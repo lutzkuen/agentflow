@@ -537,11 +537,6 @@ def _attach_recent_closed_github_issues_for_research(
 def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(stats, dict):
         return stats
-    if any(
-        isinstance(stats.get(key), dict)
-        for key in ("request_shape_rollups", "request_shape_rollup_report", "request_shape_rollup_candidates_report")
-    ):
-        return stats
 
     db = stats.get("db")
     if not isinstance(db, str) or not db.strip():
@@ -555,24 +550,52 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
     except ValueError:
         limit = 1000
 
-    from agentflow_proxy.request_shape_rollups import build_request_shape_rollups_report
+    from agentflow_proxy.request_shape_rollups import (
+        build_request_shape_cache_replay_evidence_report,
+        build_request_shape_rollups_report,
+    )
 
+    needs_rollups = not any(
+        isinstance(stats.get(key), dict)
+        for key in ("request_shape_rollups", "request_shape_rollup_report", "request_shape_rollup_candidates_report")
+    )
+    needs_cache_replay_evidence = not isinstance(stats.get("request_shape_cache_replay_evidence"), dict)
+    if not needs_rollups and not needs_cache_replay_evidence:
+        return stats
+
+    enriched = dict(stats)
     store = _open_store_for_db(db_arg)
     try:
-        report = build_request_shape_rollups_report(
-            store,
-            limit=limit,
-            persist=False,
-            run_id="orchestrator-research-dry-run",
-        )
+        if needs_rollups:
+            enriched["request_shape_rollups"] = build_request_shape_rollups_report(
+                store,
+                limit=limit,
+                persist=False,
+                run_id="orchestrator-research-dry-run",
+            )
+        if needs_cache_replay_evidence:
+            rules_path = (
+                Path(os.getenv("AGENTFLOW_CACHE_CANARY_POLICY")).expanduser()
+                if os.getenv("AGENTFLOW_CACHE_CANARY_POLICY")
+                else Path(
+                    os.getenv(
+                        "AGENTFLOW_CONFIG_DIR",
+                        os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+                    )
+                ).expanduser()
+                / "cache_canary_policy.yaml"
+            )
+            enriched["request_shape_cache_replay_evidence"] = build_request_shape_cache_replay_evidence_report(
+                store,
+                rules_path=rules_path,
+                limit=max(limit, 1000),
+            )
     finally:
         try:
             store.conn.close()
         except Exception:
             pass
 
-    enriched = dict(stats)
-    enriched["request_shape_rollups"] = report
     return enriched
 
 

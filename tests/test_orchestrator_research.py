@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 import uuid
 
 from agentflow_proxy import cli
@@ -2056,6 +2057,215 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("req-observed-cache-secret", rendered)
         self.assertNotIn("raw-projected-cache-cohort", rendered)
         self.assertNotIn("raw-request-shape-cache-candidate", rendered)
+
+    def test_cache_replay_ledger_reports_staged_request_shape_canary_progress(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 50,
+                "cache_hits": 0,
+                "request_shape_rollup_candidates": {
+                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "cache_replayability_dry_run": {
+                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "summary": {
+                            "replay_ready_cohort_count": 1,
+                            "projected_hits": 35,
+                            "projected_savings_usd": 0.075373,
+                        },
+                        "cohorts": [
+                            {
+                                "readiness": "replay-ready",
+                                "row_count": 36,
+                                "projected_hits": 35,
+                                "projected_savings_usd": 0.075373,
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "chat",
+                                "candidate_id": "raw-staged-dry-run-cache-candidate",
+                            }
+                        ],
+                    },
+                },
+                "request_shape_cache_replay_evidence": {
+                    "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                    "status": "staged-no-traffic",
+                    "reason": "missing-observed-cache-replay-traffic",
+                    "next_action": "collect-cache-replay-canary-traffic",
+                    "staged_canary_count": 1,
+                    "staged_canaries": [
+                        {
+                            "rank": 1,
+                            "policy_id": "local-openai-cache-replay-canary-secret",
+                            "rule_id": "raw-cache-replay-rule-secret",
+                            "candidate_id": "request-shape-cache-replay-secret",
+                            "shape": {
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "chat",
+                                "workflow_phase": "chat",
+                                "text_bucket": "2k_8k_chars",
+                                "token_bucket": "500_2k_tokens",
+                                "stream": False,
+                                "has_tools": False,
+                            },
+                            "sample_count": 36,
+                            "projected_hits": 35,
+                            "projected_savings_usd": 0.075373,
+                            "canary_fraction": 0.1,
+                            "holdout_fraction": 0.1,
+                        }
+                    ],
+                    "summary": {
+                        "observed_row_count": 0,
+                        "applied_count": 0,
+                        "holdout_count": 0,
+                        "exact_hit_count": 0,
+                        "miss_count": 0,
+                        "bypass_count": 0,
+                        "unsupported_shape_count": 0,
+                        "projected_hits": 35,
+                        "observed_hits": 0,
+                        "projected_savings_usd": 0.075373,
+                        "observed_savings_usd": 0.0,
+                    },
+                    "stale_evidence": {
+                        "stale": False,
+                        "reason": "fresh-or-not-yet-observed",
+                    },
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "request_ids_included": False,
+                        "session_ids_included": False,
+                        "cache_keys_included": False,
+                        "policy_ids_included": False,
+                        "rule_ids_included": False,
+                        "cohort_ids_included": False,
+                    },
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
+        cache = next(row for row in loop["levers"] if row["lever"] == "cache")
+        self.assertEqual(cache["state"], "canary-staged")
+        self.assertEqual(cache["evidence_source"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache["next_action"], "collect-cache-replay-canary-traffic")
+        self.assertEqual(cache["fingerprint_next_action"], "stage-cache-replay-canary")
+        self.assertEqual(cache["projected_hits"], 35)
+        self.assertAlmostEqual(cache["projected_saved_usd"], 0.075373)
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        cache_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "cache")
+        self.assertEqual(cache_entry["evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache_entry["current_status"], "staged")
+        self.assertEqual(cache_entry["next_action"], "collect-cache-replay-canary-traffic")
+        self.assertEqual(cache_entry["fingerprint_next_action"], "stage-cache-replay-canary")
+        self.assertEqual(cache_entry["fingerprint_evidence_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(cache_entry["fingerprint_cohort_bucket"], "cache:10_99")
+        self.assertEqual(cache_entry["lifecycle_progressed_from_next_action"], "stage-cache-replay-canary")
+        self.assertEqual(cache_entry["projected_hits"], 35)
+        self.assertEqual(cache_entry["projected_saved_usd"], 0.075373)
+
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-staged-dry-run-cache-candidate", rendered)
+        self.assertNotIn("local-openai-cache-replay-canary-secret", rendered)
+        self.assertNotIn("raw-cache-replay-rule-secret", rendered)
+        self.assertNotIn("request-shape-cache-replay-secret", rendered)
+
+    def test_cache_replay_ledger_prefers_request_shape_canary_hit_evidence_over_dry_run(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 50,
+                "request_shape_rollup_candidates": {
+                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "cache_replayability_dry_run": {
+                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "summary": {"replay_ready_cohort_count": 1, "projected_hits": 35},
+                        "cohorts": [
+                            {
+                                "readiness": "replay-ready",
+                                "row_count": 36,
+                                "projected_hits": 35,
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "chat",
+                            }
+                        ],
+                    },
+                },
+                "request_shape_cache_replay_evidence": {
+                    "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                    "status": "observed",
+                    "reason": "cache-replay-canary-evidence-observed",
+                    "next_action": "review-cache-replay-canary-promotion-readiness",
+                    "staged_canary_count": 1,
+                    "staged_canaries": [
+                        {
+                            "shape": {
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "chat",
+                                "workflow_phase": "chat",
+                                "stream": False,
+                                "has_tools": False,
+                            },
+                            "sample_count": 36,
+                            "projected_hits": 35,
+                            "projected_savings_usd": 0.075373,
+                        }
+                    ],
+                    "summary": {
+                        "observed_row_count": 4,
+                        "applied_count": 2,
+                        "holdout_count": 1,
+                        "exact_hit_count": 1,
+                        "miss_count": 1,
+                        "bypass_count": 1,
+                        "unsupported_shape_count": 0,
+                        "projected_hits": 35,
+                        "observed_hits": 1,
+                        "projected_savings_usd": 0.075373,
+                        "observed_savings_usd": 0.012345,
+                    },
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "request_ids_included": False,
+                        "session_ids_included": False,
+                        "cache_keys_included": False,
+                    },
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
+        cache = next(row for row in loop["levers"] if row["lever"] == "cache")
+        self.assertEqual(cache["state"], "measured-savings")
+        self.assertEqual(cache["evidence_source"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache["next_action"], "review-cache-replay-canary-promotion-readiness")
+        self.assertEqual(cache["applied_count"], 2)
+        self.assertEqual(cache["holdout_count"], 1)
+        self.assertEqual(cache["actual_hits"], 1)
+        self.assertAlmostEqual(cache["actual_saved_cost_usd"], 0.012345)
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        cache_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "cache")
+        self.assertEqual(cache_entry["current_status"], "holdout")
+        self.assertEqual(cache_entry["next_action"], "review-cache-replay-canary-promotion-readiness")
+        self.assertEqual(cache_entry["fingerprint_next_action"], "stage-cache-replay-canary")
+        self.assertEqual(cache_entry["fingerprint_evidence_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(cache_entry["fingerprint_cohort_bucket"], "cache:10_99")
+        self.assertEqual(cache_entry["actual_hits"], 1)
+        self.assertAlmostEqual(cache_entry["actual_saved_cost_usd"], 0.012345)
 
     def test_crunch_candidate_ranks_projected_savings_report(self):
         plan = build_research_plan(
@@ -4185,6 +4395,113 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         self.assertNotIn("raw prompt must not leak", rendered)
         self.assertNotIn("raw response must not leak", rendered)
         self.assertNotIn("raw-session-id-must-not-leak", rendered)
+
+    def test_cli_enriches_staged_request_shape_cache_replay_evidence_from_local_policy(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            config_dir = Path(tmp) / "config"
+            store = SQLiteStore(db_path)
+            try:
+                for cost in (0.01, 0.03, 0.02):
+                    store.log_call(
+                        id=str(uuid.uuid4()),
+                        created_at=utc_now(),
+                        path="/v1/responses",
+                        requested_model="gpt-5.4-mini",
+                        routed_model="gpt-5.4-mini",
+                        stream=0,
+                        cache_hit=0,
+                        status_code=200,
+                        latency_ms=125,
+                        input_tokens_est=1500,
+                        output_tokens_est=100,
+                        actual_input_tokens=1500,
+                        actual_output_tokens=100,
+                        cost_est_usd=cost,
+                        cost_baseline_usd=cost,
+                        crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+                        routing_json=stable_json(
+                            {
+                                "category": "chat",
+                                "workflow_phase": "chat",
+                                "text_chars": 6000,
+                                "has_tools": False,
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                            }
+                        ),
+                        cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                        error=None,
+                        request_json=stable_json({"prompt": "raw prompt must not leak"}),
+                        response_json=stable_json({"content": "raw response must not leak"}),
+                        session_id="raw-session-id-must-not-leak",
+                        category="chat",
+                        cache_creation_input_tokens=0,
+                        cache_read_input_tokens=0,
+                        retry_count=0,
+                        thinking_output_tokens=0,
+                        provider="openai",
+                        source_surface="openai_responses",
+                        endpoint="responses",
+                        requested_model_family="gpt-5",
+                        routed_model_family="gpt-5",
+                    )
+
+                from agentflow_proxy.request_shape_rollups import (
+                    apply_request_shape_cache_replay_canary_action,
+                    build_request_shape_cache_replay_canary_stage_report,
+                )
+
+                stage = build_request_shape_cache_replay_canary_stage_report(
+                    store,
+                    limit=20,
+                    run_id="cli-cache-replay-stage-enrichment",
+                    rollout_fraction=0.10,
+                    holdout_fraction=0.10,
+                )
+                apply_request_shape_cache_replay_canary_action(
+                    stage["top_stage_action"],
+                    rules_path=config_dir / "cache_canary_policy.yaml",
+                )
+            finally:
+                store.conn.close()
+
+            issues_path = Path(tmp) / "issues.json"
+            stats_path = Path(tmp) / "stats.json"
+            issues_path.write_text(json.dumps([]), encoding="utf-8")
+            stats_path.write_text(json.dumps({"calls": 3, "cache_hits": 0, "cache_hit_rate": 0.0, "db": db_path}), encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with patch.dict("os.environ", {"AGENTFLOW_CONFIG_DIR": str(config_dir)}, clear=False):
+                code = cli.orchestrator_research_cli(
+                    ["--issues-json", str(issues_path), "--stats-json", str(stats_path), "--threshold", "3"],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        stats_summary = payload["evidence"]["stats_summary"]
+        evidence = stats_summary["request_shape_cache_replay_evidence"]
+        self.assertEqual(evidence["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(evidence["status"], "staged-no-traffic")
+        self.assertEqual(evidence["next_action"], "collect-cache-replay-canary-traffic")
+        self.assertEqual(evidence["staged_canary_count"], 1)
+        self.assertEqual(evidence["summary"]["projected_hits"], 2)
+
+        loop = stats_summary["evidence_to_activation_loop"]
+        cache = next(row for row in loop["levers"] if row["lever"] == "cache")
+        self.assertEqual(cache["state"], "canary-staged")
+        self.assertEqual(cache["next_action"], "collect-cache-replay-canary-traffic")
+        self.assertEqual(cache["fingerprint_next_action"], "stage-cache-replay-canary")
+
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("raw response must not leak", rendered)
+        self.assertNotIn("raw-session-id-must-not-leak", rendered)
+        self.assertNotIn(str(config_dir), rendered)
 
 
 class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):

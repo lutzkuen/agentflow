@@ -1526,6 +1526,36 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
             else {},
             "privacy": openai_cache_impact.get("privacy") if isinstance(openai_cache_impact.get("privacy"), dict) else {},
         }
+    request_shape_cache_evidence = stats.get("request_shape_cache_replay_evidence")
+    if isinstance(request_shape_cache_evidence, dict):
+        staged_canaries = (
+            request_shape_cache_evidence.get("staged_canaries")
+            if isinstance(request_shape_cache_evidence.get("staged_canaries"), list)
+            else []
+        )
+        summary["request_shape_cache_replay_evidence"] = {
+            "schema": request_shape_cache_evidence.get("schema"),
+            "status": request_shape_cache_evidence.get("status"),
+            "reason": request_shape_cache_evidence.get("reason"),
+            "next_action": request_shape_cache_evidence.get("next_action"),
+            "staged_canary_count": _to_int(request_shape_cache_evidence.get("staged_canary_count")),
+            "summary": request_shape_cache_evidence.get("summary")
+            if isinstance(request_shape_cache_evidence.get("summary"), dict)
+            else {},
+            "lifecycle_counts": request_shape_cache_evidence.get("lifecycle_counts")
+            if isinstance(request_shape_cache_evidence.get("lifecycle_counts"), dict)
+            else {},
+            "blocker_breakdown": request_shape_cache_evidence.get("blocker_breakdown")
+            if isinstance(request_shape_cache_evidence.get("blocker_breakdown"), list)
+            else [],
+            "stale_evidence": request_shape_cache_evidence.get("stale_evidence")
+            if isinstance(request_shape_cache_evidence.get("stale_evidence"), dict)
+            else {},
+            "staged_canaries": staged_canaries[:5],
+            "privacy": request_shape_cache_evidence.get("privacy")
+            if isinstance(request_shape_cache_evidence.get("privacy"), dict)
+            else {},
+        }
     openai_cache_readiness = stats.get("openai_cache_replay_readiness")
     if isinstance(openai_cache_readiness, dict):
         candidate_rows = (
@@ -2718,6 +2748,7 @@ def _loop_state_rank(state: str) -> int:
     return {
         "activation-ready": 0,
         "replay-ready": 1,
+        "canary-staged": 1,
         "measured-savings": 2,
         "projected-savings": 3,
         "ranked-evidence": 4,
@@ -2732,7 +2763,7 @@ def _loop_missing_state(state: str) -> bool:
 
 
 def _loop_progress_state(state: str) -> bool:
-    return state in {"activation-ready", "replay-ready", "measured-savings", "projected-savings", "ranked-evidence", "superseded"}
+    return state in {"activation-ready", "replay-ready", "canary-staged", "measured-savings", "projected-savings", "ranked-evidence", "superseded"}
 
 
 def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
@@ -2854,13 +2885,15 @@ def build_evidence_to_activation_next_action_ledger(
         action_family = sanitize_value(stage.get("local_action_family") or lever)
         evidence_schema = sanitize_value(stage.get("evidence_source") or loop.get("schema"))
         cohort_bucket = _ledger_cohort_bucket(stage)
+        fingerprint_evidence_schema = sanitize_value(stage.get("fingerprint_evidence_source") or evidence_schema)
+        fingerprint_cohort_bucket = sanitize_value(stage.get("fingerprint_cohort_bucket") or cohort_bucket)
         raw_policy_ref = str(stage.get("policy_id") or stage.get("policy_ref") or "").strip()
         policy_ref = public_id(f"raw:{raw_policy_ref}", prefix="policy") if raw_policy_ref else None
         fingerprint_material = {
             "lever": lever,
             "local_action_family": action_family,
-            "evidence_schema": evidence_schema,
-            "cohort_bucket": cohort_bucket,
+            "evidence_schema": fingerprint_evidence_schema,
+            "cohort_bucket": fingerprint_cohort_bucket,
             "policy_ref": policy_ref,
             "next_action": sanitize_value(
                 stage.get("fingerprint_next_action")
@@ -2896,6 +2929,12 @@ def build_evidence_to_activation_next_action_ledger(
         if stage.get("fingerprint_next_action") and stage.get("fingerprint_next_action") != stage.get("next_action"):
             entry["fingerprint_next_action"] = sanitize_value(stage.get("fingerprint_next_action"))
             entry["lifecycle_progressed_from_next_action"] = sanitize_value(stage.get("fingerprint_next_action"))
+        if fingerprint_evidence_schema != evidence_schema:
+            entry["fingerprint_evidence_schema"] = fingerprint_evidence_schema
+            entry["lifecycle_progressed_from_evidence_schema"] = fingerprint_evidence_schema
+        if fingerprint_cohort_bucket != cohort_bucket:
+            entry["fingerprint_cohort_bucket"] = fingerprint_cohort_bucket
+            entry["lifecycle_progressed_from_cohort_bucket"] = fingerprint_cohort_bucket
         current_status = str(entry.get("current_status") or "")
         entry["issue_worthy_status"] = sanitize_value(
             stage.get("issue_worthy_status")
@@ -3122,6 +3161,9 @@ def _cache_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     impact_stage = _openai_cache_replay_impact_loop_stage(stats_summary)
     if impact_stage is not None:
         return impact_stage
+    request_shape_evidence_stage = _request_shape_cache_replay_evidence_loop_stage(stats_summary)
+    if request_shape_evidence_stage is not None:
+        return request_shape_evidence_stage
     readiness_stage = _openai_cache_replay_readiness_loop_stage(stats_summary)
     if readiness_stage is not None:
         return readiness_stage
@@ -3239,6 +3281,101 @@ def _cache_replay_observed_state(*, actual_hits: int, observed_savings: float, a
     if applied > 0 or holdout > 0:
         return "replay-ready"
     return "missing-evidence"
+
+
+def _request_shape_cache_replay_evidence_blockers(evidence: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    stale = evidence.get("stale_evidence") if isinstance(evidence.get("stale_evidence"), dict) else {}
+    if stale.get("stale"):
+        blockers.append(str(stale.get("reason") or "stale-cache-replay-evidence"))
+    reason = str(evidence.get("reason") or "").strip()
+    status = str(evidence.get("status") or "").strip()
+    if status in {"no-canary-policy", "no-request-shape-cache-replay-canary"}:
+        blockers.append(reason or status)
+    for row in evidence.get("blocker_breakdown") or []:
+        if isinstance(row, dict) and row.get("value"):
+            blockers.append(str(row.get("value")))
+    return list(dict.fromkeys(blocker for blocker in blockers if blocker))
+
+
+def _request_shape_cache_replay_evidence_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    evidence = stats_summary.get("request_shape_cache_replay_evidence")
+    if not isinstance(evidence, dict):
+        return None
+    staged_count = _to_int(evidence.get("staged_canary_count"))
+    summary = evidence.get("summary") if isinstance(evidence.get("summary"), dict) else {}
+    if staged_count <= 0:
+        return None
+
+    applied = _to_int(summary.get("applied_count"))
+    holdout = _to_int(summary.get("holdout_count"))
+    actual_hits = _to_int(summary.get("observed_hits") or summary.get("exact_hit_count"))
+    actual_saved = _to_float(summary.get("observed_savings_usd"))
+    blockers = _request_shape_cache_replay_evidence_blockers(evidence)
+    stale = evidence.get("stale_evidence") if isinstance(evidence.get("stale_evidence"), dict) else {}
+    status = str(evidence.get("status") or "").strip()
+    next_action = str(evidence.get("next_action") or "").strip()
+
+    if stale.get("stale"):
+        state = "blocked"
+        if not next_action:
+            next_action = "refresh-cache-replay-canary-evidence"
+    elif actual_hits > 0 or actual_saved > 0:
+        state = "measured-savings"
+        if not next_action:
+            next_action = "review-cache-replay-canary-promotion-readiness"
+    elif status == "staged-no-traffic" or (applied <= 0 and holdout <= 0):
+        state = "canary-staged"
+        if not next_action:
+            next_action = "collect-cache-replay-canary-traffic"
+    else:
+        state = _cache_replay_observed_state(
+            actual_hits=actual_hits,
+            observed_savings=actual_saved,
+            applied=applied,
+            holdout=holdout,
+            blockers=blockers,
+        )
+        if not next_action:
+            next_action = "collect-more-cache-replay-evidence" if state == "replay-ready" else "resolve-cache-replay-impact-blocker"
+
+    top_canary = {}
+    staged = evidence.get("staged_canaries") if isinstance(evidence.get("staged_canaries"), list) else []
+    if staged and isinstance(staged[0], dict):
+        top_canary = staged[0]
+    shape = top_canary.get("shape") if isinstance(top_canary.get("shape"), dict) else {}
+    cohort_bucket = "/".join(
+        str(part)
+        for part in (shape.get("source_surface"), shape.get("endpoint"), shape.get("category"))
+        if part
+    ) or "openai-cache-replay"
+    observed_sample_count = _to_int(summary.get("observed_row_count"))
+    projected_sample_count = _to_int(top_canary.get("sample_count"))
+    sample_count = observed_sample_count or projected_sample_count
+    fingerprint_sample_count = projected_sample_count or sample_count
+
+    return {
+        "lever": "cache",
+        "state": state,
+        "evidence_source": evidence.get("schema"),
+        "local_action_family": "cache",
+        "next_action": next_action,
+        "fingerprint_next_action": "stage-cache-replay-canary",
+        "fingerprint_evidence_source": "agentflow.request_shape_cache_replayability_dry_run.v1",
+        "fingerprint_cohort_bucket": sanitize_value(f"cache:{_sample_count_bucket(fingerprint_sample_count)}"),
+        "blocker_codes": [] if state in {"measured-savings", "canary-staged", "replay-ready"} else blockers,
+        "sample_count": sample_count,
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "actual_hits": actual_hits,
+        "actual_saved_cost_usd": round(actual_saved, 8),
+        "miss_count": _to_int(summary.get("miss_count")),
+        "bypass_skipped_count": _to_int(summary.get("bypass_count") or summary.get("unsupported_shape_count")),
+        "projected_hits": _to_int(summary.get("projected_hits") or top_canary.get("projected_hits")),
+        "projected_saved_usd": round(_to_float(summary.get("projected_savings_usd") or top_canary.get("projected_savings_usd")), 8),
+        "cohort_bucket": sanitize_value(cohort_bucket),
+        "staged_canary_count": staged_count,
+    }
 
 
 def _openai_cache_replay_impact_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
