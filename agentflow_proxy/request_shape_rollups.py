@@ -17,6 +17,7 @@ ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
 REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
 CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "agentflow.request_shape_crunch_opportunity_dry_run.v1"
 CRUNCH_CANARY_ACTION_SCHEMA = "agentflow.request_shape_crunch_canary_action.v1"
+CRUNCH_CANARY_STAGE_SCHEMA = "agentflow.request_shape_repeated_context_crunch_canary_stage.v1"
 CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
 CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
 CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
@@ -1133,6 +1134,19 @@ def _request_shape_crunch_canary_action(
             "max_rollout_fraction": DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION,
             "records_applied_holdout_skipped_safety_stopped_fallback_rollback": True,
         },
+        "lifecycle_metadata": {
+            "schema": "agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1",
+            "emits_applied": True,
+            "emits_holdout": True,
+            "emits_skipped": True,
+            "emits_safety_stopped": True,
+            "emits_fallback": True,
+            "emits_rollback": True,
+            "impact_report": CRUNCH_CANARY_IMPACT_SCHEMA,
+            "lifecycle_schema": CRUNCH_CANARY_LIFECYCLE_SCHEMA,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
         "next_action": "apply-local-crunch-canary-after-review",
         "privacy": _crunch_opportunity_privacy(),
     }
@@ -1553,6 +1567,84 @@ def build_request_shape_crunch_opportunity_dry_run(
         "work_class_breakdown": _breakdown(work_class_counts),
         "cohorts": cohorts[: max(1, min(_as_int(limit) or 25, 1000))],
         "missing_measurements": missing,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def build_request_shape_crunch_canary_stage_report(
+    store_obj: Any,
+    *,
+    limit: int = 1000,
+    run_id: str | None = None,
+    persist_rollups: bool = False,
+    rollout_fraction: float = DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION,
+    holdout_fraction: float = DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION,
+) -> dict[str, Any]:
+    rollup_report = build_request_shape_rollups_report(
+        store_obj,
+        limit=limit,
+        persist=persist_rollups,
+        run_id=run_id,
+    )
+    dry_run = build_request_shape_crunch_opportunity_dry_run(
+        [row for row in rollup_report.get("rollups") or [] if isinstance(row, dict)],
+        limit=25,
+        rollout_fraction=rollout_fraction,
+        holdout_fraction=holdout_fraction,
+    )
+    actions = [
+        action
+        for action in dry_run.get("recommended_actions") or []
+        if isinstance(action, dict) and action.get("schema") == CRUNCH_CANARY_ACTION_SCHEMA
+    ]
+    cohorts = [cohort for cohort in dry_run.get("cohorts") or [] if isinstance(cohort, dict)]
+    top_action = actions[0] if actions else None
+    top_cohort = cohorts[0] if cohorts else None
+    if actions:
+        status = "staged"
+        next_action = "apply-local-crunch-canary-after-review"
+        reason = "staged-repeated-context-crunch-canary"
+    else:
+        status = "no-stageable-cohort"
+        next_action = (dry_run.get("activation_follow_up") or {}).get("next_action") or "rank-repeated-context-crunch-dry-run"
+        reason = (dry_run.get("activation_follow_up") or {}).get("top_blocker") or dry_run.get("status") or "no-stageable-cohort"
+    return {
+        "schema": CRUNCH_CANARY_STAGE_SCHEMA,
+        "status": status,
+        "ok": bool(actions),
+        "dry_run": True,
+        "read_only": True,
+        "generated_at": utc_now(),
+        "run_id": rollup_report.get("run_id"),
+        "reason": reason,
+        "next_action": next_action,
+        "staged_canary_count": len(actions),
+        "stage_actions": actions,
+        "top_stage_action": top_action,
+        "top_cohort": top_cohort,
+        "source_report": {
+            "schema": rollup_report.get("schema"),
+            "window": rollup_report.get("window"),
+            "summary": {
+                "rows_considered": (rollup_report.get("summary") or {}).get("rows_considered"),
+                "rollup_count": (rollup_report.get("summary") or {}).get("rollup_count"),
+                "top_next_action": (rollup_report.get("summary") or {}).get("top_next_action"),
+                "body_rows_read": (rollup_report.get("summary") or {}).get("body_rows_read"),
+            },
+            "crunch_opportunity_summary": dry_run.get("summary"),
+            "activation_follow_up": dry_run.get("activation_follow_up"),
+        },
+        "acceptance": {
+            "stages_one_repeated_context_crunch_canary": len(actions) == 1,
+            "has_projected_tokens": bool(top_action and _as_int(top_action.get("projected_saved_tokens")) > 0),
+            "has_projected_savings": bool(top_action and _as_float(top_action.get("projected_saved_usd")) > 0),
+            "has_holdout_metadata": bool(top_action and _as_float(top_action.get("holdout_fraction")) > 0),
+            "has_safety_stop_metadata": bool(
+                top_action
+                and isinstance(top_action.get("lifecycle_metadata"), dict)
+                and bool(top_action["lifecycle_metadata"].get("emits_safety_stopped"))
+            ),
+        },
         "privacy": _crunch_opportunity_privacy(),
     }
 

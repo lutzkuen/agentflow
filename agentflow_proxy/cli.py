@@ -151,6 +151,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     session_phase_memory_cli,
     cache_replayability_report_cli,
     request_shape_rollups_cli,
+    request_shape_crunch_canary_stage_cli,
     cache_replay_cohorts_cli,
     cache_smoke_diagnostic_cli,
     cache_replay_dry_run_cli,
@@ -835,6 +836,10 @@ def cache_replayability_report_main() -> None:
 
 def request_shape_rollups_main() -> None:
     raise SystemExit(request_shape_rollups_cli())
+
+
+def request_shape_crunch_canary_stage_main() -> None:
+    raise SystemExit(request_shape_crunch_canary_stage_cli())
 
 
 def cache_replay_cohorts_main() -> None:

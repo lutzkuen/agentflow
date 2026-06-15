@@ -12,6 +12,7 @@ import yaml
 from agentflow_proxy import cli
 from agentflow_proxy.request_shape_rollups import (
     apply_request_shape_crunch_canary_action,
+    build_request_shape_crunch_canary_stage_report,
     build_request_shape_rollups_report,
     request_shape_crunch_canary_lifecycle,
 )
@@ -523,6 +524,124 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(dry_run["privacy"]["provider_bodies_included"])
         self.assertFalse(dry_run["privacy"]["session_ids_included"])
         self.assertFalse(dry_run["privacy"]["cache_keys_included"])
+
+    def test_crunch_canary_stage_report_targets_anthropic_thinking_tool_result_cohort(self) -> None:
+        for cost in (0.08, 0.07, 0.09):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=132_000,
+                cost=cost,
+                baseline=cost,
+            )
+
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="2026-06-15-crunch-canary-stage",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+        )
+
+        self.assertEqual(report["schema"], "agentflow.request_shape_repeated_context_crunch_canary_stage.v1")
+        self.assertEqual(report["status"], "staged")
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["dry_run"])
+        self.assertTrue(report["read_only"])
+        self.assertEqual(report["staged_canary_count"], 1)
+        self.assertTrue(report["acceptance"]["stages_one_repeated_context_crunch_canary"])
+        self.assertTrue(report["acceptance"]["has_projected_tokens"])
+        self.assertTrue(report["acceptance"]["has_projected_savings"])
+        self.assertTrue(report["acceptance"]["has_holdout_metadata"])
+        self.assertTrue(report["acceptance"]["has_safety_stop_metadata"])
+
+        action = report["top_stage_action"]
+        self.assertEqual(action["schema"], "agentflow.request_shape_crunch_canary_action.v1")
+        self.assertEqual(action["action_type"], "stage-local-repeated-context-crunch-canary")
+        self.assertEqual(action["target_local_policy"], "crunch_rules")
+        self.assertEqual(action["conditions"]["provider_family"], "anthropic")
+        self.assertEqual(action["conditions"]["source_surface"], "anthropic_messages")
+        self.assertEqual(action["conditions"]["endpoint"], "messages")
+        self.assertEqual(action["conditions"]["category"], "tool-result")
+        self.assertEqual(action["conditions"]["workflow_phase"], "thinking")
+        self.assertEqual(action["conditions"]["text_bucket"], "gte_128k_chars")
+        self.assertTrue(action["conditions"]["stream"])
+        self.assertTrue(action["conditions"]["has_tools"])
+        self.assertEqual(action["rollout_fraction"], 0.05)
+        self.assertEqual(action["holdout_fraction"], 0.2)
+        self.assertGreater(action["projected_saved_tokens"], 0)
+        self.assertGreater(action["projected_saved_usd"], 0)
+        self.assertTrue(action["safety_gates"]["metadata_only"])
+        self.assertTrue(action["safety_gates"]["aggregate_only"])
+        self.assertTrue(action["safety_gates"]["holdout_required"])
+        self.assertTrue(action["safety_gates"]["records_applied_holdout_skipped_safety_stopped_fallback_rollback"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_applied"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_holdout"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_skipped"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_safety_stopped"])
+        self.assertEqual(action["lifecycle_metadata"]["impact_report"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(report["source_report"]["activation_follow_up"]["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+
+        rendered = json.dumps(report, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_crunch_canary_stage_cli_emits_direct_stage_payload(self) -> None:
+        for cost in (0.08, 0.07, 0.09):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=132_000,
+                cost=cost,
+                baseline=cost,
+            )
+
+        stdout = io.StringIO()
+        code = cli.request_shape_crunch_canary_stage_cli(
+            [
+                "--db",
+                self.db_path,
+                "--limit",
+                "20",
+                "--run-id",
+                "cli-2026-06-15-stage",
+                "--rollout-fraction",
+                "0.05",
+                "--holdout-fraction",
+                "0.20",
+            ],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.request_shape_repeated_context_crunch_canary_stage.v1")
+        self.assertEqual(payload["staged_canary_count"], 1)
+        self.assertEqual(payload["top_stage_action"]["conditions"]["workflow_phase"], "thinking")
+        self.assertEqual(payload["top_stage_action"]["conditions"]["text_bucket"], "gte_128k_chars")
+        self.assertGreater(payload["top_stage_action"]["projected_saved_tokens"], 0)
+        self.assertEqual(payload["top_stage_action"]["holdout_fraction"], 0.2)
+        self.assertTrue(payload["top_stage_action"]["lifecycle_metadata"]["emits_safety_stopped"])
+        self.assertTrue(payload["privacy"]["aggregate_only"])
+        self.assertNotIn("raw prompt must not leak", stdout.getvalue())
 
     def test_request_shape_crunch_canary_apply_writes_local_rule_and_lifecycle_metadata(self) -> None:
         for cost in (0.08, 0.07, 0.09):
