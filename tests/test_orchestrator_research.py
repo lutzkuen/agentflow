@@ -2651,6 +2651,117 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-secret", rendered)
         self.assertNotIn("/home/lutz/private/shape_secret.py", rendered)
 
+    def test_crunch_candidate_prefers_request_shape_crunch_policy_decision(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 30, "rollup_count": 1},
+                    "crunch_policy_decision": {
+                        "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                        "status": "decided",
+                        "decision": "widen",
+                        "graduation_decision": "widen",
+                        "decision_id": "request-shape-crunch-policy-decision:public",
+                        "summary": {
+                            "decision": "widen",
+                            "graduation_decision": "widen",
+                            "decision_count": 1,
+                            "applied_count": 6,
+                            "holdout_count": 6,
+                            "observed_saved_tokens": 6000,
+                            "observed_saved_usd": 0.024,
+                            "error_rate_delta": 0.0,
+                            "retry_rate_delta": 0.0,
+                            "fallback_rate_delta": 0.0,
+                            "safety_stop_state": "none",
+                        },
+                        "top_decision": {
+                            "decision": "widen",
+                            "policy_id": "raw-policy-secret must not leak",
+                            "cohort_id": "cohort-public",
+                            "metrics": {
+                                "applied_count": 6,
+                                "holdout_count": 6,
+                                "observed_saved_tokens": 6000,
+                                "observed_saved_usd": 0.024,
+                            },
+                        },
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "crunch_canary_impact": {
+                        "schema": "agentflow.request_shape_crunch_canary_impact.v1",
+                        "status": "widen-ready",
+                        "summary": {
+                            "candidate_count": 1,
+                            "observed_canary_metadata_row_count": 12,
+                            "applied_count": 6,
+                            "holdout_count": 6,
+                            "saved_tokens": 6000,
+                            "saved_usd": 0.024,
+                            "next_action": "widen",
+                        },
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "follow_up_candidates": {
+                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "status": "candidates-ranked",
+                        "summary": {
+                            "ranked_candidate_count": 1,
+                            "top_next_action": "stage-repeated-context-crunch-canary",
+                            "top_local_action_family": "crunch",
+                        },
+                        "blocker_cohorts": [
+                            {
+                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "local_action_family": "crunch",
+                                "next_action": "stage-repeated-context-crunch-canary",
+                                "readiness_state": "activation-ready",
+                                "candidate_work_classes": ["crunch", "repeated_context"],
+                                "provider_family": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "endpoint": "messages",
+                                "row_count": 12,
+                                "projected_saved_tokens": 6000,
+                                "projected_savings_usd": 0.024,
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        signal = stats_summary["crunch_savings_signal"]
+        self.assertEqual(signal["status"], "policy-decision-emitted")
+        self.assertEqual(signal["top_report"]["report_key"], "request_shape_crunch_policy_decision")
+        self.assertEqual(signal["top_report"]["schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(signal["top_report"]["decision"], "widen")
+        self.assertEqual(signal["top_report"]["next_action"], "widen")
+        self.assertEqual(signal["top_report"]["projected_saved_tokens"], 6000)
+        self.assertEqual(signal["missing_measurements"], [])
+        shape_signal = stats_summary["request_shape_rollup_candidates"]
+        self.assertEqual(shape_signal["crunch_policy_decision"]["decision"], "widen")
+        loop = stats_summary["evidence_to_activation_loop"]
+        request_shape_stage = next(item for item in loop["levers"] if item["lever"] == "request-shape-rollups")
+        self.assertEqual(request_shape_stage["state"], "measured-savings")
+        self.assertEqual(request_shape_stage["next_action"], "widen")
+        self.assertEqual(
+            request_shape_stage["activation_follow_up_evidence_schema"],
+            "agentflow.request_shape_crunch_policy_decision.v1",
+        )
+        rendered = json.dumps(plan)
+        self.assertNotIn("raw-policy-secret", rendered)
+
     def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
         plan = build_research_plan(
             issues=[],

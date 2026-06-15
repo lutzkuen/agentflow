@@ -2615,11 +2615,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         decision = build_request_shape_crunch_policy_decision_report(impact_report)
 
         self.assertEqual(decision["schema"], "agentflow.request_shape_crunch_policy_decision.v1")
-        self.assertEqual(decision["decision"], "promote")
+        self.assertEqual(decision["decision"], "widen")
         self.assertEqual(decision["graduation_decision"], "widen")
-        self.assertEqual(decision["summary"]["decision"], "promote")
+        self.assertEqual(decision["summary"]["decision"], "widen")
         self.assertEqual(decision["summary"]["graduation_decision"], "widen")
         self.assertTrue(decision["summary"]["promotion_allowed"])
+        self.assertFalse(decision["summary"]["keep_staged"])
         self.assertEqual(decision["summary"]["applied_count"], 1)
         self.assertEqual(decision["summary"]["holdout_count"], 1)
         self.assertEqual(decision["summary"]["observed_saved_tokens"], 2_000)
@@ -2630,7 +2631,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["summary"]["policy_source"], "local-manual")
         self.assertFalse(decision["summary"]["policy_files_written"])
         top = decision["top_decision"]
-        self.assertEqual(top["local_policy_patch"]["patch_type"], "promote_repeated_context_crunch_canary")
+        self.assertEqual(top["decision_options"], ["widen", "rollback", "keep-staged", "blocked"])
+        self.assertEqual(top["local_policy_patch"]["patch_type"], "widen_repeated_context_crunch_canary")
         self.assertEqual(top["local_policy_patch"]["target_local_rule_file"], "crunch_rules.yaml")
         self.assertEqual(top["rollback_metadata"]["rollback_action_type"], "disable_repeated_context_crunch_canary")
         self.assertTrue(top["rollback_metadata"]["required_for_promotion"])
@@ -2719,6 +2721,64 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("canary-safety-stopped", decision["top_decision"]["reason_codes"])
         self.assertEqual(decision["top_decision"]["metrics"]["safety_stop_count"], 1)
 
+    def test_crunch_policy_decision_keeps_staged_for_missing_holdout(self) -> None:
+        lifecycle = {
+            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "policy_id": "policy-staged",
+            "cohort_id": "cohort-staged",
+            "status": "applied",
+            "cohort": "canary_applied",
+            "reason": "applied",
+            "metadata_only": True,
+        }
+        impact_report = build_request_shape_crunch_canary_impact_report(
+            [
+                {
+                    "created_at": utc_now(),
+                    "provider_family": "anthropic",
+                    "provider": "anthropic",
+                    "source_surface": "anthropic_messages",
+                    "endpoint": "messages",
+                    "category": "tool-result",
+                    "workflow_phase": "thinking",
+                    "stream": True,
+                    "has_tools": True,
+                    "text_bucket": "gte_128k_chars",
+                    "token_bucket": "lt_500_tokens",
+                    "cache_status": "skipped",
+                    "routing_status": "passthrough",
+                    "requested_model": "claude-sonnet-4-6",
+                    "routed_model": "claude-sonnet-4-6",
+                    "actual_input_tokens": 20_000,
+                    "input_tokens_est": 20_000,
+                    "text_chars": 80_000,
+                    "cost_est_usd": 0.08,
+                    "status_code": 200,
+                    "retry_count": 0,
+                    "latency_ms": 125,
+                    "crunch_json": stable_json(
+                        {
+                            "changed": True,
+                            "saved_chars": 8_000,
+                            "tokens_saved_est": 2_000,
+                            "request_shape_repeated_context_canary": lifecycle,
+                        }
+                    ),
+                }
+            ]
+        )
+        decision = build_request_shape_crunch_policy_decision_report(impact_report)
+
+        self.assertEqual(decision["decision"], "keep-staged")
+        self.assertEqual(decision["graduation_decision"], "keep-staged")
+        self.assertTrue(decision["summary"]["keep_staged"])
+        self.assertFalse(decision["summary"]["keep_blocked"])
+        self.assertEqual(decision["top_decision"]["local_policy_patch"]["patch_type"], "keep_repeated_context_crunch_canary_staged")
+        self.assertIn("missing-holdout-coverage", decision["top_decision"]["reason_codes"])
+        ledger = build_request_shape_crunch_policy_decision_ledger(decision, recorded_at="2026-06-15T18:01:00+00:00")
+        self.assertEqual(ledger["entries"][0]["status"], "needs-more-samples")
+        self.assertEqual(ledger["entries"][0]["recommendation"], "keep-staged")
+
     def test_crunch_policy_decision_cli_keeps_blocked_without_canary_metadata(self) -> None:
         self._log_call()
 
@@ -2731,7 +2791,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["schema"], "agentflow.request_shape_crunch_policy_decision.v1")
-        self.assertEqual(payload["decision"], "keep-blocked")
+        self.assertEqual(payload["decision"], "blocked")
         self.assertEqual(payload["graduation_decision"], "blocked")
         self.assertTrue(payload["summary"]["keep_blocked"])
         self.assertEqual(payload["summary"]["applied_count"], 0)

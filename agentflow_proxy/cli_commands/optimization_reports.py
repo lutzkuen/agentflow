@@ -5284,7 +5284,7 @@ def request_shape_crunch_canary_impact_cli(argv: Sequence[str] | None = None, *,
 
 
 def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
-    parser = argparse.ArgumentParser(description="Decide promote, rollback, or keep-blocked for repeated-context crunch canaries")
+    parser = argparse.ArgumentParser(description="Decide widen, rollback, keep-staged, or blocked for repeated-context crunch canaries")
     parser.add_argument(
         "--db",
         default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),

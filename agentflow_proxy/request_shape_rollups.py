@@ -1091,13 +1091,15 @@ def _crunch_policy_decision_id(candidate: dict[str, Any], decision: str) -> str:
 
 def _crunch_policy_decision_value(candidate: dict[str, Any] | None) -> str:
     if not candidate:
-        return "keep-blocked"
+        return "blocked"
     recommendation = str(candidate.get("impact_recommendation") or candidate.get("promotion_recommendation") or "")
     if recommendation == "promotion-ready":
-        return "promote"
+        return "widen"
     if recommendation == "rollback":
         return "rollback"
-    return "keep-blocked"
+    if recommendation == "collect-more-evidence":
+        return "keep-staged"
+    return "blocked"
 
 
 def _crunch_policy_decision_reason(candidate: dict[str, Any] | None, decision: str) -> str:
@@ -1106,21 +1108,21 @@ def _crunch_policy_decision_reason(candidate: dict[str, Any] | None, decision: s
     reasons = candidate.get("reason_codes") if isinstance(candidate.get("reason_codes"), list) else []
     if reasons:
         return public_label(reasons[0], "unknown")
-    if decision == "promote":
+    if decision == "widen":
         return "applied-savings-with-holdout-no-regression"
     if decision == "rollback":
         return "rollback-recommended"
-    return public_label(candidate.get("top_blocker") or "keep-blocked", "keep-blocked")
+    if decision == "keep-staged":
+        return "collect-more-canary-impact-evidence"
+    return public_label(candidate.get("top_blocker") or "blocked", "blocked")
 
 
 def _crunch_policy_graduation_decision(decision: str, reason_codes: list[str]) -> str:
-    if decision == "promote":
-        return "widen"
-    if decision == "rollback":
-        return "rollback"
+    if decision in {"widen", "rollback", "keep-staged", "blocked"}:
+        return decision
     if any(reason in {"missing-applied-or-holdout-coverage", "missing-applied-coverage", "missing-holdout-coverage"} for reason in reason_codes):
-        return "blocked"
-    return "keep-observing"
+        return "keep-staged"
+    return "blocked"
 
 
 def _crunch_policy_decision_rollback_metadata(candidate: dict[str, Any] | None, decision: str) -> dict[str, Any]:
@@ -1187,13 +1189,14 @@ def _crunch_policy_decision_patch(candidate: dict[str, Any] | None, decision: st
     if not candidate:
         return None
     patch_type = {
-        "promote": "promote_repeated_context_crunch_canary",
+        "widen": "widen_repeated_context_crunch_canary",
         "rollback": "rollback_repeated_context_crunch_canary",
-        "keep-blocked": "keep_repeated_context_crunch_canary_blocked",
+        "keep-staged": "keep_repeated_context_crunch_canary_staged",
+        "blocked": "keep_repeated_context_crunch_canary_blocked",
     }[decision]
     return {
         "schema": "agentflow.request_shape_crunch_policy_decision_local_patch.v1",
-        "status": "drafted" if decision == "promote" else "not-written",
+        "status": "drafted" if decision == "widen" else "not-written",
         "patch_type": patch_type,
         "target_local_rule_file": "crunch_rules.yaml",
         "target_local_policy_section": "crunch.rules",
@@ -1212,7 +1215,7 @@ def _crunch_policy_decision_from_candidate(candidate: dict[str, Any] | None) -> 
     rollback_metadata = _crunch_policy_decision_rollback_metadata(candidate, decision)
     metrics = _crunch_policy_decision_metrics(candidate)
     promotion_allowed = (
-        decision == "promote"
+        decision == "widen"
         and metrics["applied_count"] > 0
         and metrics["holdout_count"] > 0
         and metrics["observed_saved_tokens"] > 0
@@ -1234,11 +1237,13 @@ def _crunch_policy_decision_from_candidate(candidate: dict[str, Any] | None) -> 
         "target_local_rule_file": "crunch_rules.yaml",
         "target_local_policy_section": "crunch.rules",
         "policy_source": public_label(candidate.get("policy_source") or "local-manual", "local-manual"),
+        "decision_options": ["widen", "rollback", "keep-staged", "blocked"],
         "policy_id": candidate.get("policy_id"),
         "cohort_id": candidate.get("cohort_id"),
         "promotion_allowed": promotion_allowed,
         "rollback_required": decision == "rollback",
-        "keep_blocked": decision == "keep-blocked",
+        "keep_staged": decision == "keep-staged",
+        "keep_blocked": decision == "blocked",
         "metrics": metrics,
         "coverage": metrics["coverage"],
         "observed_saved_tokens": metrics["observed_saved_tokens"],
@@ -1270,8 +1275,9 @@ def build_request_shape_crunch_policy_decision_report(impact_report: dict[str, A
 
     decision_entries.sort(
         key=lambda item: (
-            item["decision"] == "promote",
+            item["decision"] == "widen",
             item["decision"] == "rollback",
+            item["decision"] == "keep-staged",
             _as_float(item.get("observed_saved_usd")),
             _as_int(item.get("observed_saved_tokens")),
         ),
@@ -1301,6 +1307,7 @@ def build_request_shape_crunch_policy_decision_report(impact_report: dict[str, A
             "decision_breakdown": _breakdown(decision_counts),
             "promotion_allowed": bool(top.get("promotion_allowed")),
             "rollback_required": bool(top.get("rollback_required")),
+            "keep_staged": bool(top.get("keep_staged")),
             "keep_blocked": bool(top.get("keep_blocked")),
             "applied_count": metrics["applied_count"],
             "holdout_count": metrics["holdout_count"],
@@ -1334,10 +1341,12 @@ def build_request_shape_crunch_policy_decision_report(impact_report: dict[str, A
 def _crunch_policy_decision_ledger_status(top: dict[str, Any]) -> tuple[str, bool]:
     decision = str(top.get("decision") or "")
     reason_codes = set(str(item) for item in (top.get("reason_codes") or []))
-    if decision == "promote":
+    if decision == "widen":
         return "positive", False
     if decision == "rollback":
         return "rollback-needed", True
+    if decision == "keep-staged":
+        return "needs-more-samples", False
     if reason_codes & {"missing-applied-or-holdout-coverage", "missing-applied-coverage", "missing-holdout-coverage"}:
         return "needs-more-samples", False
     if reason_codes & {"no-applied-savings", "stale-canary-impact-evidence"}:
@@ -5069,6 +5078,7 @@ def build_request_shape_rollups_report(
         impact_rows,
         max_evidence_age_hours=max_crunch_canary_evidence_age_hours,
     )
+    crunch_policy_decision = build_request_shape_crunch_policy_decision_report(crunch_canary_impact)
     follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10)
 
     return {
@@ -5103,6 +5113,7 @@ def build_request_shape_rollups_report(
         "cache_replay_blocker_classification": cache_replay_blocker_classification,
         "crunch_opportunity_dry_run": crunch_opportunity_dry_run,
         "crunch_canary_impact": crunch_canary_impact,
+        "crunch_policy_decision": crunch_policy_decision,
         "rollups": rollups,
         "privacy": {
             "metadata_only": True,
