@@ -639,6 +639,30 @@ def _primary_safety_reason(reasons: list[str]) -> str:
     return str(reasons[0]) if reasons else "local-canary-safety-stop"
 
 
+def _safety_stop_next_state(
+    *,
+    needed_resolution: list[str],
+    stale_status: str,
+    file_backed_status: str,
+    repeated_status: str,
+    safety_stop_count: int,
+    applied_count: int,
+    holdout_count: int,
+) -> tuple[str, str]:
+    needed = {str(item or "") for item in needed_resolution}
+    if safety_stop_count <= 0 and (applied_count > 0 or holdout_count > 0):
+        return "superseded", "safety-stop-no-longer-dominates-current-lifecycle-evidence"
+    if file_backed_status == "missing":
+        return "keep-blocked", "safety-stop-missing-file-backed-local-representation"
+    if needed & {"rollback_proof", "safer_threshold", "human_review"}:
+        return "keep-blocked", "safety-stop-requires-safer-threshold-or-rollback-proof"
+    if stale_status == "stale" or needed & {"holdout_coverage", "lifecycle_evidence"}:
+        return "retry-later", "safety-stop-awaits-fresh-lifecycle-or-holdout-evidence"
+    if repeated_status == "repeated":
+        return "keep-blocked", "repeated-safety-stop-kept-blocked-until-narrow-resolution"
+    return "keep-blocked", "safety-stop-kept-blocked-until-explicit-resolution"
+
+
 def _safety_group_from_lifecycle_row(row: dict[str, Any]) -> dict[str, Any] | None:
     reasons = [str(item) for item in row.get("reason_codes") or [] if str(item or "").strip()]
     cohort = str(row.get("cohort_label") or "").strip()
@@ -660,15 +684,29 @@ def _safety_group_from_lifecycle_row(row: dict[str, Any]) -> dict[str, Any] | No
         retry_count=retry_count,
     )
     primary_reason = _primary_safety_reason(reasons)
+    stale_status = _stale_status(reasons)
+    repeated_status = _repeated_noop_status(reasons, event_count)
+    file_backed_status = _file_backed_status(reasons)
+    next_state, next_state_reason = _safety_stop_next_state(
+        needed_resolution=needed,
+        stale_status=stale_status,
+        file_backed_status=file_backed_status,
+        repeated_status=repeated_status,
+        safety_stop_count=safety_count,
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+    )
     return {
         "source": "activation_lifecycle_feedback",
         "action_family": action_family,
         "blocker_code": primary_reason,
         "safety_stop_reason": primary_reason,
         "keep_blocked_reason": _keep_blocked_reason(action_family, needed, reasons),
-        "stale_status": _stale_status(reasons),
-        "repeated_noop_status": _repeated_noop_status(reasons, event_count),
-        "file_backed_representation_status": _file_backed_status(reasons),
+        "next_state": next_state,
+        "next_state_reason": next_state_reason,
+        "stale_status": stale_status,
+        "repeated_noop_status": repeated_status,
+        "file_backed_representation_status": file_backed_status,
         "needed_resolution": needed,
         "next_action": next_action,
         "event_count": event_count,
@@ -696,14 +734,26 @@ def _safety_group_from_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any] 
     )
     if next_action in {"review-the-safety-stop-and-either-resolve-the-safe-bypass-condition-or-keep-the-affected-activation-blocked-with-a-narrow-reason"}:
         next_action = "review-activation-feedback-safety-stop-and-record-keep-blocked-reason"
+    repeated_status = _repeated_noop_status(reasons, count)
+    next_state, next_state_reason = _safety_stop_next_state(
+        needed_resolution=["human_review", "safer_threshold", "rollback_proof"],
+        stale_status=_stale_status(reasons),
+        file_backed_status=_file_backed_status(reasons),
+        repeated_status=repeated_status,
+        safety_stop_count=count,
+        applied_count=0,
+        holdout_count=0,
+    )
     return {
         "source": "orchestrator_repeated_diagnostic",
         "action_family": _safe_label(diagnostic.get("source_lever") or "activation-feedback", "activation-feedback"),
         "blocker_code": reason or "safety-stop",
         "safety_stop_reason": reason or "safety-stop",
         "keep_blocked_reason": "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
+        "next_state": next_state,
+        "next_state_reason": next_state_reason,
         "stale_status": _stale_status(reasons),
-        "repeated_noop_status": _repeated_noop_status(reasons, count),
+        "repeated_noop_status": repeated_status,
         "file_backed_representation_status": _file_backed_status(reasons),
         "needed_resolution": ["human_review", "safer_threshold", "rollback_proof"],
         "next_action": next_action,
@@ -781,6 +831,8 @@ def build_activation_safety_stop_burndown(
             "top_action_family": top.get("action_family"),
             "top_blocker_code": top.get("blocker_code"),
             "top_keep_blocked_reason": top.get("keep_blocked_reason"),
+            "top_next_state": top.get("next_state"),
+            "top_next_state_reason": top.get("next_state_reason"),
             "top_next_action": top.get("next_action"),
             "next_actions": next_actions,
         },

@@ -2833,6 +2833,11 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
             safety_burndown["summary"]["top_keep_blocked_reason"],
             "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
         )
+        self.assertEqual(safety_burndown["summary"]["top_next_state"], "keep-blocked")
+        self.assertEqual(
+            safety_burndown["groups"][0]["next_state_reason"],
+            "safety-stop-requires-safer-threshold-or-rollback-proof",
+        )
         self.assertIn("activation_safety_stop_burndown", plan["evidence"]["inspected_sources"])
         rendered = json.dumps(plan)
         self.assertNotIn("sec-secret-a", rendered)
@@ -2887,6 +2892,16 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         self.assertEqual(
             safety_rows[0]["blocker_codes"],
             ["activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof"],
+        )
+        self.assertEqual(safety_rows[0]["state"], "keep-blocked")
+        self.assertEqual(safety_rows[0]["next_state"], "keep-blocked")
+        self.assertEqual(
+            safety_rows[0]["next_state_reason"],
+            "safety-stop-requires-safer-threshold-or-rollback-proof",
+        )
+        self.assertEqual(
+            safety_rows[0]["keep_blocked_reason"],
+            "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
         )
         self.assertIn("rollback_proof", safety_rows[0]["needed_resolution"])
         rendered = json.dumps(report, sort_keys=True)

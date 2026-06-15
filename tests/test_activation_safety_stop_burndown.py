@@ -66,8 +66,11 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertEqual(group["action_family"], "routing")
         self.assertEqual(group["blocker_code"], "error-rate-regression")
         self.assertEqual(group["keep_blocked_reason"], "routing-safety-stop-needs-rollback-proof")
+        self.assertEqual(group["next_state"], "keep-blocked")
+        self.assertEqual(group["next_state_reason"], "safety-stop-requires-safer-threshold-or-rollback-proof")
         self.assertIn("rollback_proof", group["needed_resolution"])
         self.assertEqual(group["next_action"], "record-routing-rollback-proof-before-reactivation")
+        self.assertEqual(report["summary"]["top_next_state"], "keep-blocked")
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertTrue(report["privacy"]["aggregate_only"])
         rendered = json.dumps(report, sort_keys=True)
@@ -98,6 +101,11 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
             "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
         )
         self.assertEqual(report["groups"][0]["repeated_noop_status"], "repeated")
+        self.assertEqual(report["groups"][0]["next_state"], "keep-blocked")
+        self.assertEqual(
+            report["groups"][0]["next_state_reason"],
+            "safety-stop-requires-safer-threshold-or-rollback-proof",
+        )
         self.assertEqual(
             report["groups"][0]["keep_blocked_reason"],
             "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
@@ -107,6 +115,47 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertNotIn("req-secret", rendered)
         self.assertNotIn("session-secret", rendered)
         self.assertNotIn("/tmp/raw.py", rendered)
+
+    def test_lifecycle_rows_classify_retry_later_and_superseded_next_states(self):
+        report = build_activation_safety_stop_burndown(
+            {
+                "schema": "agentflow.activation_staged_lifecycle_feedback_summary.v1",
+                "cohort_lifecycle_metadata": [
+                    {
+                        "policy_ref": "policy:stale",
+                        "cohort_label": "safety_stopped",
+                        "action_family": "cache_replay",
+                        "event_count": 1,
+                        "safety_stop_count": 1,
+                        "applied_count": 1,
+                        "holdout_count": 0,
+                        "reason_codes": ["stale-lifecycle-evidence"],
+                    },
+                    {
+                        "policy_ref": "policy:superseded",
+                        "cohort_label": "applied",
+                        "action_family": "crunch",
+                        "event_count": 3,
+                        "safety_stop_count": 0,
+                        "applied_count": 2,
+                        "holdout_count": 1,
+                        "reason_codes": ["safety-stop-observed"],
+                    },
+                ],
+            }
+        )
+
+        by_policy = {group["policy_ref"]: group for group in report["groups"]}
+        self.assertEqual(by_policy["policy:stale"]["next_state"], "retry-later")
+        self.assertEqual(
+            by_policy["policy:stale"]["next_state_reason"],
+            "safety-stop-awaits-fresh-lifecycle-or-holdout-evidence",
+        )
+        self.assertEqual(by_policy["policy:superseded"]["next_state"], "superseded")
+        self.assertEqual(
+            by_policy["policy:superseded"]["next_state_reason"],
+            "safety-stop-no-longer-dominates-current-lifecycle-evidence",
+        )
 
     def test_cli_reads_plan_json_and_db(self):
         with tempfile.TemporaryDirectory() as tmp:

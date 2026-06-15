@@ -1975,11 +1975,11 @@ def _loop_state_rank(state: str) -> int:
 
 
 def _loop_missing_state(state: str) -> bool:
-    return state in {"missing-evidence", "blocked"}
+    return state in {"missing-evidence", "blocked", "keep-blocked", "retry-later"}
 
 
 def _loop_progress_state(state: str) -> bool:
-    return state in {"activation-ready", "replay-ready", "measured-savings", "projected-savings", "ranked-evidence"}
+    return state in {"activation-ready", "replay-ready", "measured-savings", "projected-savings", "ranked-evidence", "superseded"}
 
 
 def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
@@ -2646,8 +2646,10 @@ def _burndown_state_rank(value: str) -> int:
         return 0
     if value in {"ranked-evidence", "measured-savings", "projected-savings", "evidence-progress"}:
         return 10
-    if value in {"missing-evidence", "blocked"}:
+    if value in {"missing-evidence", "blocked", "keep-blocked", "retry-later"}:
         return 20
+    if value == "superseded":
+        return 25
     return 30
 
 
@@ -2722,12 +2724,18 @@ def _burndown_row_from_safety_stop_group(group: dict[str, Any]) -> dict[str, Any
     if not blocker or count <= 0:
         return None
     needed = [str(item) for item in group.get("needed_resolution") or [] if str(item or "").strip()]
+    next_state = str(group.get("next_state") or "keep-blocked").strip()
+    if next_state not in {"keep-blocked", "retry-later", "superseded"}:
+        next_state = "keep-blocked"
     return {
         "lever": "activation-feedback",
         "local_action_family": sanitize_value(group.get("action_family") or "activation-feedback"),
-        "state": "blocked",
+        "state": sanitize_value(next_state),
         "next_action": sanitize_value(group.get("next_action") or "review-activation-feedback-safety-stop-and-record-keep-blocked-reason"),
         "blocker_codes": sanitize_value([blocker]),
+        "next_state": sanitize_value(next_state),
+        "next_state_reason": sanitize_value(group.get("next_state_reason") or blocker),
+        "keep_blocked_reason": sanitize_value(group.get("keep_blocked_reason") or blocker),
         "needed_resolution": sanitize_value(needed),
         "evidence_source": "agentflow.activation_safety_stop_burndown.v1",
         "sample_count": count,
