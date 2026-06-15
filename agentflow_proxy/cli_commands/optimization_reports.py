@@ -7279,3 +7279,103 @@ def post_promotion_policy_draft_dry_run_cli(
     if (result.get("error") or {}).get("type") in {"invalid_report", "raw_payload_rejected", "impact_gate_blocked"}:
         return 1
     return 0
+
+
+def post_promotion_policy_draft_apply_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Apply gated post-promotion local policy drafts to file-backed AgentFlow rule files"
+    )
+    parser.add_argument(
+        "policy_draft_report",
+        nargs="?",
+        help="Post-promotion policy draft dry-run JSON path, or '-' to read from stdin.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory containing local rule files, default: ~/.agentflow.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+    )
+    parser.add_argument("--max-apply", type=int, default=20, help="Maximum gated drafts to process, default: 20.")
+    parser.add_argument("--dry-run", action="store_true", help="Stage and validate generated policy drafts without writing active rule files.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print apply JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    if not args.policy_draft_report:
+        result = {
+            "schema": "agentflow.post_promotion_policy_draft_apply.v1",
+            "ok": False,
+            "status": "invalid",
+            "error": {
+                "type": "missing_input",
+                "message": "provide a post-promotion policy draft dry-run JSON path or '-' for stdin",
+            },
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "wrote_local_policy_files": False,
+        }
+        _write_json(stderr, result)
+        return 1
+
+    try:
+        report = _read_json_input(str(args.policy_draft_report), stdin=stdin)
+    except (OSError, json.JSONDecodeError) as exc:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.post_promotion_policy_draft_apply_error.v1",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "wrote_local_policy_files": False,
+            },
+        )
+        return 1
+
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.post_promotion_policy_apply import apply_post_promotion_policy_drafts
+
+    result = asyncio.run(apply_post_promotion_policy_drafts(
+        report,
+        config_dir=args.config_dir,
+        workspace=args.workspace,
+        dry_run=bool(args.dry_run),
+        max_apply=int(args.max_apply or 0),
+    ))
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    log_policy_event(
+        "post-promotion-policy-draft-apply",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "path": args.policy_draft_report,
+            "config_dir": args.config_dir,
+            "workspace": args.workspace,
+            "dry_run": bool(args.dry_run),
+            "draft_count": summary.get("draft_count"),
+            "processed_count": summary.get("processed_count"),
+            "applied_count": summary.get("applied_count"),
+            "blocked_count": summary.get("blocked_count"),
+            "wrote_local_policy_files": bool(result.get("wrote_local_policy_files")),
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    _write_rollout_actions_result(stdout if result.get("ok") else stderr, result, pretty=args.pretty)
+    return 0 if result.get("ok") else 1

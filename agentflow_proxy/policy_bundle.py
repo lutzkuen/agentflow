@@ -4128,7 +4128,12 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
         if "threshold_chars" in policy:
             payload["threshold_chars"] = policy.get("threshold_chars")
         local_summary_rule, _summary_meta = _managed_old_context_summary_local_rule(policy)
-        for key in ("prompt_cache", "thinking_deduplication", "instruction_section_deduplication"):
+        for key in (
+            "prompt_cache",
+            "thinking_deduplication",
+            "anthropic_thinking_history_compaction",
+            "instruction_section_deduplication",
+        ):
             if isinstance(policy.get(key), dict):
                 payload[key] = policy[key]
         if local_summary_rule is not None:

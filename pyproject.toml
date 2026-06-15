@@ -121,6 +121,7 @@ agentflow-optimization-promotion-actions = "agentflow_proxy.cli:optimization_pro
 agentflow-optimization-promotion-blocker-review = "agentflow_proxy.cli:optimization_promotion_blocker_review_main"
 agentflow-post-promotion-priority-delta-review = "agentflow_proxy.cli:post_promotion_priority_delta_review_main"
 agentflow-post-promotion-policy-draft-dry-run = "agentflow_proxy.cli:post_promotion_policy_draft_dry_run_main"
+agentflow-post-promotion-policy-draft-apply = "agentflow_proxy.cli:post_promotion_policy_draft_apply_main"
 agentflow-optimization-promotion-canaries-apply = "agentflow_proxy.cli:optimization_promotion_canary_apply_main"
 agentflow-optimization-promotion-impact = "agentflow_proxy.cli:optimization_promotion_impact_main"
 agentflow-orchestrator-research = "agentflow_proxy.cli:orchestrator_research_main"
