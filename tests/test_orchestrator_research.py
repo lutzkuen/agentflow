@@ -2881,11 +2881,30 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("managed_recommendations_report", signal["missing_measurements"])
         self.assertTrue(signal["top_omission"]["local_file_backed_representation"]["exists"])
         self.assertIn("cache", {row["local_action_family"] for row in signal["omissions"]})
+        self.assertTrue(signal["duplicate_suppression"]["suppresses_generic_missing_health_issue"])
+        self.assertEqual(
+            signal["duplicate_suppression"]["reason"],
+            "local-file-backed-handoff-outcome-recorded",
+        )
+        outcome_families = {row["local_action_family"] for row in signal["local_file_backed_handoff_outcomes"]}
+        self.assertIn("routing", outcome_families)
+        self.assertIn("cache", outcome_families)
+        self.assertEqual(
+            signal["top_local_file_backed_handoff_outcome"]["outcome"],
+            "local-file-backed-handoff-recorded",
+        )
 
         managed_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "managed-recommendation")
         self.assertTrue(managed_candidate["blocker"].startswith("managed-recommendation-health-report-missing"))
         self.assertEqual(managed_candidate["safety_status"], "review-required")
         self.assertEqual(managed_candidate["projected_savings_signal"]["status"], "missing-managed-recommendation-health-report")
+        self.assertEqual(managed_candidate["issue_generation_status"], "suppressed-local-file-backed-handoff")
+        self.assertFalse(
+            any(
+                item["title"] == "Rank managed recommendation omission reasons for local policy handoff"
+                for item in plan["backlog_changes"]["create_issues"]
+            )
+        )
 
     def test_managed_recommendation_handoff_reports_omitted_local_action_reason(self):
         plan = build_research_plan(
@@ -3053,6 +3072,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("crunch", by_family)
         self.assertIn("routing", by_family)
         self.assertIn("cache", by_family)
+        outcome_by_family = {
+            row["local_action_family"]: row
+            for row in signal["local_file_backed_handoff_outcomes"]
+        }
+        self.assertEqual(set(outcome_by_family), {"cache", "crunch", "routing"})
+        self.assertTrue(signal["duplicate_suppression"]["suppresses_generic_missing_health_issue"])
+        self.assertEqual(
+            signal["duplicate_suppression"]["covered_local_action_families"],
+            ["cache", "crunch", "routing"],
+        )
         self.assertEqual(signal["top_omission"]["local_action_family"], "crunch")
         self.assertTrue(
             signal["top_omission"]["omitted_reason"].startswith(
@@ -3073,12 +3102,22 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             self.assertIn(row["next_action"], row["local_handoff_reason"])
             self.assertIn(rule_file, row["local_handoff_reason"])
             self.assertTrue(row["local_handoff_reason"].startswith("local-file-backed-policy-handoff:"))
+            outcome = outcome_by_family[family]
+            self.assertEqual(outcome["outcome"], "local-file-backed-handoff-recorded")
+            self.assertEqual(outcome["rule_file"], rule_file)
+            self.assertEqual(outcome["follow_up_owner"], "local-policy")
 
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
         managed_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "managed-recommendation")
         self.assertEqual(managed_entry["managed_dependency"], "optional")
         self.assertEqual(managed_entry["local_action_family"], "crunch")
         self.assertIn("crunch_rules.yaml", managed_entry["local_handoff_reason"])
+        self.assertFalse(
+            any(
+                item["title"] == "Rank managed recommendation omission reasons for local policy handoff"
+                for item in plan["backlog_changes"]["create_issues"]
+            )
+        )
         self.assertFalse(signal["privacy"]["raw_prompts_included"])
         self.assertFalse(signal["privacy"]["provider_bodies_included"])
         self.assertFalse(signal["privacy"]["request_ids_included"])

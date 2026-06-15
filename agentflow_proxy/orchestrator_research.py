@@ -2280,6 +2280,66 @@ def _managed_local_handoff_stage_rows(stats_summary: dict[str, Any]) -> list[dic
     return rows
 
 
+def _managed_local_file_backed_handoff_outcomes(
+    ranked_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    outcomes: list[dict[str, Any]] = []
+    generic_missing = False
+    for row in ranked_rows:
+        representation = (
+            row.get("local_file_backed_representation")
+            if isinstance(row.get("local_file_backed_representation"), dict)
+            else {}
+        )
+        if not representation.get("exists") or row.get("follow_up_owner") != "local-policy":
+            continue
+        omitted_reason = sanitize_value(row.get("omitted_reason") or "unknown")
+        if str(omitted_reason).startswith("managed-recommendation-health-report-missing"):
+            generic_missing = True
+        outcomes.append(
+            {
+                "schema": "agentflow.managed_recommendation_local_file_backed_handoff_outcome.v1",
+                "rank": _to_int(row.get("rank")) or len(outcomes) + 1,
+                "outcome": "local-file-backed-handoff-recorded",
+                "source": sanitize_value(row.get("source") or "unknown"),
+                "omitted_reason": omitted_reason,
+                "count": _to_int(row.get("count"), 1),
+                "local_action_family": sanitize_value(row.get("local_action_family") or "unknown"),
+                "follow_up_owner": "local-policy",
+                "managed_dependency": "optional",
+                "policy_source": sanitize_value(representation.get("policy_source") or "local-file-backed"),
+                "policy_section": sanitize_value(representation.get("policy_section") or "local-policy"),
+                "rule_file": sanitize_value(representation.get("rule_file") or "local-rule-file"),
+                "next_action": sanitize_value(row.get("next_action") or "review-local-policy-representation"),
+                "local_handoff_reason": sanitize_value(row.get("local_handoff_reason") or ""),
+                "local_evidence_state": sanitize_value(row.get("local_evidence_state") or ""),
+                "local_evidence_source": sanitize_value(row.get("local_evidence_source") or ""),
+                "blocker_codes": sanitize_value(row.get("blocker_codes") or []),
+            }
+        )
+    families = sorted(
+        {
+            str(row.get("local_action_family"))
+            for row in outcomes
+            if str(row.get("local_action_family") or "").strip()
+        }
+    )
+    duplicate_suppression = {
+        "schema": "agentflow.managed_recommendation_handoff_duplicate_suppression.v1",
+        "suppresses_generic_missing_health_issue": bool(outcomes and generic_missing),
+        "reason": (
+            "local-file-backed-handoff-outcome-recorded"
+            if outcomes and generic_missing
+            else "no-generic-managed-health-omission-covered"
+        ),
+        "covered_local_action_families": families,
+        "local_file_backed_handoff_outcome_count": len(outcomes),
+        "managed_dependency": "optional",
+        "metadata_only": True,
+    }
+    return outcomes, duplicate_suppression
+
+
 def _managed_recommendation_health_signal(
     stats: dict[str, Any],
     *,
@@ -2408,6 +2468,7 @@ def _managed_recommendation_health_signal(
 
     represented = sum(1 for row in ranked if row["local_file_backed_representation"].get("exists"))
     unrepresented = len(ranked) - represented
+    handoff_outcomes, duplicate_suppression = _managed_local_file_backed_handoff_outcomes(ranked)
     top_reason = str(top.get("omitted_reason") or "") if isinstance(top, dict) else ""
     top_repr = top.get("local_file_backed_representation") if isinstance(top, dict) else None
     omitted_local_action_reason = top_reason or None
@@ -2429,6 +2490,7 @@ def _managed_recommendation_health_signal(
             "omitted_count": sum(_to_int(row.get("count"), 1) for row in ranked),
             "ranked_omission_count": len(ranked),
             "local_file_backed_count": represented,
+            "local_file_backed_handoff_outcome_count": len(handoff_outcomes),
             "no_local_representation_count": unrepresented,
             "local_policy_followup_count": len(
                 [row for row in ranked if row.get("follow_up_owner") == "local-policy"]
@@ -2437,6 +2499,9 @@ def _managed_recommendation_health_signal(
         },
         "top_omission": top,
         "omissions": ranked,
+        "top_local_file_backed_handoff_outcome": handoff_outcomes[0] if handoff_outcomes else None,
+        "local_file_backed_handoff_outcomes": handoff_outcomes,
+        "duplicate_suppression": duplicate_suppression,
         "missing_measurements": missing,
         "privacy": {
             "metadata_only": True,
@@ -2485,6 +2550,17 @@ def build_managed_recommendation_handoff_report(stats: dict[str, Any] | None) ->
             },
             "top_omission": None,
             "omissions": [],
+            "top_local_file_backed_handoff_outcome": None,
+            "local_file_backed_handoff_outcomes": [],
+            "duplicate_suppression": {
+                "schema": "agentflow.managed_recommendation_handoff_duplicate_suppression.v1",
+                "suppresses_generic_missing_health_issue": False,
+                "reason": "no-local-traffic",
+                "covered_local_action_families": [],
+                "local_file_backed_handoff_outcome_count": 0,
+                "managed_dependency": "optional",
+                "metadata_only": True,
+            },
             "missing_measurements": ["local_metadata_calls"],
             "privacy": {
                 "metadata_only": True,
@@ -5329,6 +5405,11 @@ def _managed_recommendation_candidate(stats_summary: dict[str, Any]) -> dict[str
     )
     represented = bool(representation.get("exists"))
     follow_up_owner = str(top.get("follow_up_owner") or "")
+    suppress_generic_issue = bool(
+        isinstance(signal.get("duplicate_suppression"), dict)
+        and signal["duplicate_suppression"].get("suppresses_generic_missing_health_issue")
+    )
+    issue_generation_status = "active"
     if status == "missing-managed-recommendation-health-report" and represented and follow_up_owner == "local-policy":
         reason_fragment = omitted_reason if omitted_reason.startswith("managed-recommendation") else f"managed-recommendation-{omitted_reason}"
         blocker = reason_fragment
@@ -5336,6 +5417,8 @@ def _managed_recommendation_candidate(stats_summary: dict[str, Any]) -> dict[str
         confidence = "medium"
         safety_status = "review-required"
         score = float(_to_int(top.get("count")) or calls) + 250.0
+        if suppress_generic_issue:
+            issue_generation_status = "suppressed-local-file-backed-handoff"
     elif status == "missing-managed-recommendation-health-report":
         blocker = "managed-recommendation-health-report-missing"
         path = "Emit a bounded managed recommendation health rollup before choosing local policy or managed optimizer follow-up."
@@ -5361,7 +5444,7 @@ def _managed_recommendation_candidate(stats_summary: dict[str, Any]) -> dict[str
         safety_status = "blocked"
         score = float(_to_int(top.get("count")) or calls) + 150.0
 
-    return _candidate(
+    candidate = _candidate(
         lever="managed-recommendation",
         provider_surface_bucket=str(top.get("local_action_family") or "mixed"),
         blocker=blocker,
@@ -5372,6 +5455,10 @@ def _managed_recommendation_candidate(stats_summary: dict[str, Any]) -> dict[str
         safety_status=safety_status,
         score=score,
     )
+    if issue_generation_status != "active":
+        candidate["issue_generation_status"] = issue_generation_status
+        candidate["issue_generation_suppression_reason"] = "managed-health-missing-covered-by-local-file-backed-handoff"
+    return candidate
 
 
 def _request_shape_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
@@ -5827,7 +5914,11 @@ def _proposal_from_optimization_candidate(candidate: dict[str, Any]) -> dict[str
 
 
 def _proposals_from_optimization_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [_proposal_from_optimization_candidate(candidate) for candidate in candidates]
+    return [
+        _proposal_from_optimization_candidate(candidate)
+        for candidate in candidates
+        if not str(candidate.get("issue_generation_status") or "").startswith("suppressed-")
+    ]
 
 
 def _bounded_low_backlog_evidence(
