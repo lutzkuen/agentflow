@@ -11,6 +11,7 @@ from agentflow_proxy.orchestrator_research import (
     build_evidence_to_activation_burndown,
     build_evidence_to_activation_next_action_ledger,
     build_research_plan,
+    _dedupe_create_issue_proposals_with_metadata,
 )
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 
@@ -18,8 +19,64 @@ from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 NOW = datetime(2026, 6, 11, 8, 40, tzinfo=timezone.utc)
 
 
-def issue(number, title, labels, *, repo="lutzkuen/agentflow", author="lutzkuen", state="OPEN", updated="2026-06-11T08:00:00Z"):
+def cache_replayability_stats():
     return {
+        "calls": 100,
+        "cache_hits": 0,
+        "cache_hit_rate": 0.0,
+        "request_shape_rollup_report": {
+            "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+            "cache_replayability_dry_run": {
+                "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                "status": "ranked",
+                "summary": {
+                    "cohort_count": 1,
+                    "rows_considered": 56,
+                    "replay_ready_cohort_count": 1,
+                    "replay_ready_rows": 56,
+                    "skipped_cohort_count": 0,
+                    "projected_hits": 55,
+                    "projected_savings_usd": 0.121981,
+                },
+                "cohorts": [
+                    {
+                        "readiness": "replay-ready",
+                        "reason": "replay-ready-exact-non-tool-shape",
+                        "blockers": [],
+                        "provider_family": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "category": "chat",
+                        "workflow_phase": "chat",
+                        "stream": False,
+                        "has_tools": False,
+                        "cache_status": "miss",
+                        "routing_status": "disabled",
+                        "row_count": 56,
+                        "projected_hits": 55,
+                        "projected_savings_usd": 0.121981,
+                    }
+                ],
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        },
+    }
+
+
+def issue(
+    number,
+    title,
+    labels,
+    *,
+    repo="lutzkuen/agentflow",
+    author="lutzkuen",
+    state="OPEN",
+    updated="2026-06-11T08:00:00Z",
+    closed=None,
+    body=None,
+):
+    payload = {
         "repo": repo,
         "number": number,
         "title": title,
@@ -29,6 +86,11 @@ def issue(number, title, labels, *, repo="lutzkuen/agentflow", author="lutzkuen"
         "labels": [{"name": name} for name in labels],
         "updatedAt": updated,
     }
+    if closed is not None:
+        payload["closedAt"] = closed
+    if body is not None:
+        payload["body"] = body
+    return payload
 
 
 class OrchestratorResearchPlanTests(unittest.TestCase):
@@ -1347,6 +1409,93 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw-cache-cohort-secret", rendered)
         self.assertNotIn("/tmp/private-cache-ledger.py", rendered)
+
+    def test_recent_trusted_closed_issue_suppresses_same_stage_proposal(self):
+        stale_title = "Stage cache replay canary for replay-ready on openai/openai_responses/responses"
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    515,
+                    stale_title,
+                    ["backlog", "status:ready", "cache"],
+                    state="CLOSED",
+                    closed="2026-06-11T08:20:00Z",
+                )
+            ],
+            stats=cache_replayability_stats(),
+            threshold=3,
+            now=NOW,
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn(stale_title, titles)
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertGreaterEqual(suppression["closed_prior_issue_count"], 1)
+        closed = next(row for row in suppression["suppressed"] if row["title"] == stale_title)
+        self.assertEqual(closed["suppression_kind"], "closed-prior-issue")
+        self.assertEqual(closed["existing_issue"]["number"], 515)
+
+    def test_only_recent_trusted_closed_issues_suppress_stage_proposals(self):
+        stale_title = "Stage cache replay canary for replay-ready on openai/openai_responses/responses"
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    40,
+                    stale_title,
+                    ["backlog", "status:ready", "cache"],
+                    state="CLOSED",
+                    closed="2026-05-01T00:00:00Z",
+                ),
+                issue(
+                    41,
+                    stale_title,
+                    ["backlog", "status:ready", "cache"],
+                    author="external",
+                    state="CLOSED",
+                    closed="2026-06-11T08:20:00Z",
+                ),
+            ],
+            stats=cache_replayability_stats(),
+            threshold=3,
+            now=NOW,
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertIn(stale_title, titles)
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["closed_prior_issue_count"], 0)
+
+    def test_recent_closed_issue_with_matching_evidence_fingerprint_suppresses_proposal(self):
+        proposal = {
+            "repo": "lutzkuen/agentflow",
+            "title": "Follow up cache replay cohort with renamed title",
+            "labels": ["backlog", "status:ready"],
+            "body": "## Evidence\n\n- Fingerprint: activation:abc123456789\n",
+        }
+
+        deduped, suppression = _dedupe_create_issue_proposals_with_metadata(
+            [proposal],
+            existing_issues=[
+                issue(
+                    616,
+                    "Completed cache replay predecessor with different title",
+                    ["backlog", "status:ready", "cache"],
+                    state="CLOSED",
+                    closed="2026-06-11T08:20:00Z",
+                    body="Resolved predecessor.\n\nFingerprint: activation:abc123456789\n",
+                )
+            ],
+            trusted_author="lutzkuen",
+            now=NOW,
+        )
+
+        self.assertEqual(deduped, [])
+        self.assertEqual(suppression["fingerprint_match_count"], 1)
+        self.assertEqual(suppression["closed_prior_issue_count"], 1)
+        suppressed = suppression["suppressed"][0]
+        self.assertEqual(suppressed["reason"], "evidence-fingerprint-already-exists")
+        self.assertEqual(suppressed["suppression_kind"], "closed-prior-issue")
+        self.assertEqual(suppressed["existing_issue"]["number"], 616)
 
     def test_open_legacy_ledger_issue_suppresses_duplicate_proposal(self):
         stale_title = "Stage cache replay canary for activation-ready on openai/openai_responses/responses"

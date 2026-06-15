@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import time
 from typing import Any, Sequence
@@ -432,6 +434,7 @@ def orchestrator_research_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     if stats is not None and not isinstance(stats, dict):
         _write_json(stderr, {"ok": False, "error": {"type": "invalid_stats_json", "message": "stats JSON must be an object"}})
         return 1
+    issues = _attach_recent_closed_github_issues_for_research(issues, trusted_author=args.trusted_author)
     stats = _attach_request_shape_rollups_for_research(stats)
 
     plan = build_research_plan(
@@ -444,6 +447,91 @@ def orchestrator_research_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     )
     write_json(stdout, plan, pretty=args.pretty)
     return 0
+
+
+def _issue_repo_for_research(issue: Any) -> str | None:
+    if not isinstance(issue, dict):
+        return None
+    repo = str(issue.get("repo") or issue.get("repository") or "").strip()
+    if repo.count("/") == 1:
+        return repo
+    url = str(issue.get("url") or issue.get("html_url") or "").strip()
+    marker = "github.com/"
+    if marker in url:
+        parts = url.split(marker, 1)[1].split("/")
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            return f"{parts[0]}/{parts[1]}"
+    return None
+
+
+def _attach_recent_closed_github_issues_for_research(
+    issues: list[Any],
+    *,
+    trusted_author: str,
+) -> list[Any]:
+    if os.getenv("AGENTFLOW_RESEARCH_FETCH_CLOSED_ISSUES", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return issues
+    gh = shutil.which("gh")
+    if not gh:
+        return issues
+    repos = sorted({repo for repo in (_issue_repo_for_research(issue) for issue in issues) if repo})
+    if not repos:
+        env_repos = os.getenv("AGENTFLOW_RESEARCH_GITHUB_REPOS", "")
+        repos = sorted({repo.strip() for repo in env_repos.split(",") if repo.strip().count("/") == 1})
+    if not repos:
+        return issues
+    limit = os.getenv("AGENTFLOW_RESEARCH_CLOSED_ISSUE_LIMIT", "50")
+    try:
+        limit_value = str(max(1, min(200, int(limit))))
+    except ValueError:
+        limit_value = "50"
+    merged = list(issues)
+    seen = {
+        (_issue_repo_for_research(issue) or "", str(issue.get("number") or ""))
+        for issue in issues
+        if isinstance(issue, dict)
+    }
+    for repo in repos:
+        cmd = [
+            gh,
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "closed",
+            "--author",
+            trusted_author,
+            "--limit",
+            limit_value,
+            "--json",
+            "number,title,closedAt,updatedAt,labels,url",
+        ]
+        try:
+            completed = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if completed.returncode != 0:
+            continue
+        try:
+            rows = json.loads(completed.stdout)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = (repo, str(row.get("number") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            enriched = dict(row)
+            enriched["repo"] = repo
+            enriched["state"] = "CLOSED"
+            enriched["author"] = {"login": trusted_author}
+            merged.append(enriched)
+    return merged
 
 
 def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> dict[str, Any] | None:

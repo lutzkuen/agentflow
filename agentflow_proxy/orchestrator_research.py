@@ -393,6 +393,25 @@ def _is_blocked(issue: dict[str, Any], trusted_author: str) -> bool:
     return _is_open(issue) and _is_trusted(issue, trusted_author) and "status:blocked" in labels
 
 
+def _issue_closed_time(issue: dict[str, Any]) -> datetime | None:
+    return _parse_time(
+        issue.get("closedAt")
+        or issue.get("closed_at")
+        or issue.get("updatedAt")
+        or issue.get("updated_at")
+    )
+
+
+def _is_recent_closed_issue(issue: dict[str, Any], *, now: datetime, recent_days: int) -> bool:
+    if _is_open(issue):
+        return False
+    closed_at = _issue_closed_time(issue)
+    if closed_at is None:
+        return True
+    age_seconds = (now - closed_at).total_seconds()
+    return age_seconds >= 0 and age_seconds <= max(0, recent_days) * 86400
+
+
 def _issue_ref(issue: dict[str, Any]) -> dict[str, Any]:
     return {
         "repo": issue.get("repo") or issue.get("repository") or "unknown",
@@ -5035,16 +5054,45 @@ def _issue_title_key(title: Any) -> str:
     return " ".join(words)
 
 
+_PUBLIC_FINGERPRINT_RE = re.compile(
+    r"\b(?:activation|diagnostic|policy|rule|cohort|candidate):[a-z0-9][a-z0-9_.:-]{6,}\b",
+    re.IGNORECASE,
+)
+
+
+def _proposal_fingerprints(item: dict[str, Any]) -> set[str]:
+    fingerprints: set[str] = set()
+    for key in (
+        "fingerprint",
+        "diagnostic_fingerprint",
+        "proposal_fingerprint",
+        "evidence_fingerprint",
+    ):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            fingerprints.add(redact_text(value.strip().lower()))
+    body = str(item.get("body") or "")
+    for match in _PUBLIC_FINGERPRINT_RE.findall(body):
+        fingerprints.add(redact_text(match.strip().lower()))
+    return {fingerprint for fingerprint in fingerprints if fingerprint}
+
+
 def _dedupe_create_issue_proposals(
     proposals: list[dict[str, Any]],
     *,
     existing_issues: Iterable[dict[str, Any]],
     max_count: int = 10,
+    trusted_author: str = "lutzkuen",
+    now: datetime | None = None,
+    recent_closed_days: int = 14,
 ) -> list[dict[str, Any]]:
     return _dedupe_create_issue_proposals_with_metadata(
         proposals,
         existing_issues=existing_issues,
         max_count=max_count,
+        trusted_author=trusted_author,
+        now=now,
+        recent_closed_days=recent_closed_days,
     )[0]
 
 
@@ -5053,29 +5101,48 @@ def _dedupe_create_issue_proposals_with_metadata(
     *,
     existing_issues: Iterable[dict[str, Any]],
     max_count: int = 10,
+    trusted_author: str = "lutzkuen",
+    now: datetime | None = None,
+    recent_closed_days: int = 14,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     existing_by_key: dict[str, dict[str, Any]] = {}
+    existing_by_fingerprint: dict[str, dict[str, Any]] = {}
     for issue in existing_issues:
+        if not isinstance(issue, dict) or not _is_trusted(issue, trusted_author):
+            continue
+        if not _is_open(issue) and not _is_recent_closed_issue(issue, now=now, recent_days=recent_closed_days):
+            continue
         key = _issue_title_key(issue.get("title"))
         if key and key not in existing_by_key:
             existing_by_key[key] = issue
+        for fingerprint in _proposal_fingerprints(issue):
+            existing_by_fingerprint.setdefault(fingerprint, issue)
     existing_keys = set(existing_by_key)
     existing_keys.discard("")
     seen = set(existing_keys)
+    seen_fingerprints = set(existing_by_fingerprint)
     deduped: list[dict[str, Any]] = []
     suppressed: list[dict[str, Any]] = []
     for proposal in proposals:
         key = _issue_title_key(proposal.get("title"))
         if not key:
             continue
-        if key in seen:
-            matched_issue = existing_by_key.get(key)
+        proposal_fingerprints = _proposal_fingerprints(proposal)
+        matched_fingerprint = next((item for item in proposal_fingerprints if item in seen_fingerprints), None)
+        if key in seen or matched_fingerprint is not None:
+            matched_issue = existing_by_key.get(key) or (
+                existing_by_fingerprint.get(matched_fingerprint) if matched_fingerprint else None
+            )
+            reason = "exact-title-already-exists" if key in seen else "evidence-fingerprint-already-exists"
             row = {
                 "title": sanitize_value(proposal.get("title")),
                 "repo": sanitize_value(proposal.get("repo") or (matched_issue or {}).get("repo") or "unknown"),
                 "proposal_key": key,
-                "reason": "exact-title-already-exists",
+                "reason": reason,
             }
+            if matched_fingerprint:
+                row["evidence_fingerprint"] = sanitize_value(matched_fingerprint)
             if matched_issue is not None:
                 row.update(
                     {
@@ -5089,6 +5156,7 @@ def _dedupe_create_issue_proposals_with_metadata(
             suppressed.append(row)
             continue
         seen.add(key)
+        seen_fingerprints.update(proposal_fingerprints)
         deduped.append(proposal)
         if len(deduped) >= max_count:
             break
@@ -5097,6 +5165,8 @@ def _dedupe_create_issue_proposals_with_metadata(
         "suppressed_count": len(suppressed),
         "closed_prior_issue_count": sum(1 for item in suppressed if item.get("suppression_kind") == "closed-prior-issue"),
         "open_existing_issue_count": sum(1 for item in suppressed if item.get("suppression_kind") == "open-existing-issue"),
+        "fingerprint_match_count": sum(1 for item in suppressed if item.get("reason") == "evidence-fingerprint-already-exists"),
+        "recent_closed_days": recent_closed_days,
         "suppressed": suppressed[:20],
         "privacy": {
             "metadata_only": True,
@@ -6485,6 +6555,8 @@ def build_research_plan(
             create_issues,
             existing_issues=issue_list,
             max_count=10,
+            trusted_author=trusted_author,
+            now=now,
         )
         if safety_stop_suppressed_diagnostics:
             proposal_suppression["suppressed"].extend(safety_stop_suppressed_diagnostics[:20])
