@@ -839,7 +839,7 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
     stage: dict[str, Any] = {
         "lever": source_lever,
         "state": "blocked",
-        "evidence_source": "orchestrator_logs",
+        "evidence_source": "agentflow.orchestrator_research_log_diagnostics.v1",
         "local_action_family": source_lever if source_lever in {"routing", "cache", "crunch"} else "activation-feedback",
         "next_action": "classify-activation-feedback-blocker-for-local-action-ledger",
         "blocker_codes": [reason],

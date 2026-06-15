@@ -4037,6 +4037,112 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         self.assertIn("Fingerprint:", body)
         self.assertIn("Action:", body)
 
+    def test_issue_532_combined_activation_feedback_and_safety_stop_fixture(self):
+        # Issue #532 acceptance metric: repeated activation-feedback-blocker-review (6x) and
+        # safety-stop (7x) diagnostics plus pass diagnostics (3x) must produce durable ledger
+        # entries with stable fingerprints, suppress keep-blocked safety-stop proposals, and
+        # create at most one bounded ready proposal for the unresolved diagnostic class.
+        log_lines = (
+            [f"routing blocker=safety-stop request_id=req-safety-stop-{n}" for n in range(7)]
+            + [f"activation feedback omitted by unknown gate with no machine reason request_id=req-af-{n}" for n in range(6)]
+            + [f"verdict: pass threshold=ok run_id=pass-{n}" for n in range(3)]
+        )
+        plan = build_research_plan(
+            issues=[],
+            log_sources=log_lines,
+            threshold=1,
+            now=NOW,
+        )
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        self.assertEqual(ledger["schema"], "agentflow.evidence_to_activation_next_action_ledger.v1")
+        self.assertTrue(ledger["privacy"]["metadata_only"])
+        self.assertTrue(ledger["privacy"]["aggregate_only"])
+
+        # Durable ledger entry for activation-feedback-blocker-review with stable fingerprint,
+        # source schema, action family, next action, and current state.
+        af_entries = [
+            entry for entry in ledger["entries"]
+            if entry.get("lever") == "activation-feedback"
+            and entry.get("diagnostic_class") == "activation-feedback-blocker-review"
+        ]
+        self.assertEqual(len(af_entries), 1, "expected exactly one ledger entry for activation-feedback-blocker-review")
+        af_entry = af_entries[0]
+        self.assertEqual(
+            af_entry["diagnostic_fingerprint"],
+            "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
+        )
+        self.assertEqual(af_entry["next_action"], "cut-ready-activation-feedback-issue-from-bounded-diagnostic")
+        self.assertEqual(af_entry["local_action_family"], "activation-feedback")
+        self.assertEqual(af_entry["evidence_schema"], "agentflow.orchestrator_research_log_diagnostics.v1")
+        self.assertTrue(af_entry.get("fingerprint"), "durable stable fingerprint must be non-empty")
+        self.assertIn(af_entry.get("state") or "", {"blocked", "missing-evidence"})
+
+        # Keep-blocked safety-stop ledger entry with keep_blocked_reason.
+        safety_entries = [
+            entry for entry in ledger["entries"]
+            if entry.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
+        ]
+        self.assertTrue(safety_entries, "expected a safety-stop ledger entry")
+        self.assertEqual(safety_entries[0]["current_status"], "keep-blocked")
+        self.assertEqual(
+            safety_entries[0]["keep_blocked_reason"],
+            "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
+        )
+
+        # Keep-blocked suppresses the repeated safety-stop ready issue proposal.
+        repeated_safety_proposals = [
+            item for item in plan["backlog_changes"]["create_issues"]
+            if "repeated" in item["title"].lower() and "safety stop" in item["title"].lower()
+        ]
+        self.assertFalse(repeated_safety_proposals, "keep-blocked safety-stop must suppress its ready issue proposal")
+
+        # At most one bounded ready proposal per unresolved diagnostic class.
+        af_proposals = [
+            item for item in plan["backlog_changes"]["create_issues"]
+            if "unclassified activation skip or blocker" in item["title"].lower()
+        ]
+        self.assertEqual(len(af_proposals), 1, "exactly one bounded proposal for unresolved activation-feedback-blocker-review")
+        proposal_body = af_proposals[0]["body"]
+        self.assertIn("Source schema:", proposal_body)
+        self.assertIn("Report key:", proposal_body)
+        self.assertIn("Privacy:", proposal_body)
+        self.assertIn("metadata-only", proposal_body)
+
+        # Pass diagnostics produce no proposals.
+        pass_proposals = [
+            item for item in plan["backlog_changes"]["create_issues"]
+            if "pass" in item["title"].lower() and "threshold" in item["title"].lower()
+        ]
+        self.assertFalse(pass_proposals, "pass diagnostics must not generate proposals")
+
+        # Suppression metadata records the keep-blocked count.
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["keep_blocked_ledger_suppressed_count"], 1)
+
+        # Privacy: no raw request IDs in rendered output.
+        rendered = json.dumps(plan, sort_keys=True)
+        for n in range(7):
+            self.assertNotIn(f"req-safety-stop-{n}", rendered)
+        for n in range(6):
+            self.assertNotIn(f"req-af-{n}", rendered)
+
+        # Fingerprint stability: two identical runs produce the same fingerprints.
+        plan2 = build_research_plan(
+            issues=[],
+            log_sources=log_lines,
+            threshold=1,
+            now=NOW,
+        )
+        af_entries2 = [
+            entry for entry in plan2["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]["entries"]
+            if entry.get("lever") == "activation-feedback"
+            and entry.get("diagnostic_class") == "activation-feedback-blocker-review"
+        ]
+        self.assertTrue(af_entries2, "expected repeated run to also produce an af-blocker-review ledger entry")
+        self.assertEqual(af_entries2[0]["fingerprint"], af_entry["fingerprint"])
+        self.assertEqual(af_entries2[0]["diagnostic_fingerprint"], af_entry["diagnostic_fingerprint"])
+
 
 if __name__ == "__main__":
     unittest.main()
