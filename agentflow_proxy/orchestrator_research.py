@@ -4347,20 +4347,40 @@ def _proposal_from_promotion_blocker_next_action(stats_summary: dict[str, Any]) 
     }
 
 
+def _evidence_ledger_title_token(entry: dict[str, Any]) -> str:
+    fingerprint = str(entry.get("fingerprint") or "").strip()
+    if fingerprint:
+        suffix = fingerprint.rsplit(":", 1)[-1]
+        suffix = re.sub(r"[^a-zA-Z0-9]+", "", suffix)
+        if suffix:
+            return f"evidence {suffix[:12]}"
+    cohort = str(entry.get("cohort_bucket") or "").strip()
+    if cohort:
+        words = re.sub(r"[^a-zA-Z0-9]+", "-", cohort).strip("-").lower()
+        if words:
+            return f"cohort {words[:32]}"
+    return "current evidence"
+
+
 def _evidence_ledger_action_title(entry: dict[str, Any]) -> str:
     lever = str(entry.get("lever") or "optimization").replace("_", "-")
     action = str(entry.get("next_action") or "advance-local-evidence").lower().replace("_", "-")
     if lever == "cache" and "stage" in action:
-        return "Stage cache replay canary from evidence-to-activation ledger"
+        base = "Stage cache replay canary from evidence-to-activation ledger"
+        return f"{base} ({_evidence_ledger_title_token(entry)})"
     if lever == "routing" and ("widen" in action or "activate" in action or "stage" in action):
-        return "Advance routing activation from evidence-to-activation ledger"
+        base = "Advance routing activation from evidence-to-activation ledger"
+        return f"{base} ({_evidence_ledger_title_token(entry)})"
     if lever == "crunch" and ("measure" in action or "impact" in action):
-        return "Measure crunch activation from evidence-to-activation ledger"
+        base = "Measure crunch activation from evidence-to-activation ledger"
+        return f"{base} ({_evidence_ledger_title_token(entry)})"
     if lever == "request-shape-rollups":
-        return "Advance repeated-context cohort from evidence-to-activation ledger"
+        base = "Advance repeated-context cohort from evidence-to-activation ledger"
+        return f"{base} ({_evidence_ledger_title_token(entry)})"
     if lever == "managed-recommendation":
-        return "Advance managed recommendation handoff from evidence-to-activation ledger"
-    return f"Advance {lever} next action from evidence-to-activation ledger"
+        base = "Advance managed recommendation handoff from evidence-to-activation ledger"
+        return f"{base} ({_evidence_ledger_title_token(entry)})"
+    return f"Advance {lever} next action from evidence-to-activation ledger ({_evidence_ledger_title_token(entry)})"
 
 
 def _proposal_from_evidence_to_activation_ledger(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
@@ -4392,7 +4412,10 @@ def _proposal_from_evidence_to_activation_ledger(stats_summary: dict[str, Any]) 
     closed_note = ""
     prior = entry.get("prior_issue") if isinstance(entry.get("prior_issue"), dict) else {}
     if entry.get("issue_status") == "closed-issue-seen" and prior:
-        closed_note = f"Closed prior issue seen: #{prior.get('number')} {prior.get('title')}"
+        closed_note = (
+            f"Continues closed predecessor: #{prior.get('number')} {prior.get('title')} "
+            f"({prior.get('url') or 'no-url'})"
+        )
     return {
         "repo": "lutzkuen/agentflow",
         "title": title,

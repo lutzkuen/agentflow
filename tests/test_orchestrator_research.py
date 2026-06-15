@@ -809,8 +809,17 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
 
         titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
-        self.assertIn("Stage cache replay canary from evidence-to-activation ledger", titles)
+        ledger_titles = [
+            title for title in titles
+            if title.startswith("Stage cache replay canary from evidence-to-activation ledger")
+        ]
+        self.assertEqual(len(ledger_titles), 1)
+        self.assertIn("(evidence ", ledger_titles[0])
         self.assertNotIn(stale_title, titles)
+        ledger_issue = next(item for item in plan["backlog_changes"]["create_issues"] if item["title"] == ledger_titles[0])
+        self.assertIn("Fingerprint: activation:", ledger_issue["body"])
+        self.assertIn("Continues closed predecessor: #44", ledger_issue["body"])
+        self.assertIn(stale_title, ledger_issue["body"])
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
         self.assertEqual(ledger["summary"]["top_current_status"], "staged")
         self.assertEqual(ledger["summary"]["closed_issue_seen_count"], 1)
@@ -820,6 +829,43 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw-cache-cohort-secret", rendered)
         self.assertNotIn("/tmp/private-cache-ledger.py", rendered)
+
+    def test_open_legacy_ledger_issue_suppresses_duplicate_proposal(self):
+        stale_title = "Stage cache replay canary for activation-ready on openai/openai_responses/responses"
+        plan = build_research_plan(
+            issues=[issue(44, stale_title, ["backlog", "status:ready", "cache"], state="OPEN")],
+            stats={
+                "calls": 120,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "cache_replay_cohort_ranking": {
+                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "summary": {"candidate_rows": 1, "activation_ready_count": 1, "projected_ready_hits": 30},
+                    "cohorts": [
+                        {
+                            "readiness": "activation-ready",
+                            "count": 31,
+                            "projected_hits": 30,
+                            "projected_saved_cost_usd": 0.42,
+                            "provider": "openai",
+                            "source_surface": "openai_responses",
+                            "endpoint": "responses",
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertFalse(
+            any(title.startswith("Stage cache replay canary from evidence-to-activation ledger") for title in titles)
+        )
+        self.assertNotIn(stale_title, titles)
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertGreaterEqual(suppression["open_existing_issue_count"], 1)
 
     def test_evidence_to_activation_loop_reports_activation_progress(self):
         plan = build_research_plan(
