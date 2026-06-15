@@ -96,6 +96,18 @@ def _breakdown(counter: dict[str, int]) -> list[dict[str, Any]]:
     ]
 
 
+def _public_label_list(values: Any) -> list[str]:
+    if not isinstance(values, list | tuple | set):
+        return []
+    return sorted(
+        {
+            public_label(item, "unknown")
+            for item in values
+            if public_label(item, "unknown") != "unknown"
+        }
+    )
+
+
 def _provider_family(row: dict[str, Any]) -> str:
     provider = str(row.get("provider") or "").strip().lower()
     if provider:
@@ -1328,6 +1340,7 @@ def _request_shape_crunch_canary_lifecycle_projection(
         for item in cohort.get("blockers") or []
         if public_label(item, "unknown") != "unknown"
     ]
+    evidence_blockers = _public_label_list(cohort.get("evidence_blocker_codes") or cohort.get("blocker_codes"))
     applied = holdout_count = skipped = safety_stopped = 0
     lifecycle_status = "skipped"
     explicit_reason = reason
@@ -1376,6 +1389,7 @@ def _request_shape_crunch_canary_lifecycle_projection(
         "projected_holdout_saved_chars": _scaled_projection(projected_chars, holdout_count, matched),
         "projected_holdout_saved_usd": round(projected_usd * (holdout_count / float(matched)), 6) if matched and holdout_count else 0.0,
         "blocker_reasons": blockers,
+        "evidence_blocker_codes": evidence_blockers,
         "metadata_only": True,
         "aggregate_only": True,
         "privacy": _crunch_opportunity_privacy(),
@@ -1400,6 +1414,7 @@ def _request_shape_crunch_canary_action(
         rollout_fraction=rollout,
         holdout_fraction=holdout,
     )
+    evidence_blockers = _public_label_list(cohort.get("evidence_blocker_codes") or cohort.get("blocker_codes"))
     return {
         "schema": CRUNCH_CANARY_ACTION_SCHEMA,
         "action_type": "stage-local-repeated-context-crunch-canary",
@@ -1407,6 +1422,12 @@ def _request_shape_crunch_canary_action(
         "policy_section": "crunch",
         "policy_id": policy_id,
         "cohort_id": cohort_id,
+        "source_evidence_schema": cohort.get("source_evidence_schema") or CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
+        "source_evidence_schemas": [
+            FOLLOW_UP_CANDIDATES_SCHEMA,
+            CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
+        ],
+        "local_only_reason": "file-backed-local-policy-no-managed-dependency",
         "candidate_rule": cohort.get("candidate_rule"),
         "candidate_count": candidate_count,
         "cohort_row_count": _as_int(cohort.get("row_count")),
@@ -1430,15 +1451,24 @@ def _request_shape_crunch_canary_action(
         "projected_saved_chars": _as_int(cohort.get("projected_saved_chars")),
         "projected_saved_tokens": _as_int(cohort.get("projected_saved_tokens")),
         "projected_saved_usd": round(_as_float(cohort.get("projected_saved_usd")), 6),
+        "evidence_blocker_codes": evidence_blockers,
         "projected_lifecycle": lifecycle_projection,
         "safety_gates": {
             "metadata_only": True,
             "aggregate_only": True,
             "local_file_backed": True,
+            "local_only": True,
+            "tool_call_cache_enabled": False,
+            "tool_call_cache_enablement_allowed": False,
             "provider_calls_made": False,
             "managed_server_calls_made": False,
             "raw_prompts_included": False,
             "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "tool_payloads_included": False,
             "holdout_required": holdout > 0,
             "max_rollout_fraction": DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION,
             "records_applied_holdout_skipped_safety_stopped_fallback_rollback": True,
@@ -1455,6 +1485,7 @@ def _request_shape_crunch_canary_action(
             "projected_canary_holdout_count": lifecycle_projection["projected_canary_holdout_count"],
             "projected_skipped_count": lifecycle_projection["projected_skipped_count"],
             "projected_safety_stopped_count": lifecycle_projection["projected_safety_stopped_count"],
+            "evidence_blocker_codes": evidence_blockers,
             "impact_report": CRUNCH_CANARY_IMPACT_SCHEMA,
             "lifecycle_schema": CRUNCH_CANARY_LIFECYCLE_SCHEMA,
             "metadata_only": True,
@@ -1577,6 +1608,10 @@ def apply_request_shape_crunch_canary_action(
         "enabled": True,
         "policy_source": "local-manual",
         "cohort_id": action.get("cohort_id"),
+        "source_evidence_schema": action.get("source_evidence_schema"),
+        "source_evidence_schemas": _public_label_list(action.get("source_evidence_schemas")),
+        "local_only_reason": public_label(action.get("local_only_reason"), "file-backed-local-policy-no-managed-dependency"),
+        "evidence_blocker_codes": _public_label_list(action.get("evidence_blocker_codes")),
         "conditions": action.get("conditions") if isinstance(action.get("conditions"), dict) else {},
         "rollout": {
             "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
@@ -1590,6 +1625,8 @@ def apply_request_shape_crunch_canary_action(
         "projected_saved_tokens": _as_int(action.get("projected_saved_tokens")),
         "projected_saved_usd": round(_as_float(action.get("projected_saved_usd")), 6),
         "safety_gates": action.get("safety_gates") if isinstance(action.get("safety_gates"), dict) else {},
+        "lifecycle_metadata": action.get("lifecycle_metadata") if isinstance(action.get("lifecycle_metadata"), dict) else {},
+        "privacy": _crunch_opportunity_privacy(),
         "staged_at": utc_now(),
     }
     updated = dict(existing)
@@ -1763,9 +1800,11 @@ def build_request_shape_crunch_opportunity_dry_run(
                 "schema": "agentflow.request_shape_crunch_opportunity_cohort.v1",
                 "cohort_id": cohort_id,
                 "policy_id": policy_id,
+                "source_evidence_schema": row.get("source_schema") or row.get("schema") or ROLLUP_ROW_SCHEMA,
                 "readiness": readiness,
                 "reason": reason,
                 "blockers": decision.get("blockers") or [],
+                "evidence_blocker_codes": _public_label_list(row.get("blocker_codes")),
                 "provider_family": row.get("provider_family"),
                 "source_surface": row.get("source_surface"),
                 "endpoint": row.get("endpoint"),
