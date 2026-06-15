@@ -2982,6 +2982,9 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
                     },
                     "evidence_summary": {
                         "record_count": 200,
+                        "current_applied_count": 20,
+                        "current_holdout_count": 10,
+                        "current_holdout_fraction": 0.10,
                         "promotion_status": "promoted",
                         "rank_score": 0.92,
                         "savings_delta_usd": 55.50,
@@ -3050,6 +3053,76 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
         self.assertEqual(omitted[0]["next_action"], "keep-blocked")
         self.assertIn("low-confidence", omitted[0]["no_op_reasons"])
         self.assertIn("insufficient-evidence", omitted[0]["no_op_reasons"])
+
+    def test_missing_holdout_only_widen_candidate_emits_holdout_evidence_successor(self):
+        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+
+        fixture = self._fixture()
+        widen = fixture["deltas"][0]
+        widen["evidence_summary"].pop("current_holdout_count", None)
+        widen["evidence_summary"].pop("current_holdout_fraction", None)
+        widen["evidence_summary"].update(
+            {
+                "current_applied_count": 4,
+                "current_holdout_count": 0,
+                "min_canary_applied_samples": 3,
+                "min_canary_holdout_samples": 2,
+                "required_holdout_fraction": 0.20,
+                "candidate_family": "phase-routing-widen",
+                "local_action_family": "routing",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-haiku-4-5-20251001",
+            }
+        )
+
+        result = build_post_promotion_priority_delta_review(fixture, limit=10)
+
+        candidate = next(item for item in result["candidates"] if item["delta_id"] == widen["delta_id"])
+        self.assertEqual(candidate["original_next_action"], "widen-local-policy")
+        self.assertEqual(candidate["next_action"], "collect-holdout-evidence")
+        self.assertIn("missing-holdout-coverage", candidate["no_op_reasons"])
+        successor = candidate["holdout_evidence_successor"]
+        self.assertEqual(successor["schema"], "agentflow.post_promotion_holdout_evidence_successor.v1")
+        self.assertEqual(successor["reason"], "missing-holdout-coverage")
+        self.assertEqual(successor["local_action_family"], "routing")
+        self.assertEqual(successor["source_surface"], "crunch-proxy-request")
+        self.assertEqual(successor["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(successor["routed_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(successor["current_applied_count"], 4)
+        self.assertEqual(successor["current_holdout_count"], 0)
+        self.assertEqual(successor["required_min_applied_count"], 3)
+        self.assertEqual(successor["required_min_holdout_count"], 2)
+        self.assertEqual(successor["required_holdout_fraction"], 0.20)
+        self.assertFalse(successor["privacy"]["raw_prompts_included"])
+        self.assertEqual(result["summary"]["top_next_action"], "collect-holdout-evidence")
+        self.assertIn(
+            {"value": "collect-holdout-evidence", "count": 1},
+            result["summary"]["next_action_counts"],
+        )
+
+    def test_non_holdout_widen_blockers_keep_specific_reasons(self):
+        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+
+        fixture = self._fixture()
+        base = fixture["deltas"][0]
+        base["evidence_summary"].pop("current_holdout_count", None)
+        base["evidence_summary"].pop("current_holdout_fraction", None)
+        base["evidence_summary"]["safety_stop_count"] = 1
+        stale = {**base, "delta_id": "post-promo-delta:routing:widen:stale"}
+        stale["evidence_summary"] = {**base["evidence_summary"], "safety_stop_count": 0, "stale_evidence": True}
+        unsupported = {**base, "delta_id": "post-promo-delta:routing:widen:unsupported", "no_op_reasons": ["unsupported-policy-section"]}
+        unsupported["evidence_summary"] = {**base["evidence_summary"], "safety_stop_count": 0}
+        fixture["deltas"] = [base, stale, unsupported]
+
+        result = build_post_promotion_priority_delta_review(fixture, limit=10)
+
+        by_id = {item["delta_id"]: item for item in result["candidates"]}
+        self.assertEqual(by_id[base["delta_id"]]["next_action"], "widen-local-policy")
+        self.assertNotIn("holdout_evidence_successor", by_id[base["delta_id"]])
+        self.assertEqual(by_id[stale["delta_id"]]["next_action"], "widen-local-policy")
+        self.assertTrue(by_id[stale["delta_id"]]["evidence_summary"]["stale_evidence"])
+        self.assertEqual(by_id[unsupported["delta_id"]]["next_action"], "widen-local-policy")
+        self.assertIn("unsupported-policy-section", by_id[unsupported["delta_id"]]["no_op_reasons"])
 
     def test_strips_raw_identifiers_from_output(self):
         from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
@@ -3326,6 +3399,25 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertIn("missing-preserved-previous-rule", blocked["dry_run_impact_gate"]["blocker_reasons"])
         self.assertFalse(blocked["dry_run_impact_gate"]["preserved_previous_rule"])
 
+    def test_collect_holdout_evidence_successor_is_not_treated_as_unsupported_policy_draft(self):
+        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+
+        fixture = self._priority_fixture()
+        widen = next(item for item in fixture["deltas"] if item["next_action"] == "widen-local-policy")
+        widen["evidence_summary"].pop("current_holdout_count", None)
+        widen["evidence_summary"].pop("current_holdout_fraction", None)
+        widen["evidence_summary"]["min_canary_holdout_samples"] = 2
+
+        result = build_post_promotion_policy_drafts(self._review_from_fixture(fixture))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["widen_draft_count"], 0)
+        holdout = next(item for item in result["omitted"] if item["target_candidate_id"] == widen["delta_id"])
+        self.assertEqual(holdout["next_action"], "collect-holdout-evidence")
+        self.assertEqual(holdout["reason"], "collect-holdout-evidence")
+        self.assertIn("collect-holdout-evidence", holdout["no_op_reasons"])
+        self.assertNotEqual(holdout["reason"], "unsupported-next-action")
+
     def test_safety_stopped_candidate_remains_blocked_by_impact_gate(self):
         from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
 
@@ -3359,7 +3451,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertTrue(blocked["dry_run_impact_gate"]["stale_evidence"])
         self.assertIn("stale-evidence", blocked["dry_run_impact_gate"]["blocker_reasons"])
 
-    def test_widen_without_holdout_coverage_fails_impact_gate(self):
+    def test_widen_without_holdout_coverage_becomes_holdout_evidence_follow_up(self):
         from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
 
         fixture = self._priority_fixture()
@@ -3370,11 +3462,12 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
 
         result = build_post_promotion_policy_drafts(self._review_from_fixture(fixture))
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["summary"]["impact_gate_blocked_count"], 1)
-        blocked = next(item for item in result["omitted"] if item["target_candidate_id"] == widen["delta_id"])
-        self.assertEqual(blocked["reason"], "missing-holdout-coverage")
-        self.assertFalse(blocked["dry_run_impact_gate"]["holdout_coverage_present"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["impact_gate_blocked_count"], 0)
+        self.assertEqual(result["summary"]["widen_draft_count"], 0)
+        follow_up = next(item for item in result["omitted"] if item["target_candidate_id"] == widen["delta_id"])
+        self.assertEqual(follow_up["next_action"], "collect-holdout-evidence")
+        self.assertEqual(follow_up["reason"], "collect-holdout-evidence")
 
 
 if __name__ == "__main__":

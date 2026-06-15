@@ -13,12 +13,12 @@ DELTA_SCHEMA = "agentflow.post_promotion_priority_delta_candidate.v1"
 GROUP_SCHEMA = "agentflow.post_promotion_priority_delta_group.v1"
 EXPECTED_SOURCE_SCHEMA = "agentflow.post_promotion_policy_priority_deltas.v1"
 
-_VALID_NEXT_ACTIONS = {"widen-local-policy", "rollback-local-policy", "keep-blocked"}
+_VALID_NEXT_ACTIONS = {"widen-local-policy", "collect-holdout-evidence", "rollback-local-policy", "keep-blocked"}
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,199}$")
 _ABSOLUTE_PATH_RE = re.compile(r"(^/[^/])|([A-Za-z]:\\\\)|(^\\\\\\\\)")
 _SAFE_FILE_RE = re.compile(r"^[A-Za-z0-9_.@+-]{1,160}$")
 
-_ACTION_RANK = {"widen-local-policy": 0, "rollback-local-policy": 1, "keep-blocked": 2}
+_ACTION_RANK = {"widen-local-policy": 0, "collect-holdout-evidence": 1, "rollback-local-policy": 2, "keep-blocked": 3}
 
 
 def _privacy_summary() -> dict[str, Any]:
@@ -132,9 +132,21 @@ def _safe_evidence_summary(value: Any) -> dict[str, Any]:
         "affected_row_count",
         "current_canary_count",
         "current_holdout_count",
+        "current_applied_count",
         "canary_applied_count",
         "canary_holdout_count",
+        "applied_count",
         "holdout_count",
+        "required_applied_count",
+        "required_holdout_count",
+        "required_min_applied_count",
+        "required_min_holdout_count",
+        "min_applied_samples",
+        "min_holdout_samples",
+        "minimum_applied_samples",
+        "minimum_holdout_samples",
+        "min_canary_applied_samples",
+        "min_canary_holdout_samples",
         "safety_stop_count",
         "safety_stopped_count",
     ):
@@ -147,6 +159,9 @@ def _safe_evidence_summary(value: Any) -> dict[str, Any]:
         "canary_fraction",
         "current_holdout_fraction",
         "holdout_fraction",
+        "required_holdout_fraction",
+        "minimum_holdout_fraction",
+        "min_holdout_fraction",
         "projected_savings_usd",
         "observed_savings_usd",
     ):
@@ -157,9 +172,19 @@ def _safe_evidence_summary(value: Any) -> dict[str, Any]:
         "policy_section",
         "source_surface",
         "action_family",
+        "local_action_family",
         "feedback_window",
         "stability_score_label",
         "projected_savings_bucket",
+        "candidate_family",
+        "requested_model",
+        "routed_model",
+        "target_model",
+        "candidate_target_model",
+        "cache_profile",
+        "crunch_profile",
+        "profile",
+        "policy_profile",
     ):
         label = _safe_optional_label(value.get(key))
         if label:
@@ -180,6 +205,135 @@ def _safe_evidence_summary(value: Any) -> dict[str, Any]:
         if safe is not None:
             result[key] = safe
     return result
+
+
+def _candidate_count(candidate: dict[str, Any], *keys: str) -> int:
+    evidence = candidate.get("evidence_summary") if isinstance(candidate.get("evidence_summary"), dict) else {}
+    for key in keys:
+        number = _as_int(candidate.get(key) if key in candidate else evidence.get(key))
+        if number > 0:
+            return number
+    return 0
+
+
+def _candidate_float(candidate: dict[str, Any], *keys: str) -> float | None:
+    evidence = candidate.get("evidence_summary") if isinstance(candidate.get("evidence_summary"), dict) else {}
+    for key in keys:
+        value = candidate.get(key) if key in candidate else evidence.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        number = _as_float(value, -1.0)
+        if number >= 0.0:
+            return round(number, 8)
+    return None
+
+
+def _candidate_bool(candidate: dict[str, Any], *keys: str) -> bool | None:
+    evidence = candidate.get("evidence_summary") if isinstance(candidate.get("evidence_summary"), dict) else {}
+    for key in keys:
+        value = candidate.get(key) if key in candidate else evidence.get(key)
+        safe = _safe_bool(value)
+        if safe is not None:
+            return safe
+    return None
+
+
+def _candidate_label(candidate: dict[str, Any], *keys: str, default: str = "unknown") -> str:
+    evidence = candidate.get("evidence_summary") if isinstance(candidate.get("evidence_summary"), dict) else {}
+    for key in keys:
+        value = candidate.get(key) if key in candidate else evidence.get(key)
+        label = _safe_optional_label(value)
+        if label:
+            return label
+    return default
+
+
+def _has_holdout_coverage(candidate: dict[str, Any]) -> bool:
+    if _candidate_count(candidate, "current_holdout_count", "holdout_count", "canary_holdout_count") > 0:
+        return True
+    fraction = _candidate_float(candidate, "current_holdout_fraction", "holdout_fraction")
+    return bool(fraction and fraction > 0.0)
+
+
+def _safety_stop_active(candidate: dict[str, Any]) -> bool:
+    if _candidate_count(candidate, "safety_stop_count", "safety_stopped_count") > 0:
+        return True
+    if _candidate_bool(candidate, "safety_stop_active", "safety_stop_tripped") is True:
+        return True
+    return any("safety-stop" in reason for reason in _safe_list(candidate.get("no_op_reasons")))
+
+
+def _stale_evidence(candidate: dict[str, Any]) -> bool:
+    return _candidate_bool(candidate, "stale_evidence", "stale") is True or any(
+        "stale" in reason for reason in _safe_list(candidate.get("no_op_reasons"))
+    )
+
+
+def _unsupported_policy(candidate: dict[str, Any]) -> bool:
+    return any("unsupported" in reason for reason in _safe_list(candidate.get("no_op_reasons")))
+
+
+def _holdout_evidence_successor(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    if candidate.get("status") != "recommended":
+        return None
+    if candidate.get("next_action") != "widen-local-policy":
+        return None
+    if _has_holdout_coverage(candidate) or _safety_stop_active(candidate) or _stale_evidence(candidate) or _unsupported_policy(candidate):
+        return None
+
+    current_applied = _candidate_count(candidate, "current_applied_count", "applied_count", "canary_applied_count", "current_canary_count")
+    current_holdout = _candidate_count(candidate, "current_holdout_count", "holdout_count", "canary_holdout_count")
+    required_applied = max(
+        1,
+        _candidate_count(
+            candidate,
+            "required_applied_count",
+            "required_min_applied_count",
+            "min_applied_samples",
+            "minimum_applied_samples",
+            "min_canary_applied_samples",
+        ),
+    )
+    required_holdout = max(
+        1,
+        _candidate_count(
+            candidate,
+            "required_holdout_count",
+            "required_min_holdout_count",
+            "min_holdout_samples",
+            "minimum_holdout_samples",
+            "min_canary_holdout_samples",
+        ),
+    )
+    current_holdout_fraction = _candidate_float(candidate, "current_holdout_fraction", "holdout_fraction") or 0.0
+    required_holdout_fraction = _candidate_float(candidate, "required_holdout_fraction", "minimum_holdout_fraction", "min_holdout_fraction") or 0.10
+    return {
+        "schema": "agentflow.post_promotion_holdout_evidence_successor.v1",
+        "status": "needs-holdout-evidence",
+        "reason": "missing-holdout-coverage",
+        "original_next_action": "widen-local-policy",
+        "next_action": "collect-holdout-evidence",
+        "candidate_family": _candidate_label(candidate, "candidate_family", "recommendation_type"),
+        "local_action_family": _candidate_label(candidate, "local_action_family", "action_family"),
+        "action_family": _candidate_label(candidate, "action_family"),
+        "source_surface": _candidate_label(candidate, "source_surface"),
+        "policy_section": _candidate_label(candidate, "policy_section"),
+        "requested_model": _candidate_label(candidate, "requested_model", default="unknown"),
+        "routed_model": _candidate_label(candidate, "routed_model", "target_model", "candidate_target_model", default="unknown"),
+        "cache_profile": _candidate_label(candidate, "cache_profile", default="none"),
+        "crunch_profile": _candidate_label(candidate, "crunch_profile", "profile", "policy_profile", default="none"),
+        "current_applied_count": current_applied,
+        "current_holdout_count": current_holdout,
+        "required_min_applied_count": required_applied,
+        "required_min_holdout_count": required_holdout,
+        "current_holdout_fraction": current_holdout_fraction,
+        "required_holdout_fraction": required_holdout_fraction,
+        "remaining_applied_count": max(0, required_applied - current_applied),
+        "remaining_holdout_count": max(0, required_holdout - current_holdout),
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _privacy_summary(),
+    }
 
 
 def _delta_candidate(delta: dict[str, Any]) -> dict[str, Any]:
@@ -248,6 +402,12 @@ def _delta_candidate(delta: dict[str, Any]) -> dict[str, Any]:
                 candidate[key] = safe_bool
             elif key in {"current_canary_fraction", "holdout_fraction", "current_holdout_fraction"}:
                 candidate[key] = round(_as_float(delta.get(key)), 8)
+    successor = _holdout_evidence_successor(candidate)
+    if successor is not None:
+        candidate["original_next_action"] = candidate["next_action"]
+        candidate["next_action"] = "collect-holdout-evidence"
+        candidate["no_op_reasons"] = sorted(set(no_op_reasons + ["missing-holdout-coverage"]))
+        candidate["holdout_evidence_successor"] = successor
     return candidate
 
 

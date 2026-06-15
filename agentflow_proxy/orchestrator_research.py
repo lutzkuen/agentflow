@@ -1024,6 +1024,7 @@ def _post_promotion_priority_status(stats: dict[str, Any]) -> dict[str, Any] | N
             "recommended_count": _to_int(summary.get("recommended_count")),
             "noop_count": _to_int(summary.get("noop_count")),
             "widen_count": _to_int(summary.get("widen_count")),
+            "collect_holdout_evidence_count": _to_int(summary.get("collect_holdout_evidence_count")),
             "rollback_count": _to_int(summary.get("rollback_count")),
             "keep_blocked_count": _to_int(summary.get("keep_blocked_count")),
             "policy_draft_status": sanitize_value(summary.get("policy_draft_status")),
@@ -5021,7 +5022,7 @@ def _proposal_from_post_promotion_priority_deltas(stats_summary: dict[str, Any])
         return None
     family = str(summary.get("top_local_action_family") or top.get("local_action_family") or "optimization").strip() or "optimization"
     title = _post_promotion_priority_action_title(next_action, family)
-    priority = "priority:p1" if next_action in {"widen-local-policy", "rollback-local-policy"} else "priority:p2"
+    priority = "priority:p1" if next_action in {"widen-local-policy", "collect-holdout-evidence", "rollback-local-policy"} else "priority:p2"
     labels = _default_issue_labels(priority)
     family_label = family.replace("_", "-")
     if family_label in {"routing", "cache", "crunch"}:
@@ -5037,6 +5038,7 @@ def _proposal_from_post_promotion_priority_deltas(stats_summary: dict[str, Any])
         f"Recommended count: {summary.get('recommended_count')}",
         f"No-op count: {summary.get('noop_count')}",
         f"Widen count: {summary.get('widen_count')}",
+        f"Collect holdout evidence count: {summary.get('collect_holdout_evidence_count')}",
         f"Rollback count: {summary.get('rollback_count')}",
         f"Keep-blocked count: {summary.get('keep_blocked_count')}",
         f"Policy draft status: {summary.get('policy_draft_status')}",

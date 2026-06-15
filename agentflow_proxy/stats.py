@@ -1071,6 +1071,7 @@ def _safe_count_breakdown(rows: Any, *, limit: int = 10) -> list[dict[str, Any]]
 def _post_promotion_action_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
     counts = {
         "widen-local-policy": 0,
+        "collect-holdout-evidence": 0,
         "rollback-local-policy": 0,
         "keep-blocked": 0,
     }
@@ -1137,6 +1138,13 @@ def _post_promotion_next_safe_command(
             "command": "agentflow-post-promotion-priority-delta-review --pretty",
             "read_only": True,
             "reason": "priority-review-missing",
+        }
+    if top_next_action == "collect-holdout-evidence":
+        return {
+            "label": "inspect holdout evidence successor",
+            "command": "agentflow-post-promotion-priority-delta-review --pretty",
+            "read_only": True,
+            "reason": "holdout-evidence-required",
         }
     if draft_payload is None and top_next_action in {"widen-local-policy", "rollback-local-policy", "keep-blocked"}:
         return {
@@ -1261,6 +1269,7 @@ async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
             "noop_count": _as_int(review_summary.get("noop_count")),
             "top_next_action": top_next_action,
             "widen_count": action_counts["widen-local-policy"],
+            "collect_holdout_evidence_count": action_counts["collect-holdout-evidence"],
             "rollback_count": action_counts["rollback-local-policy"],
             "keep_blocked_count": action_counts["keep-blocked"],
             "policy_draft_status": public_label(draft_payload.get("status"), draft_status) if isinstance(draft_payload, dict) else draft_status,

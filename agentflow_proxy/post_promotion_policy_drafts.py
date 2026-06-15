@@ -15,7 +15,7 @@ DRAFT_SCHEMA = "agentflow.post_promotion_policy_draft.v1"
 OMISSION_SCHEMA = "agentflow.post_promotion_policy_draft_omission.v1"
 IMPACT_GATE_SCHEMA = "agentflow.post_promotion_policy_draft_impact_gate.v1"
 
-_VALID_ACTIONS = {"widen-local-policy", "rollback-local-policy", "keep-blocked"}
+_VALID_ACTIONS = {"widen-local-policy", "collect-holdout-evidence", "rollback-local-policy", "keep-blocked"}
 _VALID_FAMILIES = {"routing", "cache", "crunch"}
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,199}$")
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,95}$")
@@ -689,8 +689,10 @@ def _draft_for_candidate(
     action = _label(candidate.get("next_action"), default="keep-blocked")
     if action not in _VALID_ACTIONS:
         return None, _omission(candidate, "unsupported-next-action", path=path)
-    if candidate.get("status") != "recommended" or action == "keep-blocked":
+    if candidate.get("status") != "recommended" or action in {"keep-blocked", "collect-holdout-evidence"}:
         reason = "keep-blocked" if action == "keep-blocked" else "not-recommended"
+        if action == "collect-holdout-evidence":
+            reason = "collect-holdout-evidence"
         return None, _omission(candidate, reason, path=path)
     rule_id = _rule_id(candidate, action)
     impact_gate = _impact_gate(
