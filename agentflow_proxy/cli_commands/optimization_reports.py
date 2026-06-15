@@ -5204,6 +5204,85 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
     return 0 if result.get("ok") else 1
 
 
+def request_shape_crunch_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Measure request-shape repeated-context crunch canary impact from local metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--max-evidence-age-hours",
+        type=float,
+        default=72.0,
+        help="Maximum age for canary impact evidence before it is treated as stale, default: 72.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.request_shape_rollups import (
+        build_request_shape_crunch_canary_impact_report,
+        build_request_shape_rollups_report,
+    )
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        rollups = build_request_shape_rollups_report(
+            store,
+            limit=args.limit,
+            persist=False,
+            max_crunch_canary_evidence_age_hours=args.max_evidence_age_hours,
+        )
+    finally:
+        store.conn.close()
+    result = rollups.get("crunch_canary_impact")
+    if not isinstance(result, dict):
+        result = build_request_shape_crunch_canary_impact_report(
+            [],
+            max_evidence_age_hours=args.max_evidence_age_hours,
+        )
+    else:
+        result = dict(result)
+        result["max_evidence_age_hours"] = max(0.0, float(args.max_evidence_age_hours))
+    result["source_report"] = {
+        "schema": rollups.get("schema"),
+        "summary": {
+            "rows_considered": (rollups.get("summary") or {}).get("rows_considered")
+            if isinstance(rollups.get("summary"), dict)
+            else None,
+            "rollup_count": (rollups.get("summary") or {}).get("rollup_count")
+            if isinstance(rollups.get("summary"), dict)
+            else None,
+        },
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+        },
+    }
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def request_shape_cache_replay_canary_stage_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Stage a read-only OpenAI Responses exact-cache replay canary action from request-shape metadata")
     parser.add_argument(

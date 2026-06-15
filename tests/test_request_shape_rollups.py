@@ -1188,10 +1188,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         ]
         self.assertEqual(impact_report["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
         self.assertEqual(impact_report["status"], "widen-ready")
+        self.assertEqual(impact_report["next_action"], "widen")
         self.assertEqual(impact_report["summary"]["applied_count"], 1)
         self.assertEqual(impact_report["summary"]["holdout_count"], 1)
         self.assertEqual(impact_report["summary"]["saved_chars"], 8_000)
         self.assertEqual(impact_report["summary"]["saved_tokens"], 2_000)
+        self.assertEqual(impact_report["summary"]["estimated_saved_tokens"], 2_000)
         self.assertGreater(impact_report["summary"]["saved_usd"], 0)
         self.assertEqual(impact_report["summary"]["error_rate_delta"], 0.0)
         self.assertEqual(impact_report["summary"]["retry_rate_delta"], 0.0)
@@ -1200,18 +1202,27 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(impact_report["summary"]["safety_stop_count"], 0)
         self.assertEqual(impact_report["summary"]["top_impact_recommendation"], "promotion-ready")
         self.assertEqual(impact_report["summary"]["promotion_ready_count"], 1)
-        self.assertEqual(impact_report["summary"]["next_action"], "widen-repeated-context-crunch-canary")
+        self.assertEqual(impact_report["summary"]["next_action"], "widen")
+        self.assertEqual(impact_report["summary"]["top_next_action"], "widen")
+        self.assertEqual(impact_report["summary"]["recommended_next_action"], "widen-repeated-context-crunch-canary")
+        self.assertTrue(impact_report["summary"]["applied_vs_holdout_coverage"]["has_applied_coverage"])
+        self.assertTrue(impact_report["summary"]["applied_vs_holdout_coverage"]["has_holdout_coverage"])
         candidate = impact_report["candidates"][0]
         self.assertEqual(candidate["verdict"], "widen-ready")
         self.assertEqual(candidate["impact_recommendation"], "promotion-ready")
         self.assertEqual(candidate["promotion_recommendation"], "promotion-ready")
         self.assertEqual(candidate["recommended_next_action"], "widen-repeated-context-crunch-canary")
+        self.assertEqual(candidate["next_action"], "widen")
         self.assertIsNone(candidate["top_blocker"])
         self.assertEqual(candidate["cohorts"]["canary_applied"]["saved_chars"], 8_000)
         self.assertEqual(candidate["cohorts"]["canary_holdout"]["saved_chars"], 0)
         self.assertEqual(candidate["cohorts"]["canary_applied"]["latency_avg_ms"], 125.0)
         self.assertEqual(candidate["latency_avg_delta_ms"], 0.0)
+        self.assertEqual(candidate["estimated_saved_tokens"], 2_000)
+        self.assertEqual(candidate["coverage"]["applied_count"], 1)
+        self.assertEqual(candidate["coverage"]["holdout_count"], 1)
         self.assertEqual(candidate["promotion_metadata"]["impact_recommendation"], "promotion-ready")
+        self.assertEqual(candidate["promotion_metadata"]["next_action"], "widen")
         self.assertEqual(candidate["promotion_metadata"]["observed_saved_tokens"], 2_000)
         feedback = impact_report["activation_lifecycle_feedback"]
         self.assertEqual(feedback["schema"], "agentflow.activation_staged_lifecycle_feedback_summary.v1")
@@ -1237,6 +1248,43 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(impact_report["privacy"]["request_ids_included"])
         self.assertFalse(impact_report["privacy"]["session_ids_included"])
         self.assertFalse(impact_report["privacy"]["individual_candidate_ids_included"])
+
+    def test_crunch_canary_impact_reports_no_applied_coverage_without_failing(self) -> None:
+        report = build_request_shape_crunch_canary_impact_report([])
+
+        self.assertEqual(report["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["read_only"])
+        self.assertEqual(report["status"], "no-applied-coverage")
+        self.assertEqual(report["next_action"], "stage-canary-first")
+        self.assertEqual(report["summary"]["next_action"], "stage-canary-first")
+        self.assertEqual(report["summary"]["candidate_count"], 0)
+        self.assertEqual(report["summary"]["applied_count"], 0)
+        self.assertEqual(report["summary"]["holdout_count"], 0)
+        self.assertEqual(report["summary"]["estimated_saved_tokens"], 0)
+        self.assertFalse(report["summary"]["applied_vs_holdout_coverage"]["has_applied_coverage"])
+        self.assertIn("applied-crunch-canary-coverage", report["missing_measurements"])
+        self.assertIn("crunch-canary-lifecycle-metadata", report["missing_measurements"])
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+
+    def test_crunch_canary_impact_cli_returns_no_applied_coverage_status(self) -> None:
+        self._log_call()
+
+        stdout = io.StringIO()
+        code = cli.request_shape_crunch_canary_impact_cli(
+            ["--db", self.db_path, "--limit", "10"],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(payload["status"], "no-applied-coverage")
+        self.assertEqual(payload["next_action"], "stage-canary-first")
+        self.assertEqual(payload["summary"]["applied_count"], 0)
+        self.assertEqual(payload["summary"]["holdout_count"], 0)
+        self.assertTrue(payload["source_report"]["privacy"]["metadata_only"])
+        self.assertNotIn("raw prompt must not leak", stdout.getvalue())
 
     def test_crunch_canary_impact_blocks_widening_on_safety_stop(self) -> None:
         for cost in (0.08, 0.07, 0.09):
@@ -1288,16 +1336,19 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(impact_report["summary"]["top_blocker_code"], "canary-safety-stopped")
         self.assertEqual(impact_report["summary"]["top_impact_recommendation"], "rollback")
         self.assertEqual(impact_report["summary"]["rollback_recommended_count"], 1)
-        self.assertEqual(impact_report["summary"]["next_action"], "rollback-repeated-context-crunch-canary")
+        self.assertEqual(impact_report["summary"]["next_action"], "rollback")
+        self.assertEqual(impact_report["summary"]["recommended_next_action"], "rollback-repeated-context-crunch-canary")
         candidate = impact_report["candidates"][0]
         self.assertEqual(candidate["verdict"], "no-widen")
         self.assertEqual(candidate["impact_recommendation"], "rollback")
         self.assertEqual(candidate["recommended_next_action"], "rollback-repeated-context-crunch-canary")
+        self.assertEqual(candidate["next_action"], "rollback")
         self.assertIn("canary-safety-stopped", candidate["reason_codes"])
         self.assertIn("missing-applied-coverage", candidate["reason_codes"])
         self.assertIn("missing-holdout-coverage", candidate["reason_codes"])
         self.assertEqual(candidate["top_blocker"], "canary-safety-stopped")
         self.assertEqual(candidate["promotion_metadata"]["impact_recommendation"], "rollback")
+        self.assertEqual(candidate["promotion_metadata"]["next_action"], "rollback")
         feedback = impact_report["activation_lifecycle_feedback"]
         self.assertEqual(feedback["cohort_lifecycle_metadata"][0]["safety_stop_count"], 1)
         self.assertIn("canary-safety-stopped", feedback["cohort_lifecycle_metadata"][0]["reason_codes"])
@@ -1366,7 +1417,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(impact_report["status"], "no-widen")
         self.assertEqual(impact_report["summary"]["top_impact_recommendation"], "rollback")
         self.assertEqual(impact_report["summary"]["rollback_recommended_count"], 1)
-        self.assertEqual(impact_report["summary"]["next_action"], "rollback-repeated-context-crunch-canary")
+        self.assertEqual(impact_report["summary"]["next_action"], "rollback")
         self.assertEqual(impact_report["summary"]["error_rate_delta"], 1.0)
         self.assertEqual(impact_report["summary"]["retry_rate_delta"], 2.0)
         self.assertEqual(impact_report["summary"]["latency_avg_delta_ms"], 800.0)
@@ -1375,10 +1426,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(candidate["verdict"], "no-widen")
         self.assertEqual(candidate["impact_recommendation"], "rollback")
         self.assertEqual(candidate["recommended_next_action"], "rollback-repeated-context-crunch-canary")
+        self.assertEqual(candidate["next_action"], "rollback")
         self.assertEqual(candidate["latency_avg_delta_ms"], 800.0)
         self.assertIn("error-rate-regression", candidate["reason_codes"])
         self.assertIn("retry-rate-regression", candidate["reason_codes"])
         self.assertEqual(candidate["promotion_metadata"]["impact_recommendation"], "rollback")
+        self.assertEqual(candidate["promotion_metadata"]["next_action"], "rollback")
         self.assertEqual(candidate["promotion_metadata"]["error_rate_delta"], 1.0)
         self.assertEqual(candidate["promotion_metadata"]["retry_rate_delta"], 2.0)
         self.assertEqual(candidate["promotion_metadata"]["latency_avg_delta_ms"], 800.0)
@@ -1450,6 +1503,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             by_policy["collect-policy"]["recommended_next_action"],
             "collect-repeated-context-crunch-canary-impact-evidence",
         )
+        self.assertEqual(by_policy["collect-policy"]["next_action"], "keep-observing")
         self.assertIn("missing-holdout-coverage", by_policy["collect-policy"]["reason_codes"])
 
         self.assertEqual(by_policy["blocked-policy"]["impact_recommendation"], "keep-blocked")
@@ -1457,6 +1511,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             by_policy["blocked-policy"]["recommended_next_action"],
             "keep-repeated-context-crunch-canary-blocked",
         )
+        self.assertEqual(by_policy["blocked-policy"]["next_action"], "keep-observing")
         self.assertIn("no-applied-savings", by_policy["blocked-policy"]["reason_codes"])
         self.assertEqual(report["summary"]["collect_more_evidence_count"], 1)
         self.assertEqual(report["summary"]["keep_blocked_count"], 1)

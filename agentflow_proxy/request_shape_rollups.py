@@ -675,6 +675,61 @@ def _crunch_impact_recommendation(
     return "collect-more-evidence", "collect-repeated-context-crunch-canary-impact-evidence"
 
 
+def _crunch_impact_next_action(
+    *,
+    impact_recommendation: str | None,
+    applied_count: int,
+    holdout_count: int,
+    reason_codes: list[str],
+) -> str:
+    if impact_recommendation == "promotion-ready":
+        return "widen"
+    if impact_recommendation == "rollback":
+        return "rollback"
+    if applied_count <= 0 or "missing-applied-coverage" in reason_codes:
+        return "stage-canary-first"
+    return "keep-observing"
+
+
+def _crunch_impact_coverage(
+    *,
+    applied_count: int,
+    holdout_count: int,
+    skipped_count: int = 0,
+    fallback_count: int = 0,
+    safety_stop_count: int = 0,
+    rollback_count: int = 0,
+    unknown_count: int = 0,
+) -> dict[str, Any]:
+    observed_count = (
+        applied_count
+        + holdout_count
+        + skipped_count
+        + fallback_count
+        + safety_stop_count
+        + rollback_count
+        + unknown_count
+    )
+    return {
+        "schema": "agentflow.request_shape_crunch_canary_coverage.v1",
+        "observed_count": observed_count,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "skipped_count": skipped_count,
+        "fallback_count": fallback_count,
+        "safety_stop_count": safety_stop_count,
+        "rollback_count": rollback_count,
+        "unknown_count": unknown_count,
+        "has_applied_coverage": applied_count > 0,
+        "has_holdout_coverage": holdout_count > 0,
+        "applied_coverage_rate": round(applied_count / observed_count, 6) if observed_count else 0.0,
+        "holdout_coverage_rate": round(holdout_count / observed_count, 6) if observed_count else 0.0,
+        "applied_to_holdout_ratio": round(applied_count / holdout_count, 6) if holdout_count else None,
+        "aggregate_only": True,
+        "metadata_only": True,
+    }
+
+
 def _crunch_impact_activation_lifecycle_feedback(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     state_counts: dict[str, int] = {}
     cohort_counts: dict[str, int] = {}
@@ -775,6 +830,12 @@ def build_request_shape_crunch_canary_impact_report(
             applied=applied,
             holdout=holdout,
         )
+        public_next_action = _crunch_impact_next_action(
+            impact_recommendation=impact_recommendation,
+            applied_count=_as_int(applied.get("count")),
+            holdout_count=_as_int(holdout.get("count")),
+            reason_codes=reasons,
+        )
         _increment(verdict_counts, verdict)
         if verdict != "widen-ready":
             for reason in reasons:
@@ -782,6 +843,16 @@ def build_request_shape_crunch_canary_impact_report(
         latency_delta = None
         if applied.get("latency_avg_ms") is not None and holdout.get("latency_avg_ms") is not None:
             latency_delta = round(_as_float(applied.get("latency_avg_ms")) - _as_float(holdout.get("latency_avg_ms")), 2)
+        observed_count = sum(_as_int(cohort.get("count")) for cohort in cohorts.values())
+        coverage = _crunch_impact_coverage(
+            applied_count=_as_int(applied.get("count")),
+            holdout_count=_as_int(holdout.get("count")),
+            skipped_count=_as_int(cohorts["skipped"].get("count")),
+            fallback_count=_as_int(fallback.get("count")),
+            safety_stop_count=_as_int(safety.get("count")),
+            rollback_count=_as_int(rollback.get("count")),
+            unknown_count=_as_int(cohorts["unknown"].get("count")),
+        )
         finalized.append(
             {
                 "schema": "agentflow.request_shape_crunch_canary_impact_candidate.v1",
@@ -789,7 +860,7 @@ def build_request_shape_crunch_canary_impact_report(
                 "cohort_id": raw["cohort_id"],
                 "cohort_metadata": raw["cohort_metadata"],
                 "policy_source": raw["policy_source"],
-                "observed_count": sum(_as_int(cohort.get("count")) for cohort in cohorts.values()),
+                "observed_count": observed_count,
                 "applied_count": _as_int(applied.get("count")),
                 "holdout_count": _as_int(holdout.get("count")),
                 "fallback_count": _as_int(fallback.get("count")),
@@ -798,6 +869,9 @@ def build_request_shape_crunch_canary_impact_report(
                 "saved_chars": _as_int(applied.get("saved_chars")),
                 "saved_tokens": _as_int(applied.get("saved_tokens")),
                 "saved_usd": round(_as_float(applied.get("saved_usd")), 8),
+                "estimated_saved_chars": _as_int(applied.get("saved_chars")),
+                "estimated_saved_tokens": _as_int(applied.get("saved_tokens")),
+                "estimated_saved_usd": round(_as_float(applied.get("saved_usd")), 8),
                 "applied_error_count": _as_int(applied.get("error_count")),
                 "holdout_error_count": _as_int(holdout.get("error_count")),
                 "applied_retry_count": _as_int(applied.get("retry_count")),
@@ -820,9 +894,11 @@ def build_request_shape_crunch_canary_impact_report(
                 "impact_recommendation": impact_recommendation,
                 "promotion_recommendation": impact_recommendation,
                 "recommended_next_action": recommended_next_action,
-                "next_action": recommended_next_action,
+                "next_action": public_next_action,
                 "top_blocker": top_blocker if verdict != "widen-ready" else None,
                 "reason_codes": reasons,
+                "coverage": coverage,
+                "applied_vs_holdout_coverage": coverage,
                 "promotion_metadata": {
                     "schema": "agentflow.request_shape_crunch_canary_promotion_recommendation.v1",
                     "action_family": "crunch",
@@ -830,6 +906,7 @@ def build_request_shape_crunch_canary_impact_report(
                     "target_local_policy": "crunch_rules",
                     "impact_recommendation": impact_recommendation,
                     "recommended_next_action": recommended_next_action,
+                    "next_action": public_next_action,
                     "reason_codes": reasons,
                     "applied_count": _as_int(applied.get("count")),
                     "holdout_count": _as_int(holdout.get("count")),
@@ -872,18 +949,54 @@ def build_request_shape_crunch_canary_impact_report(
     top_recommendation = recommendation_breakdown[0]["value"] if recommendation_breakdown else None
     top_next_action = None
     if finalized:
-        top_next_action = str(finalized[0].get("recommended_next_action") or "")
+        top_next_action = str(finalized[0].get("next_action") or "")
+    total_applied = sum(_as_int(item.get("applied_count")) for item in finalized)
+    total_holdout = sum(_as_int(item.get("holdout_count")) for item in finalized)
+    total_skipped = sum(_as_int((item.get("cohorts") or {}).get("skipped", {}).get("count")) for item in finalized)
+    total_fallback = sum(_as_int(item.get("fallback_count")) for item in finalized)
+    total_safety = sum(_as_int(item.get("safety_stop_count")) for item in finalized)
+    total_rollback = sum(_as_int(item.get("rollback_count")) for item in finalized)
+    total_unknown = sum(_as_int((item.get("cohorts") or {}).get("unknown", {}).get("count")) for item in finalized)
+    coverage = _crunch_impact_coverage(
+        applied_count=total_applied,
+        holdout_count=total_holdout,
+        skipped_count=total_skipped,
+        fallback_count=total_fallback,
+        safety_stop_count=total_safety,
+        rollback_count=total_rollback,
+        unknown_count=total_unknown,
+    )
+    if finalized and total_applied <= 0 and total_safety <= 0 and total_rollback <= 0:
+        status = "no-applied-coverage"
+    if not finalized:
+        status = "no-applied-coverage"
+        top_next_action = "stage-canary-first"
+    missing_measurements = []
+    if total_applied <= 0:
+        missing_measurements.append("applied-crunch-canary-coverage")
+    if finalized and total_holdout <= 0:
+        missing_measurements.append("holdout-crunch-canary-coverage")
+    if not finalized:
+        missing_measurements.append("crunch-canary-lifecycle-metadata")
     return {
         "schema": CRUNCH_CANARY_IMPACT_SCHEMA,
         "status": status,
+        "ok": True,
+        "read_only": True,
+        "next_action": top_next_action or "stage-canary-first",
+        "recommended_next_action": str(finalized[0].get("recommended_next_action") or "") if finalized else "stage-repeated-context-crunch-canary",
+        "missing_measurements": missing_measurements,
         "summary": {
             "candidate_count": len(finalized),
             "observed_canary_metadata_row_count": observed_rows,
-            "applied_count": sum(_as_int(item.get("applied_count")) for item in finalized),
-            "holdout_count": sum(_as_int(item.get("holdout_count")) for item in finalized),
+            "applied_count": total_applied,
+            "holdout_count": total_holdout,
             "saved_chars": sum(_as_int(item.get("saved_chars")) for item in finalized),
             "saved_tokens": sum(_as_int(item.get("saved_tokens")) for item in finalized),
             "saved_usd": round(sum(_as_float(item.get("saved_usd")) for item in finalized), 8),
+            "estimated_saved_chars": sum(_as_int(item.get("estimated_saved_chars")) for item in finalized),
+            "estimated_saved_tokens": sum(_as_int(item.get("estimated_saved_tokens")) for item in finalized),
+            "estimated_saved_usd": round(sum(_as_float(item.get("estimated_saved_usd")) for item in finalized), 8),
             "projected_saved_chars": sum(_as_int(item.get("saved_chars")) for item in finalized),
             "projected_saved_tokens": sum(_as_int(item.get("saved_tokens")) for item in finalized),
             "projected_saved_usd": round(sum(_as_float(item.get("saved_usd")) for item in finalized), 8),
@@ -897,9 +1010,9 @@ def build_request_shape_crunch_canary_impact_report(
                 ),
                 default=None,
             ),
-            "fallback_count": sum(_as_int(item.get("fallback_count")) for item in finalized),
-            "safety_stop_count": sum(_as_int(item.get("safety_stop_count")) for item in finalized),
-            "rollback_count": sum(_as_int(item.get("rollback_count")) for item in finalized),
+            "fallback_count": total_fallback,
+            "safety_stop_count": total_safety,
+            "rollback_count": total_rollback,
             "widen_ready_count": sum(1 for item in finalized if item.get("verdict") == "widen-ready"),
             "no_widen_count": sum(1 for item in finalized if item.get("verdict") != "widen-ready"),
             "promotion_ready_count": sum(1 for item in finalized if item.get("impact_recommendation") == "promotion-ready"),
@@ -910,8 +1023,20 @@ def build_request_shape_crunch_canary_impact_report(
             ),
             "top_impact_recommendation": top_recommendation,
             "top_blocker_code": blocker_breakdown[0]["value"] if blocker_breakdown else None,
-            "next_action": top_next_action
-            or ("widen-repeated-context-crunch-canary" if status == "widen-ready" else "review-repeated-context-crunch-canary-impact-blocker"),
+            "next_action": top_next_action or "stage-canary-first",
+            "top_next_action": top_next_action or "stage-canary-first",
+            "recommended_next_action": str(finalized[0].get("recommended_next_action") or "") if finalized else "stage-repeated-context-crunch-canary",
+            "coverage": coverage,
+            "applied_vs_holdout_coverage": coverage,
+            "cohort_counts": {
+                "canary_applied": total_applied,
+                "canary_holdout": total_holdout,
+                "skipped": total_skipped,
+                "fallback": total_fallback,
+                "safety_stopped": total_safety,
+                "rollback": total_rollback,
+                "unknown": total_unknown,
+            },
             "provider_calls_made": 0,
             "managed_server_calls_made": 0,
             "policy_files_written": False,
@@ -3012,6 +3137,7 @@ def build_request_shape_rollups_report(
     limit: int = 1000,
     persist: bool = True,
     run_id: str | None = None,
+    max_crunch_canary_evidence_age_hours: float = DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS,
 ) -> dict[str, Any]:
     capped_limit = max(1, min(int(limit or 1000), 10_000))
     generated_at = utc_now()
@@ -3203,7 +3329,10 @@ def build_request_shape_rollups_report(
         limit=25,
     )
     crunch_opportunity_dry_run = build_request_shape_crunch_opportunity_dry_run(rollups, limit=25)
-    crunch_canary_impact = build_request_shape_crunch_canary_impact_report(impact_rows)
+    crunch_canary_impact = build_request_shape_crunch_canary_impact_report(
+        impact_rows,
+        max_evidence_age_hours=max_crunch_canary_evidence_age_hours,
+    )
     follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10)
 
     return {
