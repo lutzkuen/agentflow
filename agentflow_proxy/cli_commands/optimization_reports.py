@@ -7276,6 +7276,6 @@ def post_promotion_policy_draft_dry_run_cli(
         },
     )
     _write_rollout_actions_result(stdout if result.get("ok") else stderr, result, pretty=args.pretty)
-    if (result.get("error") or {}).get("type") in {"invalid_report", "raw_payload_rejected"}:
+    if (result.get("error") or {}).get("type") in {"invalid_report", "raw_payload_rejected", "impact_gate_blocked"}:
         return 1
     return 0

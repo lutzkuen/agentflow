@@ -79,6 +79,20 @@ def _bounded_confidence(value: Any) -> float:
     return round(min(1.0, max(0.0, _as_float(value))), 6)
 
 
+def _safe_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "y"}:
+            return True
+        if text in {"false", "0", "no", "n"}:
+            return False
+    return None
+
+
 def _safe_list(value: Any, *, max_items: int = 20) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -109,10 +123,33 @@ def _safe_evidence_summary(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     result: dict[str, Any] = {}
-    for key in ("record_count", "candidate_count", "rollup_count"):
+    for key in (
+        "record_count",
+        "candidate_count",
+        "rollup_count",
+        "sample_count",
+        "affected_call_count",
+        "affected_row_count",
+        "current_canary_count",
+        "current_holdout_count",
+        "canary_applied_count",
+        "canary_holdout_count",
+        "holdout_count",
+        "safety_stop_count",
+        "safety_stopped_count",
+    ):
         if key in value:
             result[key] = _as_int(value.get(key))
-    for key in ("savings_delta_usd", "rank_score"):
+    for key in (
+        "savings_delta_usd",
+        "rank_score",
+        "current_canary_fraction",
+        "canary_fraction",
+        "current_holdout_fraction",
+        "holdout_fraction",
+        "projected_savings_usd",
+        "observed_savings_usd",
+    ):
         if key in value:
             result[key] = round(_as_float(value.get(key)), 8)
     for key in (
@@ -127,6 +164,21 @@ def _safe_evidence_summary(value: Any) -> dict[str, Any]:
         label = _safe_optional_label(value.get(key))
         if label:
             result[key] = label
+    for key in (
+        "safety_stop_active",
+        "safety_stop_tripped",
+        "stale",
+        "stale_evidence",
+        "preserved_previous_rule",
+        "previous_rule_preserved",
+        "previous_rule_available",
+    ):
+        raw = value.get(key)
+        if key == "stale_evidence" and isinstance(raw, dict):
+            raw = raw.get("stale")
+        safe = _safe_bool(raw)
+        if safe is not None:
+            result[key] = safe
     return result
 
 
@@ -175,6 +227,27 @@ def _delta_candidate(delta: dict[str, Any]) -> dict[str, Any]:
         value = _safe_optional_label(delta.get(key)) or evidence_summary.get(key)
         if value:
             candidate[key] = value
+    for key in (
+        "current_canary_fraction",
+        "holdout_fraction",
+        "current_holdout_fraction",
+        "preserved_previous_rule",
+        "previous_rule_preserved",
+        "previous_rule_available",
+        "safety_stop_active",
+        "safety_stop_tripped",
+        "stale_evidence",
+        "stale",
+    ):
+        if key in delta:
+            raw = delta.get(key)
+            if key == "stale_evidence" and isinstance(raw, dict):
+                raw = raw.get("stale")
+            safe_bool = _safe_bool(raw)
+            if safe_bool is not None:
+                candidate[key] = safe_bool
+            elif key in {"current_canary_fraction", "holdout_fraction", "current_holdout_fraction"}:
+                candidate[key] = round(_as_float(delta.get(key)), 8)
     return candidate
 
 

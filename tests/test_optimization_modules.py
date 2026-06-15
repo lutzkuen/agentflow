@@ -3141,6 +3141,13 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
                     "policy_section": "routing",
                     "evidence_summary": {
                         "record_count": 120,
+                        "affected_call_count": 120,
+                        "affected_row_count": 12,
+                        "current_canary_fraction": 0.20,
+                        "current_holdout_fraction": 0.10,
+                        "current_holdout_count": 12,
+                        "safety_stop_count": 0,
+                        "stale_evidence": False,
                         "promotion_status": "promoted",
                         "rank_score": 0.91,
                         "savings_delta_usd": 8.25,
@@ -3157,7 +3164,15 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
                     "savings_delta_usd": -1.20,
                     "confidence": 0.88,
                     "policy_section": "cache",
-                    "evidence_summary": {"record_count": 40, "promotion_status": "regression-flagged"},
+                    "evidence_summary": {
+                        "record_count": 40,
+                        "affected_call_count": 40,
+                        "affected_row_count": 4,
+                        "safety_stop_count": 0,
+                        "stale_evidence": False,
+                        "preserved_previous_rule": True,
+                        "promotion_status": "regression-flagged",
+                    },
                 },
                 {
                     "delta_id": "post-promo-delta:crunch:keep:low-confidence",
@@ -3177,9 +3192,12 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         }
 
     def _review(self) -> dict:
+        return self._review_from_fixture(self._priority_fixture())
+
+    def _review_from_fixture(self, fixture: dict) -> dict:
         from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
 
-        return build_post_promotion_priority_delta_review(self._priority_fixture(), limit=10)
+        return build_post_promotion_priority_delta_review(fixture, limit=10)
 
     def test_priority_review_becomes_widen_rollback_and_noop_policy_drafts(self):
         from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
@@ -3208,6 +3226,11 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertTrue(widen["proposed_policy_patch"]["requires_existing_compatible_rule"])
         self.assertTrue(widen["proposed_policy_patch"]["bounded_changes"]["preserve_holdout_fraction_gte"] >= 0.10)
         self.assertTrue(widen["proposed_policy_patch"]["bounded_changes"]["preserve_requested_model_fallback"])
+        self.assertEqual(widen["dry_run_impact_gate"]["status"], "passed")
+        self.assertEqual(widen["dry_run_impact_gate"]["affected_call_count"], 120)
+        self.assertEqual(widen["dry_run_impact_gate"]["source_surface"], "anthropic-messages")
+        self.assertEqual(widen["dry_run_impact_gate"]["projected_canary_fraction"], 0.25)
+        self.assertEqual(widen["dry_run_impact_gate"]["observed_holdout_fraction"], 0.10)
         self.assertTrue(widen["privacy"]["metadata_only"])
 
         self.assertEqual(rollback["target_local_rule_file"], "cache_rules.yaml")
@@ -3216,6 +3239,8 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertEqual(rollback["proposed_policy_patch"]["operation"], "rollback_existing_rule")
         self.assertFalse(rollback["proposed_policy_patch"]["bounded_changes"]["delete_rule"])
         self.assertTrue(rollback["rollback_metadata"]["preserve_operator_rule_history"])
+        self.assertEqual(rollback["dry_run_impact_gate"]["status"], "passed")
+        self.assertTrue(rollback["dry_run_impact_gate"]["preserved_previous_rule"])
 
         self.assertEqual(noop["next_action"], "keep-blocked")
         self.assertEqual(noop["target_local_rule_file"], "crunch_rules.yaml")
@@ -3261,6 +3286,95 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertEqual(out["summary"]["widen_draft_count"], 1)
         self.assertEqual(out["summary"]["rollback_draft_count"], 1)
         self.assertEqual(out["summary"]["omitted_count"], 1)
+
+    def test_cli_returns_nonzero_when_impact_gate_blocks_candidate(self):
+        from agentflow_proxy.cli_commands.optimization_reports import post_promotion_policy_draft_dry_run_cli
+        import io
+
+        fixture = self._priority_fixture()
+        rollback = next(item for item in fixture["deltas"] if item["next_action"] == "rollback-local-policy")
+        rollback["evidence_summary"]["preserved_previous_rule"] = False
+        stdin = io.StringIO(json.dumps(self._review_from_fixture(fixture)))
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        rc = post_promotion_policy_draft_dry_run_cli(["-"], stdin=stdin, stdout=stdout, stderr=stderr)
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        out = json.loads(stderr.getvalue())
+        self.assertEqual(out["schema"], "agentflow.post_promotion_policy_draft_dry_run.v1")
+        self.assertEqual(out["error"]["type"], "impact_gate_blocked")
+        self.assertEqual(out["summary"]["impact_gate_blocked_count"], 1)
+
+    def test_rollback_without_preserved_prior_rule_fails_impact_gate(self):
+        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+
+        fixture = self._priority_fixture()
+        rollback = next(item for item in fixture["deltas"] if item["next_action"] == "rollback-local-policy")
+        rollback["evidence_summary"]["preserved_previous_rule"] = False
+
+        result = build_post_promotion_policy_drafts(self._review_from_fixture(fixture))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["error"]["type"], "impact_gate_blocked")
+        self.assertEqual(result["summary"]["rollback_draft_count"], 0)
+        blocked = next(item for item in result["omitted"] if item["target_candidate_id"] == rollback["delta_id"])
+        self.assertEqual(blocked["reason"], "missing-preserved-previous-rule")
+        self.assertEqual(blocked["dry_run_impact_gate"]["status"], "blocked")
+        self.assertIn("missing-preserved-previous-rule", blocked["dry_run_impact_gate"]["blocker_reasons"])
+        self.assertFalse(blocked["dry_run_impact_gate"]["preserved_previous_rule"])
+
+    def test_safety_stopped_candidate_remains_blocked_by_impact_gate(self):
+        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+
+        fixture = self._priority_fixture()
+        widen = next(item for item in fixture["deltas"] if item["next_action"] == "widen-local-policy")
+        widen["evidence_summary"]["safety_stop_count"] = 2
+
+        result = build_post_promotion_policy_drafts(self._review_from_fixture(fixture))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["summary"]["widen_draft_count"], 0)
+        blocked = next(item for item in result["omitted"] if item["target_candidate_id"] == widen["delta_id"])
+        self.assertEqual(blocked["reason"], "safety-stop-active")
+        self.assertTrue(blocked["dry_run_impact_gate"]["safety_stop_active"])
+        self.assertIn("safety-stop-active", blocked["dry_run_impact_gate"]["blocker_reasons"])
+
+    def test_stale_evidence_candidate_is_blocked_by_impact_gate(self):
+        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+
+        fixture = self._priority_fixture()
+        widen = next(item for item in fixture["deltas"] if item["next_action"] == "widen-local-policy")
+        widen["evidence_summary"]["stale_evidence"] = {"stale": True, "age_hours": 96}
+
+        result = build_post_promotion_policy_drafts(self._review_from_fixture(fixture))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["summary"]["widen_draft_count"], 0)
+        blocked = next(item for item in result["omitted"] if item["target_candidate_id"] == widen["delta_id"])
+        self.assertEqual(blocked["reason"], "stale-evidence")
+        self.assertTrue(blocked["dry_run_impact_gate"]["stale_evidence"])
+        self.assertIn("stale-evidence", blocked["dry_run_impact_gate"]["blocker_reasons"])
+
+    def test_widen_without_holdout_coverage_fails_impact_gate(self):
+        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+
+        fixture = self._priority_fixture()
+        widen = next(item for item in fixture["deltas"] if item["next_action"] == "widen-local-policy")
+        widen["evidence_summary"]["current_holdout_fraction"] = 0.0
+        widen["evidence_summary"]["current_holdout_count"] = 0
+        widen["evidence_summary"].pop("holdout_fraction", None)
+
+        result = build_post_promotion_policy_drafts(self._review_from_fixture(fixture))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["summary"]["impact_gate_blocked_count"], 1)
+        blocked = next(item for item in result["omitted"] if item["target_candidate_id"] == widen["delta_id"])
+        self.assertEqual(blocked["reason"], "missing-holdout-coverage")
+        self.assertFalse(blocked["dry_run_impact_gate"]["holdout_coverage_present"])
 
 
 if __name__ == "__main__":

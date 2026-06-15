@@ -13,6 +13,7 @@ from agentflow_proxy.store import utc_now
 SCHEMA = "agentflow.post_promotion_policy_draft_dry_run.v1"
 DRAFT_SCHEMA = "agentflow.post_promotion_policy_draft.v1"
 OMISSION_SCHEMA = "agentflow.post_promotion_policy_draft_omission.v1"
+IMPACT_GATE_SCHEMA = "agentflow.post_promotion_policy_draft_impact_gate.v1"
 
 _VALID_ACTIONS = {"widen-local-policy", "rollback-local-policy", "keep-blocked"}
 _VALID_FAMILIES = {"routing", "cache", "crunch"}
@@ -171,6 +172,20 @@ def _bounded_fraction(value: Any, default: float) -> float:
     return round(max(0.0, min(1.0, _as_float(value, default))), 4)
 
 
+def _as_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "1", "yes", "y"}:
+            return True
+        if text in {"false", "0", "no", "n"}:
+            return False
+    return None
+
+
 def _label(value: Any, *, default: str = "unknown", max_length: int = 200) -> str:
     text = str(value or "").strip().replace("_", "-")
     if not text:
@@ -301,11 +316,166 @@ def _evidence_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "record_count": _as_int(source.get("record_count")),
         "candidate_count": _as_int(source.get("candidate_count")),
         "rollup_count": _as_int(source.get("rollup_count")),
+        "affected_call_count": _first_positive_int(source, candidate, "affected_call_count", "record_count", "sample_count", "candidate_count", "rollup_count"),
+        "affected_row_count": _first_positive_int(source, candidate, "affected_row_count", "record_count", "sample_count", "candidate_count", "rollup_count"),
         "promotion_status": source.get("promotion_status"),
         "rank_score": round(_as_float(source.get("rank_score")), 8),
         "savings_delta_usd": round(_as_float(candidate.get("savings_delta_usd") or source.get("savings_delta_usd")), 8),
         "confidence": _bounded_fraction(candidate.get("confidence"), 0.0),
         "no_op_reasons": _reason_list(candidate.get("no_op_reasons")),
+        "privacy": _privacy(),
+    }
+
+
+def _candidate_value(candidate: dict[str, Any], *keys: str) -> Any:
+    source = candidate.get("evidence_summary") if isinstance(candidate.get("evidence_summary"), dict) else {}
+    for key in keys:
+        if key in candidate:
+            return candidate.get(key)
+        if key in source:
+            return source.get(key)
+    return None
+
+
+def _first_positive_int(source: dict[str, Any], candidate: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        value = source.get(key)
+        if value is None:
+            value = candidate.get(key)
+        number = _as_int(value)
+        if number > 0:
+            return number
+    return 0
+
+
+def _candidate_bool(candidate: dict[str, Any], *keys: str) -> bool | None:
+    for key in keys:
+        safe = _as_bool(_candidate_value(candidate, key))
+        if safe is not None:
+            return safe
+    return None
+
+
+def _candidate_fraction(candidate: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _candidate_value(candidate, key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            continue
+        number = _as_float(value, -1.0)
+        if number >= 0.0:
+            return _bounded_fraction(number, 0.0)
+    return None
+
+
+def _candidate_count(candidate: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        number = _as_int(_candidate_value(candidate, key))
+        if number > 0:
+            return number
+    return 0
+
+
+def _stale_evidence(candidate: dict[str, Any]) -> bool:
+    value = _candidate_value(candidate, "stale_evidence", "stale")
+    if isinstance(value, dict):
+        return bool(value.get("stale"))
+    return bool(_as_bool(value))
+
+
+def _safety_stop_active(candidate: dict[str, Any]) -> bool:
+    if _candidate_count(candidate, "safety_stop_count", "safety_stopped_count") > 0:
+        return True
+    if _candidate_bool(candidate, "safety_stop_active", "safety_stop_tripped") is True:
+        return True
+    status = _label(_candidate_value(candidate, "safety_stop_status", "promotion_status"), default="")
+    if status in {"safety-stop", "safety-stopped", "safety-stop-active", "safety-stop-tripped"}:
+        return True
+    return any("safety-stop" in reason for reason in _reason_list(candidate.get("no_op_reasons")))
+
+
+def _has_holdout_coverage(candidate: dict[str, Any]) -> bool:
+    if _candidate_count(candidate, "current_holdout_count", "holdout_count", "canary_holdout_count") > 0:
+        return True
+    fraction = _candidate_fraction(candidate, "current_holdout_fraction", "holdout_fraction")
+    return bool(fraction and fraction > 0.0)
+
+
+def _has_preserved_previous_rule(candidate: dict[str, Any]) -> bool:
+    return _candidate_bool(
+        candidate,
+        "preserved_previous_rule",
+        "previous_rule_preserved",
+        "previous_rule_available",
+    ) is True
+
+
+def _impact_gate(
+    candidate: dict[str, Any],
+    *,
+    action: str,
+    rule_id: str,
+    widen_fraction: float,
+    holdout_fraction: float,
+) -> dict[str, Any]:
+    evidence = candidate.get("evidence_summary") if isinstance(candidate.get("evidence_summary"), dict) else {}
+    affected_call_count = _first_positive_int(
+        evidence,
+        candidate,
+        "affected_call_count",
+        "record_count",
+        "sample_count",
+        "candidate_count",
+        "rollup_count",
+    )
+    affected_row_count = _first_positive_int(
+        evidence,
+        candidate,
+        "affected_row_count",
+        "record_count",
+        "sample_count",
+        "candidate_count",
+        "rollup_count",
+    )
+    current_canary = _candidate_fraction(candidate, "current_canary_fraction", "canary_fraction") or 0.0
+    projected_canary = 0.0 if action == "rollback-local-policy" else _bounded_fraction(current_canary + widen_fraction, widen_fraction)
+    observed_holdout = _candidate_fraction(candidate, "current_holdout_fraction", "holdout_fraction")
+    required_holdout = 0.0 if action == "rollback-local-policy" else _bounded_fraction(holdout_fraction, 0.10)
+
+    blockers: list[str] = []
+    if action == "widen-local-policy" and not _has_holdout_coverage(candidate):
+        blockers.append("missing-holdout-coverage")
+    if _stale_evidence(candidate):
+        blockers.append("stale-evidence")
+    if _safety_stop_active(candidate):
+        blockers.append("safety-stop-active")
+    if action == "rollback-local-policy" and not _has_preserved_previous_rule(candidate):
+        blockers.append("missing-preserved-previous-rule")
+
+    return {
+        "schema": IMPACT_GATE_SCHEMA,
+        "status": "blocked" if blockers else "passed",
+        "reason": blockers[0] if blockers else "impact-gate-passed",
+        "blocker_reasons": blockers,
+        "draft_action": action,
+        "rule_id": rule_id,
+        "action_family": _family(candidate),
+        "source_surface": _label(candidate.get("source_surface"), default="unknown"),
+        "recommendation_type": _label(candidate.get("recommendation_type"), default="unknown"),
+        "affected_call_count": affected_call_count,
+        "affected_row_count": affected_row_count,
+        "current_canary_fraction": current_canary,
+        "projected_canary_fraction": projected_canary,
+        "required_holdout_fraction": required_holdout,
+        "observed_holdout_fraction": observed_holdout if observed_holdout is not None else 0.0,
+        "holdout_coverage_present": _has_holdout_coverage(candidate),
+        "stale_evidence": _stale_evidence(candidate),
+        "safety_stop_active": _safety_stop_active(candidate),
+        "preserved_previous_rule": _has_preserved_previous_rule(candidate),
+        "expected_savings_delta_usd": round(_as_float(candidate.get("savings_delta_usd") or evidence.get("savings_delta_usd")), 8),
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
         "privacy": _privacy(),
     }
 
@@ -328,7 +498,14 @@ def _review_metadata(candidate: dict[str, Any], policy: dict[str, Any]) -> dict[
     }
 
 
-def _widen_draft(candidate: dict[str, Any], policy: dict[str, Any], *, widen_fraction: float, holdout_fraction: float) -> dict[str, Any]:
+def _widen_draft(
+    candidate: dict[str, Any],
+    policy: dict[str, Any],
+    *,
+    widen_fraction: float,
+    holdout_fraction: float,
+    impact_gate: dict[str, Any],
+) -> dict[str, Any]:
     evidence = _evidence_summary(candidate)
     activation_delta = _bounded_fraction(widen_fraction, 0.05)
     holdout = _bounded_fraction(holdout_fraction, 0.10)
@@ -371,6 +548,8 @@ def _widen_draft(candidate: dict[str, Any], policy: dict[str, Any], *, widen_fra
         "evidence_summary": evidence,
         "dry_run_impact_estimate": {
             "schema": "agentflow.post_promotion_policy_draft_impact_estimate.v1",
+            "affected_call_count": impact_gate["affected_call_count"],
+            "affected_row_count": impact_gate["affected_row_count"],
             "savings_delta_usd": evidence["savings_delta_usd"],
             "confidence": evidence["confidence"],
             "activation_fraction_delta_lte": activation_delta,
@@ -378,6 +557,7 @@ def _widen_draft(candidate: dict[str, Any], policy: dict[str, Any], *, widen_fra
             "provider_calls_made": False,
             "managed_server_calls_made": False,
         },
+        "dry_run_impact_gate": impact_gate,
         "rollback_metadata": {
             "schema": "agentflow.post_promotion_policy_draft_rollback_metadata.v1",
             "rollback_action_type": policy["rollback_action_type"],
@@ -394,7 +574,12 @@ def _widen_draft(candidate: dict[str, Any], policy: dict[str, Any], *, widen_fra
     }
 
 
-def _rollback_draft(candidate: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+def _rollback_draft(
+    candidate: dict[str, Any],
+    policy: dict[str, Any],
+    *,
+    impact_gate: dict[str, Any],
+) -> dict[str, Any]:
     evidence = _evidence_summary(candidate)
     rule_id = _rule_id(candidate, "rollback-local-policy")
     patch = {
@@ -435,12 +620,15 @@ def _rollback_draft(candidate: dict[str, Any], policy: dict[str, Any]) -> dict[s
         "evidence_summary": evidence,
         "dry_run_impact_estimate": {
             "schema": "agentflow.post_promotion_policy_draft_impact_estimate.v1",
+            "affected_call_count": impact_gate["affected_call_count"],
+            "affected_row_count": impact_gate["affected_row_count"],
             "savings_delta_usd": evidence["savings_delta_usd"],
             "confidence": evidence["confidence"],
             "projected_policy_risk_removed": True,
             "provider_calls_made": False,
             "managed_server_calls_made": False,
         },
+        "dry_run_impact_gate": impact_gate,
         "rollback_metadata": {
             "schema": "agentflow.post_promotion_policy_draft_rollback_metadata.v1",
             "rollback_action_type": policy["rollback_action_type"],
@@ -452,7 +640,13 @@ def _rollback_draft(candidate: dict[str, Any], policy: dict[str, Any]) -> dict[s
     }
 
 
-def _omission(candidate: dict[str, Any], reason: str, *, path: str | None = None) -> dict[str, Any]:
+def _omission(
+    candidate: dict[str, Any],
+    reason: str,
+    *,
+    path: str | None = None,
+    impact_gate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     family = _family(candidate)
     policy = _policy_meta(family) or {
         "target_local_rule_file": f"{family}_rules.yaml",
@@ -461,7 +655,7 @@ def _omission(candidate: dict[str, Any], reason: str, *, path: str | None = None
         "family_review_command": "",
         "apply_preview_command": "",
     }
-    return {
+    result = {
         "schema": OMISSION_SCHEMA,
         "status": "omitted",
         "reason": reason,
@@ -476,6 +670,9 @@ def _omission(candidate: dict[str, Any], reason: str, *, path: str | None = None
         "no_op_reasons": _reason_list(candidate.get("no_op_reasons"), reason),
         "privacy": _privacy(),
     }
+    if impact_gate is not None:
+        result["dry_run_impact_gate"] = impact_gate
+    return result
 
 
 def _draft_for_candidate(
@@ -495,10 +692,26 @@ def _draft_for_candidate(
     if candidate.get("status") != "recommended" or action == "keep-blocked":
         reason = "keep-blocked" if action == "keep-blocked" else "not-recommended"
         return None, _omission(candidate, reason, path=path)
+    rule_id = _rule_id(candidate, action)
+    impact_gate = _impact_gate(
+        candidate,
+        action=action,
+        rule_id=rule_id,
+        widen_fraction=widen_fraction,
+        holdout_fraction=holdout_fraction,
+    )
+    if impact_gate["status"] == "blocked":
+        return None, _omission(candidate, str(impact_gate["reason"]), path=path, impact_gate=impact_gate)
     if action == "widen-local-policy":
-        return _widen_draft(candidate, policy, widen_fraction=widen_fraction, holdout_fraction=holdout_fraction), None
+        return _widen_draft(
+            candidate,
+            policy,
+            widen_fraction=widen_fraction,
+            holdout_fraction=holdout_fraction,
+            impact_gate=impact_gate,
+        ), None
     if action == "rollback-local-policy":
-        return _rollback_draft(candidate, policy), None
+        return _rollback_draft(candidate, policy, impact_gate=impact_gate), None
     return None, _omission(candidate, "unsupported-next-action", path=path)
 
 
@@ -558,11 +771,17 @@ def build_post_promotion_policy_drafts(
 
     draft_actions = [str(item.get("draft_action") or "unknown") for item in drafts]
     omitted_reasons = [str(item.get("reason") or "unknown") for item in omitted]
-    ok = bool(drafts or omitted)
+    impact_gates = [
+        item["dry_run_impact_gate"]
+        for item in drafts + omitted
+        if isinstance(item.get("dry_run_impact_gate"), dict)
+    ]
+    blocked_impact_gates = [gate for gate in impact_gates if gate.get("status") == "blocked"]
+    ok = bool(drafts or omitted) and not blocked_impact_gates
     result = {
         "schema": SCHEMA,
         "ok": ok,
-        "status": "drafted" if drafts else "no-op",
+        "status": "blocked" if blocked_impact_gates else "drafted" if drafts else "no-op",
         "generated_at": utc_now(),
         "source_report_schema": priority_review.get("schema"),
         "source_report_generated_at": priority_review.get("generated_at"),
@@ -574,6 +793,16 @@ def build_post_promotion_policy_drafts(
             "omitted_count": len(omitted),
             "draft_action_counts": _count_rows(draft_actions),
             "omission_reason_counts": _count_rows(omitted_reasons),
+            "impact_gate_count": len(impact_gates),
+            "impact_gate_pass_count": sum(1 for gate in impact_gates if gate.get("status") == "passed"),
+            "impact_gate_blocked_count": len(blocked_impact_gates),
+            "impact_gate_blocker_reason_counts": _count_rows([
+                str(reason)
+                for gate in blocked_impact_gates
+                for reason in gate.get("blocker_reasons", [])
+            ]),
+            "projected_affected_call_count": sum(_as_int(gate.get("affected_call_count")) for gate in impact_gates),
+            "projected_affected_row_count": sum(_as_int(gate.get("affected_row_count")) for gate in impact_gates),
             "widen_fraction": _bounded_fraction(widen_fraction, 0.05),
             "holdout_fraction": _bounded_fraction(holdout_fraction, 0.10),
             "target_local_rule_files": sorted({str(item.get("target_local_rule_file")) for item in drafts + omitted if item.get("target_local_rule_file")}),
@@ -589,7 +818,21 @@ def build_post_promotion_policy_drafts(
         "managed_server_calls_made": False,
         "managed_enforced": False,
         "privacy": _privacy(),
-        "error": None if ok else {"type": "no_candidates", "message": "no post-promotion priority candidates were available"},
+        "error": (
+            {
+                "type": "impact_gate_blocked",
+                "message": "one or more post-promotion policy drafts were blocked by local dry-run impact gates",
+                "blocker_reason_counts": _count_rows([
+                    str(reason)
+                    for gate in blocked_impact_gates
+                    for reason in gate.get("blocker_reasons", [])
+                ]),
+            }
+            if blocked_impact_gates
+            else None
+            if ok
+            else {"type": "no_candidates", "message": "no post-promotion priority candidates were available"}
+        ),
     }
     json.dumps(result, sort_keys=True)
     return result
