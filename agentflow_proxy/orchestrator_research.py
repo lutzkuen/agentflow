@@ -5958,6 +5958,11 @@ def _proposal_from_repeated_diagnostic(
     )
     lifecycle_context = diagnostic.get("lifecycle_context") if isinstance(diagnostic.get("lifecycle_context"), dict) else {}
     fingerprint = fingerprint or _diagnostic_fingerprint(diagnostic_class)
+    ledger_stage = _diagnostic_ledger_stage(diagnostic) or {}
+    ledger_next_action = str(ledger_stage.get("next_action") or "").strip()
+    ledger_current_status = _ledger_status_from_stage(ledger_stage) if ledger_stage else ""
+    ledger_action_family = str(ledger_stage.get("local_action_family") or "").strip()
+    ledger_verification_check = str(ledger_stage.get("verification_check") or "").strip()
     reclassification_source = str(diagnostic.get("reclassification_source") or "")
     is_bounded_human_review = reclassification_source == "no-match-bounded-human-review"
     if is_bounded_human_review:
@@ -5978,6 +5983,16 @@ def _proposal_from_repeated_diagnostic(
         f"Action: create",
         f"Expected unblock path: {expected_unblock_path}",
     ]
+    if ledger_stage:
+        evidence.extend(
+            [
+                f"Ledger next action: {ledger_next_action}",
+                f"Ledger current status: {ledger_current_status}",
+                f"Ledger local action family: {ledger_action_family}",
+            ]
+        )
+        if ledger_verification_check:
+            evidence.append(f"Ledger verification check: {ledger_verification_check}")
     if is_bounded_human_review:
         evidence.extend([
             "Source schema: agentflow.orchestrator_research_log_diagnostics.v1",
@@ -6035,6 +6050,16 @@ def _repeated_diagnostic_comment_for_issue(
     source_lever = str(diagnostic.get("source_lever") or _diagnostic_source_lever(reason, diagnostic_class))
     evidence_count = _to_int(diagnostic.get("count", 0))
     example_excerpt = str(diagnostic.get("example") or "")[:120]
+    ledger_stage = _diagnostic_ledger_stage(diagnostic) or {}
+    ledger_evidence = []
+    if ledger_stage:
+        ledger_evidence = [
+            f"Ledger next action: {ledger_stage.get('next_action')}",
+            f"Ledger current status: {_ledger_status_from_stage(ledger_stage)}",
+            f"Ledger local action family: {ledger_stage.get('local_action_family')}",
+        ]
+        if ledger_stage.get("verification_check"):
+            ledger_evidence.append(f"Ledger verification check: {ledger_stage.get('verification_check')}")
     body = _issue_body(
         title=str(issue.get("title") or ""),
         rationale=(
@@ -6050,6 +6075,7 @@ def _repeated_diagnostic_comment_for_issue(
             f"Fingerprint: {fingerprint}",
             f"Action: update",
             f"Duplicate of open issue: #{_issue_number(issue)}",
+            *ledger_evidence,
         ],
         implementation=[
             "Check whether the original blocker is still present in the current reports or stats.",

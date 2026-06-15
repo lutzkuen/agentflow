@@ -3852,6 +3852,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("Report key:", proposal_body)
         self.assertIn("Privacy:", proposal_body)
         self.assertIn("metadata-only", proposal_body)
+        self.assertIn("Ledger next action: cut-ready-activation-feedback-issue-from-bounded-diagnostic", proposal_body)
+        self.assertIn("Ledger current status: blocked", proposal_body)
+        self.assertIn("Ledger local action family: activation-feedback", proposal_body)
+        self.assertIn(
+            "Ledger verification check: The next research plan emits a durable activation-feedback ledger entry with a concrete next action, stable fingerprint, and metadata-only privacy flags.",
+            proposal_body,
+        )
         repeated_plan = build_research_plan(
             issues=[],
             log_sources=[
@@ -4334,6 +4341,9 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         self.assertIn("Proposed owner:", body)
         self.assertIn("Fingerprint:", body)
         self.assertIn("Action:", body)
+        self.assertIn("Ledger next action:", body)
+        self.assertIn("Ledger current status:", body)
+        self.assertIn("Ledger local action family:", body)
 
     def test_issue_532_combined_activation_feedback_and_safety_stop_fixture(self):
         # Issue #532 acceptance metric: repeated activation-feedback-blocker-review (6x) and
