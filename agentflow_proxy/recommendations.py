@@ -30,6 +30,7 @@ RECOMMENDATION_PATH = "/v1/recommendation"
 POLICY_DECISION_PATH = "/v1/policy-decision"
 OUTCOME_PATH_TEMPLATE = "/v1/optimization-units/{unit_id}/outcome"
 POLICY_EVENTS_PATH = "/v1/policy-events"
+PROMOTION_BLOCKER_ACTION_OUTCOME_ROLLUPS_PATH = "/v1/promotion-blocker-action-outcome-rollups"
 FEATURE_SCHEMA_VERSION = "agentflow.optimization_unit_features.v1"
 POLICY_DECISION_PREFLIGHT_SCHEMA = "agentflow.policy_decision_preflight.v1"
 POLICY_DECISION_SCHEMA = "agentflow.policy_decision.v1"
@@ -3203,7 +3204,10 @@ async def _send_outcome_payload(*, endpoint: str, payload: dict[str, Any], unit_
     started = time.time()
     try:
         async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
-            response = await client.patch(url, json=payload, headers=_managed_headers())
+            if endpoint == PROMOTION_BLOCKER_ACTION_OUTCOME_ROLLUPS_PATH:
+                response = await client.post(url, json=payload, headers=_managed_headers())
+            else:
+                response = await client.patch(url, json=payload, headers=_managed_headers())
         meta["latency_ms"] = int((time.time() - started) * 1000)
         meta["status_code"] = response.status_code
         if response.status_code >= 400:

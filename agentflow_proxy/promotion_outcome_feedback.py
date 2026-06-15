@@ -11,6 +11,10 @@ from agentflow_proxy.store import stable_json, utc_now
 SCHEMA = "agentflow.promotion_outcome_feedback_ledger.v1"
 ENTRY_SCHEMA = "agentflow.promotion_outcome_feedback_entry.v1"
 SUMMARY_SCHEMA = "agentflow.promotion_outcome_feedback_summary.v1"
+POST_PROMOTION_ACTION_OUTCOME_ROLLUP_SOURCE_SURFACE = "post_promotion_action_outcomes"
+POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ENDPOINT = "/v1/promotion-blocker-action-outcome-rollups"
+POST_PROMOTION_ACTION_OUTCOME_ROLLUP_INGEST_SCHEMA = "agentflow.promotion_blocker_action_outcome_rollup_ingest.v1"
+POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ROW_SCHEMA = "agentflow.promotion_blocker_action_outcome_rollup_row.v1"
 
 _RAW_LIKE_KEY_PARTS = (
     "api_key",
@@ -120,6 +124,340 @@ def _stable_id(prefix: str, *parts: Any) -> str:
 def _counts(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     counter = Counter(str(row.get(key) or "unknown") for row in rows)
     return [{"value": value, "count": count} for value, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))]
+
+
+def _count_dict(rows: list[dict[str, Any]], key: str, *, weight_key: str | None = None) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        value = str(row.get(key) or "unknown")
+        weight = max(1, _as_int(row.get(weight_key))) if weight_key else 1
+        counter[value] += weight
+    return dict(sorted(counter.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _increment_count(counts: dict[str, int], value: Any, amount: int = 1) -> None:
+    key = str(value or "unknown")
+    counts[key] = counts.get(key, 0) + max(0, amount)
+
+
+def _rollup_privacy_summary() -> dict[str, Any]:
+    privacy = _privacy_summary()
+    privacy.update({
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "individual_candidate_ids_included": False,
+        "policy_file_contents_included": False,
+        "tenant_secrets_included": False,
+    })
+    return privacy
+
+
+def _entry_next_action(entry: dict[str, Any]) -> str:
+    recommendation = str(entry.get("recommendation") or "").replace("_", "-")
+    status = str(entry.get("status") or "").replace("_", "-")
+    if entry.get("rollback_needed") or recommendation == "rollback" or status == "rollback-needed":
+        return "rollback-local-policy"
+    if recommendation in {"promote", "widen", "widen-local-policy"} or status == "positive":
+        return "widen-local-policy"
+    return "keep-blocked"
+
+
+def _entry_outcome_count(entry: dict[str, Any]) -> int:
+    counted = (
+        _as_int(entry.get("applied_count"))
+        + _as_int(entry.get("holdout_count"))
+        + _as_int(entry.get("skipped_count"))
+        + _as_int(entry.get("bypassed_count"))
+        + _as_int(entry.get("safety_stop_count"))
+    )
+    return max(1, counted)
+
+
+def _load_feedback_entry(row: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    try:
+        entry = json.loads(row.get("feedback_json") or "{}")
+    except Exception:
+        entry = {}
+    if not isinstance(entry, dict):
+        entry = {}
+    entry = {**entry, "id": row.get("id"), "created_at": row.get("created_at")}
+    violations: list[dict[str, str]] = []
+    _scan_raw_like(entry, "$", violations)
+    return entry, violations
+
+
+def _row_source_surface(entry: dict[str, Any]) -> str:
+    source = entry.get("source_surface")
+    if source:
+        return str(source)
+    evidence = str(entry.get("source_evidence_schema") or "")
+    if "openai" in evidence:
+        return "openai_responses"
+    if "anthropic" in evidence or "claude" in evidence:
+        return "anthropic_messages"
+    return "unknown"
+
+
+def build_post_promotion_action_outcome_rollups(
+    store_obj: Any,
+    *,
+    limit: int = 1000,
+    generated_at: str | None = None,
+) -> dict[str, Any]:
+    generated = generated_at or utc_now()
+    capped = max(1, min(int(limit or 1), 10000))
+    result: dict[str, Any] = {
+        "schema": "agentflow.post_promotion_action_outcome_rollups.v1",
+        "ok": False,
+        "status": "invalid",
+        "generated_at": generated,
+        "source_surface": POST_PROMOTION_ACTION_OUTCOME_ROLLUP_SOURCE_SURFACE,
+        "endpoint": POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ENDPOINT,
+        "rollups": [],
+        "payload": None,
+        "summary": {},
+        "privacy": _rollup_privacy_summary(),
+    }
+    if not hasattr(store_obj, "promotion_outcome_feedback_rows"):
+        result.update({
+            "status": "unsupported-store",
+            "error": {"type": "unsupported_store", "message": "store does not expose promotion outcome feedback rows"},
+        })
+        return result
+
+    entries: list[dict[str, Any]] = []
+    violations: list[dict[str, str]] = []
+    for row in store_obj.promotion_outcome_feedback_rows(limit=capped):
+        entry, entry_violations = _load_feedback_entry(row)
+        if entry_violations:
+            violations.extend(entry_violations)
+            continue
+        if entry:
+            entries.append(entry)
+    if violations:
+        result.update({
+            "status": "privacy-blocked",
+            "error": {"type": "privacy_blocked", "message": "stored promotion outcome feedback contains raw-like fields"},
+            "privacy": {**_rollup_privacy_summary(), "input_privacy_violations": violations[:20]},
+        })
+        return result
+    if not entries:
+        result.update({
+            "ok": True,
+            "status": "no-outcomes",
+            "summary": {"entry_count": 0, "rollup_count": 0},
+        })
+        return result
+
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for entry in entries:
+        key = (
+            _row_source_surface(entry),
+            str(entry.get("action_family") or "unknown"),
+            str(entry.get("policy_section") or entry.get("action_family") or "unknown"),
+            str(entry.get("rule_source") or "unknown"),
+        )
+        groups.setdefault(key, []).append(entry)
+
+    rollups: list[dict[str, Any]] = []
+    for (source_surface, action_family, policy_section, policy_source), group in groups.items():
+        outcome_status_counts: dict[str, int] = {}
+        reason_code_counts: dict[str, int] = {}
+        source_outcome_counts: dict[str, int] = {}
+        next_action_counts: dict[str, int] = {}
+        applied_count = holdout_count = skipped_count = bypassed_count = safety_stopped_count = 0
+        observed = projected = 0.0
+        for entry in group:
+            outcome_count = _entry_outcome_count(entry)
+            _increment_count(outcome_status_counts, entry.get("status"), outcome_count)
+            _increment_count(source_outcome_counts, entry.get("recommendation") or entry.get("status"), outcome_count)
+            _increment_count(next_action_counts, _entry_next_action(entry), outcome_count)
+            for reason in entry.get("reason_codes") or []:
+                _increment_count(reason_code_counts, reason, outcome_count)
+            applied_count += _as_int(entry.get("applied_count"))
+            holdout_count += _as_int(entry.get("holdout_count"))
+            skipped_count += _as_int(entry.get("skipped_count"))
+            bypassed_count += _as_int(entry.get("bypassed_count"))
+            safety_stopped_count += _as_int(entry.get("safety_stop_count"))
+            observed += _as_float(entry.get("observed_savings_usd"))
+            projected += _as_float(entry.get("projected_savings_usd"))
+        outcome_count_total = sum(outcome_status_counts.values()) or len(group)
+        top_outcome = max(outcome_status_counts.items(), key=lambda item: (item[1], item[0]))[0]
+        top_next_action = max(next_action_counts.items(), key=lambda item: (item[1], item[0]))[0]
+        blocker_reason = (
+            max(reason_code_counts.items(), key=lambda item: (item[1], item[0]))[0]
+            if reason_code_counts
+            else top_outcome
+        )
+        rollups.append({
+            "schema": POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ROW_SCHEMA,
+            "source_surface": source_surface,
+            "local_action_family": action_family,
+            "action_family": action_family,
+            "recommendation_type": "post-promotion-action-outcome",
+            "blocker_reason": blocker_reason,
+            "outcome_status": top_outcome,
+            "next_action": top_next_action,
+            "policy_source": policy_source,
+            "observed_savings_usd": round(observed, 8),
+            "projected_savings_usd": round(max(0.0, projected), 8),
+            "row_count": len(group),
+            "outcome_count": outcome_count_total,
+            "executed_count": applied_count + holdout_count,
+            "applied_count": applied_count,
+            "skipped_count": skipped_count + bypassed_count,
+            "safety_stopped_count": safety_stopped_count,
+            "noop_count": max(0, outcome_count_total - applied_count - holdout_count - skipped_count - bypassed_count - safety_stopped_count),
+            "outcome_status_counts": outcome_status_counts,
+            "reason_code_counts": reason_code_counts,
+            "recommendation_type_counts": {"post-promotion-action-outcome": outcome_count_total},
+            "local_action_family_counts": {action_family: outcome_count_total},
+            "policy_source_counts": {policy_source: outcome_count_total},
+            "source_outcome_counts": source_outcome_counts,
+            "local_executor_compatibility": {
+                "status": "blocked" if top_next_action == "rollback-local-policy" else "compatible",
+                "local_action_family": action_family,
+                "reason_codes": sorted(reason_code_counts),
+            },
+            "metadata": {
+                "aggregate_only": True,
+                "policy_section": policy_section,
+                "holdout_count": holdout_count,
+                "bypassed_count": bypassed_count,
+                "savings_delta_usd": round(observed - projected, 8),
+                "source_entry_count": len(group),
+            },
+            "privacy": _rollup_privacy_summary(),
+        })
+    rollups.sort(key=lambda row: (-_as_int(row.get("outcome_count")), str(row.get("local_action_family")), str(row.get("source_surface"))))
+    payload = {
+        "schema": POST_PROMOTION_ACTION_OUTCOME_ROLLUP_INGEST_SCHEMA,
+        "generated_at": generated,
+        "run_id": _stable_id("post-promotion-outcomes", generated, len(entries), len(rollups)),
+        "window": {
+            "source": "local-promotion-outcome-feedback",
+            "entry_count": len(entries),
+        },
+        "status": "ready",
+        "top_next_action": rollups[0].get("next_action") if rollups else None,
+        "summary": {
+            "entry_count": len(entries),
+            "rollup_count": len(rollups),
+            "outcome_count": sum(_as_int(row.get("outcome_count")) for row in rollups),
+            "observed_savings_usd": round(sum(_as_float(row.get("observed_savings_usd")) for row in rollups), 8),
+            "projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in rollups), 8),
+            "outcome_status_counts": _count_dict(entries, "status", weight_key=None),
+            "action_family_counts": _count_dict(entries, "action_family", weight_key=None),
+        },
+        "rollups": rollups,
+        "privacy": _rollup_privacy_summary(),
+    }
+    result.update({
+        "ok": True,
+        "status": "ready",
+        "rollups": rollups,
+        "payload": payload,
+        "summary": payload["summary"],
+    })
+    return result
+
+
+async def queue_post_promotion_action_outcome_rollups(
+    store_obj: Any,
+    *,
+    limit: int = 1000,
+    flush_immediately: bool = False,
+) -> dict[str, Any]:
+    from agentflow_proxy import recommendations
+    from agentflow_proxy.managed_egress import ManagedEgressBlocked, assert_managed_egress_safe, managed_egress_blocked_meta
+
+    built = build_post_promotion_action_outcome_rollups(store_obj, limit=limit)
+    meta: dict[str, Any] = {
+        "schema": "agentflow.post_promotion_action_outcome_rollup_flush_status.v1",
+        "enabled": recommendations.recommendations_enabled(),
+        "server_url": recommendations.recommendation_server_url(),
+        "endpoint": POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ENDPOINT,
+        "source_surface": POST_PROMOTION_ACTION_OUTCOME_ROLLUP_SOURCE_SURFACE,
+        "rollup_status": built.get("status"),
+        "rollup_count": len(built.get("rollups") or []),
+        "payload_included": False,
+        "privacy": _rollup_privacy_summary(),
+    }
+    if not built.get("ok"):
+        meta.update({
+            "status": "rejected",
+            "reason": built.get("status") or "invalid-rollups",
+            "error": built.get("error"),
+        })
+        return meta
+    if built.get("status") == "no-outcomes":
+        meta.update({"status": "skipped", "reason": "no-post-promotion-outcomes"})
+        return meta
+    if not recommendations.recommendations_enabled():
+        meta.update({"status": "disabled", "reason": "managed-feedback-disabled"})
+        return meta
+    if not recommendations.recommendation_server_configured():
+        meta.update({"status": "no-managed-config", "reason": "server-url-not-configured"})
+        return meta
+    if not hasattr(store_obj, "enqueue_managed_outcome_feedback"):
+        meta.update({"status": "skipped", "reason": "store-does-not-support-managed-feedback-queue"})
+        return meta
+
+    payload = built.get("payload") if isinstance(built.get("payload"), dict) else {}
+    try:
+        assert_managed_egress_safe(payload)
+    except ManagedEgressBlocked as exc:
+        meta.update({
+            "status": "rejected",
+            "reason": "unsafe-egress-payload",
+            **managed_egress_blocked_meta(endpoint=POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ENDPOINT, violations=exc.violations),
+        })
+        return meta
+
+    queue_id = _stable_id("post-promotion-action-outcomes", stable_json(payload))
+    if hasattr(store_obj, "get_managed_outcome_feedback"):
+        existing = store_obj.get_managed_outcome_feedback(queue_id)
+        if existing:
+            meta.update({
+                "status": existing.get("status") if existing.get("status") == "sent" else "pending-flush",
+                "reason": "already-queued",
+                "queue_id": queue_id,
+                "attempts": existing.get("attempts") or 0,
+            })
+            return meta
+
+    row = {
+        "id": queue_id,
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
+        "source_surface": POST_PROMOTION_ACTION_OUTCOME_ROLLUP_SOURCE_SURFACE,
+        "endpoint": POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ENDPOINT,
+        "optimization_unit_id": 0,
+        "payload_json": stable_json(payload),
+        "status": "queued",
+        "attempts": 0,
+        "next_attempt_at": utc_now(),
+    }
+    store_obj.enqueue_managed_outcome_feedback(**row)
+    meta.update({
+        "status": "pending-flush",
+        "reason": "queued",
+        "queue_id": queue_id,
+        "attempts": 0,
+    })
+    if flush_immediately:
+        results = await recommendations.flush_queued_outcome_feedback(
+            store_obj,
+            limit=1,
+            source_surface=POST_PROMOTION_ACTION_OUTCOME_ROLLUP_SOURCE_SURFACE,
+        )
+        first = results[0] if results else {}
+        meta.update({
+            "status": "flushed" if first.get("status") == "sent" else first.get("status") or "pending-flush",
+            "reason": first.get("reason") or meta.get("reason"),
+            "flush_result": {key: value for key, value in first.items() if key != "payload_json"},
+        })
+    return meta
 
 
 def _action_status(action: dict[str, Any], thresholds: dict[str, Any]) -> tuple[str, bool]:

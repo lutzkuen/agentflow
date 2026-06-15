@@ -10553,6 +10553,83 @@ class ManagedFeedbackCliTests(unittest.TestCase):
             next_attempt_at="2026-06-08T10:00:00+00:00",
         )
 
+    def _log_post_promotion_feedback(
+        self,
+        store,
+        *,
+        row_id,
+        action_family,
+        status,
+        recommendation,
+        applied,
+        holdout,
+        safety_stopped=0,
+        observed=0.0,
+        projected=0.0,
+        feedback_extra=None,
+    ):
+        from agentflow_proxy.store import stable_json
+
+        entry = {
+            "schema": "agentflow.promotion_outcome_feedback_entry.v1",
+            "id": row_id,
+            "created_at": "2026-06-15T07:00:00+00:00",
+            "policy_id": f"local-policy-{action_family}",
+            "action_family": action_family,
+            "policy_section": action_family,
+            "rule_source": "managed-recommended",
+            "source_evidence_schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "status": status,
+            "recommendation": recommendation,
+            "rollback_needed": recommendation == "rollback",
+            "reason_codes": ["post-promotion-fixture"],
+            "observed_savings_usd": observed,
+            "projected_savings_usd": projected,
+            "applied_count": applied,
+            "holdout_count": holdout,
+            "skipped_count": 0,
+            "bypassed_count": 0,
+            "safety_stop_count": safety_stopped,
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+            },
+        }
+        if feedback_extra:
+            entry.update(feedback_extra)
+        store.log_promotion_outcome_feedback(
+            id=row_id,
+            created_at="2026-06-15T07:00:00+00:00",
+            impact_generated_at="2026-06-15T06:55:00+00:00",
+            policy_id=f"local-policy-{action_family}",
+            action_family=action_family,
+            policy_section=action_family,
+            rule_source="managed-recommended",
+            rule_id=f"rule-{action_family}",
+            candidate_id=f"candidate-{action_family}",
+            action_id=f"action-{action_family}",
+            source_evidence_schema="agentflow.optimization_promotion_rollout_actions.v1",
+            status=status,
+            recommendation=recommendation,
+            rollback_needed=1 if recommendation == "rollback" else 0,
+            observed_savings_usd=observed,
+            projected_savings_usd=projected,
+            projection_realization_ratio=None,
+            applied_count=applied,
+            holdout_count=holdout,
+            skipped_count=0,
+            bypassed_count=0,
+            safety_stop_count=safety_stopped,
+            error_rate_delta=0.0,
+            retry_rate_delta=0.0,
+            latency_delta_ms=0.0,
+            feedback_json=stable_json(entry),
+        )
+
     def test_managed_feedback_status_cli_reports_metadata_only_queue_counts(self):
         from agentflow_proxy.store import Store
 
@@ -10715,6 +10792,129 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         self.assertEqual(row["last_status_code"], 503)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["flush"]["retryable_error"], 1)
+
+    def test_managed_feedback_flush_posts_post_promotion_action_outcome_rollups(self):
+        from agentflow_proxy.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._log_post_promotion_feedback(
+                    store,
+                    row_id="post-promotion-routing",
+                    action_family="routing",
+                    status="positive",
+                    recommendation="widen",
+                    applied=3,
+                    holdout=2,
+                    observed=0.009,
+                    projected=0.006,
+                )
+                self._log_post_promotion_feedback(
+                    store,
+                    row_id="post-promotion-cache",
+                    action_family="cache",
+                    status="rollback-needed",
+                    recommendation="rollback",
+                    applied=1,
+                    holdout=1,
+                    safety_stopped=1,
+                    observed=-0.001,
+                    projected=0.004,
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_feedback_flush_cli(
+                        ["--db", db_path, "--post-promotion-action-outcomes", "--limit", "5"],
+                        stdout=stdout,
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(ManagedFeedbackFlushClient.calls), 1)
+        self.assertEqual(
+            ManagedFeedbackFlushClient.calls[0]["url"],
+            "http://managed.test/v1/promotion-blocker-action-outcome-rollups",
+        )
+        sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
+        self.assertEqual(sent_payload["schema"], "agentflow.promotion_blocker_action_outcome_rollup_ingest.v1")
+        self.assertEqual(len(sent_payload["rollups"]), 2)
+        rollups = {row["local_action_family"]: row for row in sent_payload["rollups"]}
+        self.assertEqual(rollups["routing"]["applied_count"], 3)
+        self.assertEqual(rollups["routing"]["metadata"]["holdout_count"], 2)
+        self.assertEqual(rollups["routing"]["next_action"], "widen-local-policy")
+        self.assertEqual(rollups["cache"]["safety_stopped_count"], 1)
+        self.assertEqual(rollups["cache"]["next_action"], "rollback-local-policy")
+        rendered = json.dumps(sent_payload, sort_keys=True)
+        for forbidden in (
+            "raw request secret",
+            "raw response secret",
+            "candidate-routing",
+            "candidate-cache",
+            "rule-routing",
+            "rule-cache",
+            "action-routing",
+            "action-cache",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["flush"]["sent"], 1)
+        self.assertEqual(result["post_promotion_action_outcome_rollups"]["status"], "flushed")
+        self.assertEqual(result["post_promotion_action_outcome_rollups"]["rollup_count"], 2)
+
+    def test_post_promotion_action_outcome_rollups_reject_raw_stored_feedback_before_send(self):
+        from agentflow_proxy.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._log_post_promotion_feedback(
+                    store,
+                    row_id="post-promotion-unsafe",
+                    action_family="routing",
+                    status="positive",
+                    recommendation="widen",
+                    applied=1,
+                    holdout=1,
+                    feedback_extra={"raw_request": "raw post promotion request must stay local"},
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_feedback_flush_cli(
+                        ["--db", db_path, "--post-promotion-action-outcomes", "--limit", "5"],
+                        stdout=stdout,
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(ManagedFeedbackFlushClient.calls, [])
+        rendered = stdout.getvalue()
+        self.assertNotIn("raw post promotion request must stay local", rendered)
+        result = json.loads(rendered)
+        self.assertEqual(result["post_promotion_action_outcome_rollups"]["status"], "rejected")
+        self.assertEqual(result["post_promotion_action_outcome_rollups"]["reason"], "privacy-blocked")
 
     def test_sqlite_maintenance_cli_reports_dry_run(self):
         from agentflow_proxy.store import Store, stable_json

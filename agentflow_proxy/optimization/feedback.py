@@ -941,6 +941,60 @@ def _optimization_coordinator_lifecycle_status(
     }
 
 
+def _post_promotion_action_outcome_status(
+    store: Any,
+    *,
+    source_surface: str | None,
+) -> dict[str, Any]:
+    rows = (
+        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        if hasattr(store, "managed_outcome_feedback_payload_rows")
+        else []
+    )
+    row_count = 0
+    rollup_count = 0
+    outcome_count = 0
+    queue_state_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    outcome_counts: dict[str, int] = {}
+    next_action_counts: dict[str, int] = {}
+    policy_source_counts: dict[str, int] = {}
+    for row in rows:
+        payload = _safe_payload_json(row)
+        if payload.get("schema") != "agentflow.promotion_blocker_action_outcome_rollup_ingest.v1":
+            continue
+        row_count += 1
+        queue_state = _queue_state(row.get("status"))
+        queue_state_counts[queue_state] = queue_state_counts.get(queue_state, 0) + 1
+        rollups = payload.get("rollups") if isinstance(payload.get("rollups"), list) else []
+        rollup_count += len([item for item in rollups if isinstance(item, dict)])
+        for item in rollups:
+            if not isinstance(item, dict):
+                continue
+            count = int(item.get("outcome_count") or item.get("row_count") or 1)
+            outcome_count += count
+            for target, value in (
+                (action_counts, item.get("local_action_family") or item.get("action_family")),
+                (outcome_counts, item.get("outcome_status")),
+                (next_action_counts, item.get("next_action")),
+                (policy_source_counts, item.get("policy_source")),
+            ):
+                key = str(value or "unknown")
+                target[key] = target.get(key, 0) + count
+    return {
+        "schema": "agentflow.post_promotion_action_outcome_queue_status.v1",
+        "queue_rows": row_count,
+        "rollup_count": rollup_count,
+        "outcome_count": outcome_count,
+        "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
+        "local_action_family_breakdown": breakdown_from_counts(action_counts),
+        "outcome_status_breakdown": breakdown_from_counts(outcome_counts),
+        "next_action_breakdown": breakdown_from_counts(next_action_counts),
+        "policy_source_breakdown": breakdown_from_counts(policy_source_counts),
+        "payload_json_included": False,
+    }
+
+
 def public_feedback_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     optimization_unit_id = row.get("optimization_unit_id")
     if optimization_unit_id in (0, "0"):
@@ -1036,6 +1090,7 @@ def managed_feedback_status_result(
     codex_terminal_transcript_lifecycle = _codex_terminal_transcript_lifecycle_status(store, source_surface=source_surface)
     openai_optimization_lifecycle = _openai_optimization_lifecycle_status(store, source_surface=source_surface)
     optimization_coordinator_lifecycle = _optimization_coordinator_lifecycle_status(store, source_surface=source_surface)
+    post_promotion_action_outcomes = _post_promotion_action_outcome_status(store, source_surface=source_surface)
     return {
         "schema": "agentflow.managed_feedback_status.v1",
         "ok": True,
@@ -1051,6 +1106,7 @@ def managed_feedback_status_result(
         "codex_terminal_transcript_lifecycle": codex_terminal_transcript_lifecycle,
         "openai_optimization_lifecycle": openai_optimization_lifecycle,
         "optimization_coordinator_lifecycle": optimization_coordinator_lifecycle,
+        "post_promotion_action_outcomes": post_promotion_action_outcomes,
         "status_breakdown": breakdown_from_counts(status_counts),
         "source_surface_breakdown": breakdown_from_counts(source_counts),
         "oldest_pending": public_feedback_row(oldest_pending, now=now) if oldest_pending else None,
@@ -1117,6 +1173,17 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
     )
     parser.add_argument("--source-surface", help="Optional queue source surface filter, for example codex_turn.")
     parser.add_argument("--limit", type=int, default=5, help="Maximum due rows to flush, default: 5, max: 100.")
+    parser.add_argument(
+        "--post-promotion-action-outcomes",
+        action="store_true",
+        help="Build and queue metadata-only post-promotion action outcome rollups before flushing.",
+    )
+    parser.add_argument(
+        "--outcome-limit",
+        type=int,
+        default=1000,
+        help="Maximum local promotion outcome feedback rows to roll up when --post-promotion-action-outcomes is set.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Report due rows without claiming or sending them.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
     args = parser.parse_args(argv)
@@ -1125,6 +1192,36 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
     limit = max(1, min(args.limit, 100))
     store = open_store_for_db(str(args.db))
     try:
+        post_promotion_rollups: dict[str, Any] | None = None
+        flush_source_surface = args.source_surface
+        if args.post_promotion_action_outcomes:
+            from agentflow_proxy.promotion_outcome_feedback import (
+                POST_PROMOTION_ACTION_OUTCOME_ROLLUP_SOURCE_SURFACE,
+                build_post_promotion_action_outcome_rollups,
+                queue_post_promotion_action_outcome_rollups,
+            )
+
+            flush_source_surface = flush_source_surface or POST_PROMOTION_ACTION_OUTCOME_ROLLUP_SOURCE_SURFACE
+            if args.dry_run:
+                built = build_post_promotion_action_outcome_rollups(
+                    store,
+                    limit=max(1, min(args.outcome_limit, 10000)),
+                )
+                post_promotion_rollups = {
+                    "status": "would-queue" if built.get("status") == "ready" else built.get("status"),
+                    "reason": "dry-run",
+                    "rollup_count": len(built.get("rollups") or []),
+                    "payload_included": False,
+                    "privacy": built.get("privacy"),
+                }
+            else:
+                post_promotion_rollups = asyncio.run(
+                    queue_post_promotion_action_outcome_rollups(
+                        store,
+                        limit=max(1, min(args.outcome_limit, 10000)),
+                        flush_immediately=False,
+                    )
+                )
         before = managed_feedback_status_result(store, source_surface=args.source_surface, sample_limit=limit)
         if args.dry_run:
             results = [
@@ -1141,7 +1238,7 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
                     recommendations.flush_queued_outcome_feedback(
                         store,
                         limit=limit,
-                        source_surface=args.source_surface,
+                        source_surface=flush_source_surface,
                     )
                 )
                 flush_status = "completed"
@@ -1158,6 +1255,13 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
     for item in results:
         status = str(item.get("status") or "unknown")
         result_counts[status] = result_counts.get(status, 0) + 1
+        if (
+            post_promotion_rollups
+            and item.get("queue_id") == post_promotion_rollups.get("queue_id")
+        ):
+            post_promotion_rollups["status"] = "flushed" if status == "sent" else status
+            post_promotion_rollups["reason"] = item.get("reason") or post_promotion_rollups.get("reason")
+            post_promotion_rollups["attempts"] = item.get("attempts", post_promotion_rollups.get("attempts"))
     result = {
         "schema": "agentflow.managed_feedback_flush.v1",
         "ok": True,
@@ -1174,6 +1278,7 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
             "dropped_after_limit": result_counts.get("dropped-after-limit", 0),
         },
         "managed_feedback": managed_feedback_config(),
+        "post_promotion_action_outcome_rollups": post_promotion_rollups,
         "before": before["summary"],
         "after": after["summary"],
         "result_breakdown": breakdown_from_counts(result_counts),
