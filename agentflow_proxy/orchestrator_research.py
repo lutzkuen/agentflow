@@ -2748,6 +2748,8 @@ def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
         return "applied"
     if state in {"activation-ready", "replay-ready"}:
         return "staged"
+    if state in {"measurement-required", "canary-staged"}:
+        return "staged"
     if state == "measured-savings":
         return "measured"
     if state in {"projected-savings", "ranked-evidence"}:
@@ -2858,7 +2860,11 @@ def build_evidence_to_activation_next_action_ledger(
             "evidence_schema": evidence_schema,
             "cohort_bucket": cohort_bucket,
             "policy_ref": policy_ref,
-            "next_action": sanitize_value(stage.get("next_action") or "inspect-local-evidence"),
+            "next_action": sanitize_value(
+                stage.get("fingerprint_next_action")
+                or stage.get("next_action")
+                or "inspect-local-evidence"
+            ),
         }
         entry = {
             "schema": EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA,
@@ -2885,6 +2891,9 @@ def build_evidence_to_activation_next_action_ledger(
             "expected_savings_path": _ledger_expected_savings_path(stage),
             "legacy_issue_title": _legacy_issue_title_for_ledger_entry(stage),
         }
+        if stage.get("fingerprint_next_action") and stage.get("fingerprint_next_action") != stage.get("next_action"):
+            entry["fingerprint_next_action"] = sanitize_value(stage.get("fingerprint_next_action"))
+            entry["lifecycle_progressed_from_next_action"] = sanitize_value(stage.get("fingerprint_next_action"))
         current_status = str(entry.get("current_status") or "")
         entry["issue_worthy_status"] = sanitize_value(
             stage.get("issue_worthy_status")
@@ -2936,6 +2945,18 @@ def build_evidence_to_activation_next_action_ledger(
             entry["managed_dependency"] = sanitize_value(stage.get("managed_dependency"))
         if stage.get("local_handoff_reason"):
             entry["local_handoff_reason"] = sanitize_value(stage.get("local_handoff_reason"))
+        if stage.get("activation_follow_up_evidence_schema"):
+            entry["activation_follow_up_evidence_schema"] = sanitize_value(stage.get("activation_follow_up_evidence_schema"))
+        if stage.get("activation_state"):
+            entry["activation_state"] = sanitize_value(stage.get("activation_state"))
+        if stage.get("activation_mode"):
+            entry["activation_mode"] = sanitize_value(stage.get("activation_mode"))
+        if stage.get("follow_up_status"):
+            entry["follow_up_status"] = sanitize_value(stage.get("follow_up_status"))
+        if stage.get("canary_already_staged") is not None:
+            entry["canary_already_staged"] = bool(stage.get("canary_already_staged"))
+        if stage.get("canary_already_applied") is not None:
+            entry["canary_already_applied"] = bool(stage.get("canary_already_applied"))
         representation = (
             stage.get("local_file_backed_representation")
             if isinstance(stage.get("local_file_backed_representation"), dict)
@@ -3323,23 +3344,51 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _request_shape_crunch_progress_report(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    signal = stats_summary.get("crunch_savings_signal")
+    if not isinstance(signal, dict):
+        return None
+    reports = []
+    top_report = signal.get("top_report") if isinstance(signal.get("top_report"), dict) else None
+    if top_report is not None:
+        reports.append(top_report)
+    reports.extend(row for row in signal.get("reports") or [] if isinstance(row, dict))
+    for report in reports:
+        if report.get("report_key") != "request_shape_crunch_opportunity":
+            continue
+        next_action = str(report.get("next_action") or "").strip()
+        activation_state = str(report.get("activation_state") or "").strip()
+        follow_up_status = str(report.get("follow_up_status") or "").strip()
+        if (
+            report.get("canary_already_staged")
+            or activation_state in {"measurement-required", "canary-staged"}
+            or follow_up_status == "canary-staged"
+            or next_action == "measure-repeated-context-crunch-canary-impact"
+        ):
+            return report
+    return None
+
+
 def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     signal = stats_summary.get("request_shape_rollup_candidates")
     if not isinstance(signal, dict):
         return None
     summary = signal.get("summary") if isinstance(signal.get("summary"), dict) else {}
     top = signal.get("top_candidate") if isinstance(signal.get("top_candidate"), dict) else {}
+    local_action_family = str(top.get("local_action_family") or summary.get("top_local_action_family") or "cohort-ranking")
+    next_action = str(summary.get("top_next_action") or "emit-request-shape-rollups")
     readiness = str(top.get("readiness_state") or "").strip()
     if readiness in {"activation-ready", "measurement-required", "needs-lifecycle-evidence", "blocked"}:
         state = readiness
     else:
         state = "ranked-evidence" if str(signal.get("status") or "") == "candidates-ranked" and top else "missing-evidence"
-    return {
+
+    stage: dict[str, Any] = {
         "lever": "request-shape-rollups",
         "state": state,
         "evidence_source": signal.get("source_schema") or signal.get("schema"),
-        "local_action_family": str(top.get("local_action_family") or summary.get("top_local_action_family") or "cohort-ranking"),
-        "next_action": str(summary.get("top_next_action") or "emit-request-shape-rollups"),
+        "local_action_family": local_action_family,
+        "next_action": next_action,
         "blocker_codes": [str(item) for item in signal.get("missing_measurements") or [] if str(item or "").strip()]
         or [str(item) for item in top.get("blocker_codes") or [] if str(item or "").strip()],
         "sample_count": _to_int(top.get("sample_count") or top.get("row_count") or summary.get("rows_considered")),
@@ -3347,6 +3396,34 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
         "projected_saved_tokens": _to_int(top.get("projected_saved_tokens")),
         "ranked_candidate_count": _to_int(summary.get("ranked_candidate_count")),
     }
+    progress = _request_shape_crunch_progress_report(stats_summary)
+    if (
+        local_action_family == "crunch"
+        and next_action == "stage-repeated-context-crunch-canary"
+        and progress is not None
+    ):
+        progress_next_action = str(progress.get("next_action") or "").strip()
+        if progress_next_action:
+            stage["next_action"] = progress_next_action
+        stage["fingerprint_next_action"] = next_action
+        stage["state"] = sanitize_value(progress.get("activation_state") or "measurement-required")
+        stage["activation_state"] = sanitize_value(progress.get("activation_state") or "measurement-required")
+        stage["activation_mode"] = sanitize_value(progress.get("activation_mode"))
+        stage["follow_up_status"] = sanitize_value(progress.get("follow_up_status"))
+        stage["canary_already_staged"] = bool(progress.get("canary_already_staged"))
+        stage["canary_already_applied"] = bool(progress.get("canary_already_applied"))
+        missing = [str(item) for item in progress.get("missing_measurements") or [] if str(item or "").strip()]
+        if missing:
+            stage["blocker_codes"] = missing
+        elif progress.get("no_op_reason"):
+            stage["blocker_codes"] = [str(progress.get("no_op_reason"))]
+        stage["activation_follow_up_evidence_schema"] = sanitize_value(progress.get("schema"))
+        stage["projected_saved_usd"] = round(
+            _to_float(progress.get("projected_saved_usd") or stage.get("projected_saved_usd")),
+            8,
+        )
+        stage["projected_saved_tokens"] = _to_int(progress.get("projected_saved_tokens") or stage.get("projected_saved_tokens"))
+    return stage
 
 
 def _managed_recommendation_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
@@ -4906,18 +4983,38 @@ def _request_shape_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | 
     status = str(signal.get("status") or "unknown")
     calls = _to_int(signal.get("summary", {}).get("calls")) if isinstance(signal.get("summary"), dict) else 0
     top = signal.get("top_candidate") if isinstance(signal.get("top_candidate"), dict) else {}
+    candidate_signal = signal
+    request_shape_ledger = None
+    ledger = stats_summary.get("evidence_to_activation_next_action_ledger")
+    if isinstance(ledger, dict):
+        for entry in ledger.get("entries") or []:
+            if isinstance(entry, dict) and entry.get("lever") == "request-shape-rollups":
+                request_shape_ledger = entry
+                break
     if top:
         next_action = str(top.get("next_action") or "rank-request-shape-cohort")
+        if isinstance(request_shape_ledger, dict):
+            ledger_next_action = str(request_shape_ledger.get("next_action") or "").strip()
+            if ledger_next_action:
+                next_action = ledger_next_action
         blocker = f"request-shape-{next_action}"
-        readiness = str(top.get("readiness_state") or "")
+        readiness = str((request_shape_ledger or {}).get("state") or top.get("readiness_state") or "")
         family = str(top.get("local_action_family") or "")
         path = (
             f"Use the top aggregate request-shape cohort to advance `{next_action}` for the local `{family or 'policy'}` path."
         )
         confidence = "medium" if readiness in {"activation-ready", "measurement-required"} or "repeated_context" in (top.get("candidate_work_classes") or []) else "low"
         safety_status = "ready" if readiness == "activation-ready" else "review-required"
+        if str((request_shape_ledger or {}).get("current_status") or "") in {"blocked", "safety-stopped", "keep-blocked"}:
+            safety_status = "blocked"
         score = float(_to_int(top.get("row_count"))) + _to_float(top.get("cost_est_usd")) * 1000.0 + 300.0
         bucket = str(top.get("provider_surface_bucket") or "mixed")
+        if isinstance(request_shape_ledger, dict):
+            candidate_signal = dict(signal)
+            candidate_signal["ledger_fingerprint"] = request_shape_ledger.get("fingerprint")
+            candidate_signal["ledger_current_status"] = request_shape_ledger.get("current_status")
+            candidate_signal["ledger_next_action"] = request_shape_ledger.get("next_action")
+            candidate_signal["ledger_blocker_codes"] = request_shape_ledger.get("blocker_codes") or []
     elif status == "missing-request-shape-rollups":
         blocker = "request-shape-rollup-report-missing"
         path = "Emit a bounded request-shape rollup report before selecting repeated-context or replayability activation work."
@@ -4938,7 +5035,7 @@ def _request_shape_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | 
         provider_surface_bucket=bucket,
         blocker=blocker,
         estimated_savings_path=path,
-        projected_savings_signal=signal,
+        projected_savings_signal=candidate_signal,
         confidence=confidence,
         sequencing="Use after direct routing/cache/crunch blockers; the top shape row should decide which follow-up lever owns the next implementation issue.",
         safety_status=safety_status,
@@ -5230,6 +5327,10 @@ def _candidate_title(candidate: dict[str, Any]) -> str:
         return "Rank managed recommendation omission reasons for local policy handoff"
     if lever == "request-shape-rollups":
         blocker_text = blocker.replace("request-shape-", "")
+        if "measure" in blocker_text and "crunch" in blocker_text:
+            return "Measure request-shape repeated-context crunch canary impact"
+        if "safety" in blocker_text and "crunch" in blocker_text:
+            return "Review request-shape repeated-context crunch canary safety stop"
         if "crunch" in blocker_text:
             return "Stage request-shape repeated-context crunch canary"
         if "tool-call-cache-invalidation" in blocker_text:

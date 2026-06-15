@@ -1558,6 +1558,120 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-cache-cohort-secret", rendered)
         self.assertNotIn("/tmp/private-cache-ledger.py", rendered)
 
+    def test_issue_534_request_shape_crunch_ledger_advances_to_measurement(self):
+        open_ledger_issue = issue(
+            534,
+            "Advance repeated-context cohort from evidence-to-activation ledger (evidence 3a012e702da0)",
+            ["backlog", "status:ready", "priority:p2", "privacy"],
+            body="Existing implementation issue.\n\nFingerprint: activation:3a012e702da0a8a8\n",
+        )
+        plan = build_research_plan(
+            issues=[open_ledger_issue],
+            stats={
+                "calls": 1000,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "follow_up_candidates": {
+                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "summary": {
+                            "top_next_action": "stage-repeated-context-crunch-canary",
+                            "top_local_action_family": "crunch",
+                            "ranked_candidate_count": 1,
+                            "rows_considered": 388,
+                        },
+                        "blocker_cohorts": [
+                            {
+                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "local_action_family": "crunch",
+                                "next_action": "stage-repeated-context-crunch-canary",
+                                "readiness_state": "activation-ready",
+                                "sample_count": 388,
+                                "row_count": 388,
+                                "projected_savings_usd": 2.530359,
+                                "projected_saved_tokens": 843452,
+                                "blocker_codes": [
+                                    "thinking-routing-guard",
+                                    "tool-call-cache-disabled",
+                                    "unsupported-streaming-shape",
+                                ],
+                                "provider_family": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "endpoint": "messages",
+                                "category": "tool-result",
+                                "workflow_phase": "thinking",
+                                "stream": True,
+                                "has_tools": True,
+                                "text_bucket": "gte_128k_chars",
+                                "token_bucket": "lt_500_tokens",
+                                "cache_status": "skipped",
+                                "routing_status": "passthrough",
+                                "request_id": "raw-request-shape-issue-534-secret",
+                                "session_id": "raw-session-issue-534-secret",
+                                "cache_key": "raw-cache-issue-534-secret",
+                                "file_path": "/tmp/private-issue-534.py",
+                            }
+                        ],
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "request_shape_crunch_opportunity": {
+                    "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                    "status": "projected-savings-ranked",
+                    "summary": {
+                        "rows_considered": 738,
+                        "matched_count": 738,
+                        "candidate_count": 15,
+                        "projected_saved_usd": 3.997114,
+                        "projected_saved_tokens": 1344975,
+                        "recommended_action_count": 1,
+                    },
+                    "activation_follow_up": {
+                        "status": "canary-staged",
+                        "activation_state": "measurement-required",
+                        "activation_mode": "staged-canary-measurement",
+                        "next_action": "measure-repeated-context-crunch-canary-impact",
+                        "missing_measurements": ["missing-crunch-canary-impact-measurement"],
+                        "canary_already_staged": True,
+                        "canary_already_applied": True,
+                        "no_op_reason": "matching-repeated-context-crunch-canary-already-staged",
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        entry = next(item for item in ledger["entries"] if item["lever"] == "request-shape-rollups")
+        self.assertEqual(entry["fingerprint"], "activation:3a012e702da0a8a8")
+        self.assertEqual(entry["fingerprint_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(entry["next_action"], "measure-repeated-context-crunch-canary-impact")
+        self.assertEqual(entry["current_status"], "staged")
+        self.assertEqual(entry["state"], "measurement-required")
+        self.assertEqual(entry["blocker_codes"], ["missing-crunch-canary-impact-measurement"])
+        self.assertEqual(entry["evidence_schema"], "agentflow.request_shape_follow_up_candidates.v1")
+        self.assertEqual(
+            entry["activation_follow_up_evidence_schema"],
+            "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+        )
+        self.assertTrue(entry["canary_already_staged"])
+        self.assertTrue(entry["canary_already_applied"])
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn("Stage request-shape repeated-context crunch canary", titles)
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["fingerprint_match_count"], 1)
+        self.assertEqual(suppression["open_existing_issue_count"], 1)
+        self.assertEqual(suppression["suppressed"][0]["evidence_fingerprint"], "activation:3a012e702da0a8a8")
+        self.assertEqual(suppression["suppressed"][0]["existing_issue"]["number"], 534)
+
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-request-shape-issue-534-secret", rendered)
+        self.assertNotIn("raw-session-issue-534-secret", rendered)
+        self.assertNotIn("raw-cache-issue-534-secret", rendered)
+        self.assertNotIn("/tmp/private-issue-534.py", rendered)
+
     def test_recent_trusted_closed_issue_suppresses_same_stage_proposal(self):
         stale_title = "Stage cache replay canary for replay-ready on openai/openai_responses/responses"
         plan = build_research_plan(
