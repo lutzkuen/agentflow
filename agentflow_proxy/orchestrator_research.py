@@ -1829,9 +1829,16 @@ def _request_shape_candidate_row(row: dict[str, Any], *, source_schema: Any, ran
     count = _to_int(row.get("row_count") or row.get("count"))
     cost = _to_float(row.get("cost_est_usd"))
     savings = _to_float(row.get("observed_savings_usd"))
+    projected_savings = _to_float(row.get("projected_savings_usd") or row.get("projected_crunch_savings_usd"))
+    projected_tokens = _to_int(row.get("projected_saved_tokens") or row.get("projected_crunch_tokens_saved"))
+    projected_hits = _to_int(row.get("projected_hits"))
     error_count = _to_int(row.get("error_count"))
     retry_count = _to_int(row.get("retry_count"))
+    next_action = sanitize_value(row.get("next_action") or _request_shape_next_action(classes, blockers))
+    readiness = sanitize_value(row.get("readiness_state"))
+    local_action_family = sanitize_value(row.get("local_action_family"))
     return {
+        "schema": sanitize_value(row.get("schema")),
         "rank": rank,
         "source_schema": sanitize_value(source_schema),
         "provider_surface_bucket": "/".join(part for part in (provider, source_surface, endpoint) if part) or "mixed",
@@ -1849,22 +1856,34 @@ def _request_shape_candidate_row(row: dict[str, Any], *, source_schema: Any, ran
         "cache_status": sanitize_value(row.get("cache_status") or "unknown"),
         "routing_status": sanitize_value(row.get("routing_status") or "unknown"),
         "row_count": count,
+        "sample_count": _to_int(row.get("sample_count") or count),
         "error_count": error_count,
         "retry_count": retry_count,
         "cost_est_usd": round(cost, 6),
         "observed_savings_usd": round(savings, 6),
+        "projected_hits": projected_hits,
+        "projected_saved_tokens": projected_tokens,
+        "projected_savings_usd": round(projected_savings, 6),
         "candidate_work_classes": classes,
         "candidate_families": sorted(set(families)),
         "blocker_codes": sorted(set(blockers)),
-        "next_action": _request_shape_next_action(classes, blockers),
+        "readiness_state": readiness,
+        "local_action_family": local_action_family,
+        "actionability_reason": sanitize_value(row.get("actionability_reason")),
+        "next_action": next_action,
         "_score": (
             count
             + cost * 1000.0
             + savings * 2000.0
+            + projected_savings * 2500.0
+            + projected_tokens / 1000.0
+            + projected_hits * 25.0
             + (350.0 if "repeated_context" in classes else 0.0)
             + (250.0 if "replayability" in classes else 0.0)
             + (150.0 if "routing" in classes else 0.0)
             + (125.0 if "crunch" in classes else 0.0)
+            + (300.0 if readiness == "activation-ready" else 0.0)
+            + (150.0 if readiness == "measurement-required" else 0.0)
             - error_count * 5.0
             - retry_count * 0.5
         ),
@@ -1923,6 +1942,11 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
     for row in ranked[:10]:
         clean = dict(row)
         clean.pop("_score", None)
+        if not clean.get("schema"):
+            clean.pop("schema", None)
+        for optional in ("readiness_state", "local_action_family", "actionability_reason"):
+            if not clean.get(optional):
+                clean.pop(optional, None)
         clean_ranked.append(clean)
     report_summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     follow_up_summary = (
@@ -2584,16 +2608,22 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
         return None
     summary = signal.get("summary") if isinstance(signal.get("summary"), dict) else {}
     top = signal.get("top_candidate") if isinstance(signal.get("top_candidate"), dict) else {}
-    state = "ranked-evidence" if str(signal.get("status") or "") == "candidates-ranked" and top else "missing-evidence"
+    readiness = str(top.get("readiness_state") or "").strip()
+    if readiness in {"activation-ready", "measurement-required", "needs-lifecycle-evidence", "blocked"}:
+        state = readiness
+    else:
+        state = "ranked-evidence" if str(signal.get("status") or "") == "candidates-ranked" and top else "missing-evidence"
     return {
         "lever": "request-shape-rollups",
         "state": state,
         "evidence_source": signal.get("source_schema") or signal.get("schema"),
-        "local_action_family": "cohort-ranking",
+        "local_action_family": str(top.get("local_action_family") or summary.get("top_local_action_family") or "cohort-ranking"),
         "next_action": str(summary.get("top_next_action") or "emit-request-shape-rollups"),
         "blocker_codes": [str(item) for item in signal.get("missing_measurements") or [] if str(item or "").strip()]
         or [str(item) for item in top.get("blocker_codes") or [] if str(item or "").strip()],
-        "sample_count": _to_int(top.get("row_count") or summary.get("rows_considered")),
+        "sample_count": _to_int(top.get("sample_count") or top.get("row_count") or summary.get("rows_considered")),
+        "projected_saved_usd": round(_to_float(top.get("projected_savings_usd")), 8),
+        "projected_saved_tokens": _to_int(top.get("projected_saved_tokens")),
         "ranked_candidate_count": _to_int(summary.get("ranked_candidate_count")),
     }
 

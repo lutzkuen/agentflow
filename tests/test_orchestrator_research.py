@@ -2241,6 +2241,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         },
                         "candidates": [
                             {
+                                "schema": "agentflow.request_shape_blocker_cohort.v1",
                                 "provider_surface_bucket": "openai/openai_responses/responses",
                                 "provider_family": "openai",
                                 "source_surface": "openai_responses",
@@ -2251,12 +2252,22 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                                 "routing_status": "disabled",
                                 "next_action": "stage-cache-replay-canary",
                                 "local_action_family": "cache",
+                                "readiness_state": "activation-ready",
+                                "actionability_reason": "replay-ready-exact-non-tool-shape",
                                 "candidate_work_classes": ["replayability"],
                                 "candidate_families": ["cache_replay"],
                                 "blocker_codes": [],
                                 "row_count": 56,
+                                "sample_count": 56,
+                                "projected_hits": 55,
+                                "projected_savings_usd": 0.121981,
                                 "cost_est_usd": 0.12,
                                 "observed_savings_usd": 0.0,
+                                "candidate_id": "raw-request-shape-cohort-secret",
+                                "request_id": "raw-request-shape-request-secret",
+                                "session_id": "raw-request-shape-session-secret",
+                                "cache_key": "raw-request-shape-cache-secret",
+                                "file_path": "/tmp/private-request-shape.py",
                             }
                         ],
                         "privacy": {"metadata_only": True, "aggregate_only": True},
@@ -2329,7 +2340,32 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(cache_candidate["projected_savings_signal"]["readiness"], "replay-ready")
         self.assertEqual(cache_candidate["projected_savings_signal"]["projected_hits"], 55)
 
+        shape_signal = stats_summary["request_shape_rollup_candidates"]
+        self.assertEqual(shape_signal["status"], "candidates-ranked")
+        self.assertEqual(shape_signal["summary"]["top_next_action"], "stage-cache-replay-canary")
+        self.assertEqual(shape_signal["summary"]["top_local_action_family"], "cache")
+        top_shape = shape_signal["top_candidate"]
+        self.assertEqual(top_shape["schema"], "agentflow.request_shape_blocker_cohort.v1")
+        self.assertEqual(top_shape["rank"], 1)
+        self.assertEqual(top_shape["local_action_family"], "cache")
+        self.assertEqual(top_shape["readiness_state"], "activation-ready")
+        self.assertEqual(top_shape["next_action"], "stage-cache-replay-canary")
+        self.assertEqual(top_shape["sample_count"], 56)
+        self.assertEqual(top_shape["projected_hits"], 55)
+        self.assertAlmostEqual(top_shape["projected_savings_usd"], 0.121981)
+        request_shape_stage = next(row for row in loop["levers"] if row["lever"] == "request-shape-rollups")
+        self.assertEqual(request_shape_stage["state"], "activation-ready")
+        self.assertEqual(request_shape_stage["local_action_family"], "cache")
+        self.assertEqual(request_shape_stage["next_action"], "stage-cache-replay-canary")
+        self.assertEqual(request_shape_stage["sample_count"], 56)
+        self.assertAlmostEqual(request_shape_stage["projected_saved_usd"], 0.121981)
+
         rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-request-shape-cohort-secret", rendered)
+        self.assertNotIn("raw-request-shape-request-secret", rendered)
+        self.assertNotIn("raw-request-shape-session-secret", rendered)
+        self.assertNotIn("raw-request-shape-cache-secret", rendered)
+        self.assertNotIn("/tmp/private-request-shape.py", rendered)
         self.assertNotIn("request-secret-should-redact", rendered)
         self.assertNotIn("session-secret-should-redact", rendered)
         self.assertNotIn("cache-secret-should-redact", rendered)
