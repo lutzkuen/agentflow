@@ -1130,6 +1130,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         summary.get("no_op_reason")
         or summary.get("top_no_op_reason")
         or summary.get("top_blocker_reason")
+        or summary.get("top_blocker")
         or blocker_value
         or ("no-positive-projected-savings" if status == "no-positive-projection" else None)
     )
@@ -1490,18 +1491,36 @@ def _managed_omission_priority(reason: str, representation: dict[str, Any]) -> i
     return 50
 
 
+def _managed_local_handoff_reason(
+    representation: dict[str, Any],
+    *,
+    next_action: str,
+) -> str:
+    if representation.get("exists"):
+        section = str(representation.get("policy_section") or "local-policy").strip() or "local-policy"
+        rule_file = str(representation.get("rule_file") or "local-rule-file").strip() or "local-rule-file"
+        action = str(next_action or "review-local-policy-representation").strip() or "review-local-policy-representation"
+        return sanitize_value(f"local-file-backed-policy-handoff:{section}:{rule_file}:{action}")
+    reason = str(representation.get("reason") or "no-local-policy-representation").strip()
+    return sanitize_value(f"local-handoff-blocked:{reason}")
+
+
 def _managed_omission_row(row: dict[str, Any], *, source: str) -> dict[str, Any]:
     reason = _managed_omission_reason(row)
     action_family = _managed_action_family(row)
     representation = _local_file_backed_representation(action_family)
+    follow_up_owner = "local-policy" if representation.get("exists") else "blocked-boundary-review"
+    next_action = "review-local-policy-representation" if representation.get("exists") else "define-or-keep-omitted-local-action"
     return {
         "source": source,
         "omitted_reason": reason,
         "count": _breakdown_count(row),
         "local_action_family": action_family or "unknown",
         "local_file_backed_representation": representation,
-        "follow_up_owner": "local-policy" if representation.get("exists") else "blocked-boundary-review",
-        "next_action": "review-local-policy-representation" if representation.get("exists") else "define-or-keep-omitted-local-action",
+        "follow_up_owner": follow_up_owner,
+        "next_action": next_action,
+        "local_handoff_reason": _managed_local_handoff_reason(representation, next_action=next_action),
+        "managed_dependency": "optional",
         "_priority": _managed_omission_priority(reason, representation),
     }
 
@@ -1541,6 +1560,8 @@ def _managed_local_handoff_stage_rows(stats_summary: dict[str, Any]) -> list[dic
         reason = "managed-recommendation-health-report-missing"
         if blockers:
             reason = f"managed-recommendation-health-report-missing:{sanitize_value(blockers[0])}"
+        follow_up_owner = "local-policy" if representation.get("exists") else "blocked-boundary-review"
+        next_action = sanitize_value(stage.get("next_action") or "emit-managed-recommendation-health-rollup")
         rows.append(
             {
                 "source": "local_policy_evidence",
@@ -1548,8 +1569,10 @@ def _managed_local_handoff_stage_rows(stats_summary: dict[str, Any]) -> list[dic
                 "count": _to_int(stage.get("sample_count") or stage.get("cache_hits") or 1, 1),
                 "local_action_family": family,
                 "local_file_backed_representation": representation,
-                "follow_up_owner": "local-policy" if representation.get("exists") else "blocked-boundary-review",
-                "next_action": sanitize_value(stage.get("next_action") or "emit-managed-recommendation-health-rollup"),
+                "follow_up_owner": follow_up_owner,
+                "next_action": next_action,
+                "local_handoff_reason": _managed_local_handoff_reason(representation, next_action=next_action),
+                "managed_dependency": "optional",
                 "local_evidence_state": sanitize_value(stage.get("state") or "unknown"),
                 "local_evidence_source": sanitize_value(stage.get("evidence_source") or "stats_summary"),
                 "blocker_codes": sanitize_value(blockers),
@@ -1630,6 +1653,8 @@ def _managed_recommendation_health_signal(
             "local_file_backed_representation": _local_file_backed_representation(None),
             "follow_up_owner": "local-policy",
             "next_action": "emit-managed-recommendation-health-rollup",
+            "local_handoff_reason": "local-handoff-blocked:unknown-local-action-family",
+            "managed_dependency": "optional",
         }
         status = "missing-managed-recommendation-health-report"
         missing = ["managed_recommendations_report", "omitted_local_action_reason"]
@@ -1647,6 +1672,7 @@ def _managed_recommendation_health_signal(
         "status": status,
         "source_schema": report_schema,
         "calls": calls,
+        "managed_dependency": "optional",
         "omitted_local_action_reason": omitted_local_action_reason,
         "top_local_file_backed_exists": top_local_file_backed_exists,
         "summary": {
@@ -2111,6 +2137,8 @@ def build_evidence_to_activation_next_action_ledger(
             entry["follow_up_owner"] = sanitize_value(stage.get("follow_up_owner"))
         if stage.get("managed_dependency"):
             entry["managed_dependency"] = sanitize_value(stage.get("managed_dependency"))
+        if stage.get("local_handoff_reason"):
+            entry["local_handoff_reason"] = sanitize_value(stage.get("local_handoff_reason"))
         representation = (
             stage.get("local_file_backed_representation")
             if isinstance(stage.get("local_file_backed_representation"), dict)
@@ -2474,6 +2502,8 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     blockers = [str(item) for item in signal.get("missing_measurements") or [] if str(item or "").strip()]
     if not blockers and top_report.get("no_op_reason"):
         blockers = [str(top_report.get("no_op_reason"))]
+    if not blockers and top_report.get("top_blocker"):
+        blockers = [str(top_report.get("top_blocker"))]
     return {
         "lever": "crunch",
         "state": state,
@@ -2556,6 +2586,7 @@ def _managed_recommendation_loop_stage(stats_summary: dict[str, Any]) -> dict[st
         "omitted_reason": sanitize_value(omitted_reason or "unknown"),
         "follow_up_owner": sanitize_value(follow_up_owner),
         "managed_dependency": sanitize_value(summary.get("managed_dependency") or "optional"),
+        "local_handoff_reason": sanitize_value(top.get("local_handoff_reason") or ""),
         "local_file_backed_representation": representation,
     }
 

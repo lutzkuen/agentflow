@@ -1552,6 +1552,102 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(managed_entry["local_file_backed_representation"]["exists"])
         self.assertEqual(managed_entry["local_file_backed_representation"]["policy_section"], "crunch")
 
+    def test_missing_managed_report_ranks_local_policy_handoff_omissions(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2873,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "request_shape_crunch_opportunity": {
+                    "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                    "status": "projected-savings-ranked",
+                    "summary": {
+                        "rows_considered": 749,
+                        "matched_count": 749,
+                        "candidate_count": 11,
+                        "projected_saved_usd": 4.086506,
+                        "projected_saved_tokens": 1375441,
+                        "activation_state": "activation-ready",
+                        "next_action": "stage-repeated-context-crunch-canary",
+                        "top_blocker": "repeated-context-crunch-opportunity",
+                    },
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "provider_bodies_included": False,
+                        "request_ids_included": False,
+                        "session_ids_included": False,
+                    },
+                },
+                "routing": [
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "unknown",
+                        "endpoint": "unknown",
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-sonnet-4-6",
+                        "category": "tool-result",
+                        "c": 1197,
+                    },
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4-mini",
+                        "routed_model": "gpt-5.4-mini",
+                        "category": "chat",
+                        "c": 640,
+                    },
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["managed_recommendation_health"]
+        self.assertEqual(signal["status"], "missing-managed-recommendation-health-report")
+        self.assertEqual(signal["managed_dependency"], "optional")
+        self.assertEqual(signal["summary"]["managed_dependency"], "optional")
+        self.assertEqual(signal["summary"]["no_local_representation_count"], 0)
+        self.assertGreaterEqual(signal["summary"]["ranked_omission_count"], 3)
+
+        by_family = {row["local_action_family"]: row for row in signal["omissions"]}
+        self.assertIn("crunch", by_family)
+        self.assertIn("routing", by_family)
+        self.assertIn("cache", by_family)
+        self.assertEqual(signal["top_omission"]["local_action_family"], "crunch")
+        self.assertTrue(
+            signal["top_omission"]["omitted_reason"].startswith(
+                "managed-recommendation-health-report-missing:repeated-context-crunch-opportunity"
+            )
+        )
+
+        for family, rule_file in {
+            "crunch": "crunch_rules.yaml",
+            "routing": "routing_rules.yaml",
+            "cache": "cache_rules.yaml",
+        }.items():
+            row = by_family[family]
+            self.assertTrue(row["local_file_backed_representation"]["exists"])
+            self.assertEqual(row["local_file_backed_representation"]["rule_file"], rule_file)
+            self.assertEqual(row["managed_dependency"], "optional")
+            self.assertEqual(row["follow_up_owner"], "local-policy")
+            self.assertIn(row["next_action"], row["local_handoff_reason"])
+            self.assertIn(rule_file, row["local_handoff_reason"])
+            self.assertTrue(row["local_handoff_reason"].startswith("local-file-backed-policy-handoff:"))
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        managed_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "managed-recommendation")
+        self.assertEqual(managed_entry["managed_dependency"], "optional")
+        self.assertEqual(managed_entry["local_action_family"], "crunch")
+        self.assertIn("crunch_rules.yaml", managed_entry["local_handoff_reason"])
+        self.assertFalse(signal["privacy"]["raw_prompts_included"])
+        self.assertFalse(signal["privacy"]["provider_bodies_included"])
+        self.assertFalse(signal["privacy"]["request_ids_included"])
+        self.assertFalse(signal["privacy"]["session_ids_included"])
+
     def test_request_shape_rollup_report_ranks_repeated_context_candidate(self):
         plan = build_research_plan(
             issues=[],
