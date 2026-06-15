@@ -5168,6 +5168,67 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
     return 0
 
 
+def request_shape_cache_replay_canary_stage_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Stage a read-only OpenAI Responses exact-cache replay canary action from request-shape metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument("--run-id", help="Optional stable rollup run id. Defaults to a generated local id.")
+    parser.add_argument(
+        "--persist-rollups",
+        action="store_true",
+        help="Persist the underlying request_shape_rollups rows. The staged canary action itself remains dry-run/read-only.",
+    )
+    parser.add_argument(
+        "--rollout-fraction",
+        type=float,
+        default=0.10,
+        help="Candidate canary rollout fraction to encode in the staged action, default: 0.10",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.10,
+        help="Candidate holdout fraction to encode in the staged action, default: 0.10",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.request_shape_rollups import build_request_shape_cache_replay_canary_stage_report
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_request_shape_cache_replay_canary_stage_report(
+            store,
+            limit=args.limit,
+            run_id=args.run_id,
+            persist_rollups=args.persist_rollups,
+            rollout_fraction=args.rollout_fraction,
+            holdout_fraction=args.holdout_fraction,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def cache_replay_cohorts_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Rank replay-ready plateau cohorts from local cache metadata")
     parser.add_argument(

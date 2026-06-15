@@ -15,6 +15,8 @@ from agentflow_proxy.store import stable_json, utc_now
 SCHEMA = "agentflow.request_shape_rollups.v1"
 ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
 REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
+REPLAY_CACHE_CANARY_ACTION_SCHEMA = "agentflow.request_shape_cache_replay_canary_action.v1"
+REPLAY_CACHE_CANARY_STAGE_SCHEMA = "agentflow.request_shape_cache_replay_canary_stage.v1"
 CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "agentflow.request_shape_crunch_opportunity_dry_run.v1"
 CRUNCH_CANARY_ACTION_SCHEMA = "agentflow.request_shape_crunch_canary_action.v1"
 CRUNCH_CANARY_STAGE_SCHEMA = "agentflow.request_shape_repeated_context_crunch_canary_stage.v1"
@@ -29,6 +31,8 @@ REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE = 0.05
 DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION = 0.10
 DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION = 0.10
 DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS = 72.0
+DEFAULT_CACHE_REPLAY_CANARY_ROLLOUT_FRACTION = 0.10
+DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION = 0.10
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -1646,6 +1650,236 @@ def build_request_shape_crunch_canary_stage_report(
             ),
         },
         "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _cache_replay_canary_cohort_id(cohort: dict[str, Any]) -> str:
+    basis = {
+        "schema": "agentflow.request_shape_cache_replay_canary_cohort_id_basis.v1",
+        "provider_family": cohort.get("provider_family"),
+        "source_surface": cohort.get("source_surface"),
+        "endpoint": cohort.get("endpoint"),
+        "category": cohort.get("category"),
+        "workflow_phase": cohort.get("workflow_phase"),
+        "stream": bool(cohort.get("stream")),
+        "has_tools": bool(cohort.get("has_tools")),
+        "cache_status": cohort.get("cache_status"),
+        "routing_status": cohort.get("routing_status"),
+        "text_bucket": cohort.get("text_bucket"),
+        "token_bucket": cohort.get("token_bucket"),
+    }
+    digest = hashlib.sha256(stable_json(basis).encode("utf-8")).hexdigest()[:16]
+    endpoint = public_label(cohort.get("endpoint"), "unknown").replace("_", "-")
+    category = public_label(cohort.get("category"), "unknown").replace("_", "-")
+    return f"request-shape-cache-replay:{endpoint}:{category}:{digest}"
+
+
+def _cache_replay_canary_policy_id(cohort_id: str) -> str:
+    digest = hashlib.sha256(cohort_id.encode("utf-8")).hexdigest()[:16]
+    return f"local-openai-cache-replay-canary:{digest}"
+
+
+def _request_shape_cache_replay_canary_action(
+    cohort: dict[str, Any],
+    *,
+    candidate_count: int,
+    rollout_fraction: float,
+    holdout_fraction: float,
+) -> dict[str, Any]:
+    cohort_id = str(cohort.get("cohort_id") or _cache_replay_canary_cohort_id(cohort))
+    policy_id = _cache_replay_canary_policy_id(cohort_id)
+    rollout = _bounded_fraction(rollout_fraction, DEFAULT_CACHE_REPLAY_CANARY_ROLLOUT_FRACTION)
+    holdout = _bounded_fraction(holdout_fraction, DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION)
+    if rollout + holdout > 1.0:
+        holdout = max(0.0, 1.0 - rollout)
+    return {
+        "schema": REPLAY_CACHE_CANARY_ACTION_SCHEMA,
+        "action_type": "stage-local-openai-cache-replay-canary",
+        "target_local_policy": "cache_canary_policy",
+        "policy_section": "cache",
+        "policy_id": policy_id,
+        "cohort_id": cohort_id,
+        "candidate_count": candidate_count,
+        "cohort_row_count": _as_int(cohort.get("row_count")),
+        "rollout_fraction": round(rollout, 6),
+        "holdout_fraction": round(holdout, 6),
+        "canary_fraction": round(rollout, 6),
+        "policy_source": "local-manual",
+        "conditions": {
+            "provider_family": cohort.get("provider_family"),
+            "source_surface": cohort.get("source_surface"),
+            "endpoint": cohort.get("endpoint"),
+            "category": cohort.get("category"),
+            "workflow_phase": cohort.get("workflow_phase"),
+            "stream": bool(cohort.get("stream")),
+            "has_tools": bool(cohort.get("has_tools")),
+            "cache_status": cohort.get("cache_status"),
+            "routing_status": cohort.get("routing_status"),
+            "text_bucket": cohort.get("text_bucket"),
+            "token_bucket": cohort.get("token_bucket"),
+            "readiness": cohort.get("readiness"),
+            "reason": cohort.get("reason"),
+        },
+        "projected_hits": _as_int(cohort.get("projected_hits")),
+        "projected_savings_usd": round(_as_float(cohort.get("projected_savings_usd")), 6),
+        "safety_gates": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "local_file_backed": True,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "cache_entries_written": False,
+            "policy_files_written": False,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "raw_responses_included": False,
+            "cache_keys_included": False,
+            "request_fingerprints_included": False,
+            "openai_responses_only": cohort.get("source_surface") == "openai_responses" and cohort.get("endpoint") == "responses",
+            "exact_non_tool_only": not bool(cohort.get("has_tools")) and not bool(cohort.get("stream")),
+            "tool_call_cache_enabled": False,
+            "streaming_replay_enabled": False,
+            "holdout_required": holdout > 0,
+            "records_applied_holdout_skipped_invalidation_blocked": True,
+        },
+        "cache_decision_metadata": {
+            "schema": "agentflow.request_shape_cache_replay_decision_metadata.v1",
+            "cache_json_field": "cache_replay_canary",
+            "emits_statuses": [
+                "applied",
+                "holdout",
+                "skipped",
+                "invalidation_blocked",
+                "cache_hit",
+                "cache_miss",
+            ],
+            "records_applied": True,
+            "records_holdout": True,
+            "records_skipped": True,
+            "records_invalidation_blocked": True,
+            "records_cache_hit": True,
+            "records_cache_miss": True,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "lifecycle_metadata": {
+            "schema": "agentflow.request_shape_cache_replay_canary_stage_lifecycle_metadata.v1",
+            "emits_applied": True,
+            "emits_holdout": True,
+            "emits_skipped": True,
+            "emits_invalidation_blocked": True,
+            "emits_cache_hit": True,
+            "emits_cache_miss": True,
+            "impact_report": "agentflow.openai_cache_replay_impact.v1",
+            "lifecycle_feedback_schema": "agentflow.openai_cache_replay_lifecycle_feedback.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "next_action": "apply-local-cache-replay-canary-after-review",
+        "privacy": _replayability_privacy(),
+    }
+
+
+def build_request_shape_cache_replay_canary_stage_report(
+    store_obj: Any,
+    *,
+    limit: int = 1000,
+    run_id: str | None = None,
+    persist_rollups: bool = False,
+    rollout_fraction: float = DEFAULT_CACHE_REPLAY_CANARY_ROLLOUT_FRACTION,
+    holdout_fraction: float = DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION,
+) -> dict[str, Any]:
+    rollup_report = build_request_shape_rollups_report(
+        store_obj,
+        limit=limit,
+        persist=persist_rollups,
+        run_id=run_id,
+    )
+    dry_run = (
+        rollup_report.get("cache_replayability_dry_run")
+        if isinstance(rollup_report.get("cache_replayability_dry_run"), dict)
+        else {}
+    )
+    cohorts = [
+        cohort
+        for cohort in dry_run.get("cohorts") or []
+        if isinstance(cohort, dict)
+        and cohort.get("readiness") == "replay-ready"
+        and cohort.get("provider_family") == "openai"
+        and cohort.get("source_surface") == "openai_responses"
+        and cohort.get("endpoint") == "responses"
+        and not bool(cohort.get("has_tools"))
+        and not bool(cohort.get("stream"))
+        and _as_int(cohort.get("projected_hits")) > 0
+        and _as_float(cohort.get("projected_savings_usd")) > 0
+    ]
+    actions = [
+        _request_shape_cache_replay_canary_action(
+            cohort,
+            candidate_count=len(cohorts),
+            rollout_fraction=rollout_fraction,
+            holdout_fraction=holdout_fraction,
+        )
+        for cohort in cohorts
+    ]
+    top_action = actions[0] if actions else None
+    top_cohort = cohorts[0] if cohorts else None
+    if actions:
+        status = "staged"
+        next_action = "apply-local-cache-replay-canary-after-review"
+        reason = "staged-openai-responses-cache-replay-canary"
+    else:
+        status = "no-stageable-cohort"
+        next_action = "rank-request-shape-cache-replayability"
+        reason = (dry_run.get("summary") or {}).get("top_blocker_code") or dry_run.get("status") or "no-stageable-cohort"
+    return {
+        "schema": REPLAY_CACHE_CANARY_STAGE_SCHEMA,
+        "status": status,
+        "ok": bool(actions),
+        "dry_run": True,
+        "read_only": True,
+        "generated_at": utc_now(),
+        "run_id": rollup_report.get("run_id"),
+        "reason": reason,
+        "next_action": next_action,
+        "staged_canary_count": len(actions),
+        "stage_actions": actions,
+        "top_stage_action": top_action,
+        "top_cohort": top_cohort,
+        "source_report": {
+            "schema": rollup_report.get("schema"),
+            "window": rollup_report.get("window"),
+            "summary": {
+                "rows_considered": (rollup_report.get("summary") or {}).get("rows_considered"),
+                "rollup_count": (rollup_report.get("summary") or {}).get("rollup_count"),
+                "top_next_action": (rollup_report.get("summary") or {}).get("top_next_action"),
+                "body_rows_read": (rollup_report.get("summary") or {}).get("body_rows_read"),
+            },
+            "cache_replayability_summary": dry_run.get("summary"),
+            "readiness_breakdown": dry_run.get("readiness_breakdown"),
+            "blocker_breakdown": dry_run.get("blocker_breakdown"),
+        },
+        "acceptance": {
+            "has_replay_ready_openai_responses_cohort": bool(actions),
+            "has_projected_hits": bool(top_action and _as_int(top_action.get("projected_hits")) > 0),
+            "has_projected_savings": bool(top_action and _as_float(top_action.get("projected_savings_usd")) > 0),
+            "writes_no_provider_bodies": bool(top_action and not top_action["safety_gates"]["provider_bodies_included"]),
+            "writes_no_cache_entries": bool(top_action and not top_action["safety_gates"]["cache_entries_written"]),
+            "has_holdout_metadata": bool(top_action and _as_float(top_action.get("holdout_fraction")) > 0),
+            "has_lifecycle_metadata": bool(
+                top_action
+                and isinstance(top_action.get("lifecycle_metadata"), dict)
+                and bool(top_action["lifecycle_metadata"].get("emits_applied"))
+                and bool(top_action["lifecycle_metadata"].get("emits_holdout"))
+                and bool(top_action["lifecycle_metadata"].get("emits_skipped"))
+                and bool(top_action["lifecycle_metadata"].get("emits_invalidation_blocked"))
+            ),
+            "preserves_tool_and_streaming_guards": all(
+                not bool(action.get("conditions", {}).get("has_tools")) and not bool(action.get("conditions", {}).get("stream"))
+                for action in actions
+            ),
+        },
+        "privacy": _replayability_privacy(),
     }
 
 

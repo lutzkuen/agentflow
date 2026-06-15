@@ -12,6 +12,7 @@ import yaml
 from agentflow_proxy import cli
 from agentflow_proxy.request_shape_rollups import (
     apply_request_shape_crunch_canary_action,
+    build_request_shape_cache_replay_canary_stage_report,
     build_request_shape_crunch_canary_stage_report,
     build_request_shape_rollups_report,
     request_shape_crunch_canary_lifecycle,
@@ -435,6 +436,170 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(dry_run["privacy"]["cache_keys_included"])
         self.assertFalse(dry_run["privacy"]["request_fingerprints_included"])
         self.assertFalse(dry_run["privacy"]["individual_candidate_ids_included"])
+
+    def test_cache_replay_canary_stage_report_targets_openai_responses_replay_ready_cohort(self) -> None:
+        for cost in (0.01, 0.03, 0.02):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
+        self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="tool-light",
+            workflow_phase="tool-light",
+            stream=0,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="tools-disabled",
+            text_chars=6_000,
+            cost=0.02,
+            baseline=0.02,
+        )
+
+        report = build_request_shape_cache_replay_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="2026-06-15-cache-replay-stage",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+        )
+
+        self.assertEqual(report["schema"], "agentflow.request_shape_cache_replay_canary_stage.v1")
+        self.assertEqual(report["status"], "staged")
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["dry_run"])
+        self.assertTrue(report["read_only"])
+        self.assertEqual(report["staged_canary_count"], 1)
+        self.assertTrue(report["acceptance"]["has_replay_ready_openai_responses_cohort"])
+        self.assertTrue(report["acceptance"]["has_projected_hits"])
+        self.assertTrue(report["acceptance"]["has_projected_savings"])
+        self.assertTrue(report["acceptance"]["writes_no_provider_bodies"])
+        self.assertTrue(report["acceptance"]["writes_no_cache_entries"])
+        self.assertTrue(report["acceptance"]["has_holdout_metadata"])
+        self.assertTrue(report["acceptance"]["has_lifecycle_metadata"])
+        self.assertTrue(report["acceptance"]["preserves_tool_and_streaming_guards"])
+
+        action = report["top_stage_action"]
+        self.assertEqual(action["schema"], "agentflow.request_shape_cache_replay_canary_action.v1")
+        self.assertEqual(action["action_type"], "stage-local-openai-cache-replay-canary")
+        self.assertEqual(action["target_local_policy"], "cache_canary_policy")
+        self.assertEqual(action["conditions"]["provider_family"], "openai")
+        self.assertEqual(action["conditions"]["source_surface"], "openai_responses")
+        self.assertEqual(action["conditions"]["endpoint"], "responses")
+        self.assertEqual(action["conditions"]["category"], "chat")
+        self.assertEqual(action["conditions"]["workflow_phase"], "chat")
+        self.assertEqual(action["conditions"]["text_bucket"], "2k_8k_chars")
+        self.assertFalse(action["conditions"]["stream"])
+        self.assertFalse(action["conditions"]["has_tools"])
+        self.assertGreater(action["projected_hits"], 0)
+        self.assertGreater(action["projected_savings_usd"], 0)
+        self.assertEqual(action["rollout_fraction"], 0.05)
+        self.assertEqual(action["holdout_fraction"], 0.2)
+        self.assertTrue(action["safety_gates"]["metadata_only"])
+        self.assertTrue(action["safety_gates"]["aggregate_only"])
+        self.assertTrue(action["safety_gates"]["exact_non_tool_only"])
+        self.assertFalse(action["safety_gates"]["tool_call_cache_enabled"])
+        self.assertFalse(action["safety_gates"]["streaming_replay_enabled"])
+        self.assertTrue(action["cache_decision_metadata"]["records_applied"])
+        self.assertTrue(action["cache_decision_metadata"]["records_holdout"])
+        self.assertTrue(action["cache_decision_metadata"]["records_skipped"])
+        self.assertTrue(action["cache_decision_metadata"]["records_invalidation_blocked"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_applied"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_holdout"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_skipped"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_invalidation_blocked"])
+        self.assertEqual(action["lifecycle_metadata"]["impact_report"], "agentflow.openai_cache_replay_impact.v1")
+        self.assertEqual(report["source_report"]["cache_replayability_summary"]["replay_ready_cohort_count"], 1)
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+
+        rendered = json.dumps(report, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_cache_replay_canary_stage_cli_emits_direct_stage_payload(self) -> None:
+        for cost in (0.01, 0.03, 0.02):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
+
+        stdout = io.StringIO()
+        code = cli.request_shape_cache_replay_canary_stage_cli(
+            [
+                "--db",
+                self.db_path,
+                "--limit",
+                "20",
+                "--run-id",
+                "cli-2026-06-15-cache-stage",
+                "--rollout-fraction",
+                "0.05",
+                "--holdout-fraction",
+                "0.20",
+            ],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.request_shape_cache_replay_canary_stage.v1")
+        self.assertEqual(payload["staged_canary_count"], 1)
+        self.assertEqual(payload["top_stage_action"]["conditions"]["source_surface"], "openai_responses")
+        self.assertEqual(payload["top_stage_action"]["conditions"]["endpoint"], "responses")
+        self.assertFalse(payload["top_stage_action"]["conditions"]["has_tools"])
+        self.assertFalse(payload["top_stage_action"]["conditions"]["stream"])
+        self.assertGreater(payload["top_stage_action"]["projected_hits"], 0)
+        self.assertGreater(payload["top_stage_action"]["projected_savings_usd"], 0)
+        self.assertEqual(payload["top_stage_action"]["holdout_fraction"], 0.2)
+        self.assertTrue(payload["top_stage_action"]["lifecycle_metadata"]["emits_invalidation_blocked"])
+        self.assertTrue(payload["privacy"]["aggregate_only"])
+        self.assertNotIn("raw prompt must not leak", stdout.getvalue())
 
     def test_crunch_opportunity_dry_run_projects_repeated_context_savings(self) -> None:
         for cost in (0.08, 0.07, 0.09):
