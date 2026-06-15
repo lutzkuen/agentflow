@@ -28,6 +28,7 @@ CRUNCH_CANARY_STAGE_SCHEMA = "agentflow.request_shape_repeated_context_crunch_ca
 CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
 CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
 CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
+CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
 FOLLOW_UP_CANDIDATES_SCHEMA = "agentflow.request_shape_follow_up_candidates.v1"
 FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "agentflow.request_shape_blocker_cohort.v1"
 REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
@@ -1062,6 +1063,248 @@ def build_request_shape_crunch_canary_impact_report(
         "blocker_reason_breakdown": blocker_breakdown,
         "candidates": finalized,
         "activation_lifecycle_feedback": _crunch_impact_activation_lifecycle_feedback(finalized),
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _crunch_policy_decision_id(candidate: dict[str, Any], decision: str) -> str:
+    digest = hashlib.sha256(
+        stable_json(
+            {
+                "schema": CRUNCH_POLICY_DECISION_SCHEMA,
+                "policy_id": candidate.get("policy_id"),
+                "cohort_id": candidate.get("cohort_id"),
+                "decision": decision,
+                "reason_codes": candidate.get("reason_codes") or [],
+            }
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"request-shape-crunch-policy-decision:{digest}"
+
+
+def _crunch_policy_decision_value(candidate: dict[str, Any] | None) -> str:
+    if not candidate:
+        return "keep-blocked"
+    recommendation = str(candidate.get("impact_recommendation") or candidate.get("promotion_recommendation") or "")
+    if recommendation == "promotion-ready":
+        return "promote"
+    if recommendation == "rollback":
+        return "rollback"
+    return "keep-blocked"
+
+
+def _crunch_policy_decision_reason(candidate: dict[str, Any] | None, decision: str) -> str:
+    if not candidate:
+        return "missing-crunch-canary-impact-evidence"
+    reasons = candidate.get("reason_codes") if isinstance(candidate.get("reason_codes"), list) else []
+    if reasons:
+        return public_label(reasons[0], "unknown")
+    if decision == "promote":
+        return "applied-savings-with-holdout-no-regression"
+    if decision == "rollback":
+        return "rollback-recommended"
+    return public_label(candidate.get("top_blocker") or "keep-blocked", "keep-blocked")
+
+
+def _crunch_policy_decision_rollback_metadata(candidate: dict[str, Any] | None, decision: str) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.request_shape_crunch_policy_decision_rollback_metadata.v1",
+        "rollback_action_type": "disable_repeated_context_crunch_canary",
+        "target_policy_id": candidate.get("policy_id") if candidate else None,
+        "target_cohort_id": candidate.get("cohort_id") if candidate else None,
+        "target_local_rule_file": "crunch_rules.yaml",
+        "rollback_reason_codes": [
+            "safety-stop-observed",
+            "error-rate-regression",
+            "retry-rate-regression",
+            "fallback-observed",
+            "rollback-observed",
+            "operator-requested",
+        ],
+        "required_for_promotion": True,
+        "present": bool(candidate),
+        "selected_decision": decision,
+        "policy_files_written": False,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _crunch_policy_decision_metrics(candidate: dict[str, Any] | None) -> dict[str, Any]:
+    coverage = (
+        candidate.get("coverage")
+        if isinstance(candidate, dict) and isinstance(candidate.get("coverage"), dict)
+        else _crunch_impact_coverage(applied_count=0, holdout_count=0)
+    )
+    cohorts = candidate.get("cohorts") if isinstance(candidate, dict) and isinstance(candidate.get("cohorts"), dict) else {}
+    applied = cohorts.get("canary_applied") if isinstance(cohorts.get("canary_applied"), dict) else {}
+    holdout = cohorts.get("canary_holdout") if isinstance(cohorts.get("canary_holdout"), dict) else {}
+    return {
+        "schema": "agentflow.request_shape_crunch_policy_decision_metrics.v1",
+        "coverage": coverage,
+        "applied_count": _as_int(candidate.get("applied_count")) if candidate else 0,
+        "holdout_count": _as_int(candidate.get("holdout_count")) if candidate else 0,
+        "observed_saved_chars": _as_int(candidate.get("saved_chars")) if candidate else 0,
+        "observed_saved_tokens": _as_int(candidate.get("saved_tokens")) if candidate else 0,
+        "observed_saved_usd": round(_as_float(candidate.get("saved_usd")) if candidate else 0.0, 8),
+        "applied_error_count": _as_int(candidate.get("applied_error_count")) if candidate else 0,
+        "holdout_error_count": _as_int(candidate.get("holdout_error_count")) if candidate else 0,
+        "applied_retry_count": _as_int(candidate.get("applied_retry_count")) if candidate else 0,
+        "holdout_retry_count": _as_int(candidate.get("holdout_retry_count")) if candidate else 0,
+        "fallback_count": _as_int(candidate.get("fallback_count")) if candidate else 0,
+        "safety_stop_count": _as_int(candidate.get("safety_stop_count")) if candidate else 0,
+        "rollback_count": _as_int(candidate.get("rollback_count")) if candidate else 0,
+        "error_rate_delta": round(_as_float(candidate.get("error_rate_delta")) if candidate else 0.0, 6),
+        "retry_rate_delta": round(_as_float(candidate.get("retry_rate_delta")) if candidate else 0.0, 6),
+        "fallback_rate_delta": round(_as_float(candidate.get("fallback_rate_delta")) if candidate else 0.0, 6),
+        "latency_avg_delta_ms": candidate.get("latency_avg_delta_ms") if candidate else None,
+        "applied_error_rate": _as_float(applied.get("error_rate")),
+        "holdout_error_rate": _as_float(holdout.get("error_rate")),
+        "applied_retry_rate": _as_float(applied.get("retry_rate")),
+        "holdout_retry_rate": _as_float(holdout.get("retry_rate")),
+        "aggregate_only": True,
+        "metadata_only": True,
+    }
+
+
+def _crunch_policy_decision_patch(candidate: dict[str, Any] | None, decision: str) -> dict[str, Any] | None:
+    if not candidate:
+        return None
+    patch_type = {
+        "promote": "promote_repeated_context_crunch_canary",
+        "rollback": "rollback_repeated_context_crunch_canary",
+        "keep-blocked": "keep_repeated_context_crunch_canary_blocked",
+    }[decision]
+    return {
+        "schema": "agentflow.request_shape_crunch_policy_decision_local_patch.v1",
+        "status": "drafted" if decision == "promote" else "not-written",
+        "patch_type": patch_type,
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "target_policy_id": candidate.get("policy_id"),
+        "target_cohort_id": candidate.get("cohort_id"),
+        "policy_source": "local-manual" if decision == "promote" else public_label(candidate.get("policy_source") or "local-manual", "local-manual"),
+        "policy_files_written": False,
+        "requires_operator_apply": True,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _crunch_policy_decision_from_candidate(candidate: dict[str, Any] | None) -> dict[str, Any]:
+    decision = _crunch_policy_decision_value(candidate)
+    reason = _crunch_policy_decision_reason(candidate, decision)
+    rollback_metadata = _crunch_policy_decision_rollback_metadata(candidate, decision)
+    metrics = _crunch_policy_decision_metrics(candidate)
+    promotion_allowed = (
+        decision == "promote"
+        and metrics["applied_count"] > 0
+        and metrics["holdout_count"] > 0
+        and metrics["observed_saved_tokens"] > 0
+        and rollback_metadata["present"]
+    )
+    if candidate is None:
+        candidate = {}
+    decision_id = _crunch_policy_decision_id(candidate, decision)
+    return {
+        "schema": "agentflow.request_shape_crunch_policy_decision_entry.v1",
+        "decision_id": decision_id,
+        "decision": decision,
+        "status": "decided",
+        "reason": reason,
+        "reason_codes": candidate.get("reason_codes") or [reason],
+        "action_family": "crunch",
+        "local_action_family": "crunch",
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "policy_source": public_label(candidate.get("policy_source") or "local-manual", "local-manual"),
+        "policy_id": candidate.get("policy_id"),
+        "cohort_id": candidate.get("cohort_id"),
+        "promotion_allowed": promotion_allowed,
+        "rollback_required": decision == "rollback",
+        "keep_blocked": decision == "keep-blocked",
+        "metrics": metrics,
+        "coverage": metrics["coverage"],
+        "observed_saved_tokens": metrics["observed_saved_tokens"],
+        "observed_saved_usd": metrics["observed_saved_usd"],
+        "error_rate_delta": metrics["error_rate_delta"],
+        "retry_rate_delta": metrics["retry_rate_delta"],
+        "fallback_rate_delta": metrics["fallback_rate_delta"],
+        "safety_stop_state": "observed" if metrics["safety_stop_count"] > 0 else "none",
+        "local_policy_patch": _crunch_policy_decision_patch(candidate, decision),
+        "rollback_metadata": rollback_metadata,
+        "source_candidate_schema": candidate.get("schema"),
+        "source_impact_recommendation": candidate.get("impact_recommendation"),
+        "source_recommended_next_action": candidate.get("recommended_next_action"),
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def build_request_shape_crunch_policy_decision_report(impact_report: dict[str, Any]) -> dict[str, Any]:
+    candidates = impact_report.get("candidates") if isinstance(impact_report, dict) else []
+    if not isinstance(candidates, list):
+        candidates = []
+    decision_entries = [
+        _crunch_policy_decision_from_candidate(candidate)
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    ]
+    if not decision_entries:
+        decision_entries = [_crunch_policy_decision_from_candidate(None)]
+
+    decision_entries.sort(
+        key=lambda item: (
+            item["decision"] == "promote",
+            item["decision"] == "rollback",
+            _as_float(item.get("observed_saved_usd")),
+            _as_int(item.get("observed_saved_tokens")),
+        ),
+        reverse=True,
+    )
+    top = decision_entries[0]
+    decision_counts: dict[str, int] = {}
+    for item in decision_entries:
+        _increment(decision_counts, item.get("decision"))
+    metrics = top["metrics"] if isinstance(top.get("metrics"), dict) else _crunch_policy_decision_metrics(None)
+    return {
+        "schema": CRUNCH_POLICY_DECISION_SCHEMA,
+        "ok": True,
+        "status": "decided",
+        "read_only": True,
+        "generated_at": utc_now(),
+        "decision": top["decision"],
+        "decision_id": top["decision_id"],
+        "top_decision": top,
+        "decisions": decision_entries,
+        "summary": {
+            "decision": top["decision"],
+            "decision_id": top["decision_id"],
+            "decision_count": len(decision_entries),
+            "decision_breakdown": _breakdown(decision_counts),
+            "promotion_allowed": bool(top.get("promotion_allowed")),
+            "rollback_required": bool(top.get("rollback_required")),
+            "keep_blocked": bool(top.get("keep_blocked")),
+            "applied_count": metrics["applied_count"],
+            "holdout_count": metrics["holdout_count"],
+            "observed_saved_tokens": metrics["observed_saved_tokens"],
+            "observed_saved_usd": metrics["observed_saved_usd"],
+            "error_rate_delta": metrics["error_rate_delta"],
+            "retry_rate_delta": metrics["retry_rate_delta"],
+            "fallback_rate_delta": metrics["fallback_rate_delta"],
+            "safety_stop_state": top["safety_stop_state"],
+            "policy_source": top["policy_source"],
+            "target_local_rule_file": "crunch_rules.yaml",
+            "target_local_policy_section": "crunch.rules",
+            "coverage": top["coverage"],
+            "source_impact_status": impact_report.get("status") if isinstance(impact_report, dict) else None,
+            "source_impact_recommendation": top.get("source_impact_recommendation"),
+            "policy_files_written": False,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+        },
+        "source_report": {
+            "schema": impact_report.get("schema") if isinstance(impact_report, dict) else None,
+            "status": impact_report.get("status") if isinstance(impact_report, dict) else None,
+            "summary": impact_report.get("summary") if isinstance(impact_report.get("summary"), dict) else {},
+        },
         "privacy": _crunch_opportunity_privacy(),
     }
 

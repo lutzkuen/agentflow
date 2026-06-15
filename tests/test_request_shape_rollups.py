@@ -16,6 +16,7 @@ from agentflow_proxy.request_shape_rollups import (
     build_request_shape_cache_replay_canary_stage_report,
     build_request_shape_cache_replay_evidence_report,
     build_request_shape_crunch_canary_impact_report,
+    build_request_shape_crunch_policy_decision_report,
     build_request_shape_crunch_canary_stage_report,
     build_request_shape_rollups_report,
     request_shape_crunch_canary_lifecycle,
@@ -2244,6 +2245,162 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["summary"]["collect_more_evidence_count"], 1)
         self.assertEqual(report["summary"]["keep_blocked_count"], 1)
         self.assertFalse(report["privacy"]["provider_bodies_included"])
+
+    def test_crunch_policy_decision_promotes_positive_canary_with_rollback_metadata(self) -> None:
+        def impact_row(status: str, *, saved_tokens: int = 0, saved_chars: int = 0, saved_usd: float = 0.0) -> dict[str, object]:
+            lifecycle = {
+                "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+                "policy_id": "policy-promote",
+                "cohort_id": "cohort-promote",
+                "status": status,
+                "cohort": "canary_applied" if status == "applied" else "canary_holdout",
+                "reason": status,
+                "policy_source": "local-manual",
+                "metadata_only": True,
+            }
+            crunch_json = {
+                "changed": saved_tokens > 0,
+                "before_chars": 80_000,
+                "after_chars": max(0, 80_000 - saved_chars),
+                "saved_chars": saved_chars,
+                "tokens_saved_est": saved_tokens,
+                "request_shape_repeated_context_canary": lifecycle,
+            }
+            if saved_usd:
+                crunch_json["savings_usd"] = saved_usd
+            return {
+                "created_at": utc_now(),
+                "provider_family": "anthropic",
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "endpoint": "messages",
+                "category": "tool-result",
+                "workflow_phase": "thinking",
+                "stream": True,
+                "has_tools": True,
+                "text_bucket": "gte_128k_chars",
+                "token_bucket": "lt_500_tokens",
+                "cache_status": "skipped",
+                "routing_status": "passthrough",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-sonnet-4-6",
+                "actual_input_tokens": 20_000,
+                "input_tokens_est": 20_000,
+                "text_chars": 80_000,
+                "cost_est_usd": 0.08,
+                "status_code": 200,
+                "retry_count": 0,
+                "latency_ms": 125,
+                "crunch_json": stable_json(crunch_json),
+            }
+
+        impact_report = build_request_shape_crunch_canary_impact_report(
+            [
+                impact_row("applied", saved_tokens=2_000, saved_chars=8_000, saved_usd=0.0125),
+                impact_row("holdout"),
+            ]
+        )
+        decision = build_request_shape_crunch_policy_decision_report(impact_report)
+
+        self.assertEqual(decision["schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(decision["decision"], "promote")
+        self.assertEqual(decision["summary"]["decision"], "promote")
+        self.assertTrue(decision["summary"]["promotion_allowed"])
+        self.assertEqual(decision["summary"]["applied_count"], 1)
+        self.assertEqual(decision["summary"]["holdout_count"], 1)
+        self.assertEqual(decision["summary"]["observed_saved_tokens"], 2_000)
+        self.assertEqual(decision["summary"]["observed_saved_usd"], 0.0125)
+        self.assertEqual(decision["summary"]["error_rate_delta"], 0.0)
+        self.assertEqual(decision["summary"]["retry_rate_delta"], 0.0)
+        self.assertEqual(decision["summary"]["fallback_rate_delta"], 0.0)
+        self.assertEqual(decision["summary"]["policy_source"], "local-manual")
+        self.assertFalse(decision["summary"]["policy_files_written"])
+        top = decision["top_decision"]
+        self.assertEqual(top["local_policy_patch"]["patch_type"], "promote_repeated_context_crunch_canary")
+        self.assertEqual(top["local_policy_patch"]["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(top["rollback_metadata"]["rollback_action_type"], "disable_repeated_context_crunch_canary")
+        self.assertTrue(top["rollback_metadata"]["required_for_promotion"])
+        self.assertTrue(top["coverage"]["has_applied_coverage"])
+        self.assertTrue(top["coverage"]["has_holdout_coverage"])
+        self.assertTrue(decision["privacy"]["metadata_only"])
+        self.assertTrue(decision["privacy"]["aggregate_only"])
+        self.assertFalse(decision["privacy"]["raw_prompts_included"])
+        self.assertFalse(decision["privacy"]["provider_bodies_included"])
+        self.assertFalse(decision["privacy"]["request_ids_included"])
+        self.assertFalse(decision["privacy"]["session_ids_included"])
+
+    def test_crunch_policy_decision_rolls_back_on_safety_stop(self) -> None:
+        lifecycle = {
+            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "policy_id": "policy-safety",
+            "cohort_id": "cohort-safety",
+            "status": "safety-stopped",
+            "cohort": "safety_stopped",
+            "reason": "error-rate-regression",
+            "safety_stop": True,
+            "metadata_only": True,
+        }
+        impact_report = build_request_shape_crunch_canary_impact_report(
+            [
+                {
+                    "created_at": utc_now(),
+                    "provider_family": "anthropic",
+                    "provider": "anthropic",
+                    "source_surface": "anthropic_messages",
+                    "endpoint": "messages",
+                    "category": "tool-result",
+                    "workflow_phase": "thinking",
+                    "stream": True,
+                    "has_tools": True,
+                    "text_bucket": "gte_128k_chars",
+                    "token_bucket": "lt_500_tokens",
+                    "cache_status": "skipped",
+                    "routing_status": "passthrough",
+                    "requested_model": "claude-sonnet-4-6",
+                    "routed_model": "claude-sonnet-4-6",
+                    "actual_input_tokens": 20_000,
+                    "input_tokens_est": 20_000,
+                    "text_chars": 80_000,
+                    "cost_est_usd": 0.08,
+                    "status_code": 500,
+                    "retry_count": 2,
+                    "latency_ms": 125,
+                    "crunch_json": stable_json({"request_shape_repeated_context_canary": lifecycle}),
+                }
+            ]
+        )
+        decision = build_request_shape_crunch_policy_decision_report(impact_report)
+
+        self.assertEqual(decision["decision"], "rollback")
+        self.assertTrue(decision["summary"]["rollback_required"])
+        self.assertEqual(decision["summary"]["safety_stop_state"], "observed")
+        self.assertEqual(decision["top_decision"]["reason"], "canary-safety-stopped")
+        self.assertFalse(decision["top_decision"]["promotion_allowed"])
+        self.assertEqual(decision["top_decision"]["local_policy_patch"]["patch_type"], "rollback_repeated_context_crunch_canary")
+        self.assertIn("canary-safety-stopped", decision["top_decision"]["reason_codes"])
+        self.assertEqual(decision["top_decision"]["metrics"]["safety_stop_count"], 1)
+
+    def test_crunch_policy_decision_cli_keeps_blocked_without_canary_metadata(self) -> None:
+        self._log_call()
+
+        stdout = io.StringIO()
+        code = cli.request_shape_crunch_policy_decision_cli(
+            ["--db", self.db_path, "--limit", "10"],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(payload["decision"], "keep-blocked")
+        self.assertTrue(payload["summary"]["keep_blocked"])
+        self.assertEqual(payload["summary"]["applied_count"], 0)
+        self.assertEqual(payload["summary"]["holdout_count"], 0)
+        self.assertEqual(payload["top_decision"]["reason"], "missing-crunch-canary-impact-evidence")
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+        self.assertTrue(payload["source_rollups"]["privacy"]["metadata_only"])
+        self.assertNotIn("raw prompt must not leak", stdout.getvalue())
+        self.assertNotIn("raw-session-id-must-not-leak", stdout.getvalue())
 
     def test_cli_persists_rollups_by_default_and_dry_run_skips_write(self) -> None:
         self._log_call()

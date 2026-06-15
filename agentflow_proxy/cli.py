@@ -152,6 +152,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     cache_replayability_report_cli,
     request_shape_rollups_cli,
     request_shape_crunch_canary_impact_cli,
+    request_shape_crunch_policy_decision_cli,
     request_shape_crunch_canary_stage_cli,
     request_shape_cache_replay_canary_stage_cli,
     request_shape_cache_replay_evidence_cli,
@@ -847,6 +848,10 @@ def request_shape_rollups_main() -> None:
 
 def request_shape_crunch_canary_impact_main() -> None:
     raise SystemExit(request_shape_crunch_canary_impact_cli())
+
+
+def request_shape_crunch_policy_decision_main() -> None:
+    raise SystemExit(request_shape_crunch_policy_decision_cli())
 
 
 def request_shape_crunch_canary_stage_main() -> None:
