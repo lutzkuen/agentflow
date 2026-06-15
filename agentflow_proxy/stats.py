@@ -223,6 +223,21 @@ def _post_promotion_policy_draft_dry_run_path() -> Path:
     return agentflow_config_path("post_promotion_policy_draft_dry_run.json")
 
 
+def _evidence_to_activation_plan_path() -> Path:
+    for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON"):
+        raw = os.getenv(name)
+        if raw:
+            return Path(raw).expanduser()
+    ops_root = os.getenv("AGENTFLOW_OPS_ROOT")
+    if ops_root:
+        return Path(ops_root).expanduser() / "runs" / "research" / "latest.plan.json"
+    package_root = Path(__file__).resolve().parents[1]
+    ops_sibling = package_root.parent / "runs" / "research" / "latest.plan.json"
+    if ops_sibling.exists():
+        return ops_sibling
+    return agentflow_config_path("research/latest.plan.json")
+
+
 def _post_promotion_outcome_flush_status_path() -> Path:
     raw = os.getenv("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH")
     if raw:
@@ -19370,6 +19385,215 @@ async def stats_optimization_coordinator_dashboard(store_obj: Any, *, limit: int
         "privacy": _coordinator_report_privacy(),
     }
 
+_EVIDENCE_NEXT_ACTION_ENTRY_FIELDS = {
+    "rank",
+    "lever",
+    "local_action_family",
+    "current_status",
+    "state",
+    "next_action",
+    "blocker_codes",
+    "sample_count",
+    "applied_count",
+    "holdout_count",
+    "projected_hits",
+    "actual_hits",
+    "actual_saved_cost_usd",
+    "projected_saved_usd",
+    "savings_per_1000_calls_usd",
+    "evidence_schema",
+    "cohort_bucket",
+    "issue_worthy_status",
+    "expected_savings_path",
+    "legacy_issue_title",
+    "requested_model",
+    "candidate_target_model",
+    "omitted_reason",
+    "follow_up_owner",
+    "managed_dependency",
+    "local_handoff_reason",
+    "local_file_backed_representation",
+}
+
+
+def _public_evidence_next_action_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    public = {
+        key: _copy_policy(value)
+        for key, value in entry.items()
+        if key in _EVIDENCE_NEXT_ACTION_ENTRY_FIELDS and value not in (None, "", [])
+    }
+    if not isinstance(public.get("blocker_codes"), list):
+        public["blocker_codes"] = []
+    public["rank"] = _as_int(public.get("rank"))
+    public["sample_count"] = _as_int(public.get("sample_count"))
+    public["applied_count"] = _as_int(public.get("applied_count"))
+    public["holdout_count"] = _as_int(public.get("holdout_count"))
+    public["projected_hits"] = _as_int(public.get("projected_hits"))
+    public["actual_hits"] = _as_int(public.get("actual_hits"))
+    public["actual_saved_cost_usd"] = round(_as_float(public.get("actual_saved_cost_usd")), 8)
+    public["projected_saved_usd"] = round(_as_float(public.get("projected_saved_usd")), 8)
+    public["savings_per_1000_calls_usd"] = round(_as_float(public.get("savings_per_1000_calls_usd")), 8)
+    issue = entry.get("prior_issue") if isinstance(entry.get("prior_issue"), dict) else None
+    if issue:
+        public["prior_issue"] = {
+            key: issue.get(key)
+            for key in ("number", "state", "title", "url")
+            if issue.get(key) not in (None, "", [])
+        }
+    return public
+
+
+def _empty_evidence_next_actions_payload(
+    *,
+    status: str,
+    status_reason: str,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.dashboard_evidence_to_activation_next_actions.v1",
+        "generated_at": utc_now(),
+        "status": status,
+        "status_reason": status_reason,
+        "summary": {
+            "tracked_entry_count": 0,
+            "top_lever": None,
+            "top_current_status": None,
+            "top_next_action": None,
+            "top_blocker_codes": [],
+            "top_expected_savings_path": None,
+            "status_counts": [],
+        },
+        "source": source,
+        "entries": [],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "absolute_paths_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "dashboard_read_only": True,
+            "artifact_path_included": False,
+        },
+    }
+
+
+async def stats_evidence_to_activation_next_actions(limit: int = 20) -> dict[str, Any]:
+    path = _evidence_to_activation_plan_path()
+    source: dict[str, Any] = {
+        "kind": "orchestrator-research-plan",
+        "configured": any(os.getenv(name) for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON")),
+        "path_class": _local_path_class(path),
+        "path_included": False,
+        "available": False,
+    }
+    try:
+        stat = path.stat()
+        source.update(
+            {
+                "available": True,
+                "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "size_bytes": stat.st_size,
+            }
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _empty_evidence_next_actions_payload(
+            status="unavailable",
+            status_reason="latest research plan artifact was not found",
+            source=source,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        source["available"] = bool(path.exists())
+        return _empty_evidence_next_actions_payload(
+            status="invalid-artifact",
+            status_reason=f"latest research plan artifact could not be read: {type(exc).__name__}",
+            source=source,
+        )
+    if not isinstance(payload, dict):
+        return _empty_evidence_next_actions_payload(
+            status="invalid-artifact",
+            status_reason="latest research plan artifact is not a JSON object",
+            source=source,
+        )
+
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    ledger = evidence.get("evidence_to_activation_next_action_ledger")
+    if not isinstance(ledger, dict):
+        ledger = payload.get("evidence_to_activation_next_action_ledger")
+    stats_summary = evidence.get("stats_summary") if isinstance(evidence.get("stats_summary"), dict) else {}
+    if not isinstance(ledger, dict):
+        ledger = stats_summary.get("evidence_to_activation_next_action_ledger")
+    if not isinstance(ledger, dict):
+        return _empty_evidence_next_actions_payload(
+            status="no-ledger",
+            status_reason="latest research plan does not contain an evidence-to-activation next-action ledger",
+            source={**source, "plan_generated_at": payload.get("generated_at")},
+        )
+
+    capped = max(1, min(int(limit or 20), 100))
+    entries = [
+        _public_evidence_next_action_entry(entry)
+        for entry in ledger.get("entries") or []
+        if isinstance(entry, dict)
+    ][:capped]
+    summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
+    public_summary = {
+        key: _copy_policy(summary.get(key))
+        for key in (
+            "tracked_entry_count",
+            "closed_issue_seen_count",
+            "top_lever",
+            "top_current_status",
+            "top_next_action",
+            "top_blocker_codes",
+            "top_expected_savings_path",
+            "status_counts",
+            "issue_status_counts",
+        )
+        if summary.get(key) not in (None, "", [])
+    }
+    public_summary["tracked_entry_count"] = _as_int(public_summary.get("tracked_entry_count")) or len(entries)
+    if not isinstance(public_summary.get("top_blocker_codes"), list):
+        public_summary["top_blocker_codes"] = []
+    if not isinstance(public_summary.get("status_counts"), list):
+        public_summary["status_counts"] = []
+    if not isinstance(public_summary.get("issue_status_counts"), list):
+        public_summary["issue_status_counts"] = []
+
+    ledger_privacy = ledger.get("privacy") if isinstance(ledger.get("privacy"), dict) else {}
+    return {
+        "schema": "agentflow.dashboard_evidence_to_activation_next_actions.v1",
+        "generated_at": utc_now(),
+        "status": "tracked" if entries else "empty",
+        "status_reason": "latest research plan ledger loaded" if entries else "latest research plan ledger has no entries",
+        "ledger_schema": ledger.get("schema"),
+        "ledger_status": ledger.get("status"),
+        "summary": public_summary,
+        "source": {**source, "plan_generated_at": payload.get("generated_at")},
+        "entries": entries,
+        "privacy": {
+            "metadata_only": ledger_privacy.get("metadata_only", True) is True,
+            "aggregate_only": ledger_privacy.get("aggregate_only", True) is True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "absolute_paths_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "dashboard_read_only": True,
+            "artifact_path_included": False,
+        },
+    }
+
 
 def dashboard_html() -> str:
     return """<!doctype html>
@@ -19498,11 +19722,35 @@ def dashboard_html() -> str:
   <button class="panel-btn" onclick="showTab('openai')">OpenAI optimization</button>
   <button class="panel-btn" onclick="showTab('evalqueue')">Eval queue</button>
   <button class="panel-btn" onclick="showTab('coordinator')">Coordinator</button>
+  <button class="panel-btn" onclick="showTab('activationnext')">Activation next actions</button>
   <button class="panel-btn" onclick="showTab('promotionblockers')">Promotion blockers</button>
   <button class="panel-btn" onclick="showTab('managed')">Managed optimizer</button>
   <button class="panel-btn" onclick="showTab('phaserouting')">Phase routing</button>
   <button class="panel-btn" onclick="showTab('phasememory')">Phase memory</button>
   <button class="panel-btn" onclick="showTab('oldcontext')">Old-context summary</button>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-activationnext">
+<div class="section">
+  <h2>Evidence-to-activation next actions</h2>
+  <table data-table-id="evidence-activation-summary" data-filter-label="Filter activation next-action summary">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="text">Top lever</th><th data-sort-type="text">Next action</th><th data-sort-type="number">Entries</th><th data-sort-type="text">Top blockers</th><th data-sort-type="text">Source</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="evidence-activation-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Ranked local actions</h2>
+  <div class="table-wrap">
+  <table class="activity-table" data-table-id="evidence-activation-entries" data-filter-label="Filter activation next actions">
+    <thead><tr>
+      <th data-sort-type="number">Rank</th><th data-sort-type="text">Lever</th><th data-sort-type="text">Status</th><th data-sort-type="text">Next action</th><th data-sort-type="number">Samples</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Blockers</th><th data-sort-type="text">Cohort</th><th data-sort-type="text">Expected path</th>
+    </tr></thead>
+    <tbody id="evidence-activation-entries-tbody"></tbody>
+  </table>
+  </div>
 </div>
 </div>
 
@@ -21015,7 +21263,7 @@ async function loadFullStats(){
 
 let activeTabName='activity';
 const operationalTabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','sessions','research'];
-const researchTabs=['adoption','terminal','thinking','scaffold','openai','evalqueue','coordinator','promotionblockers','managed','phaserouting','phasememory','oldcontext'];
+const researchTabs=['adoption','terminal','thinking','scaffold','openai','evalqueue','coordinator','activationnext','promotionblockers','managed','phaserouting','phasememory','oldcontext'];
 const tabs=[...operationalTabs,...researchTabs];
 function isResearchTab(name){
   return researchTabs.includes(name);
@@ -23447,6 +23695,61 @@ function postPromotionDeltaBadge(status){
   if(status==='needs-evidence')return'routed';
   return'miss';
 }
+function evidenceActivationStatusBadge(status){
+  if(['tracked','staged','activation-ready','replay-ready','ready','projected','measured'].includes(status))return'hit';
+  if(['blocked','safety-stopped','invalid-artifact'].includes(status))return'err';
+  if(['unavailable','no-ledger','empty'].includes(status))return'miss';
+  return'provider';
+}
+function evidenceActivationPrivacyBadges(privacy){
+  privacy=privacy||{};
+  return [
+    privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">metadata unclear</span>',
+    privacy.aggregate_only?'<span class="badge hit">aggregate</span>':'<span class="badge routed">aggregate unclear</span>',
+    privacy.raw_prompts_included?'<span class="badge err">raw prompts</span>':'<span class="badge hit">raw prompts omitted</span>',
+    privacy.provider_bodies_included?'<span class="badge err">provider bodies</span>':'<span class="badge hit">provider bodies omitted</span>',
+    privacy.request_ids_included||privacy.session_ids_included?'<span class="badge err">IDs</span>':'<span class="badge hit">IDs omitted</span>',
+    privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>',
+    privacy.absolute_paths_included?'<span class="badge err">absolute paths</span>':'<span class="badge hit">paths omitted</span>'
+  ].join(' ');
+}
+async function refreshEvidenceActivationNextActions(){
+  try{
+    const r=await fetch('/agentflow/stats/evidence-to-activation-next-actions?limit=20');
+    const d=await r.json();
+    const s=d.summary||{};
+    const source=d.source||{};
+    const privacy=d.privacy||{};
+    const sourceBadges=[
+      source.available?'<span class="badge hit">latest plan</span>':'<span class="badge miss">no plan</span>',
+      source.configured?'<span class="badge provider">configured path</span>':'<span class="badge miss">default path</span>',
+      `<span class="badge miss">${esc(source.path_class||'unknown')}</span>`,
+      source.mtime?`<span class="badge provider">${esc(ago(source.mtime))}</span>`:''
+    ].filter(Boolean).join(' ');
+    document.getElementById('evidence-activation-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${evidenceActivationStatusBadge(d.status)}">${esc(d.status||'unknown')}</span><div class="sub">${esc(d.status_reason||'')}</div></td>
+      <td><span class="badge provider">${esc(s.top_lever||'none')}</span><div class="sub">${esc(s.top_current_status||'')}</div></td>
+      <td class="model">${esc(s.top_next_action||'none')}</td>
+      <td class="tokens">${(s.tracked_entry_count||0).toLocaleString()}</td>
+      <td class="flags">${(s.top_blocker_codes||[]).slice(0,5).map(code=>`<span class="badge miss">${esc(code)}</span>`).join(' ')||'<span class="badge hit">none</span>'}</td>
+      <td class="flags">${sourceBadges}</td>
+      <td class="flags">${evidenceActivationPrivacyBadges(privacy)}</td>
+    </tr>`;
+    const rows=d.entries||[];
+    document.getElementById('evidence-activation-entries-tbody').innerHTML=rows.map(row=>`<tr>
+      <td class="tokens">${row.rank||0}</td>
+      <td><span class="badge provider">${esc(row.lever||'unknown')}</span><div class="sub">${esc(row.local_action_family||'')}</div></td>
+      <td><span class="badge ${evidenceActivationStatusBadge(row.current_status)}">${esc(row.current_status||'unknown')}</span><div class="sub">${esc(row.state||'')}</div></td>
+      <td class="model">${esc(row.next_action||'inspect-local-evidence')}<div class="sub">${esc(row.issue_worthy_status||'')}</div></td>
+      <td class="tokens">${(row.sample_count||0).toLocaleString()}<div class="sub">applied ${(row.applied_count||0).toLocaleString()} · holdout ${(row.holdout_count||0).toLocaleString()}</div></td>
+      <td class="savings">${fmt(row.projected_saved_usd||0,6)}<div class="sub">per 1k ${fmt(row.savings_per_1000_calls_usd||0,6)}</div></td>
+      <td class="flags">${(row.blocker_codes||[]).slice(0,5).map(code=>`<span class="badge miss">${esc(code)}</span>`).join(' ')||'<span class="badge hit">none</span>'}</td>
+      <td class="model">${esc(row.cohort_bucket||row.evidence_schema||'unknown')}<div class="sub">${esc(row.evidence_schema||'')}</div></td>
+      <td class="flags">${esc(row.expected_savings_path||'')}</td>
+    </tr>`).join('')||`<tr><td colspan="9" style="color:#8b949e">${esc(d.status_reason||'No evidence-to-activation next actions available')}</td></tr>`;
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshPromotionBlockerNextActions(){
   try{
     const [blockerResponse,deltaResponse,handoffResponse]=await Promise.all([
@@ -24147,6 +24450,7 @@ const tabRefreshers={
   openai:[refreshManagedOpenAIActivation,refreshOpenAIOptimizationReadiness,refreshOpenAICanaryReadiness,refreshOpenAIOldContextSummary,refreshOpenAIScoreboard],
   evalqueue:[refreshOptimizationPromotionActions,refreshOptimizationEvalQueue],
   coordinator:[refreshOptimizationCoordinator],
+  activationnext:[refreshEvidenceActivationNextActions],
   promotionblockers:[refreshPromotionBlockerNextActions],
   managed:[refreshManaged],
   phaserouting:[refreshClaudeRoutingPromotionFunnel,refreshShadowRoutingPromotionReadiness,refreshOptimizationPromotionFunnel,refreshPhaseRouting],

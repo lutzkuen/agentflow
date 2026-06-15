@@ -9062,7 +9062,10 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
         self.assertIn("const operationalTabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','sessions','research']", html)
-        self.assertIn("const researchTabs=['adoption','terminal','thinking','scaffold','openai','evalqueue','coordinator','promotionblockers','managed','phaserouting','phasememory','oldcontext']", html)
+        self.assertIn("const researchTabs=['adoption','terminal','thinking','scaffold','openai','evalqueue','coordinator','activationnext','promotionblockers','managed','phaserouting','phasememory','oldcontext']", html)
+        self.assertIn(">Activation next actions</button>", html)
+        self.assertIn("id=\"evidence-activation-summary-tbody\"", html)
+        self.assertIn("fetch('/agentflow/stats/evidence-to-activation-next-actions?limit=20')", html)
 
     def test_dashboard_exposes_terminal_output_compaction_readiness_panel(self):
         html = stats_views.dashboard_html()

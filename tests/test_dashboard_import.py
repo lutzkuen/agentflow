@@ -3506,6 +3506,115 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
 
+    def test_evidence_to_activation_next_actions_endpoint_reads_sanitized_plan(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        plan_tmp = tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False)
+        store = Store(tmp.name)
+        plan_path = Path(plan_tmp.name)
+        plan_payload = {
+            "schema": "agentflow.orchestrator_research_plan.v1",
+            "generated_at": "2026-06-15T10:00:00+00:00",
+            "evidence": {
+                "evidence_to_activation_next_action_ledger": {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                    "status": "tracked",
+                    "summary": {
+                        "tracked_entry_count": 1,
+                        "top_lever": "crunch",
+                        "top_current_status": "staged",
+                        "top_next_action": "stage-repeated-context-crunch-canary",
+                        "top_blocker_codes": ["repeated-context-crunch-opportunity"],
+                        "status_counts": [{"status": "staged", "count": 1}],
+                    },
+                    "entries": [
+                        {
+                            "rank": 1,
+                            "fingerprint": "activation:secret-fingerprint",
+                            "lever": "crunch",
+                            "local_action_family": "crunch",
+                            "current_status": "staged",
+                            "state": "activation-ready",
+                            "next_action": "stage-repeated-context-crunch-canary",
+                            "blocker_codes": ["repeated-context-crunch-opportunity"],
+                            "sample_count": 431,
+                            "projected_saved_usd": 2.899322,
+                            "evidence_schema": "agentflow.request_shape_follow_up_candidates.v1",
+                            "cohort_bucket": "request-shape-rollups:100_999",
+                            "expected_savings_path": "Move request-shape rollups into the next repeated-context replay, routing, or crunch cohort issue.",
+                            "raw_prompt": "raw prompt must not render",
+                            "request_id": "req-secret",
+                            "session_id": "sess-secret",
+                            "cache_key": "cache-secret",
+                            "absolute_path": "/tmp/secret-project/file.py",
+                        }
+                    ],
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "provider_bodies_included": False,
+                        "absolute_paths_included": False,
+                        "request_ids_included": False,
+                        "session_ids_included": False,
+                        "cache_keys_included": False,
+                        "individual_candidate_ids_included": False,
+                    },
+                }
+            },
+        }
+        try:
+            json.dump(plan_payload, plan_tmp)
+            plan_tmp.close()
+            with patch.dict(os.environ, {"AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path)}, clear=False):
+                app = create_dashboard_app(
+                    store_obj=lambda: store,
+                    default_db=tmp.name,
+                    upstream="https://anthropic.test",
+                    limiter_status=lambda: [],
+                    limiter_config={},
+                    full_stats_ttl_s=0,
+                )
+                client = TestClient(app)
+                response = client.get("/agentflow/stats/evidence-to-activation-next-actions?limit=5")
+                dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "agentflow.dashboard_evidence_to_activation_next_actions.v1")
+            self.assertEqual(payload["status"], "tracked")
+            self.assertEqual(payload["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
+            self.assertEqual(payload["entries"][0]["lever"], "crunch")
+            self.assertEqual(payload["entries"][0]["sample_count"], 431)
+            self.assertFalse(payload["source"]["path_included"])
+            self.assertFalse(payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(payload["privacy"]["provider_bodies_included"])
+            self.assertFalse(payload["privacy"]["absolute_paths_included"])
+            self.assertFalse(payload["privacy"]["request_ids_included"])
+            self.assertFalse(payload["privacy"]["session_ids_included"])
+            self.assertFalse(payload["privacy"]["cache_keys_included"])
+            self.assertIn("evidence-activation-summary-tbody", dashboard.text)
+            self.assertIn("evidence-activation-entries-tbody", dashboard.text)
+
+            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            self.assertNotIn(str(plan_path), rendered)
+            self.assertNotIn("raw prompt must not render", rendered)
+            self.assertNotIn("req-secret", rendered)
+            self.assertNotIn("sess-secret", rendered)
+            self.assertNotIn("cache-secret", rendered)
+            self.assertNotIn("/tmp/secret-project/file.py", rendered)
+            self.assertNotIn("activation:secret-fingerprint", rendered)
+        finally:
+            try:
+                plan_tmp.close()
+            except Exception:
+                pass
+            try:
+                plan_path.unlink()
+            except FileNotFoundError:
+                pass
+            store.conn.close()
+            tmp.close()
+
 
 if __name__ == "__main__":
     unittest.main()
