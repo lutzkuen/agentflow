@@ -1544,8 +1544,10 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         ),
     )
     status = "projected-savings-ranked" if projected_usd > 0 or projected_tokens > 0 or projected_chars > 0 else "no-positive-projection"
+    activation_follow_up = report.get("activation_follow_up") if isinstance(report.get("activation_follow_up"), dict) else {}
     no_op_reason = sanitize_value(
-        summary.get("no_op_reason")
+        activation_follow_up.get("no_op_reason")
+        or summary.get("no_op_reason")
         or summary.get("top_no_op_reason")
         or summary.get("top_blocker_reason")
         or summary.get("top_blocker")
@@ -1553,7 +1555,8 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         or ("no-positive-projected-savings" if status == "no-positive-projection" else None)
     )
     next_action = sanitize_value(
-        summary.get("top_next_action")
+        activation_follow_up.get("next_action")
+        or summary.get("top_next_action")
         or summary.get("next_action")
         or (
             "rank-crunch-opportunity-follow-up"
@@ -1561,7 +1564,6 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
             else "inspect-crunch-coverage-and-projection"
         )
     )
-    activation_follow_up = report.get("activation_follow_up") if isinstance(report.get("activation_follow_up"), dict) else {}
     activation_state = sanitize_value(summary.get("activation_state") or activation_follow_up.get("activation_state"))
     report_missing = [
         sanitize_value(item)
@@ -1582,11 +1584,19 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         "projected_saved_tokens": projected_tokens,
         "projected_saved_chars": projected_chars,
         "activation_state": activation_state,
+        "activation_mode": sanitize_value(activation_follow_up.get("activation_mode")),
+        "follow_up_status": sanitize_value(activation_follow_up.get("status")),
+        "savings_status": sanitize_value(activation_follow_up.get("savings_status") or status),
         "top_blocker": sanitize_value(blocker_value),
         "top_blocker_count": blocker_count,
         "no_op_reason": no_op_reason,
         "next_action": next_action,
         "missing_measurements": report_missing,
+        "canary_already_staged": bool(activation_follow_up.get("canary_already_staged")),
+        "canary_already_applied": bool(activation_follow_up.get("canary_already_applied")),
+        "duplicate_suppression": sanitize_value(activation_follow_up.get("duplicate_suppression"))
+        if isinstance(activation_follow_up.get("duplicate_suppression"), dict)
+        else {},
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,

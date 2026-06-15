@@ -1762,6 +1762,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
                             "activation_state": "activation-ready",
                             "next_action": "stage-repeated-context-crunch-canary",
+                            "report_key": "request_shape_crunch_opportunity",
+                            "evidence_schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                            "projected_saved_chars": 48000,
+                            "projected_saved_tokens": 12000,
+                            "projected_saved_usd": 0.036,
+                            "canary_already_staged": False,
+                            "no_op_reason": None,
                             "missing_measurements": [],
                             "privacy": {"metadata_only": True, "aggregate_only": True},
                         },
@@ -1794,6 +1801,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(signal["top_report"]["recommended_action_count"], 1)
         self.assertEqual(signal["top_report"]["activation_state"], "activation-ready")
         self.assertEqual(signal["top_report"]["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(signal["top_report"]["savings_status"], "projected-savings-ranked")
+        self.assertFalse(signal["top_report"]["canary_already_staged"])
         self.assertEqual(signal["missing_measurements"], [])
 
         crunch_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "crunch")
@@ -1833,6 +1842,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
                             "activation_state": "measurement-required",
                             "next_action": "measure-repeated-context-crunch-canary-impact",
+                            "no_op_reason": "matching-repeated-context-crunch-canary-already-staged",
+                            "canary_already_staged": True,
+                            "duplicate_suppression": {
+                                "schema": "agentflow.request_shape_crunch_follow_up_duplicate_suppression.v1",
+                                "suppresses_new_stage_action": True,
+                                "reason": "matching-repeated-context-crunch-canary-already-staged",
+                                "matching_local_policy": "crunch_rules",
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                            },
                             "missing_measurements": ["missing-crunch-canary-impact-measurement"],
                             "privacy": {"metadata_only": True, "aggregate_only": True},
                         },
@@ -1849,6 +1868,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(signal["status"], "projected-savings-ranked")
         self.assertEqual(signal["top_report"]["activation_state"], "measurement-required")
         self.assertEqual(signal["top_report"]["next_action"], "measure-repeated-context-crunch-canary-impact")
+        self.assertEqual(signal["top_report"]["no_op_reason"], "matching-repeated-context-crunch-canary-already-staged")
+        self.assertTrue(signal["top_report"]["canary_already_staged"])
+        self.assertTrue(signal["top_report"]["duplicate_suppression"]["suppresses_new_stage_action"])
         self.assertEqual(signal["missing_measurements"], ["missing-crunch-canary-impact-measurement"])
 
     def test_crunch_candidate_prefers_request_shape_crunch_canary_impact(self):

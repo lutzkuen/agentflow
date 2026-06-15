@@ -786,9 +786,22 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(follow_up["schema"], "agentflow.request_shape_crunch_activation_follow_up.v1")
         self.assertEqual(follow_up["activation_state"], "activation-ready")
         self.assertEqual(follow_up["activation_mode"], "canary-candidate")
+        self.assertEqual(follow_up["savings_status"], "projected-savings-ranked")
+        self.assertEqual(follow_up["report_key"], "request_shape_crunch_opportunity")
+        self.assertEqual(follow_up["evidence_schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertEqual(follow_up["candidate_count"], dry_run["summary"]["candidate_count"])
+        self.assertEqual(follow_up["matched_count"], dry_run["summary"]["matched_count"])
+        self.assertEqual(follow_up["rows_considered"], dry_run["summary"]["rows_considered"])
+        self.assertEqual(follow_up["projected_saved_chars"], dry_run["summary"]["projected_saved_chars"])
+        self.assertEqual(follow_up["projected_saved_tokens"], dry_run["summary"]["projected_saved_tokens"])
+        self.assertEqual(follow_up["projected_saved_usd"], dry_run["summary"]["projected_saved_usd"])
         self.assertEqual(follow_up["next_action"], "stage-repeated-context-crunch-canary")
         self.assertEqual(follow_up["target_local_policy"], "crunch_rules")
         self.assertEqual(follow_up["recommended_action_count"], 1)
+        self.assertFalse(follow_up["canary_already_staged"])
+        self.assertFalse(follow_up["canary_already_applied"])
+        self.assertIsNone(follow_up["no_op_reason"])
+        self.assertFalse(follow_up["duplicate_suppression"]["suppresses_new_stage_action"])
         self.assertEqual(follow_up["missing_measurements"], [])
         self.assertTrue(follow_up["privacy"]["metadata_only"])
         self.assertTrue(follow_up["privacy"]["aggregate_only"])
@@ -1233,6 +1246,17 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(dry_run["summary"]["top_next_action"], "measure-repeated-context-crunch-canary-impact")
         self.assertEqual(dry_run["activation_follow_up"]["activation_state"], "measurement-required")
         self.assertEqual(dry_run["activation_follow_up"]["next_action"], "measure-repeated-context-crunch-canary-impact")
+        self.assertEqual(
+            dry_run["activation_follow_up"]["no_op_reason"],
+            "matching-repeated-context-crunch-canary-already-staged",
+        )
+        self.assertTrue(dry_run["activation_follow_up"]["canary_already_staged"])
+        self.assertTrue(dry_run["activation_follow_up"]["canary_already_applied"])
+        self.assertTrue(dry_run["activation_follow_up"]["duplicate_suppression"]["suppresses_new_stage_action"])
+        self.assertEqual(
+            dry_run["activation_follow_up"]["duplicate_suppression"]["matching_local_policy"],
+            "crunch_rules",
+        )
         self.assertIn("missing-crunch-canary-impact-measurement", dry_run["activation_follow_up"]["missing_measurements"])
         self.assertEqual(dry_run["cohorts"][0]["readiness"], "canary-staged")
         self.assertEqual(dry_run["cohorts"][0]["reason"], "repeated-context-crunch-canary-applied-and-holdout")

@@ -1665,10 +1665,18 @@ def apply_request_shape_crunch_canary_action(
 def _request_shape_crunch_follow_up(
     *,
     status: str,
+    report_key: str,
+    evidence_schema: str,
+    candidate_count: int,
+    matched_count: int,
+    rows_considered: int,
     recommended_action_count: int,
     canary_applied_rows: int,
     canary_holdout_rows: int,
     canary_safety_stopped_rows: int,
+    projected_saved_chars: int,
+    projected_saved_tokens: int,
+    projected_saved_usd: float,
     top_blocker: str | None,
     missing_measurements: list[str],
 ) -> dict[str, Any]:
@@ -1677,51 +1685,83 @@ def _request_shape_crunch_follow_up(
         next_action = "review-repeated-context-crunch-canary-safety-stop"
         activation_mode = "review-required"
         blocker = "canary-safety-stopped"
+        no_op_reason = "matching-repeated-context-crunch-canary-safety-stopped"
     elif canary_applied_rows > 0 or canary_holdout_rows > 0:
         activation_state = "measurement-required"
         next_action = "measure-repeated-context-crunch-canary-impact"
         activation_mode = "staged-canary-measurement"
         blocker = "missing-crunch-canary-impact-measurement"
+        no_op_reason = "matching-repeated-context-crunch-canary-already-staged"
     elif recommended_action_count > 0:
         activation_state = "activation-ready"
         next_action = "stage-repeated-context-crunch-canary"
         activation_mode = "canary-candidate"
         blocker = None
+        no_op_reason = None
     elif status == "no-repeated-context-crunch-cohorts":
         activation_state = "missing-evidence"
         next_action = "rank-repeated-context-crunch-dry-run"
         activation_mode = "evidence-required"
         blocker = "repeated-context-crunch-cohorts"
+        no_op_reason = blocker
     elif missing_measurements:
         activation_state = "missing-measurement"
         next_action = "inspect-crunch-coverage-and-projection"
         activation_mode = "evidence-required"
         blocker = missing_measurements[0]
+        no_op_reason = blocker
     else:
         activation_state = "ranked"
         next_action = "rank-crunch-opportunity-follow-up"
         activation_mode = "review-required"
         blocker = top_blocker
+        no_op_reason = blocker
 
     follow_up_missing = list(dict.fromkeys(str(item) for item in missing_measurements if str(item or "").strip()))
     if activation_state == "measurement-required" and blocker not in follow_up_missing:
         follow_up_missing.append(blocker)
     if activation_state == "blocked" and blocker not in follow_up_missing:
         follow_up_missing.append(blocker)
+    canary_already_staged = canary_applied_rows > 0 or canary_holdout_rows > 0
+    savings_status = (
+        "projected-savings-ranked"
+        if projected_saved_chars > 0 or projected_saved_tokens > 0 or projected_saved_usd > 0
+        else "no-positive-projection"
+    )
 
     return {
         "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
         "status": status,
+        "savings_status": savings_status,
+        "report_key": report_key,
+        "evidence_schema": evidence_schema,
+        "candidate_count": candidate_count,
+        "matched_count": matched_count,
+        "rows_considered": rows_considered,
         "activation_state": activation_state,
         "activation_mode": activation_mode,
         "next_action": next_action,
         "target_local_policy": "crunch_rules",
         "policy_section": "crunch",
         "local_file_backed": True,
+        "projected_saved_chars": projected_saved_chars,
+        "projected_saved_tokens": projected_saved_tokens,
+        "projected_saved_usd": round(projected_saved_usd, 6),
         "recommended_action_count": recommended_action_count,
         "canary_applied_rows": canary_applied_rows,
         "canary_holdout_rows": canary_holdout_rows,
         "canary_safety_stopped_rows": canary_safety_stopped_rows,
+        "canary_already_staged": canary_already_staged,
+        "canary_already_applied": canary_applied_rows > 0,
+        "no_op_reason": no_op_reason,
+        "duplicate_suppression": {
+            "schema": "agentflow.request_shape_crunch_follow_up_duplicate_suppression.v1",
+            "suppresses_new_stage_action": recommended_action_count == 0 and (canary_already_staged or canary_safety_stopped_rows > 0),
+            "reason": no_op_reason,
+            "matching_local_policy": "crunch_rules" if canary_already_staged or canary_safety_stopped_rows > 0 else None,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
         "top_blocker": blocker or top_blocker,
         "missing_measurements": follow_up_missing,
         "privacy": _crunch_opportunity_privacy(),
@@ -1859,6 +1899,7 @@ def build_request_shape_crunch_opportunity_dry_run(
     ]
     blocker_breakdown = _breakdown(blocker_counts)
     top_blocker = blocker_breakdown[0]["value"] if blocker_breakdown else None
+    matched_count = sum(_as_int(row.get("row_count") or row.get("count")) for row in crunch_rows)
     status = "ranked" if projected_tokens > 0 or observed_tokens > 0 or projected_savings > 0 or observed_savings > 0 else "no-positive-crunch-opportunity"
     if canary_safety_stopped_rows:
         status = "canary-safety-stopped"
@@ -1873,10 +1914,18 @@ def build_request_shape_crunch_opportunity_dry_run(
         missing.append("positive-observed-or-projected-savings")
     activation_follow_up = _request_shape_crunch_follow_up(
         status=status,
+        report_key="request_shape_crunch_opportunity",
+        evidence_schema=CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
+        candidate_count=len(cohorts),
+        matched_count=matched_count,
+        rows_considered=matched_count,
         recommended_action_count=len(recommended_actions),
         canary_applied_rows=canary_applied_rows,
         canary_holdout_rows=canary_holdout_rows,
         canary_safety_stopped_rows=canary_safety_stopped_rows,
+        projected_saved_chars=projected_chars,
+        projected_saved_tokens=projected_tokens,
+        projected_saved_usd=projected_savings,
         top_blocker=top_blocker,
         missing_measurements=missing,
     )
@@ -1886,8 +1935,8 @@ def build_request_shape_crunch_opportunity_dry_run(
         "status": status,
         "summary": {
             "candidate_count": len(cohorts),
-            "matched_count": sum(_as_int(row.get("row_count") or row.get("count")) for row in crunch_rows),
-            "rows_considered": sum(_as_int(row.get("row_count") or row.get("count")) for row in crunch_rows),
+            "matched_count": matched_count,
+            "rows_considered": matched_count,
             "measurement_ready_cohort_count": readiness_counts.get("measurement-ready", 0),
             "canary_staged_cohort_count": readiness_counts.get("canary-staged", 0),
             "canary_applied_cohort_count": readiness_counts.get("canary-applied", 0),
