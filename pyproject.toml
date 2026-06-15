@@ -111,6 +111,7 @@ agentflow-request-shape-cache-replay-canary-stage = "agentflow_proxy.cli:request
 agentflow-request-shape-cache-replay-evidence = "agentflow_proxy.cli:request_shape_cache_replay_evidence_main"
 agentflow-request-shape-cache-replay-policy-decision = "agentflow_proxy.cli:request_shape_cache_replay_policy_decision_main"
 agentflow-managed-recommendation-handoff = "agentflow_proxy.cli:managed_recommendation_handoff_main"
+agentflow-local-activation-outcome-summary = "agentflow_proxy.cli:local_activation_outcome_summary_main"
 agentflow-cache-replay-cohorts = "agentflow_proxy.cli:cache_replay_cohorts_main"
 agentflow-cache-smoke-diagnostic = "agentflow_proxy.cli:cache_smoke_diagnostic_main"
 agentflow-cache-replay-dry-run = "agentflow_proxy.cli:cache_replay_dry_run_main"

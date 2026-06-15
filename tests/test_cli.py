@@ -94,6 +94,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "repeated_scaffold_opportunity_cli",
             "instruction_dedup_opportunity_cli",
             "terminal_output_compaction_opportunity_cli",
+            "local_activation_outcome_summary_cli",
         ]
 
         for command in moved_commands:
@@ -102,7 +103,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_optimization_report_console_script_entrypoints_import(self):
         script_lines = Path("pyproject.toml").read_text(encoding="utf-8").splitlines()
-        affected_tokens = ("agentflow-openai-", "agentflow-optimization-")
+        affected_tokens = ("agentflow-openai-", "agentflow-optimization-", "agentflow-local-activation-")
         report_tokens = ("opportunity", "compaction", "report", "rollout-actions")
         checked = []
 

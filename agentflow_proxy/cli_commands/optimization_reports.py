@@ -5647,6 +5647,53 @@ def managed_recommendation_handoff_cli(argv: Sequence[str] | None = None, *, std
     return 0
 
 
+def local_activation_outcome_summary_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Export aggregate local activation outcomes for optional feature-only managed optimizer handoff"
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to aggregate, default: 1000, max: 20000",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory containing local AgentFlow policy rule files, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.local_activation_outcomes import build_local_activation_outcome_summary
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_local_activation_outcome_summary(
+            store,
+            limit=args.limit,
+            config_dir=args.config_dir,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if not bool((result.get("egress_guard") or {}).get("blocked")) else 1
+
+
 def cache_replay_cohorts_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Rank replay-ready plateau cohorts from local cache metadata")
     parser.add_argument(
