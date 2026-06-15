@@ -267,6 +267,14 @@ _DIAGNOSTIC_TAXONOMY: tuple[dict[str, Any], ...] = (
         "acceptance_check": "Generated evidence remains metadata-only and excludes prompts, provider bodies, file paths, request IDs, session IDs, and raw identifiers.",
     },
     {
+        "class": "activation-feedback-blocker-review",
+        "priority": 80,
+        "aliases": ("activation-feedback-blocker-review", "bounded-activation-feedback-review"),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Cut a bounded activation-feedback issue from sanitized repeated diagnostics, then record the narrower blocker in the local action ledger.",
+        "acceptance_check": "The next research plan emits a durable activation-feedback ledger entry with a concrete next action, stable fingerprint, and metadata-only privacy flags.",
+    },
+    {
         "class": "unclassified-skip-or-blocker",
         "priority": 90,
         "aliases": ("unclassified-skip-or-blocker",),
@@ -743,8 +751,8 @@ def _classify_unclassified_diagnostic(example: str) -> dict[str, Any] | None:
             "reclassification_source": "stale-lifecycle-pattern",
         }
     return {
-        "reason": "unclassified-skip-or-blocker",
-        "diagnostic_class": "unclassified-skip-or-blocker",
+        "reason": "activation-feedback-blocker-review",
+        "diagnostic_class": "activation-feedback-blocker-review",
         "backlog_action": "create-ready-issue",
         "reclassification_source": "no-match-bounded-human-review",
     }
@@ -788,6 +796,9 @@ def _normal_diagnostic_token(value: Any) -> str:
 def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | None:
     reason = _normal_diagnostic_token(diagnostic.get("reason"))
     diagnostic_class = _normal_diagnostic_token(diagnostic.get("diagnostic_class") or reason)
+    if reason == "unclassified-skip-or-blocker" or diagnostic_class == "unclassified-skip-or-blocker":
+        reason = "activation-feedback-blocker-review"
+        diagnostic_class = "activation-feedback-blocker-review"
     if not reason or reason in _PASS_DIAGNOSTIC_REASONS or diagnostic_class in _PASS_DIAGNOSTIC_REASONS:
         return None
 
@@ -817,6 +828,7 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
         "projected_saved_usd": 0.0,
         "diagnostic_class": diagnostic_class,
         "diagnostic_reason": reason,
+        "diagnostic_fingerprint": _diagnostic_fingerprint(diagnostic_class),
         "issue_worthy_status": (
             "ready" if count > 1 and str(diagnostic.get("backlog_action") or "") != "needs-human-review" else "review"
         ),
@@ -900,6 +912,15 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
             {
                 "state": "missing-evidence",
                 "next_action": "collect-missing-activation-dependency-evidence",
+            }
+        )
+    elif diagnostic_class == "activation-feedback-blocker-review":
+        stage.update(
+            {
+                "lever": "activation-feedback",
+                "local_action_family": "activation-feedback",
+                "state": "blocked",
+                "next_action": "cut-ready-activation-feedback-issue-from-bounded-diagnostic",
             }
         )
 
@@ -2618,6 +2639,7 @@ def _ledger_expected_savings_path(stage: dict[str, Any]) -> str:
         "crunch": "Move crunch opportunity evidence from projected savings into measurement, canary, or activation follow-up.",
         "request-shape-rollups": "Move request-shape rollups into the next repeated-context replay, routing, or crunch cohort issue.",
         "managed-recommendation": "Move managed omission evidence into a local file-backed policy handoff or explicit no-op reason.",
+        "activation-feedback": "Convert repeated activation-feedback diagnostics into a durable local action issue without rediscovering the same blocker.",
     }
     return sanitize_value(paths.get(lever, f"Advance the local {lever} evidence path through `{next_action}`."))
 
@@ -2738,6 +2760,8 @@ def build_evidence_to_activation_next_action_ledger(
             entry["diagnostic_class"] = sanitize_value(stage.get("diagnostic_class"))
         if stage.get("diagnostic_reason"):
             entry["diagnostic_reason"] = sanitize_value(stage.get("diagnostic_reason"))
+        if stage.get("diagnostic_fingerprint"):
+            entry["diagnostic_fingerprint"] = sanitize_value(stage.get("diagnostic_fingerprint"))
         if stage.get("source"):
             entry["source"] = sanitize_value(stage.get("source"))
         if stage.get("requested_model"):

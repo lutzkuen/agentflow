@@ -1272,10 +1272,20 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             by_blocker["unsupported-streaming-shape"]["next_action"],
             "add-streaming-cache-replay-support-or-route-to-crunch-canary",
         )
-        self.assertEqual(by_blocker["unclassified-skip-or-blocker"]["lever"], "activation-feedback")
+        self.assertNotIn("unclassified-skip-or-blocker", by_blocker)
+        self.assertEqual(by_blocker["activation-feedback-blocker-review"]["lever"], "activation-feedback")
+        self.assertEqual(by_blocker["activation-feedback-blocker-review"]["local_action_family"], "activation-feedback")
         self.assertEqual(
-            by_blocker["unclassified-skip-or-blocker"]["next_action"],
-            "classify-activation-feedback-blocker-for-local-action-ledger",
+            by_blocker["activation-feedback-blocker-review"]["next_action"],
+            "cut-ready-activation-feedback-issue-from-bounded-diagnostic",
+        )
+        self.assertEqual(
+            by_blocker["activation-feedback-blocker-review"]["diagnostic_fingerprint"],
+            "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
+        )
+        self.assertIn(
+            "durable local action issue",
+            by_blocker["activation-feedback-blocker-review"]["expected_savings_path"],
         )
         self.assertTrue(all(entry.get("issue_worthy_status") for entry in ledger["entries"]))
         rendered = json.dumps(plan, sort_keys=True)
@@ -3359,9 +3369,31 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             )
 
         diagnostics = plan["evidence"]["repeated_diagnostics"]
-        actionable = [d for d in diagnostics if d.get("reason") == "unclassified-skip-or-blocker"]
+        self.assertNotIn("unclassified-skip-or-blocker", [d.get("reason") for d in diagnostics])
+        actionable = [d for d in diagnostics if d.get("reason") == "activation-feedback-blocker-review"]
         self.assertTrue(actionable)
+        self.assertEqual(actionable[0].get("diagnostic_class"), "activation-feedback-blocker-review")
         self.assertEqual(actionable[0].get("reclassification_source"), "no-match-bounded-human-review")
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        ledger_entries = [
+            entry
+            for entry in ledger["entries"]
+            if entry.get("lever") == "activation-feedback"
+        ]
+        self.assertEqual(len(ledger_entries), 1)
+        self.assertEqual(
+            ledger_entries[0]["next_action"],
+            "cut-ready-activation-feedback-issue-from-bounded-diagnostic",
+        )
+        self.assertEqual(ledger_entries[0]["local_action_family"], "activation-feedback")
+        self.assertEqual(ledger_entries[0]["sample_count"], 2)
+        self.assertEqual(ledger_entries[0]["issue_worthy_status"], "ready")
+        self.assertEqual(
+            ledger_entries[0]["diagnostic_fingerprint"],
+            "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
+        )
+        self.assertTrue(ledger["privacy"]["metadata_only"])
+        self.assertTrue(ledger["privacy"]["aggregate_only"])
         created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
         bounded_proposals = [t for t in created_titles if "unclassified activation skip or blocker" in t]
         self.assertEqual(len(bounded_proposals), 1, "exactly one bounded human-review proposal should be created")
@@ -3373,6 +3405,22 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("Report key:", proposal_body)
         self.assertIn("Privacy:", proposal_body)
         self.assertIn("metadata-only", proposal_body)
+        repeated_plan = build_research_plan(
+            issues=[],
+            log_sources=[
+                "activation skipped due to xyz-unknown-blocker-type",
+                "activation skipped due to xyz-unknown-blocker-type",
+            ],
+            threshold=1,
+            now=NOW,
+        )
+        repeated_entry = [
+            entry
+            for entry in repeated_plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]["entries"]
+            if entry.get("lever") == "activation-feedback"
+        ][0]
+        self.assertEqual(repeated_entry["fingerprint"], ledger_entries[0]["fingerprint"])
+        self.assertEqual(repeated_entry["diagnostic_fingerprint"], ledger_entries[0]["diagnostic_fingerprint"])
 
     def test_unclassified_canary_cohort_skip_is_reclassified(self):
         with TemporaryDirectory() as tmp:
