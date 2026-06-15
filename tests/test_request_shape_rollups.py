@@ -722,7 +722,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["acceptance"]["has_projected_tokens"])
         self.assertTrue(report["acceptance"]["has_projected_savings"])
         self.assertTrue(report["acceptance"]["has_holdout_metadata"])
+        self.assertTrue(report["acceptance"]["has_projected_lifecycle_split"])
         self.assertTrue(report["acceptance"]["has_safety_stop_metadata"])
+        self.assertTrue(report["acceptance"]["unsafe_or_stale_cohorts_remain_skipped"])
 
         action = report["top_stage_action"]
         self.assertEqual(action["schema"], "agentflow.request_shape_crunch_canary_action.v1")
@@ -740,6 +742,15 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(action["holdout_fraction"], 0.2)
         self.assertGreater(action["projected_saved_tokens"], 0)
         self.assertGreater(action["projected_saved_usd"], 0)
+        self.assertEqual(action["projected_lifecycle"]["schema"], "agentflow.request_shape_crunch_canary_projected_lifecycle.v1")
+        self.assertEqual(action["projected_lifecycle"]["matched_count"], 3)
+        self.assertEqual(action["projected_lifecycle"]["projected_canary_applied_count"], 1)
+        self.assertEqual(action["projected_lifecycle"]["projected_canary_holdout_count"], 1)
+        self.assertEqual(action["projected_lifecycle"]["projected_skipped_count"], 1)
+        self.assertGreater(action["projected_lifecycle"]["projected_applied_saved_tokens"], 0)
+        self.assertGreater(action["projected_lifecycle"]["projected_applied_saved_usd"], 0)
+        self.assertTrue(action["projected_lifecycle"]["privacy"]["metadata_only"])
+        self.assertTrue(action["projected_lifecycle"]["privacy"]["aggregate_only"])
         self.assertTrue(action["safety_gates"]["metadata_only"])
         self.assertTrue(action["safety_gates"]["aggregate_only"])
         self.assertTrue(action["safety_gates"]["holdout_required"])
@@ -748,7 +759,20 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(action["lifecycle_metadata"]["emits_holdout"])
         self.assertTrue(action["lifecycle_metadata"]["emits_skipped"])
         self.assertTrue(action["lifecycle_metadata"]["emits_safety_stopped"])
+        self.assertEqual(action["lifecycle_metadata"]["projected_canary_applied_count"], 1)
+        self.assertEqual(action["lifecycle_metadata"]["projected_canary_holdout_count"], 1)
+        self.assertEqual(action["lifecycle_metadata"]["projected_skipped_count"], 1)
         self.assertEqual(action["lifecycle_metadata"]["impact_report"], "agentflow.request_shape_crunch_canary_impact.v1")
+        projection = report["stage_lifecycle_projection"]
+        self.assertEqual(projection["schema"], "agentflow.request_shape_crunch_canary_stage_lifecycle_projection.v1")
+        self.assertEqual(projection["matched_count"], 3)
+        self.assertEqual(projection["projected_canary_applied_count"], 1)
+        self.assertEqual(projection["projected_canary_holdout_count"], 1)
+        self.assertEqual(projection["projected_skipped_count"], 1)
+        self.assertGreater(projection["projected_applied_saved_tokens"], 0)
+        self.assertGreater(projection["projected_applied_saved_usd"], 0)
+        self.assertTrue(projection["privacy"]["metadata_only"])
+        self.assertTrue(projection["privacy"]["aggregate_only"])
         self.assertEqual(report["source_report"]["activation_follow_up"]["next_action"], "stage-repeated-context-crunch-canary")
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertTrue(report["privacy"]["aggregate_only"])
@@ -804,9 +828,60 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(payload["top_stage_action"]["conditions"]["text_bucket"], "gte_128k_chars")
         self.assertGreater(payload["top_stage_action"]["projected_saved_tokens"], 0)
         self.assertEqual(payload["top_stage_action"]["holdout_fraction"], 0.2)
+        self.assertEqual(payload["top_stage_action"]["projected_lifecycle"]["projected_canary_applied_count"], 1)
+        self.assertEqual(payload["top_stage_action"]["projected_lifecycle"]["projected_canary_holdout_count"], 1)
         self.assertTrue(payload["top_stage_action"]["lifecycle_metadata"]["emits_safety_stopped"])
+        self.assertEqual(payload["stage_lifecycle_projection"]["projected_canary_applied_count"], 1)
+        self.assertEqual(payload["stage_lifecycle_projection"]["projected_canary_holdout_count"], 1)
         self.assertTrue(payload["privacy"]["aggregate_only"])
         self.assertNotIn("raw prompt must not leak", stdout.getvalue())
+
+    def test_crunch_canary_stage_keeps_safety_stopped_cohort_out_of_applied_holdout_split(self) -> None:
+        safety_lifecycle = {
+            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "policy_id": "local-repeated-context-crunch-canary-safety",
+            "cohort_id": "request-shape-crunch:safety",
+            "status": "safety-stopped",
+            "cohort": "safety_stopped",
+            "reason": "error-rate-regression",
+            "safety_stop": True,
+            "metadata_only": True,
+        }
+        for _ in range(2):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=132_000,
+                cost=0.08,
+                baseline=0.08,
+                crunch_extra={"request_shape_repeated_context_canary": safety_lifecycle},
+            )
+
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="2026-06-15-crunch-canary-safety-stage",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+        )
+
+        self.assertEqual(report["status"], "no-stageable-cohort")
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["staged_canary_count"], 0)
+        self.assertTrue(report["acceptance"]["unsafe_or_stale_cohorts_remain_skipped"])
+        projection = report["stage_lifecycle_projection"]
+        self.assertEqual(projection["projected_canary_applied_count"], 0)
+        self.assertEqual(projection["projected_canary_holdout_count"], 0)
+        self.assertEqual(projection["projected_safety_stopped_count"], 2)
+        self.assertEqual(projection["skipped_or_safety_reasons"][0]["value"], "repeated-context-crunch-canary-safety-stopped")
+        self.assertEqual(report["cohort_lifecycle_projections"][0]["status"], "safety-stopped")
+        self.assertEqual(report["cohort_lifecycle_projections"][0]["reason"], "repeated-context-crunch-canary-safety-stopped")
+        self.assertTrue(report["cohort_lifecycle_projections"][0]["privacy"]["metadata_only"])
+        self.assertTrue(report["cohort_lifecycle_projections"][0]["privacy"]["aggregate_only"])
 
     def test_request_shape_crunch_canary_apply_writes_local_rule_and_lifecycle_metadata(self) -> None:
         for cost in (0.08, 0.07, 0.09):

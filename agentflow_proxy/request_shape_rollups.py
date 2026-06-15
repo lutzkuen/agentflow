@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1083,6 +1084,85 @@ def _bounded_fraction(value: float, default: float) -> float:
     return max(0.0, min(1.0, number))
 
 
+def _scaled_projection(total: int, selected: int, matched: int) -> int:
+    if total <= 0 or selected <= 0 or matched <= 0:
+        return 0
+    return max(0, int(round(total * (selected / float(matched)))))
+
+
+def _request_shape_crunch_canary_lifecycle_projection(
+    cohort: dict[str, Any],
+    *,
+    rollout_fraction: float,
+    holdout_fraction: float,
+) -> dict[str, Any]:
+    matched = _as_int(cohort.get("row_count") or cohort.get("cohort_row_count"))
+    rollout = _bounded_fraction(rollout_fraction, DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION)
+    holdout = _bounded_fraction(holdout_fraction, DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION)
+    if rollout + holdout > 1.0:
+        holdout = max(0.0, 1.0 - rollout)
+
+    readiness = public_label(cohort.get("readiness"), "unknown")
+    reason = public_label(cohort.get("reason"), "unknown")
+    blockers = [
+        public_label(item, "unknown")
+        for item in cohort.get("blockers") or []
+        if public_label(item, "unknown") != "unknown"
+    ]
+    applied = holdout_count = skipped = safety_stopped = 0
+    lifecycle_status = "skipped"
+    explicit_reason = reason
+
+    if readiness == "measurement-ready" and matched > 0:
+        holdout_count = min(matched, int(math.ceil(matched * holdout))) if holdout > 0 else 0
+        remaining = max(0, matched - holdout_count)
+        applied = min(remaining, int(math.ceil(matched * rollout))) if rollout > 0 else 0
+        skipped = max(0, matched - applied - holdout_count)
+        lifecycle_status = "projected-applied-holdout" if applied > 0 and holdout_count > 0 else "projected-partial"
+        explicit_reason = "projected-canary-applied-and-holdout" if applied > 0 and holdout_count > 0 else "projected-canary-partial"
+    elif readiness == "canary-safety-stopped":
+        safety_stopped = matched
+        lifecycle_status = "safety-stopped"
+        explicit_reason = reason or "repeated-context-crunch-canary-safety-stopped"
+    else:
+        skipped = matched
+        lifecycle_status = "skipped"
+        explicit_reason = reason or (blockers[0] if blockers else "not-stageable")
+
+    projected_tokens = _as_int(cohort.get("projected_saved_tokens"))
+    projected_chars = _as_int(cohort.get("projected_saved_chars"))
+    projected_usd = _as_float(cohort.get("projected_saved_usd"))
+
+    return {
+        "schema": "agentflow.request_shape_crunch_canary_projected_lifecycle.v1",
+        "status": lifecycle_status,
+        "reason": explicit_reason,
+        "readiness": readiness,
+        "matched_count": matched,
+        "rollout_fraction": round(rollout, 6),
+        "holdout_fraction": round(holdout, 6),
+        "projected_canary_applied_count": applied,
+        "projected_canary_holdout_count": holdout_count,
+        "projected_skipped_count": skipped,
+        "projected_safety_stopped_count": safety_stopped,
+        "projected_fallback_count": 0,
+        "projected_rollback_count": 0,
+        "projected_saved_tokens": projected_tokens,
+        "projected_saved_chars": projected_chars,
+        "projected_saved_usd": round(projected_usd, 6),
+        "projected_applied_saved_tokens": _scaled_projection(projected_tokens, applied, matched),
+        "projected_applied_saved_chars": _scaled_projection(projected_chars, applied, matched),
+        "projected_applied_saved_usd": round(projected_usd * (applied / float(matched)), 6) if matched and applied else 0.0,
+        "projected_holdout_saved_tokens": _scaled_projection(projected_tokens, holdout_count, matched),
+        "projected_holdout_saved_chars": _scaled_projection(projected_chars, holdout_count, matched),
+        "projected_holdout_saved_usd": round(projected_usd * (holdout_count / float(matched)), 6) if matched and holdout_count else 0.0,
+        "blocker_reasons": blockers,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
 def _request_shape_crunch_canary_action(
     cohort: dict[str, Any],
     *,
@@ -1096,6 +1176,11 @@ def _request_shape_crunch_canary_action(
     holdout = _bounded_fraction(holdout_fraction, DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION)
     if rollout + holdout > 1.0:
         holdout = max(0.0, 1.0 - rollout)
+    lifecycle_projection = _request_shape_crunch_canary_lifecycle_projection(
+        cohort,
+        rollout_fraction=rollout,
+        holdout_fraction=holdout,
+    )
     return {
         "schema": CRUNCH_CANARY_ACTION_SCHEMA,
         "action_type": "stage-local-repeated-context-crunch-canary",
@@ -1126,6 +1211,7 @@ def _request_shape_crunch_canary_action(
         "projected_saved_chars": _as_int(cohort.get("projected_saved_chars")),
         "projected_saved_tokens": _as_int(cohort.get("projected_saved_tokens")),
         "projected_saved_usd": round(_as_float(cohort.get("projected_saved_usd")), 6),
+        "projected_lifecycle": lifecycle_projection,
         "safety_gates": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -1146,6 +1232,10 @@ def _request_shape_crunch_canary_action(
             "emits_safety_stopped": True,
             "emits_fallback": True,
             "emits_rollback": True,
+            "projected_canary_applied_count": lifecycle_projection["projected_canary_applied_count"],
+            "projected_canary_holdout_count": lifecycle_projection["projected_canary_holdout_count"],
+            "projected_skipped_count": lifecycle_projection["projected_skipped_count"],
+            "projected_safety_stopped_count": lifecycle_projection["projected_safety_stopped_count"],
             "impact_report": CRUNCH_CANARY_IMPACT_SCHEMA,
             "lifecycle_schema": CRUNCH_CANARY_LIFECYCLE_SCHEMA,
             "metadata_only": True,
@@ -1604,6 +1694,37 @@ def build_request_shape_crunch_canary_stage_report(
     cohorts = [cohort for cohort in dry_run.get("cohorts") or [] if isinstance(cohort, dict)]
     top_action = actions[0] if actions else None
     top_cohort = cohorts[0] if cohorts else None
+    lifecycle_projections = [
+        _request_shape_crunch_canary_lifecycle_projection(
+            cohort,
+            rollout_fraction=rollout_fraction,
+            holdout_fraction=holdout_fraction,
+        )
+        for cohort in cohorts
+    ]
+    skipped_or_safety_reasons: dict[str, int] = {}
+    for item in lifecycle_projections:
+        skipped_or_safety = _as_int(item.get("projected_skipped_count")) + _as_int(item.get("projected_safety_stopped_count"))
+        if skipped_or_safety:
+            _increment(skipped_or_safety_reasons, item.get("reason") or "unknown", skipped_or_safety)
+    stage_lifecycle_projection = {
+        "schema": "agentflow.request_shape_crunch_canary_stage_lifecycle_projection.v1",
+        "cohort_count": len(lifecycle_projections),
+        "matched_count": sum(_as_int(item.get("matched_count")) for item in lifecycle_projections),
+        "projected_canary_applied_count": sum(_as_int(item.get("projected_canary_applied_count")) for item in lifecycle_projections),
+        "projected_canary_holdout_count": sum(_as_int(item.get("projected_canary_holdout_count")) for item in lifecycle_projections),
+        "projected_skipped_count": sum(_as_int(item.get("projected_skipped_count")) for item in lifecycle_projections),
+        "projected_safety_stopped_count": sum(_as_int(item.get("projected_safety_stopped_count")) for item in lifecycle_projections),
+        "projected_fallback_count": sum(_as_int(item.get("projected_fallback_count")) for item in lifecycle_projections),
+        "projected_rollback_count": sum(_as_int(item.get("projected_rollback_count")) for item in lifecycle_projections),
+        "projected_applied_saved_tokens": sum(_as_int(item.get("projected_applied_saved_tokens")) for item in lifecycle_projections),
+        "projected_applied_saved_chars": sum(_as_int(item.get("projected_applied_saved_chars")) for item in lifecycle_projections),
+        "projected_applied_saved_usd": round(sum(_as_float(item.get("projected_applied_saved_usd")) for item in lifecycle_projections), 6),
+        "skipped_or_safety_reasons": _breakdown(skipped_or_safety_reasons),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _crunch_opportunity_privacy(),
+    }
     if actions:
         status = "staged"
         next_action = "apply-local-crunch-canary-after-review"
@@ -1626,6 +1747,8 @@ def build_request_shape_crunch_canary_stage_report(
         "stage_actions": actions,
         "top_stage_action": top_action,
         "top_cohort": top_cohort,
+        "stage_lifecycle_projection": stage_lifecycle_projection,
+        "cohort_lifecycle_projections": lifecycle_projections[:25],
         "source_report": {
             "schema": rollup_report.get("schema"),
             "window": rollup_report.get("window"),
@@ -1643,10 +1766,20 @@ def build_request_shape_crunch_canary_stage_report(
             "has_projected_tokens": bool(top_action and _as_int(top_action.get("projected_saved_tokens")) > 0),
             "has_projected_savings": bool(top_action and _as_float(top_action.get("projected_saved_usd")) > 0),
             "has_holdout_metadata": bool(top_action and _as_float(top_action.get("holdout_fraction")) > 0),
+            "has_projected_lifecycle_split": bool(
+                stage_lifecycle_projection["projected_canary_applied_count"] > 0
+                and stage_lifecycle_projection["projected_canary_holdout_count"] > 0
+            ),
             "has_safety_stop_metadata": bool(
                 top_action
                 and isinstance(top_action.get("lifecycle_metadata"), dict)
                 and bool(top_action["lifecycle_metadata"].get("emits_safety_stopped"))
+            ),
+            "unsafe_or_stale_cohorts_remain_skipped": all(
+                item.get("readiness") == "measurement-ready"
+                or _as_int(item.get("projected_skipped_count")) > 0
+                or _as_int(item.get("projected_safety_stopped_count")) > 0
+                for item in lifecycle_projections
             ),
         },
         "privacy": _crunch_opportunity_privacy(),
