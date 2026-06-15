@@ -68,6 +68,48 @@ def _pass_through_report() -> dict:
     }
 
 
+def _pass_through_report_with_blocked_lifecycle() -> dict:
+    report = _pass_through_report()
+    bucket = report["buckets"][0]
+    bucket["sample_count"] = 1250
+    bucket["anthropic_canary_lifecycle_evidence"] = {
+        "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+        "status": "matched",
+        "matched_count": 1250,
+        "observed_count": 51,
+        "cohort_counts": {
+            "canary_applied": 0,
+            "canary_holdout": 0,
+            "safety_stopped": 51,
+            "skipped": 0,
+            "bypassed_or_disabled": 0,
+            "unknown": 0,
+        },
+        "coverage": {
+            "matched_count": 1250,
+            "observed_rate": 0.0408,
+            "applied_rate": 0.0,
+            "holdout_rate": 0.0,
+        },
+        "error_count": 0,
+        "retry_count": 0,
+        "fallback_count": 0,
+        "latest_observed_at": "2026-06-15T10:01:52.308969+00:00",
+        "stale_evidence": {"stale": False, "age_hours": 3.222, "max_age_hours": 72.0},
+        "blocker_codes": ["missing-applied-coverage", "missing-holdout-coverage", "safety-stop-observed"],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+        },
+    }
+    report["buckets"] = [bucket]
+    return report
+
+
 def _assert_privacy_clean(testcase: unittest.TestCase, payload: dict) -> None:
     rendered = json.dumps(payload, sort_keys=True)
     for forbidden in (
@@ -149,6 +191,54 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertIn("thinking-routing-guard", thinking_omission["projected_lifecycle_evidence"]["blocker_codes"])
         self.assertEqual(omitted_by_reason["missing-routed-model"]["status"], "omitted")
         self.assertEqual(omitted_by_reason["missing-routed-model"]["target_model"], "claude-haiku-4-5-20251001")
+        _assert_privacy_clean(self, result)
+
+    def test_blocks_current_lifecycle_evidence_without_promotion_or_stage(self) -> None:
+        result = build_anthropic_routing_canary_stage_report(
+            _pass_through_report_with_blocked_lifecycle(),
+            canary_fraction=0.05,
+            holdout_fraction=0.10,
+            min_samples=5,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["candidate_count"], 1)
+        self.assertEqual(result["summary"]["eligible_candidate_count"], 0)
+        self.assertEqual(result["summary"]["staged_count"], 0)
+        self.assertEqual(result["summary"]["omitted_count"], 1)
+        self.assertEqual(result["summary"]["blocked_review_count"], 1)
+        self.assertEqual(result["summary"]["projected_canary_applied_count"], 0)
+        self.assertEqual(result["summary"]["projected_canary_holdout_count"], 0)
+        self.assertEqual(result["summary"]["projected_safety_stopped_count"], 51)
+        self.assertTrue(result["summary"]["acceptance_met"])
+        self.assertTrue(result["acceptance"]["blocked_review_recorded"])
+        self.assertTrue(result["acceptance"]["blocked_review_has_local_rule_file_representation"])
+        self.assertTrue(result["acceptance"]["no_automatic_promotion_while_blocked"])
+
+        blocked = result["blocked_reviews"][0]
+        self.assertEqual(blocked["status"], "blocked-review")
+        self.assertEqual(blocked["matched_count"], 1250)
+        self.assertEqual(blocked["observed_count"], 51)
+        self.assertEqual(blocked["cohort_counts"]["canary_applied"], 0)
+        self.assertEqual(blocked["cohort_counts"]["canary_holdout"], 0)
+        self.assertEqual(blocked["cohort_counts"]["safety_stopped"], 51)
+        self.assertEqual(blocked["coverage"]["applied_rate"], 0.0)
+        self.assertEqual(blocked["coverage"]["holdout_rate"], 0.0)
+        self.assertIn("missing-applied-coverage", blocked["blocker_codes"])
+        self.assertIn("missing-holdout-coverage", blocked["blocker_codes"])
+        self.assertIn("safety-stop-observed", blocked["blocker_codes"])
+        self.assertEqual(blocked["local_file_backed_representation"]["rule_file"], "routing_rules.yaml")
+        self.assertEqual(blocked["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(blocked["next_action"], "review-anthropic-routing-safety-stop-before-canary")
+        self.assertFalse(blocked["promotion_allowed"])
+        self.assertFalse(blocked["stage_allowed"])
+        self.assertFalse(blocked["active_policy_changed"])
+        self.assertFalse(blocked["wrote_active_policy_files"])
+
+        omitted = result["omitted"][0]
+        self.assertEqual(omitted["status"], "blocked-review")
+        self.assertEqual(omitted["projected_lifecycle_evidence"]["cohort_counts"]["safety_stopped"], 51)
+        self.assertEqual(omitted["blocked_review"]["target_local_rule_file"], "routing_rules.yaml")
         _assert_privacy_clean(self, result)
 
     def test_cli_extracts_nested_research_plan_report(self) -> None:

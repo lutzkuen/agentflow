@@ -12,6 +12,7 @@ SCHEMA = "agentflow.anthropic_routing_canary_stage.v1"
 OMISSION_SCHEMA = "agentflow.anthropic_routing_canary_stage_omission.v1"
 STAGED_SCHEMA = "agentflow.anthropic_routing_canary_staged_draft.v1"
 PROJECTED_LIFECYCLE_SCHEMA = "agentflow.anthropic_routing_canary_projected_lifecycle_coverage.v1"
+BLOCKED_REVIEW_SCHEMA = "agentflow.anthropic_routing_canary_blocked_review.v1"
 ACCEPTANCE_SCHEMA = "agentflow.anthropic_routing_canary_stage_acceptance.v1"
 PASS_THROUGH_SCHEMA = "agentflow.pass_through_routing_activation_candidates.v1"
 
@@ -179,6 +180,10 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
     blockers: list[str] = []
     blockers.extend(_string_list(bucket.get("blocker_codes")))
     blockers.extend(_string_list(bucket.get("blockers")))
+    lifecycle = bucket.get("anthropic_canary_lifecycle_evidence")
+    if isinstance(lifecycle, dict):
+        lifecycle_blockers = _lifecycle_blockers(lifecycle)
+        blockers.extend(lifecycle_blockers)
     if actionability and actionability != "actionable":
         blockers.append(actionability)
     if provider != "anthropic":
@@ -201,7 +206,7 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
             blockers.append("missing-routed-model")
     if bucket.get("routed_model") in (None, "") and _string(bucket.get("no_op_reason")):
         blockers.append("missing-routed-model")
-    return {
+    candidate = {
         "candidate_id": _candidate_id(bucket),
         "provider": "anthropic",
         "source_surface": source_surface,
@@ -218,6 +223,7 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
         "expected_local_executor": required_executor,
         "stream": True,
         "blockers": sorted(set(blockers)),
+        "next_action": _metadata_value(bucket.get("next_action")),
         "aggregate_inference": {
             "source": "pass_through_routing_report",
             "input_source_surface_label": bucket.get("source_surface"),
@@ -227,6 +233,9 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
             "metadata_only": True,
         },
     }
+    if isinstance(lifecycle, dict):
+        candidate["anthropic_canary_lifecycle_evidence"] = lifecycle
+    return candidate
 
 
 def _candidate_list_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -252,12 +261,113 @@ def _safety_blockers(candidate: dict[str, Any]) -> list[str]:
         "unsafe-tool-call-context",
         "tool-call-cache-disabled",
         "needs-lifecycle-evidence",
+        "safety-stop-observed",
     }
     return sorted(blockers & safety)
 
 
+def _lifecycle_blockers(lifecycle: dict[str, Any]) -> list[str]:
+    blockers = set(_string_list(lifecycle.get("blocker_codes")))
+    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    coverage = lifecycle.get("coverage") if isinstance(lifecycle.get("coverage"), dict) else {}
+    stale = lifecycle.get("stale_evidence") if isinstance(lifecycle.get("stale_evidence"), dict) else {}
+    if _as_int(counts.get("canary_applied")) <= 0 or _as_float(coverage.get("applied_rate")) <= 0:
+        blockers.add("missing-applied-coverage")
+    if _as_int(counts.get("canary_holdout")) <= 0 or _as_float(coverage.get("holdout_rate")) <= 0:
+        blockers.add("missing-holdout-coverage")
+    if _as_int(counts.get("safety_stopped")) > 0:
+        blockers.add("safety-stop-observed")
+    if bool(stale.get("stale")):
+        blockers.add("stale-lifecycle-evidence")
+    return sorted(blockers)
+
+
+def _existing_lifecycle(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    lifecycle = candidate.get("anthropic_canary_lifecycle_evidence")
+    return lifecycle if isinstance(lifecycle, dict) else None
+
+
+def _local_file_backed_representation() -> dict[str, Any]:
+    return {
+        "exists": True,
+        "policy_section": "routing",
+        "policy_source": "local-file-backed",
+        "reason": "file-backed-local-policy",
+        "rule_file": "routing_rules.yaml",
+    }
+
+
+def _next_action_for_blockers(candidate: dict[str, Any], blockers: list[str]) -> str:
+    explicit = _string(candidate.get("next_action"))
+    if explicit:
+        return explicit
+    blocker_set = set(blockers)
+    if "safety-stop-observed" in blocker_set:
+        return "review-anthropic-routing-safety-stop-before-canary"
+    if {"missing-applied-coverage", "missing-holdout-coverage"} & blocker_set:
+        return "collect-anthropic-routing-applied-holdout-coverage"
+    if "stale-lifecycle-evidence" in blocker_set:
+        return "refresh-anthropic-routing-lifecycle-evidence"
+    return "stage-anthropic-routing-canary-review"
+
+
+def _normalize_lifecycle_evidence(candidate: dict[str, Any], lifecycle: dict[str, Any]) -> dict[str, Any]:
+    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    coverage = lifecycle.get("coverage") if isinstance(lifecycle.get("coverage"), dict) else {}
+    stale = lifecycle.get("stale_evidence") if isinstance(lifecycle.get("stale_evidence"), dict) else {}
+    blockers = _lifecycle_blockers(lifecycle)
+    matched = _as_int(lifecycle.get("matched_count") or coverage.get("matched_count") or candidate.get("matched_count"))
+    observed = _as_int(lifecycle.get("observed_count"))
+    if observed <= 0:
+        observed = sum(
+            _as_int(counts.get(key))
+            for key in ("canary_applied", "canary_holdout", "safety_stopped", "skipped", "bypassed_or_disabled", "unknown")
+        )
+    return {
+        "schema": lifecycle.get("schema") or "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+        "status": lifecycle.get("status") or ("blocked" if blockers else "matched"),
+        "matched_count": matched,
+        "observed_count": observed,
+        "cohort_counts": {
+            "canary_applied": _as_int(counts.get("canary_applied")),
+            "canary_holdout": _as_int(counts.get("canary_holdout")),
+            "safety_stopped": _as_int(counts.get("safety_stopped")),
+            "skipped": _as_int(counts.get("skipped")),
+            "bypassed_or_disabled": _as_int(counts.get("bypassed_or_disabled")),
+            "unknown": _as_int(counts.get("unknown")),
+        },
+        "coverage": {
+            "matched_count": matched,
+            "observed_rate": _as_float(coverage.get("observed_rate")),
+            "applied_rate": _as_float(coverage.get("applied_rate")),
+            "holdout_rate": _as_float(coverage.get("holdout_rate")),
+        },
+        "error_count": _as_int(lifecycle.get("error_count")),
+        "retry_count": _as_int(lifecycle.get("retry_count")),
+        "fallback_count": _as_int(lifecycle.get("fallback_count")),
+        "latest_observed_at": lifecycle.get("latest_observed_at"),
+        "stale_evidence": {
+            "stale": bool(stale.get("stale")),
+            "age_hours": stale.get("age_hours") if isinstance(stale.get("age_hours"), (int, float, type(None))) else None,
+            "max_age_hours": stale.get("max_age_hours") if isinstance(stale.get("max_age_hours"), (int, float, type(None))) else 72.0,
+        },
+        "blocker_codes": blockers,
+        "next_action": _next_action_for_blockers(candidate, blockers),
+        "local_file_backed_representation": _local_file_backed_representation(),
+        "privacy": PRIVACY,
+    }
+
+
 def _candidate_omission_reason(candidate: dict[str, Any], *, min_samples: int) -> str | None:
     blockers = set(_string_list(candidate.get("blockers")) + _string_list(candidate.get("blocker_codes")))
+    if "safety-stop-observed" in blockers:
+        return "safety-stop-observed"
+    if "missing-applied-coverage" in blockers:
+        return "missing-applied-coverage"
+    if "missing-holdout-coverage" in blockers:
+        return "missing-holdout-coverage"
+    if "stale-lifecycle-evidence" in blockers:
+        return "stale-lifecycle-evidence"
     safety_blockers = _safety_blockers(candidate)
     if safety_blockers:
         return safety_blockers[0]
@@ -349,10 +459,49 @@ def _projected_lifecycle(
     }
 
 
-def _omission(candidate: dict[str, Any], reason: str, lifecycle: dict[str, Any] | None = None) -> dict[str, Any]:
+def _blocked_review(candidate: dict[str, Any], reason: str, lifecycle: dict[str, Any]) -> dict[str, Any]:
+    blockers = _string_list(lifecycle.get("blocker_codes"))
+    next_action = _next_action_for_blockers(candidate, blockers)
+    return {
+        "schema": BLOCKED_REVIEW_SCHEMA,
+        "status": "blocked-review",
+        "reason": reason,
+        "target_candidate_id": _candidate_id(candidate),
+        "provider": "anthropic",
+        "source_surface": candidate.get("source_surface"),
+        "endpoint": candidate.get("endpoint"),
+        "requested_model": candidate.get("requested_model"),
+        "target_model": candidate.get("target_model"),
+        "category": candidate.get("category"),
+        "matched_count": _as_int(lifecycle.get("matched_count")),
+        "observed_count": _as_int(lifecycle.get("observed_count")),
+        "cohort_counts": lifecycle.get("cohort_counts"),
+        "coverage": lifecycle.get("coverage"),
+        "stale_evidence": lifecycle.get("stale_evidence"),
+        "blocker_codes": blockers,
+        "next_action": next_action,
+        "local_file_backed_representation": _local_file_backed_representation(),
+        "target_local_rule_file": "routing_rules.yaml",
+        "promotion_allowed": False,
+        "stage_allowed": False,
+        "active_policy_changed": False,
+        "wrote_active_policy_files": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "lifecycle_evidence": lifecycle,
+        "privacy": PRIVACY,
+    }
+
+
+def _omission(
+    candidate: dict[str, Any],
+    reason: str,
+    lifecycle: dict[str, Any] | None = None,
+    blocked_review: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "schema": OMISSION_SCHEMA,
-        "status": "safety_stopped" if lifecycle and lifecycle.get("status") == "safety_stopped" else "omitted",
+        "status": "blocked-review" if blocked_review else "safety_stopped" if lifecycle and lifecycle.get("status") == "safety_stopped" else "omitted",
         "reason": reason,
         "target_candidate_id": _candidate_id(candidate),
         "provider": "anthropic",
@@ -363,6 +512,7 @@ def _omission(candidate: dict[str, Any], reason: str, lifecycle: dict[str, Any] 
         "category": candidate.get("category"),
         "blocker_codes": _string_list(candidate.get("blockers") or candidate.get("blocker_codes")),
         "projected_lifecycle_evidence": lifecycle,
+        "blocked_review": blocked_review,
         "privacy": PRIVACY,
     }
 
@@ -391,10 +541,19 @@ def _stage_review_intent(canary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _acceptance_report(staged: list[dict[str, Any]], *, projected_applied: int, projected_holdout: int) -> dict[str, Any]:
+def _acceptance_report(
+    staged: list[dict[str, Any]],
+    *,
+    projected_applied: int,
+    projected_holdout: int,
+    blocked_reviews: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     reported_tool_result_canary = False
     lifecycle_counts_present = False
     safety_gates_present = False
+    blocked_review_recorded = False
+    blocked_review_has_rule_file = False
+    blocked_review_prevents_promotion = False
 
     for draft in staged:
         routing = draft.get("policies", {}).get("routing", {}) if isinstance(draft.get("policies"), dict) else {}
@@ -433,6 +592,41 @@ def _acceptance_report(staged: list[dict[str, Any]], *, projected_applied: int, 
             and bool(gates.get("content_free"))
         )
 
+    for blocked in blocked_reviews or []:
+        counts = blocked.get("cohort_counts") if isinstance(blocked.get("cohort_counts"), dict) else {}
+        coverage = blocked.get("coverage") if isinstance(blocked.get("coverage"), dict) else {}
+        representation = (
+            blocked.get("local_file_backed_representation")
+            if isinstance(blocked.get("local_file_backed_representation"), dict)
+            else {}
+        )
+        blockers = set(_string_list(blocked.get("blocker_codes")))
+        blocked_review_recorded = blocked_review_recorded or (
+            blocked.get("status") == "blocked-review"
+            and _as_int(blocked.get("matched_count")) > 0
+            and "missing-applied-coverage" in blockers
+            and "missing-holdout-coverage" in blockers
+            and "safety-stop-observed" in blockers
+            and "next_action" in blocked
+            and "canary_applied" in counts
+            and "canary_holdout" in counts
+            and "safety_stopped" in counts
+            and "applied_rate" in coverage
+            and "holdout_rate" in coverage
+        )
+        blocked_review_has_rule_file = blocked_review_has_rule_file or (
+            representation.get("exists") is True
+            and representation.get("policy_section") == "routing"
+            and representation.get("rule_file") == "routing_rules.yaml"
+            and blocked.get("target_local_rule_file") == "routing_rules.yaml"
+        )
+        blocked_review_prevents_promotion = blocked_review_prevents_promotion or (
+            blocked.get("promotion_allowed") is False
+            and blocked.get("stage_allowed") is False
+            and blocked.get("active_policy_changed") is False
+            and blocked.get("wrote_active_policy_files") is False
+        )
+
     holdout_coverage = projected_holdout > 0
     privacy_clean = (
         bool(PRIVACY["metadata_only"])
@@ -444,7 +638,7 @@ def _acceptance_report(staged: list[dict[str, Any]], *, projected_applied: int, 
         and not bool(PRIVACY["provider_calls_made"])
         and not bool(PRIVACY["managed_server_calls_made"])
     )
-    acceptance_met = all(
+    staged_acceptance_met = all(
         [
             reported_tool_result_canary,
             holdout_coverage,
@@ -453,6 +647,15 @@ def _acceptance_report(staged: list[dict[str, Any]], *, projected_applied: int, 
             privacy_clean,
         ]
     )
+    blocked_acceptance_met = all(
+        [
+            blocked_review_recorded,
+            blocked_review_has_rule_file,
+            blocked_review_prevents_promotion,
+            privacy_clean,
+        ]
+    )
+    acceptance_met = staged_acceptance_met or blocked_acceptance_met
     return {
         "schema": ACCEPTANCE_SCHEMA,
         "status": "met" if acceptance_met else "not_met",
@@ -463,6 +666,9 @@ def _acceptance_report(staged: list[dict[str, Any]], *, projected_applied: int, 
         "holdout_coverage_projected": holdout_coverage,
         "lifecycle_counts_include_applied_holdout_skipped_safety_error_retry_fallback": lifecycle_counts_present,
         "thinking_and_tool_safety_gates_present": safety_gates_present,
+        "blocked_review_recorded": blocked_review_recorded,
+        "blocked_review_has_local_rule_file_representation": blocked_review_has_rule_file,
+        "no_automatic_promotion_while_blocked": blocked_review_prevents_promotion,
         "metadata_only_privacy_proof": privacy_clean,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
@@ -629,13 +835,21 @@ def build_anthropic_routing_canary_stage_report(
     candidates = _candidate_list_from_report(report)
     staged: list[dict[str, Any]] = []
     omitted: list[dict[str, Any]] = []
+    blocked_reviews: list[dict[str, Any]] = []
     eligible: list[dict[str, Any]] = []
     for candidate in candidates:
         reason = _candidate_omission_reason(candidate, min_samples=min_samples)
         if reason:
             safety_blockers = _safety_blockers(candidate)
             lifecycle = None
-            if safety_blockers:
+            blocked_review = None
+            existing_lifecycle = _existing_lifecycle(candidate)
+            if existing_lifecycle:
+                lifecycle = _normalize_lifecycle_evidence(candidate, existing_lifecycle)
+                if _string_list(lifecycle.get("blocker_codes")):
+                    blocked_review = _blocked_review(candidate, reason, lifecycle)
+                    blocked_reviews.append(blocked_review)
+            if safety_blockers and lifecycle is None:
                 lifecycle = _projected_lifecycle(
                     matched_count=_as_int(candidate.get("matched_count")),
                     canary_fraction=0.0,
@@ -643,7 +857,7 @@ def build_anthropic_routing_canary_stage_report(
                     savings_per_1000_calls_usd=_as_float(candidate.get("estimated_savings_per_1000_calls_usd")),
                     safety_blockers=safety_blockers,
                 )
-            omitted.append(_omission(candidate, reason, lifecycle))
+            omitted.append(_omission(candidate, reason, lifecycle, blocked_review))
             continue
         eligible.append(candidate)
 
@@ -685,7 +899,12 @@ def build_anthropic_routing_canary_stage_report(
         lifecycle = item.get("projected_lifecycle_evidence")
         if isinstance(lifecycle, dict):
             projected_safety += _as_int((lifecycle.get("cohort_counts") or {}).get("safety_stopped"))
-    acceptance = _acceptance_report(staged, projected_applied=projected_applied, projected_holdout=projected_holdout)
+    acceptance = _acceptance_report(
+        staged,
+        projected_applied=projected_applied,
+        projected_holdout=projected_holdout,
+        blocked_reviews=blocked_reviews,
+    )
 
     return {
         "schema": SCHEMA,
@@ -696,6 +915,7 @@ def build_anthropic_routing_canary_stage_report(
             "eligible_candidate_count": len(eligible),
             "staged_count": len(staged),
             "omitted_count": len(omitted),
+            "blocked_review_count": len(blocked_reviews),
             "projected_canary_applied_count": projected_applied,
             "projected_canary_holdout_count": projected_holdout,
             "projected_safety_stopped_count": projected_safety,
@@ -707,6 +927,7 @@ def build_anthropic_routing_canary_stage_report(
         },
         "staged_drafts": staged,
         "omitted": omitted,
+        "blocked_reviews": blocked_reviews,
         "wrote_active_policy_files": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
