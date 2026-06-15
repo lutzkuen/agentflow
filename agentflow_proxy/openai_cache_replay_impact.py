@@ -511,6 +511,16 @@ def _ratio(numerator: float, denominator: float) -> float | None:
     return round(numerator / denominator, 6)
 
 
+def _first_real_hit_status(*, observed_hits: int, applied_count: int, holdout_count: int) -> str:
+    if observed_hits > 0:
+        return "observed-hit"
+    if applied_count > 0:
+        return "awaiting-hit"
+    if holdout_count > 0:
+        return "holdout-only"
+    return "not-evaluated"
+
+
 def _canary_hit_measurement(
     *,
     candidate: dict[str, Any],
@@ -525,10 +535,18 @@ def _canary_hit_measurement(
     projected_saved_usd = dry_run_projected_savings if dry_run_projected_savings > 0 else legacy_projected_savings_usd
     observed_hits = _as_int(applied.get("cache_hit_count"))
     observed_misses = _as_int(applied.get("miss_count"))
+    applied_count = _as_int(applied.get("count"))
+    holdout_count = _as_int(holdout.get("count"))
     holdout_forwards = _as_int(holdout.get("bypass_skipped_count")) + _as_int(holdout.get("miss_count"))
     return {
         "schema": "agentflow.openai_cache_replay_canary_hit_measurement.v1",
         "replay_source_schema": candidate.get("replay_source_schema"),
+        "first_real_hit_status": _first_real_hit_status(
+            observed_hits=observed_hits,
+            applied_count=applied_count,
+            holdout_count=holdout_count,
+        ),
+        "first_real_hit_observed": observed_hits > 0,
         "projected_hits": projected_hits,
         "projected_saved_usd": round(projected_saved_usd, 8),
         "dry_run_projected_savings_usd": round(dry_run_projected_savings, 8),
@@ -536,8 +554,8 @@ def _canary_hit_measurement(
         "observed_saved_usd": round(observed_savings_usd, 8),
         "hit_realization_rate": _ratio(float(observed_hits), float(projected_hits)),
         "savings_realization_rate": _ratio(float(observed_savings_usd), float(projected_saved_usd)),
-        "applied_count": _as_int(applied.get("count")),
-        "holdout_count": _as_int(holdout.get("count")),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
         "applied_hit_count": observed_hits,
         "applied_miss_count": observed_misses,
         "applied_bypass_skipped_count": _as_int(applied.get("bypass_skipped_count")),
@@ -559,9 +577,18 @@ def _aggregate_canary_hit_measurements(quality_gates: list[dict[str, Any]]) -> d
     projected_saved_usd = sum(_as_float(item.get("projected_saved_usd")) for item in measurements)
     observed_hits = sum(_as_int(item.get("observed_hits")) for item in measurements)
     observed_saved_usd = sum(_as_float(item.get("observed_saved_usd")) for item in measurements)
+    applied_count = sum(_as_int(item.get("applied_count")) for item in measurements)
+    holdout_count = sum(_as_int(item.get("holdout_count")) for item in measurements)
     return {
         "schema": "agentflow.openai_cache_replay_canary_hit_measurement.v1",
         "candidate_count": len(measurements),
+        "first_real_hit_status": _first_real_hit_status(
+            observed_hits=observed_hits,
+            applied_count=applied_count,
+            holdout_count=holdout_count,
+        ),
+        "first_real_hit_observed": observed_hits > 0,
+        "first_real_hit_candidate_count": sum(1 for item in measurements if item.get("first_real_hit_observed")),
         "projected_hits": projected_hits,
         "projected_saved_usd": round(projected_saved_usd, 8),
         "dry_run_projected_savings_usd": round(
@@ -572,8 +599,8 @@ def _aggregate_canary_hit_measurements(quality_gates: list[dict[str, Any]]) -> d
         "observed_saved_usd": round(observed_saved_usd, 8),
         "hit_realization_rate": _ratio(float(observed_hits), float(projected_hits)),
         "savings_realization_rate": _ratio(float(observed_saved_usd), float(projected_saved_usd)),
-        "applied_count": sum(_as_int(item.get("applied_count")) for item in measurements),
-        "holdout_count": sum(_as_int(item.get("holdout_count")) for item in measurements),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
         "applied_hit_count": sum(_as_int(item.get("applied_hit_count")) for item in measurements),
         "applied_miss_count": sum(_as_int(item.get("applied_miss_count")) for item in measurements),
         "applied_bypass_skipped_count": sum(_as_int(item.get("applied_bypass_skipped_count")) for item in measurements),
@@ -890,6 +917,8 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "observed_savings_usd": round(observed, 8),
         "projected_savings_usd": round(projected, 8),
         "canary_hit_measurement": canary_hit_measurement,
+        "first_real_hit_status": canary_hit_measurement["first_real_hit_status"],
+        "first_real_hit_observed": canary_hit_measurement["first_real_hit_observed"],
         "status_code_breakdown": _counter_rows(candidate["status_buckets"]),
         "endpoint_breakdown": _counter_rows(candidate["endpoint_buckets"]),
         "category_breakdown": _counter_rows(candidate["category_buckets"]),
@@ -1009,6 +1038,8 @@ def build_openai_cache_replay_impact_report(
                 "actual_saved_cost_usd": item.get("actual_saved_cost_usd") or 0.0,
                 "miss_count": item.get("miss_count") or 0,
                 "bypass_skipped_count": item.get("bypass_skipped_count") or 0,
+                "first_real_hit_status": item.get("first_real_hit_status"),
+                "first_real_hit_observed": bool(item.get("first_real_hit_observed")),
                 "top_remaining_blocker": item.get("top_remaining_blocker"),
                 "observed_savings_usd": item.get("observed_savings_usd"),
                 "projected_savings_usd": item.get("projected_savings_usd"),
@@ -1047,6 +1078,9 @@ def build_openai_cache_replay_impact_report(
         "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in quality_gates), 8),
         "canary_hit_measurement": _aggregate_canary_hit_measurements(quality_gates),
     }
+    summary["first_real_hit_status"] = summary["canary_hit_measurement"]["first_real_hit_status"]
+    summary["first_real_hit_observed"] = summary["canary_hit_measurement"]["first_real_hit_observed"]
+    summary["first_real_hit_candidate_count"] = summary["canary_hit_measurement"]["first_real_hit_candidate_count"]
     promotion_evidence = _local_promotion_evidence(
         status=status,
         summary=summary,

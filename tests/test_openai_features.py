@@ -672,6 +672,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         has_tools=True,
         canary_fraction=1.0,
         graduation=None,
+        replayability_levels=None,
     ):
         rule = {
                 "id": "reviewed-openai-cache-replay",
@@ -686,7 +687,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     "category": category,
                     "has_tools": has_tools,
                     "stream": False,
-                    "replayability_levels": ["local-exact-response"],
+                    "replayability_levels": replayability_levels or ["local-exact-response"],
                 },
                 "rollout": {
                     "schema": "agentflow.pattern_policy_rollout.v1",
@@ -819,6 +820,84 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         rendered = json.dumps({"seed": seed_cache, "hit": hit_cache}, sort_keys=True)
         self.assertNotIn("src/example.py", rendered)
         self.assertNotIn(watched, rendered)
+        self.assertNotIn("raw-openai-session-must-not-leak", rendered)
+
+    def test_openai_cache_replay_canary_records_first_real_non_tool_responses_hit(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": " ".join(["Summarize the stable release checklist for this offline replay canary."] * 60),
+        }
+        pattern_hash = self._openai_cache_pattern_hash(request_body)
+        self._enable_openai_cache_replay_rule(
+            pattern_hash,
+            category="chat",
+            has_tools=False,
+            replayability_levels=["features_only", "local-exact-response"],
+            graduation={
+                "schema": "agentflow.openai_cache_replay_shape_activation.v1",
+                "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                "source_reason": "replay-ready-exact-non-tool-shape",
+                "cohort_bucket": "openai_responses/responses/chat/chat/2k_8k_chars/500_2k_tokens",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "projected_hits": 1,
+                "projected_savings_usd": 0.01,
+                "sample_count": 2,
+                "aggregate_only": True,
+            },
+        )
+        CapturingOpenAIClient.response_body = {
+            "id": "resp_non_tool_cached",
+            "object": "response",
+            "model": "gpt-5-codex",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "cached non-tool response"}]}],
+            "usage": {"input_tokens": 25, "output_tokens": 5},
+        }
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            first = TestClient(server.app).post(
+                "/v1/responses",
+                json=request_body,
+                headers={"x-session-id": "raw-openai-session-must-not-leak"},
+            )
+            CapturingOpenAIClient.response_body = {
+                "id": "resp_non_tool_upstream_should_not_be_used",
+                "object": "response",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "not used"}]}],
+                "usage": {"input_tokens": 25, "output_tokens": 5},
+            }
+            second = TestClient(server.app).post(
+                "/v1/responses",
+                json=request_body,
+                headers={"x-session-id": "raw-openai-session-must-not-leak"},
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["id"], "resp_non_tool_cached")
+        self.assertEqual(len(CapturingOpenAIClient.calls), 1)
+        rows = server.store.conn.execute("select cache_hit, stream, cache_json from calls order by rowid").fetchall()
+        self.assertEqual(rows[0]["cache_hit"], 0)
+        self.assertEqual(rows[1]["cache_hit"], 1)
+        self.assertEqual(rows[0]["stream"], 0)
+        self.assertEqual(rows[1]["stream"], 0)
+        seed_cache = json.loads(rows[0]["cache_json"])
+        hit_cache = json.loads(rows[1]["cache_json"])
+        self.assertEqual(seed_cache["status"], "miss")
+        self.assertEqual(seed_cache["reason"], "exact-pattern-miss")
+        self.assertEqual(seed_cache["cache_replay_store"]["status"], "stored")
+        self.assertEqual(seed_cache["cache_replay_canary"]["status"], "applied")
+        self.assertEqual(hit_cache["status"], "hit")
+        self.assertEqual(hit_cache["reason"], "exact-match")
+        self.assertEqual(hit_cache["cache_replay_canary"]["status"], "applied")
+        self.assertEqual(hit_cache["cache_replay_canary"]["projection"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(hit_cache["pattern_rule"]["allow_tool_calls"], False)
+        self.assertEqual(hit_cache["pattern_rule"]["safe_invalidation"], False)
+        rendered = json.dumps({"seed": seed_cache, "hit": hit_cache}, sort_keys=True)
         self.assertNotIn("raw-openai-session-must-not-leak", rendered)
 
     def test_openai_cache_replay_canary_decision_includes_request_shape_projection(self):
