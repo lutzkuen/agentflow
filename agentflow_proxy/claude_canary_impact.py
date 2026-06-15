@@ -693,6 +693,122 @@ def _lifecycle_blocker_counts(candidate: dict[str, Any], *, observed: int, appli
     return blockers
 
 
+def _anthropic_lifecycle_needed_resolution(
+    *,
+    counts: dict[str, int],
+    blockers: set[str],
+    stale: dict[str, Any],
+) -> list[str]:
+    needed: list[str] = []
+    if counts.get("canary_applied", 0) <= 0 or "missing-applied-coverage" in blockers:
+        needed.append("applied_coverage")
+    if counts.get("canary_holdout", 0) <= 0 or "missing-holdout-coverage" in blockers:
+        needed.append("holdout_coverage")
+    if stale.get("stale") or "stale-evidence" in blockers:
+        needed.append("fresh_lifecycle_evidence")
+    if counts.get("safety_stopped", 0) > 0 or "safety-stop-observed" in blockers:
+        needed.extend(["safety_stop_reason_review", "safer_threshold_or_executor_guard", "rollback_proof"])
+    return sorted(set(needed))
+
+
+def _anthropic_lifecycle_keep_blocked_reason(needed_resolution: list[str], blockers: set[str]) -> str | None:
+    needed = set(needed_resolution)
+    if "safety_stop_reason_review" not in needed and "safety-stop-observed" not in blockers:
+        if {"applied_coverage", "holdout_coverage", "fresh_lifecycle_evidence"} & needed:
+            return "anthropic-routing-blocked-until-lifecycle-coverage"
+        return None
+    parts = ["anthropic-routing-safety-stop-needs"]
+    if {"applied_coverage", "holdout_coverage"} & needed:
+        parts.append("applied-holdout-coverage")
+    if "fresh_lifecycle_evidence" in needed:
+        parts.append("fresh-lifecycle-evidence")
+    if "safer_threshold_or_executor_guard" in needed:
+        parts.append("safer-threshold-or-executor-guard")
+    if "rollback_proof" in needed:
+        parts.append("rollback-proof")
+    return "-".join(parts)
+
+
+def _anthropic_lifecycle_next_state_reason(needed_resolution: list[str], blockers: set[str]) -> str | None:
+    if "safety-stop-observed" in blockers:
+        return "safety-stop-requires-safer-threshold-or-executor-guard-and-rollback-proof"
+    if "stale-evidence" in blockers:
+        return "safety-stop-awaits-fresh-lifecycle-or-holdout-evidence"
+    if {"applied_coverage", "holdout_coverage"} & set(needed_resolution):
+        return "missing-applied-or-holdout-coverage"
+    return None
+
+
+def _anthropic_lifecycle_rollback_guard(
+    candidate: dict[str, Any],
+    *,
+    counts: dict[str, int],
+    coverage: dict[str, Any],
+    blockers: set[str],
+) -> dict[str, Any]:
+    stale = candidate.get("stale_evidence") if isinstance(candidate.get("stale_evidence"), dict) else {}
+    reason_breakdown = [
+        row.get("value")
+        for row in candidate.get("safety_skip_counts") or []
+        if isinstance(row, dict) and row.get("value")
+    ]
+    safety_stop_reasons = sorted(
+        {
+            _reason_code(reason, "unknown-safety-stop")
+            for reason in [*reason_breakdown, *list(blockers)]
+            if "safety" in str(reason) or "thinking" in str(reason)
+        }
+    )
+    return {
+        "schema": "agentflow.anthropic_routing_canary_rollback_guard.v1",
+        "rule_id": candidate.get("rule_id") or candidate.get("policy_id"),
+        "policy_id": candidate.get("policy_id"),
+        "target_candidate_id": candidate.get("target_candidate_id") or candidate.get("candidate_id"),
+        "cohort_bucket": "|".join(
+            _reason_code(part, "unknown")
+            for part in (
+                candidate.get("source_surface") or "anthropic_messages",
+                candidate.get("original_model") or "unknown-requested",
+                candidate.get("candidate_target_model") or "unknown-target",
+                candidate.get("category") or "unknown-category",
+                candidate.get("workflow_phase") or "unknown-phase",
+            )
+        ),
+        "safety_stop_reason_codes": safety_stop_reasons,
+        "fallback_behavior": {
+            "fallback_to_requested_on_rate_limit": True,
+            "fallback_count": _sum_cohort_metric(candidate, "fallback_count"),
+            "retry_count": _sum_cohort_metric(candidate, "retry_count"),
+            "error_count": _sum_cohort_metric(candidate, "error_count"),
+            "requested_model_fallback_cost_usd": candidate.get("requested_model_fallback_cost_usd"),
+        },
+        "coverage": {
+            "applied_rate": coverage.get("applied_rate"),
+            "holdout_rate": coverage.get("holdout_rate"),
+            "matched_count": coverage.get("matched_count"),
+        },
+        "cohort_counts": counts,
+        "stale_evidence": {
+            "stale": bool(stale.get("stale")),
+            "age_hours": stale.get("age_hours") if isinstance(stale.get("age_hours"), (int, float, type(None))) else None,
+            "max_age_hours": stale.get("max_age_hours") if isinstance(stale.get("max_age_hours"), (int, float, type(None))) else None,
+        },
+        "rollback_action": "disable_phase_canary",
+        "rollback_canary_fraction": 0.0,
+        "rollback_holdout_fraction": 0.0,
+        "preserve_previous_rule_required": True,
+        "reason_codes": sorted(blockers),
+        "local_file_backed_representation": {
+            "exists": True,
+            "policy_section": "routing",
+            "policy_source": "local-file-backed",
+            "reason": "file-backed-local-policy",
+            "rule_file": "routing_rules.yaml",
+        },
+        "privacy": _privacy_summary(),
+    }
+
+
 def _anthropic_lifecycle_from_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     counts = {
         "canary_applied": _as_int((candidate.get("cohort_counts") or {}).get("canary_applied")),
@@ -706,26 +822,46 @@ def _anthropic_lifecycle_from_candidate(candidate: dict[str, Any]) -> dict[str, 
     applied = counts["canary_applied"]
     holdout = counts["canary_holdout"]
     blockers = _lifecycle_blocker_counts(candidate, observed=observed, applied=applied, holdout=holdout)
+    blocker_set = set(blockers)
+    stale = candidate.get("stale_evidence") if isinstance(candidate.get("stale_evidence"), dict) else {}
+    coverage = {
+        "matched_count": observed,
+        "observed_rate": 1.0 if observed else 0.0,
+        "applied_rate": round(applied / observed, 6) if observed else 0.0,
+        "holdout_rate": round(holdout / observed, 6) if observed else 0.0,
+    }
+    needed_resolution = _anthropic_lifecycle_needed_resolution(counts=counts, blockers=blocker_set, stale=stale)
+    keep_blocked_reason = _anthropic_lifecycle_keep_blocked_reason(needed_resolution, blocker_set)
+    status = "matched" if observed else "no-anthropic-canary-metadata"
+    if keep_blocked_reason:
+        status = "keep-blocked"
+    elif blocker_set:
+        status = "blocked"
     return {
         "schema": ANTHROPIC_LIFECYCLE_SCHEMA,
-        "status": "matched" if observed else "no-anthropic-canary-metadata",
+        "status": status,
+        "next_state": "keep-blocked" if keep_blocked_reason else None,
+        "next_state_reason": _anthropic_lifecycle_next_state_reason(needed_resolution, blocker_set),
+        "keep_blocked_reason": keep_blocked_reason,
+        "needed_resolution": needed_resolution,
         "observed_count": observed,
         "cohort_counts": counts,
-        "coverage": {
-            "matched_count": observed,
-            "observed_rate": 1.0 if observed else 0.0,
-            "applied_rate": round(applied / observed, 6) if observed else 0.0,
-            "holdout_rate": round(holdout / observed, 6) if observed else 0.0,
-        },
+        "coverage": coverage,
         "error_count": _sum_cohort_metric(candidate, "error_count"),
         "retry_count": _sum_cohort_metric(candidate, "retry_count"),
         "fallback_count": _sum_cohort_metric(candidate, "fallback_count"),
         "oldest_observed_at": candidate.get("oldest_observed_at"),
         "latest_observed_at": candidate.get("latest_observed_at"),
-        "stale_evidence": candidate.get("stale_evidence") if isinstance(candidate.get("stale_evidence"), dict) else {},
+        "stale_evidence": stale,
         "reason_breakdown": candidate.get("reason_buckets") or [],
         "blocker_codes": sorted(blockers),
         "blocker_reason_breakdown": _counter_rows(blockers),
+        "rollback_guard_metadata": _anthropic_lifecycle_rollback_guard(
+            candidate,
+            counts=counts,
+            coverage=coverage,
+            blockers=blocker_set,
+        ),
         "privacy": _privacy_summary(),
     }
 
@@ -817,6 +953,11 @@ def build_anthropic_routing_canary_lifecycle_report(
                 _as_int((candidate["anthropic_canary_lifecycle_evidence"] or {}).get("observed_count"))
                 for candidate in candidates
                 if ((candidate["anthropic_canary_lifecycle_evidence"] or {}).get("stale_evidence") or {}).get("stale")
+            ),
+            "keep_blocked_count": sum(
+                1
+                for candidate in candidates
+                if (candidate.get("anthropic_canary_lifecycle_evidence") or {}).get("next_state") == "keep-blocked"
             ),
             "blocker_reason_breakdown": _counter_rows(blocker_totals),
         },

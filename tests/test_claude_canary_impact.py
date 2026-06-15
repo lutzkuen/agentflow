@@ -414,8 +414,30 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
         self.assertEqual(lifecycle["cohort_counts"]["safety_stopped"], 1)
         self.assertEqual(lifecycle["fallback_count"], 1)
         self.assertEqual(lifecycle["retry_count"], 1)
+        self.assertEqual(lifecycle["status"], "keep-blocked")
+        self.assertEqual(lifecycle["next_state"], "keep-blocked")
+        self.assertEqual(
+            lifecycle["next_state_reason"],
+            "safety-stop-requires-safer-threshold-or-executor-guard-and-rollback-proof",
+        )
+        self.assertEqual(
+            lifecycle["keep_blocked_reason"],
+            "anthropic-routing-safety-stop-needs-safer-threshold-or-executor-guard-rollback-proof",
+        )
+        self.assertIn("rollback_proof", lifecycle["needed_resolution"])
         self.assertIn("thinking-routing-guard", lifecycle["blocker_codes"])
         self.assertIn("thinking-history-blocked", lifecycle["blocker_codes"])
+        rollback_guard = lifecycle["rollback_guard_metadata"]
+        self.assertEqual(rollback_guard["schema"], "agentflow.anthropic_routing_canary_rollback_guard.v1")
+        self.assertEqual(rollback_guard["rule_id"], "test-claude-phase-canary")
+        self.assertEqual(rollback_guard["cohort_counts"]["canary_applied"], 2)
+        self.assertEqual(rollback_guard["cohort_counts"]["canary_holdout"], 1)
+        self.assertEqual(rollback_guard["cohort_counts"]["safety_stopped"], 1)
+        self.assertGreater(rollback_guard["coverage"]["applied_rate"], 0)
+        self.assertGreater(rollback_guard["coverage"]["holdout_rate"], 0)
+        self.assertIn("thinking-history-blocked", rollback_guard["safety_stop_reason_codes"])
+        self.assertEqual(rollback_guard["fallback_behavior"]["fallback_count"], 1)
+        self.assertEqual(rollback_guard["local_file_backed_representation"]["rule_file"], "routing_rules.yaml")
 
         missing_holdout = by_candidate["candidate-missing-holdout"]["anthropic_canary_lifecycle_evidence"]
         self.assertIn("missing-holdout-coverage", missing_holdout["blocker_codes"])
@@ -428,6 +450,69 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
         self.assertEqual(cli_payload["schema"], "agentflow.anthropic_routing_canary_lifecycle_report.v1")
         _assert_privacy_clean(self, report)
         _assert_privacy_clean(self, cli_payload)
+
+    def test_anthropic_routing_lifecycle_report_keep_blocks_zero_coverage_safety_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                self._log_claude_canary_call(
+                    store,
+                    candidate_id="candidate-zero-coverage-safety-stop",
+                    cohort="safety_stopped",
+                    suffix="safety-only",
+                    reason="thinking-safety-gate",
+                    safety_reason_codes=["thinking-history-blocked"],
+                )
+                report = build_anthropic_routing_canary_lifecycle_report(
+                    store,
+                    limit=10,
+                    max_evidence_age_hours=72,
+                    now=datetime(2026, 6, 10, 5, tzinfo=timezone.utc),
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(report["summary"]["canary_applied_count"], 0)
+        self.assertEqual(report["summary"]["canary_holdout_count"], 0)
+        self.assertEqual(report["summary"]["safety_stopped_count"], 1)
+        self.assertEqual(report["summary"]["keep_blocked_count"], 1)
+        candidate = report["candidates"][0]
+        lifecycle = candidate["anthropic_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["status"], "keep-blocked")
+        self.assertEqual(lifecycle["next_state"], "keep-blocked")
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 0)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 0)
+        self.assertEqual(lifecycle["coverage"]["applied_rate"], 0.0)
+        self.assertEqual(lifecycle["coverage"]["holdout_rate"], 0.0)
+        self.assertIn("missing-applied-coverage", lifecycle["blocker_codes"])
+        self.assertIn("missing-holdout-coverage", lifecycle["blocker_codes"])
+        self.assertIn("safety-stop-observed", lifecycle["blocker_codes"])
+        self.assertEqual(
+            lifecycle["keep_blocked_reason"],
+            "anthropic-routing-safety-stop-needs-applied-holdout-coverage-safer-threshold-or-executor-guard-rollback-proof",
+        )
+        self.assertEqual(
+            lifecycle["needed_resolution"],
+            [
+                "applied_coverage",
+                "holdout_coverage",
+                "rollback_proof",
+                "safer_threshold_or_executor_guard",
+                "safety_stop_reason_review",
+            ],
+        )
+        rollback_guard = lifecycle["rollback_guard_metadata"]
+        self.assertEqual(rollback_guard["rollback_action"], "disable_phase_canary")
+        self.assertEqual(rollback_guard["rollback_canary_fraction"], 0.0)
+        self.assertEqual(rollback_guard["rollback_holdout_fraction"], 0.0)
+        self.assertEqual(rollback_guard["coverage"]["applied_rate"], 0.0)
+        self.assertEqual(rollback_guard["coverage"]["holdout_rate"], 0.0)
+        self.assertIn("thinking-history-blocked", rollback_guard["safety_stop_reason_codes"])
+        self.assertEqual(rollback_guard["fallback_behavior"]["error_count"], 0)
+        self.assertEqual(rollback_guard["fallback_behavior"]["retry_count"], 0)
+        self.assertEqual(rollback_guard["fallback_behavior"]["fallback_count"], 0)
+        self.assertEqual(rollback_guard["local_file_backed_representation"]["rule_file"], "routing_rules.yaml")
+        _assert_privacy_clean(self, report)
 
     def test_claude_canary_impact_verdicts_cover_gates(self) -> None:
         scenarios = (
