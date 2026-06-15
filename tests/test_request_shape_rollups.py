@@ -14,6 +14,7 @@ from agentflow_proxy.request_shape_rollups import (
     apply_request_shape_cache_replay_canary_action,
     apply_request_shape_crunch_canary_action,
     build_request_shape_cache_replay_canary_stage_report,
+    build_request_shape_cache_replay_evidence_report,
     build_request_shape_crunch_canary_impact_report,
     build_request_shape_crunch_canary_stage_report,
     build_request_shape_rollups_report,
@@ -897,6 +898,363 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(written["pattern_rules"][0]["conditions"]["has_tools"])
         self.assertFalse(written["pattern_rules"][0]["conditions"]["stream"])
         self.assertNotIn("raw prompt must not leak", policy_path.read_text(encoding="utf-8"))
+
+    def test_cache_replay_evidence_reports_empty_no_canary_without_leaking_paths(self) -> None:
+        policy_path = Path(self.tmpdir.name) / "missing" / "cache_canary_policy.yaml"
+
+        report = build_request_shape_cache_replay_evidence_report(
+            self.store,
+            rules_path=policy_path,
+            limit=20,
+        )
+
+        self.assertEqual(report["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(report["status"], "no-canary-policy")
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["source"]["policy_file_present"])
+        self.assertFalse(report["source"]["policy_path_included"])
+        self.assertEqual(report["staged_canary_count"], 0)
+        self.assertEqual(report["summary"]["applied_count"], 0)
+        self.assertEqual(report["summary"]["holdout_count"], 0)
+        self.assertEqual(report["summary"]["projected_hits"], 0)
+        self.assertEqual(report["summary"]["observed_hits"], 0)
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+        self.assertFalse(report["privacy"]["cache_canary_policy_path_included"])
+        self.assertFalse(report["privacy"]["policy_ids_included"])
+        self.assertFalse(report["privacy"]["rule_ids_included"])
+        self.assertFalse(report["privacy"]["cohort_ids_included"])
+        self.assertNotIn(str(policy_path), json.dumps(report, sort_keys=True))
+
+    def test_cache_replay_evidence_reports_staged_but_no_traffic(self) -> None:
+        for cost in (0.01, 0.03, 0.02):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
+        report = build_request_shape_cache_replay_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="2026-06-15-cache-replay-evidence-stage",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+        )
+        policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
+        apply_request_shape_cache_replay_canary_action(report["top_stage_action"], rules_path=policy_path)
+        empty_store = SQLiteStore(str(Path(self.tmpdir.name) / "empty.sqlite3"))
+        try:
+            evidence = build_request_shape_cache_replay_evidence_report(
+                empty_store,
+                rules_path=policy_path,
+                limit=20,
+            )
+        finally:
+            empty_store.conn.close()
+
+        self.assertEqual(evidence["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(evidence["status"], "staged-no-traffic")
+        self.assertTrue(evidence["ok"])
+        self.assertEqual(evidence["staged_canary_count"], 1)
+        self.assertEqual(evidence["summary"]["projected_hits"], 2)
+        self.assertEqual(evidence["summary"]["observed_hits"], 0)
+        self.assertEqual(evidence["summary"]["observed_row_count"], 0)
+        self.assertEqual(evidence["summary"]["applied_count"], 0)
+        self.assertEqual(evidence["summary"]["holdout_count"], 0)
+        self.assertTrue(evidence["acceptance"]["has_staged_canary_metadata"])
+        self.assertTrue(evidence["acceptance"]["reports_projected_vs_observed_hits"])
+        self.assertTrue(evidence["acceptance"]["reports_stale_evidence_metadata"])
+        self.assertFalse(evidence["source"]["policy_path_included"])
+        rendered = json.dumps(evidence, sort_keys=True)
+        self.assertNotIn(str(policy_path), rendered)
+        self.assertNotIn("local-openai-cache-replay-canary", rendered)
+        self.assertNotIn("request-shape-cache-replay:", rendered)
+
+    def test_cache_replay_evidence_reports_observed_applied_holdout_and_blockers(self) -> None:
+        for cost in (0.01, 0.03, 0.02):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
+        stage = build_request_shape_cache_replay_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="2026-06-15-cache-replay-evidence-observed",
+            rollout_fraction=0.50,
+            holdout_fraction=0.25,
+        )
+        policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
+        apply_result = apply_request_shape_cache_replay_canary_action(stage["top_stage_action"], rules_path=policy_path)
+        written = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+        rule = written["pattern_rules"][0]
+        public_pattern_rule = {
+            "rule_id": rule["id"],
+            "candidate_id": rule["candidate_id"],
+            "policy_source": "local-manual",
+            "scope": "session",
+            "allow_tool_calls": False,
+            "safe_invalidation": False,
+            "rollout": rule["rollout"],
+            "canary": {"enabled": True, "selected": True, "cohort": "canary_applied"},
+            "graduation": rule["graduation"],
+        }
+        applied_canary = {
+            "schema": "agentflow.cache_replay_canary_decision.v1",
+            "rule_id": rule["id"],
+            "candidate_id": rule["candidate_id"],
+            "policy_source": "local-manual",
+            "scope": "session",
+            "canary": {"enabled": True, "selected": True, "cohort": "canary_applied"},
+            "canary_cohort": "canary_applied",
+            "status": "applied",
+            "reason": "no-dependency-required",
+            "projection": rule["graduation"],
+        }
+        self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="chat",
+            workflow_phase="chat",
+            stream=0,
+            has_tools=False,
+            cache_status="hit",
+            cache_reason="exact-pattern-hit",
+            cache_hit=1,
+            text_chars=6_000,
+            cost=0.001,
+            baseline=0.031,
+            cache_extra={
+                "pattern_rule": public_pattern_rule,
+                "cache_replay_canary": applied_canary,
+                "estimated_saved_cost_usd": 0.03,
+            },
+        )
+        self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="chat",
+            workflow_phase="chat",
+            stream=0,
+            has_tools=False,
+            cache_status="miss",
+            cache_reason="exact-pattern-miss",
+            text_chars=6_000,
+            cost=0.01,
+            baseline=0.01,
+            cache_extra={
+                "pattern_rule": public_pattern_rule,
+                "cache_replay_canary": applied_canary,
+            },
+        )
+        holdout_canary = {
+            **applied_canary,
+            "canary": {"enabled": True, "selected": False, "cohort": "canary_holdout"},
+            "canary_cohort": "canary_holdout",
+            "status": "holdout",
+            "reason": "canary_holdout",
+        }
+        self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="chat",
+            workflow_phase="chat",
+            stream=0,
+            has_tools=False,
+            cache_status="miss",
+            cache_reason="canary_holdout",
+            text_chars=6_000,
+            cost=0.01,
+            baseline=0.01,
+            cache_extra={
+                "pattern_rule": {**public_pattern_rule, "canary": holdout_canary["canary"]},
+                "cache_replay_canary": holdout_canary,
+            },
+        )
+        bypass_canary = {**applied_canary, "status": "bypassed", "reason": "session-scope-missing"}
+        self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="chat",
+            workflow_phase="chat",
+            stream=0,
+            has_tools=False,
+            cache_status="skipped",
+            cache_reason="session-scope-missing",
+            text_chars=6_000,
+            cost=0.01,
+            baseline=0.01,
+            cache_extra={
+                "pattern_rule": public_pattern_rule,
+                "cache_replay_canary": bypass_canary,
+            },
+        )
+        invalidated_canary = {**applied_canary, "status": "invalidated", "reason": "dependency-changed"}
+        self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="chat",
+            workflow_phase="chat",
+            stream=0,
+            has_tools=False,
+            cache_status="skipped",
+            cache_reason="dependency-changed",
+            text_chars=6_000,
+            cost=0.01,
+            baseline=0.01,
+            cache_extra={
+                "pattern_rule": public_pattern_rule,
+                "cache_replay_canary": invalidated_canary,
+            },
+        )
+
+        evidence = build_request_shape_cache_replay_evidence_report(
+            self.store,
+            rules_path=policy_path,
+            limit=20,
+        )
+
+        self.assertTrue(apply_result["ok"])
+        self.assertEqual(evidence["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(evidence["status"], "observed")
+        self.assertEqual(evidence["summary"]["applied_count"], 2)
+        self.assertEqual(evidence["summary"]["holdout_count"], 1)
+        self.assertEqual(evidence["summary"]["exact_hit_count"], 1)
+        self.assertEqual(evidence["summary"]["miss_count"], 1)
+        self.assertEqual(evidence["summary"]["bypass_count"], 1)
+        self.assertEqual(evidence["summary"]["invalidation_skipped_count"], 1)
+        self.assertEqual(evidence["summary"]["observed_hits"], 1)
+        self.assertEqual(evidence["summary"]["observed_savings_usd"], 0.03)
+        self.assertEqual(evidence["summary"]["projected_hits"], 2)
+        self.assertFalse(evidence["stale_evidence"]["stale"])
+        blockers = {item["value"]: item["count"] for item in evidence["blocker_breakdown"]}
+        self.assertEqual(blockers["session-scope-missing"], 1)
+        self.assertEqual(blockers["dependency-changed"], 1)
+        canary_statuses = {item["value"]: item["count"] for item in evidence["canary_status_breakdown"]}
+        self.assertEqual(canary_statuses["applied"], 2)
+        self.assertEqual(canary_statuses["holdout"], 1)
+        self.assertTrue(evidence["acceptance"]["reports_applied_and_holdout_counts"])
+        self.assertTrue(evidence["acceptance"]["reports_projected_vs_observed_hits"])
+        self.assertTrue(evidence["acceptance"]["reports_observed_savings_estimate"])
+        self.assertTrue(evidence["acceptance"]["reports_blocker_breakdown"])
+
+        rendered = json.dumps(evidence, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+            rule["id"],
+            rule["candidate_id"],
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_cache_replay_evidence_cli_reads_policy_overlay(self) -> None:
+        for cost in (0.01, 0.03, 0.02):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
+        stage = build_request_shape_cache_replay_canary_stage_report(self.store, limit=20)
+        policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
+        apply_request_shape_cache_replay_canary_action(stage["top_stage_action"], rules_path=policy_path)
+
+        stdout = io.StringIO()
+        code = cli.request_shape_cache_replay_evidence_cli(
+            [
+                "--db",
+                self.db_path,
+                "--limit",
+                "20",
+                "--rules-path",
+                str(policy_path),
+            ],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(payload["status"], "staged-no-traffic")
+        self.assertEqual(payload["staged_canary_count"], 1)
+        self.assertTrue(payload["privacy"]["aggregate_only"])
+        self.assertNotIn(str(policy_path), stdout.getvalue())
 
     def test_crunch_opportunity_dry_run_projects_repeated_context_savings(self) -> None:
         for cost in (0.08, 0.07, 0.09):

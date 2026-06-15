@@ -5373,6 +5373,63 @@ def request_shape_cache_replay_canary_stage_cli(argv: Sequence[str] | None = Non
     return 0 if not args.apply or bool((result.get("apply_result") or {}).get("ok")) else 1
 
 
+def request_shape_cache_replay_evidence_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report aggregate local evidence for staged request-shape cache replay canaries")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=10000,
+        help="Recent provider calls to inspect, default: 10000",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory containing cache_canary_policy.yaml, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
+    )
+    parser.add_argument(
+        "--rules-path",
+        help="Explicit cache_canary_policy.yaml path. Overrides --config-dir.",
+    )
+    parser.add_argument(
+        "--max-age-hours",
+        type=float,
+        default=72.0,
+        help="Mark evidence stale after this many hours without observed canary traffic, default: 72",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.request_shape_rollups import build_request_shape_cache_replay_evidence_report
+
+    rules_path = Path(args.rules_path).expanduser() if args.rules_path else Path(args.config_dir).expanduser() / "cache_canary_policy.yaml"
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_request_shape_cache_replay_evidence_report(
+            store,
+            rules_path=rules_path,
+            limit=args.limit,
+            max_age_hours=args.max_age_hours,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def cache_replay_cohorts_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Rank replay-ready plateau cohorts from local cache metadata")
     parser.add_argument(

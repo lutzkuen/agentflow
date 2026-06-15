@@ -21,6 +21,7 @@ REPLAY_BLOCKER_CLASSIFICATION_ROW_SCHEMA = "agentflow.request_shape_cache_replay
 REPLAY_CACHE_CANARY_ACTION_SCHEMA = "agentflow.request_shape_cache_replay_canary_action.v1"
 REPLAY_CACHE_CANARY_STAGE_SCHEMA = "agentflow.request_shape_cache_replay_canary_stage.v1"
 REPLAY_CACHE_CANARY_APPLY_SCHEMA = "agentflow.request_shape_cache_replay_canary_apply.v1"
+REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_replay_evidence.v1"
 CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "agentflow.request_shape_crunch_opportunity_dry_run.v1"
 CRUNCH_CANARY_ACTION_SCHEMA = "agentflow.request_shape_crunch_canary_action.v1"
 CRUNCH_CANARY_STAGE_SCHEMA = "agentflow.request_shape_repeated_context_crunch_canary_stage.v1"
@@ -38,6 +39,7 @@ DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS = 72.0
 DEFAULT_CACHE_REPLAY_CANARY_ROLLOUT_FRACTION = 0.10
 DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION = 0.10
 DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS = 3600
+DEFAULT_CACHE_REPLAY_CANARY_MAX_EVIDENCE_AGE_HOURS = 72.0
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -2727,6 +2729,343 @@ def apply_request_shape_cache_replay_canary_action(
         "managed_server_calls_made": False,
         "cache_entries_written": False,
         "privacy": _replayability_privacy(),
+    }
+
+
+def _cache_replay_evidence_privacy() -> dict[str, Any]:
+    privacy = dict(_replayability_privacy())
+    privacy.update({
+        "policy_ids_included": False,
+        "rule_ids_included": False,
+        "cohort_ids_included": False,
+        "cache_canary_policy_path_included": False,
+    })
+    return privacy
+
+
+def _load_cache_replay_canary_policy(path: str | Path) -> tuple[dict[str, Any], bool]:
+    policy_path = Path(path).expanduser()
+    if not policy_path.exists():
+        return {}, False
+    import yaml
+
+    loaded = yaml.safe_load(policy_path.read_text(encoding="utf-8")) or {}
+    return (loaded if isinstance(loaded, dict) else {}), True
+
+
+def _request_shape_cache_replay_policy_rules(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    rules = policy.get("pattern_rules") if isinstance(policy.get("pattern_rules"), list) else []
+    staged: list[dict[str, Any]] = []
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else {}
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
+        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+        if graduation.get("source_schema") != REPLAYABILITY_DRY_RUN_SCHEMA:
+            continue
+        staged.append({
+            "index": index + 1,
+            "rule_id": str(rule.get("id") or rule.get("rule_id") or ""),
+            "candidate_id": str(rule.get("candidate_id") or ""),
+            "policy_source": public_label(rule.get("policy_source"), "unknown"),
+            "enabled": bool(rule.get("enabled", True)),
+            "conditions": conditions,
+            "action": action,
+            "rollout": rollout,
+            "graduation": graduation,
+            "staged_at": rule.get("staged_at") or graduation.get("staged_at"),
+        })
+    return staged
+
+
+def _cache_replay_public_shape_from_rule(rule: dict[str, Any]) -> dict[str, Any]:
+    graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else {}
+    conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    return {
+        "provider_family": public_label(conditions.get("provider_family") or "openai", "unknown"),
+        "source_surface": public_label(graduation.get("source_surface") or conditions.get("source_surface"), "unknown"),
+        "endpoint": public_label(graduation.get("endpoint") or conditions.get("endpoint"), "unknown"),
+        "category": public_label(graduation.get("category") or conditions.get("category"), "unknown"),
+        "workflow_phase": public_label(graduation.get("workflow_phase") or conditions.get("workflow_phase"), "unknown"),
+        "text_bucket": public_label(graduation.get("text_bucket") or conditions.get("text_bucket"), "unknown"),
+        "token_bucket": public_label(graduation.get("token_bucket") or conditions.get("token_bucket"), "unknown"),
+        "stream": bool(conditions.get("stream")),
+        "has_tools": bool(conditions.get("has_tools")),
+    }
+
+
+def _cache_replay_staged_policy_summary(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for rank, rule in enumerate(rules, start=1):
+        graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else {}
+        rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        summaries.append({
+            "rank": rank,
+            "policy_source": rule.get("policy_source") or "unknown",
+            "enabled": bool(rule.get("enabled", True)),
+            "shape": _cache_replay_public_shape_from_rule(rule),
+            "sample_count": _as_int(graduation.get("sample_count")),
+            "projected_hits": _as_int(graduation.get("projected_hits") or graduation.get("projected_hit_count")),
+            "projected_savings_usd": round(_as_float(
+                graduation.get("projected_savings_usd") or graduation.get("projected_saved_cost_usd")
+            ), 6),
+            "canary_fraction": round(_as_float(rollout.get("canary_fraction")), 6),
+            "holdout_fraction": round(_as_float(rollout.get("holdout_fraction")), 6),
+            "ttl_seconds": _as_int(action.get("ttl_seconds"), DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS),
+            "source_schema": graduation.get("source_schema"),
+            "aggregate_only": True,
+            "metadata_only": True,
+        })
+    return summaries
+
+
+def _cache_replay_row_matches_staged_rules(
+    cache_meta: dict[str, Any],
+    *,
+    staged_rule_ids: set[str],
+    staged_candidate_ids: set[str],
+) -> bool:
+    pattern_rule = cache_meta.get("pattern_rule") if isinstance(cache_meta.get("pattern_rule"), dict) else {}
+    replay_canary = (
+        cache_meta.get("cache_replay_canary")
+        if isinstance(cache_meta.get("cache_replay_canary"), dict)
+        else {}
+    )
+    for meta in (pattern_rule, replay_canary):
+        rule_id = str(meta.get("rule_id") or meta.get("id") or "")
+        candidate_id = str(meta.get("candidate_id") or "")
+        if rule_id and rule_id in staged_rule_ids:
+            return True
+        if candidate_id and candidate_id in staged_candidate_ids:
+            return True
+    graduation = pattern_rule.get("graduation") if isinstance(pattern_rule.get("graduation"), dict) else {}
+    projection = replay_canary.get("projection") if isinstance(replay_canary.get("projection"), dict) else {}
+    return graduation.get("source_schema") == REPLAYABILITY_DRY_RUN_SCHEMA or projection.get("source_schema") == REPLAYABILITY_DRY_RUN_SCHEMA
+
+
+def _cache_replay_evidence_class(row: dict[str, Any], cache_meta: dict[str, Any]) -> tuple[str, str]:
+    replay_canary = (
+        cache_meta.get("cache_replay_canary")
+        if isinstance(cache_meta.get("cache_replay_canary"), dict)
+        else {}
+    )
+    cache_status = str(cache_meta.get("status") or "").strip().lower()
+    canary_status = str(replay_canary.get("status") or cache_meta.get("canary_cohort") or "").strip().lower()
+    reason = public_label(replay_canary.get("reason") or cache_meta.get("reason") or cache_status, "unknown")
+    cache_hit = bool(row.get("cache_hit")) or cache_status == "hit"
+    unsupported_reasons = {
+        "stream-mismatch",
+        "streaming-not-allowed",
+        "streaming-replay-not-supported",
+        "has-tools-mismatch",
+        "unsafe-tool-cache-pattern",
+        "file-watch-required",
+        "unsupported-endpoint",
+        "cohort-mismatch",
+        "replayability-gate-mismatch",
+    }
+    if canary_status == "holdout":
+        return "holdout", reason
+    if canary_status == "applied":
+        if cache_hit:
+            return "exact_hit", reason
+        if cache_status == "miss":
+            return "miss", reason
+        return "applied", reason
+    if canary_status in {"invalidated", "invalidation_blocked"}:
+        return "invalidation_skipped", reason
+    if canary_status in {"bypassed", "bypass", "safety_stopped"}:
+        return "bypassed", reason
+    if cache_status == "hit":
+        return "exact_hit", reason
+    if cache_status == "miss":
+        return "miss", reason
+    if reason in unsupported_reasons or cache_status == "skipped":
+        return "unsupported_shape", reason
+    return "bypassed", reason
+
+
+def _cache_replay_row_observed_savings(row: dict[str, Any], cache_meta: dict[str, Any], evidence_class: str) -> float:
+    if evidence_class != "exact_hit":
+        return 0.0
+    saved = _as_float(cache_meta.get("estimated_saved_cost_usd"))
+    if saved > 0:
+        return saved
+    baseline = _as_float(row.get("cost_baseline_usd"))
+    actual = _as_float(row.get("cost_est_usd"))
+    return max(0.0, baseline - actual)
+
+
+def build_request_shape_cache_replay_evidence_report(
+    store_obj: Any,
+    *,
+    rules_path: str | Path,
+    limit: int = 10000,
+    max_age_hours: float = DEFAULT_CACHE_REPLAY_CANARY_MAX_EVIDENCE_AGE_HOURS,
+) -> dict[str, Any]:
+    policy, policy_exists = _load_cache_replay_canary_policy(rules_path)
+    staged_rules = _request_shape_cache_replay_policy_rules(policy)
+    staged_rule_ids = {str(rule.get("rule_id")) for rule in staged_rules if rule.get("rule_id")}
+    staged_candidate_ids = {str(rule.get("candidate_id")) for rule in staged_rules if rule.get("candidate_id")}
+    capped_limit = max(1, min(int(limit or 1), 10000))
+    rows = store_obj.optimization_action_ledger_rows(limit=capped_limit)
+
+    lifecycle_counts = {
+        "canary_applied_count": 0,
+        "canary_holdout_count": 0,
+        "exact_hit_count": 0,
+        "miss_count": 0,
+        "bypass_count": 0,
+        "invalidation_skipped_count": 0,
+        "unsupported_shape_count": 0,
+    }
+    blocker_counts: dict[str, int] = {}
+    cache_status_counts: dict[str, int] = {}
+    canary_status_counts: dict[str, int] = {}
+    observed_rows = 0
+    observed_savings = 0.0
+    latest_observed: datetime | None = None
+
+    for row in rows:
+        cache_meta = _json_obj(row.get("cache_json"))
+        if not cache_meta or not staged_rules:
+            continue
+        if not _cache_replay_row_matches_staged_rules(
+            cache_meta,
+            staged_rule_ids=staged_rule_ids,
+            staged_candidate_ids=staged_candidate_ids,
+        ):
+            continue
+
+        observed_rows += 1
+        replay_canary = (
+            cache_meta.get("cache_replay_canary")
+            if isinstance(cache_meta.get("cache_replay_canary"), dict)
+            else {}
+        )
+        cache_status = public_label(cache_meta.get("status"), "unknown")
+        canary_status = public_label(replay_canary.get("status"), "unknown")
+        _increment(cache_status_counts, cache_status)
+        _increment(canary_status_counts, canary_status)
+        evidence_class, reason = _cache_replay_evidence_class(row, cache_meta)
+        if evidence_class == "exact_hit":
+            lifecycle_counts["canary_applied_count"] += 1
+            lifecycle_counts["exact_hit_count"] += 1
+        elif evidence_class == "miss":
+            lifecycle_counts["canary_applied_count"] += 1
+            lifecycle_counts["miss_count"] += 1
+        elif evidence_class == "applied":
+            lifecycle_counts["canary_applied_count"] += 1
+        elif evidence_class == "holdout":
+            lifecycle_counts["canary_holdout_count"] += 1
+        elif evidence_class == "invalidation_skipped":
+            lifecycle_counts["invalidation_skipped_count"] += 1
+            _increment(blocker_counts, reason)
+        elif evidence_class == "unsupported_shape":
+            lifecycle_counts["unsupported_shape_count"] += 1
+            _increment(blocker_counts, reason)
+        else:
+            lifecycle_counts["bypass_count"] += 1
+            _increment(blocker_counts, reason)
+        observed_savings += _cache_replay_row_observed_savings(row, cache_meta, evidence_class)
+        observed_at = _parse_utc(row.get("created_at"))
+        if observed_at and (latest_observed is None or observed_at > latest_observed):
+            latest_observed = observed_at
+
+    now = _parse_utc(utc_now()) or datetime.now(timezone.utc)
+    staged_times = [
+        parsed
+        for rule in staged_rules
+        if (parsed := _parse_utc(rule.get("staged_at"))) is not None
+    ]
+    reference_time = latest_observed or (min(staged_times) if staged_times else None)
+    age_hours = round((now - reference_time).total_seconds() / 3600.0, 3) if reference_time else None
+    stale = bool(age_hours is not None and age_hours > max_age_hours)
+    if not policy_exists:
+        status = "no-canary-policy"
+        reason = "cache-canary-policy-missing"
+        next_action = "stage-cache-replay-canary"
+    elif not staged_rules:
+        status = "no-request-shape-cache-replay-canary"
+        reason = "request-shape-cache-replay-canary-missing"
+        next_action = "stage-cache-replay-canary"
+    elif observed_rows == 0:
+        status = "staged-no-traffic"
+        reason = "missing-observed-cache-replay-traffic"
+        next_action = "collect-cache-replay-canary-traffic"
+    else:
+        status = "observed"
+        reason = "cache-replay-canary-evidence-observed"
+        next_action = "review-cache-replay-canary-promotion-readiness"
+    projected_hits = sum(
+        _as_int((rule.get("graduation") or {}).get("projected_hits") or (rule.get("graduation") or {}).get("projected_hit_count"))
+        for rule in staged_rules
+        if isinstance(rule.get("graduation"), dict)
+    )
+    projected_savings = sum(
+        _as_float((rule.get("graduation") or {}).get("projected_savings_usd") or (rule.get("graduation") or {}).get("projected_saved_cost_usd"))
+        for rule in staged_rules
+        if isinstance(rule.get("graduation"), dict)
+    )
+    observed_hits = lifecycle_counts["exact_hit_count"]
+    return {
+        "schema": REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA,
+        "status": status,
+        "ok": bool(staged_rules),
+        "generated_at": utc_now(),
+        "reason": reason,
+        "next_action": next_action,
+        "source": {
+            "policy_file": "cache_canary_policy.yaml",
+            "policy_file_present": policy_exists,
+            "policy_path_included": False,
+            "rows_scanned": len(rows),
+            "lookback_limit": capped_limit,
+        },
+        "staged_canary_count": len(staged_rules),
+        "staged_canaries": _cache_replay_staged_policy_summary(staged_rules),
+        "summary": {
+            "observed_row_count": observed_rows,
+            "applied_count": lifecycle_counts["canary_applied_count"],
+            "holdout_count": lifecycle_counts["canary_holdout_count"],
+            "exact_hit_count": lifecycle_counts["exact_hit_count"],
+            "miss_count": lifecycle_counts["miss_count"],
+            "bypass_count": lifecycle_counts["bypass_count"],
+            "invalidation_skipped_count": lifecycle_counts["invalidation_skipped_count"],
+            "unsupported_shape_count": lifecycle_counts["unsupported_shape_count"],
+            "projected_hits": projected_hits,
+            "observed_hits": observed_hits,
+            "projected_savings_usd": round(projected_savings, 6),
+            "observed_savings_usd": round(observed_savings, 6),
+            "hit_observation_rate": round(observed_hits / float(lifecycle_counts["canary_applied_count"]), 6)
+            if lifecycle_counts["canary_applied_count"] else 0.0,
+            "top_blocker": _breakdown(blocker_counts)[0]["value"] if blocker_counts else None,
+        },
+        "lifecycle_counts": lifecycle_counts,
+        "cache_status_breakdown": _breakdown(cache_status_counts),
+        "canary_status_breakdown": _breakdown(canary_status_counts),
+        "blocker_breakdown": _breakdown(blocker_counts),
+        "stale_evidence": {
+            "max_age_hours": float(max_age_hours),
+            "latest_observed_at": latest_observed.isoformat() if latest_observed else None,
+            "reference_time": reference_time.isoformat() if reference_time else None,
+            "age_hours": age_hours,
+            "stale": stale,
+            "reason": "evidence-older-than-max-age" if stale else "fresh-or-not-yet-observed",
+        },
+        "acceptance": {
+            "has_staged_canary_metadata": bool(staged_rules),
+            "reports_applied_and_holdout_counts": "canary_applied_count" in lifecycle_counts and "canary_holdout_count" in lifecycle_counts,
+            "reports_projected_vs_observed_hits": projected_hits >= 0 and observed_hits >= 0,
+            "reports_observed_savings_estimate": True,
+            "reports_blocker_breakdown": isinstance(_breakdown(blocker_counts), list),
+            "reports_stale_evidence_metadata": True,
+            "aggregate_only": True,
+        },
+        "privacy": _cache_replay_evidence_privacy(),
     }
 
 
