@@ -119,6 +119,7 @@ agentflow-optimization-eval-next = "agentflow_proxy.cli:optimization_eval_queue_
 agentflow-optimization-promotion-report = "agentflow_proxy.cli:optimization_promotion_report_main"
 agentflow-optimization-promotion-actions = "agentflow_proxy.cli:optimization_promotion_actions_main"
 agentflow-optimization-promotion-blocker-review = "agentflow_proxy.cli:optimization_promotion_blocker_review_main"
+agentflow-post-promotion-priority-delta-review = "agentflow_proxy.cli:post_promotion_priority_delta_review_main"
 agentflow-optimization-promotion-canaries-apply = "agentflow_proxy.cli:optimization_promotion_canary_apply_main"
 agentflow-optimization-promotion-impact = "agentflow_proxy.cli:optimization_promotion_impact_main"
 agentflow-orchestrator-research = "agentflow_proxy.cli:orchestrator_research_main"

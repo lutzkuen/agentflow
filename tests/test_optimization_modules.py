@@ -2960,5 +2960,168 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(store.updated[0][1]["managed_recommendation"]["outcome_feedback"], queued)
 
 
+class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
+    def _fixture(self) -> dict:
+        return {
+            "schema": "agentflow.post_promotion_policy_priority_deltas.v1",
+            "deltas": [
+                {
+                    "delta_id": "post-promo-delta:routing:widen:crunch-savings",
+                    "rank": 1,
+                    "status": "recommended",
+                    "next_action": "widen-local-policy",
+                    "action_family": "routing",
+                    "source_surface": "crunch_proxy_request",
+                    "recommendation_type": "widen-crunch-threshold",
+                    "savings_delta_usd": 55.50,
+                    "confidence": 0.92,
+                    "policy_section": "crunch",
+                    "local_executor_compatibility": {
+                        "status": "compatible",
+                        "local_action_family": "routing",
+                    },
+                    "evidence_summary": {
+                        "record_count": 200,
+                        "promotion_status": "promoted",
+                        "rank_score": 0.92,
+                        "savings_delta_usd": 55.50,
+                    },
+                    "prompt": "raw prompt must not appear",
+                    "messages": [{"content": "raw message must not appear"}],
+                    "request_id": "secret-request-id",
+                    "session_id": "secret-session-id",
+                    "cache_key": "secret-cache-key",
+                },
+                {
+                    "delta_id": "post-promo-delta:crunch:rollback:below-threshold",
+                    "rank": 2,
+                    "status": "recommended",
+                    "next_action": "rollback-local-policy",
+                    "action_family": "crunch",
+                    "source_surface": "crunch_proxy_request",
+                    "recommendation_type": "rollback-crunch-rule",
+                    "savings_delta_usd": -12.00,
+                    "confidence": 0.85,
+                    "evidence_summary": {"record_count": 80, "promotion_status": "demoted"},
+                },
+                {
+                    "delta_id": "post-promo-delta:cache:keep:low-confidence",
+                    "rank": 3,
+                    "status": "noop",
+                    "next_action": "keep-blocked",
+                    "action_family": "cache",
+                    "source_surface": "cache_proxy_request",
+                    "recommendation_type": "noop",
+                    "savings_delta_usd": 0.0,
+                    "confidence": 0.30,
+                    "no_op_reasons": ["low-confidence", "insufficient-evidence"],
+                    "evidence_summary": {"record_count": 5},
+                },
+            ],
+        }
+
+    def test_ranks_widen_before_rollback_before_keep_blocked(self):
+        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+
+        result = build_post_promotion_priority_delta_review(self._fixture(), limit=10)
+
+        self.assertEqual(result["schema"], "agentflow.post_promotion_priority_delta_review.v1")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["wrote_local_policy_files"])
+        self.assertFalse(result["provider_calls_made"])
+
+        summary = result["summary"]
+        self.assertEqual(summary["source_delta_count"], 3)
+        self.assertEqual(summary["review_candidate_count"], 3)
+        self.assertEqual(summary["recommended_count"], 2)
+        self.assertEqual(summary["noop_count"], 1)
+
+        candidates = result["candidates"]
+        self.assertEqual(len(candidates), 3)
+        # widen must appear before rollback in the routing group
+        routing_group = next(g for g in result["groups"] if g["action_family"] == "routing")
+        self.assertEqual(routing_group["rank"], 1)
+        self.assertEqual(routing_group["top_next_action"], "widen-local-policy")
+
+        # noop item appears in omitted_actions with explicit no_op_reasons
+        omitted = result["omitted_actions"]
+        self.assertEqual(len(omitted), 1)
+        self.assertEqual(omitted[0]["next_action"], "keep-blocked")
+        self.assertIn("low-confidence", omitted[0]["no_op_reasons"])
+        self.assertIn("insufficient-evidence", omitted[0]["no_op_reasons"])
+
+    def test_strips_raw_identifiers_from_output(self):
+        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+
+        result = build_post_promotion_priority_delta_review(self._fixture(), limit=10)
+        encoded = json.dumps(result, sort_keys=True)
+
+        for forbidden in (
+            "raw prompt must not appear",
+            "raw message must not appear",
+            "secret-request-id",
+            "secret-session-id",
+            "secret-cache-key",
+            '"prompt"',
+            '"messages"',
+            '"request_id"',
+            '"session_id"',
+            '"cache_key"',
+        ):
+            self.assertNotIn(forbidden, encoded, msg=f"forbidden token found in output: {forbidden!r}")
+
+    def test_empty_payload_returns_ok_no_candidates(self):
+        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+
+        result = build_post_promotion_priority_delta_review({}, limit=10)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["review_candidate_count"], 0)
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["groups"], [])
+        self.assertFalse(result["privacy"]["provider_calls_made"])
+        self.assertFalse(result["privacy"]["raw_prompts_included"])
+
+    def test_schema_mismatch_adds_validation_warning(self):
+        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+
+        result = build_post_promotion_priority_delta_review({"schema": "unknown.schema.v1", "deltas": []})
+
+        self.assertFalse(result["validation"]["ok"])
+        self.assertTrue(len(result["validation"]["warnings"]) > 0)
+
+    def test_cli_reads_fixture_from_stdin_and_emits_report(self):
+        from agentflow_proxy.cli_commands.optimization_reports import post_promotion_priority_delta_review_cli
+        import io
+
+        stdin = io.StringIO(json.dumps(self._fixture()))
+        stdout = io.StringIO()
+
+        rc = post_promotion_priority_delta_review_cli(["-"], stdin=stdin, stdout=stdout)
+
+        self.assertEqual(rc, 0)
+        out = json.loads(stdout.getvalue())
+        self.assertEqual(out["schema"], "agentflow.post_promotion_priority_delta_review.v1")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["summary"]["review_candidate_count"], 3)
+        self.assertFalse(out["provider_calls_made"])
+        self.assertFalse(out["managed_server_calls_made"])
+
+    def test_cli_no_managed_url_returns_empty_report(self):
+        from agentflow_proxy.cli_commands.optimization_reports import post_promotion_priority_delta_review_cli
+        import io
+
+        stdout = io.StringIO()
+        rc = post_promotion_priority_delta_review_cli([], stdout=stdout)
+
+        self.assertEqual(rc, 0)
+        out = json.loads(stdout.getvalue())
+        self.assertEqual(out["schema"], "agentflow.post_promotion_priority_delta_review.v1")
+        self.assertEqual(out["summary"]["review_candidate_count"], 0)
+        self.assertEqual(out["fetch"]["status"], "skipped")
+        self.assertEqual(out["fetch"]["reason"], "no-managed-url-configured")
+
+
 if __name__ == "__main__":
     unittest.main()
