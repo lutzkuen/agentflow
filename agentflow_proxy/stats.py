@@ -209,6 +209,27 @@ def _promotion_blocker_review_path() -> Path:
     return agentflow_config_path("promotion_blocker_recommendation_review.json")
 
 
+def _post_promotion_priority_review_path() -> Path:
+    raw = os.getenv("AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH")
+    if raw:
+        return Path(raw).expanduser()
+    return agentflow_config_path("post_promotion_priority_delta_review.json")
+
+
+def _post_promotion_policy_draft_dry_run_path() -> Path:
+    raw = os.getenv("AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH")
+    if raw:
+        return Path(raw).expanduser()
+    return agentflow_config_path("post_promotion_policy_draft_dry_run.json")
+
+
+def _post_promotion_outcome_flush_status_path() -> Path:
+    raw = os.getenv("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH")
+    if raw:
+        return Path(raw).expanduser()
+    return agentflow_config_path("post_promotion_outcome_flush_status.json")
+
+
 def _local_path_class(raw: str | os.PathLike[str] | None) -> str:
     expanded = os.path.abspath(os.path.expanduser(str(raw or ""))) if raw else ""
     home = os.path.abspath(os.path.expanduser("~"))
@@ -971,6 +992,342 @@ def _promotion_blocker_dashboard_privacy() -> dict[str, Any]:
         "provider_calls_made": False,
         "managed_server_calls_made": False,
         "wrote_local_policy_files": False,
+    }
+
+
+def _post_promotion_priority_handoff_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "feature_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "provider_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_responses_included": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "absolute_paths_included": False,
+        "file_paths_included": False,
+        "individual_candidate_ids_included": False,
+        "individual_action_ids_included": False,
+        "individual_rule_ids_included": False,
+        "artifact_payloads_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "wrote_local_policy_files": False,
+    }
+
+
+def _post_promotion_artifact_source(
+    *,
+    kind: str,
+    path: Path,
+    env_name: str,
+    payload: dict[str, Any] | None,
+    status: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "configured": bool(os.getenv(env_name)),
+        "available": payload is not None,
+        "status": status,
+        "reason": reason,
+        "schema": payload.get("schema") if isinstance(payload, dict) else None,
+        "generated_at": payload.get("generated_at") if isinstance(payload, dict) else None,
+        "path_class": _local_path_class(path),
+        "path_included": False,
+        "payload_included": False,
+    }
+
+
+def _read_post_promotion_artifact(path: Path) -> tuple[dict[str, Any] | None, str, str]:
+    if not path.exists():
+        return None, "missing", "artifact-not-found"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, "unavailable", f"artifact-unreadable:{exc.__class__.__name__}"
+    if not isinstance(payload, dict):
+        return None, "unavailable", "artifact-not-json-object"
+    return payload, "available", "loaded-local-artifact"
+
+
+def _safe_count_breakdown(rows: Any, *, limit: int = 10) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for row in rows[: max(0, limit)]:
+        if not isinstance(row, dict):
+            continue
+        result.append({
+            "value": public_label(row.get("value"), "unknown"),
+            "count": _as_int(row.get("count")),
+        })
+    return result
+
+
+def _post_promotion_action_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {
+        "widen-local-policy": 0,
+        "rollback-local-policy": 0,
+        "keep-blocked": 0,
+    }
+    for candidate in candidates:
+        action = public_label(candidate.get("next_action"), "keep-blocked")
+        if action not in counts:
+            action = "keep-blocked"
+        counts[action] += 1
+    return counts
+
+
+def _post_promotion_status_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        status = public_label(candidate.get("status"), "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _post_promotion_noop_reasons(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        reasons = candidate.get("no_op_reasons") if isinstance(candidate.get("no_op_reasons"), list) else []
+        for reason in reasons:
+            label = public_label(reason, "unknown")
+            counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _post_promotion_handoff_freshness(generated_values: list[Any], *, now: datetime) -> dict[str, Any]:
+    parsed_values = [_parse_utc_datetime(value) for value in generated_values if value]
+    parsed = [value for value in parsed_values if value is not None]
+    latest = max(parsed, default=None)
+    if latest is None:
+        return {
+            "latest_artifact_at": None,
+            "age_seconds": None,
+            "state": "no-artifacts",
+        }
+    age_seconds = max(0, int((now - latest).total_seconds()))
+    if age_seconds <= 6 * 60 * 60:
+        state = "fresh"
+    elif age_seconds <= 24 * 60 * 60:
+        state = "aging"
+    else:
+        state = "stale"
+    return {
+        "latest_artifact_at": latest.isoformat(),
+        "age_seconds": age_seconds,
+        "state": state,
+    }
+
+
+def _post_promotion_next_safe_command(
+    *,
+    review_payload: dict[str, Any] | None,
+    draft_payload: dict[str, Any] | None,
+    flush_payload: dict[str, Any] | None,
+    top_next_action: str | None,
+) -> dict[str, Any]:
+    if review_payload is None:
+        return {
+            "label": "fetch managed priority deltas",
+            "command": "agentflow-post-promotion-priority-delta-review --pretty",
+            "read_only": True,
+            "reason": "priority-review-missing",
+        }
+    if draft_payload is None and top_next_action in {"widen-local-policy", "rollback-local-policy", "keep-blocked"}:
+        return {
+            "label": "dry-run local policy handoff",
+            "command": "agentflow-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
+            "read_only": True,
+            "reason": "policy-draft-dry-run-missing",
+        }
+    draft_status = public_label(draft_payload.get("status"), "unknown") if isinstance(draft_payload, dict) else "missing"
+    if draft_status == "blocked":
+        return {
+            "label": "inspect dry-run impact gate blockers",
+            "command": "agentflow-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
+            "read_only": True,
+            "reason": "impact-gate-blocked",
+        }
+    if flush_payload is None:
+        return {
+            "label": "dry-run post-promotion outcome flush",
+            "command": "agentflow-managed-feedback-status --post-promotion-action-outcomes --dry-run --pretty",
+            "read_only": True,
+            "reason": "outcome-flush-status-missing",
+        }
+    return {
+        "label": "review handoff status",
+        "command": "agentflow-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
+        "read_only": True,
+        "reason": "handoff-artifacts-present",
+    }
+
+
+async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    review_path = _post_promotion_priority_review_path()
+    draft_path = _post_promotion_policy_draft_dry_run_path()
+    flush_path = _post_promotion_outcome_flush_status_path()
+    review_payload, review_status, review_reason = _read_post_promotion_artifact(review_path)
+    draft_payload, draft_status, draft_reason = _read_post_promotion_artifact(draft_path)
+    flush_payload, flush_status, flush_reason = _read_post_promotion_artifact(flush_path)
+
+    if review_payload is not None and review_payload.get("schema") != "agentflow.post_promotion_priority_delta_review.v1":
+        review_payload = None
+        review_status = "unavailable"
+        review_reason = "unexpected-priority-review-schema"
+    if draft_payload is not None and draft_payload.get("schema") != "agentflow.post_promotion_policy_draft_dry_run.v1":
+        draft_payload = None
+        draft_status = "unavailable"
+        draft_reason = "unexpected-policy-draft-schema"
+    if flush_payload is not None and flush_payload.get("schema") not in {
+        "agentflow.managed_feedback_flush.v1",
+        "agentflow.post_promotion_action_outcome_rollup_flush_status.v1",
+    }:
+        flush_payload = None
+        flush_status = "unavailable"
+        flush_reason = "unexpected-outcome-flush-schema"
+
+    review_summary = review_payload.get("summary") if isinstance(review_payload, dict) and isinstance(review_payload.get("summary"), dict) else {}
+    review_candidates = review_payload.get("candidates") if isinstance(review_payload, dict) and isinstance(review_payload.get("candidates"), list) else []
+    review_candidates = [item for item in review_candidates if isinstance(item, dict)]
+    action_counts = _post_promotion_action_counts(review_candidates)
+    status_counts = _post_promotion_status_counts(review_candidates)
+    noop_reasons = _post_promotion_noop_reasons(review_candidates)
+    top_next_action = public_label(review_summary.get("top_next_action"), "none") if review_payload else None
+    if top_next_action in {None, "none"} and review_candidates:
+        top_next_action = public_label(review_candidates[0].get("next_action"), "keep-blocked")
+
+    draft_summary = draft_payload.get("summary") if isinstance(draft_payload, dict) and isinstance(draft_payload.get("summary"), dict) else {}
+    impact_gate_status = "missing"
+    if draft_payload is not None:
+        blocked = _as_int(draft_summary.get("impact_gate_blocked_count"))
+        passed = _as_int(draft_summary.get("impact_gate_pass_count"))
+        if blocked:
+            impact_gate_status = "blocked"
+        elif passed or _as_int(draft_summary.get("impact_gate_count")):
+            impact_gate_status = "passed"
+        else:
+            impact_gate_status = public_label(draft_payload.get("status"), "unknown")
+
+    flush_nested = (
+        flush_payload.get("post_promotion_action_outcome_rollups")
+        if isinstance(flush_payload, dict) and isinstance(flush_payload.get("post_promotion_action_outcome_rollups"), dict)
+        else flush_payload
+        if isinstance(flush_payload, dict) and flush_payload.get("schema") == "agentflow.post_promotion_action_outcome_rollup_flush_status.v1"
+        else {}
+    )
+    flush_summary = flush_payload.get("flush") if isinstance(flush_payload, dict) and isinstance(flush_payload.get("flush"), dict) else {}
+    flush_status_label = (
+        public_label(flush_nested.get("status"), "unknown")
+        if isinstance(flush_nested, dict) and flush_nested
+        else public_label(flush_summary.get("status"), "missing")
+        if isinstance(flush_summary, dict) and flush_summary
+        else "missing"
+    )
+    freshness = _post_promotion_handoff_freshness(
+        [
+            review_payload.get("generated_at") if isinstance(review_payload, dict) else None,
+            draft_payload.get("generated_at") if isinstance(draft_payload, dict) else None,
+            flush_payload.get("generated_at") if isinstance(flush_payload, dict) else None,
+        ],
+        now=now,
+    )
+    command = _post_promotion_next_safe_command(
+        review_payload=review_payload,
+        draft_payload=draft_payload,
+        flush_payload=flush_payload,
+        top_next_action=top_next_action,
+    )
+    available_count = sum(1 for payload in (review_payload, draft_payload, flush_payload) if payload is not None)
+    overall_status = "available" if review_payload is not None else "no-data" if available_count == 0 else "partial"
+    return {
+        "schema": "agentflow.post_promotion_priority_handoff_dashboard.v1",
+        "ok": True,
+        "read_only": True,
+        "generated_at": utc_now(),
+        "status": overall_status,
+        "status_reason": "priority handoff artifacts loaded" if review_payload is not None else "post-promotion priority review artifact not found",
+        "summary": {
+            "artifact_count": available_count,
+            "priority_review_status": review_status,
+            "priority_review_candidate_count": _as_int(review_summary.get("review_candidate_count")) or len(review_candidates),
+            "recommended_count": _as_int(review_summary.get("recommended_count")),
+            "noop_count": _as_int(review_summary.get("noop_count")),
+            "top_next_action": top_next_action,
+            "widen_count": action_counts["widen-local-policy"],
+            "rollback_count": action_counts["rollback-local-policy"],
+            "keep_blocked_count": action_counts["keep-blocked"],
+            "policy_draft_status": public_label(draft_payload.get("status"), draft_status) if isinstance(draft_payload, dict) else draft_status,
+            "draft_count": _as_int(draft_summary.get("draft_count")),
+            "widen_draft_count": _as_int(draft_summary.get("widen_draft_count")),
+            "rollback_draft_count": _as_int(draft_summary.get("rollback_draft_count")),
+            "omitted_count": _as_int(draft_summary.get("omitted_count")),
+            "impact_gate_status": impact_gate_status,
+            "impact_gate_blocked_count": _as_int(draft_summary.get("impact_gate_blocked_count")),
+            "outcome_flush_status": flush_status_label,
+            "outcome_rollup_count": _as_int(flush_nested.get("rollup_count")) if isinstance(flush_nested, dict) else 0,
+            "outcome_flush_reason": public_label(flush_nested.get("reason"), "none") if isinstance(flush_nested, dict) and flush_nested else public_label(flush_reason, "none"),
+            "freshness_state": freshness["state"],
+            "latest_artifact_at": freshness["latest_artifact_at"],
+            "latest_artifact_age_seconds": freshness["age_seconds"],
+            "next_safe_command": command["command"],
+            "next_command_reason": command["reason"],
+        },
+        "status_counts": _breakdown_from_counts(status_counts),
+        "next_action_counts": _breakdown_from_counts(action_counts),
+        "no_op_reason_counts": _breakdown_from_counts(noop_reasons)[:10],
+        "impact_gate_blocker_reason_counts": _safe_count_breakdown(draft_summary.get("impact_gate_blocker_reason_counts")),
+        "sources": {
+            "priority_review": _post_promotion_artifact_source(
+                kind="priority-review-report",
+                path=review_path,
+                env_name="AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH",
+                payload=review_payload,
+                status=review_status,
+                reason=review_reason,
+            ),
+            "policy_draft_dry_run": _post_promotion_artifact_source(
+                kind="policy-draft-dry-run-report",
+                path=draft_path,
+                env_name="AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH",
+                payload=draft_payload,
+                status=draft_status,
+                reason=draft_reason,
+            ),
+            "outcome_flush_status": _post_promotion_artifact_source(
+                kind="outcome-flush-status-report",
+                path=flush_path,
+                env_name="AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH",
+                payload=flush_payload,
+                status=flush_status,
+                reason=flush_reason,
+            ),
+        },
+        "commands": [
+            command,
+            {
+                "label": "fetch managed priority deltas",
+                "command": "agentflow-post-promotion-priority-delta-review --pretty",
+                "read_only": True,
+            },
+            {
+                "label": "dry-run local policy handoff",
+                "command": "agentflow-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
+                "read_only": True,
+            },
+            {
+                "label": "dry-run post-promotion outcome flush",
+                "command": "agentflow-managed-feedback-status --post-promotion-action-outcomes --dry-run --pretty",
+                "read_only": True,
+            },
+        ],
+        "privacy": _post_promotion_priority_handoff_privacy(),
     }
 
 
@@ -19995,6 +20352,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Post-promotion priority handoff health</h2>
+  <table class="activity-table" data-table-id="post-promotion-priority-handoff" data-filter-label="Filter priority handoff">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="time">Freshness</th><th data-sort-type="text">Top action</th><th data-sort-type="number">Widen</th><th data-sort-type="number">Rollback</th><th data-sort-type="number">Keep blocked</th><th data-sort-type="text">Draft gate</th><th data-sort-type="text">Outcome flush</th><th data-sort-type="text">No-op reasons</th><th data-sort-type="text">Next command</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="post-promotion-priority-handoff-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Priority handoff artifacts</h2>
+  <table data-table-id="post-promotion-priority-handoff-sources" data-filter-label="Filter priority handoff artifacts">
+    <thead><tr>
+      <th data-sort-type="text">Artifact</th><th data-sort-type="text">Status</th><th data-sort-type="time">Generated</th><th data-sort-type="text">Source</th>
+    </tr></thead>
+    <tbody id="post-promotion-priority-handoff-sources-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Review commands</h2>
   <table data-table-id="promotion-blocker-commands" data-filter-label="Filter promotion blocker commands">
     <thead><tr>
@@ -23040,12 +23415,14 @@ function postPromotionDeltaBadge(status){
 }
 async function refreshPromotionBlockerNextActions(){
   try{
-    const [blockerResponse,deltaResponse]=await Promise.all([
+    const [blockerResponse,deltaResponse,handoffResponse]=await Promise.all([
       fetch('/agentflow/stats/promotion-blocker-next-actions?limit=20'),
-      fetch('/agentflow/stats/post-promotion-deltas?limit=1000')
+      fetch('/agentflow/stats/post-promotion-deltas?limit=1000'),
+      fetch('/agentflow/stats/post-promotion-priority-handoff')
     ]);
     const d=await blockerResponse.json();
     const deltaData=await deltaResponse.json();
+    const handoff=await handoffResponse.json();
     const s=d.summary||{};
     const source=d.source||{};
     const privacy=d.privacy||{};
@@ -23103,6 +23480,32 @@ async function refreshPromotionBlockerNextActions(){
         <td class="flags">${p.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} ${p.raw_prompts_included||p.provider_bodies_included||p.request_ids_included||p.session_ids_included||p.cache_keys_included||p.file_paths_included?'<span class="badge err">raw/local data</span>':'<span class="badge hit">raw data omitted</span>'}</td>
       </tr>`;
     }).join('')||`<tr><td colspan="12" style="color:#8b949e">${esc(deltaData.status==='no-feedback'?'No post-promotion feedback recorded yet':'No post-promotion deltas available')}</td></tr>`;
+    const h=handoff.summary||{};
+    const hp=handoff.privacy||{};
+    const noopReasons=promotionBlockerReasonBadges(handoff.no_op_reason_counts||[]);
+    document.getElementById('post-promotion-priority-handoff-tbody').innerHTML=`<tr>
+      <td><span class="badge ${handoff.status==='available'?'hit':handoff.status==='partial'?'routed':'miss'}">${esc(handoff.status||'unknown')}</span><div class="sub">${esc(handoff.status_reason||'')}</div></td>
+      <td class="ts">${h.latest_artifact_at?ago(h.latest_artifact_at):'—'}<div class="sub">${esc(h.freshness_state||'no-artifacts')}</div></td>
+      <td class="flags"><span class="badge provider">${esc(h.top_next_action||'none')}</span></td>
+      <td class="tokens">${(h.widen_count||0).toLocaleString()}<div class="sub">${(h.widen_draft_count||0).toLocaleString()} drafts</div></td>
+      <td class="tokens">${(h.rollback_count||0).toLocaleString()}<div class="sub">${(h.rollback_draft_count||0).toLocaleString()} drafts</div></td>
+      <td class="tokens">${(h.keep_blocked_count||0).toLocaleString()}<div class="sub">${(h.omitted_count||0).toLocaleString()} omitted</div></td>
+      <td class="flags"><span class="badge ${h.impact_gate_status==='blocked'?'err':h.impact_gate_status==='passed'?'hit':'miss'}">${esc(h.impact_gate_status||'missing')}</span><div class="sub">${(h.impact_gate_blocked_count||0).toLocaleString()} blocked</div></td>
+      <td class="flags"><span class="badge ${['flushed','sent','completed','would-queue'].includes(h.outcome_flush_status)?'hit':h.outcome_flush_status==='missing'?'miss':'routed'}">${esc(h.outcome_flush_status||'missing')}</span><div class="sub">${esc(h.outcome_flush_reason||'')}</div></td>
+      <td class="flags">${noopReasons}</td>
+      <td class="model">${esc(h.next_safe_command||'agentflow-post-promotion-priority-delta-review --pretty')}<div class="sub">${esc(h.next_command_reason||'')}</div></td>
+      <td class="flags">${hp.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} ${hp.artifact_payloads_included?'<span class="badge err">payloads</span>':'<span class="badge hit">payloads omitted</span>'} ${hp.raw_prompts_included||hp.provider_bodies_included||hp.request_ids_included||hp.session_ids_included||hp.cache_keys_included||hp.file_paths_included?'<span class="badge err">raw/local data</span>':'<span class="badge hit">raw data omitted</span>'}</td>
+    </tr>`;
+    const sources=handoff.sources||{};
+    document.getElementById('post-promotion-priority-handoff-sources-tbody').innerHTML=Object.keys(sources).map(key=>{
+      const row=sources[key]||{};
+      return `<tr>
+        <td><span class="badge provider">${esc(row.kind||key)}</span></td>
+        <td><span class="badge ${row.available?'hit':row.status==='unavailable'?'err':'miss'}">${esc(row.status||'unknown')}</span><div class="sub">${esc(row.reason||'')}</div></td>
+        <td class="ts">${row.generated_at?ago(row.generated_at):'—'}</td>
+        <td class="flags">${row.configured?'<span class="badge provider">configured path</span>':'<span class="badge miss">default path</span>'} <span class="badge miss">${esc(row.path_class||'unknown')}</span> ${row.payload_included?'<span class="badge err">payload included</span>':'<span class="badge hit">payload omitted</span>'}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="4" style="color:#8b949e">No priority handoff artifact sources configured</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }

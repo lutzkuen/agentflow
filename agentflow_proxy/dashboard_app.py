@@ -499,6 +499,10 @@ def create_dashboard_router(
             lambda: stats_views.stats_post_promotion_deltas(_store(store_obj), limit=limit),
         )
 
+    @router.get("/agentflow/stats/post-promotion-priority-handoff")
+    async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
+        return await stats_views.stats_post_promotion_priority_handoff()
+
     @router.get("/agentflow/stats/rollout-actions/readiness")
     async def stats_rollout_actions_readiness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_rollout_actions_readiness(_store(store_obj), limit=limit)

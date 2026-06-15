@@ -58,8 +58,14 @@ class DashboardImportTests(unittest.TestCase):
         event_tmp = tempfile.TemporaryDirectory()
         old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
         old_promotion_blocker_review = os.environ.get("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")
+        old_priority_review = os.environ.get("AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH")
+        old_priority_dry_run = os.environ.get("AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH")
+        old_priority_flush = os.environ.get("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH")
         os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
         os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = str(Path(event_tmp.name) / "missing_promotion_blocker_review.json")
+        os.environ["AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = str(Path(event_tmp.name) / "missing_post_promotion_priority_review.json")
+        os.environ["AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = str(Path(event_tmp.name) / "missing_post_promotion_policy_draft_dry_run.json")
+        os.environ["AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = str(Path(event_tmp.name) / "missing_post_promotion_outcome_flush_status.json")
         store = Store(tmp.name)
         try:
             from agentflow_proxy.policy_events import log_policy_event
@@ -108,6 +114,7 @@ class DashboardImportTests(unittest.TestCase):
             optimization_promotion_funnel = client.get("/agentflow/stats/optimization-promotion-funnel")
             promotion_blocker_next_actions = client.get("/agentflow/stats/promotion-blocker-next-actions")
             post_promotion_deltas = client.get("/agentflow/stats/post-promotion-deltas")
+            post_promotion_priority_handoff = client.get("/agentflow/stats/post-promotion-priority-handoff")
             rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
             local_pattern_coverage = client.get("/agentflow/stats/local-pattern-coverage")
             phase_routing = client.get("/agentflow/stats/phase-routing")
@@ -292,6 +299,20 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(post_promotion_deltas.json()["privacy"]["session_ids_included"])
             self.assertFalse(post_promotion_deltas.json()["privacy"]["cache_keys_included"])
             self.assertFalse(post_promotion_deltas.json()["privacy"]["file_paths_included"])
+            self.assertEqual(post_promotion_priority_handoff.status_code, 200)
+            self.assertEqual(post_promotion_priority_handoff.json()["schema"], "agentflow.post_promotion_priority_handoff_dashboard.v1")
+            self.assertEqual(post_promotion_priority_handoff.json()["status"], "no-data")
+            self.assertEqual(post_promotion_priority_handoff.json()["summary"]["top_next_action"], None)
+            self.assertEqual(post_promotion_priority_handoff.json()["summary"]["freshness_state"], "no-artifacts")
+            self.assertIn("agentflow-post-promotion-priority-delta-review", post_promotion_priority_handoff.json()["summary"]["next_safe_command"])
+            self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["provider_calls_made"])
+            self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["managed_server_calls_made"])
+            self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["raw_prompts_included"])
+            self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["provider_bodies_included"])
+            self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["request_ids_included"])
+            self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["session_ids_included"])
+            self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["cache_keys_included"])
+            self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["file_paths_included"])
             self.assertEqual(rollout_readiness.status_code, 200)
             self.assertEqual(rollout_readiness.json()["schema"], "agentflow.rollout_actions_readiness.v1")
             self.assertFalse(rollout_readiness.json()["privacy"]["raw_action_payloads_included"])
@@ -387,11 +408,15 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
             self.assertIn("/agentflow/stats/promotion-blocker-next-actions", dashboard.text)
             self.assertIn("/agentflow/stats/post-promotion-deltas", dashboard.text)
+            self.assertIn("/agentflow/stats/post-promotion-priority-handoff", dashboard.text)
             self.assertIn("Promotion blocker next actions", dashboard.text)
             self.assertIn("promotion-blocker-summary-tbody", dashboard.text)
             self.assertIn("promotion-blocker-groups-tbody", dashboard.text)
             self.assertIn("Post-promotion blocker deltas", dashboard.text)
             self.assertIn("post-promotion-deltas-tbody", dashboard.text)
+            self.assertIn("Post-promotion priority handoff health", dashboard.text)
+            self.assertIn("post-promotion-priority-handoff-tbody", dashboard.text)
+            self.assertIn("post-promotion-priority-handoff-sources-tbody", dashboard.text)
             self.assertIn("/agentflow/stats/claude-routing-promotion-funnel", dashboard.text)
             self.assertIn("Claude routing promotion funnel", dashboard.text)
             self.assertIn("claude-routing-funnel-candidates-tbody", dashboard.text)
@@ -454,6 +479,18 @@ class DashboardImportTests(unittest.TestCase):
                 os.environ.pop("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH", None)
             else:
                 os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = old_promotion_blocker_review
+            if old_priority_review is None:
+                os.environ.pop("AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH", None)
+            else:
+                os.environ["AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = old_priority_review
+            if old_priority_dry_run is None:
+                os.environ.pop("AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH", None)
+            else:
+                os.environ["AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = old_priority_dry_run
+            if old_priority_flush is None:
+                os.environ.pop("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH", None)
+            else:
+                os.environ["AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = old_priority_flush
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
@@ -594,6 +631,177 @@ class DashboardImportTests(unittest.TestCase):
                 os.environ.pop("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH", None)
             else:
                 os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = old_review_path
+            store.conn.close()
+            tmp.close()
+            work_tmp.cleanup()
+
+    def test_post_promotion_priority_handoff_endpoint_uses_review_dry_run_and_flush_fixtures(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        work_tmp = tempfile.TemporaryDirectory()
+        old_priority_review = os.environ.get("AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH")
+        old_priority_dry_run = os.environ.get("AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH")
+        old_priority_flush = os.environ.get("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH")
+        review_path = Path(work_tmp.name) / "priority_review.json"
+        dry_run_path = Path(work_tmp.name) / "policy_draft_dry_run.json"
+        flush_path = Path(work_tmp.name) / "outcome_flush.json"
+        os.environ["AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = str(review_path)
+        os.environ["AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = str(dry_run_path)
+        os.environ["AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = str(flush_path)
+        store = Store(tmp.name)
+        try:
+            from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+            from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+
+            priority_payload = {
+                "schema": "agentflow.post_promotion_policy_priority_deltas.v1",
+                "deltas": [
+                    {
+                        "delta_id": "secret-priority-routing-delta",
+                        "rank": 1,
+                        "status": "recommended",
+                        "next_action": "widen-local-policy",
+                        "action_family": "routing",
+                        "source_surface": "anthropic_messages",
+                        "recommendation_type": "widen-routing-canary",
+                        "savings_delta_usd": 4.5,
+                        "confidence": 0.91,
+                        "policy_section": "routing",
+                        "evidence_summary": {
+                            "affected_call_count": 100,
+                            "affected_row_count": 10,
+                            "current_canary_fraction": 0.10,
+                            "current_holdout_fraction": 0.20,
+                            "preserved_previous_rule": True,
+                        },
+                        "prompt": "raw handoff prompt must not leak",
+                        "request_id": "raw-handoff-request-secret",
+                        "session_id": "raw-handoff-session-secret",
+                        "cache_key": "raw-handoff-cache-secret",
+                        "file_path": "/home/lutz/private/handoff_secret.py",
+                    },
+                    {
+                        "delta_id": "secret-priority-cache-delta",
+                        "rank": 2,
+                        "status": "recommended",
+                        "next_action": "rollback-local-policy",
+                        "action_family": "cache",
+                        "source_surface": "openai_responses",
+                        "recommendation_type": "rollback-cache-canary",
+                        "savings_delta_usd": -1.0,
+                        "confidence": 0.88,
+                        "policy_section": "cache",
+                        "evidence_summary": {
+                            "affected_call_count": 20,
+                            "affected_row_count": 2,
+                            "preserved_previous_rule": True,
+                        },
+                    },
+                    {
+                        "delta_id": "secret-priority-crunch-delta",
+                        "rank": 3,
+                        "status": "noop",
+                        "next_action": "keep-blocked",
+                        "action_family": "crunch",
+                        "source_surface": "anthropic_messages",
+                        "recommendation_type": "noop",
+                        "savings_delta_usd": 0.0,
+                        "confidence": 0.20,
+                        "policy_section": "crunch",
+                        "no_op_reasons": ["low-confidence", "stale-evidence"],
+                    },
+                ],
+            }
+            review = build_post_promotion_priority_delta_review(priority_payload, limit=10)
+            dry_run = build_post_promotion_policy_drafts(review)
+            flush = {
+                "schema": "agentflow.managed_feedback_flush.v1",
+                "ok": True,
+                "generated_at": utc_now(),
+                "flush": {"status": "completed", "reason": "ok", "sent": 1},
+                "post_promotion_action_outcome_rollups": {
+                    "schema": "agentflow.post_promotion_action_outcome_rollup_flush_status.v1",
+                    "status": "flushed",
+                    "reason": "sent",
+                    "rollup_count": 2,
+                    "payload_included": False,
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+                "privacy": {"metadata_only": True, "payload_json_included": False},
+            }
+            review_path.write_text(json.dumps(review, sort_keys=True), encoding="utf-8")
+            dry_run_path.write_text(json.dumps(dry_run, sort_keys=True), encoding="utf-8")
+            flush_path.write_text(json.dumps(flush, sort_keys=True), encoding="utf-8")
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+
+            response = client.get("/agentflow/stats/post-promotion-priority-handoff")
+            dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["schema"], "agentflow.post_promotion_priority_handoff_dashboard.v1")
+            self.assertEqual(data["status"], "available")
+            self.assertEqual(data["summary"]["priority_review_candidate_count"], 3)
+            self.assertEqual(data["summary"]["top_next_action"], "widen-local-policy")
+            self.assertEqual(data["summary"]["widen_count"], 1)
+            self.assertEqual(data["summary"]["rollback_count"], 1)
+            self.assertEqual(data["summary"]["keep_blocked_count"], 1)
+            self.assertEqual(data["summary"]["policy_draft_status"], "drafted")
+            self.assertEqual(data["summary"]["impact_gate_status"], "passed")
+            self.assertEqual(data["summary"]["outcome_flush_status"], "flushed")
+            self.assertEqual(data["summary"]["outcome_rollup_count"], 2)
+            self.assertEqual(data["summary"]["freshness_state"], "fresh")
+            self.assertIn("agentflow-post-promotion-policy-draft-dry-run", data["summary"]["next_safe_command"])
+            self.assertEqual(data["next_action_counts"][0]["value"], "keep-blocked")
+            self.assertEqual({row["value"] for row in data["status_counts"]}, {"recommended", "noop"})
+            self.assertEqual({row["value"] for row in data["no_op_reason_counts"]}, {"low-confidence", "stale-evidence"})
+            self.assertFalse(data["sources"]["priority_review"]["path_included"])
+            self.assertFalse(data["sources"]["priority_review"]["payload_included"])
+            self.assertFalse(data["privacy"]["artifact_payloads_included"])
+            self.assertFalse(data["privacy"]["provider_calls_made"])
+            self.assertFalse(data["privacy"]["managed_server_calls_made"])
+            rendered = json.dumps(data, sort_keys=True)
+            for forbidden in (
+                "raw handoff prompt",
+                "raw-handoff-request-secret",
+                "raw-handoff-session-secret",
+                "raw-handoff-cache-secret",
+                "/home/lutz/private/handoff_secret.py",
+                "secret-priority-routing-delta",
+                "secret-priority-cache-delta",
+                "secret-priority-crunch-delta",
+                '"prompt"',
+                '"request_id"',
+                '"session_id"',
+                '"cache_key"',
+                '"file_path"',
+            ):
+                self.assertNotIn(forbidden, rendered)
+
+            self.assertEqual(dashboard.status_code, 200)
+            self.assertIn("Post-promotion priority handoff health", dashboard.text)
+            self.assertIn("post-promotion-priority-handoff-tbody", dashboard.text)
+            self.assertIn("post-promotion-priority-handoff-sources-tbody", dashboard.text)
+        finally:
+            if old_priority_review is None:
+                os.environ.pop("AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH", None)
+            else:
+                os.environ["AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = old_priority_review
+            if old_priority_dry_run is None:
+                os.environ.pop("AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH", None)
+            else:
+                os.environ["AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = old_priority_dry_run
+            if old_priority_flush is None:
+                os.environ.pop("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH", None)
+            else:
+                os.environ["AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = old_priority_flush
             store.conn.close()
             tmp.close()
             work_tmp.cleanup()
