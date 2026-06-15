@@ -1942,6 +1942,8 @@ def _local_file_backed_representation(action_family: str | None) -> dict[str, An
 def _managed_omission_priority(reason: str, representation: dict[str, Any]) -> int:
     reason_l = reason.lower()
     if not representation.get("exists"):
+        if representation.get("reason") == "unknown-local-action-family":
+            return 70
         return 10
     if any(term in reason_l for term in ("safety", "privacy", "raw", "unsupported", "no-local", "omitted")):
         return 20
@@ -2072,6 +2074,53 @@ def _managed_recommendation_health_signal(
         for row in _managed_health_rows(report):
             rows.append(_managed_omission_row(row, source="recommendation_health"))
 
+        fallback_rows = _managed_local_handoff_stage_rows(local_summary or stats)
+        represented_families = {
+            str(row.get("local_action_family") or "")
+            for row in rows
+            if isinstance(row.get("local_file_backed_representation"), dict)
+            and row["local_file_backed_representation"].get("exists")
+        }
+        has_generic_managed_omission = any(
+            row.get("local_action_family") == "unknown"
+            and isinstance(row.get("local_file_backed_representation"), dict)
+            and row["local_file_backed_representation"].get("reason") == "unknown-local-action-family"
+            for row in rows
+        )
+        if fallback_rows and (not represented_families or has_generic_managed_omission):
+            existing = {
+                (
+                    str(row.get("omitted_reason") or ""),
+                    str(row.get("local_action_family") or ""),
+                    str(row.get("next_action") or ""),
+                )
+                for row in rows
+            }
+            for row in fallback_rows:
+                family = str(row.get("local_action_family") or "")
+                if family in represented_families:
+                    for existing_row in rows:
+                        if str(existing_row.get("local_action_family") or "") != family:
+                            continue
+                        if str(existing_row.get("next_action") or "") == "review-local-policy-representation":
+                            existing_row["next_action"] = row.get("next_action")
+                            existing_row["local_handoff_reason"] = row.get("local_handoff_reason")
+                            existing_row["local_evidence_state"] = row.get("local_evidence_state")
+                            existing_row["local_evidence_source"] = row.get("local_evidence_source")
+                            if row.get("blocker_codes"):
+                                existing_row["blocker_codes"] = row.get("blocker_codes")
+                        break
+                    continue
+                key = (
+                    str(row.get("omitted_reason") or ""),
+                    family,
+                    str(row.get("next_action") or ""),
+                )
+                if key not in existing:
+                    rows.append(row)
+                    existing.add(key)
+                    represented_families.add(family)
+
         if not rows and config.get("enabled") is False:
             disabled_count = _to_int(summary.get("disabled_count") or summary.get("window_calls") or calls)
             rows.append(
@@ -2166,6 +2215,64 @@ def _managed_recommendation_health_signal(
             "absolute_paths_included": False,
         },
     }
+
+
+def build_managed_recommendation_handoff_report(stats: dict[str, Any] | None) -> dict[str, Any]:
+    """Build the local, metadata-only managed recommendation handoff report.
+
+    The managed optimizer is optional for this report. When managed recommendation
+    health is absent, disabled, or has no omission rows, local aggregate evidence
+    is ranked into file-backed routing/crunch/cache policy handoffs instead.
+    """
+    summary = _stats_summary(stats)
+    signal = summary.get("managed_recommendation_health")
+    if not isinstance(signal, dict):
+        signal = {
+            "schema": "agentflow.managed_recommendation_handoff_health.v1",
+            "status": "no-local-traffic",
+            "source_schema": None,
+            "calls": 0,
+            "managed_dependency": "optional",
+            "omitted_local_action_reason": None,
+            "top_local_file_backed_exists": None,
+            "summary": {
+                "window_calls": 0,
+                "metadata_rows": 0,
+                "received_count": 0,
+                "applied_count": 0,
+                "observed_savings_usd": 0.0,
+                "omitted_count": 0,
+                "ranked_omission_count": 0,
+                "local_file_backed_count": 0,
+                "no_local_representation_count": 0,
+                "local_policy_followup_count": 0,
+                "managed_dependency": "optional",
+            },
+            "top_omission": None,
+            "omissions": [],
+            "missing_measurements": ["local_metadata_calls"],
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+                "individual_candidate_ids_included": False,
+                "absolute_paths_included": False,
+            },
+        }
+    result = dict(signal)
+    result["read_only"] = True
+    result["provider_calls_made"] = False
+    result["managed_server_calls_made"] = False
+    result["local_policy_handoff"] = {
+        "source": "local-file-backed-policy",
+        "managed_dependency": "optional",
+        "supported_local_action_families": ["routing", "crunch", "cache"],
+    }
+    return sanitize_value(result)
 
 
 def _request_shape_report(stats: dict[str, Any]) -> dict[str, Any] | None:

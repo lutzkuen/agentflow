@@ -1256,6 +1256,86 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(payload["privacy"]["aggregate_only"])
         self.assertNotIn(str(policy_path), stdout.getvalue())
 
+    def test_managed_recommendation_handoff_cli_ranks_local_policy_handoffs(self) -> None:
+        for cost in (0.08, 0.07, 0.09):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming",
+                text_chars=80_000,
+                cost=cost,
+                baseline=cost,
+            )
+        for cost in (0.01, 0.03, 0.02):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
+
+        stdout = io.StringIO()
+        code = cli.managed_recommendation_handoff_cli(
+            [
+                "--db",
+                self.db_path,
+                "--limit",
+                "20",
+                "--request-shape-limit",
+                "20",
+            ],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.managed_recommendation_handoff_health.v1")
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["provider_calls_made"])
+        self.assertFalse(payload["managed_server_calls_made"])
+        self.assertEqual(payload["managed_dependency"], "optional")
+
+        by_family = {row["local_action_family"]: row for row in payload["omissions"]}
+        for family, rule_file in {
+            "crunch": "crunch_rules.yaml",
+            "cache": "cache_rules.yaml",
+        }.items():
+            self.assertIn(family, by_family)
+            row = by_family[family]
+            self.assertEqual(row["follow_up_owner"], "local-policy")
+            self.assertTrue(row["local_file_backed_representation"]["exists"])
+            self.assertEqual(row["local_file_backed_representation"]["rule_file"], rule_file)
+            self.assertIn(rule_file, row["local_handoff_reason"])
+        self.assertEqual(by_family["crunch"]["next_action"], "stage-repeated-context-crunch-canary")
+
+        rendered = stdout.getvalue()
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertTrue(payload["privacy"]["metadata_only"])
+        self.assertTrue(payload["privacy"]["aggregate_only"])
+
     def test_crunch_opportunity_dry_run_projects_repeated_context_savings(self) -> None:
         for cost in (0.08, 0.07, 0.09):
             self._log_call(

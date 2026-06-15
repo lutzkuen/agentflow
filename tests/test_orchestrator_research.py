@@ -2262,6 +2262,69 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(signal["privacy"]["request_ids_included"])
         self.assertFalse(signal["privacy"]["session_ids_included"])
 
+    def test_managed_report_without_omissions_falls_back_to_local_policy_handoffs(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2873,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "managed_recommendations": {
+                    "schema": "agentflow.managed_recommendations.v1",
+                    "current_config": {"enabled": False},
+                    "summary": {
+                        "window_calls": 2873,
+                        "metadata_rows": 0,
+                        "received_count": 0,
+                        "applied_count": 0,
+                        "disabled_count": 2873,
+                    },
+                    "reason_breakdown": [],
+                    "status_breakdown": [],
+                    "recommendation_health": {"rows": []},
+                },
+                "request_shape_crunch_opportunity": {
+                    "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                    "status": "projected-savings-ranked",
+                    "summary": {
+                        "rows_considered": 749,
+                        "matched_count": 749,
+                        "candidate_count": 11,
+                        "projected_saved_usd": 4.086506,
+                        "projected_saved_tokens": 1375441,
+                        "activation_state": "activation-ready",
+                        "next_action": "stage-repeated-context-crunch-canary",
+                        "top_blocker": "repeated-context-crunch-opportunity",
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "routing": [
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "unknown",
+                        "endpoint": "unknown",
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-sonnet-4-6",
+                        "category": "tool-result",
+                        "c": 1197,
+                    }
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["managed_recommendation_health"]
+        self.assertEqual(signal["status"], "omission-reasons-ranked")
+        self.assertEqual(signal["top_omission"]["local_action_family"], "crunch")
+        self.assertEqual(signal["top_omission"]["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(signal["top_omission"]["follow_up_owner"], "local-policy")
+        self.assertEqual(signal["top_omission"]["local_file_backed_representation"]["rule_file"], "crunch_rules.yaml")
+        self.assertGreaterEqual(signal["summary"]["local_file_backed_count"], 3)
+        self.assertEqual(signal["summary"]["no_local_representation_count"], 0)
+        self.assertIn("routing", {row["local_action_family"] for row in signal["omissions"]})
+        self.assertIn("cache", {row["local_action_family"] for row in signal["omissions"]})
+
     def test_request_shape_rollup_report_ranks_repeated_context_candidate(self):
         plan = build_research_plan(
             issues=[],

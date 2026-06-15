@@ -5430,6 +5430,68 @@ def request_shape_cache_replay_evidence_cli(argv: Sequence[str] | None = None, *
     return 0
 
 
+def managed_recommendation_handoff_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Rank optional managed recommendation omissions into local file-backed policy handoffs"
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to inspect for managed recommendation metadata, default: 1000",
+    )
+    parser.add_argument(
+        "--request-shape-limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to inspect for local request-shape evidence, default: 1000",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy import stats as stats_views
+    from agentflow_proxy.orchestrator_research import build_managed_recommendation_handoff_report
+    from agentflow_proxy.request_shape_rollups import build_request_shape_rollups_report
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        base_stats = asyncio.run(stats_views.stats(store, str(args.db)))
+        local_stats = asyncio.run(stats_views.stats_full(store))
+        managed_report = asyncio.run(stats_views.stats_managed_recommendations(store, limit=max(1, int(args.limit))))
+        request_shape_report = build_request_shape_rollups_report(
+            store,
+            limit=max(1, int(args.request_shape_limit)),
+            persist=False,
+            run_id="managed-recommendation-handoff-dry-run",
+        )
+    finally:
+        store.conn.close()
+
+    report_input = dict(base_stats)
+    report_input.update(local_stats)
+    if "routing" in base_stats:
+        report_input["routing"] = base_stats["routing"]
+    report_input["managed_recommendations"] = managed_report
+    report_input["request_shape_rollups"] = request_shape_report
+    result = build_managed_recommendation_handoff_report(report_input)
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def cache_replay_cohorts_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Rank replay-ready plateau cohorts from local cache metadata")
     parser.add_argument(
