@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -95,6 +96,126 @@ class StoreBackendTest(unittest.TestCase):
                 self.assertEqual(max(counts), 40)
                 self.assertEqual(store.conn.execute("select count(*) as c from calls").fetchone()["c"], 40)
                 self.assertEqual(store.get_cache("cache-35"), {"i": 35})
+            finally:
+                store.conn.close()
+
+    def test_log_call_records_policy_decision_blocker_when_metadata_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                store.log_call(
+                    id="missing-policy-decision",
+                    created_at=utc_now(),
+                    path="/v1/messages",
+                    provider="anthropic",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=12,
+                    input_tokens_est=10,
+                    output_tokens_est=5,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.001,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=None,
+                    cache_json=stable_json({"status": "skipped"}),
+                    category="tool-result",
+                )
+
+                row = store.conn.execute(
+                    "select source_surface, endpoint, routing_json from calls where id = ?",
+                    ("missing-policy-decision",),
+                ).fetchone()
+                self.assertEqual(row["source_surface"], "anthropic_messages")
+                managed = json.loads(row["routing_json"])["managed_recommendation"]
+                self.assertEqual(managed["schema"], "agentflow.managed_policy_decision_evaluation.v1")
+                self.assertEqual(managed["status"], "skipped-local-blocker")
+                self.assertEqual(managed["reason"], "policy-decision-metadata-missing")
+                self.assertTrue(managed["coverage_denominator_included"])
+                self.assertTrue(managed["expected_evaluation"])
+                self.assertEqual(managed["fallback"], "local-policy")
+                self.assertTrue(managed["privacy"]["metadata_only"])
+                self.assertFalse(managed["privacy"]["provider_bodies_included"])
+            finally:
+                store.conn.close()
+
+    def test_log_call_preserves_existing_managed_policy_decision_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                managed = {
+                    "schema": "agentflow.policy_decision.v1",
+                    "status": "received",
+                    "policy_id": "policy-1",
+                    "applied": True,
+                }
+                store.log_call(
+                    id="real-policy-decision",
+                    created_at=utc_now(),
+                    path="/v1/responses",
+                    provider="openai",
+                    source_surface="openai_responses",
+                    endpoint="responses",
+                    requested_model="gpt-5.4",
+                    routed_model="gpt-5.4-mini",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=12,
+                    input_tokens_est=10,
+                    output_tokens_est=5,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.002,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"managed_recommendation": managed}),
+                    cache_json=stable_json({"status": "miss"}),
+                    category="chat",
+                )
+
+                row = store.conn.execute(
+                    "select routing_json from calls where id = ?",
+                    ("real-policy-decision",),
+                ).fetchone()
+                self.assertEqual(json.loads(row["routing_json"])["managed_recommendation"], managed)
+            finally:
+                store.conn.close()
+
+    def test_codex_turn_start_records_policy_decision_blocker_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                store.log_codex_app_event(
+                    id="codex-turn-start",
+                    created_at=utc_now(),
+                    direction="client_to_server",
+                    method="turn/start",
+                    routing_json=None,
+                )
+                store.log_codex_app_event(
+                    id="codex-turn-completed",
+                    created_at=utc_now(),
+                    direction="server_to_client",
+                    method="turn/completed",
+                    routing_json=None,
+                )
+
+                rows = {
+                    row["id"]: (
+                        json.loads(row["routing_json"])["managed_recommendation"]
+                        if row["routing_json"]
+                        else None
+                    )
+                    for row in store.conn.execute(
+                        "select id, routing_json from codex_app_events order by id"
+                    ).fetchall()
+                }
+                self.assertEqual(rows["codex-turn-start"]["source_surface"], "codex_turn")
+                self.assertEqual(rows["codex-turn-start"]["status"], "skipped-local-blocker")
+                self.assertEqual(rows["codex-turn-start"]["reason"], "policy-decision-metadata-missing")
+                self.assertTrue(rows["codex-turn-start"]["coverage_denominator_included"])
+                self.assertIsNone(rows["codex-turn-completed"])
             finally:
                 store.conn.close()
 

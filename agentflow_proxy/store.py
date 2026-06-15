@@ -200,6 +200,125 @@ def _ensure_routing_experiment_metadata(
     return stable_json(routing)
 
 
+def _managed_policy_decision_coverage_meta(
+    *,
+    routing: dict[str, Any],
+    provider: Any,
+    source_surface: Any,
+    endpoint: Any,
+    path: Any,
+    requested_model: Any,
+    routed_model: Any,
+    stream: Any,
+    category: Any,
+    codex_event: bool = False,
+    codex_direction: Any = None,
+    codex_method: Any = None,
+) -> dict[str, Any]:
+    provider_label = "openai" if codex_event else _safe_metadata_label(provider, fallback="anthropic")
+    is_codex_turn_start = codex_event and codex_direction == "client_to_server" and codex_method == "turn/start"
+    surface_label = (
+        "codex_turn"
+        if is_codex_turn_start
+        else "codex_app_event"
+        if codex_event
+        else _infer_source_surface(
+            provider=provider_label,
+            source_surface=source_surface,
+            endpoint=endpoint,
+            path=path,
+        )
+    )
+    endpoint_label = _safe_metadata_label(endpoint or path, fallback="unknown")
+    canonical_surfaces = {"anthropic_messages", "openai_responses", "openai_chat", "codex_turn"}
+    in_scope = surface_label in canonical_surfaces and (not codex_event or is_codex_turn_start)
+    status = "skipped-local-blocker" if in_scope else "out-of-scope"
+    reason = "policy-decision-metadata-missing" if in_scope else "source-surface-not-canonical"
+    if codex_event and not is_codex_turn_start:
+        reason = "codex-app-event-not-turn-start"
+
+    return {
+        "schema": "agentflow.managed_policy_decision_evaluation.v1",
+        "status": status,
+        "reason": reason,
+        "coverage_class": "blocked" if in_scope else "out-of-scope",
+        "coverage_denominator_included": bool(in_scope),
+        "expected_evaluation": bool(in_scope),
+        "local_blocker": bool(in_scope),
+        "fallback": "local-policy",
+        "applied": False,
+        "changed_model": False,
+        "enabled": False,
+        "provider": provider_label,
+        "source_surface": surface_label,
+        "endpoint": endpoint_label,
+        "stream": bool(stream),
+        "requested_model": _safe_metadata_label(
+            requested_model or routing.get("requested_model"),
+            fallback="",
+        ),
+        "routed_model": _safe_metadata_label(
+            routed_model or routing.get("routed_model"),
+            fallback="",
+        ),
+        "category": _safe_metadata_label(category or routing.get("category"), fallback="unknown"),
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+        },
+    }
+
+
+def _ensure_managed_policy_decision_metadata(
+    routing_json: Any,
+    *,
+    provider: Any = None,
+    source_surface: Any = None,
+    endpoint: Any = None,
+    path: Any = None,
+    requested_model: Any = None,
+    routed_model: Any = None,
+    stream: Any = False,
+    category: Any = None,
+    codex_event: bool = False,
+    codex_direction: Any = None,
+    codex_method: Any = None,
+) -> Any:
+    routing = _parse_json_object(routing_json) or {}
+    managed = routing.get("managed_recommendation")
+    if isinstance(managed, dict) and managed:
+        return routing_json if isinstance(routing_json, str) else stable_json(routing)
+
+    routing["managed_recommendation"] = _managed_policy_decision_coverage_meta(
+        routing=routing,
+        provider=provider,
+        source_surface=source_surface,
+        endpoint=endpoint,
+        path=path,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        stream=stream,
+        category=category,
+        codex_event=codex_event,
+        codex_direction=codex_direction,
+        codex_method=codex_method,
+    )
+    if codex_event and codex_direction == "client_to_server" and codex_method == "turn/start":
+        routing.setdefault("status", "not-applied")
+        routing.setdefault("reason", "codex-app-telemetry-only")
+        routing.setdefault("applied", False)
+        routing.setdefault("eligible", False)
+        routing.setdefault("policy_source", "local-default")
+    return stable_json(routing)
+
+
 def cosine_similarity(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right))
 
@@ -932,6 +1051,17 @@ class SQLiteStore:
             stream=kwargs.get("stream"),
             category=kwargs.get("category"),
         )
+        kwargs["routing_json"] = _ensure_managed_policy_decision_metadata(
+            kwargs.get("routing_json"),
+            provider=kwargs.get("provider", "anthropic"),
+            source_surface=kwargs.get("source_surface"),
+            endpoint=kwargs.get("endpoint"),
+            path=kwargs.get("path"),
+            requested_model=kwargs.get("requested_model"),
+            routed_model=kwargs.get("routed_model"),
+            stream=kwargs.get("stream"),
+            category=kwargs.get("category"),
+        )
         cols = [
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
@@ -1240,6 +1370,21 @@ class SQLiteStore:
             codex_direction=kwargs.get("direction"),
             codex_method=kwargs.get("method"),
         )
+        if kwargs.get("direction") == "client_to_server" and kwargs.get("method") == "turn/start":
+            kwargs["routing_json"] = _ensure_managed_policy_decision_metadata(
+                kwargs.get("routing_json"),
+                provider="openai",
+                source_surface="codex_turn",
+                endpoint=kwargs.get("method"),
+                path=kwargs.get("method"),
+                requested_model=None,
+                routed_model=None,
+                stream=False,
+                category="codex-turn",
+                codex_event=True,
+                codex_direction=kwargs.get("direction"),
+                codex_method=kwargs.get("method"),
+            )
         cols = [
             "id", "created_at", "direction", "method", "request_id", "thread_id",
             "message_chars", "params_chars", "input_items", "input_text_chars",

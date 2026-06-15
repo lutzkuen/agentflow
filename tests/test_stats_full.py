@@ -819,9 +819,9 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("local policy remains authoritative", result["current_config"]["offline_state"])
         self.assertFalse(result["privacy"]["raw_prompts_included"])
         self.assertEqual(summary["window_calls"], 4)
-        self.assertEqual(summary["metadata_rows"], 3)
-        self.assertEqual(summary["historical_null_rows"], 1)
-        self.assertEqual(summary["disabled_count"], 1)
+        self.assertEqual(summary["metadata_rows"], 4)
+        self.assertEqual(summary["historical_null_rows"], 0)
+        self.assertEqual(summary["disabled_count"], 2)
         self.assertEqual(summary["enabled_count"], 2)
         self.assertEqual(summary["received_count"], 1)
         self.assertEqual(summary["applied_count"], 1)
@@ -843,8 +843,8 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(summary["last_recommendation_error_class"], "server-error")
         self.assertEqual(summary["last_feedback_error_class"], "request-failed")
         self.assertEqual({row["value"]: row["count"] for row in result["policy_ids"]}, {"candidate-route-chat": 1})
-        self.assertEqual(result["recent"][0]["recommendation_status"], "missing")
-        self.assertEqual(result["recent"][0]["recommendation_reason"], "historical-null")
+        self.assertEqual(result["recent"][0]["recommendation_status"], "skipped-local-blocker")
+        self.assertEqual(result["recent"][0]["recommendation_reason"], "policy-decision-metadata-missing")
         applied_recent = next(row for row in result["recent"] if row["applied"])
         self.assertAlmostEqual(applied_recent["observed_savings_usd"], 0.002, places=6)
         self.assertTrue(applied_recent["observed_savings_attributed_to_managed"])
@@ -1925,9 +1925,9 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(summary["optimized_rows"], 3)
         self.assertEqual(summary["pass_through_rows"], 2)
         self.assertGreater(summary["optimized_error_rate"], 0)
-        self.assertEqual(summary["managed_recommendation_rows"], 3)
+        self.assertEqual(summary["managed_recommendation_rows"], 5)
         self.assertEqual(summary["managed_recommendation_enabled"], 2)
-        self.assertEqual(summary["managed_recommendation_disabled"], 1)
+        self.assertEqual(summary["managed_recommendation_disabled"], 3)
         self.assertEqual(summary["managed_feedback_sent"], 1)
         self.assertEqual(summary["managed_feedback_skipped"], 1)
         self.assertEqual(summary["managed_feedback_error"], 1)
@@ -1945,7 +1945,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(patterns["repeated_input_section"]["count"], 2)
         self.assertEqual(patterns["older_input_head_tail"]["saved_chars_est"], 500)
         feedback_statuses = {row["value"]: row["count"] for row in result["managed_feedback_breakdown"]}
-        self.assertEqual(feedback_statuses, {"sent": 1, "skipped": 1, "error": 1})
+        self.assertEqual(feedback_statuses, {"sent": 1, "skipped": 1, "error": 1, "pending": 2})
         sample = next(row for row in result["recent_samples"] if row["saved_chars"] == 1600)
         self.assertEqual(set(sample["codex_pattern_types"]), {"repeated_input_section", "older_input_head_tail"})
         self.assertNotIn(secret, json.dumps(result))
@@ -2861,34 +2861,31 @@ class StatsFullTest(unittest.TestCase):
         result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=10))
         summary = result["summary"]
         metadata = {row["value"]: row["count"] for row in result["decision_metadata_breakdown"]}
-        routing = {row["status"]: row["count"] for row in result["routing_breakdown"]}
+        routing: dict[str, int] = {}
+        for row in result["routing_breakdown"]:
+            routing[row["status"]] = routing.get(row["status"], 0) + row["count"]
         current_missing = {row["value"]: row["count"] for row in result["current_missing_decision_breakdown"]}
         not_instrumented = {row["value"]: row["count"] for row in result["not_instrumented_decision_breakdown"]}
         historical = {row["value"]: row["count"] for row in result["historical_unavailable_decision_breakdown"]}
         sample_states = {row["decision_metadata_state"] for row in result["recent_samples"]}
 
         self.assertEqual(summary["turn_start_rows"], 4)
-        self.assertEqual(summary["decision_metadata_complete_rows"], 1)
-        self.assertEqual(summary["decision_metadata_historical_unavailable_rows"], 1)
-        self.assertEqual(summary["decision_metadata_not_instrumented_rows"], 1)
-        self.assertEqual(summary["decision_metadata_current_missing_rows"], 1)
-        self.assertEqual(summary["current_missing_decisions"], 3)
-        self.assertEqual(summary["not_instrumented_decisions"], 1)
-        self.assertEqual(summary["historical_unavailable_decisions"], 3)
+        self.assertEqual(summary["decision_metadata_complete_rows"], 2)
+        self.assertEqual(summary["decision_metadata_historical_unavailable_rows"], 0)
+        self.assertEqual(summary["decision_metadata_not_instrumented_rows"], 2)
+        self.assertEqual(summary["decision_metadata_current_missing_rows"], 0)
+        self.assertEqual(summary["current_missing_decisions"], 0)
+        self.assertEqual(summary["not_instrumented_decisions"], 4)
+        self.assertEqual(summary["historical_unavailable_decisions"], 0)
         self.assertEqual(metadata, {
-            "complete": 1,
-            "historical-unavailable": 1,
-            "not-instrumented": 1,
-            "current-missing": 1,
+            "complete": 2,
+            "not-instrumented": 2,
         })
-        self.assertEqual(routing["not-applied"], 1)
-        self.assertEqual(routing["historical-unavailable"], 1)
-        self.assertEqual(routing["not-instrumented"], 1)
-        self.assertEqual(routing["missing"], 1)
-        self.assertEqual(current_missing, {"routing": 1, "crunch": 1, "cache": 1})
-        self.assertEqual(not_instrumented, {"routing": 1})
-        self.assertEqual(historical, {"routing": 1, "crunch": 1, "cache": 1})
-        self.assertIn("historical-unavailable", sample_states)
+        self.assertEqual(routing["not-applied"], 4)
+        self.assertEqual(current_missing, {})
+        self.assertEqual(not_instrumented, {"crunch": 2, "cache": 2})
+        self.assertEqual(historical, {})
+        self.assertIn("not-instrumented", sample_states)
         self.assertFalse(result["privacy"]["raw_params_included"])
 
     def test_codex_effectiveness_classifies_workflow_phases_from_event_sequences(self):
