@@ -1259,6 +1259,19 @@ def _codex_stateless_shadow_skip_reason(params: dict[str, Any]) -> str | None:
     return None
 
 
+_CODEX_SHADOW_UNSUPPORTED_SHAPE_REASONS = {
+    "unknown-param-shape",
+    "action-like-params",
+    "non-text-input",
+}
+
+
+def _codex_shadow_preflight_status_for_reason(reason: str) -> str:
+    if reason in _CODEX_SHADOW_UNSUPPORTED_SHAPE_REASONS:
+        return "unsupported"
+    return "unavailable"
+
+
 def _codex_shadow_api_key() -> str | None:
     value = os.getenv("AGENTFLOW_CODEX_APP_SHADOW_OPENAI_API_KEY") or os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     return str(value).strip() if value else None
@@ -1313,6 +1326,7 @@ def _codex_shadow_preflight(
     skip_reason = _codex_stateless_shadow_skip_reason(params)
     if skip_reason:
         meta["reason"] = skip_reason
+        meta["status"] = _codex_shadow_preflight_status_for_reason(skip_reason)
         if skip_reason == "unknown-param-shape":
             meta["unknown_keys"] = sorted(str(key) for key in params if str(key) not in CODEX_SAFE_TURN_PARAM_KEYS)[:8]
         return None, meta
@@ -3171,23 +3185,9 @@ def _attach_codex_routing_experiment_pending(
         )
         experiment_meta["shadow_request_preflight"] = shadow_preflight
         if shadow_preflight.get("status") != "executable":
-            reason = str(shadow_preflight.get("reason") or "shadow-unavailable")
-            status = "shadow-unsupported-shape" if reason == "unsupported-shape" else "shadow-unavailable"
             experiment_meta = dict(experiment_meta)
-            experiment_meta.update({
-                "status": "skipped",
-                "sampled": False,
-                "reason": f"codex-shadow-preflight-{status}",
-                "pending_outcome": False,
-                "would_sample": True,
-                "shadow_preflight_status": status,
-                "shadow_preflight_reason": reason,
-                "reason_codes": [
-                    "codex-shadow-preflight-skipped",
-                    status,
-                    f"{status}-{reason}",
-                ],
-            })
+            experiment_meta["pending_outcome"] = True
+            experiment_meta["preflight_blocked"] = True
     live_routing_meta = (optimization_metadata or {}).get("routing") if isinstance(optimization_metadata, dict) else None
     if isinstance(live_routing_meta, dict):
         live_routing_meta["routing_experiment"] = experiment_meta
@@ -3347,8 +3347,10 @@ async def _maybe_run_codex_routing_experiment(
     shadow_cost_est_usd: float | None = None
     shadow_error: str | None = None
     shadow_limitation: str | None = None
+    shadow_blocker_status = str(shadow_preflight.get("status") or "unavailable")
     if primary_status_code != 200:
         shadow_limitation = "primary-turn-not-successful"
+        shadow_blocker_status = "unavailable"
         experiment_meta["shadow_request_preflight"] = {
             **shadow_preflight,
             "status": "unavailable",
@@ -3498,7 +3500,13 @@ async def _maybe_run_codex_routing_experiment(
                 float(experiment_meta.get("budget_spent_usd") or 0.0) + float(shadow_cost_est_usd or 0.0),
                 6,
             ),
-            error=(f"shadow-unavailable:{shadow_limitation}" if shadow_limitation else shadow_error),
+            error=(
+                f"shadow-unsupported-shape:{shadow_limitation}"
+                if shadow_limitation and shadow_blocker_status == "unsupported"
+                else f"shadow-unavailable:{shadow_limitation}"
+                if shadow_limitation
+                else shadow_error
+            ),
             routing_json=stable_json(routing_meta),
             experiment_json=stable_json(experiment_meta),
             primary_response_json=stable_json(primary_response_body) if ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES else None,

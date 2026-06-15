@@ -2596,14 +2596,16 @@ summary_model_hint:
                             start_event_id=start_event_id,
                             pending_routing_experiments=pending,
                         )
-                        self.assertEqual(pending, {})
+                        self.assertIn("turn-routing-experiment-stateful", pending)
                         await codex_app_proxy._maybe_run_codex_routing_experiment(
                             json.dumps(response),
                             request_started=request_started,
                             pending_routing_experiments=pending,
                         )
-                    experiment_count = test_store.conn.execute("select count(*) as c from routing_experiments").fetchone()["c"]
-                    queue_count = test_store.conn.execute("select count(*) as c from managed_outcome_feedback_queue").fetchone()["c"]
+                    experiment = dict(test_store.conn.execute("select * from routing_experiments").fetchone())
+                    queue_row = dict(test_store.conn.execute(
+                        "select source_surface, endpoint, status, payload_json from managed_outcome_feedback_queue"
+                    ).fetchone())
                     routing_row = dict(test_store.conn.execute(
                         "select routing_json from codex_app_events where id = ?",
                         (start_event_id,),
@@ -2612,25 +2614,147 @@ summary_model_hint:
                         "agentflow_proxy.routing_experiments",
                         fromlist=["build_routing_experiment_report"],
                     ).build_routing_experiment_report(test_store, limit=5)
-                    return experiment_count, queue_count, json.loads(routing_row["routing_json"]), report
+                    return experiment, queue_row, json.loads(routing_row["routing_json"]), report
                 finally:
                     test_store.conn.close()
 
-        experiment_count, queue_count, routing, report = asyncio.run(run_fixture())
+        experiment, queue_row, routing, report = asyncio.run(run_fixture())
 
-        self.assertEqual(experiment_count, 0)
-        self.assertEqual(queue_count, 0)
+        self.assertEqual(experiment["source_surface"], "codex_turn")
+        self.assertEqual(experiment["primary_status_code"], 200)
+        self.assertIsNone(experiment["shadow_status_code"])
+        self.assertEqual(experiment["error"], "shadow-unavailable:stateful-context-reference")
+        self.assertEqual(queue_row["source_surface"], "routing_experiment_outcome")
+        payload = json.loads(queue_row["payload_json"])
+        self.assertEqual(payload["source_surface"], "codex_turn")
+        self.assertEqual(payload["outcome"]["status"], "shadow-unavailable")
+        self.assertFalse(payload["outcome"]["compared"])
+        self.assertIn("shadow-unavailable-stateful-context-reference", payload["reason_codes"])
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
         experiment_json = routing["routing_experiment"]
-        self.assertEqual(experiment_json["status"], "skipped")
-        self.assertFalse(experiment_json["sampled"])
-        self.assertTrue(experiment_json["would_sample"])
-        self.assertEqual(experiment_json["reason"], "codex-shadow-preflight-shadow-unavailable")
+        self.assertEqual(experiment_json["status"], "shadow-unavailable")
+        self.assertTrue(experiment_json["sampled"])
+        self.assertTrue(experiment_json["preflight_blocked"])
         self.assertEqual(experiment_json["shadow_request_preflight"]["status"], "unavailable")
         self.assertEqual(experiment_json["shadow_request_preflight"]["reason"], "stateful-context-reference")
-        self.assertIn("codex-shadow-preflight-skipped", experiment_json["reason_codes"])
         self.assertIn("shadow-unavailable-stateful-context-reference", experiment_json["reason_codes"])
-        self.assertEqual(report["candidates"], [])
-        self.assertEqual(report["summary"]["sample_count"], 0)
+        [candidate] = report["candidates"]
+        self.assertEqual(candidate["source_surface"], "codex_turn")
+        self.assertEqual(candidate["shadow_unavailable_samples"], 1)
+        self.assertEqual(report["summary"]["sample_count"], 1)
+
+    def test_codex_routing_experiment_unsupported_shape_logs_blocked_outcome(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-non-text",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5-codex",
+                "input": [{"type": "image", "image_url": "https://example.test/private-secret.png"}],
+            },
+        }
+        response = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-non-text",
+            "result": {"message": "cannot summarize image-only input"},
+        }
+        optimization_metadata = {
+            "routing": {
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+            },
+            "crunch": {"status": "skipped", "reason": "no-change", "applied": False},
+            "cache": {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False},
+        }
+
+        def sampled_decision(body, routing_meta, *, stream, provider, source_surface, store_obj):
+            return {
+                "schema": "agentflow.routing_experiment_decision.v1",
+                "enabled": True,
+                "mode": "shadow_candidate_pass_through",
+                "status": "selected",
+                "sampled": True,
+                "reason": "sampled-shadow-candidate-pass-through",
+                "counterfactual": True,
+                "shadow_only": True,
+                "provider": "openai",
+                "source_surface": "codex_turn",
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-mini",
+                "primary_model": "gpt-5-codex",
+                "shadow_model": "gpt-5-mini",
+                "user_visible_model": "gpt-5-codex",
+                "category": "codex-turn",
+                "workflow_phase": "summary",
+                "text_chars": 0,
+                "daily_budget_usd": 10.0,
+                "budget_spent_usd": 0.0,
+                "budget_remaining_usd": 10.0,
+                "similarity_threshold": 0.86,
+                "privacy": {
+                    "metadata_only": True,
+                    "raw_prompts_included": False,
+                    "raw_responses_included": False,
+                    "request_ids_included": False,
+                    "session_ids_included": False,
+                    "file_paths_included": False,
+                },
+            }
+
+        async def run_fixture():
+            with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+                test_store = Store(tmp.name)
+                try:
+                    request_started = {}
+                    pending = {}
+                    with (
+                        patch.object(codex_app_proxy, "store", test_store),
+                        patch.object(codex_app_proxy, "routing_experiment_decision", side_effect=sampled_decision),
+                        patch.object(codex_app_proxy, "_codex_shadow_api_key", return_value="test-key"),
+                    ):
+                        start_event_id = codex_app_proxy._record_message(
+                            json.dumps(message),
+                            direction="client_to_server",
+                            session_id="session-routing-experiment-non-text",
+                            request_started=request_started,
+                            optimization_metadata=optimization_metadata,
+                        )
+                        codex_app_proxy._attach_codex_routing_experiment_pending(
+                            json.dumps(message),
+                            optimization_metadata=optimization_metadata,
+                            start_event_id=start_event_id,
+                            pending_routing_experiments=pending,
+                        )
+                        self.assertIn("turn-routing-experiment-non-text", pending)
+                        await codex_app_proxy._maybe_run_codex_routing_experiment(
+                            json.dumps(response),
+                            request_started=request_started,
+                            pending_routing_experiments=pending,
+                        )
+                    experiment = dict(test_store.conn.execute("select * from routing_experiments").fetchone())
+                    queue_row = dict(test_store.conn.execute("select payload_json from managed_outcome_feedback_queue").fetchone())
+                    routing_row = dict(test_store.conn.execute(
+                        "select routing_json from codex_app_events where id = ?",
+                        (start_event_id,),
+                    ).fetchone())
+                    return experiment, json.loads(queue_row["payload_json"]), json.loads(routing_row["routing_json"])
+                finally:
+                    test_store.conn.close()
+
+        experiment, payload, routing = asyncio.run(run_fixture())
+
+        self.assertEqual(experiment["source_surface"], "codex_turn")
+        self.assertEqual(experiment["error"], "shadow-unsupported-shape:non-text-input")
+        experiment_json = json.loads(experiment["experiment_json"])
+        self.assertEqual(experiment_json["status"], "shadow-unsupported-shape")
+        self.assertEqual(experiment_json["shadow_request_preflight"]["status"], "unsupported")
+        self.assertEqual(experiment_json["shadow_request_preflight"]["reason"], "non-text-input")
+        self.assertIn("unsupported-shadow-shape-non-text-input", experiment_json["reason_codes"])
+        self.assertEqual(payload["outcome"]["status"], "shadow-unsupported-shape")
+        self.assertIn("unsupported-shadow-shape-non-text-input", payload["reason_codes"])
+        self.assertNotIn("private-secret", json.dumps(payload))
+        self.assertNotIn("private-secret", json.dumps(routing["routing_experiment"]))
 
     def test_codex_routing_experiment_respects_budget_and_sample_skips(self):
         message = {
