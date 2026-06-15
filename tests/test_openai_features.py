@@ -1894,8 +1894,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
     def test_openai_gpt54_canary_sequence_restores_applied_and_holdout_report_coverage(self):
         os.environ["AGENTFLOW_DB"] = self.tmp.name
         self._enable_openai_canary(
-            canary_fraction=0.05,
-            holdout_fraction=0.05,
+            canary_fraction=0.15,
+            holdout_fraction=0.10,
             target_model="gpt-5.4-mini",
             model_pattern="gpt-5.4",
         )
@@ -1928,8 +1928,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         candidate = next(row for row in report["candidates"] if row["requested_model"] == "gpt-5.4")
         lifecycle = candidate["openai_canary_lifecycle_evidence"]
 
-        self.assertGreater(lifecycle["cohort_counts"]["canary_applied"], 0)
-        self.assertGreater(lifecycle["cohort_counts"]["canary_holdout"], 0)
+        self.assertGreaterEqual(lifecycle["cohort_counts"]["canary_applied"], 3)
+        self.assertGreaterEqual(lifecycle["cohort_counts"]["canary_holdout"], 2)
         self.assertEqual(lifecycle["blocker_codes"], [])
         self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
         self.assertGreater(report["summary"]["openai_canary_applied_count"], 0)

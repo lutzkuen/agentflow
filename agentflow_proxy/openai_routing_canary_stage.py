@@ -1016,7 +1016,7 @@ async def stage_openai_routing_canary_drafts(
     *,
     draft_id: str | None = None,
     workspace: str | None = None,
-    canary_fraction: float = 0.05,
+    canary_fraction: float = 0.15,
     holdout_fraction: float = 0.10,
     min_samples: int = 5,
     top_candidates: int | None = 1,

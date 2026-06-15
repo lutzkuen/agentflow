@@ -109,11 +109,11 @@ openai_canary:
   allow_tools: true
   allow_stream: false
   min_text_chars: 0
-  max_text_chars: 8000
+  max_text_chars: 16000
   min_input_tokens_est: 0
-  max_input_tokens_est: 2000
-  canary_fraction: 0.05
-  holdout_fraction: 0.05
+  max_input_tokens_est: 4000
+  canary_fraction: 0.15
+  holdout_fraction: 0.10
   salt: agentflow-openai-routing-canary-v1
   cohort_unit: request_features_sequence
   safety_stop:

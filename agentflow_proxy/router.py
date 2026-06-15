@@ -331,11 +331,11 @@ def _default_openai_canary_policy() -> dict[str, Any]:
         "allow_tools": True,
         "allow_stream": False,
         "min_text_chars": 0,
-        "max_text_chars": 8000,
+        "max_text_chars": 16000,
         "min_input_tokens_est": 0,
-        "max_input_tokens_est": 2000,
-        "canary_fraction": 0.05,
-        "holdout_fraction": 0.05,
+        "max_input_tokens_est": 4000,
+        "canary_fraction": 0.15,
+        "holdout_fraction": 0.10,
         "salt": "agentflow-openai-routing-canary-v1",
         "cohort_unit": "request_features_sequence",
         "safety_stop": {
@@ -1171,6 +1171,10 @@ def _openai_canary_base_meta(
         "stream": stream,
         "canary_fraction": float(ROUTING_OPENAI_CANARY.get("canary_fraction") or 0.0),
         "holdout_fraction": float(ROUTING_OPENAI_CANARY.get("holdout_fraction") or 0.0),
+        "min_text_chars": _int_min(ROUTING_OPENAI_CANARY.get("min_text_chars"), 0, 0),
+        "max_text_chars": _int_min(ROUTING_OPENAI_CANARY.get("max_text_chars"), 8000, 0),
+        "min_input_tokens_est": _int_min(ROUTING_OPENAI_CANARY.get("min_input_tokens_est"), 0, 0),
+        "max_input_tokens_est": _int_min(ROUTING_OPENAI_CANARY.get("max_input_tokens_est"), 2000, 0),
         "policy_source": ROUTING_OPENAI_CANARY.get("policy_source") or ROUTING_RULES_SOURCE,
     }
 

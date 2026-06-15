@@ -2195,7 +2195,7 @@ def openai_routing_canary_stage_cli(
         default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
         help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
     )
-    parser.add_argument("--canary-fraction", type=float, default=0.05, help="Proposed deterministic canary fraction, default: 0.05.")
+    parser.add_argument("--canary-fraction", type=float, default=0.15, help="Proposed deterministic canary fraction, default: 0.15.")
     parser.add_argument("--holdout-fraction", type=float, default=0.10, help="Proposed deterministic holdout fraction, default: 0.10.")
     parser.add_argument("--min-samples", type=int, default=5, help="Minimum candidate samples before staging, default: 5.")
     parser.add_argument("--top-candidates", type=int, default=1, help="Maximum ranked eligible candidates to stage, default: 1.")

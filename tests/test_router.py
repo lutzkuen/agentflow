@@ -376,8 +376,8 @@ rules:
         canary = meta["openai_canary"]
         self.assertEqual(canary["policy_id"], "local-openai-routing-canary-v1")
         self.assertEqual(canary["target_model"], "gpt-5.4-mini")
-        self.assertEqual(canary["canary_fraction"], 0.05)
-        self.assertEqual(canary["holdout_fraction"], 0.05)
+        self.assertEqual(canary["canary_fraction"], 0.15)
+        self.assertEqual(canary["holdout_fraction"], 0.10)
         self.assertEqual(canary["category"], "tool-light")
         self.assertTrue(canary["has_tools"])
         self.assertIn(canary["status"], {"applied", "holdout", "not_selected"})
@@ -385,6 +385,32 @@ rules:
         self.assertIn("safety_stop", canary)
         self.assertTrue(canary["safety_stop"]["enabled"])
         self.assertEqual(router_module.ROUTING_OPENAI_CANARY["safety_stop"]["max_error_rate"], 0.03)
+
+    def test_openai_canary_default_covers_wider_tool_light_cohort(self):
+        routed, meta = router_module.route_openai_model({
+            "model": "gpt-5.4",
+            "input": "Inspect this tool-light payload.\n" + ("x" * 12000),
+            "tools": [{"type": "function", "name": "lookup_file"}],
+        })
+
+        self.assertIn(routed, {"gpt-5.4", "gpt-5.4-mini"})
+        canary = meta["openai_canary"]
+        self.assertEqual(meta["category"], "tool-light")
+        self.assertEqual(canary["max_text_chars"], 16000)
+        self.assertEqual(canary["max_input_tokens_est"], 4000)
+        self.assertEqual(canary["canary_fraction"], 0.15)
+        self.assertEqual(canary["holdout_fraction"], 0.10)
+        self.assertIn(canary["status"], {"applied", "holdout", "not_selected"})
+        self.assertNotEqual(canary["reason"], "request-too-large")
+
+        _, heavy_meta = router_module.route_openai_model({
+            "model": "gpt-5.4",
+            "input": "Inspect this heavier payload.\n" + ("x" * 17000),
+            "tools": [{"type": "function", "name": "lookup_file"}],
+        })
+        self.assertEqual(heavy_meta["category"], "tool-heavy")
+        self.assertEqual(heavy_meta["openai_canary"]["status"], "ineligible")
+        self.assertEqual(heavy_meta["openai_canary"]["reason"], "category-not-enabled")
 
     def test_openai_canary_ignores_non_target_models_by_default(self):
         routed, meta = router_module.route_openai_model({
