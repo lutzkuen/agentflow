@@ -311,6 +311,50 @@ def _next_action_for_blockers(candidate: dict[str, Any], blockers: list[str]) ->
     return "stage-anthropic-routing-canary-review"
 
 
+def _blocked_needed_resolution(candidate: dict[str, Any], blockers: list[str], lifecycle: dict[str, Any]) -> list[str]:
+    needed: list[str] = []
+    blocker_set = set(blockers)
+    aggregate_inference = candidate.get("aggregate_inference") if isinstance(candidate.get("aggregate_inference"), dict) else {}
+    if aggregate_inference.get("source_surface_inferred") or aggregate_inference.get("endpoint_inferred"):
+        needed.append("narrower_cohort")
+    if "missing-applied-coverage" in blocker_set:
+        needed.append("applied_coverage")
+    if "missing-holdout-coverage" in blocker_set:
+        needed.append("holdout_coverage")
+    if "stale-lifecycle-evidence" in blocker_set:
+        needed.append("fresh_lifecycle_evidence")
+    if "safety-stop-observed" in blocker_set or _as_int((lifecycle.get("cohort_counts") or {}).get("safety_stopped")) > 0:
+        needed.extend(["safety_stop_reason_review", "safer_threshold_or_executor_guard", "rollback_proof"])
+    return sorted(set(needed))
+
+
+def _keep_blocked_reason(needed_resolution: list[str], blockers: list[str]) -> str:
+    needed = set(needed_resolution)
+    if "safety_stop_reason_review" not in needed and "safety-stop-observed" not in set(blockers):
+        return "anthropic-routing-blocked-until-lifecycle-coverage"
+    parts = ["anthropic-routing-safety-stop-needs"]
+    if "narrower_cohort" in needed:
+        parts.append("narrower-cohort")
+    if {"applied_coverage", "holdout_coverage"} & needed:
+        parts.append("applied-holdout-coverage")
+    if "fresh_lifecycle_evidence" in needed:
+        parts.append("fresh-lifecycle-evidence")
+    if "safer_threshold_or_executor_guard" in needed:
+        parts.append("safer-threshold-or-executor-guard")
+    if "rollback_proof" in needed:
+        parts.append("rollback-proof")
+    return "-".join(parts)
+
+
+def _next_state_reason(needed_resolution: list[str], blockers: list[str]) -> str:
+    blocker_set = set(blockers)
+    if "stale-lifecycle-evidence" in blocker_set:
+        return "safety-stop-awaits-fresh-lifecycle-or-holdout-evidence"
+    if "safety-stop-observed" in blocker_set:
+        return "safety-stop-requires-safer-threshold-or-executor-guard-and-rollback-proof"
+    return "missing-applied-or-holdout-coverage"
+
+
 def _normalize_lifecycle_evidence(candidate: dict[str, Any], lifecycle: dict[str, Any]) -> dict[str, Any]:
     counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
     coverage = lifecycle.get("coverage") if isinstance(lifecycle.get("coverage"), dict) else {}
@@ -462,10 +506,16 @@ def _projected_lifecycle(
 def _blocked_review(candidate: dict[str, Any], reason: str, lifecycle: dict[str, Any]) -> dict[str, Any]:
     blockers = _string_list(lifecycle.get("blocker_codes"))
     next_action = _next_action_for_blockers(candidate, blockers)
+    needed_resolution = _blocked_needed_resolution(candidate, blockers, lifecycle)
+    keep_blocked_reason = _keep_blocked_reason(needed_resolution, blockers)
     return {
         "schema": BLOCKED_REVIEW_SCHEMA,
         "status": "blocked-review",
         "reason": reason,
+        "next_state": "keep-blocked",
+        "next_state_reason": _next_state_reason(needed_resolution, blockers),
+        "keep_blocked_reason": keep_blocked_reason,
+        "needed_resolution": needed_resolution,
         "target_candidate_id": _candidate_id(candidate),
         "provider": "anthropic",
         "source_surface": candidate.get("source_surface"),
@@ -480,6 +530,7 @@ def _blocked_review(candidate: dict[str, Any], reason: str, lifecycle: dict[str,
         "stale_evidence": lifecycle.get("stale_evidence"),
         "blocker_codes": blockers,
         "next_action": next_action,
+        "durable_next_action": "keep-anthropic-routing-blocked-until-safety-stop-burndown",
         "local_file_backed_representation": _local_file_backed_representation(),
         "target_local_rule_file": "routing_rules.yaml",
         "promotion_allowed": False,
@@ -554,6 +605,7 @@ def _acceptance_report(
     blocked_review_recorded = False
     blocked_review_has_rule_file = False
     blocked_review_prevents_promotion = False
+    blocked_review_has_keep_blocked_reason = False
 
     for draft in staged:
         routing = draft.get("policies", {}).get("routing", {}) if isinstance(draft.get("policies"), dict) else {}
@@ -626,6 +678,13 @@ def _acceptance_report(
             and blocked.get("active_policy_changed") is False
             and blocked.get("wrote_active_policy_files") is False
         )
+        needed = _string_list(blocked.get("needed_resolution"))
+        blocked_review_has_keep_blocked_reason = blocked_review_has_keep_blocked_reason or (
+            blocked.get("next_state") == "keep-blocked"
+            and _string(blocked.get("keep_blocked_reason")).startswith("anthropic-routing-safety-stop-needs")
+            and "safety_stop_reason_review" in needed
+            and "rollback_proof" in needed
+        )
 
     holdout_coverage = projected_holdout > 0
     privacy_clean = (
@@ -652,6 +711,7 @@ def _acceptance_report(
             blocked_review_recorded,
             blocked_review_has_rule_file,
             blocked_review_prevents_promotion,
+            blocked_review_has_keep_blocked_reason,
             privacy_clean,
         ]
     )
@@ -669,6 +729,7 @@ def _acceptance_report(
         "blocked_review_recorded": blocked_review_recorded,
         "blocked_review_has_local_rule_file_representation": blocked_review_has_rule_file,
         "no_automatic_promotion_while_blocked": blocked_review_prevents_promotion,
+        "blocked_review_has_keep_blocked_reason": blocked_review_has_keep_blocked_reason,
         "metadata_only_privacy_proof": privacy_clean,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
@@ -905,6 +966,7 @@ def build_anthropic_routing_canary_stage_report(
         projected_holdout=projected_holdout,
         blocked_reviews=blocked_reviews,
     )
+    top_blocked = blocked_reviews[0] if blocked_reviews else {}
 
     return {
         "schema": SCHEMA,
@@ -920,6 +982,9 @@ def build_anthropic_routing_canary_stage_report(
             "projected_canary_holdout_count": projected_holdout,
             "projected_safety_stopped_count": projected_safety,
             "acceptance_met": bool(acceptance["acceptance_met"]),
+            "top_next_state": top_blocked.get("next_state"),
+            "top_keep_blocked_reason": top_blocked.get("keep_blocked_reason"),
+            "top_needed_resolution": top_blocked.get("needed_resolution") or [],
             "estimated_savings_per_1000_calls_usd": round(
                 max((_as_float(draft["policies"]["routing"]["phase_canary"]["promotion"].get("estimated_savings_per_1000_calls_usd")) for draft in staged), default=0.0),
                 6,

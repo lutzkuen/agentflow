@@ -214,9 +214,36 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertTrue(result["acceptance"]["blocked_review_recorded"])
         self.assertTrue(result["acceptance"]["blocked_review_has_local_rule_file_representation"])
         self.assertTrue(result["acceptance"]["no_automatic_promotion_while_blocked"])
+        self.assertTrue(result["acceptance"]["blocked_review_has_keep_blocked_reason"])
+        self.assertEqual(result["summary"]["top_next_state"], "keep-blocked")
+        self.assertEqual(
+            result["summary"]["top_keep_blocked_reason"],
+            "anthropic-routing-safety-stop-needs-narrower-cohort-applied-holdout-coverage-safer-threshold-or-executor-guard-rollback-proof",
+        )
+        self.assertIn("rollback_proof", result["summary"]["top_needed_resolution"])
 
         blocked = result["blocked_reviews"][0]
         self.assertEqual(blocked["status"], "blocked-review")
+        self.assertEqual(blocked["next_state"], "keep-blocked")
+        self.assertEqual(
+            blocked["next_state_reason"],
+            "safety-stop-requires-safer-threshold-or-executor-guard-and-rollback-proof",
+        )
+        self.assertEqual(
+            blocked["keep_blocked_reason"],
+            "anthropic-routing-safety-stop-needs-narrower-cohort-applied-holdout-coverage-safer-threshold-or-executor-guard-rollback-proof",
+        )
+        self.assertEqual(
+            blocked["needed_resolution"],
+            [
+                "applied_coverage",
+                "holdout_coverage",
+                "narrower_cohort",
+                "rollback_proof",
+                "safer_threshold_or_executor_guard",
+                "safety_stop_reason_review",
+            ],
+        )
         self.assertEqual(blocked["matched_count"], 1250)
         self.assertEqual(blocked["observed_count"], 51)
         self.assertEqual(blocked["cohort_counts"]["canary_applied"], 0)
@@ -230,6 +257,7 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertEqual(blocked["local_file_backed_representation"]["rule_file"], "routing_rules.yaml")
         self.assertEqual(blocked["target_local_rule_file"], "routing_rules.yaml")
         self.assertEqual(blocked["next_action"], "review-anthropic-routing-safety-stop-before-canary")
+        self.assertEqual(blocked["durable_next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
         self.assertFalse(blocked["promotion_allowed"])
         self.assertFalse(blocked["stage_allowed"])
         self.assertFalse(blocked["active_policy_changed"])
