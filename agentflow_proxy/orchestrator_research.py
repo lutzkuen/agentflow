@@ -86,6 +86,32 @@ _SAFETY_STOP_SIGNAL_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_CANARY_COHORT_SKIP_RE = re.compile(
+    r"(?:not[-_]in[-_](?:canary|applied|holdout)[-_]cohort|"
+    r"canary[-_]cohort[-_](?:not[-_]selected|skipped|bypassed)|"
+    r"(?:canary|routing|crunch|cache)[-_]canary[-_](?:not[-_]applied|not[-_]selected|skipped)|"
+    r"no[-_]canary[-_](?:assignment|selection|cohort)|"
+    r"holdout[-_]not[-_]selected|"
+    r"outside[-_]canary[-_]window|"
+    r"activation[-_]canary[-_](?:skipped|not[-_]applied))",
+    re.IGNORECASE,
+)
+_BELOW_THRESHOLD_SKIP_RE = re.compile(
+    r"(?:(?:context|token)[-_](?:count[-_])?below[-_](?:minimum|threshold)|"
+    r"too[-_]short[-_]to[-_](?:crunch|compress|summarize)|"
+    r"compression[-_]ratio[-_](?:insufficient|below[-_]threshold)|"
+    r"context[-_]length[-_]too[-_]short|"
+    r"below[-_]crunch[-_](?:minimum|threshold)|"
+    r"below[-_](?:summary|cache)[-_]threshold)",
+    re.IGNORECASE,
+)
+_STALE_LIFECYCLE_SKIP_RE = re.compile(
+    r"(?:stale[-_](?:lifecycle|canary|activation)[-_](?:evidence|feedback|data)|"
+    r"(?:lifecycle|activation|canary)[-_]evidence[-_](?:stale|outdated|expired)|"
+    r"evidence[-_](?:stale|outdated)[-_]retry|"
+    r"activation[-_]data[-_](?:not[-_]fresh|stale|outdated))",
+    re.IGNORECASE,
+)
 _KNOWN_DIAGNOSTIC_TERMS = (
     "need-more-samples",
     "missing dependency evidence",
@@ -695,11 +721,32 @@ def _classify_unclassified_diagnostic(example: str) -> dict[str, Any] | None:
             "backlog_action": "create-ready-issue",
             "reclassification_source": "safety-stop-unclassified-pattern",
         }
+    if _CANARY_COHORT_SKIP_RE.search(example):
+        return {
+            "reason": "missing-lifecycle-feedback",
+            "diagnostic_class": "missing-lifecycle-feedback",
+            "backlog_action": "create-ready-issue",
+            "reclassification_source": "canary-cohort-skip-pattern",
+        }
+    if _BELOW_THRESHOLD_SKIP_RE.search(example):
+        return {
+            "reason": "missing-dependency-evidence",
+            "diagnostic_class": "missing-dependency-evidence",
+            "backlog_action": "create-ready-issue",
+            "reclassification_source": "below-threshold-pattern",
+        }
+    if _STALE_LIFECYCLE_SKIP_RE.search(example):
+        return {
+            "reason": "stale-quality-evidence",
+            "diagnostic_class": "stale-evidence",
+            "backlog_action": "create-ready-issue",
+            "reclassification_source": "stale-lifecycle-pattern",
+        }
     return {
         "reason": "unclassified-skip-or-blocker",
         "diagnostic_class": "unclassified-skip-or-blocker",
-        "backlog_action": "needs-human-review",
-        "reclassification_source": "no-match",
+        "backlog_action": "create-ready-issue",
+        "reclassification_source": "no-match-bounded-human-review",
     }
 
 
@@ -5219,7 +5266,12 @@ def _proposal_from_repeated_diagnostic(
     )
     lifecycle_context = diagnostic.get("lifecycle_context") if isinstance(diagnostic.get("lifecycle_context"), dict) else {}
     fingerprint = fingerprint or _diagnostic_fingerprint(diagnostic_class)
-    title_reason = diagnostic_class.replace("-", " ")
+    reclassification_source = str(diagnostic.get("reclassification_source") or "")
+    is_bounded_human_review = reclassification_source == "no-match-bounded-human-review"
+    if is_bounded_human_review:
+        title_reason = "unclassified activation skip or blocker"
+    else:
+        title_reason = diagnostic_class.replace("-", " ")
     evidence_count = _to_int(diagnostic.get("count", 0))
     example_excerpt = str(diagnostic.get("example") or "")[:120]
     evidence = [
@@ -5234,6 +5286,12 @@ def _proposal_from_repeated_diagnostic(
         f"Action: create",
         f"Expected unblock path: {expected_unblock_path}",
     ]
+    if is_bounded_human_review:
+        evidence.extend([
+            "Source schema: agentflow.orchestrator_research_log_diagnostics.v1",
+            f"Report key: repeated_diagnostics.{diagnostic_class}",
+            "Privacy: metadata-only, telemetry_profile=metadata-only, no raw prompts, no provider bodies, no request or session IDs",
+        ])
     if lifecycle_context:
         evidence.extend(
             [

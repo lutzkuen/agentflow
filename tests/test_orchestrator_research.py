@@ -3117,7 +3117,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("unclassified-skip-or-blocker", reasons)
         self.assertIn("missing-dependency-evidence", reasons)
 
-    def test_unclassified_true_unknown_blocker_gets_needs_human_review(self):
+    def test_unclassified_true_unknown_blocker_emits_one_bounded_human_review_proposal(self):
         with TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "run.log"
             log_path.write_text(
@@ -3140,8 +3140,99 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         diagnostics = plan["evidence"]["repeated_diagnostics"]
         actionable = [d for d in diagnostics if d.get("reason") == "unclassified-skip-or-blocker"]
         self.assertTrue(actionable)
+        self.assertEqual(actionable[0].get("reclassification_source"), "no-match-bounded-human-review")
         created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
-        self.assertFalse(any("unclassified skip or blocker" in t for t in created_titles))
+        bounded_proposals = [t for t in created_titles if "unclassified activation skip or blocker" in t]
+        self.assertEqual(len(bounded_proposals), 1, "exactly one bounded human-review proposal should be created")
+        proposal_body = next(
+            item["body"] for item in plan["backlog_changes"]["create_issues"]
+            if "unclassified activation skip or blocker" in item["title"].lower()
+        )
+        self.assertIn("Source schema:", proposal_body)
+        self.assertIn("Report key:", proposal_body)
+        self.assertIn("Privacy:", proposal_body)
+        self.assertIn("metadata-only", proposal_body)
+
+    def test_unclassified_canary_cohort_skip_is_reclassified(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "routing action skipped: not-in-canary-cohort, session omitted",
+                        "routing action skipped: not-in-canary-cohort, session omitted",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        reasons = [d["reason"] for d in diagnostics]
+        self.assertNotIn("unclassified-skip-or-blocker", reasons)
+        self.assertIn("missing-lifecycle-feedback", reasons)
+        classified = next(d for d in diagnostics if d["reason"] == "missing-lifecycle-feedback")
+        self.assertEqual(classified.get("reclassification_source"), "canary-cohort-skip-pattern")
+
+    def test_unclassified_below_threshold_skip_is_reclassified(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "crunch action skipped: context-below-threshold token count insufficient",
+                        "crunch action skipped: context-below-threshold token count insufficient",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        reasons = [d["reason"] for d in diagnostics]
+        self.assertNotIn("unclassified-skip-or-blocker", reasons)
+        self.assertIn("missing-dependency-evidence", reasons)
+        classified = next(d for d in diagnostics if d["reason"] == "missing-dependency-evidence")
+        self.assertEqual(classified.get("reclassification_source"), "below-threshold-pattern")
+
+    def test_unclassified_stale_lifecycle_skip_is_reclassified(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "cache replay action omitted: activation-data-not-fresh evidence window exceeded",
+                        "cache replay action omitted: activation-data-not-fresh evidence window exceeded",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        reasons = [d["reason"] for d in diagnostics]
+        self.assertNotIn("unclassified-skip-or-blocker", reasons)
+        self.assertIn("stale-quality-evidence", reasons)
+        classified = next(d for d in diagnostics if d["reason"] == "stale-quality-evidence")
+        self.assertEqual(classified.get("reclassification_source"), "stale-lifecycle-pattern")
 
     def test_privacy_redacts_raw_fields_paths_and_ids(self):
         plan = build_research_plan(
