@@ -2329,6 +2329,38 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         ],
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
+                    "follow_up_candidates": {
+                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "status": "candidates-ranked",
+                        "summary": {
+                            "ranked_candidate_count": 1,
+                            "top_next_action": "stage-repeated-context-crunch-canary",
+                            "top_local_action_family": "crunch",
+                        },
+                        "blocker_cohorts": [
+                            {
+                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "local_action_family": "crunch",
+                                "next_action": "stage-repeated-context-crunch-canary",
+                                "readiness_state": "activation-ready",
+                                "candidate_work_classes": ["crunch", "repeated_context"],
+                                "provider_family": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "endpoint": "messages",
+                                "category": "tool-result",
+                                "workflow_phase": "thinking",
+                                "stream": True,
+                                "has_tools": True,
+                                "text_bucket": "gte_128k_chars",
+                                "token_bucket": "lt_500_tokens",
+                                "sample_count": 12,
+                                "row_count": 12,
+                                "projected_saved_tokens": 6000,
+                                "projected_savings_usd": 0.024,
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
                     "crunch_opportunity_dry_run": {
                         "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
                         "status": "ranked",
@@ -2355,6 +2387,22 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(signal["top_report"]["matched_count"], 12)
         self.assertEqual(signal["top_report"]["projected_saved_tokens"], 6000)
         self.assertEqual(signal["top_report"]["next_action"], "widen-repeated-context-crunch-canary")
+        self.assertEqual(signal["missing_measurements"], [])
+        loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
+        request_shape_stage = next(item for item in loop["levers"] if item["lever"] == "request-shape-rollups")
+        self.assertEqual(request_shape_stage["state"], "measured-savings")
+        self.assertEqual(request_shape_stage["next_action"], "widen-repeated-context-crunch-canary")
+        self.assertEqual(request_shape_stage["blocker_codes"], [])
+        self.assertEqual(
+            request_shape_stage["activation_follow_up_evidence_schema"],
+            "agentflow.request_shape_crunch_canary_impact.v1",
+        )
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        request_shape_entry = next(item for item in ledger["entries"] if item["lever"] == "request-shape-rollups")
+        self.assertEqual(request_shape_entry["current_status"], "holdout")
+        self.assertEqual(request_shape_entry["applied_count"], 6)
+        self.assertEqual(request_shape_entry["holdout_count"], 6)
+        self.assertEqual(request_shape_entry.get("blocker_codes", []), [])
         rendered = json.dumps(plan)
         self.assertNotIn("raw-policy-secret", rendered)
         self.assertNotIn("raw-session-id-secret", rendered)

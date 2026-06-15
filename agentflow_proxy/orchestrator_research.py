@@ -1671,6 +1671,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         ),
     )
     applied_count = _first_int(summary, ("applied_count", "crunched_count", "summary_applied_count"))
+    holdout_count = _first_int(summary, ("holdout_count", "summary_holdout_count"))
     skipped_count = _first_int(summary, ("skipped_count", "no_op_count", "ineligible_count", "suppressed_count"))
     recommended_action_count = _first_int(summary, ("recommended_action_count", "recommended_count", "planned_count"))
     projected_usd = _first_numeric(
@@ -1737,6 +1738,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         "candidate_count": candidate_count,
         "matched_count": matched_count,
         "applied_count": applied_count,
+        "holdout_count": holdout_count,
         "skipped_count": skipped_count,
         "recommended_action_count": recommended_action_count,
         "projected_saved_usd": round(projected_usd, 6),
@@ -3354,6 +3356,12 @@ def _request_shape_crunch_progress_report(stats_summary: dict[str, Any]) -> dict
         reports.append(top_report)
     reports.extend(row for row in signal.get("reports") or [] if isinstance(row, dict))
     for report in reports:
+        if report.get("report_key") != "request_shape_crunch_canary_impact":
+            continue
+        if _to_int(report.get("candidate_count")) <= 0 and _to_int(report.get("matched_count")) <= 0:
+            continue
+        return report
+    for report in reports:
         if report.get("report_key") != "request_shape_crunch_opportunity":
             continue
         next_action = str(report.get("next_action") or "").strip()
@@ -3367,6 +3375,22 @@ def _request_shape_crunch_progress_report(stats_summary: dict[str, Any]) -> dict
         ):
             return report
     return None
+
+
+def _request_shape_crunch_progress_state(progress: dict[str, Any]) -> str:
+    activation_state = str(progress.get("activation_state") or "").strip()
+    if activation_state:
+        return sanitize_value(activation_state)
+    if progress.get("report_key") == "request_shape_crunch_canary_impact":
+        next_action = str(progress.get("next_action") or "").strip()
+        if next_action == "widen":
+            return "measured-savings"
+        if next_action == "rollback":
+            return "blocked"
+        if progress.get("missing_measurements"):
+            return "measurement-required"
+        return "measured-savings"
+    return "measurement-required"
 
 
 def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
@@ -3406,8 +3430,9 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
         if progress_next_action:
             stage["next_action"] = progress_next_action
         stage["fingerprint_next_action"] = next_action
-        stage["state"] = sanitize_value(progress.get("activation_state") or "measurement-required")
-        stage["activation_state"] = sanitize_value(progress.get("activation_state") or "measurement-required")
+        progress_state = _request_shape_crunch_progress_state(progress)
+        stage["state"] = progress_state
+        stage["activation_state"] = progress_state
         stage["activation_mode"] = sanitize_value(progress.get("activation_mode"))
         stage["follow_up_status"] = sanitize_value(progress.get("follow_up_status"))
         stage["canary_already_staged"] = bool(progress.get("canary_already_staged"))
@@ -3417,7 +3442,11 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
             stage["blocker_codes"] = missing
         elif progress.get("no_op_reason"):
             stage["blocker_codes"] = [str(progress.get("no_op_reason"))]
+        else:
+            stage["blocker_codes"] = []
         stage["activation_follow_up_evidence_schema"] = sanitize_value(progress.get("schema"))
+        stage["applied_count"] = _to_int(progress.get("applied_count"))
+        stage["holdout_count"] = _to_int(progress.get("holdout_count"))
         stage["projected_saved_usd"] = round(
             _to_float(progress.get("projected_saved_usd") or stage.get("projected_saved_usd")),
             8,
