@@ -3704,6 +3704,21 @@ def _merge_anthropic_canary_lifecycle_counts(base: dict[str, Any], extra: dict[s
     return merged
 
 
+def _has_anthropic_canary_lifecycle_counts(row: dict[str, Any]) -> bool:
+    return any(_to_int(row.get(key)) > 0 for key in _ANTHROPIC_CANARY_COUNTER_FIELDS) or bool(
+        row.get("anthropic_canary_latest_observed_at")
+        or row.get("claude_canary_latest_observed_at")
+        or row.get("canary_latest_observed_at")
+    )
+
+
+def _subtract_anthropic_canary_lifecycle_counts(total: dict[str, Any], own: dict[str, Any]) -> dict[str, Any]:
+    remaining = dict(total)
+    for key in _ANTHROPIC_CANARY_COUNTER_FIELDS:
+        remaining[key] = max(0, _to_int(total.get(key)) - _to_int(own.get(key)))
+    return remaining
+
+
 def _routing_lifecycle_evidence(bucket: dict[str, Any]) -> dict[str, Any] | None:
     for key in ("openai_canary_lifecycle_evidence", "anthropic_canary_lifecycle_evidence"):
         lifecycle = bucket.get(key)
@@ -3784,6 +3799,7 @@ def _classify_pass_through_bucket(row: dict[str, Any]) -> dict[str, Any]:
         "anthropic_canary_lifecycle_evidence": _aggregate_anthropic_canary_lifecycle_evidence(row, sample_count=count)
         if provider == "anthropic" and target_model
         else None,
+        "anthropic_canary_lifecycle_related_only": bool(row.get("_anthropic_canary_lifecycle_related_only")),
     }
 
 
@@ -3819,14 +3835,21 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
         requested = _routing_text(raw.get("requested_model")) or "unknown"
         routed = raw.get("routed_model")
         routed_text = _routing_text(routed)
-        if not routed_text or requested == routed_text:
-            continue
         target_model, _, _ = _routing_candidate_target(
             provider,
             requested,
             _routing_text(raw.get("category")) or "unknown",
             _routing_text(raw.get("phase") or raw.get("workflow_phase")) or "unknown",
         )
+        if provider == "anthropic" and target_model and _has_anthropic_canary_lifecycle_counts(raw):
+            key = _pass_through_lifecycle_key(raw, target_model=target_model)
+            routed_anthropic_lifecycle_by_key[key] = _merge_anthropic_canary_lifecycle_counts(
+                routed_anthropic_lifecycle_by_key.get(key, {}),
+                dict(raw),
+            )
+            continue
+        if not routed_text or requested == routed_text:
+            continue
         if target_model != routed_text:
             continue
         lifecycle_row = dict(raw)
@@ -3875,6 +3898,11 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
             classified_input = _merge_openai_canary_lifecycle_counts(classified_input, openai_lifecycle_extra)
         anthropic_lifecycle_extra = routed_anthropic_lifecycle_by_key.get(key)
         if anthropic_lifecycle_extra:
+            has_own_anthropic_lifecycle = _has_anthropic_canary_lifecycle_counts(raw)
+            if has_own_anthropic_lifecycle:
+                anthropic_lifecycle_extra = _subtract_anthropic_canary_lifecycle_counts(anthropic_lifecycle_extra, raw)
+            else:
+                classified_input["_anthropic_canary_lifecycle_related_only"] = True
             classified_input = _merge_anthropic_canary_lifecycle_counts(classified_input, anthropic_lifecycle_extra)
         buckets.append(_classify_pass_through_bucket(classified_input))
 
@@ -3897,6 +3925,8 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
             lifecycle_totals["fallback"] += _to_int(lifecycle.get("fallback_count"))
         lifecycle = bucket.get("anthropic_canary_lifecycle_evidence")
         if isinstance(lifecycle, dict):
+            if bucket.get("anthropic_canary_lifecycle_related_only"):
+                continue
             cohorts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
             lifecycle_totals["anthropic_canary_applied"] += _to_int(cohorts.get("canary_applied"))
             lifecycle_totals["anthropic_canary_holdout"] += _to_int(cohorts.get("canary_holdout"))

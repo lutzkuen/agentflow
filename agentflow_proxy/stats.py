@@ -16451,7 +16451,32 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
                sum(case when json_extract(routing_json, '$.openai_canary.fallback_reason') is not null
                           or json_extract(routing_json, '$.fallback_reason') is not null
                         then 1 else 0 end) as openai_canary_fallback_count,
-               max(case when json_extract(routing_json, '$.openai_canary.cohort') is not null then created_at else null end) as openai_canary_latest_observed_at
+               max(case when json_extract(routing_json, '$.openai_canary.cohort') is not null then created_at else null end) as openai_canary_latest_observed_at,
+               sum(case when json_extract(routing_json, '$.phase_canary.cohort') = 'canary_applied' then 1 else 0 end) as anthropic_canary_applied_count,
+               sum(case when json_extract(routing_json, '$.phase_canary.cohort') = 'canary_holdout' then 1 else 0 end) as anthropic_canary_holdout_count,
+               sum(case when json_extract(routing_json, '$.phase_canary.cohort') = 'safety_stopped'
+                         or json_extract(routing_json, '$.phase_canary.status') = 'safety_stopped'
+                        then 1 else 0 end) as anthropic_canary_safety_stopped_count,
+               sum(case when json_extract(routing_json, '$.phase_canary.cohort') = 'skipped' then 1 else 0 end) as anthropic_canary_skipped_count,
+               sum(case when json_extract(routing_json, '$.phase_canary.cohort') = 'bypassed_or_disabled' then 1 else 0 end) as anthropic_canary_bypassed_or_disabled_count,
+               sum(case when json_extract(routing_json, '$.phase_canary.cohort') is not null
+                          and json_extract(routing_json, '$.phase_canary.cohort') not in (
+                              'canary_applied',
+                              'canary_holdout',
+                              'safety_stopped',
+                              'skipped',
+                              'bypassed_or_disabled'
+                          )
+                        then 1 else 0 end) as anthropic_canary_unknown_count,
+               sum(case when json_extract(routing_json, '$.phase_canary.cohort') is not null and status_code >= 400 then 1 else 0 end) as anthropic_canary_error_count,
+               sum(case when json_extract(routing_json, '$.phase_canary.cohort') is not null and coalesce(retry_count, 0) > 0 then 1 else 0 end) as anthropic_canary_retry_count,
+               sum(case when json_extract(routing_json, '$.phase_canary.cohort') is not null
+                          and (
+                              json_extract(routing_json, '$.phase_canary.fallback_reason') is not null
+                              or json_extract(routing_json, '$.fallback_reason') is not null
+                          )
+                        then 1 else 0 end) as anthropic_canary_fallback_count,
+               max(case when json_extract(routing_json, '$.phase_canary.cohort') is not null then created_at else null end) as anthropic_canary_latest_observed_at
         from calls
         group by coalesce(provider, 'anthropic'), coalesce(source_surface, 'unknown'),
                  coalesce(endpoint, 'unknown'), requested_model, routed_model,

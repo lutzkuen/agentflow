@@ -169,6 +169,130 @@ class StatsFullTest(unittest.TestCase):
         rendered = json.dumps(result, sort_keys=True)
         self.assertNotIn("raw-openai-session-secret", rendered)
 
+    def test_lightweight_stats_routing_rows_include_anthropic_canary_lifecycle_counts(self):
+        observed_at = datetime.now(timezone.utc).isoformat()
+
+        def log_anthropic_canary_call(
+            call_id: str,
+            *,
+            cohort: str,
+            routed_model: str,
+            status: str | None = None,
+            reason: str | None = None,
+            status_code: int = 200,
+            retry_count: int = 0,
+            fallback_reason: str | None = None,
+        ) -> None:
+            canary_status = status or {
+                "canary_applied": "applied",
+                "canary_holdout": "holdout",
+                "safety_stopped": "safety_stopped",
+                "skipped": "not_selected",
+            }.get(cohort, "unknown")
+            canary = {
+                "enabled": True,
+                "policy_id": "local-phase-sonnet-haiku-canary-v1",
+                "status": canary_status,
+                "cohort": cohort,
+                "reason": reason or "selected-canary",
+                "requested_model": "claude-sonnet-4-6",
+                "target_model": "claude-haiku-4-5-20251001",
+                "actual_forwarded_model": routed_model,
+                "category": "tool-result",
+                "workflow_phase": "tool-execution",
+                "workflow_phase_confidence": "high",
+                "source_surface": "anthropic_messages",
+                "stream": True,
+            }
+            routing = {
+                "provider": "anthropic",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": routed_model,
+                "category": "tool-result",
+                "workflow_phase": "tool-execution",
+                "phase_canary": canary,
+            }
+            if fallback_reason:
+                routing["fallback_reason"] = fallback_reason
+                canary["fallback_reason"] = fallback_reason
+            server.store.log_call(
+                id=call_id,
+                created_at=observed_at,
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model=routed_model,
+                stream=1,
+                cache_hit=0,
+                status_code=status_code,
+                latency_ms=100,
+                input_tokens_est=300,
+                output_tokens_est=40,
+                actual_input_tokens=300,
+                actual_output_tokens=40,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.003,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json(routing),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="raw-anthropic-session-secret",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=retry_count,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+                requested_model_family="sonnet",
+                routed_model_family="haiku" if "haiku" in routed_model else "sonnet",
+            )
+
+        log_anthropic_canary_call(
+            "anthropic-canary-applied",
+            cohort="canary_applied",
+            routed_model="claude-haiku-4-5-20251001",
+            status_code=500,
+            retry_count=1,
+            fallback_reason="rate_limited",
+        )
+        log_anthropic_canary_call(
+            "anthropic-canary-holdout",
+            cohort="canary_holdout",
+            routed_model="claude-sonnet-4-6",
+            reason="selected-holdout",
+        )
+        log_anthropic_canary_call(
+            "anthropic-canary-safety",
+            cohort="safety_stopped",
+            routed_model="claude-sonnet-4-6",
+            reason="thinking-safety-gate",
+        )
+
+        result = asyncio.run(stats_views.stats(server.store, self.tmp.name))
+        rows = {
+            (row["requested_model"], row["routed_model"]): row
+            for row in result["routing"]
+        }
+
+        applied = rows[("claude-sonnet-4-6", "claude-haiku-4-5-20251001")]
+        requested = rows[("claude-sonnet-4-6", "claude-sonnet-4-6")]
+        self.assertEqual(applied["source_surface"], "anthropic_messages")
+        self.assertEqual(applied["endpoint"], "messages")
+        self.assertEqual(applied["category"], "tool-result")
+        self.assertEqual(applied["anthropic_canary_applied_count"], 1)
+        self.assertEqual(applied["anthropic_canary_error_count"], 1)
+        self.assertEqual(applied["anthropic_canary_retry_count"], 1)
+        self.assertEqual(applied["anthropic_canary_fallback_count"], 1)
+        self.assertEqual(applied["anthropic_canary_latest_observed_at"], observed_at)
+        self.assertEqual(requested["anthropic_canary_holdout_count"], 1)
+        self.assertEqual(requested["anthropic_canary_safety_stopped_count"], 1)
+        self.assertEqual(requested["anthropic_canary_latest_observed_at"], observed_at)
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("raw-anthropic-session-secret", rendered)
+
     def test_crunch_savings_uses_cache_blended_input_rate(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
