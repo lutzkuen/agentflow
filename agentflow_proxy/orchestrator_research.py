@@ -1210,7 +1210,9 @@ def _aggregate_crunch_report_rollup(
     tokens_saved: int,
     chars_saved: int,
     crunched_count: int,
+    missing_measurements: list[str] | None = None,
 ) -> dict[str, Any] | None:
+    missing_measurements = missing_measurements or []
     if (
         calls <= 0
         and crunched_count <= 0
@@ -1218,13 +1220,18 @@ def _aggregate_crunch_report_rollup(
         and chars_saved <= 0
         and today_savings <= 0
         and total_savings <= 0
+        and not missing_measurements
     ):
         return None
     projected_tokens = max(0, tokens_saved)
     projected_chars = max(0, chars_saved)
     projected_usd = max(0.0, today_savings or total_savings)
     skipped_count = max(0, calls - crunched_count)
-    if crunched_count > 0 or tokens_saved > 0 or chars_saved > 0 or projected_usd > 0:
+    if missing_measurements:
+        no_op_reason = "missing-crunch-aggregate-measurement"
+        next_action = "emit-crunch-aggregate-measurement"
+        status = "missing-measurement"
+    elif crunched_count > 0 or tokens_saved > 0 or chars_saved > 0 or projected_usd > 0:
         no_op_reason = None
         next_action = "rank-observed-crunch-family-follow-up"
         status = "projected-savings-ranked"
@@ -1251,6 +1258,7 @@ def _aggregate_crunch_report_rollup(
         "top_blocker_count": skipped_count if no_op_reason else 0,
         "no_op_reason": no_op_reason,
         "next_action": next_action,
+        "missing_measurements": missing_measurements,
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -1262,6 +1270,25 @@ def _aggregate_crunch_report_rollup(
             "absolute_paths_included": False,
         },
     }
+
+
+def _missing_aggregate_crunch_measurements(stats: dict[str, Any]) -> list[str]:
+    aggregate_keys = (
+        "crunched_count",
+        "crunch_chars_saved",
+        "crunch_tokens_saved",
+        "crunch_savings_usd",
+        "today_crunch_savings_usd",
+        "avg_crunch_ratio",
+    )
+    if any(key in stats for key in aggregate_keys):
+        return []
+    return [
+        "crunched-count",
+        "crunch-token-or-char-savings",
+        "crunch-savings-usd",
+        "avg-crunch-ratio",
+    ]
 
 
 def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
@@ -1301,6 +1328,7 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
             tokens_saved=tokens_saved,
             chars_saved=chars_saved,
             crunched_count=crunched_count,
+            missing_measurements=_missing_aggregate_crunch_measurements(stats),
         )
         if aggregate_rollup is not None:
             reports.append(aggregate_rollup)
@@ -1328,6 +1356,8 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
     ]
     activation_state = str((top_report or {}).get("activation_state") or "")
 
+    top_report_status = str((top_report or {}).get("status") or "")
+
     if positive_projection:
         status = "projected-savings-ranked"
         if activation_state in {"blocked", "measurement-required", "missing-measurement", "missing-evidence"}:
@@ -1337,6 +1367,9 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
     elif observed_positive:
         status = "observed-savings-ranked"
         missing = []
+    elif top_report_status == "missing-measurement":
+        status = "missing-crunch-measurement"
+        missing = top_report_missing or ["crunch-aggregate-measurement"]
     elif reports:
         status = "non-positive-projection"
         missing = top_report_missing or ["positive-observed-or-projected-savings"]
@@ -2520,6 +2553,9 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     elif status == "non-positive-projection":
         state = "no-op"
         next_action = str(top_report.get("next_action") or "inspect-crunch-coverage-and-projection")
+    elif status == "missing-crunch-measurement":
+        state = "missing-evidence"
+        next_action = str(top_report.get("next_action") or "emit-crunch-aggregate-measurement")
     else:
         state = "missing-evidence"
         next_action = "emit-crunch-opportunity-report"

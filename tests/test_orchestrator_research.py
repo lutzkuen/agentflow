@@ -1420,6 +1420,44 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(crunch_stage["state"], "no-op")
         self.assertEqual(crunch_stage["next_action"], "inspect-crunch-coverage-and-projection")
 
+    def test_crunch_candidate_records_missing_aggregate_measurement(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "cache_hit_rate": 0.0,
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
+        self.assertEqual(signal["status"], "missing-crunch-measurement")
+        self.assertEqual(signal["top_report"]["report_key"], "aggregate_crunch_measurement")
+        self.assertEqual(signal["top_report"]["status"], "missing-measurement")
+        self.assertEqual(signal["top_report"]["next_action"], "emit-crunch-aggregate-measurement")
+        self.assertEqual(signal["top_report"]["no_op_reason"], "missing-crunch-aggregate-measurement")
+        self.assertIn("crunched-count", signal["missing_measurements"])
+        self.assertIn("crunch-token-or-char-savings", signal["missing_measurements"])
+        self.assertIn("crunch-savings-usd", signal["missing_measurements"])
+        self.assertIn("avg-crunch-ratio", signal["missing_measurements"])
+        self.assertTrue(signal["privacy"]["metadata_only"])
+        self.assertTrue(signal["privacy"]["aggregate_only"])
+        self.assertFalse(signal["privacy"]["raw_prompts_included"])
+        self.assertFalse(signal["privacy"]["provider_bodies_included"])
+        self.assertFalse(signal["privacy"]["request_ids_included"])
+        self.assertFalse(signal["privacy"]["session_ids_included"])
+
+        crunch_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "crunch")
+        self.assertEqual(crunch_candidate["blocker"], "missing-crunch-savings-signal")
+        self.assertEqual(crunch_candidate["projected_savings_signal"]["status"], "missing-crunch-measurement")
+
+        loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
+        crunch_stage = next(stage for stage in loop["levers"] if stage["lever"] == "crunch")
+        self.assertEqual(crunch_stage["state"], "missing-evidence")
+        self.assertEqual(crunch_stage["next_action"], "emit-crunch-aggregate-measurement")
+        self.assertIn("crunched-count", crunch_stage["blocker_codes"])
+
     def test_crunch_candidate_uses_request_shape_crunch_opportunity_dry_run(self):
         plan = build_research_plan(
             issues=[],
