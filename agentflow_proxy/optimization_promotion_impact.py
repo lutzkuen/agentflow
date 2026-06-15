@@ -640,6 +640,31 @@ def _family_recommendation(recommendations: list[str]) -> str:
     return "promote"
 
 
+def _cohort_blocker_count(cohort: dict[str, Any]) -> int:
+    return (
+        _as_int(cohort.get("error_count"))
+        + _as_int(cohort.get("retry_count"))
+        + _as_int(cohort.get("fallback_count"))
+    )
+
+
+def _missing_family_measurements(
+    *,
+    applied_count: int,
+    holdout_or_bypass_count: int,
+    projected_savings: float,
+    observed_savings: float,
+) -> list[str]:
+    missing: list[str] = []
+    if applied_count <= 0:
+        missing.append("missing-applied-promotion-metadata")
+    if holdout_or_bypass_count <= 0:
+        missing.append("missing-holdout-or-bypass-promotion-metadata")
+    if applied_count <= 0 or (projected_savings > 0 and observed_savings == 0):
+        missing.append("missing-observed-savings-delta")
+    return missing
+
+
 def _family_impacts(action_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     families: dict[str, dict[str, Any]] = {}
     for action in action_results:
@@ -673,16 +698,46 @@ def _family_impacts(action_results: list[dict[str, Any]]) -> list[dict[str, Any]
         finalized = {key: _finalize_cohort(value) for key, value in row["cohorts"].items()}
         applied = finalized.get("canary_applied", _finalize_cohort(_empty_cohort()))
         holdout = finalized.get("canary_holdout", _finalize_cohort(_empty_cohort()))
+        bypass = finalized.get("bypassed_or_disabled", _finalize_cohort(_empty_cohort()))
+        safety_stopped = finalized.get("safety_stopped", _finalize_cohort(_empty_cohort()))
+        applied_count = _as_int(applied.get("count"))
+        holdout_count = _as_int(holdout.get("count"))
+        bypass_count = _as_int(bypass.get("count"))
+        holdout_or_bypass_count = holdout_count + bypass_count
+        applied_blocker_count = _cohort_blocker_count(applied)
+        holdout_or_bypass_blocker_count = _cohort_blocker_count(holdout) + _cohort_blocker_count(bypass) + _as_int(safety_stopped.get("count"))
+        blocker_delta = applied_blocker_count - holdout_or_bypass_blocker_count
+        savings_delta = round(
+            _as_float(applied.get("observed_savings_usd"))
+            - _as_float(holdout.get("observed_savings_usd"))
+            - _as_float(bypass.get("observed_savings_usd")),
+            8,
+        )
         latency_delta = None
         if applied.get("latency_avg_ms") is not None and holdout.get("latency_avg_ms") is not None:
             latency_delta = round(_as_float(applied.get("latency_avg_ms")) - _as_float(holdout.get("latency_avg_ms")), 2)
         recommendation = _family_recommendation(row["recommendations"])
+        missing_measurements = _missing_family_measurements(
+            applied_count=applied_count,
+            holdout_or_bypass_count=holdout_or_bypass_count,
+            projected_savings=_as_float(row["projected_savings_usd"]),
+            observed_savings=_as_float(row["observed_savings_usd"]),
+        )
         result = {
             "action_family": family,
             "action_count": row["action_count"],
             "matched_metadata_row_count": row["matched_metadata_row_count"],
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "bypass_count": bypass_count,
+            "holdout_or_bypass_count": holdout_or_bypass_count,
+            "applied_blocker_count": applied_blocker_count,
+            "holdout_or_bypass_blocker_count": holdout_or_bypass_blocker_count,
+            "blocker_delta": blocker_delta,
             "projected_savings_usd": round(_as_float(row["projected_savings_usd"]), 8),
             "observed_savings_usd": round(_as_float(row["observed_savings_usd"]), 8),
+            "savings_delta_usd": savings_delta,
+            "missing_measurements": missing_measurements,
             "cohort_metrics": finalized,
             "applied_vs_holdout_deltas": {
                 "applied_minus_holdout_error_rate": round(_as_float(applied.get("error_rate")) - _as_float(holdout.get("error_rate")), 6),
@@ -693,6 +748,8 @@ def _family_impacts(action_results: list[dict[str, Any]]) -> list[dict[str, Any]
                     _as_float(applied.get("observed_savings_usd")) - _as_float(holdout.get("observed_savings_usd")),
                     8,
                 ),
+                "applied_minus_holdout_or_bypass_blocker_count": blocker_delta,
+                "applied_minus_holdout_or_bypass_observed_savings_usd": savings_delta,
             },
             "recommendation": recommendation,
             "recommended_local_next_step": recommendation,

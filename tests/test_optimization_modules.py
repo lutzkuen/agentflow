@@ -1851,14 +1851,28 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(by_section["routing"]["next_step"]["recommendation"], "promote")
         by_family = {row["action_family"]: row for row in report["family_impacts"]}
         self.assertEqual(set(by_family), {"routing", "crunch", "cache", "evaluation-only"})
+        self.assertEqual(by_family["routing"]["applied_count"], 1)
+        self.assertEqual(by_family["routing"]["holdout_count"], 1)
+        self.assertEqual(by_family["routing"]["holdout_or_bypass_count"], 1)
+        self.assertEqual(by_family["routing"]["blocker_delta"], 0)
+        self.assertGreater(by_family["routing"]["savings_delta_usd"], 0)
+        self.assertEqual(by_family["routing"]["missing_measurements"], [])
         self.assertEqual(by_family["routing"]["cohort_metrics"]["canary_applied"]["count"], 1)
         self.assertEqual(by_family["routing"]["cohort_metrics"]["canary_holdout"]["count"], 1)
         self.assertGreater(by_family["routing"]["applied_vs_holdout_deltas"]["applied_minus_holdout_observed_savings_usd"], 0)
+        self.assertGreater(
+            by_family["routing"]["applied_vs_holdout_deltas"]["applied_minus_holdout_or_bypass_observed_savings_usd"],
+            0,
+        )
         self.assertEqual(by_family["routing"]["recommendation"], "promote")
         self.assertEqual(by_family["crunch"]["recommendation"], "promote")
         self.assertEqual(by_family["cache"]["recommendation"], "promote")
         self.assertEqual(by_family["evaluation-only"]["recommendation"], "needs-more-evidence")
         self.assertEqual(by_family["evaluation-only"]["top_blocker"], "insufficient-canary-applied-samples")
+        self.assertEqual(by_family["evaluation-only"]["applied_count"], 0)
+        self.assertIn("missing-applied-promotion-metadata", by_family["evaluation-only"]["missing_measurements"])
+        self.assertIn("missing-holdout-or-bypass-promotion-metadata", by_family["evaluation-only"]["missing_measurements"])
+        self.assertIn("missing-observed-savings-delta", by_family["evaluation-only"]["missing_measurements"])
         self.assertEqual(report["summary"]["recommendation_counts"], [
             {"value": "promote", "count": 3},
             {"value": "needs-more-evidence", "count": 1},
