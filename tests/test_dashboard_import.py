@@ -107,6 +107,7 @@ class DashboardImportTests(unittest.TestCase):
             optimization_coordinator = client.get("/agentflow/stats/optimization-coordinator")
             optimization_promotion_funnel = client.get("/agentflow/stats/optimization-promotion-funnel")
             promotion_blocker_next_actions = client.get("/agentflow/stats/promotion-blocker-next-actions")
+            post_promotion_deltas = client.get("/agentflow/stats/post-promotion-deltas")
             rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
             local_pattern_coverage = client.get("/agentflow/stats/local-pattern-coverage")
             phase_routing = client.get("/agentflow/stats/phase-routing")
@@ -280,6 +281,17 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(promotion_blocker_next_actions.json()["status"], "no-data")
             self.assertFalse(promotion_blocker_next_actions.json()["privacy"]["provider_calls_made"])
             self.assertFalse(promotion_blocker_next_actions.json()["privacy"]["managed_server_calls_made"])
+            self.assertEqual(post_promotion_deltas.status_code, 200)
+            self.assertEqual(post_promotion_deltas.json()["schema"], "agentflow.post_promotion_blocker_deltas_dashboard.v1")
+            self.assertEqual(post_promotion_deltas.json()["status"], "no-feedback")
+            self.assertFalse(post_promotion_deltas.json()["privacy"]["provider_calls_made"])
+            self.assertFalse(post_promotion_deltas.json()["privacy"]["managed_server_calls_made"])
+            self.assertFalse(post_promotion_deltas.json()["privacy"]["raw_prompts_included"])
+            self.assertFalse(post_promotion_deltas.json()["privacy"]["provider_bodies_included"])
+            self.assertFalse(post_promotion_deltas.json()["privacy"]["request_ids_included"])
+            self.assertFalse(post_promotion_deltas.json()["privacy"]["session_ids_included"])
+            self.assertFalse(post_promotion_deltas.json()["privacy"]["cache_keys_included"])
+            self.assertFalse(post_promotion_deltas.json()["privacy"]["file_paths_included"])
             self.assertEqual(rollout_readiness.status_code, 200)
             self.assertEqual(rollout_readiness.json()["schema"], "agentflow.rollout_actions_readiness.v1")
             self.assertFalse(rollout_readiness.json()["privacy"]["raw_action_payloads_included"])
@@ -374,9 +386,12 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("Optimization promotion canary impact", dashboard.text)
             self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
             self.assertIn("/agentflow/stats/promotion-blocker-next-actions", dashboard.text)
+            self.assertIn("/agentflow/stats/post-promotion-deltas", dashboard.text)
             self.assertIn("Promotion blocker next actions", dashboard.text)
             self.assertIn("promotion-blocker-summary-tbody", dashboard.text)
             self.assertIn("promotion-blocker-groups-tbody", dashboard.text)
+            self.assertIn("Post-promotion blocker deltas", dashboard.text)
+            self.assertIn("post-promotion-deltas-tbody", dashboard.text)
             self.assertIn("/agentflow/stats/claude-routing-promotion-funnel", dashboard.text)
             self.assertIn("Claude routing promotion funnel", dashboard.text)
             self.assertIn("claude-routing-funnel-candidates-tbody", dashboard.text)
@@ -582,6 +597,178 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             work_tmp.cleanup()
+
+    def test_post_promotion_deltas_endpoint_aggregates_feedback_by_family_without_raw_identifiers(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+        try:
+            for index, entry in enumerate(
+                [
+                    {
+                        "schema": "agentflow.promotion_outcome_feedback_entry.v1",
+                        "id": "raw-routing-entry-id",
+                        "created_at": "2026-06-15T00:00:00+00:00",
+                        "policy_id": "raw-routing-policy-secret",
+                        "action_family": "routing",
+                        "policy_section": "routing",
+                        "rule_id": "raw-routing-rule-secret",
+                        "candidate_id": "raw-routing-candidate-secret",
+                        "action_id": "raw-routing-action-secret",
+                        "status": "positive",
+                        "recommendation": "widen",
+                        "observed_savings_usd": 0.03,
+                        "projected_savings_usd": 0.02,
+                        "applied_count": 5,
+                        "holdout_count": 5,
+                        "reason_codes": ["impact-positive"],
+                        "privacy": {"raw_prompts_included": False},
+                    },
+                    {
+                        "schema": "agentflow.promotion_outcome_feedback_entry.v1",
+                        "id": "raw-cache-entry-id",
+                        "created_at": "2026-06-15T00:01:00+00:00",
+                        "policy_id": "raw-cache-policy-secret",
+                        "action_family": "cache",
+                        "policy_section": "cache",
+                        "rule_id": "raw-cache-rule-secret",
+                        "candidate_id": "raw-cache-candidate-secret",
+                        "action_id": "raw-cache-action-secret",
+                        "status": "needs-more-samples",
+                        "recommendation": "keep-canary",
+                        "observed_savings_usd": 0.0,
+                        "projected_savings_usd": 0.04,
+                        "applied_count": 1,
+                        "holdout_count": 0,
+                        "reason_codes": ["missing-holdout-coverage"],
+                        "privacy": {"raw_prompts_included": False},
+                    },
+                    {
+                        "schema": "agentflow.promotion_outcome_feedback_entry.v1",
+                        "id": "raw-crunch-entry-id",
+                        "created_at": "2026-06-15T00:02:00+00:00",
+                        "policy_id": "raw-crunch-policy-secret",
+                        "action_family": "crunch",
+                        "policy_section": "crunch",
+                        "rule_id": "raw-crunch-rule-secret",
+                        "candidate_id": "raw-crunch-candidate-secret",
+                        "action_id": "raw-crunch-action-secret",
+                        "status": "rollback-needed",
+                        "recommendation": "rollback",
+                        "rollback_needed": True,
+                        "observed_savings_usd": 0.0,
+                        "projected_savings_usd": 0.06,
+                        "applied_count": 2,
+                        "holdout_count": 2,
+                        "safety_stop_count": 1,
+                        "reason_codes": ["error-rate-regression"],
+                        "request_id": "raw-request-id-must-not-leak",
+                        "session_id": "raw-session-id-must-not-leak",
+                        "cache_key": "raw-cache-key-must-not-leak",
+                        "file_path": "/home/lutz/private/post_promotion_secret.py",
+                        "raw_request": {"prompt": "raw post-promotion prompt must not leak"},
+                        "privacy": {"raw_prompts_included": False},
+                    },
+                ],
+                start=1,
+            ):
+                store.log_promotion_outcome_feedback(
+                    id=f"feedback-{index}",
+                    created_at=entry["created_at"],
+                    impact_generated_at=entry["created_at"],
+                    policy_id=entry["policy_id"],
+                    action_family=entry["action_family"],
+                    policy_section=entry["policy_section"],
+                    rule_source="managed-recommended",
+                    rule_id=entry["rule_id"],
+                    candidate_id=entry["candidate_id"],
+                    action_id=entry["action_id"],
+                    source_evidence_schema="agentflow.optimization_promotion_rollout_actions.v1",
+                    status=entry["status"],
+                    recommendation=entry["recommendation"],
+                    rollback_needed=1 if entry.get("rollback_needed") else 0,
+                    observed_savings_usd=entry["observed_savings_usd"],
+                    projected_savings_usd=entry["projected_savings_usd"],
+                    applied_count=entry["applied_count"],
+                    holdout_count=entry["holdout_count"],
+                    skipped_count=0,
+                    bypassed_count=0,
+                    safety_stop_count=entry.get("safety_stop_count", 0),
+                    error_rate_delta=0.0,
+                    retry_rate_delta=0.0,
+                    latency_delta_ms=0.0,
+                    feedback_json=stable_json(entry),
+                )
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+
+            response = client.get("/agentflow/stats/post-promotion-deltas?limit=100")
+            dashboard = client.get("/agentflow/dashboard")
+        finally:
+            store.conn.close()
+            tmp.close()
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["schema"], "agentflow.post_promotion_blocker_deltas_dashboard.v1")
+        self.assertEqual(data["status"], "available")
+        self.assertEqual(data["summary"]["family_count"], 3)
+        self.assertEqual(data["summary"]["entry_count"], 3)
+        self.assertEqual(data["summary"]["applied_count"], 8)
+        self.assertEqual(data["summary"]["holdout_count"], 7)
+        self.assertEqual(data["summary"]["safety_stop_count"], 1)
+        by_family = {row["local_action_family"]: row for row in data["deltas"]}
+        self.assertEqual(set(by_family), {"routing", "cache", "crunch"})
+        self.assertEqual(by_family["routing"]["status"], "improving")
+        self.assertEqual(by_family["routing"]["next_action"], "widen-local-promotion")
+        self.assertEqual(by_family["cache"]["status"], "needs-evidence")
+        self.assertEqual(by_family["cache"]["latest_blocker_reason"], "missing-holdout-coverage")
+        self.assertEqual(by_family["crunch"]["status"], "blocked")
+        self.assertEqual(by_family["crunch"]["latest_blocker_reason"], "error-rate-regression")
+        self.assertAlmostEqual(by_family["routing"]["savings_delta_usd"], 0.01)
+        self.assertAlmostEqual(by_family["crunch"]["savings_delta_usd"], -0.06)
+        self.assertTrue(data["read_only"])
+        self.assertTrue(data["privacy"]["metadata_only"])
+        self.assertTrue(data["privacy"]["aggregate_only"])
+        for key in (
+            "raw_prompts_included",
+            "provider_bodies_included",
+            "request_ids_included",
+            "session_ids_included",
+            "cache_keys_included",
+            "file_paths_included",
+            "individual_candidate_ids_included",
+            "individual_action_ids_included",
+            "individual_rule_ids_included",
+        ):
+            self.assertFalse(data["privacy"][key])
+        rendered = json.dumps(data, sort_keys=True)
+        for forbidden in (
+            "raw-routing-policy-secret",
+            "raw-cache-rule-secret",
+            "raw-crunch-candidate-secret",
+            "raw-crunch-action-secret",
+            "raw-request-id-must-not-leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "/home/lutz/private/post_promotion_secret.py",
+            "raw post-promotion prompt",
+            '"raw_request"',
+            '"request_id"',
+            '"session_id"',
+            '"cache_key"',
+            '"file_path"',
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn("Post-promotion blocker deltas", dashboard.text)
+        self.assertIn("post-promotion-deltas-tbody", dashboard.text)
 
     def test_dashboard_inline_javascript_syntax_checks_with_node(self):
         node = shutil.which("node")

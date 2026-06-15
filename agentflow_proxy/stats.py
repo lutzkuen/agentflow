@@ -12423,6 +12423,223 @@ def _promotion_omission_dashboard_bucket(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _post_promotion_privacy_summary() -> dict[str, Any]:
+    privacy = {
+        **_promotion_privacy_summary(),
+        "content_free": True,
+        "local_only": True,
+        "individual_candidate_ids_included": False,
+        "individual_action_ids_included": False,
+        "individual_rule_ids_included": False,
+        "session_ids_included": False,
+        "file_paths_included": False,
+        "absolute_paths_included": False,
+        "provider_bodies_included": False,
+        "policy_file_contents_included": False,
+    }
+    return privacy
+
+
+def _post_promotion_family(value: Any) -> str:
+    text = str(value or "unknown").strip().lower().replace("_", "-")
+    if text in {"cache", "cache-replay"}:
+        return "cache"
+    if text in {"routing", "provider-routing", "phase-routing"}:
+        return "routing"
+    if text in {"crunch", "old-context-summary", "old-context-summarization"}:
+        return "crunch"
+    return public_label(text or "unknown", "unknown")
+
+
+def _post_promotion_state(entry: dict[str, Any]) -> str:
+    status = str(entry.get("status") or "").strip().lower().replace("_", "-")
+    recommendation = str(entry.get("recommendation") or "").strip().lower().replace("_", "-")
+    if entry.get("rollback_needed") or "rollback" in status or recommendation == "rollback":
+        return "blocked"
+    if "safety" in status or status in {"regression-flagged", "keep-blocked"}:
+        return "blocked"
+    if status in {"needs-more-samples", "needs-more-evidence", "needs-review"}:
+        return "needs-evidence"
+    if status in {"positive", "promoted", "widened"} or recommendation in {"promote", "widen"}:
+        return "improving"
+    if _as_float(entry.get("observed_savings_usd")) > 0:
+        return "measured"
+    return "observed"
+
+
+def _post_promotion_next_action(state: str, latest: dict[str, Any], blocker: str | None) -> str:
+    status = str(latest.get("status") or "").strip().lower().replace("_", "-")
+    recommendation = str(latest.get("recommendation") or "").strip().lower().replace("_", "-")
+    if state == "blocked":
+        if "safety" in status or (blocker and "safety" in blocker):
+            return "review-post-promotion-safety-blocker"
+        if "rollback" in status or recommendation == "rollback":
+            return "rollback-or-keep-promotion-blocked"
+        return "review-post-promotion-regression"
+    if state == "needs-evidence":
+        return "collect-post-promotion-holdout-evidence"
+    if recommendation in {"promote", "widen"}:
+        return "widen-local-promotion"
+    if state in {"improving", "measured"}:
+        return "continue-measuring-post-promotion-impact"
+    return "inspect-post-promotion-feedback"
+
+
+def _post_promotion_status(states: list[str], latest: dict[str, Any] | None) -> str:
+    if "blocked" in states:
+        return "blocked"
+    if "needs-evidence" in states:
+        return "needs-evidence"
+    if "improving" in states:
+        return "improving"
+    if "measured" in states:
+        return "measured"
+    return "observed" if latest else "no-feedback"
+
+
+def _post_promotion_latest_blocker(entries: list[dict[str, Any]], safety_groups: list[dict[str, Any]]) -> str | None:
+    for group in sorted(safety_groups, key=lambda row: str(row.get("rank") or ""), reverse=False):
+        for key in ("keep_blocked_reason", "blocker_code", "safety_stop_reason"):
+            value = str(group.get(key) or "").strip()
+            if value:
+                return public_label(value, "post-promotion-blocker")
+    for entry in sorted(entries, key=lambda row: str(row.get("created_at") or row.get("impact_generated_at") or ""), reverse=True):
+        codes = []
+        for key in ("reason_codes", "warning_codes"):
+            value = entry.get(key)
+            if isinstance(value, list):
+                codes.extend(_optimization_eval_reason_codes(value))
+        if codes:
+            return codes[0]
+        if entry.get("rollback_needed"):
+            return "rollback-needed"
+        status = str(entry.get("status") or "").strip()
+        if status and status not in {"positive", "observed"}:
+            return public_label(status, "post-promotion-blocker")
+    return None
+
+
+def _post_promotion_delta_row(
+    family: str,
+    entries: list[dict[str, Any]],
+    safety_groups: list[dict[str, Any]],
+) -> dict[str, Any]:
+    latest = max(entries, key=lambda row: str(row.get("created_at") or row.get("impact_generated_at") or ""), default=None)
+    states = [_post_promotion_state(entry) for entry in entries]
+    if safety_groups and "blocked" not in states:
+        states.append("blocked")
+    status = _post_promotion_status(states, latest)
+    applied = sum(_as_int(entry.get("applied_count")) for entry in entries) + sum(_as_int(group.get("applied_count")) for group in safety_groups)
+    holdout = sum(_as_int(entry.get("holdout_count")) for entry in entries) + sum(_as_int(group.get("holdout_count")) for group in safety_groups)
+    safety_stops = sum(_as_int(entry.get("safety_stop_count")) for entry in entries) + sum(_as_int(group.get("safety_stop_count")) for group in safety_groups)
+    observed = sum(_as_float(entry.get("observed_savings_usd")) for entry in entries)
+    projected = sum(_as_float(entry.get("projected_savings_usd")) for entry in entries) + sum(_as_float(group.get("savings_estimate_usd")) for group in safety_groups)
+    latest_blocker = _post_promotion_latest_blocker(entries, safety_groups)
+    recommendation_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    for entry in entries:
+        recommendation = public_label(entry.get("recommendation"), "none")
+        status_label = public_label(entry.get("status"), "unknown")
+        recommendation_counts[recommendation] = recommendation_counts.get(recommendation, 0) + 1
+        status_counts[status_label] = status_counts.get(status_label, 0) + 1
+    return {
+        "schema": "agentflow.post_promotion_blocker_delta.v1",
+        "local_action_family": family,
+        "status": status,
+        "entry_count": len(entries),
+        "safety_stop_group_count": len(safety_groups),
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "safety_stop_count": safety_stops,
+        "latest_blocker_reason": latest_blocker,
+        "observed_savings_usd": round(observed, 8),
+        "projected_savings_usd": round(projected, 8),
+        "savings_delta_usd": round(observed - projected, 8),
+        "next_action": _post_promotion_next_action(status, latest or {}, latest_blocker),
+        "latest_feedback_at": (latest or {}).get("created_at") or (latest or {}).get("impact_generated_at"),
+        "status_counts": _breakdown_from_counts(status_counts),
+        "recommendation_counts": _breakdown_from_counts(recommendation_counts),
+        "privacy": _post_promotion_privacy_summary(),
+    }
+
+
+async def stats_post_promotion_deltas(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    from agentflow_proxy.activation_lifecycle_feedback import activation_safety_stop_burndown_report
+    from agentflow_proxy.promotion_outcome_feedback import promotion_outcome_feedback_summary
+
+    capped_limit = max(1, min(int(limit or 1000), 10_000))
+    feedback = promotion_outcome_feedback_summary(store_obj, limit=capped_limit)
+    safety = activation_safety_stop_burndown_report(store_obj, limit=capped_limit)
+    entries_by_family: dict[str, list[dict[str, Any]]] = {}
+    for entry in feedback.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        family = _post_promotion_family(entry.get("action_family") or entry.get("policy_section"))
+        entries_by_family.setdefault(family, []).append(entry)
+
+    safety_by_family: dict[str, list[dict[str, Any]]] = {}
+    for group in safety.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        family = _post_promotion_family(group.get("action_family"))
+        safety_by_family.setdefault(family, []).append(group)
+
+    families = sorted(set(entries_by_family) | set(safety_by_family))
+    deltas = [
+        _post_promotion_delta_row(
+            family,
+            entries_by_family.get(family, []),
+            safety_by_family.get(family, []),
+        )
+        for family in families
+    ]
+    deltas.sort(
+        key=lambda row: (
+            row.get("status") != "blocked",
+            -_as_int(row.get("safety_stop_count")),
+            -abs(_as_float(row.get("savings_delta_usd"))),
+            str(row.get("local_action_family") or ""),
+        )
+    )
+    top = deltas[0] if deltas else {}
+    privacy = _post_promotion_privacy_summary()
+    return {
+        "schema": "agentflow.post_promotion_blocker_deltas_dashboard.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "limit": capped_limit,
+        "status": "available" if deltas else "no-feedback",
+        "summary": {
+            "family_count": len(deltas),
+            "entry_count": sum(_as_int(row.get("entry_count")) for row in deltas),
+            "blocked_family_count": sum(1 for row in deltas if row.get("status") == "blocked"),
+            "needs_evidence_family_count": sum(1 for row in deltas if row.get("status") == "needs-evidence"),
+            "applied_count": sum(_as_int(row.get("applied_count")) for row in deltas),
+            "holdout_count": sum(_as_int(row.get("holdout_count")) for row in deltas),
+            "safety_stop_count": sum(_as_int(row.get("safety_stop_count")) for row in deltas),
+            "observed_savings_usd": round(sum(_as_float(row.get("observed_savings_usd")) for row in deltas), 8),
+            "projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in deltas), 8),
+            "savings_delta_usd": round(sum(_as_float(row.get("savings_delta_usd")) for row in deltas), 8),
+            "top_local_action_family": top.get("local_action_family"),
+            "top_status": top.get("status"),
+            "top_blocker_reason": top.get("latest_blocker_reason"),
+            "top_next_action": top.get("next_action"),
+        },
+        "deltas": deltas,
+        "source_reports": {
+            "promotion_outcome_feedback_schema": feedback.get("schema"),
+            "activation_safety_stop_burndown_schema": safety.get("schema"),
+            "feedback_entry_count": feedback.get("entry_count"),
+            "safety_stop_group_count": (safety.get("summary") or {}).get("ranked_group_count") if isinstance(safety.get("summary"), dict) else None,
+        },
+        "privacy": privacy,
+    }
+
+
 async def stats_optimization_promotion_actions(store_obj: Any, limit: int = 50) -> dict[str, Any]:
     from agentflow_proxy.optimization_eval_plan import build_optimization_eval_plan
     from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
@@ -19769,6 +19986,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Post-promotion blocker deltas</h2>
+  <table class="activity-table" data-table-id="post-promotion-deltas" data-filter-label="Filter post-promotion deltas">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="text">Status</th><th data-sort-type="number">Feedback</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Observed</th><th data-sort-type="money">Projected</th><th data-sort-type="money">Delta</th><th data-sort-type="text">Latest blocker</th><th data-sort-type="text">Next action</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="post-promotion-deltas-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Review commands</h2>
   <table data-table-id="promotion-blocker-commands" data-filter-label="Filter promotion blocker commands">
     <thead><tr>
@@ -22806,10 +23032,20 @@ function promotionBlockerCandidateBadges(rows){
     return `<span class="badge provider">${esc(row.recommendation_type||'recommendation')} → ${esc(row.next_action||'next-action')}${executor}: ${esc(reasons)}</span>`;
   }).join(' ');
 }
+function postPromotionDeltaBadge(status){
+  if(status==='improving'||status==='measured')return'hit';
+  if(status==='blocked')return'err';
+  if(status==='needs-evidence')return'routed';
+  return'miss';
+}
 async function refreshPromotionBlockerNextActions(){
   try{
-    const r=await fetch('/agentflow/stats/promotion-blocker-next-actions?limit=20');
-    const d=await r.json();
+    const [blockerResponse,deltaResponse]=await Promise.all([
+      fetch('/agentflow/stats/promotion-blocker-next-actions?limit=20'),
+      fetch('/agentflow/stats/post-promotion-deltas?limit=1000')
+    ]);
+    const d=await blockerResponse.json();
+    const deltaData=await deltaResponse.json();
     const s=d.summary||{};
     const source=d.source||{};
     const privacy=d.privacy||{};
@@ -22848,6 +23084,25 @@ async function refreshPromotionBlockerNextActions(){
       <td class="model">${esc(row.command||'—')}</td>
       <td>${row.read_only?'<span class="badge hit">read-only</span>':'<span class="badge routed">check command</span>'}</td>
     </tr>`).join('')||'<tr><td colspan="2" style="color:#8b949e">No local review command hints available</td></tr>';
+    const deltas=deltaData.deltas||[];
+    document.getElementById('post-promotion-deltas-tbody').innerHTML=deltas.map(row=>{
+      const p=row.privacy||{};
+      const delta=row.savings_delta_usd||0;
+      return `<tr>
+        <td><span class="badge provider">${esc(row.local_action_family||'unknown')}</span></td>
+        <td><span class="badge ${postPromotionDeltaBadge(row.status)}">${esc(row.status||'unknown')}</span></td>
+        <td class="tokens">${(row.entry_count||0).toLocaleString()}<div class="sub">${(row.safety_stop_group_count||0).toLocaleString()} safety groups</div></td>
+        <td class="tokens">${(row.applied_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+        <td class="${(row.safety_stop_count||0)>0?'cost':'tokens'}">${(row.safety_stop_count||0).toLocaleString()}</td>
+        <td class="savings">${fmt(row.observed_savings_usd||0,6)}</td>
+        <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+        <td class="${delta>=0?'savings':'cost'}">${fmt(delta,6)}</td>
+        <td class="flags">${row.latest_blocker_reason?`<span class="badge ${row.status==='blocked'?'err':'miss'}">${esc(row.latest_blocker_reason)}</span>`:'<span class="badge hit">none</span>'}</td>
+        <td class="flags"><span class="badge provider">${esc(row.next_action||'inspect-post-promotion-feedback')}</span></td>
+        <td class="flags">${p.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} ${p.raw_prompts_included||p.provider_bodies_included||p.request_ids_included||p.session_ids_included||p.cache_keys_included||p.file_paths_included?'<span class="badge err">raw/local data</span>':'<span class="badge hit">raw data omitted</span>'}</td>
+      </tr>`;
+    }).join('')||`<tr><td colspan="12" style="color:#8b949e">${esc(deltaData.status==='no-feedback'?'No post-promotion feedback recorded yet':'No post-promotion deltas available')}</td></tr>`;
     applyAllDataTables();
   }catch(e){}
 }

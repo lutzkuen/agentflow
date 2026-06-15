@@ -491,6 +491,14 @@ def create_dashboard_router(
     async def stats_promotion_blocker_next_actions(limit: int = 20) -> dict[str, Any]:
         return await stats_views.stats_promotion_blocker_next_actions(limit=limit)
 
+    @router.get("/agentflow/stats/post-promotion-deltas")
+    async def stats_post_promotion_deltas(limit: int = 1000) -> dict[str, Any]:
+        return await cached_expensive_stats(
+            "post-promotion-deltas",
+            (int(limit),),
+            lambda: stats_views.stats_post_promotion_deltas(_store(store_obj), limit=limit),
+        )
+
     @router.get("/agentflow/stats/rollout-actions/readiness")
     async def stats_rollout_actions_readiness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_rollout_actions_readiness(_store(store_obj), limit=limit)
