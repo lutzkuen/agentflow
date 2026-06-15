@@ -175,6 +175,24 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         )
         return call_id
 
+    def test_openai_cache_replay_impact_recommends_stage_when_canary_evidence_is_missing(self) -> None:
+        report = build_openai_cache_replay_impact_report(self.store, limit=20)
+
+        self.assertEqual(report["schema"], "agentflow.openai_cache_replay_impact.v1")
+        self.assertEqual(report["status"], "no-openai-cache-replay-metadata")
+        evidence = report["local_promotion_evidence"]
+        self.assertEqual(evidence["schema"], "agentflow.openai_cache_replay_local_promotion_evidence.v1")
+        self.assertEqual(evidence["status"], "missing-canary-evidence")
+        self.assertEqual(evidence["recommended_local_action"]["action"], "stage-cache-replay-canary")
+        self.assertEqual(evidence["top_blocker"], "missing-cache-replay-canary-lifecycle-evidence")
+        self.assertEqual(evidence["coverage"]["observed_replay_metadata_rows"], 0)
+        self.assertEqual(evidence["outcomes"]["observed_hits"], 0)
+        self.assertEqual(evidence["savings"]["projected_saved_usd"], 0.0)
+        self.assertEqual(report["summary"]["recommended_local_action"], "stage-cache-replay-canary")
+        self.assertFalse(evidence["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(evidence["privacy"]["cache_keys_included"])
+        self.assertFalse(evidence["provider_calls_made"])
+
     def _capture_openai_provider_adoption(self, fulfilled_call_id: str, *, tool_id: str) -> None:
         capture_provider_tool_adoption(
             self.store,
@@ -743,6 +761,21 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(by_verdict["widen"]["cohort_metrics"]["applied"]["cache_hit_rate"], 1.0)
         self.assertAlmostEqual(by_verdict["widen"]["observed_savings_usd"], 0.07)
         self.assertEqual(by_verdict["widen"]["provider_adoption_gate"]["status"], "passed")
+        promotion = report["local_promotion_evidence"]
+        self.assertEqual(promotion["schema"], "agentflow.openai_cache_replay_local_promotion_evidence.v1")
+        self.assertEqual(promotion["coverage"]["applied_count"], 10)
+        self.assertEqual(promotion["coverage"]["holdout_count"], 5)
+        self.assertEqual(promotion["outcomes"]["observed_hits"], 10)
+        self.assertAlmostEqual(promotion["savings"]["observed_saved_usd"], 0.18)
+        self.assertEqual(promotion["recommended_local_action"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(promotion["recommended_local_action"]["action"], "rollback-or-disable-openai-cache-replay-rule")
+        candidate_actions = {
+            row["candidate_id"]: row["recommended_local_action"]
+            for row in promotion["candidate_evidence"]
+        }
+        self.assertEqual(candidate_actions["openai-cache-promote"], "promote-openai-cache-replay-rule-draft")
+        self.assertEqual(report["summary"]["local_promotion_status"], "rollback-required")
+        self.assertEqual(report["summary"]["recommended_local_action"], "rollback-or-disable-openai-cache-replay-rule")
         self.assertIn("hold", by_verdict)
         self.assertTrue(
             any("stale-dependency-blocker" in row["reason_codes"] for row in report["candidates"]),

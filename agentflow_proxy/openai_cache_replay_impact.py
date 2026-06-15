@@ -20,6 +20,7 @@ from agentflow_proxy.store import utc_now
 SCHEMA = "agentflow.openai_cache_replay_impact.v1"
 QUALITY_GATE_SCHEMA = "agentflow.openai_cache_replay_quality_gate.v1"
 LIFECYCLE_SCHEMA = "agentflow.openai_cache_replay_lifecycle_feedback.v1"
+LOCAL_PROMOTION_EVIDENCE_SCHEMA = "agentflow.openai_cache_replay_local_promotion_evidence.v1"
 
 DEFAULT_MIN_APPLIED_SAMPLES = 2
 DEFAULT_MIN_HOLDOUT_SAMPLES = 1
@@ -584,6 +585,156 @@ def _aggregate_canary_hit_measurements(quality_gates: list[dict[str, Any]]) -> d
     }
 
 
+def _candidate_local_promotion_evidence(item: dict[str, Any]) -> dict[str, Any]:
+    verdict = str(item.get("verdict") or "unknown")
+    blockers = sorted(
+        {
+            _reason_code(value)
+            for value in [
+                *(item.get("reason_codes") or []),
+                item.get("top_remaining_blocker"),
+            ]
+            if value
+        }
+    )
+    if verdict in {"widen", "promote"}:
+        readiness = "promotion-ready"
+        action = "promote-openai-cache-replay-rule-draft"
+    elif verdict == "rollback":
+        readiness = "rollback-required"
+        action = "rollback-or-disable-openai-cache-replay-rule"
+    elif verdict == "more-samples":
+        readiness = "collecting-evidence"
+        action = "collect-more-applied-and-holdout-cache-replay-evidence"
+    else:
+        readiness = "canary-only"
+        action = "keep-openai-cache-replay-canary-only"
+    if _as_int(item.get("safety_stop_count")):
+        readiness = "rollback-required"
+        action = "review-openai-cache-replay-safety-stop"
+    return {
+        "schema": "agentflow.openai_cache_replay_candidate_promotion_evidence.v1",
+        "candidate_id": item.get("candidate_id"),
+        "rule_id": item.get("rule_id"),
+        "readiness": readiness,
+        "recommended_local_action": action,
+        "verdict": verdict,
+        "reason_codes": blockers,
+        "coverage": {
+            "sample_count": _as_int(item.get("sample_count")),
+            "applied_count": _as_int(item.get("applied_count")),
+            "holdout_count": _as_int(item.get("holdout_count")),
+            "blocked_count": _as_int(item.get("blocked_count")),
+            "invalidated_count": _as_int(item.get("invalidated_count")),
+            "safety_stop_count": _as_int(item.get("safety_stop_count")),
+        },
+        "outcomes": {
+            "observed_hits": _as_int(item.get("actual_hits")),
+            "miss_count": _as_int(item.get("miss_count")),
+            "bypass_skipped_count": _as_int(item.get("bypass_skipped_count")),
+            "hit_realization_rate": (item.get("canary_hit_measurement") or {}).get("hit_realization_rate")
+            if isinstance(item.get("canary_hit_measurement"), dict)
+            else None,
+        },
+        "savings": {
+            "projected_saved_usd": round(_as_float(item.get("projected_saved_usd")), 8),
+            "observed_saved_usd": round(_as_float(item.get("actual_saved_cost_usd")), 8),
+            "savings_realization_rate": (item.get("canary_hit_measurement") or {}).get("savings_realization_rate")
+            if isinstance(item.get("canary_hit_measurement"), dict)
+            else None,
+        },
+        "target_local_rule_file": "cache_rules.yaml",
+        "target_local_policy_section": "cache.rules",
+        "privacy": _privacy_summary(),
+    }
+
+
+def _local_promotion_evidence(
+    *,
+    status: str,
+    summary: dict[str, Any],
+    quality_gates: list[dict[str, Any]],
+    reason_counts: Counter[str],
+    remaining_blocker_counts: Counter[str],
+) -> dict[str, Any]:
+    observed_rows = _as_int(summary.get("observed_openai_cache_replay_metadata_row_count"))
+    applied_count = _as_int(summary.get("applied_count"))
+    holdout_count = _as_int(summary.get("holdout_count"))
+    projected_saved_usd = _as_float(summary.get("projected_saved_usd"))
+    observed_saved_usd = _as_float(summary.get("actual_saved_cost_usd"))
+    projected_hits = _as_int(summary.get("projected_hits"))
+    actual_hits = _as_int(summary.get("actual_hits"))
+    candidates = [_candidate_local_promotion_evidence(item) for item in quality_gates]
+    if not observed_rows:
+        readiness = "missing-canary-evidence"
+        action = "stage-cache-replay-canary"
+        reason_codes = ["missing-cache-replay-canary-lifecycle-evidence"]
+        top_blocker = "missing-cache-replay-canary-lifecycle-evidence"
+    elif any(item["readiness"] == "rollback-required" for item in candidates):
+        readiness = "rollback-required"
+        action = "rollback-or-disable-openai-cache-replay-rule"
+        reason_codes = sorted(reason_counts) or ["cache-replay-safety-or-quality-blocker"]
+        top_blocker = _top_counter_value(reason_counts) or _top_counter_value(remaining_blocker_counts)
+    elif any(item["readiness"] == "promotion-ready" for item in candidates):
+        readiness = "promotion-ready"
+        action = "promote-openai-cache-replay-rule-draft"
+        reason_codes = ["target-savings-met"]
+        top_blocker = _top_counter_value(remaining_blocker_counts)
+    elif applied_count or holdout_count:
+        readiness = "canary-only"
+        action = "keep-openai-cache-replay-canary-only"
+        reason_codes = sorted(reason_counts) or ["cache-replay-needs-more-evidence"]
+        top_blocker = _top_counter_value(reason_counts) or _top_counter_value(remaining_blocker_counts)
+    else:
+        readiness = "collecting-evidence"
+        action = "collect-more-applied-and-holdout-cache-replay-evidence"
+        reason_codes = sorted(reason_counts) or ["missing-applied-or-holdout-evidence"]
+        top_blocker = _top_counter_value(reason_counts) or _top_counter_value(remaining_blocker_counts)
+    return {
+        "schema": LOCAL_PROMOTION_EVIDENCE_SCHEMA,
+        "status": readiness,
+        "source_status": status,
+        "recommended_local_action": {
+            "action": action,
+            "target_local_rule_file": "cache_rules.yaml",
+            "target_local_policy_section": "cache.rules",
+            "policy_source": "local-file-backed",
+            "reason_codes": reason_codes,
+        },
+        "coverage": {
+            "observed_replay_metadata_rows": observed_rows,
+            "candidate_count": _as_int(summary.get("candidate_count")),
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "blocked_count": _as_int(summary.get("blocked_count")),
+            "invalidated_count": _as_int(summary.get("invalidated_count")),
+            "safety_stop_count": _as_int(summary.get("safety_stop_count")),
+            "applied_rate": _ratio(float(applied_count), float(observed_rows)),
+            "holdout_rate": _ratio(float(holdout_count), float(observed_rows)),
+        },
+        "outcomes": {
+            "observed_hits": actual_hits,
+            "miss_count": _as_int(summary.get("miss_count")),
+            "bypass_skipped_count": _as_int(summary.get("bypass_skipped_count")),
+            "hit_realization_rate": _ratio(float(actual_hits), float(projected_hits)),
+        },
+        "savings": {
+            "projected_hits": projected_hits,
+            "projected_saved_usd": round(projected_saved_usd, 8),
+            "observed_saved_usd": round(observed_saved_usd, 8),
+            "savings_realization_rate": _ratio(observed_saved_usd, projected_saved_usd),
+        },
+        "top_blocker": top_blocker,
+        "candidate_evidence": candidates,
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _privacy_summary(),
+    }
+
+
 def _decide_gate(
     *,
     cohorts: dict[str, dict[str, Any]],
@@ -869,6 +1020,43 @@ def build_openai_cache_replay_impact_report(
         "wrote_local_files": False,
         "provider_calls_made": False,
     }
+    status = "matched" if observed_rows else "no-openai-cache-replay-metadata"
+    summary = {
+        "sampled_call_count": len(rows),
+        "observed_openai_cache_replay_metadata_row_count": observed_rows,
+        "candidate_count": len(quality_gates),
+        "applied_count": cohort_counts.get("applied", 0),
+        "holdout_count": cohort_counts.get("holdout", 0),
+        "blocked_count": cohort_counts.get("blocked", 0),
+        "invalidated_count": cohort_counts.get("invalidated", 0),
+        "safety_stop_count": cohort_counts.get("safety_stop", 0),
+        "replay_ready_cohort_count": sum(1 for item in quality_gates if item.get("readiness") == "replay-ready"),
+        "skipped_cohort_count": sum(1 for item in quality_gates if item.get("readiness") == "skipped"),
+        "projected_hits": sum(_as_int(item.get("projected_hits")) for item in quality_gates),
+        "projected_saved_usd": round(sum(_as_float(item.get("projected_saved_usd")) for item in quality_gates), 8),
+        "dry_run_projected_savings_usd": round(
+            sum(_as_float(item.get("dry_run_projected_savings_usd")) for item in quality_gates),
+            8,
+        ),
+        "actual_hits": sum(_as_int(item.get("actual_hits")) for item in quality_gates),
+        "actual_saved_cost_usd": round(sum(_as_float(item.get("actual_saved_cost_usd")) for item in quality_gates), 8),
+        "miss_count": sum(_as_int(item.get("miss_count")) for item in quality_gates),
+        "bypass_skipped_count": sum(_as_int(item.get("bypass_skipped_count")) for item in quality_gates),
+        "top_remaining_blocker": _top_counter_value(remaining_blocker_counts),
+        "observed_savings_usd": round(sum(_as_float(item.get("observed_savings_usd")) for item in quality_gates), 8),
+        "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in quality_gates), 8),
+        "canary_hit_measurement": _aggregate_canary_hit_measurements(quality_gates),
+    }
+    promotion_evidence = _local_promotion_evidence(
+        status=status,
+        summary=summary,
+        quality_gates=quality_gates,
+        reason_counts=reason_counts,
+        remaining_blocker_counts=remaining_blocker_counts,
+    )
+    summary["recommended_local_action"] = promotion_evidence["recommended_local_action"]["action"]
+    summary["local_promotion_status"] = promotion_evidence["status"]
+    summary["top_blocker"] = promotion_evidence["top_blocker"]
     return {
         "schema": SCHEMA,
         "generated_at": utc_now(),
@@ -879,33 +1067,10 @@ def build_openai_cache_replay_impact_report(
         "managed_server_calls_made": False,
         "lookback_limit": lookback_limit,
         "since": since,
-        "status": "matched" if observed_rows else "no-openai-cache-replay-metadata",
-        "summary": {
-            "sampled_call_count": len(rows),
-            "observed_openai_cache_replay_metadata_row_count": observed_rows,
-            "candidate_count": len(quality_gates),
-            "applied_count": cohort_counts.get("applied", 0),
-            "holdout_count": cohort_counts.get("holdout", 0),
-            "blocked_count": cohort_counts.get("blocked", 0),
-            "invalidated_count": cohort_counts.get("invalidated", 0),
-            "safety_stop_count": cohort_counts.get("safety_stop", 0),
-            "replay_ready_cohort_count": sum(1 for item in quality_gates if item.get("readiness") == "replay-ready"),
-            "skipped_cohort_count": sum(1 for item in quality_gates if item.get("readiness") == "skipped"),
-            "projected_hits": sum(_as_int(item.get("projected_hits")) for item in quality_gates),
-            "projected_saved_usd": round(sum(_as_float(item.get("projected_saved_usd")) for item in quality_gates), 8),
-            "dry_run_projected_savings_usd": round(
-                sum(_as_float(item.get("dry_run_projected_savings_usd")) for item in quality_gates),
-                8,
-            ),
-            "actual_hits": sum(_as_int(item.get("actual_hits")) for item in quality_gates),
-            "actual_saved_cost_usd": round(sum(_as_float(item.get("actual_saved_cost_usd")) for item in quality_gates), 8),
-            "miss_count": sum(_as_int(item.get("miss_count")) for item in quality_gates),
-            "bypass_skipped_count": sum(_as_int(item.get("bypass_skipped_count")) for item in quality_gates),
-            "top_remaining_blocker": _top_counter_value(remaining_blocker_counts),
-            "observed_savings_usd": round(sum(_as_float(item.get("observed_savings_usd")) for item in quality_gates), 8),
-            "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in quality_gates), 8),
-            "canary_hit_measurement": _aggregate_canary_hit_measurements(quality_gates),
-        },
+        "status": status,
+        "summary": summary,
+        "local_promotion_evidence": promotion_evidence,
+        "recommended_local_action": promotion_evidence["recommended_local_action"],
         "cohort_breakdown": _counter_rows(cohort_counts),
         "remaining_blocker_breakdown": _counter_rows(remaining_blocker_counts),
         "quality_gate": top_level_gate,
