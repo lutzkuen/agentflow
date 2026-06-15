@@ -109,6 +109,7 @@ agentflow-request-shape-crunch-policy-decision = "agentflow_proxy.cli:request_sh
 agentflow-request-shape-crunch-canary-stage = "agentflow_proxy.cli:request_shape_crunch_canary_stage_main"
 agentflow-request-shape-cache-replay-canary-stage = "agentflow_proxy.cli:request_shape_cache_replay_canary_stage_main"
 agentflow-request-shape-cache-replay-evidence = "agentflow_proxy.cli:request_shape_cache_replay_evidence_main"
+agentflow-request-shape-cache-replay-policy-decision = "agentflow_proxy.cli:request_shape_cache_replay_policy_decision_main"
 agentflow-managed-recommendation-handoff = "agentflow_proxy.cli:managed_recommendation_handoff_main"
 agentflow-cache-replay-cohorts = "agentflow_proxy.cli:cache_replay_cohorts_main"
 agentflow-cache-smoke-diagnostic = "agentflow_proxy.cli:cache_smoke_diagnostic_main"

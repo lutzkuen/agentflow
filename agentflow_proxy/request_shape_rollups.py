@@ -22,6 +22,7 @@ REPLAY_CACHE_CANARY_ACTION_SCHEMA = "agentflow.request_shape_cache_replay_canary
 REPLAY_CACHE_CANARY_STAGE_SCHEMA = "agentflow.request_shape_cache_replay_canary_stage.v1"
 REPLAY_CACHE_CANARY_APPLY_SCHEMA = "agentflow.request_shape_cache_replay_canary_apply.v1"
 REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_replay_evidence.v1"
+REPLAY_CACHE_POLICY_DECISION_SCHEMA = "agentflow.request_shape_cache_replay_policy_decision.v1"
 CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "agentflow.request_shape_crunch_opportunity_dry_run.v1"
 CRUNCH_CANARY_ACTION_SCHEMA = "agentflow.request_shape_crunch_canary_action.v1"
 CRUNCH_CANARY_STAGE_SCHEMA = "agentflow.request_shape_repeated_context_crunch_canary_stage.v1"
@@ -3309,6 +3310,376 @@ def build_request_shape_cache_replay_evidence_report(
             "aggregate_only": True,
         },
         "privacy": _cache_replay_evidence_privacy(),
+    }
+
+
+def _cache_replay_policy_decision_privacy() -> dict[str, Any]:
+    privacy = dict(_cache_replay_evidence_privacy())
+    privacy.update({
+        "policy_patch_includes_raw_ids": False,
+        "policy_files_written": False,
+        "cache_entries_written": False,
+    })
+    return privacy
+
+
+def _cache_replay_policy_decision_id(evidence: dict[str, Any], decision: str) -> str:
+    top = _cache_replay_policy_decision_top_canary(evidence)
+    basis = {
+        "schema": REPLAY_CACHE_POLICY_DECISION_SCHEMA,
+        "decision": decision,
+        "shape": top.get("shape") if isinstance(top, dict) else {},
+        "projected_hits": (evidence.get("summary") or {}).get("projected_hits")
+        if isinstance(evidence.get("summary"), dict)
+        else 0,
+        "observed_hits": (evidence.get("summary") or {}).get("observed_hits")
+        if isinstance(evidence.get("summary"), dict)
+        else 0,
+    }
+    return f"cache-replay-policy-decision:{hashlib.sha256(stable_json(basis).encode('utf-8')).hexdigest()[:16]}"
+
+
+def _cache_replay_policy_rule_id(evidence: dict[str, Any]) -> str:
+    top = _cache_replay_policy_decision_top_canary(evidence)
+    shape = top.get("shape") if isinstance(top, dict) else {}
+    digest = hashlib.sha256(stable_json(shape).encode("utf-8")).hexdigest()[:16]
+    return f"local-openai-cache-replay-promoted:{digest}"
+
+
+def _cache_replay_policy_decision_top_canary(evidence: dict[str, Any]) -> dict[str, Any]:
+    canaries = evidence.get("staged_canaries") if isinstance(evidence.get("staged_canaries"), list) else []
+    for canary in canaries:
+        if isinstance(canary, dict):
+            return canary
+    return {}
+
+
+def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> dict[str, Any]:
+    summary = evidence.get("summary") if isinstance(evidence, dict) and isinstance(evidence.get("summary"), dict) else {}
+    stale = evidence.get("stale_evidence") if isinstance(evidence, dict) and isinstance(evidence.get("stale_evidence"), dict) else {}
+    applied = _as_int(summary.get("applied_count"))
+    holdout = _as_int(summary.get("holdout_count"))
+    observed_hits = _as_int(summary.get("observed_hits"))
+    observed_savings = _as_float(summary.get("observed_savings_usd"))
+    projected_hits = _as_int(summary.get("projected_hits"))
+    projected_savings = _as_float(summary.get("projected_savings_usd"))
+    return {
+        "schema": "agentflow.request_shape_cache_replay_policy_decision_metrics.v1",
+        "staged_canary_count": _as_int(evidence.get("staged_canary_count")) if isinstance(evidence, dict) else 0,
+        "observed_row_count": _as_int(summary.get("observed_row_count")),
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "exact_hit_count": _as_int(summary.get("exact_hit_count")),
+        "miss_count": _as_int(summary.get("miss_count")),
+        "bypass_count": _as_int(summary.get("bypass_count")),
+        "invalidation_skipped_count": _as_int(summary.get("invalidation_skipped_count")),
+        "unsupported_shape_count": _as_int(summary.get("unsupported_shape_count")),
+        "projected_hits": projected_hits,
+        "observed_hits": observed_hits,
+        "projected_savings_usd": round(projected_savings, 6),
+        "observed_savings_usd": round(observed_savings, 6),
+        "hit_observation_rate": round(_as_float(summary.get("hit_observation_rate")), 6),
+        "savings_realization_ratio": round(observed_savings / projected_savings, 6) if projected_savings > 0 else 0.0,
+        "stale_evidence": bool(stale.get("stale")),
+        "evidence_age_hours": stale.get("age_hours"),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _cache_replay_policy_reason_codes(evidence: dict[str, Any] | None) -> list[str]:
+    if not isinstance(evidence, dict):
+        return ["missing-cache-replay-evidence"]
+    metrics = _cache_replay_policy_decision_metrics(evidence)
+    codes: list[str] = []
+    if metrics["staged_canary_count"] <= 0:
+        codes.append("missing-cache-replay-canary-policy")
+    if metrics["applied_count"] <= 0:
+        codes.append("missing-applied-coverage")
+    if metrics["holdout_count"] <= 0:
+        codes.append("missing-holdout-coverage")
+    if metrics["observed_hits"] <= 0:
+        codes.append("missing-observed-cache-hits")
+    if metrics["observed_savings_usd"] <= 0:
+        codes.append("missing-observed-cache-savings")
+    if metrics["stale_evidence"]:
+        codes.append("stale-cache-replay-evidence")
+    if metrics["invalidation_skipped_count"] > 0:
+        codes.append("invalidation-or-stale-risk-observed")
+    blocker_breakdown = evidence.get("blocker_breakdown") if isinstance(evidence.get("blocker_breakdown"), list) else []
+    for item in blocker_breakdown[:3]:
+        if isinstance(item, dict):
+            code = public_label(item.get("value"), "unknown")
+            if code != "unknown":
+                codes.append(code)
+    return list(dict.fromkeys(codes))
+
+
+def _cache_replay_policy_decision_value(evidence: dict[str, Any] | None) -> str:
+    metrics = _cache_replay_policy_decision_metrics(evidence)
+    if metrics["stale_evidence"]:
+        return "rollback"
+    if (
+        metrics["staged_canary_count"] > 0
+        and metrics["applied_count"] > 0
+        and metrics["holdout_count"] > 0
+        and metrics["observed_hits"] > 0
+        and metrics["observed_savings_usd"] > 0
+        and metrics["invalidation_skipped_count"] == 0
+    ):
+        return "promote"
+    return "keep-blocked"
+
+
+def _cache_replay_policy_decision_reason(evidence: dict[str, Any] | None, decision: str) -> str:
+    if decision == "promote":
+        return "cache-replay-canary-hit-recovery-observed"
+    if decision == "rollback":
+        return "stale-cache-replay-evidence"
+    codes = _cache_replay_policy_reason_codes(evidence)
+    return codes[0] if codes else "cache-replay-promotion-blocked"
+
+
+def _cache_replay_policy_rollback_metadata(evidence: dict[str, Any] | None, decision: str) -> dict[str, Any]:
+    rule_id = _cache_replay_policy_rule_id(evidence or {})
+    return {
+        "schema": "agentflow.request_shape_cache_replay_policy_decision_rollback_metadata.v1",
+        "required_for_promotion": True,
+        "rollback_action_type": "disable_openai_exact_cache_replay_policy",
+        "target_local_rule_file": "cache_rules.yaml",
+        "source_canary_policy_file": "cache_canary_policy.yaml",
+        "rule_id": rule_id,
+        "disable_patch": {
+            "pattern_rules": [
+                {
+                    "id": rule_id,
+                    "enabled": False,
+                    "disabled_reason": _cache_replay_policy_decision_reason(evidence, decision),
+                }
+            ]
+        },
+        "metadata_only": True,
+        "aggregate_only": True,
+        "rules_path_included": False,
+    }
+
+
+def _cache_replay_policy_conditions_from_shape(shape: dict[str, Any]) -> dict[str, Any]:
+    conditions = {
+        "pattern_hashes": ["sha256:*"],
+        "provider_family": shape.get("provider_family") or "openai",
+        "source_surface": shape.get("source_surface"),
+        "endpoint": shape.get("endpoint"),
+        "category": shape.get("category"),
+        "workflow_phase": shape.get("workflow_phase"),
+        "text_bucket": shape.get("text_bucket"),
+        "token_bucket": shape.get("token_bucket"),
+        "has_tools": False,
+        "stream": False,
+        "replayability_levels": ["features_only", "local-exact-response"],
+    }
+    return {key: value for key, value in conditions.items() if value not in (None, "", [])}
+
+
+def _cache_replay_policy_patch(evidence: dict[str, Any] | None, decision: str) -> dict[str, Any] | None:
+    if not isinstance(evidence, dict):
+        return None
+    top = _cache_replay_policy_decision_top_canary(evidence)
+    shape = top.get("shape") if isinstance(top.get("shape"), dict) else {}
+    metrics = _cache_replay_policy_decision_metrics(evidence)
+    rule_id = _cache_replay_policy_rule_id(evidence)
+    reason = _cache_replay_policy_decision_reason(evidence, decision)
+    if decision == "rollback":
+        return {
+            "schema": "agentflow.request_shape_cache_replay_policy_decision_local_patch.v1",
+            "patch_type": "rollback_openai_exact_cache_replay_policy",
+            "target_local_rule_file": "cache_rules.yaml",
+            "source_canary_policy_file": "cache_canary_policy.yaml",
+            "pattern_rules": [
+                {
+                    "id": rule_id,
+                    "enabled": False,
+                    "disabled_reason": reason,
+                }
+            ],
+            "metadata_only": True,
+            "aggregate_only": True,
+            "rules_path_included": False,
+        }
+    if decision != "promote":
+        return None
+    ttl_seconds = _as_int(top.get("ttl_seconds"), DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS)
+    return {
+        "schema": "agentflow.request_shape_cache_replay_policy_decision_local_patch.v1",
+        "patch_type": "promote_openai_exact_cache_replay_canary",
+        "target_local_rule_file": "cache_rules.yaml",
+        "source_canary_policy_file": "cache_canary_policy.yaml",
+        "policy_source": "local-manual",
+        "pattern_rules": [
+            {
+                "id": rule_id,
+                "enabled": True,
+                "policy_source": "local-manual",
+                "description": "Promoted OpenAI Responses exact-cache replay rule from local request-shape canary evidence.",
+                "conditions": _cache_replay_policy_conditions_from_shape(shape),
+                "action": {
+                    "type": "exact_cache_pattern",
+                    "allow_tool_calls": False,
+                    "safe_invalidation": False,
+                    "streaming": False,
+                    "scope": "session",
+                    "min_call_count": 2,
+                    "ttl_seconds": ttl_seconds,
+                },
+                "rollout": {
+                    "schema": "agentflow.pattern_policy_rollout.v1",
+                    "recommendation_mode": "active",
+                    "canary_enabled": False,
+                    "canary_fraction": 1.0,
+                    "holdout_fraction": 0.0,
+                    "canary_salt": rule_id,
+                    "canary_unit": "request_fingerprint",
+                },
+                "graduation": {
+                    "schema": "agentflow.request_shape_cache_replay_policy_graduation.v1",
+                    "source_schema": REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA,
+                    "source_verdict": "promote",
+                    "source_surface": shape.get("source_surface"),
+                    "endpoint": shape.get("endpoint"),
+                    "category": shape.get("category"),
+                    "workflow_phase": shape.get("workflow_phase"),
+                    "text_bucket": shape.get("text_bucket"),
+                    "token_bucket": shape.get("token_bucket"),
+                    "sample_count": metrics["observed_row_count"],
+                    "applied_count": metrics["applied_count"],
+                    "holdout_count": metrics["holdout_count"],
+                    "projected_hits": metrics["projected_hits"],
+                    "observed_hits": metrics["observed_hits"],
+                    "projected_savings_usd": metrics["projected_savings_usd"],
+                    "observed_savings_usd": metrics["observed_savings_usd"],
+                    "aggregate_only": True,
+                    "graduated_at": utc_now(),
+                },
+            }
+        ],
+        "metadata_only": True,
+        "aggregate_only": True,
+        "rules_path_included": False,
+        "policy_files_written": False,
+        "cache_entries_written": False,
+    }
+
+
+def build_request_shape_cache_replay_policy_decision_report(evidence_report: dict[str, Any]) -> dict[str, Any]:
+    evidence = evidence_report if isinstance(evidence_report, dict) else {}
+    decision = _cache_replay_policy_decision_value(evidence)
+    metrics = _cache_replay_policy_decision_metrics(evidence)
+    reason = _cache_replay_policy_decision_reason(evidence, decision)
+    reason_codes = _cache_replay_policy_reason_codes(evidence)
+    rollback_metadata = _cache_replay_policy_rollback_metadata(evidence, decision)
+    local_policy_patch = _cache_replay_policy_patch(evidence, decision)
+    promotion_allowed = decision == "promote"
+    rollback_required = decision == "rollback"
+    entry = {
+        "schema": "agentflow.request_shape_cache_replay_policy_decision_entry.v1",
+        "decision_id": _cache_replay_policy_decision_id(evidence, decision),
+        "decision": decision,
+        "reason": reason,
+        "reason_codes": reason_codes,
+        "recommended_next_action": {
+            "promote": "promote-openai-exact-cache-replay-policy",
+            "rollback": "disable-openai-exact-cache-replay-canary",
+            "keep-blocked": "keep-openai-exact-cache-replay-blocked",
+        }[decision],
+        "next_action": "apply-local-cache-policy-patch-after-review" if decision in {"promote", "rollback"} else "keep-observing",
+        "target_local_policy": "cache_rules",
+        "target_local_rule_file": "cache_rules.yaml",
+        "source_canary_policy_file": "cache_canary_policy.yaml",
+        "policy_source": "local-manual" if metrics["staged_canary_count"] else "unknown",
+        "promotion_allowed": promotion_allowed,
+        "rollback_required": rollback_required,
+        "keep_blocked": decision == "keep-blocked",
+        "coverage": {
+            "schema": "agentflow.request_shape_cache_replay_policy_decision_coverage.v1",
+            "has_applied_coverage": metrics["applied_count"] > 0,
+            "has_holdout_coverage": metrics["holdout_count"] > 0,
+            "has_observed_hits": metrics["observed_hits"] > 0,
+            "has_observed_savings": metrics["observed_savings_usd"] > 0,
+            "has_fresh_evidence": not metrics["stale_evidence"],
+            "has_no_invalidation_skips": metrics["invalidation_skipped_count"] == 0,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "metrics": metrics,
+        "rollback_metadata": rollback_metadata,
+        "local_policy_patch": local_policy_patch,
+        "privacy": _cache_replay_policy_decision_privacy(),
+    }
+    return {
+        "schema": REPLAY_CACHE_POLICY_DECISION_SCHEMA,
+        "status": "decided",
+        "ok": True,
+        "read_only": True,
+        "generated_at": utc_now(),
+        "decision": decision,
+        "reason": reason,
+        "reason_codes": reason_codes,
+        "top_decision": entry,
+        "decisions": [entry],
+        "summary": {
+            "decision": decision,
+            "promotion_allowed": promotion_allowed,
+            "rollback_required": rollback_required,
+            "keep_blocked": decision == "keep-blocked",
+            "staged_canary_count": metrics["staged_canary_count"],
+            "observed_row_count": metrics["observed_row_count"],
+            "applied_count": metrics["applied_count"],
+            "holdout_count": metrics["holdout_count"],
+            "exact_hit_count": metrics["exact_hit_count"],
+            "miss_count": metrics["miss_count"],
+            "bypass_count": metrics["bypass_count"],
+            "invalidation_skipped_count": metrics["invalidation_skipped_count"],
+            "projected_hits": metrics["projected_hits"],
+            "observed_hits": metrics["observed_hits"],
+            "projected_savings_usd": metrics["projected_savings_usd"],
+            "observed_savings_usd": metrics["observed_savings_usd"],
+            "hit_observation_rate": metrics["hit_observation_rate"],
+            "savings_realization_ratio": metrics["savings_realization_ratio"],
+            "stale_evidence": metrics["stale_evidence"],
+            "policy_source": entry["policy_source"],
+            "target_local_rule_file": "cache_rules.yaml",
+            "source_canary_policy_file": "cache_canary_policy.yaml",
+            "policy_files_written": False,
+            "cache_entries_written": False,
+        },
+        "source_evidence": {
+            "schema": evidence.get("schema"),
+            "status": evidence.get("status"),
+            "summary": evidence.get("summary") if isinstance(evidence.get("summary"), dict) else {},
+            "stale_evidence": evidence.get("stale_evidence") if isinstance(evidence.get("stale_evidence"), dict) else {},
+            "privacy": _cache_replay_evidence_privacy(),
+        },
+        "acceptance": {
+            "records_durable_decision": decision in {"promote", "rollback", "keep-blocked"},
+            "reports_hit_recovery": metrics["observed_hits"] >= 0 and metrics["projected_hits"] >= 0,
+            "reports_holdout_coverage": metrics["holdout_count"] >= 0,
+            "drafts_local_policy_patch_or_blocker": bool(local_policy_patch) or bool(reason_codes),
+            "targets_file_backed_cache_policy": entry["target_local_rule_file"] == "cache_rules.yaml",
+            "keeps_tool_and_streaming_replay_blocked": bool(
+                local_policy_patch is None
+                or all(
+                    isinstance(rule, dict)
+                    and not bool((rule.get("conditions") or {}).get("has_tools"))
+                    and not bool((rule.get("conditions") or {}).get("stream"))
+                    and not bool((rule.get("action") or {}).get("allow_tool_calls"))
+                    and not bool((rule.get("action") or {}).get("streaming"))
+                    for rule in local_policy_patch.get("pattern_rules", [])
+                )
+            ),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _cache_replay_policy_decision_privacy(),
     }
 
 

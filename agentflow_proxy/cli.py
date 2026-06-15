@@ -156,6 +156,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     request_shape_crunch_canary_stage_cli,
     request_shape_cache_replay_canary_stage_cli,
     request_shape_cache_replay_evidence_cli,
+    request_shape_cache_replay_policy_decision_cli,
     managed_recommendation_handoff_cli,
     cache_replay_cohorts_cli,
     cache_smoke_diagnostic_cli,
@@ -864,6 +865,10 @@ def request_shape_cache_replay_canary_stage_main() -> None:
 
 def request_shape_cache_replay_evidence_main() -> None:
     raise SystemExit(request_shape_cache_replay_evidence_cli())
+
+
+def request_shape_cache_replay_policy_decision_main() -> None:
+    raise SystemExit(request_shape_cache_replay_policy_decision_cli())
 
 
 def managed_recommendation_handoff_main() -> None:
