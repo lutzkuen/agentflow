@@ -5303,6 +5303,16 @@ def request_shape_cache_replay_canary_stage_cli(argv: Sequence[str] | None = Non
         help="Persist the underlying request_shape_rollups rows. The staged canary action itself remains dry-run/read-only.",
     )
     parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local AgentFlow policy overlays when --apply is used, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the selected request-shape cache replay canary to cache_canary_policy.yaml.",
+    )
+    parser.add_argument(
         "--rollout-fraction",
         type=float,
         default=0.10,
@@ -5337,11 +5347,30 @@ def request_shape_cache_replay_canary_stage_cli(argv: Sequence[str] | None = Non
         )
     finally:
         store.conn.close()
+    if args.apply:
+        from agentflow_proxy.request_shape_rollups import apply_request_shape_cache_replay_canary_action
+
+        action = result.get("top_stage_action") if isinstance(result.get("top_stage_action"), dict) else {}
+        apply_result = apply_request_shape_cache_replay_canary_action(
+            action,
+            rules_path=Path(args.config_dir).expanduser() / "cache_canary_policy.yaml",
+            dry_run=False,
+        )
+        result = {
+            **result,
+            "dry_run": False,
+            "read_only": False,
+            "apply_result": apply_result,
+            "wrote_policy_files": bool(apply_result.get("wrote_policy_files")),
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "cache_entries_written": False,
+        }
     if args.pretty:
         stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
     else:
         _write_json(stdout, result)
-    return 0
+    return 0 if not args.apply or bool((result.get("apply_result") or {}).get("ok")) else 1
 
 
 def cache_replay_cohorts_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:

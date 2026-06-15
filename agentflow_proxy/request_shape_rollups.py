@@ -20,6 +20,7 @@ REPLAY_BLOCKER_CLASSIFICATION_SCHEMA = "agentflow.request_shape_cache_replay_blo
 REPLAY_BLOCKER_CLASSIFICATION_ROW_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification_row.v1"
 REPLAY_CACHE_CANARY_ACTION_SCHEMA = "agentflow.request_shape_cache_replay_canary_action.v1"
 REPLAY_CACHE_CANARY_STAGE_SCHEMA = "agentflow.request_shape_cache_replay_canary_stage.v1"
+REPLAY_CACHE_CANARY_APPLY_SCHEMA = "agentflow.request_shape_cache_replay_canary_apply.v1"
 CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "agentflow.request_shape_crunch_opportunity_dry_run.v1"
 CRUNCH_CANARY_ACTION_SCHEMA = "agentflow.request_shape_crunch_canary_action.v1"
 CRUNCH_CANARY_STAGE_SCHEMA = "agentflow.request_shape_repeated_context_crunch_canary_stage.v1"
@@ -36,6 +37,7 @@ DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION = 0.10
 DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS = 72.0
 DEFAULT_CACHE_REPLAY_CANARY_ROLLOUT_FRACTION = 0.10
 DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION = 0.10
+DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS = 3600
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -2230,6 +2232,32 @@ def _request_shape_cache_replay_canary_action(
             "readiness": cohort.get("readiness"),
             "reason": cohort.get("reason"),
         },
+        "ttl_seconds": DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS,
+        "invalidation": {
+            "schema": "agentflow.request_shape_cache_replay_invalidation_assumptions.v1",
+            "strategy": "session-scoped-exact-non-tool",
+            "scope": "session",
+            "safe_invalidation": False,
+            "tool_call_cache_enabled": False,
+            "streaming_replay_enabled": False,
+            "ttl_seconds": DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS,
+            "assumptions": [
+                "non-streaming-openai-responses-only",
+                "no-tool-calls",
+                "exact-request-shape-replay",
+                "session-scoped-keying",
+                "ttl-limited-replay-window",
+            ],
+            "bypass_reasons": [
+                "tools-present",
+                "streaming-replay-not-supported",
+                "invalidation-evidence-missing",
+                "unsafe-tool-calls-without-invalidation",
+                "cohort-mismatch",
+            ],
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
         "projected_hits": _as_int(cohort.get("projected_hits")),
         "projected_savings_usd": round(_as_float(cohort.get("projected_savings_usd")), 6),
         "projected_lifecycle": lifecycle_projection,
@@ -2252,6 +2280,8 @@ def _request_shape_cache_replay_canary_action(
             "exact_non_tool_only": not bool(cohort.get("has_tools")) and not bool(cohort.get("stream")),
             "tool_call_cache_enabled": False,
             "streaming_replay_enabled": False,
+            "ttl_seconds": DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS,
+            "session_scoped": True,
             "holdout_required": holdout > 0,
             "records_applied_holdout_skipped_invalidation_blocked": True,
             "records_applied_holdout_skipped_bypassed_invalidated_hit_miss": True,
@@ -2527,6 +2557,175 @@ def build_request_shape_cache_replay_canary_stage_report(
                 skipped_guards.get("tool_streaming_and_invalidation_missing_remain_skipped")
             ),
         },
+        "privacy": _replayability_privacy(),
+    }
+
+
+def apply_request_shape_cache_replay_canary_action(
+    action: dict[str, Any],
+    *,
+    rules_path: str | Path,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    errors: list[dict[str, str]] = []
+    if action.get("schema") != REPLAY_CACHE_CANARY_ACTION_SCHEMA:
+        errors.append({"path": "$.schema", "message": "unsupported request-shape cache replay canary action schema"})
+    if action.get("action_type") != "stage-local-openai-cache-replay-canary":
+        errors.append({"path": "$.action_type", "message": "unsupported request-shape cache replay canary action type"})
+    if action.get("target_local_policy") != "cache_canary_policy":
+        errors.append({"path": "$.target_local_policy", "message": "request-shape cache replay canary must target cache_canary_policy"})
+    privacy = action.get("privacy") if isinstance(action.get("privacy"), dict) else {}
+    safety = action.get("safety_gates") if isinstance(action.get("safety_gates"), dict) else {}
+    for key in (
+        "raw_prompts_included",
+        "provider_bodies_included",
+        "raw_responses_included",
+        "cache_keys_included",
+        "request_fingerprints_included",
+        "request_ids_included",
+        "session_ids_included",
+    ):
+        if privacy.get(key) or safety.get(key):
+            errors.append({"path": f"$.privacy.{key}", "message": "request-shape cache replay canary action is not metadata-only"})
+    conditions = action.get("conditions") if isinstance(action.get("conditions"), dict) else {}
+    if conditions.get("provider_family") != "openai" or conditions.get("source_surface") != "openai_responses" or conditions.get("endpoint") != "responses":
+        errors.append({"path": "$.conditions", "message": "request-shape cache replay canary must target OpenAI Responses"})
+    if bool(conditions.get("has_tools")):
+        errors.append({"path": "$.conditions.has_tools", "message": "tool-call cache replay requires separate invalidation evidence"})
+    if bool(conditions.get("stream")):
+        errors.append({"path": "$.conditions.stream", "message": "streaming cache replay is not supported by this canary"})
+    if _as_int(action.get("projected_hits")) <= 0:
+        errors.append({"path": "$.projected_hits", "message": "request-shape cache replay canary needs positive projected hits"})
+    if _as_float(action.get("projected_savings_usd")) <= 0:
+        errors.append({"path": "$.projected_savings_usd", "message": "request-shape cache replay canary needs positive projected savings"})
+
+    path = Path(rules_path)
+    existing: dict[str, Any] = {}
+    if path.exists():
+        import yaml
+
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        existing = loaded if isinstance(loaded, dict) else {}
+    if errors:
+        return {
+            "schema": REPLAY_CACHE_CANARY_APPLY_SCHEMA,
+            "ok": False,
+            "dry_run": bool(dry_run),
+            "wrote_policy_files": False,
+            "target_local_policy": "cache_canary_policy",
+            "rules_path_included": False,
+            "errors": errors,
+            "privacy": _replayability_privacy(),
+        }
+
+    policy_id = str(action.get("policy_id") or _cache_replay_canary_policy_id(str(action.get("cohort_id") or "")))
+    cohort_id = str(action.get("cohort_id") or "")
+    rollout = _bounded_fraction(action.get("rollout_fraction", action.get("canary_fraction")), DEFAULT_CACHE_REPLAY_CANARY_ROLLOUT_FRACTION)
+    holdout = _bounded_fraction(action.get("holdout_fraction"), DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION)
+    if rollout + holdout > 1.0:
+        holdout = max(0.0, 1.0 - rollout)
+    ttl_seconds = max(60, _as_int(action.get("ttl_seconds"), DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS))
+    rule_conditions = {
+        "pattern_hashes": ["sha256:*"],
+        "provider_family": conditions.get("provider_family"),
+        "source_surface": conditions.get("source_surface"),
+        "endpoint": conditions.get("endpoint"),
+        "category": conditions.get("category"),
+        "workflow_phase": conditions.get("workflow_phase"),
+        "text_bucket": conditions.get("text_bucket"),
+        "token_bucket": conditions.get("token_bucket"),
+        "has_tools": False,
+        "stream": False,
+        "replayability_levels": ["features_only", "local-exact-response"],
+    }
+    rule_conditions = {key: value for key, value in rule_conditions.items() if value not in (None, "", [])}
+    canary_rule = {
+        "id": policy_id,
+        "enabled": True,
+        "policy_source": "local-manual",
+        "candidate_id": cohort_id,
+        "description": "Local OpenAI Responses exact-cache replay canary staged from aggregate request-shape evidence.",
+        "conditions": rule_conditions,
+        "action": {
+            "type": "exact_cache_pattern",
+            "allow_tool_calls": False,
+            "safe_invalidation": False,
+            "streaming": False,
+            "scope": "session",
+            "min_call_count": 2,
+            "ttl_seconds": ttl_seconds,
+        },
+        "rollout": {
+            "schema": "agentflow.pattern_policy_rollout.v1",
+            "recommendation_mode": "openai-cache-replay-request-shape-canary",
+            "canary_enabled": True,
+            "canary_fraction": round(rollout, 6),
+            "holdout_fraction": round(holdout, 6),
+            "canary_salt": policy_id,
+            "canary_unit": "request_fingerprint",
+            "local_feedback_fields": [
+                "cache_hit",
+                "status_code",
+                "retry_count",
+                "latency_ms",
+                "cost_est_usd",
+                "cost_baseline_usd",
+                "cache_replay_canary",
+                "invalidation_reason",
+            ],
+        },
+        "graduation": {
+            "schema": "agentflow.request_shape_cache_replay_shape_activation.v1",
+            "source_schema": REPLAYABILITY_DRY_RUN_SCHEMA,
+            "source_reason": conditions.get("reason"),
+            "cohort_id": cohort_id,
+            "source_surface": conditions.get("source_surface"),
+            "endpoint": conditions.get("endpoint"),
+            "category": conditions.get("category"),
+            "workflow_phase": conditions.get("workflow_phase"),
+            "text_bucket": conditions.get("text_bucket"),
+            "token_bucket": conditions.get("token_bucket"),
+            "sample_count": _as_int(action.get("cohort_row_count")),
+            "projected_hits": _as_int(action.get("projected_hits")),
+            "projected_savings_usd": round(_as_float(action.get("projected_savings_usd")), 6),
+            "aggregate_only": True,
+            "staged_at": utc_now(),
+        },
+        "invalidation": action.get("invalidation") if isinstance(action.get("invalidation"), dict) else {},
+        "safety_gates": action.get("safety_gates") if isinstance(action.get("safety_gates"), dict) else {},
+        "lifecycle_metadata": action.get("lifecycle_metadata") if isinstance(action.get("lifecycle_metadata"), dict) else {},
+        "privacy": _replayability_privacy(),
+        "staged_at": utc_now(),
+    }
+
+    updated = dict(existing)
+    updated["schema"] = str(updated.get("schema") or "agentflow.openai_cache_replay_canary_policy.v1")
+    updated["policy_source"] = "local-manual"
+    updated["generated_at"] = utc_now()
+    rules = updated.get("pattern_rules") if isinstance(updated.get("pattern_rules"), list) else []
+    kept = [rule for rule in rules if not (isinstance(rule, dict) and rule.get("id") == policy_id)]
+    updated["pattern_rules"] = kept + [canary_rule]
+    if not dry_run:
+        import yaml
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(updated, sort_keys=False), encoding="utf-8")
+
+    return {
+        "schema": REPLAY_CACHE_CANARY_APPLY_SCHEMA,
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "wrote_policy_files": not dry_run,
+        "target_local_policy": "cache_canary_policy",
+        "policy_id": policy_id,
+        "cohort_id": cohort_id,
+        "canary_fraction": canary_rule["rollout"]["canary_fraction"],
+        "holdout_fraction": canary_rule["rollout"]["holdout_fraction"],
+        "ttl_seconds": ttl_seconds,
+        "rules_path_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "cache_entries_written": False,
         "privacy": _replayability_privacy(),
     }
 
