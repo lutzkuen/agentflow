@@ -386,6 +386,146 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(plan["privacy"]["request_ids_included"])
         self.assertFalse(plan["privacy"]["session_ids_included"])
 
+    def test_post_promotion_priority_deltas_generate_successor_instead_of_stale_stage_titles(self):
+        stale_titles = [
+            "Stage cache replay canary for replay-ready on openai/openai_responses/responses",
+            "Rank crunch savings follow-up for crunch-projected-savings-ranked",
+            "Stage request-shape repeated-context crunch canary",
+            "Rank managed recommendation omission reasons for local policy handoff",
+            "Stage routing evidence for claude-sonnet-4-6 to claude-haiku-4-5-20251001",
+            "Turn replay-ready cache candidate into local replay evidence",
+            "Resolve repeated-safety-stop activation feedback blocker",
+        ]
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    470 + index,
+                    title,
+                    ["backlog", "status:ready", "priority:p1", "core-feature"],
+                    state="CLOSED",
+                )
+                for index, title in enumerate(stale_titles)
+            ],
+            stats={
+                "calls": 2876,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "unknown",
+                        "endpoint": "unknown",
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-sonnet-4-6",
+                        "category": "tool-result",
+                        "c": 1197,
+                    }
+                ],
+                "post_promotion_priority_review": {
+                    "schema": "agentflow.post_promotion_priority_delta_review.v1",
+                    "status": "ranked",
+                    "summary": {
+                        "review_candidate_count": 3,
+                        "recommended_count": 2,
+                        "noop_count": 1,
+                        "top_next_action": "widen-local-policy",
+                        "widen_count": 1,
+                        "rollback_count": 1,
+                        "keep_blocked_count": 1,
+                    },
+                    "groups": [
+                        {
+                            "rank": 1,
+                            "action_family": "routing",
+                            "candidate_count": 1,
+                            "top_next_action": "widen-local-policy",
+                            "savings_delta_usd": 4.5,
+                        }
+                    ],
+                    "candidates": [
+                        {
+                            "rank": 1,
+                            "status": "recommended",
+                            "next_action": "widen-local-policy",
+                            "action_family": "routing",
+                            "recommendation_type": "widen-routing-canary",
+                            "policy_section": "routing",
+                            "savings_delta_usd": 4.5,
+                            "confidence": 0.91,
+                            "prompt": "raw post promotion prompt must not leak",
+                            "request_id": "post-promotion-request-secret",
+                            "session_id": "post-promotion-session-secret",
+                            "cache_key": "post-promotion-cache-secret",
+                            "file_path": "/home/lutz/private/post_promotion_secret.py",
+                        },
+                        {
+                            "rank": 2,
+                            "status": "recommended",
+                            "next_action": "rollback-local-policy",
+                            "action_family": "cache",
+                            "recommendation_type": "rollback-cache-canary",
+                            "policy_section": "cache",
+                            "savings_delta_usd": -1.0,
+                        },
+                        {
+                            "rank": 3,
+                            "status": "noop",
+                            "next_action": "keep-blocked",
+                            "action_family": "crunch",
+                            "recommendation_type": "noop",
+                            "policy_section": "crunch",
+                            "no_op_reasons": ["low-confidence", "stale-evidence"],
+                        },
+                    ],
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "provider_bodies_included": False,
+                    },
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertIn("Widen post-promotion routing policy from priority deltas", titles)
+        for stale_title in stale_titles:
+            self.assertNotIn(stale_title, titles)
+
+        status = plan["evidence"]["stats_summary"]["post_promotion_priority_delta_status"]
+        self.assertEqual(status["schema"], "agentflow.post_promotion_priority_delta_research_status.v1")
+        self.assertEqual(status["summary"]["top_next_action"], "widen-local-policy")
+        self.assertEqual(status["summary"]["top_local_action_family"], "routing")
+        self.assertTrue(status["privacy"]["metadata_only"])
+        self.assertFalse(status["privacy"]["raw_prompts_included"])
+        self.assertFalse(status["privacy"]["provider_bodies_included"])
+        self.assertFalse(status["privacy"]["request_ids_included"])
+        self.assertFalse(status["privacy"]["session_ids_included"])
+        self.assertFalse(status["privacy"]["cache_keys_included"])
+        self.assertFalse(status["privacy"]["individual_candidate_ids_included"])
+        self.assertIn("post_promotion_priority_delta_status", plan["evidence"]["inspected_sources"])
+
+        successor = next(item for item in plan["backlog_changes"]["create_issues"] if item["title"] == "Widen post-promotion routing policy from priority deltas")
+        self.assertIn("next_action=widen-local-policy", successor["body"])
+        self.assertIn("post-promotion priority-delta", successor["body"])
+        self.assertIn("routing", successor["labels"])
+        self.assertIn("privacy", successor["labels"])
+
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertGreaterEqual(suppression["closed_prior_issue_count"], 1)
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw post promotion prompt must not leak", rendered)
+        self.assertNotIn("post-promotion-request-secret", rendered)
+        self.assertNotIn("post-promotion-session-secret", rendered)
+        self.assertNotIn("post-promotion-cache-secret", rendered)
+        self.assertNotIn("/home/lutz/private/post_promotion_secret.py", rendered)
+        self.assertFalse(plan["privacy"]["raw_prompts_included"])
+        self.assertFalse(plan["privacy"]["provider_bodies_included"])
+        self.assertFalse(plan["privacy"]["request_ids_included"])
+        self.assertFalse(plan["privacy"]["session_ids_included"])
+
     def test_current_pass_through_routing_summary_is_ranked_into_activation_candidates(self):
         plan = build_research_plan(
             issues=[],

@@ -863,6 +863,182 @@ def _promotion_blocker_next_action_status(stats: dict[str, Any]) -> dict[str, An
     }
 
 
+def _post_promotion_priority_source_report(stats: dict[str, Any]) -> dict[str, Any] | None:
+    for key in (
+        "post_promotion_priority_handoff",
+        "post_promotion_priority_handoff_dashboard",
+        "post_promotion_priority_review",
+        "post_promotion_priority_delta_review",
+    ):
+        report = stats.get(key)
+        if isinstance(report, dict):
+            return report
+    return None
+
+
+def _post_promotion_priority_privacy() -> dict[str, bool]:
+    return {
+        "metadata_only": True,
+        "feature_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "provider_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "cache_keys_included": False,
+        "individual_candidate_ids_included": False,
+        "absolute_paths_included": False,
+    }
+
+
+def _post_promotion_priority_action_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    for row in report.get("next_action_counts") or []:
+        if not isinstance(row, dict):
+            continue
+        action = str(row.get("value") or row.get("next_action") or "").strip()
+        if action:
+            rows.append(
+                {
+                    "next_action": sanitize_value(action),
+                    "count": _to_int(row.get("count"), 1),
+                    "local_action_family": sanitize_value(summary.get("top_local_action_family") or "unknown"),
+                }
+            )
+
+    for group in report.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        action = str(group.get("top_next_action") or group.get("next_action") or "").strip()
+        if not action:
+            continue
+        rows.append(
+            {
+                "next_action": sanitize_value(action),
+                "count": _to_int(group.get("candidate_count"), 1),
+                "local_action_family": sanitize_value(group.get("action_family") or group.get("local_action_family") or "unknown"),
+                "savings_delta_usd": round(_to_float(group.get("savings_delta_usd") or group.get("projected_savings_usd")), 8),
+                "status": sanitize_value(group.get("status")),
+                "top_no_op_reason": sanitize_value(group.get("top_no_op_reason")),
+            }
+        )
+
+    for candidate in report.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        action = str(candidate.get("next_action") or "").strip()
+        if not action:
+            continue
+        rows.append(
+            {
+                "next_action": sanitize_value(action),
+                "count": 1,
+                "local_action_family": sanitize_value(
+                    candidate.get("action_family")
+                    or candidate.get("local_action_family")
+                    or candidate.get("policy_section")
+                    or "unknown"
+                ),
+                "savings_delta_usd": round(_to_float(candidate.get("savings_delta_usd") or candidate.get("projected_savings_usd")), 8),
+                "status": sanitize_value(candidate.get("status")),
+                "confidence": round(_to_float(candidate.get("confidence")), 6),
+                "recommendation_type": sanitize_value(candidate.get("recommendation_type")),
+                "policy_section": sanitize_value(candidate.get("policy_section")),
+                "no_op_reasons": [sanitize_value(reason) for reason in candidate.get("no_op_reasons") or []],
+            }
+        )
+
+    top_action = str(summary.get("top_next_action") or "").strip()
+    if top_action and not any(row.get("next_action") == top_action for row in rows):
+        rows.append(
+            {
+                "next_action": sanitize_value(top_action),
+                "count": _to_int(summary.get("priority_review_candidate_count") or summary.get("review_candidate_count"), 1),
+                "local_action_family": sanitize_value(summary.get("top_local_action_family") or "unknown"),
+            }
+        )
+
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        action = str(row.get("next_action") or "")
+        family = str(row.get("local_action_family") or "unknown")
+        key = (action, family)
+        existing = merged.setdefault(
+            key,
+            {
+                "next_action": action,
+                "local_action_family": family,
+                "count": 0,
+                "savings_delta_usd": 0.0,
+            },
+        )
+        existing["count"] = _to_int(existing.get("count")) + max(1, _to_int(row.get("count"), 1))
+        existing["savings_delta_usd"] = round(
+            _to_float(existing.get("savings_delta_usd")) + _to_float(row.get("savings_delta_usd")),
+            8,
+        )
+        for field in ("status", "confidence", "recommendation_type", "policy_section", "top_no_op_reason", "no_op_reasons"):
+            if row.get(field) and not existing.get(field):
+                existing[field] = row[field]
+
+    result = list(merged.values())
+    preferred_action = str(summary.get("top_next_action") or "").strip()
+
+    def sort_key(item: dict[str, Any]) -> tuple[int, float, int, str]:
+        preferred = 0 if preferred_action and item.get("next_action") == preferred_action else 1
+        return (
+            preferred,
+            -abs(_to_float(item.get("savings_delta_usd"))),
+            -_to_int(item.get("count")),
+            str(item.get("next_action")),
+        )
+
+    result.sort(key=sort_key)
+    return result[:10]
+
+
+def _post_promotion_priority_status(stats: dict[str, Any]) -> dict[str, Any] | None:
+    report = _post_promotion_priority_source_report(stats)
+    if report is None:
+        return None
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    action_rows = _post_promotion_priority_action_rows(report)
+    top = action_rows[0] if action_rows else {}
+    top_action = str(summary.get("top_next_action") or top.get("next_action") or "").strip()
+    candidate_count = _to_int(
+        summary.get("priority_review_candidate_count")
+        or summary.get("review_candidate_count")
+        or summary.get("source_delta_count")
+        or len(report.get("candidates") if isinstance(report.get("candidates"), list) else [])
+    )
+    if not top_action and candidate_count <= 0 and str(report.get("status") or "") in {"", "no-data", "unavailable"}:
+        return None
+    return {
+        "schema": "agentflow.post_promotion_priority_delta_research_status.v1",
+        "source_schema": sanitize_value(report.get("schema")),
+        "source_status": sanitize_value(report.get("status") or "available"),
+        "summary": {
+            "priority_review_candidate_count": candidate_count,
+            "recommended_count": _to_int(summary.get("recommended_count")),
+            "noop_count": _to_int(summary.get("noop_count")),
+            "widen_count": _to_int(summary.get("widen_count")),
+            "rollback_count": _to_int(summary.get("rollback_count")),
+            "keep_blocked_count": _to_int(summary.get("keep_blocked_count")),
+            "policy_draft_status": sanitize_value(summary.get("policy_draft_status")),
+            "impact_gate_status": sanitize_value(summary.get("impact_gate_status")),
+            "outcome_flush_status": sanitize_value(summary.get("outcome_flush_status")),
+            "outcome_rollup_count": _to_int(summary.get("outcome_rollup_count")),
+            "freshness_state": sanitize_value(summary.get("freshness_state")),
+            "top_next_action": sanitize_value(top_action),
+            "top_local_action_family": sanitize_value(summary.get("top_local_action_family") or top.get("local_action_family")),
+        },
+        "next_actions": action_rows,
+        "privacy": _post_promotion_priority_privacy(),
+    }
+
+
 def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     stats = sanitize_value(stats or {})
     if not isinstance(stats, dict):
@@ -1005,6 +1181,9 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     promotion_blocker = _promotion_blocker_next_action_status(stats)
     if promotion_blocker is not None:
         summary["promotion_blocker_next_action_status"] = promotion_blocker
+    post_promotion_priority = _post_promotion_priority_status(stats)
+    if post_promotion_priority is not None:
+        summary["post_promotion_priority_delta_status"] = post_promotion_priority
     promotion_feedback = stats.get("promotion_outcome_feedback")
     if not isinstance(promotion_feedback, dict):
         promotion_report = stats.get("promotion_report")
@@ -4814,6 +4993,100 @@ def _proposal_from_promotion_blocker_next_action(stats_summary: dict[str, Any]) 
     }
 
 
+def _post_promotion_priority_action_title(action: str, family: str) -> str:
+    action_l = action.lower().replace("_", "-")
+    family_l = family.lower().replace("_", "-") or "optimization"
+    if "rollback" in action_l or "disable" in action_l:
+        return f"Rollback post-promotion {family_l} policy from priority deltas"
+    if "widen" in action_l:
+        return f"Widen post-promotion {family_l} policy from priority deltas"
+    if "holdout" in action_l or "coverage" in action_l or "collect" in action_l:
+        return f"Collect post-promotion {family_l} holdout evidence from priority deltas"
+    if "flush" in action_l or "managed" in action_l or "outcome" in action_l or "feedback" in action_l:
+        return f"Flush post-promotion {family_l} outcomes from priority deltas"
+    if "keep-blocked" in action_l or "blocked" in action_l:
+        return f"Keep post-promotion {family_l} policy blocked with priority-delta reason"
+    return f"Advance post-promotion {family_l} priority-delta successor"
+
+
+def _proposal_from_post_promotion_priority_deltas(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    status = stats_summary.get("post_promotion_priority_delta_status")
+    if not isinstance(status, dict):
+        return None
+    summary = status.get("summary") if isinstance(status.get("summary"), dict) else {}
+    rows = [row for row in status.get("next_actions") or [] if isinstance(row, dict)]
+    top = rows[0] if rows else {}
+    next_action = str(summary.get("top_next_action") or top.get("next_action") or "").strip()
+    if not next_action:
+        return None
+    family = str(summary.get("top_local_action_family") or top.get("local_action_family") or "optimization").strip() or "optimization"
+    title = _post_promotion_priority_action_title(next_action, family)
+    priority = "priority:p1" if next_action in {"widen-local-policy", "rollback-local-policy"} else "priority:p2"
+    labels = _default_issue_labels(priority)
+    family_label = family.replace("_", "-")
+    if family_label in {"routing", "cache", "crunch"}:
+        labels.append(family_label)
+    labels.append("privacy")
+
+    evidence = [
+        f"Source metadata: {status.get('source_schema')}",
+        f"Source status: {status.get('source_status')}",
+        f"Top local action family: {family}",
+        f"Top next action: {next_action}",
+        f"Priority review candidate count: {summary.get('priority_review_candidate_count')}",
+        f"Recommended count: {summary.get('recommended_count')}",
+        f"No-op count: {summary.get('noop_count')}",
+        f"Widen count: {summary.get('widen_count')}",
+        f"Rollback count: {summary.get('rollback_count')}",
+        f"Keep-blocked count: {summary.get('keep_blocked_count')}",
+        f"Policy draft status: {summary.get('policy_draft_status')}",
+        f"Impact gate status: {summary.get('impact_gate_status')}",
+        f"Outcome flush status: {summary.get('outcome_flush_status')}",
+        f"Outcome rollup count: {summary.get('outcome_rollup_count')}",
+        f"Freshness state: {summary.get('freshness_state')}",
+    ]
+    if top:
+        evidence.extend(
+            [
+                f"Top row count: {top.get('count')}",
+                f"Top row savings delta USD: {top.get('savings_delta_usd')}",
+                f"Top row status: {top.get('status')}",
+                f"Top row policy section: {top.get('policy_section')}",
+                f"Top row no-op reasons: {', '.join(str(reason) for reason in top.get('no_op_reasons') or []) or top.get('top_no_op_reason') or 'none'}",
+            ]
+        )
+
+    return {
+        "repo": "lutzkuen/agentflow",
+        "title": title,
+        "labels": list(dict.fromkeys(labels)),
+        "body": _issue_body(
+            title=title,
+            rationale=(
+                "Research mode found a post-promotion priority-delta artifact. "
+                "The next backlog item should advance the priority review's successor action instead of recreating stale stage, replay, or rank issues that were already closed."
+            ),
+            evidence=evidence,
+            implementation=[
+                "Start from the persisted post_promotion_priority_delta_status section in the research plan and the local post-promotion priority review or handoff artifact.",
+                f"Implement the successor action `{next_action}` for the `{family}` family using local policy draft, canary review, rollback, holdout, or managed-feedback flush modules.",
+                "Suppress closed stage/replay/rank predecessor titles when their evidence is represented by the current priority-delta successor.",
+                "Do not inspect prompts, provider bodies, request IDs, session IDs, cache keys, file paths, or individual candidate identifiers.",
+                "Record the outcome in machine-readable post-promotion policy draft, impact, rollback, holdout, or feedback metadata so the next research plan can rank the following action.",
+            ],
+            acceptance=[
+                f"The next research plan creates a successor issue for next_action={next_action} and does not recreate closed stage/replay/rank titles for the same milestone.",
+                "The follow-up reports policy draft, impact gate, rollback, holdout, or outcome flush status for the post-promotion priority-delta action.",
+                "Generated and follow-up evidence remains metadata-only and excludes prompts, provider bodies, absolute paths, request IDs, session IDs, cache keys, and individual candidate IDs.",
+            ],
+            savings_path=(
+                "This keeps the unattended savings loop moving from post-promotion evidence into local widen, rollback, keep-blocked, holdout, or feedback work instead of cycling on completed staging issues."
+            ),
+            sequencing="Sequence before generic telemetry-derived proposals when a fresh post-promotion priority-delta artifact is present.",
+        ),
+    }
+
+
 def _evidence_ledger_title_token(entry: dict[str, Any]) -> str:
     fingerprint = str(entry.get("fingerprint") or "").strip()
     if fingerprint:
@@ -5614,6 +5887,9 @@ def build_research_plan(
                 optimization_candidates=optimization_candidates,
             )
         )
+        post_promotion_priority_proposal = _proposal_from_post_promotion_priority_deltas(summary)
+        if post_promotion_priority_proposal is not None:
+            create_issues.append(post_promotion_priority_proposal)
         promotion_blocker_proposal = _proposal_from_promotion_blocker_next_action(summary)
         if promotion_blocker_proposal is not None:
             create_issues.append(promotion_blocker_proposal)
@@ -5691,6 +5967,8 @@ def build_research_plan(
     inspected_sources = ["github_issues"]
     if summary:
         inspected_sources.append("local_stats")
+    if "post_promotion_priority_delta_status" in summary:
+        inspected_sources.append("post_promotion_priority_delta_status")
     if "promotion_blocker_next_action_status" in summary:
         inspected_sources.append("promotion_blocker_next_action_status")
     if "evidence_to_activation_next_action_ledger" in summary:

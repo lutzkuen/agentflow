@@ -22,7 +22,7 @@ from agentflow_proxy.repeated_scaffold_feedback import (
 )
 from agentflow_proxy.repeated_scaffold_activation import build_repeated_scaffold_activation_report
 from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
-from agentflow_proxy.store import SQLiteStore, stable_json
+from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 
 
 class RepeatedScaffoldFeedbackClient:
@@ -93,7 +93,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         self,
         *,
         cohort: str,
-        created_at: str = "2026-06-12T00:00:00+00:00",
+        created_at: str | None = None,
         status_code: int = 200,
         retry_count: int = 0,
         latency_ms: int = 100,
@@ -110,6 +110,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         candidate_id: str = "candidate-provider-123",
         safety_stop: bool = False,
     ) -> None:
+        created_at = created_at or utc_now()
         saved_chars = tokens_saved * 4 if saved_chars is None else saved_chars
         applied = cohort == "canary_applied"
         holdout = cohort == "canary_holdout"

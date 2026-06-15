@@ -1016,8 +1016,9 @@ class DashboardImportTests(unittest.TestCase):
             crunch_json=None,
             routing_extra=None,
             category="tool-result",
-            created_at="2026-06-12T00:00:00+00:00",
+            created_at=None,
         ):
+            created_at = created_at or utc_now()
             routing = {
                 "provider": "anthropic",
                 "source_surface": "anthropic_messages",
@@ -1146,17 +1147,14 @@ class DashboardImportTests(unittest.TestCase):
         log_call(
             crunch_json=repeated_scaffold_crunch("canary_applied", 1100),
             routing_extra=managed_repeated_scaffold,
-            created_at="2026-06-12T00:01:00+00:00",
         )
         log_call(
             crunch_json=repeated_scaffold_crunch("canary_applied", 1200),
             routing_extra=managed_repeated_scaffold,
-            created_at="2026-06-12T00:02:00+00:00",
         )
         log_call(
             crunch_json=repeated_scaffold_crunch("canary_holdout", 0),
             routing_extra=managed_repeated_scaffold,
-            created_at="2026-06-12T00:03:00+00:00",
         )
         Path(os.environ["AGENTFLOW_SCAFFOLD_CANARY_POLICY"]).write_text(
             "\n".join([
