@@ -1232,6 +1232,105 @@ eligibility_overrides:
         self.assertNotIn("thread-secret", rendered)
         self.assertNotIn("session-secret", rendered)
 
+    def test_store_attaches_shadow_coverage_metadata_to_uncovered_proxy_calls(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                store.log_call(
+                    id="uncovered-openai-call",
+                    created_at=utc_now(),
+                    path="/v1/chat/completions",
+                    provider="openai",
+                    requested_model="gpt-5.4",
+                    routed_model="gpt-5.4",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=10,
+                    input_tokens_est=10,
+                    output_tokens_est=1,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.001,
+                    routing_json=stable_json({
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "category": "chat",
+                        "raw_prompt": "raw secret prompt should not enter experiment metadata",
+                    }),
+                    category="chat",
+                )
+                row = store.conn.execute(
+                    "select provider, source_surface, routing_json from calls where id = ?",
+                    ("uncovered-openai-call",),
+                ).fetchone()
+                report = experiments.build_routing_experiment_report(store, limit=5)
+            finally:
+                store.conn.close()
+
+        routing = json.loads(row["routing_json"])
+        experiment = routing["routing_experiment"]
+        self.assertEqual(row["source_surface"], "openai_chat")
+        self.assertEqual(experiment["schema"], "agentflow.routing_experiment_decision.v1")
+        self.assertEqual(experiment["status"], "skipped")
+        self.assertEqual(experiment["reason"], "routing-experiment-decision-missing")
+        self.assertEqual(experiment["coverage_class"], "blocked")
+        self.assertEqual(experiment["source_surface"], "openai_chat")
+        rendered_experiment = stable_json(experiment)
+        self.assertNotIn("raw secret prompt", rendered_experiment)
+        self.assertFalse(experiment["privacy"]["raw_prompts_included"])
+        self.assertEqual(report["summary"]["routing_experiment_denominator_count"], 1)
+        self.assertEqual(report["summary"]["routing_experiment_metadata_coverage_rate"], 1.0)
+        self.assertEqual(report["summary"]["eligible_count"], 1)
+        self.assertEqual(report["summary"]["blocked_count"], 1)
+        self.assertEqual(report["summary"]["not_sampled_count"], 0)
+        self.assertEqual(report["summary"]["out_of_scope_count"], 0)
+        self.assertEqual(report["summary"]["metadata_missing_count"], 0)
+
+    def test_report_denominator_includes_codex_turns_without_sample_rows(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                store.log_codex_app_event(
+                    id="codex-uncovered-turn",
+                    created_at=utc_now(),
+                    direction="client_to_server",
+                    method="turn/start",
+                    request_id="turn-secret",
+                    thread_id="thread-secret",
+                    message_chars=50,
+                    params_chars=10,
+                    input_items=1,
+                    input_text_chars=50,
+                    session_id="session-secret",
+                    routing_json=stable_json({
+                        "status": "observed",
+                        "raw_prompt": "raw codex secret should not enter experiment metadata",
+                    }),
+                )
+                report = experiments.build_routing_experiment_report(store, limit=5)
+                row = store.conn.execute(
+                    "select routing_json from codex_app_events where id = ?",
+                    ("codex-uncovered-turn",),
+                ).fetchone()
+            finally:
+                store.conn.close()
+
+        routing = json.loads(row["routing_json"])
+        experiment = routing["routing_experiment"]
+        self.assertEqual(experiment["provider"], "openai")
+        self.assertEqual(experiment["source_surface"], "codex_turn")
+        self.assertEqual(experiment["reason"], "routing-experiment-decision-missing")
+        self.assertEqual(report["summary"]["routing_experiment_denominator_count"], 1)
+        self.assertEqual(report["summary"]["decision_coverage_counts"]["blocked"], 1)
+        self.assertEqual(report["decision_surfaces"], [
+            {"provider": "openai", "source_surface": "codex_turn", "status": "skipped", "count": 1}
+        ])
+        rendered = stable_json(report)
+        self.assertNotIn("turn-secret", rendered)
+        self.assertNotIn("thread-secret", rendered)
+        self.assertNotIn("session-secret", rendered)
+        self.assertNotIn("raw codex secret", stable_json(experiment))
+
     def test_report_groups_anthropic_openai_and_codex_samples_separately(self):
         with TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "agentflow.sqlite3"))

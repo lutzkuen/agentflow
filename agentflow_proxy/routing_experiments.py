@@ -1299,6 +1299,46 @@ def _feedback_status_and_reason(row: Any) -> tuple[str, str]:
     return blocker, blocker
 
 
+_NOT_SAMPLED_REASONS = {
+    "disabled",
+    "kill-switch",
+    "daily-budget-zero",
+    "daily-budget-exhausted",
+    "sample-rate-zero",
+    "sample-rate-not-selected",
+    "streaming-shadow-not-sampled",
+}
+_OUT_OF_SCOPE_REASONS = {
+    "provider-not-enabled",
+    "source-surface-not-enabled",
+    "source-surface-not-canonical",
+    "codex-app-event-not-turn-start",
+}
+
+
+def _coverage_class_for_decision(experiment: dict[str, Any] | None) -> str:
+    if not isinstance(experiment, dict):
+        return "metadata-missing"
+    explicit = str(experiment.get("coverage_class") or "").strip().replace("_", "-")
+    if explicit in {"sampled", "compared", "blocked", "not-sampled", "out-of-scope", "metadata-missing"}:
+        return explicit
+    status = str(experiment.get("status") or "").strip()
+    reason = str(experiment.get("reason") or "").strip()
+    if status == "compared":
+        return "compared"
+    if status == "selected" or bool(experiment.get("sampled")):
+        return "sampled"
+    if status == "out-of-scope" or reason in _OUT_OF_SCOPE_REASONS:
+        return "out-of-scope"
+    if reason in _NOT_SAMPLED_REASONS:
+        return "not-sampled"
+    if status.startswith("shadow-") or reason.startswith("shadow-") or "shadow-" in reason:
+        return "blocked"
+    if status == "skipped":
+        return "blocked"
+    return "metadata-missing" if not status and not reason else "blocked"
+
+
 def _post_fix_shadow_yield_candidate_key(
     *,
     provider: Any,
@@ -2163,6 +2203,14 @@ def build_routing_experiment_report(
     decision_reason_counts: dict[tuple[str, str, str, str], int] = {}
     decision_status_counts: dict[str, int] = {}
     decision_surface_counts: dict[tuple[str, str, str], int] = {}
+    decision_coverage_counts: dict[str, int] = {
+        "sampled": 0,
+        "compared": 0,
+        "blocked": 0,
+        "not-sampled": 0,
+        "out-of-scope": 0,
+        "metadata-missing": 0,
+    }
 
     def record_decision(provider_value: Any, source_surface_value: Any, routing_json: Any) -> None:
         routing = _parse_jsonish(routing_json)
@@ -2171,19 +2219,27 @@ def build_routing_experiment_report(
             source_surface_label = _public_label(source_surface_value)
             status = "unknown"
             reason = "invalid-routing-json"
+            coverage_class = "metadata-missing"
         else:
             experiment = routing.get("routing_experiment") if isinstance(routing, dict) else None
             if not isinstance(experiment, dict):
-                return
-            provider_label = _public_label(experiment.get("provider") or provider_value)
-            source_surface_label = _public_label(experiment.get("source_surface") or source_surface_value)
-            reason = _public_label(experiment.get("reason"))
-            status = _public_label(experiment.get("status"))
+                provider_label = _public_label(provider_value)
+                source_surface_label = _public_label(source_surface_value)
+                reason = "routing-experiment-metadata-missing"
+                status = "out-of-scope"
+                coverage_class = "metadata-missing"
+            else:
+                provider_label = _public_label(experiment.get("provider") or provider_value)
+                source_surface_label = _public_label(experiment.get("source_surface") or source_surface_value)
+                reason = _public_label(experiment.get("reason"))
+                status = _public_label(experiment.get("status"))
+                coverage_class = _coverage_class_for_decision(experiment)
         key = (provider_label, source_surface_label, status, reason)
         decision_reason_counts[key] = decision_reason_counts.get(key, 0) + 1
         decision_status_counts[status] = decision_status_counts.get(status, 0) + 1
         surface_key = (provider_label, source_surface_label, status)
         decision_surface_counts[surface_key] = decision_surface_counts.get(surface_key, 0) + 1
+        decision_coverage_counts[coverage_class] = int(decision_coverage_counts.get(coverage_class, 0)) + 1
 
     try:
         decision_rows = conn.execute(
@@ -2193,7 +2249,6 @@ def build_routing_experiment_report(
                    routing_json
             from calls
             where routing_json is not null
-              and routing_json like '%"routing_experiment"%'
             order by created_at desc
             limit 5000
             """
@@ -2212,7 +2267,6 @@ def build_routing_experiment_report(
             where direction = 'client_to_server'
               and method = 'turn/start'
               and routing_json is not null
-              and routing_json like '%"routing_experiment"%'
             order by created_at desc
             limit 5000
             """
@@ -2250,6 +2304,14 @@ def build_routing_experiment_report(
     compared_total = int((summary_row or {}).get("compared_samples") or 0)
     avg_similarity_total = (summary_row or {}).get("avg_similarity")
     pass_rate_total = (summary_row or {}).get("pass_rate")
+    decision_denominator_count = int(sum(decision_status_counts.values()))
+    metadata_missing_count = int(decision_coverage_counts.get("metadata-missing", 0))
+    out_of_scope_count = int(decision_coverage_counts.get("out-of-scope", 0))
+    decision_eligible_count = max(0, decision_denominator_count - metadata_missing_count - out_of_scope_count)
+    metadata_coverage_rate = (
+        round((decision_denominator_count - metadata_missing_count) / decision_denominator_count, 4)
+        if decision_denominator_count else 1.0
+    )
     eligibility_projection = _build_shadow_eligibility_projection(conn)
     claude_shadow_yield = _build_claude_shadow_yield_report(conn, candidates=candidates)
     post_fix_shadow_yield = build_post_fix_shadow_yield_report(
@@ -2295,6 +2357,17 @@ def build_routing_experiment_report(
             "feedback_status_counts": feedback_status_counts,
             "sample_mode_counts": sample_mode_counts,
             "decision_count": int(sum(decision_status_counts.values())),
+            "routing_experiment_denominator_count": decision_denominator_count,
+            "routing_experiment_metadata_count": max(0, decision_denominator_count - metadata_missing_count),
+            "routing_experiment_metadata_coverage_rate": metadata_coverage_rate,
+            "eligible_count": decision_eligible_count,
+            "sampled_count": int((summary_row or {}).get("samples") or 0),
+            "compared_count": compared_total,
+            "blocked_count": int(decision_coverage_counts.get("blocked", 0)),
+            "not_sampled_count": int(decision_coverage_counts.get("not-sampled", 0)),
+            "out_of_scope_count": out_of_scope_count,
+            "metadata_missing_count": metadata_missing_count,
+            "decision_coverage_counts": dict(decision_coverage_counts),
             "decision_status_counts": decision_status_counts,
             "applied_routed_down_samples": int(sample_mode_counts.get("applied_routed_down", 0)),
             "shadow_candidate_pass_through_samples": int(sample_mode_counts.get("shadow_candidate_pass_through", 0)),

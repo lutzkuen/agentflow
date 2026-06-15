@@ -26,6 +26,180 @@ def stable_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _parse_json_object(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return dict(value)
+    if not value:
+        return None
+    try:
+        parsed = json.loads(str(value))
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _safe_metadata_label(value: Any, *, fallback: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    lowered = text.lower()
+    raw_markers = (
+        "raw",
+        "provider_body",
+        "request_id",
+        "session_id",
+        "thread_id",
+        "cache_key",
+        "file_path",
+        "tool_payload",
+        "authorization",
+        "api_key",
+        "secret",
+        "transcript",
+        "/tmp/",
+        "/home/",
+        "sk-",
+    )
+    if len(text) > 160 or any(marker in lowered for marker in raw_markers):
+        return "redacted-metadata-label"
+    return text
+
+
+def _infer_source_surface(*, provider: Any, source_surface: Any, endpoint: Any, path: Any) -> str:
+    if source_surface not in (None, ""):
+        return _safe_metadata_label(source_surface)
+    provider_label = _safe_metadata_label(provider, fallback="unknown")
+    endpoint_text = str(endpoint or path or "").lower()
+    if provider_label == "anthropic":
+        return "anthropic_messages"
+    if provider_label == "openai":
+        if "chat/completions" in endpoint_text:
+            return "openai_chat"
+        if "responses" in endpoint_text:
+            return "openai_responses"
+    return f"{provider_label}_passthrough"
+
+
+def _routing_experiment_coverage_meta(
+    *,
+    routing: dict[str, Any],
+    provider: Any,
+    source_surface: Any,
+    endpoint: Any,
+    path: Any,
+    requested_model: Any,
+    routed_model: Any,
+    stream: Any,
+    category: Any,
+    codex_event: bool = False,
+    codex_direction: Any = None,
+    codex_method: Any = None,
+) -> dict[str, Any] | None:
+    if isinstance(routing.get("routing_experiment"), dict):
+        return None
+
+    provider_label = "openai" if codex_event else _safe_metadata_label(provider, fallback="anthropic")
+    is_codex_turn_start = codex_event and codex_direction == "client_to_server" and codex_method == "turn/start"
+    surface_label = (
+        "codex_turn"
+        if is_codex_turn_start
+        else "codex_app_event"
+        if codex_event
+        else _infer_source_surface(
+            provider=provider_label,
+            source_surface=source_surface,
+            endpoint=endpoint,
+            path=path,
+        )
+    )
+    endpoint_label = _safe_metadata_label(endpoint or path, fallback="unknown")
+    canonical_surfaces = {"anthropic_messages", "openai_responses", "openai_chat", "codex_turn"}
+    reason = "routing-experiment-decision-missing"
+    status = "skipped"
+    coverage_class = "blocked"
+    if codex_event and not is_codex_turn_start:
+        reason = "codex-app-event-not-turn-start"
+        status = "out-of-scope"
+        coverage_class = "out-of-scope"
+    elif surface_label not in canonical_surfaces:
+        reason = "source-surface-not-canonical"
+        status = "out-of-scope"
+        coverage_class = "out-of-scope"
+
+    return {
+        "schema": "agentflow.routing_experiment_decision.v1",
+        "status": status,
+        "sampled": False,
+        "reason": reason,
+        "coverage_class": coverage_class,
+        "provider": provider_label,
+        "source_surface": surface_label,
+        "endpoint": endpoint_label,
+        "stream": bool(stream),
+        "requested_model": _safe_metadata_label(
+            requested_model or routing.get("requested_model"),
+            fallback="",
+        ),
+        "routed_model": _safe_metadata_label(
+            routed_model or routing.get("routed_model"),
+            fallback="",
+        ),
+        "category": _safe_metadata_label(category or routing.get("category"), fallback="unknown"),
+        "workflow_phase": _safe_metadata_label(routing.get("workflow_phase"), fallback="unknown"),
+        "counterfactual": False,
+        "shadow_only": False,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+        },
+    }
+
+
+def _ensure_routing_experiment_metadata(
+    routing_json: Any,
+    *,
+    provider: Any = None,
+    source_surface: Any = None,
+    endpoint: Any = None,
+    path: Any = None,
+    requested_model: Any = None,
+    routed_model: Any = None,
+    stream: Any = False,
+    category: Any = None,
+    codex_event: bool = False,
+    codex_direction: Any = None,
+    codex_method: Any = None,
+) -> Any:
+    routing = _parse_json_object(routing_json)
+    if routing is None:
+        return routing_json
+    fallback = _routing_experiment_coverage_meta(
+        routing=routing,
+        provider=provider,
+        source_surface=source_surface,
+        endpoint=endpoint,
+        path=path,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        stream=stream,
+        category=category,
+        codex_event=codex_event,
+        codex_direction=codex_direction,
+        codex_method=codex_method,
+    )
+    if fallback is None:
+        return routing_json if isinstance(routing_json, str) else stable_json(routing)
+    routing["routing_experiment"] = fallback
+    return stable_json(routing)
+
+
 def cosine_similarity(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right))
 
@@ -738,6 +912,26 @@ class SQLiteStore:
             self.conn.commit()
 
     def log_call(self, **kwargs: Any) -> None:
+        if kwargs.get("endpoint") in (None, ""):
+            kwargs["endpoint"] = kwargs.get("path")
+        if kwargs.get("source_surface") in (None, ""):
+            kwargs["source_surface"] = _infer_source_surface(
+                provider=kwargs.get("provider", "anthropic"),
+                source_surface=kwargs.get("source_surface"),
+                endpoint=kwargs.get("endpoint"),
+                path=kwargs.get("path"),
+            )
+        kwargs["routing_json"] = _ensure_routing_experiment_metadata(
+            kwargs.get("routing_json"),
+            provider=kwargs.get("provider", "anthropic"),
+            source_surface=kwargs.get("source_surface"),
+            endpoint=kwargs.get("endpoint"),
+            path=kwargs.get("path"),
+            requested_model=kwargs.get("requested_model"),
+            routed_model=kwargs.get("routed_model"),
+            stream=kwargs.get("stream"),
+            category=kwargs.get("category"),
+        )
         cols = [
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
@@ -1032,6 +1226,20 @@ class SQLiteStore:
             self.conn.commit()
 
     def log_codex_app_event(self, **kwargs: Any) -> None:
+        kwargs["routing_json"] = _ensure_routing_experiment_metadata(
+            kwargs.get("routing_json"),
+            provider="openai",
+            source_surface="codex_turn",
+            endpoint=kwargs.get("method"),
+            path=kwargs.get("method"),
+            requested_model=None,
+            routed_model=None,
+            stream=False,
+            category="codex-turn",
+            codex_event=True,
+            codex_direction=kwargs.get("direction"),
+            codex_method=kwargs.get("method"),
+        )
         cols = [
             "id", "created_at", "direction", "method", "request_id", "thread_id",
             "message_chars", "params_chars", "input_items", "input_text_chars",
