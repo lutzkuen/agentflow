@@ -96,15 +96,16 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertEqual(rule["action"]["scope"], "session")
         self.assertEqual(rule["action"]["min_call_count"], 5)
 
-    def test_packaged_openai_cache_replay_rule_promotes_applied_while_retaining_holdout(self):
+    def test_packaged_openai_cache_replay_rule_stages_49_row_cohort_with_holdout(self):
         rules = list(cache_module.CACHE_PATTERN_RULES)
         [rule] = [
             item for item in rules
-            if item.get("id") == "local-openai-cache-replay-promoted-d6ac8a0fa54c1d2f"
+            if item.get("id") == "local-openai-cache-replay-canary-ae8404ee817f89f4"
         ]
 
         self.assertTrue(rule["enabled"])
         self.assertEqual(rule["policy_source"], "local-manual")
+        self.assertEqual(rule["candidate_id"], "request-shape-cache-replay:responses:chat:8e210a2f5680d16d")
         self.assertEqual(rule["conditions"]["provider_family"], "openai")
         self.assertEqual(rule["conditions"]["source_surface"], "openai_responses")
         self.assertEqual(rule["conditions"]["endpoint"], "responses")
@@ -116,7 +117,12 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertFalse(rule["action"]["allow_tool_calls"])
         self.assertFalse(rule["action"]["streaming"])
         self.assertEqual(rule["action"]["scope"], "session")
-        self.assertEqual(rule["rollout"]["canary_fraction"], 0.95)
+        self.assertEqual(rule["rollout"]["canary_fraction"], 0.10)
+        self.assertEqual(rule["rollout"]["canary_unit"], "request_fingerprint")
+        self.assertEqual(rule["graduation"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(rule["graduation"]["sample_count"], 49)
+        self.assertEqual(rule["graduation"]["projected_hits"], 48)
+        self.assertEqual(rule["graduation"]["projected_savings_usd"], 0.102518)
 
         cohorts = set()
         for index in range(200):
@@ -130,7 +136,7 @@ class CacheDecisionMetaTest(unittest.TestCase):
                 "has_tools": False,
                 "stream": False,
                 "replayability_level": "features_only",
-                "rollout_unit_hash": f"sha256:{index:064x}",
+                "request_fingerprint": f"sha256:{index:064x}",
                 "raw_pattern_strings_included": False,
             }
             _, _, meta = cache_module.cache_lookup_meta(has_tool_blocks=False, pattern_features=features)
