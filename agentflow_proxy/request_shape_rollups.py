@@ -3,13 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import yaml
+
+from agentflow_proxy.paths import agentflow_config_path
 from agentflow_proxy.pricing import pricing_basis
-from agentflow_proxy.public_metadata import public_label
+from agentflow_proxy.public_metadata import public_id, public_label
 from agentflow_proxy.store import stable_json, utc_now
 
 
@@ -34,6 +38,7 @@ CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
 CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
 CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
 CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
+CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "agentflow.request_shape_crunch_activation_evidence.v1"
 CRUNCH_POLICY_DECISION_APPLY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_apply.v1"
 CRUNCH_POLICY_DECISION_LEDGER_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger.v1"
 CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger_entry.v1"
@@ -1815,6 +1820,166 @@ def _crunch_opportunity_privacy() -> dict[str, Any]:
         "provider_calls_made": False,
         "managed_server_calls_made": False,
         "policy_files_written": False,
+    }
+
+
+def _crunch_rule_candidate_paths(rules_path: str | Path | None = None) -> list[Path]:
+    candidates: list[Path] = []
+    if rules_path:
+        candidates.append(Path(rules_path))
+    env_path = os.getenv("AGENTFLOW_CRUNCH_RULES")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path.cwd() / "config" / "crunch_rules.yaml")
+    candidates.append(agentflow_config_path("crunch_rules.yaml"))
+    candidates.append(Path(__file__).parent / "crunch_rules.yaml")
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path.expanduser())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path.expanduser())
+    return deduped
+
+
+def _active_request_shape_crunch_rules(rules_path: str | Path | None = None) -> list[dict[str, Any]]:
+    loaded: dict[str, Any] | None = None
+    for path in _crunch_rule_candidate_paths(rules_path):
+        if not path.exists():
+            continue
+        try:
+            value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if isinstance(value, dict):
+            loaded = value
+            break
+    if loaded is None:
+        return []
+
+    section = loaded.get("request_shape_repeated_context_canaries")
+    raw_rules = section.get("rules") if isinstance(section, dict) and isinstance(section.get("rules"), list) else []
+    rules: list[dict[str, Any]] = []
+    for item in raw_rules:
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            continue
+        decision = item.get("policy_decision") if isinstance(item.get("policy_decision"), dict) else {}
+        if decision.get("schema") != "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1":
+            continue
+        decision_value = public_label(decision.get("decision") or "unknown", "unknown")
+        rules.append(
+            {
+                "rank": len(rules) + 1,
+                "rule_ref": public_id(item.get("id") or f"request-shape-crunch-rule-{len(rules) + 1}", prefix="rule"),
+                "policy_source": public_label(item.get("policy_source") or "local-manual", "local-manual"),
+                "decision": decision_value,
+                "graduation_decision": public_label(decision.get("graduation_decision") or decision_value, "unknown"),
+                "decision_id": public_label(decision.get("decision_id") or "unknown", "unknown"),
+                "source_evidence_schema": public_label(decision.get("source_evidence_schema") or "unknown", "unknown"),
+                "applied_count": _as_int(decision.get("applied_count")),
+                "holdout_count": _as_int(decision.get("holdout_count")),
+                "skipped_count": _as_int(decision.get("skipped_count")),
+                "blocked_count": _as_int(decision.get("blocked_count")),
+                "observed_saved_tokens": _as_int(decision.get("observed_saved_tokens")),
+                "observed_saved_usd": round(_as_float(decision.get("observed_saved_usd")), 8),
+                "metadata_only": True,
+                "aggregate_only": True,
+            }
+        )
+    return rules
+
+
+def build_request_shape_crunch_activation_evidence_report(
+    *,
+    crunch_policy_decision: dict[str, Any],
+    crunch_canary_impact: dict[str, Any],
+    rules_path: str | Path | None = None,
+) -> dict[str, Any]:
+    decision_summary = crunch_policy_decision.get("summary") if isinstance(crunch_policy_decision.get("summary"), dict) else {}
+    impact_summary = crunch_canary_impact.get("summary") if isinstance(crunch_canary_impact.get("summary"), dict) else {}
+    decision_id = public_label(
+        crunch_policy_decision.get("decision_id") or decision_summary.get("decision_id") or "unknown",
+        "unknown",
+    )
+    active_rules = _active_request_shape_crunch_rules(rules_path)
+    matching_rules = [rule for rule in active_rules if rule.get("decision_id") == decision_id]
+    evidence_rules = matching_rules or active_rules
+    top_rule = evidence_rules[0] if evidence_rules else {}
+
+    applied_count = _as_int(decision_summary.get("applied_count") or impact_summary.get("applied_count"))
+    holdout_count = _as_int(decision_summary.get("holdout_count") or impact_summary.get("holdout_count"))
+    skipped_count = _as_int((decision_summary.get("coverage") or {}).get("skipped_count") if isinstance(decision_summary.get("coverage"), dict) else impact_summary.get("skipped_count"))
+    observed_saved_tokens = _as_int(decision_summary.get("observed_saved_tokens") or impact_summary.get("saved_tokens"))
+    observed_saved_usd = _as_float(decision_summary.get("observed_saved_usd") or impact_summary.get("saved_usd"))
+    coverage = decision_summary.get("coverage") if isinstance(decision_summary.get("coverage"), dict) else {}
+    safety_stop_count = _as_int(coverage.get("safety_stop_count") or impact_summary.get("safety_stop_count"))
+    rollback_count = _as_int(coverage.get("rollback_count") or impact_summary.get("rollback_count"))
+    fallback_count = _as_int(coverage.get("fallback_count") or impact_summary.get("fallback_count"))
+    widened_rule_count = sum(1 for rule in active_rules if rule.get("decision") == "widen")
+    matching_widened_rule_count = sum(1 for rule in matching_rules if rule.get("decision") == "widen")
+    decision = public_label(crunch_policy_decision.get("decision") or decision_summary.get("decision") or "unknown", "unknown")
+    has_active_decision_rule = bool(matching_rules)
+    has_measured_decision = applied_count > 0 and holdout_count > 0
+    if has_active_decision_rule and has_measured_decision and safety_stop_count <= 0 and rollback_count <= 0:
+        status = "active-rule-evidence-observed"
+        next_action = "monitor-post-widening-crunch-activation"
+        missing_measurements: list[str] = []
+    elif has_measured_decision:
+        status = "policy-decision-without-active-rule"
+        next_action = "inspect-crunch-rule-file-activation"
+        missing_measurements = ["matching-active-crunch-rule"]
+    else:
+        status = "missing-crunch-activation-evidence"
+        next_action = "measure-request-shape-crunch-canary-impact"
+        missing_measurements = ["applied-and-holdout-crunch-decision-coverage"]
+
+    return {
+        "schema": CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
+        "status": status,
+        "ok": True,
+        "read_only": True,
+        "decision_id": decision_id,
+        "decision": decision,
+        "graduation_decision": public_label(
+            crunch_policy_decision.get("graduation_decision") or decision_summary.get("graduation_decision") or decision,
+            "unknown",
+        ),
+        "next_action": next_action,
+        "source_reports": {
+            "policy_decision_schema": public_label(crunch_policy_decision.get("schema") or "unknown", "unknown"),
+            "canary_impact_schema": public_label(crunch_canary_impact.get("schema") or "unknown", "unknown"),
+            "active_rule_source_evidence_schema": public_label(top_rule.get("source_evidence_schema") or "unknown", "unknown"),
+        },
+        "summary": {
+            "active_rule_count": len(active_rules),
+            "matching_active_rule_count": len(matching_rules),
+            "widened_rule_count": widened_rule_count,
+            "matching_widened_rule_count": matching_widened_rule_count,
+            "decision": decision,
+            "graduation_decision": public_label(decision_summary.get("graduation_decision") or decision, "unknown"),
+            "decision_id": decision_id,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": skipped_count,
+            "blocked_count": safety_stop_count + rollback_count + fallback_count,
+            "fallback_count": fallback_count,
+            "safety_stop_count": safety_stop_count,
+            "rollback_count": rollback_count,
+            "observed_saved_tokens": observed_saved_tokens,
+            "observed_saved_usd": round(observed_saved_usd, 8),
+            "policy_source": public_label(top_rule.get("policy_source") or decision_summary.get("policy_source") or "local-manual", "local-manual"),
+            "target_local_rule_file": "crunch_rules.yaml",
+            "target_local_policy_section": "crunch.rules",
+            "policy_files_written": False,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "next_action": next_action,
+        },
+        "rules": evidence_rules[:5],
+        "missing_measurements": missing_measurements,
+        "privacy": _crunch_opportunity_privacy(),
     }
 
 
@@ -5995,6 +6160,10 @@ def build_request_shape_rollups_report(
         max_evidence_age_hours=max_crunch_canary_evidence_age_hours,
     )
     crunch_policy_decision = build_request_shape_crunch_policy_decision_report(crunch_canary_impact)
+    crunch_activation_evidence = build_request_shape_crunch_activation_evidence_report(
+        crunch_policy_decision=crunch_policy_decision,
+        crunch_canary_impact=crunch_canary_impact,
+    )
     follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10)
 
     return {
@@ -6030,6 +6199,7 @@ def build_request_shape_rollups_report(
         "crunch_opportunity_dry_run": crunch_opportunity_dry_run,
         "crunch_canary_impact": crunch_canary_impact,
         "crunch_policy_decision": crunch_policy_decision,
+        "crunch_activation_evidence": crunch_activation_evidence,
         "rollups": rollups,
         "privacy": {
             "metadata_only": True,

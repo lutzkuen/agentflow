@@ -3256,6 +3256,148 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw-request-secret", rendered)
 
+    def test_issue_564_crunch_activation_evidence_advances_current_request_shape_rules(self):
+        decision_id = "request-shape-crunch-policy-decision:9db327d1abdec766"
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 3467,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "crunch_chars_saved": 0,
+                "crunched_count": 0,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 1000, "rollup_count": 33},
+                    "crunch_activation_evidence": {
+                        "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                        "status": "active-rule-evidence-observed",
+                        "decision": "widen",
+                        "graduation_decision": "widen",
+                        "decision_id": decision_id,
+                        "next_action": "monitor-post-widening-crunch-activation",
+                        "summary": {
+                            "active_rule_count": 1,
+                            "matching_active_rule_count": 1,
+                            "widened_rule_count": 1,
+                            "matching_widened_rule_count": 1,
+                            "decision": "widen",
+                            "graduation_decision": "widen",
+                            "decision_id": decision_id,
+                            "applied_count": 77,
+                            "holdout_count": 30,
+                            "skipped_count": 218,
+                            "blocked_count": 0,
+                            "fallback_count": 0,
+                            "safety_stop_count": 0,
+                            "rollback_count": 0,
+                            "observed_saved_tokens": 5965139,
+                            "observed_saved_usd": 17.895417,
+                            "policy_source": "local-manual",
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "target_local_policy_section": "crunch.rules",
+                            "next_action": "monitor-post-widening-crunch-activation",
+                        },
+                        "rules": [
+                            {
+                                "rank": 1,
+                                "rule_ref": "request-shape-crunch-canary:public-rule",
+                                "policy_source": "local-manual",
+                                "decision": "widen",
+                                "decision_id": decision_id,
+                                "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "crunch_policy_decision": {
+                        "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                        "status": "decided",
+                        "decision": "widen",
+                        "graduation_decision": "widen",
+                        "decision_id": decision_id,
+                        "summary": {
+                            "decision": "widen",
+                            "graduation_decision": "widen",
+                            "decision_id": decision_id,
+                            "applied_count": 77,
+                            "holdout_count": 30,
+                            "observed_saved_tokens": 5965139,
+                            "observed_saved_usd": 17.895417,
+                            "safety_stop_state": "none",
+                        },
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "follow_up_candidates": {
+                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "status": "candidates-ranked",
+                        "summary": {
+                            "ranked_candidate_count": 1,
+                            "top_next_action": "measure-repeated-context-crunch-canary-impact",
+                            "top_local_action_family": "crunch",
+                        },
+                        "blocker_cohorts": [
+                            {
+                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "local_action_family": "crunch",
+                                "next_action": "measure-repeated-context-crunch-canary-impact",
+                                "readiness_state": "measurement-required",
+                                "candidate_work_classes": ["crunch", "repeated_context"],
+                                "provider_family": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "endpoint": "unknown",
+                                "row_count": 363,
+                                "sample_count": 363,
+                                "projected_saved_tokens": 1655076,
+                                "projected_savings_usd": 4.965228,
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        signal = stats_summary["crunch_savings_signal"]
+        self.assertEqual(signal["status"], "observed-savings-ranked")
+        self.assertEqual(signal["observed"]["source"], "request_shape_crunch_activation_evidence")
+        self.assertEqual(signal["top_report"]["report_key"], "request_shape_crunch_activation_evidence")
+        self.assertEqual(signal["top_report"]["decision_id"], decision_id)
+        self.assertEqual(signal["top_report"]["applied_count"], 77)
+        self.assertEqual(signal["top_report"]["holdout_count"], 30)
+        self.assertEqual(signal["top_report"]["projected_saved_tokens"], 5965139)
+        self.assertEqual(signal["top_report"]["active_rule_count"], 1)
+        self.assertEqual(signal["top_report"]["widened_rule_count"], 1)
+        self.assertEqual(signal["top_report"]["missing_measurements"], [])
+        loop = stats_summary["evidence_to_activation_loop"]
+        crunch_stage = next(item for item in loop["levers"] if item["lever"] == "crunch")
+        self.assertEqual(crunch_stage["state"], "measured-savings")
+        self.assertNotEqual(crunch_stage["next_action"], "emit-crunch-opportunity-report")
+        request_shape_stage = next(item for item in loop["levers"] if item["lever"] == "request-shape-rollups")
+        self.assertEqual(request_shape_stage["state"], "measured-active")
+        self.assertEqual(request_shape_stage["active_rule_count"], 1)
+        self.assertEqual(request_shape_stage["widened_rule_count"], 1)
+        self.assertEqual(request_shape_stage["applied_count"], 77)
+        self.assertEqual(request_shape_stage["holdout_count"], 30)
+        ledger = stats_summary["evidence_to_activation_next_action_ledger"]
+        entry = next(item for item in ledger["entries"] if item["lever"] == "request-shape-rollups")
+        self.assertEqual(entry["state"], "measured-active")
+        self.assertEqual(entry["current_status"], "applied")
+        self.assertEqual(entry["active_rule_count"], 1)
+        self.assertEqual(entry["widened_rule_count"], 1)
+        self.assertEqual(entry["applied_count"], 77)
+        self.assertEqual(entry["holdout_count"], 30)
+        self.assertEqual(entry["active_rule_source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-request-secret", rendered)
+
     def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
         plan = build_research_plan(
             issues=[],

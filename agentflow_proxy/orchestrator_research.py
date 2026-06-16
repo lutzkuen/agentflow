@@ -1831,8 +1831,11 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
     )
     is_policy_decision = report_key == "request_shape_crunch_policy_decision"
     is_active_coverage = report_key == "active_crunch_rule_coverage"
+    is_activation_evidence = report_key == "request_shape_crunch_activation_evidence"
     if is_policy_decision:
         status = "policy-decision-emitted"
+    elif is_activation_evidence:
+        status = "active-rule-evidence-observed" if applied_count > 0 or projected_usd > 0 or projected_tokens > 0 else "missing-crunch-activation-evidence"
     elif is_active_coverage:
         status = "active-rule-coverage-observed" if applied_count > 0 or projected_usd > 0 or projected_tokens > 0 or projected_chars > 0 else "no-applied-coverage"
     else:
@@ -1898,9 +1901,9 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         "duplicate_suppression": sanitize_value(activation_follow_up.get("duplicate_suppression"))
         if isinstance(activation_follow_up.get("duplicate_suppression"), dict)
         else {},
-        "decision": sanitize_value(report.get("decision") or summary.get("decision")) if is_policy_decision else None,
+        "decision": sanitize_value(report.get("decision") or summary.get("decision")) if is_policy_decision or is_activation_evidence else None,
         "graduation_decision": sanitize_value(report.get("graduation_decision") or summary.get("graduation_decision"))
-        if is_policy_decision
+        if is_policy_decision or is_activation_evidence
         else None,
         "decision_id": sanitize_value(report.get("decision_id") or summary.get("decision_id")),
         "active_rule_count": _to_int(summary.get("active_rule_count")),
@@ -2059,6 +2062,11 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
             reports.append(rollup)
     shape_report = _request_shape_report(stats)
     if isinstance(shape_report, dict):
+        shape_activation_evidence = shape_report.get("crunch_activation_evidence")
+        if isinstance(shape_activation_evidence, dict):
+            rollup = _crunch_report_rollup("request_shape_crunch_activation_evidence", shape_activation_evidence)
+            if rollup is not None and shape_activation_evidence.get("status") == "active-rule-evidence-observed":
+                reports.append(rollup)
         shape_policy_decision = shape_report.get("crunch_policy_decision")
         if isinstance(shape_policy_decision, dict) and _crunch_policy_decision_has_measured_evidence(shape_policy_decision):
             rollup = _crunch_report_rollup("request_shape_crunch_policy_decision", shape_policy_decision)
@@ -2096,6 +2104,7 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
                 or _to_int(item.get("projected_saved_tokens")) > 0
                 or _to_int(item.get("projected_saved_chars")) > 0
             ),
+            item.get("report_key") == "request_shape_crunch_activation_evidence",
             item.get("report_key") == "request_shape_crunch_policy_decision",
             item.get("report_key") == "request_shape_crunch_canary_impact",
             _to_float(item.get("projected_saved_usd")),
@@ -2110,7 +2119,12 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
     observed_reports = [
         report
         for report in reports
-        if report.get("report_key") in {"active_crunch_rule_coverage", "request_shape_crunch_policy_decision", "request_shape_crunch_canary_impact"}
+        if report.get("report_key") in {
+            "active_crunch_rule_coverage",
+            "request_shape_crunch_activation_evidence",
+            "request_shape_crunch_policy_decision",
+            "request_shape_crunch_canary_impact",
+        }
     ]
     observed_reports.sort(
         key=lambda item: (
@@ -2148,7 +2162,10 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
 
     top_report_status = str((top_report or {}).get("status") or "")
 
-    if top_report and top_report.get("report_key") == "request_shape_crunch_policy_decision":
+    if top_report and top_report.get("report_key") == "request_shape_crunch_activation_evidence":
+        status = "observed-savings-ranked"
+        missing = top_report_missing
+    elif top_report and top_report.get("report_key") == "request_shape_crunch_policy_decision":
         status = "policy-decision-emitted"
         missing = top_report_missing
     elif top_report and top_report.get("report_key") == "active_crunch_rule_coverage" and observed_positive:
@@ -3980,6 +3997,13 @@ def _request_shape_crunch_progress_report(stats_summary: dict[str, Any]) -> dict
         reports.append(top_report)
     reports.extend(row for row in signal.get("reports") or [] if isinstance(row, dict))
     for report in reports:
+        if report.get("report_key") != "request_shape_crunch_activation_evidence":
+            continue
+        if _to_int(report.get("active_rule_count")) <= 0:
+            continue
+        if _to_int(report.get("applied_count")) > 0 or _to_int(report.get("projected_saved_tokens")) > 0:
+            return report
+    for report in reports:
         if report.get("report_key") != "active_crunch_rule_coverage":
             continue
         if _to_int(report.get("widened_rule_count")) <= 0:
@@ -4039,6 +4063,14 @@ def _request_shape_crunch_progress_state(progress: dict[str, Any]) -> str:
         if decision == "blocked":
             return "blocked"
         return "measured-savings"
+    if progress.get("report_key") == "request_shape_crunch_activation_evidence":
+        if _to_int(progress.get("active_rule_count")) > 0 and (
+            _to_int(progress.get("applied_count")) > 0 or _to_int(progress.get("projected_saved_tokens")) > 0
+        ):
+            return "measured-active"
+        if progress.get("missing_measurements"):
+            return "missing-evidence"
+        return "measured-savings"
     if progress.get("report_key") == "active_crunch_rule_coverage":
         if _to_int(progress.get("applied_count")) > 0 or _to_int(progress.get("projected_saved_tokens")) > 0:
             return "measured-active"
@@ -4078,7 +4110,7 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
     progress = _request_shape_crunch_progress_report(stats_summary)
     if (
         local_action_family == "crunch"
-        and next_action == "stage-repeated-context-crunch-canary"
+        and next_action in {"stage-repeated-context-crunch-canary", "measure-repeated-context-crunch-canary-impact"}
         and progress is not None
     ):
         progress_next_action = str(progress.get("next_action") or "").strip()
@@ -4102,7 +4134,7 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
         stage["activation_follow_up_evidence_schema"] = sanitize_value(progress.get("schema"))
         stage["applied_count"] = _to_int(progress.get("applied_count"))
         stage["holdout_count"] = _to_int(progress.get("holdout_count"))
-        if progress.get("report_key") == "active_crunch_rule_coverage":
+        if progress.get("report_key") in {"active_crunch_rule_coverage", "request_shape_crunch_activation_evidence"}:
             stage["active_rule_count"] = _to_int(progress.get("active_rule_count"))
             stage["widened_rule_count"] = _to_int(progress.get("widened_rule_count"))
             stage["active_rule_ref"] = sanitize_value(progress.get("active_rule_ref"))

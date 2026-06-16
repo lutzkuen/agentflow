@@ -18,6 +18,7 @@ from agentflow_proxy.request_shape_rollups import (
     build_request_shape_cache_replay_evidence_report,
     build_request_shape_cache_replay_policy_decision_report,
     build_request_shape_crunch_canary_impact_report,
+    build_request_shape_crunch_activation_evidence_report,
     build_request_shape_crunch_policy_decision_ledger,
     build_request_shape_crunch_policy_decision_report,
     build_request_shape_crunch_canary_stage_report,
@@ -3357,6 +3358,91 @@ class RequestShapeRollupTests(unittest.TestCase):
         ledger = build_request_shape_crunch_policy_decision_ledger(decision, recorded_at="2026-06-15T18:01:00+00:00")
         self.assertEqual(ledger["entries"][0]["status"], "needs-more-samples")
         self.assertEqual(ledger["entries"][0]["recommendation"], "keep-staged")
+
+    def test_crunch_activation_evidence_joins_current_decision_and_active_rule(self) -> None:
+        decision_id = "request-shape-crunch-policy-decision:9db327d1abdec766"
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "crunch_rules.yaml"
+            rules_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "request_shape_repeated_context_canaries": {
+                            "enabled": True,
+                            "rules": [
+                                {
+                                    "id": "raw-policy-secret-should-not-leak",
+                                    "enabled": True,
+                                    "policy_source": "local-manual",
+                                    "policy_decision": {
+                                        "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                        "decision_id": decision_id,
+                                        "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                        "decision": "widen",
+                                        "graduation_decision": "widen",
+                                        "applied_count": 26,
+                                        "holdout_count": 17,
+                                        "observed_saved_tokens": 1647683,
+                                        "observed_saved_usd": 4.943049,
+                                    },
+                                }
+                            ],
+                        }
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            payload = build_request_shape_crunch_activation_evidence_report(
+                crunch_policy_decision={
+                    "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "decision": "widen",
+                    "graduation_decision": "widen",
+                    "decision_id": decision_id,
+                    "summary": {
+                        "decision": "widen",
+                        "graduation_decision": "widen",
+                        "decision_id": decision_id,
+                        "applied_count": 77,
+                        "holdout_count": 30,
+                        "observed_saved_tokens": 5965139,
+                        "observed_saved_usd": 17.895417,
+                        "coverage": {
+                            "skipped_count": 218,
+                            "fallback_count": 0,
+                            "safety_stop_count": 0,
+                            "rollback_count": 0,
+                        },
+                    },
+                },
+                crunch_canary_impact={
+                    "schema": "agentflow.request_shape_crunch_canary_impact.v1",
+                    "summary": {
+                        "applied_count": 77,
+                        "holdout_count": 30,
+                        "saved_tokens": 5965139,
+                        "saved_usd": 17.895417,
+                    },
+                },
+                rules_path=rules_path,
+            )
+
+        self.assertEqual(payload["schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(payload["status"], "active-rule-evidence-observed")
+        self.assertEqual(payload["decision_id"], decision_id)
+        self.assertEqual(payload["summary"]["active_rule_count"], 1)
+        self.assertEqual(payload["summary"]["matching_active_rule_count"], 1)
+        self.assertEqual(payload["summary"]["widened_rule_count"], 1)
+        self.assertEqual(payload["summary"]["applied_count"], 77)
+        self.assertEqual(payload["summary"]["holdout_count"], 30)
+        self.assertEqual(payload["summary"]["observed_saved_tokens"], 5965139)
+        self.assertAlmostEqual(payload["summary"]["observed_saved_usd"], 17.895417)
+        self.assertEqual(payload["summary"]["safety_stop_count"], 0)
+        self.assertEqual(payload["summary"]["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertTrue(payload["privacy"]["metadata_only"])
+        self.assertTrue(payload["privacy"]["aggregate_only"])
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw-policy-secret-should-not-leak", rendered)
+        self.assertNotIn(str(rules_path), rendered)
 
     def test_crunch_policy_decision_cli_keeps_blocked_without_canary_metadata(self) -> None:
         self._log_call()
