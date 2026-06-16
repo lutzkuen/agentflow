@@ -1094,10 +1094,14 @@ def phase_canary_decision(
         meta.update({
             "status": "applied",
             "cohort": "canary_applied",
-            "reason": "selected-canary",
-            "actual_forwarded_model": target_model,
+            "reason": "selected-canary-shadow-only",
+            "actual_forwarded_model": requested,
+            "shadow_model": target_model,
+            "shadow_only": True,
+            "requires_shadow_comparison": not stream,
+            "live_promotion_required": True,
         })
-        return target_model, meta
+        return requested, meta
     meta.update({
         "status": "not_selected",
         "cohort": "skipped",
@@ -1487,10 +1491,14 @@ def openai_canary_decision(
         meta.update({
             "status": "applied",
             "cohort": "canary_applied",
-            "reason": "selected-canary",
-            "actual_forwarded_model": target_model,
+            "reason": "selected-canary-shadow-only",
+            "actual_forwarded_model": requested,
+            "shadow_model": target_model,
+            "shadow_only": True,
+            "requires_shadow_comparison": not stream,
+            "live_promotion_required": True,
         })
-        return target_model, meta
+        return requested, meta
     meta.update({
         "status": "not_selected",
         "cohort": "skipped",
@@ -1685,7 +1693,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
         )
         if canary_meta.get("reason") != "requested-model-not-enabled":
             routed = canary_routed or requested
-            reason = "phase canary selected Sonnet-to-Haiku route"
+            reason = "phase canary selected shadow route; keep requested model"
             if canary_meta.get("status") == "holdout":
                 reason = "phase canary holdout; keep requested model"
             elif canary_meta.get("status") == "not_selected":
@@ -1808,7 +1816,7 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             category=category,
         )
         routed = canary_routed or requested
-        reason = "OpenAI canary selected local route"
+        reason = "OpenAI canary selected shadow route; keep requested model"
         if canary_meta.get("status") == "holdout":
             reason = "OpenAI canary holdout; keep requested model"
         elif canary_meta.get("status") == "not_selected":

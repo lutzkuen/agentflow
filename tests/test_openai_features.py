@@ -378,7 +378,9 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         decision = {
             "schema": "agentflow.openai_managed_recommendation_decision.v1",
             "status": "selected",
-            "apply_reason": "canary-selected",
+            "apply_reason": "live-route-selected",
+            "selected_for_local_application": True,
+            "live_promotion_mode": "live",
             "target_model_normalized": "gpt-5-mini",
             "policy_id": "test-policy",
             "reason": "test policy",
@@ -1512,7 +1514,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertIn("unit", seen)
         self.assertNotIn("raw openai prompt secret", row["routing_json"])
 
-    def test_openai_policy_decision_canary_applies_without_legacy_recommendation_mode(self):
+    def test_openai_policy_decision_canary_shadows_without_legacy_recommendation_mode(self):
         request_body = {
             "model": "gpt-5-codex",
             "input": "raw canary prompt secret",
@@ -1554,16 +1556,25 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     response = TestClient(server.app).post("/v1/responses", json=request_body)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-mini")
+        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        self.assertEqual(CapturingOpenAIClient.calls[1]["json"]["model"], "gpt-5-mini")
         [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
         routing = json.loads(row["routing_json"])
         managed = routing["managed_recommendation"]
-        self.assertEqual(row["routed_model"], "gpt-5-mini")
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
         self.assertEqual(managed["mode"], "policy-decision-canary")
-        self.assertEqual(managed["status"], "applied")
-        self.assertTrue(managed["applied"])
+        self.assertEqual(managed["status"], "shadow_selected")
+        self.assertFalse(managed["applied"])
+        self.assertFalse(managed["changed_model"])
+        self.assertTrue(managed["shadow_only"])
+        self.assertEqual(managed["shadow_model"], "gpt-5-mini")
+        self.assertEqual(managed["would_route_model"], "gpt-5-mini")
         self.assertEqual(managed["canary"]["cohort"], "canary_applied")
-        self.assertEqual(routing["final_policy_source"], "managed-recommended")
+        self.assertEqual(routing["managed_route_candidate_model"], "gpt-5-mini")
+        self.assertTrue(routing["managed_route_shadow_only"])
+        self.assertEqual(routing["routing_experiment"]["trigger"], "managed-policy-routing-canary")
+        self.assertTrue(routing["routing_experiment"]["shadow_only"])
         self.assertIn("unit", seen)
         self.assertNotIn("raw canary prompt secret", row["routing_json"])
 
@@ -1660,7 +1671,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertIsNotNone(managed["projection"]["current_input_cost_est_usd"])
         self.assertIsNotNone(managed["projection"]["target_input_cost_est_usd"])
 
-    def test_openai_canary_applies_only_selected_safe_openai_model(self):
+    def test_openai_canary_shadows_only_selected_safe_openai_model(self):
         request_body = {
             "model": "gpt-5-codex",
             "input": "short prompt",
@@ -1688,18 +1699,23 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     response = TestClient(server.app).post("/v1/responses", json=request_body)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-mini")
+        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        self.assertEqual(CapturingOpenAIClient.calls[1]["json"]["model"], "gpt-5-mini")
         [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
         routing = json.loads(row["routing_json"])
         managed = routing["managed_recommendation"]
 
-        self.assertEqual(row["routed_model"], "gpt-5-mini")
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
         self.assertEqual(managed["mode"], "canary")
-        self.assertEqual(managed["status"], "applied")
-        self.assertTrue(managed["applied"])
-        self.assertTrue(managed["changed_model"])
+        self.assertEqual(managed["status"], "shadow_selected")
+        self.assertFalse(managed["applied"])
+        self.assertFalse(managed["changed_model"])
+        self.assertTrue(managed["shadow_only"])
+        self.assertEqual(managed["shadow_model"], "gpt-5-mini")
         self.assertEqual(managed["canary"]["cohort"], "canary_applied")
-        self.assertEqual(routing["final_policy_source"], "managed-recommended")
+        self.assertEqual(routing["managed_route_candidate_model"], "gpt-5-mini")
+        self.assertTrue(routing["routing_experiment"]["shadow_only"])
 
     def test_openai_bad_recommendation_falls_back_to_local_request(self):
         request_body = {
@@ -1761,6 +1777,13 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "confidence": 0.94,
             "policy_id": "managed-local-actions",
             "reason": "feature-only policy decision",
+            "policy_decision_schema": "agentflow.policy_decision.v1",
+            "routing_status": "recommended",
+            "recommended_mode": "live",
+            "route_down_probability": 0.9,
+            "model_artifact_version": "routing-predictor-v1-openai",
+            "model_evidence_hash": "sha256:evidence",
+            "predictor_rule_id": "routing-evidence:openai:gpt5->mini",
             "routing": {"target_model": "gpt-5-mini"},
             "crunch": {"profile": "aggressive", "threshold_chars": 1000},
             "cache": {"profile": "semantic", "semantic_threshold": 0.82},
@@ -2046,7 +2069,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                         managed["local_actions"]["unsupported_actions"][0]["reason"],
                         "unsupported-action-type",
                     )
-                    self.assertEqual(managed["status"], "applied")
+                    self.assertEqual(managed["status"], "shadow_selected")
+                    self.assertFalse(managed["changed_model"])
                 else:
                     self.assertEqual(CapturingOpenAIClient.calls[-1]["json"]["model"], "gpt-5-codex")
                     self.assertEqual(managed["status"], "skipped")
@@ -2072,7 +2096,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(managed["apply_reason"], "disabled")
         self.assertFalse(managed["applied"])
 
-    def test_openai_local_canary_applies_in_responses_optimized_path(self):
+    def test_openai_local_canary_shadows_in_responses_optimized_path(self):
         self._enable_openai_canary(canary_fraction=1.0)
         request_body = {"model": "gpt-5-codex", "input": "short prompt SECRET_OPENAI_CANARY"}
 
@@ -2080,7 +2104,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             response = TestClient(server.app).post("/v1/responses", json=request_body)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-mini")
+        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        self.assertEqual(CapturingOpenAIClient.calls[1]["json"]["model"], "gpt-5-mini")
         [row] = server.store.conn.execute(
             "select requested_model, routed_model, routing_json, request_json from calls"
         ).fetchall()
@@ -2088,7 +2114,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         canary = routing["openai_canary"]
 
         self.assertEqual(row["requested_model"], "gpt-5-codex")
-        self.assertEqual(row["routed_model"], "gpt-5-mini")
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
         self.assertIsNone(row["request_json"])
         self.assertEqual(canary["status"], "applied")
         self.assertEqual(canary["cohort"], "canary_applied")
@@ -2096,7 +2122,15 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(canary["candidate_id"], "test-openai-candidate")
         self.assertEqual(canary["original_model"], "gpt-5-codex")
         self.assertEqual(canary["target_model"], "gpt-5-mini")
-        self.assertEqual(canary["actual_forwarded_model"], "gpt-5-mini")
+        self.assertEqual(canary["actual_forwarded_model"], "gpt-5-codex")
+        self.assertEqual(canary["shadow_model"], "gpt-5-mini")
+        self.assertTrue(canary["shadow_only"])
+        self.assertTrue(canary["requires_shadow_comparison"])
+        self.assertTrue(canary["live_promotion_required"])
+        self.assertEqual(routing["routing_experiment"]["trigger"], "openai-local-routing-canary")
+        self.assertEqual(routing["routing_experiment"]["primary_model"], "gpt-5-codex")
+        self.assertEqual(routing["routing_experiment"]["shadow_model"], "gpt-5-mini")
+        self.assertTrue(routing["routing_experiment"]["shadow_only"])
         self.assertTrue(canary["cohort_key_hash"].startswith("sha256:"))
         self.assertIsNotNone(canary["projected_input_savings_usd"])
         self.assertNotIn("SECRET_OPENAI_CANARY", row["routing_json"])
@@ -2151,8 +2185,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertTrue(all(canary["cohort_unit"] == "request_features_sequence" for canary in canaries))
         self.assertTrue(all("cohort_sequence_index" in canary for canary in canaries))
         self.assertTrue(all(canary["cohort_features"]["requested_model"] == "gpt-5.4" for canary in canaries))
-        self.assertTrue(any(row["routed_model"] == "gpt-5.4-mini" for row in rows))
-        self.assertTrue(any(row["routed_model"] == "gpt-5.4" for row in rows))
+        self.assertTrue(all(row["routed_model"] == "gpt-5.4" for row in rows))
+        self.assertTrue(any(canary.get("shadow_model") == "gpt-5.4-mini" for canary in applied))
 
         report = build_openai_routing_report(server.store, limit=50)
         candidate = next(row for row in report["candidates"] if row["requested_model"] == "gpt-5.4")
@@ -2202,14 +2236,17 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(CapturingStreamingOpenAIClient.stream_calls[0]["json"]["model"], "gpt-5-mini")
+        self.assertEqual(CapturingStreamingOpenAIClient.stream_calls[0]["json"]["model"], "gpt-5-codex")
         [row] = server.store.conn.execute("select stream, routed_model, routing_json from calls").fetchall()
         canary = json.loads(row["routing_json"])["openai_canary"]
 
         self.assertEqual(row["stream"], 1)
-        self.assertEqual(row["routed_model"], "gpt-5-mini")
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
         self.assertEqual(canary["status"], "applied")
+        self.assertEqual(canary["actual_forwarded_model"], "gpt-5-codex")
+        self.assertEqual(canary["shadow_model"], "gpt-5-mini")
         self.assertTrue(canary["stream"])
+        self.assertFalse(canary["requires_shadow_comparison"])
 
     def test_openai_local_canary_rate_limit_fallback_records_requested_model(self):
         self._enable_openai_canary(canary_fraction=1.0)
@@ -2228,18 +2265,17 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                 )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(RateLimitThenSuccessOpenAIClient.calls[0]["json"]["model"], "gpt-5-mini")
+        self.assertEqual(RateLimitThenSuccessOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
         self.assertEqual(RateLimitThenSuccessOpenAIClient.calls[1]["json"]["model"], "gpt-5-codex")
+        self.assertEqual(RateLimitThenSuccessOpenAIClient.calls[2]["json"]["model"], "gpt-5-mini")
         [row] = server.store.conn.execute("select retry_count, routed_model, routing_json from calls").fetchall()
         routing = json.loads(row["routing_json"])
         canary = routing["openai_canary"]
 
         self.assertEqual(row["retry_count"], 1)
         self.assertEqual(row["routed_model"], "gpt-5-codex")
-        self.assertEqual(routing["fallback_reason"], "rate_limited")
-        self.assertEqual(routing["fallback_model"], "gpt-5-codex")
+        self.assertNotIn("fallback_reason", routing)
         self.assertEqual(canary["status"], "applied")
-        self.assertEqual(canary["fallback_reason"], "rate_limited")
         self.assertEqual(canary["actual_forwarded_model"], "gpt-5-codex")
 
     def test_openai_routing_experiment_records_primary_shadow_metadata_only(self):
@@ -2292,8 +2328,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(CapturingOpenAIClient.calls), 2)
-        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-mini")
-        self.assertEqual(CapturingOpenAIClient.calls[1]["json"]["model"], "gpt-5-codex")
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        self.assertEqual(CapturingOpenAIClient.calls[1]["json"]["model"], "gpt-5-mini")
 
         [experiment_row] = server.store.conn.execute(
             """
@@ -2317,8 +2353,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(experiment_row["source_surface"], "openai_responses")
         self.assertEqual(experiment_row["requested_model"], "gpt-5-codex")
         self.assertEqual(experiment_row["routed_model"], "gpt-5-mini")
-        self.assertEqual(experiment_row["primary_model"], "gpt-5-mini")
-        self.assertEqual(experiment_row["shadow_model"], "gpt-5-codex")
+        self.assertEqual(experiment_row["primary_model"], "gpt-5-codex")
+        self.assertEqual(experiment_row["shadow_model"], "gpt-5-mini")
         self.assertEqual(experiment_row["primary_status_code"], 200)
         self.assertEqual(experiment_row["shadow_status_code"], 200)
         self.assertEqual(experiment_row["output_similarity"], 1.0)

@@ -304,10 +304,13 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(routed, "gpt-5-mini")
+        self.assertEqual(routed, "gpt-5-codex")
         self.assertEqual(meta["openai_canary"]["status"], "applied")
         self.assertEqual(meta["openai_canary"]["candidate_id"], "openai-canary-candidate-privacy")
         self.assertEqual(meta["openai_canary"]["cohort"], "canary_applied")
+        self.assertEqual(meta["openai_canary"]["shadow_model"], "gpt-5-mini")
+        self.assertEqual(meta["openai_canary"]["actual_forwarded_model"], "gpt-5-codex")
+        self.assertTrue(meta["openai_canary"]["shadow_only"])
         self.assertNotIn("request_id", router.ROUTING_OPENAI_CANARY)
         self.assertNotIn("cache_key", router.ROUTING_OPENAI_CANARY)
         self.assertNotIn("file_path", router.ROUTING_OPENAI_CANARY)

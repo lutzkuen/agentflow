@@ -147,7 +147,7 @@ def execute_openai_local_policy(
     policy_decision: dict[str, Any],
     store_obj: Any,
     cruncher: Cruncher = crunch_body,
-    router: Router = route_openai_model,
+    router: Router | None = None,
     applier: RecommendationApplier = apply_openai_recommendation_decision,
 ) -> OpenAILocalPolicyStage:
     """Apply local crunch, route, cache-profile, and safe managed actions without provider I/O."""
@@ -194,6 +194,10 @@ def execute_openai_local_policy(
             endpoint=endpoint,
         )
 
+    if router is None:
+        from agentflow_proxy.router import route_openai_model as current_route_openai_model
+
+        router = current_route_openai_model
     routed_model, routing_meta = router(provider_body)
     resolved_requested_model = str(provider_body.get("model") or requested_model)
     local_routed_model = str(routed_model)

@@ -479,12 +479,15 @@ rules: []
                         "input": "summarize the recent result",
                     })
 
-                    self.assertEqual(routed, "gpt-5.4-mini")
+                    self.assertEqual(routed, "gpt-5.4")
                     self.assertTrue(meta["enabled"])
                     self.assertEqual(meta["provider"], "openai")
                     self.assertEqual(meta["policy_source"], "local-manual")
                     self.assertEqual(meta["openai_canary"]["status"], "applied")
                     self.assertEqual(meta["openai_canary"]["cohort"], "canary_applied")
+                    self.assertEqual(meta["openai_canary"]["shadow_model"], "gpt-5.4-mini")
+                    self.assertEqual(meta["openai_canary"]["actual_forwarded_model"], "gpt-5.4")
+                    self.assertTrue(meta["openai_canary"]["shadow_only"])
             finally:
                 importlib.reload(router_module)
 
@@ -706,12 +709,15 @@ rules: []
 
                     routed, meta = manual_router.route_model(body)
 
-                    self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
-                    self.assertEqual(meta["reason"], "phase canary selected Sonnet-to-Haiku route")
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(meta["reason"], "phase canary selected shadow route; keep requested model")
                     self.assertEqual(meta["phase_canary"]["status"], "applied")
                     self.assertEqual(meta["phase_canary"]["cohort"], "canary_applied")
                     self.assertEqual(meta["phase_canary"]["policy_id"], "test-phase-canary")
                     self.assertEqual(meta["phase_canary"]["workflow_phase"], "tool-execution")
+                    self.assertEqual(meta["phase_canary"]["shadow_model"], manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(meta["phase_canary"]["actual_forwarded_model"], manual_router.SONNET_DEFAULT)
+                    self.assertTrue(meta["phase_canary"]["shadow_only"])
                     self.assertIn("cohort_hash", meta["phase_canary"])
                     self.assertNotIn("content", stable_json(meta["phase_canary"]["cohort_features"]))
             finally:
@@ -904,9 +910,11 @@ rules: []
 
                     self.assertEqual(non_stream_routed, manual_router.SONNET_DEFAULT)
                     self.assertEqual(non_stream_meta["phase_canary"]["reason"], "stream-scope-not-enabled")
-                    self.assertEqual(stream_routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(stream_routed, manual_router.SONNET_DEFAULT)
                     self.assertEqual(stream_meta["phase_canary"]["status"], "applied")
                     self.assertTrue(stream_meta["phase_canary"]["stream"])
+                    self.assertEqual(stream_meta["phase_canary"]["shadow_model"], manual_router.HAIKU_DEFAULT)
+                    self.assertFalse(stream_meta["phase_canary"]["requires_shadow_comparison"])
                     self.assertNotIn("content", stable_json(stream_meta["phase_canary"]["cohort_features"]))
             finally:
                 importlib.reload(router_module)
@@ -1053,11 +1061,13 @@ rules: []
                     first_routed, first_meta = manual_router.route_model(first, session_id="raw-secret-session")
                     second_routed, second_meta = manual_router.route_model(second, session_id="raw-secret-session")
 
-                    self.assertEqual(first_routed, manual_router.HAIKU_DEFAULT)
-                    self.assertEqual(second_routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(first_routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(second_routed, manual_router.SONNET_DEFAULT)
                     first_canary = first_meta["phase_canary"]
                     second_canary = second_meta["phase_canary"]
                     self.assertEqual(first_canary["candidate_id"], "promoted-shadow-candidate")
+                    self.assertEqual(first_canary["shadow_model"], manual_router.HAIKU_DEFAULT)
+                    self.assertTrue(first_canary["shadow_only"])
                     self.assertEqual(first_canary["cohort_key_hash"], second_canary["cohort_key_hash"])
                     self.assertEqual(first_canary["cohort_features"]["cohort_unit"], "session")
                     self.assertIn("session_id_hash", first_canary["cohort_features"])

@@ -22,6 +22,7 @@ OPENAI_RECOMMENDATION_CANARY_FRACTION_ENV = "AGENTFLOW_OPENAI_RECOMMENDATION_CAN
 OPENAI_RECOMMENDATION_CANARY_SALT_ENV = "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_SALT"
 
 VALID_OPENAI_RECOMMENDATION_MODES = {"observe-only", "dry-run", "canary"}
+LIVE_POLICY_DECISION_MODES = {"live", "enforced", "promoted", "promotion", "route_to"}
 
 
 def openai_recommendation_mode() -> str:
@@ -316,13 +317,16 @@ async def fetch_openai_recommendation_decision(
                 "lifecycle_event": "holdout",
             })
             return decision
-        if recommended_mode != "canary":
+        if recommended_mode not in {"canary", *LIVE_POLICY_DECISION_MODES}:
             decision.update({
                 "status": "skipped",
                 "apply_reason": f"recommended-mode-{recommended_mode or 'missing'}",
                 "lifecycle_event": "fallback",
             })
             return decision
+        if recommended_mode in LIVE_POLICY_DECISION_MODES:
+            decision["selected_for_local_application"] = True
+            decision["live_promotion_mode"] = recommended_mode
     if target_model == current_model:
         decision.update({
             "status": "noop",
@@ -345,6 +349,34 @@ async def fetch_openai_recommendation_decision(
             "would_change_model": target_model is not None and target_model != current_model,
             "would_route_model": target_model,
             "lifecycle_event": "dry_run",
+        })
+        return decision
+
+    if decision.get("selected_for_local_application"):
+        local_actions = evaluate_managed_local_actions(
+            fetched,
+            provider="openai",
+            current_model=current_model,
+            source_surface=recommendation_unit.get("source_surface"),
+            application_enabled=True,
+        )
+        if local_actions.get("status") == "skipped":
+            decision.update({
+                "status": "skipped",
+                "apply_reason": local_actions.get("apply_reason") or "local-action-validation-failed",
+                "local_actions": local_actions,
+                "lifecycle_event": "fallback",
+            })
+            return decision
+        decision.update({
+            "status": "selected",
+            "selected_for_local_application": True,
+            "selected_for_shadow_evaluation": False,
+            "fallback": None,
+            "apply_reason": "live-route-selected",
+            "target_model_normalized": target_model,
+            "local_actions": local_actions,
+            "lifecycle_event": "live_route_selected",
         })
         return decision
 
@@ -374,12 +406,13 @@ async def fetch_openai_recommendation_decision(
         })
         return decision
 
+    live_application = bool(decision.get("selected_for_local_application"))
     local_actions = evaluate_managed_local_actions(
         fetched,
         provider="openai",
         current_model=current_model,
         source_surface=recommendation_unit.get("source_surface"),
-        application_enabled=True,
+        application_enabled=live_application,
     )
     if local_actions.get("status") == "skipped":
         decision.update({
@@ -399,12 +432,13 @@ async def fetch_openai_recommendation_decision(
 
     decision.update({
         "status": "selected",
-        "selected_for_local_application": True,
+        "selected_for_local_application": live_application,
+        "selected_for_shadow_evaluation": not live_application,
         "fallback": None,
-        "apply_reason": "canary-selected",
+        "apply_reason": "live-route-selected" if live_application else "canary-shadow-selected",
         "target_model_normalized": target_model,
         "local_actions": local_actions,
-        "lifecycle_event": "canary_selected",
+        "lifecycle_event": "live_route_selected" if live_application else "canary_shadow_selected",
     })
     return decision
 
@@ -418,7 +452,42 @@ def apply_openai_recommendation_decision(
     """Apply a preflight managed decision to the locally mutated OpenAI request when safe."""
     applied = dict(decision)
     target_model = applied.get("target_model_normalized")
-    if applied.get("apply_reason") != "canary-selected" or not isinstance(target_model, str):
+    if applied.get("selected_for_shadow_evaluation") is True and isinstance(target_model, str):
+        current_model = str(body.get("model") or routing_meta.get("routed_model") or "")
+        applied["local_model_at_application"] = current_model
+        applied.update({
+            "status": "shadow_selected",
+            "applied": False,
+            "changed_model": False,
+            "fallback": "local-policy",
+            "apply_reason": "canary-shadow-selected",
+            "local_action_taken": "canary_shadow",
+            "would_route_model": target_model,
+            "shadow_model": target_model,
+            "shadow_only": True,
+            "live_promotion_required": True,
+            "lifecycle_event": "canary_shadow_selected",
+        })
+        routing_meta["managed_route_candidate_model"] = target_model
+        routing_meta["managed_route_candidate_reason"] = applied.get("reason")
+        routing_meta["managed_route_recommended_mode"] = "canary"
+        routing_meta["managed_route_shadow_only"] = True
+        routing_meta["managed_policy_id"] = applied.get("policy_id")
+        routing_meta["managed_reason"] = applied.get("reason")
+        local_actions = applied.get("local_actions")
+        if isinstance(local_actions, dict):
+            local_actions.setdefault("routing", {})
+            if isinstance(local_actions["routing"], dict):
+                local_actions["routing"].update({
+                    "status": "shadow_selected",
+                    "applied": False,
+                    "target_model": target_model,
+                    "apply_reason": "canary-shadow-selected",
+                })
+            routing_meta["managed_local_actions"] = local_actions
+        return applied
+
+    if not applied.get("selected_for_local_application") or not isinstance(target_model, str):
         local_actions = applied.get("local_actions")
         if isinstance(local_actions, dict):
             routing_meta["managed_local_actions"] = local_actions

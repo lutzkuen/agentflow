@@ -431,6 +431,19 @@ def routing_experiment_decision(
     requested = str(routing_meta.get("requested_model") or body.get("model") or "")
     routed = str(routing_meta.get("routed_model") or body.get("model") or "")
     mode = ROUTING_EXPERIMENT_MODE
+    openai_canary = routing_meta.get("openai_canary") if isinstance(routing_meta.get("openai_canary"), dict) else {}
+    managed = routing_meta.get("managed_recommendation") if isinstance(routing_meta.get("managed_recommendation"), dict) else {}
+    forced_openai_canary_shadow = (
+        provider == "openai"
+        and not stream
+        and requested == routed
+        and (
+            openai_canary.get("status") == "applied"
+            or managed.get("selected_for_shadow_evaluation") is True
+        )
+    )
+    if forced_openai_canary_shadow:
+        mode = "shadow_candidate_pass_through"
     category = str(routing_meta.get("category") or "")
     workflow_phase = str(routing_meta.get("workflow_phase") or "")
     text_chars = int(routing_meta.get("text_chars") or 0)
@@ -506,7 +519,8 @@ def routing_experiment_decision(
         },
     }
     if not ROUTING_EXPERIMENT_ENABLED:
-        return meta
+        if not forced_openai_canary_shadow:
+            return meta
     if meta["kill_switch"]:
         meta["reason"] = "kill-switch"
         return meta
@@ -526,7 +540,22 @@ def routing_experiment_decision(
         if requested != routed:
             meta["reason"] = "already-routed-down"
             return meta
-        candidate = _route_down_candidate_for_requested(requested)
+        candidate = None
+        force_shadow = False
+        if provider == "openai" and openai_canary.get("status") == "applied":
+            candidate = str(openai_canary.get("shadow_model") or openai_canary.get("target_model") or "").strip() or None
+            force_shadow = candidate is not None
+            meta["trigger"] = "openai-local-routing-canary"
+            meta["canary_policy_id"] = openai_canary.get("policy_id")
+            meta["canary_cohort"] = openai_canary.get("cohort")
+        elif provider == "openai" and managed.get("selected_for_shadow_evaluation") is True:
+            candidate = str(managed.get("shadow_model") or managed.get("would_route_model") or "").strip() or None
+            force_shadow = candidate is not None
+            meta["trigger"] = "managed-policy-routing-canary"
+            meta["managed_policy_id"] = managed.get("policy_id")
+            meta["canary_cohort"] = (managed.get("local_canary") or {}).get("cohort") if isinstance(managed.get("local_canary"), dict) else None
+        if candidate is None:
+            candidate = _route_down_candidate_for_requested(requested)
         if not candidate:
             meta["reason"] = "model-pair-not-enabled"
             return meta
@@ -537,6 +566,7 @@ def routing_experiment_decision(
         meta["counterfactual"] = True
         meta["shadow_only"] = True
     elif mode == "applied_routed_down":
+        force_shadow = False
         if requested == routed:
             meta["reason"] = "not-routed-down"
             return meta
@@ -568,22 +598,26 @@ def routing_experiment_decision(
     if workflow_phases and workflow_phase not in workflow_phases:
         meta["reason"] = "workflow-phase-not-enabled"
         return meta
-    if budget_limit <= 0:
+    if budget_limit <= 0 and not force_shadow:
         meta["reason"] = "daily-budget-zero"
         return meta
-    if budget_spent >= budget_limit:
+    if budget_spent >= budget_limit and not force_shadow:
         meta["reason"] = "daily-budget-exhausted"
         return meta
     sample_rate = float(controls["sample_rate"])
-    if sample_rate <= 0:
+    if sample_rate <= 0 and not force_shadow:
         meta["reason"] = "sample-rate-zero"
         return meta
-    if random_value() >= sample_rate:
+    if not force_shadow and random_value() >= sample_rate:
         meta["reason"] = "streaming-shadow-not-sampled" if stream else "sample-rate-not-selected"
         return meta
 
     meta["status"] = "selected"
     meta["sampled"] = True
+    if force_shadow:
+        meta["sampled_by_canary"] = True
+        meta["sample_rate"] = 1.0
+        meta["sample_rate_scope"] = "canary-selected"
     if stream and mode == "shadow_candidate_pass_through":
         meta["reason"] = "streaming-shadow-sampled"
     else:
