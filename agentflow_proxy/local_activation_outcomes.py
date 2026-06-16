@@ -13,6 +13,8 @@ from agentflow_proxy.store import utc_now
 SCHEMA = "agentflow.local_activation_outcome_summary.v1"
 OUTCOME_SCHEMA = "agentflow.local_activation_outcome_summary_row.v1"
 PRIVACY_SCHEMA = "agentflow.local_activation_outcome_summary_privacy.v1"
+CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
+CACHE_REPLAY_POLICY_DECISION_SCHEMA = "agentflow.request_shape_cache_replay_policy_decision.v1"
 
 RULE_FILES = {
     "routing": "routing_rules.yaml",
@@ -282,6 +284,193 @@ def _finalize_row(row: dict[str, Any], blockers: Counter[str]) -> dict[str, Any]
     return row
 
 
+def _first_dict(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _report_decision_entry(report: dict[str, Any]) -> dict[str, Any]:
+    top = report.get("top_decision")
+    if isinstance(top, dict):
+        return top
+    decisions = report.get("decisions")
+    if isinstance(decisions, list):
+        for item in decisions:
+            if isinstance(item, dict):
+                return item
+    return {}
+
+
+def _decision_count(report: dict[str, Any]) -> int:
+    decisions = report.get("decisions")
+    if isinstance(decisions, list):
+        return len([item for item in decisions if isinstance(item, dict)])
+    return 1 if _report_decision_entry(report) else 0
+
+
+def _apply_crunch_policy_decision_report(row: dict[str, Any], blockers: Counter[str], report: dict[str, Any]) -> bool:
+    if report.get("schema") != CRUNCH_POLICY_DECISION_SCHEMA:
+        return False
+    top = _report_decision_entry(report)
+    summary = _first_dict(report.get("summary"))
+    metrics = _first_dict(top.get("metrics"))
+    coverage = _first_dict(top.get("coverage"), summary.get("coverage"), metrics.get("coverage"))
+    applied = _as_int(metrics.get("applied_count") or coverage.get("applied_count") or summary.get("applied_count"))
+    holdout = _as_int(metrics.get("holdout_count") or coverage.get("holdout_count") or summary.get("holdout_count"))
+    skipped = _as_int(coverage.get("skipped_count") or summary.get("skipped_count"))
+    safety_stopped = _as_int(metrics.get("safety_stop_count") or coverage.get("safety_stop_count") or summary.get("safety_stop_count"))
+    error_count = _as_int(metrics.get("applied_error_count")) + _as_int(metrics.get("holdout_error_count"))
+    retry_count = _as_int(metrics.get("applied_retry_count")) + _as_int(metrics.get("holdout_retry_count"))
+    fallback_count = _as_int(metrics.get("fallback_count") or coverage.get("fallback_count") or summary.get("fallback_count"))
+    observed_tokens = _as_int(top.get("observed_saved_tokens") or metrics.get("observed_saved_tokens") or summary.get("observed_saved_tokens"))
+    observed_savings = _as_float(top.get("observed_saved_usd") or metrics.get("observed_saved_usd") or summary.get("observed_saved_usd"))
+    row_count = _as_int(coverage.get("observed_count") or coverage.get("matched_count") or (applied + holdout + skipped))
+    if row_count <= 0:
+        row_count = applied + holdout + skipped
+
+    row["row_count"] = max(_as_int(row.get("row_count")), row_count)
+    row["applied_count"] = max(_as_int(row.get("applied_count")), applied)
+    row["holdout_count"] = max(_as_int(row.get("holdout_count")), holdout)
+    row["skipped_count"] = max(_as_int(row.get("skipped_count")), skipped)
+    row["safety_stopped_count"] = max(_as_int(row.get("safety_stopped_count")), safety_stopped)
+    row["error_count"] = max(_as_int(row.get("error_count")), error_count)
+    row["retry_count"] = max(_as_int(row.get("retry_count")), retry_count)
+    row["fallback_count"] = max(_as_int(row.get("fallback_count")), fallback_count)
+    row["observed_savings_usd"] = max(_as_float(row.get("observed_savings_usd")), observed_savings)
+    row["observed_saved_tokens"] = max(_as_int(row.get("observed_saved_tokens")), observed_tokens)
+    row["projected_savings_usd"] = max(_as_float(row.get("projected_savings_usd")), _as_float(summary.get("projected_savings_usd")))
+    row["source_evidence_schema"] = CRUNCH_POLICY_DECISION_SCHEMA
+    row["source_decision_id"] = str(top.get("decision_id") or report.get("decision_id") or "") or None
+    row["source_decision"] = public_label(top.get("decision") or report.get("decision"), "unknown")
+    row["graduation_decision"] = public_label(top.get("graduation_decision") or report.get("graduation_decision"), "unknown")
+    row["safety_stop_state"] = public_label(top.get("safety_stop_state") or summary.get("safety_stop_state"), "none")
+    row["coverage"] = {
+        "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+        "source_schema": public_label(coverage.get("schema"), "unknown"),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "observed_count": row_count,
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "skipped_count": skipped,
+        "safety_stop_count": safety_stopped,
+        "error_count": error_count,
+        "retry_count": retry_count,
+        "fallback_count": fallback_count,
+    }
+    row["decision_count"] = _decision_count(report)
+    row["target_local_rule_file"] = "crunch_rules.yaml"
+    row["target_local_policy_section"] = "crunch.rules"
+    row["next_action"] = public_label(top.get("source_recommended_next_action") or summary.get("source_impact_recommendation") or top.get("decision"), row.get("next_action") or "review")
+
+    reason_codes = _reason_codes(top.get("reason_codes"), top, summary)
+    if row["source_decision"] not in {"widen", "promote", "apply", "recommended", "unknown"}:
+        reason_codes.append(f"decision-{row['source_decision']}")
+    for code in reason_codes:
+        blockers[code] += 1
+    row["source_report"] = {
+        "schema": CRUNCH_POLICY_DECISION_SCHEMA,
+        "status": public_label(report.get("status"), "unknown"),
+        "decision": row["source_decision"],
+        "decision_count": _decision_count(report),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    return True
+
+
+def _apply_cache_policy_decision_report(row: dict[str, Any], blockers: Counter[str], report: dict[str, Any]) -> bool:
+    if report.get("schema") != CACHE_REPLAY_POLICY_DECISION_SCHEMA:
+        return False
+    top = _report_decision_entry(report)
+    summary = _first_dict(report.get("summary"))
+    metrics = _first_dict(top.get("metrics"))
+    coverage = _first_dict(top.get("coverage"))
+    applied = _as_int(metrics.get("applied_count") or summary.get("applied_count"))
+    holdout = _as_int(metrics.get("holdout_count") or summary.get("holdout_count"))
+    row_count = _as_int(metrics.get("observed_row_count") or summary.get("observed_row_count") or (applied + holdout))
+    retry_count = _as_int(metrics.get("retry_count") or summary.get("retry_count"))
+    fallback_count = _as_int(metrics.get("fallback_count") or summary.get("fallback_count"))
+    error_count = _as_int(metrics.get("error_count") or summary.get("error_count"))
+    observed_hits = _as_int(metrics.get("observed_hits") or summary.get("observed_hits"))
+    exact_hit_count = _as_int(metrics.get("exact_hit_count") or summary.get("exact_hit_count"))
+    projected_hits = _as_int(metrics.get("projected_hits") or summary.get("projected_hits"))
+    observed_savings = _as_float(metrics.get("observed_savings_usd") or summary.get("observed_savings_usd"))
+    projected_savings = _as_float(metrics.get("projected_savings_usd") or summary.get("projected_savings_usd"))
+
+    row["row_count"] = max(_as_int(row.get("row_count")), row_count)
+    row["applied_count"] = max(_as_int(row.get("applied_count")), applied)
+    row["holdout_count"] = max(_as_int(row.get("holdout_count")), holdout)
+    row["skipped_count"] = max(_as_int(row.get("skipped_count")), max(0, row_count - applied - holdout))
+    row["error_count"] = max(_as_int(row.get("error_count")), error_count)
+    row["retry_count"] = max(_as_int(row.get("retry_count")), retry_count)
+    row["fallback_count"] = max(_as_int(row.get("fallback_count")), fallback_count)
+    row["observed_savings_usd"] = max(_as_float(row.get("observed_savings_usd")), observed_savings)
+    row["projected_savings_usd"] = max(_as_float(row.get("projected_savings_usd")), projected_savings)
+    row["source_evidence_schema"] = CACHE_REPLAY_POLICY_DECISION_SCHEMA
+    row["source_decision_id"] = str(top.get("decision_id") or "") or None
+    row["source_decision"] = public_label(top.get("decision") or report.get("decision"), "unknown")
+    row["graduation_decision"] = row["source_decision"]
+    row["coverage"] = {
+        "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+        "source_schema": public_label(coverage.get("schema"), "unknown"),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "observed_count": row_count,
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "observed_hits": observed_hits,
+        "exact_hit_count": exact_hit_count,
+        "projected_hits": projected_hits,
+        "retry_count": retry_count,
+        "fallback_count": fallback_count,
+        "error_count": error_count,
+        "invalidation_skipped_count": _as_int(metrics.get("invalidation_skipped_count") or summary.get("invalidation_skipped_count")),
+        "unsupported_shape_count": _as_int(metrics.get("unsupported_shape_count") or summary.get("unsupported_shape_count")),
+    }
+    row["decision_count"] = _decision_count(report)
+    row["target_local_rule_file"] = "cache_rules.yaml"
+    row["target_local_policy_section"] = "cache.pattern_rules"
+    row["next_action"] = public_label(top.get("recommended_next_action") or top.get("next_action") or summary.get("decision"), row.get("next_action") or "review")
+    row["observed_hits"] = observed_hits
+    row["exact_hit_count"] = exact_hit_count
+    row["projected_hits"] = projected_hits
+
+    reason_codes = _reason_codes(report.get("reason_codes"), top.get("reason_codes"), top, summary)
+    if row["source_decision"] not in {"widen", "promote", "apply", "recommended", "unknown"}:
+        reason_codes.append(f"decision-{row['source_decision']}")
+    for code in reason_codes:
+        blockers[code] += 1
+    row["source_report"] = {
+        "schema": CACHE_REPLAY_POLICY_DECISION_SCHEMA,
+        "status": public_label(report.get("status"), "unknown"),
+        "decision": row["source_decision"],
+        "decision_count": _decision_count(report),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    return True
+
+
+def _apply_policy_decision_reports(
+    summaries: dict[str, dict[str, Any]],
+    blockers: dict[str, Counter[str]],
+    activation_reports: list[dict[str, Any]],
+) -> int:
+    applied = 0
+    for report in activation_reports:
+        if not isinstance(report, dict):
+            continue
+        if _apply_crunch_policy_decision_report(summaries["crunch"], blockers["crunch"], report):
+            applied += 1
+            continue
+        if _apply_cache_policy_decision_report(summaries["cache"], blockers["cache"], report):
+            applied += 1
+    return applied
+
+
 def _fetch_rows(store_obj: Any, *, limit: int) -> list[dict[str, Any]]:
     capped = max(1, min(int(limit or 1), 20_000))
     return [
@@ -306,6 +495,7 @@ def build_local_activation_outcome_summary(
     *,
     limit: int = 1000,
     config_dir: str | Path | None = None,
+    activation_reports: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     rows = _fetch_rows(store_obj, limit=limit)
     summaries = {section: _empty_row(section, config_dir) for section in ("routing", "crunch", "cache")}
@@ -374,6 +564,9 @@ def build_local_activation_outcome_summary(
         for code in _reason_codes(cache, _nested_dict(cache, "cache_replay_canary", "exact_cache_replay")):
             blockers["cache"][code] += 1
 
+    activation_reports = [item for item in (activation_reports or []) if isinstance(item, dict)]
+    policy_decision_report_count = _apply_policy_decision_reports(summaries, blockers, activation_reports)
+
     outcome_summaries = [_finalize_row(summaries[section], blockers[section]) for section in ("routing", "crunch", "cache")]
     result = {
         "schema": SCHEMA,
@@ -387,6 +580,14 @@ def build_local_activation_outcome_summary(
             "rows_considered": len(rows),
             "lookback_limit": max(1, min(int(limit or 1), 20_000)),
             "local_action_family_count": len(outcome_summaries),
+            "policy_decision_report_count": policy_decision_report_count,
+            "policy_decision_families": sorted(
+                {
+                    row["local_action_family"]
+                    for row in outcome_summaries
+                    if row.get("source_evidence_schema") in {CRUNCH_POLICY_DECISION_SCHEMA, CACHE_REPLAY_POLICY_DECISION_SCHEMA}
+                }
+            ),
             "applied_count": sum(_as_int(row.get("applied_count")) for row in outcome_summaries),
             "holdout_count": sum(_as_int(row.get("holdout_count")) for row in outcome_summaries),
             "error_count": sum(_as_int(row.get("error_count")) for row in outcome_summaries),
@@ -399,6 +600,10 @@ def build_local_activation_outcome_summary(
         "local_policy_handoff": {
             "source": "local-activation-outcome-summary",
             "supported_local_action_families": ["routing", "crunch", "cache"],
+            "source_policy_decision_schemas": [
+                CRUNCH_POLICY_DECISION_SCHEMA,
+                CACHE_REPLAY_POLICY_DECISION_SCHEMA,
+            ],
             "managed_dependency": "optional",
             "server_ingestion_required": False,
         },
@@ -415,4 +620,3 @@ def build_local_activation_outcome_summary(
     if violations:
         result["egress_guard"]["blocked_keys"] = sorted({item.get("key", "unknown") for item in violations})
     return result
-

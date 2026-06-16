@@ -5733,13 +5733,36 @@ def local_activation_outcome_summary_cli(argv: Sequence[str] | None = None, *, s
     stdout = stdout if stdout is not None else sys.stdout
 
     from agentflow_proxy.local_activation_outcomes import build_local_activation_outcome_summary
+    from agentflow_proxy.request_shape_rollups import (
+        build_request_shape_cache_replay_evidence_report,
+        build_request_shape_cache_replay_policy_decision_report,
+        build_request_shape_rollups_report,
+    )
 
     store = _open_store_for_db(str(args.db))
     try:
+        activation_reports: list[dict[str, Any]] = []
+        rollups = build_request_shape_rollups_report(
+            store,
+            limit=args.limit,
+            persist=False,
+            run_id="local-activation-outcome-summary",
+        )
+        crunch_policy_decision = rollups.get("crunch_policy_decision")
+        if isinstance(crunch_policy_decision, dict):
+            activation_reports.append(crunch_policy_decision)
+        cache_canary_rules = Path(args.config_dir).expanduser() / "cache_canary_policy.yaml"
+        cache_evidence = build_request_shape_cache_replay_evidence_report(
+            store,
+            rules_path=cache_canary_rules,
+            limit=max(args.limit, 1000),
+        )
+        activation_reports.append(build_request_shape_cache_replay_policy_decision_report(cache_evidence))
         result = build_local_activation_outcome_summary(
             store,
             limit=args.limit,
             config_dir=args.config_dir,
+            activation_reports=activation_reports,
         )
     finally:
         store.conn.close()

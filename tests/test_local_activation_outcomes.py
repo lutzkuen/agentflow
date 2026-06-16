@@ -129,6 +129,139 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         for forbidden in ("raw prompt", "req-secret", "session-secret", "cache-key-secret", str(Path(tmp).resolve())):
             self.assertNotIn(forbidden, rendered)
 
+    def test_summary_merges_cache_and_crunch_policy_decision_reports(self):
+        crunch_decision = {
+            "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+            "status": "decided",
+            "decision": "widen",
+            "graduation_decision": "widen",
+            "decision_id": "request-shape-crunch-policy-decision:fixture",
+            "top_decision": {
+                "decision_id": "request-shape-crunch-policy-decision:fixture",
+                "decision": "widen",
+                "graduation_decision": "widen",
+                "safety_stop_state": "none",
+                "source_recommended_next_action": "widen-repeated-context-crunch-canary",
+                "metrics": {
+                    "applied_count": 7,
+                    "holdout_count": 8,
+                    "observed_saved_tokens": 10738,
+                    "observed_saved_usd": 0.032214,
+                    "applied_retry_count": 1,
+                    "holdout_retry_count": 2,
+                    "fallback_count": 0,
+                    "safety_stop_count": 0,
+                },
+                "coverage": {
+                    "schema": "agentflow.request_shape_crunch_canary_coverage.v1",
+                    "observed_count": 74,
+                    "applied_count": 7,
+                    "holdout_count": 8,
+                    "skipped_count": 59,
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                },
+                "reason_codes": ["promotion-ready"],
+            },
+            "summary": {
+                "decision": "widen",
+                "graduation_decision": "widen",
+                "decision_id": "request-shape-crunch-policy-decision:fixture",
+                "applied_count": 7,
+                "holdout_count": 8,
+                "observed_saved_tokens": 10738,
+                "observed_saved_usd": 0.032214,
+                "target_local_rule_file": "crunch_rules.yaml",
+                "target_local_policy_section": "crunch.rules",
+            },
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+        cache_decision = {
+            "schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+            "status": "decided",
+            "decision": "widen",
+            "top_decision": {
+                "decision_id": "request-shape-cache-replay-policy-decision:fixture",
+                "decision": "widen",
+                "recommended_next_action": "widen-openai-exact-cache-replay-policy",
+                "metrics": {
+                    "observed_row_count": 71,
+                    "applied_count": 6,
+                    "holdout_count": 5,
+                    "exact_hit_count": 4,
+                    "observed_hits": 4,
+                    "projected_hits": 35,
+                    "observed_savings_usd": 0.011,
+                    "projected_savings_usd": 0.075373,
+                    "retry_count": 1,
+                    "fallback_count": 0,
+                    "error_count": 0,
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                },
+                "coverage": {
+                    "schema": "agentflow.request_shape_cache_replay_policy_decision_coverage.v1",
+                    "has_applied_coverage": True,
+                    "has_holdout_coverage": True,
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                },
+                "reason_codes": [],
+            },
+            "summary": {
+                "decision": "widen",
+                "applied_count": 6,
+                "holdout_count": 5,
+                "observed_hits": 4,
+                "projected_hits": 35,
+                "observed_savings_usd": 0.011,
+                "projected_savings_usd": 0.075373,
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+            },
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                report = build_local_activation_outcome_summary(
+                    store,
+                    limit=20,
+                    config_dir=tmp,
+                    activation_reports=[crunch_decision, cache_decision],
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(report["schema"], "agentflow.local_activation_outcome_summary.v1")
+        self.assertEqual(report["egress_guard"]["status"], "passed")
+        self.assertEqual(report["summary"]["policy_decision_report_count"], 2)
+        self.assertEqual(report["summary"]["policy_decision_families"], ["cache", "crunch"])
+
+        by_family = {row["local_action_family"]: row for row in report["outcome_summaries"]}
+        self.assertEqual(by_family["crunch"]["source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(by_family["crunch"]["source_decision"], "widen")
+        self.assertEqual(by_family["crunch"]["graduation_decision"], "widen")
+        self.assertEqual(by_family["crunch"]["applied_count"], 7)
+        self.assertEqual(by_family["crunch"]["holdout_count"], 8)
+        self.assertEqual(by_family["crunch"]["observed_saved_tokens"], 10738)
+        self.assertEqual(by_family["crunch"]["retry_count"], 3)
+        self.assertEqual(by_family["crunch"]["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertTrue(by_family["crunch"]["coverage"]["metadata_only"])
+        self.assertTrue(by_family["crunch"]["coverage"]["aggregate_only"])
+
+        self.assertEqual(by_family["cache"]["source_evidence_schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
+        self.assertEqual(by_family["cache"]["source_decision"], "widen")
+        self.assertEqual(by_family["cache"]["applied_count"], 6)
+        self.assertEqual(by_family["cache"]["holdout_count"], 5)
+        self.assertEqual(by_family["cache"]["observed_hits"], 4)
+        self.assertEqual(by_family["cache"]["projected_hits"], 35)
+        self.assertEqual(by_family["cache"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertTrue(by_family["cache"]["coverage"]["metadata_only"])
+        self.assertTrue(by_family["cache"]["coverage"]["aggregate_only"])
+
     def test_cli_emits_local_activation_outcome_summary(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -153,4 +286,3 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "agentflow.local_activation_outcome_summary.v1")
         self.assertEqual(payload["egress_guard"]["status"], "passed")
         self.assertEqual(payload["summary"]["local_action_family_count"], 3)
-
