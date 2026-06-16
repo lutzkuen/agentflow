@@ -5568,7 +5568,7 @@ def request_shape_cache_replay_evidence_cli(argv: Sequence[str] | None = None, *
 
 
 def request_shape_cache_replay_policy_decision_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
-    parser = argparse.ArgumentParser(description="Decide promote, rollback, or keep-blocked for OpenAI exact-cache replay canaries")
+    parser = argparse.ArgumentParser(description="Decide widen, rollback, keep-staged, or keep-blocked for OpenAI exact-cache replay canaries")
     parser.add_argument(
         "--db",
         default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),

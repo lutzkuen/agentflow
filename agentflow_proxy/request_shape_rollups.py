@@ -3894,6 +3894,9 @@ def build_request_shape_cache_replay_evidence_report(
         "bypass_count": 0,
         "invalidation_skipped_count": 0,
         "unsupported_shape_count": 0,
+        "retry_count": 0,
+        "fallback_count": 0,
+        "error_count": 0,
     }
     blocker_counts: dict[str, int] = {}
     cache_status_counts: dict[str, int] = {}
@@ -3913,6 +3916,7 @@ def build_request_shape_cache_replay_evidence_report(
         ):
             continue
 
+        routing = _json_obj(row.get("routing_json"))
         observed_rows += 1
         replay_canary = (
             cache_meta.get("cache_replay_canary")
@@ -3943,6 +3947,20 @@ def build_request_shape_cache_replay_evidence_report(
         else:
             lifecycle_counts["bypass_count"] += 1
             _increment(blocker_counts, reason)
+        retry_count = _as_int(row.get("retry_count"))
+        if retry_count > 0:
+            lifecycle_counts["retry_count"] += retry_count
+        status_code = _as_int(row.get("status_code"), 200)
+        if status_code >= 400:
+            lifecycle_counts["error_count"] += 1
+            _increment(blocker_counts, "upstream-error-observed")
+        if any(
+            bool(container.get("fallback_reason") or container.get("fallback_applied") or container.get("fallback_required"))
+            for container in (cache_meta, routing)
+            if isinstance(container, dict)
+        ):
+            lifecycle_counts["fallback_count"] += 1
+            _increment(blocker_counts, "fallback-observed")
         observed_savings += _cache_replay_row_observed_savings(row, cache_meta, evidence_class)
         observed_at = _parse_utc(row.get("created_at"))
         if observed_at and (latest_observed is None or observed_at > latest_observed):
@@ -4040,6 +4058,9 @@ def build_request_shape_cache_replay_evidence_report(
             "bypass_count": lifecycle_counts["bypass_count"],
             "invalidation_skipped_count": lifecycle_counts["invalidation_skipped_count"],
             "unsupported_shape_count": lifecycle_counts["unsupported_shape_count"],
+            "retry_count": lifecycle_counts["retry_count"],
+            "fallback_count": lifecycle_counts["fallback_count"],
+            "error_count": lifecycle_counts["error_count"],
             "projected_hits": projected_hits,
             "observed_hits": observed_hits,
             "projected_savings_usd": round(projected_savings, 6),
@@ -4134,6 +4155,9 @@ def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> di
         "bypass_count": _as_int(summary.get("bypass_count")),
         "invalidation_skipped_count": _as_int(summary.get("invalidation_skipped_count")),
         "unsupported_shape_count": _as_int(summary.get("unsupported_shape_count")),
+        "retry_count": _as_int(summary.get("retry_count")),
+        "fallback_count": _as_int(summary.get("fallback_count")),
+        "error_count": _as_int(summary.get("error_count")),
         "projected_hits": projected_hits,
         "observed_hits": observed_hits,
         "projected_savings_usd": round(projected_savings, 6),
@@ -4166,6 +4190,14 @@ def _cache_replay_policy_reason_codes(evidence: dict[str, Any] | None) -> list[s
         codes.append("stale-cache-replay-evidence")
     if metrics["invalidation_skipped_count"] > 0:
         codes.append("invalidation-or-stale-risk-observed")
+    if metrics["unsupported_shape_count"] > 0:
+        codes.append("unsupported-cache-replay-shape-observed")
+    if metrics["fallback_count"] > 0:
+        codes.append("cache-replay-fallback-observed")
+    if metrics["error_count"] > 0:
+        codes.append("cache-replay-error-observed")
+    if metrics["retry_count"] > 0:
+        codes.append("cache-replay-retry-observed")
     blocker_breakdown = evidence.get("blocker_breakdown") if isinstance(evidence.get("blocker_breakdown"), list) else []
     for item in blocker_breakdown[:3]:
         if isinstance(item, dict):
@@ -4179,20 +4211,24 @@ def _cache_replay_policy_decision_value(evidence: dict[str, Any] | None) -> str:
     metrics = _cache_replay_policy_decision_metrics(evidence)
     if metrics["stale_evidence"]:
         return "rollback"
+    if metrics["invalidation_skipped_count"] > 0 or metrics["unsupported_shape_count"] > 0:
+        return "keep-blocked"
+    if metrics["fallback_count"] > 0 or metrics["error_count"] > 0:
+        return "keep-blocked"
+    if metrics["staged_canary_count"] <= 0:
+        return "keep-blocked"
     if (
-        metrics["staged_canary_count"] > 0
-        and metrics["applied_count"] > 0
+        metrics["applied_count"] > 0
         and metrics["holdout_count"] > 0
         and metrics["observed_hits"] > 0
         and metrics["observed_savings_usd"] > 0
-        and metrics["invalidation_skipped_count"] == 0
     ):
-        return "promote"
-    return "keep-blocked"
+        return "widen"
+    return "keep-staged"
 
 
 def _cache_replay_policy_decision_reason(evidence: dict[str, Any] | None, decision: str) -> str:
-    if decision == "promote":
+    if decision == "widen":
         return "cache-replay-canary-hit-recovery-observed"
     if decision == "rollback":
         return "stale-cache-replay-evidence"
@@ -4266,12 +4302,12 @@ def _cache_replay_policy_patch(evidence: dict[str, Any] | None, decision: str) -
             "aggregate_only": True,
             "rules_path_included": False,
         }
-    if decision != "promote":
+    if decision != "widen":
         return None
     ttl_seconds = _as_int(top.get("ttl_seconds"), DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS)
     return {
         "schema": "agentflow.request_shape_cache_replay_policy_decision_local_patch.v1",
-        "patch_type": "promote_openai_exact_cache_replay_canary",
+        "patch_type": "widen_openai_exact_cache_replay_canary",
         "target_local_rule_file": "cache_rules.yaml",
         "source_canary_policy_file": "cache_canary_policy.yaml",
         "policy_source": "local-manual",
@@ -4303,7 +4339,7 @@ def _cache_replay_policy_patch(evidence: dict[str, Any] | None, decision: str) -
                 "graduation": {
                     "schema": "agentflow.request_shape_cache_replay_policy_graduation.v1",
                     "source_schema": REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA,
-                    "source_verdict": "promote",
+                    "source_verdict": "widen",
                     "source_surface": shape.get("source_surface"),
                     "endpoint": shape.get("endpoint"),
                     "category": shape.get("category"),
@@ -4338,7 +4374,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
     reason_codes = _cache_replay_policy_reason_codes(evidence)
     rollback_metadata = _cache_replay_policy_rollback_metadata(evidence, decision)
     local_policy_patch = _cache_replay_policy_patch(evidence, decision)
-    promotion_allowed = decision == "promote"
+    promotion_allowed = decision == "widen"
     rollback_required = decision == "rollback"
     entry = {
         "schema": "agentflow.request_shape_cache_replay_policy_decision_entry.v1",
@@ -4347,17 +4383,21 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "reason": reason,
         "reason_codes": reason_codes,
         "recommended_next_action": {
-            "promote": "promote-openai-exact-cache-replay-policy",
+            "widen": "widen-openai-exact-cache-replay-policy",
             "rollback": "disable-openai-exact-cache-replay-canary",
+            "keep-staged": "keep-openai-exact-cache-replay-canary-staged",
             "keep-blocked": "keep-openai-exact-cache-replay-blocked",
         }[decision],
-        "next_action": "apply-local-cache-policy-patch-after-review" if decision in {"promote", "rollback"} else "keep-observing",
+        "next_action": "apply-local-cache-policy-patch-after-review" if decision in {"widen", "rollback"} else "keep-observing",
         "target_local_policy": "cache_rules",
         "target_local_rule_file": "cache_rules.yaml",
+        "target_local_policy_section": "cache.pattern_rules",
         "source_canary_policy_file": "cache_canary_policy.yaml",
         "policy_source": "local-manual" if metrics["staged_canary_count"] else "unknown",
+        "decision_options": ["widen", "rollback", "keep-staged", "keep-blocked"],
         "promotion_allowed": promotion_allowed,
         "rollback_required": rollback_required,
+        "keep_staged": decision == "keep-staged",
         "keep_blocked": decision == "keep-blocked",
         "coverage": {
             "schema": "agentflow.request_shape_cache_replay_policy_decision_coverage.v1",
@@ -4367,6 +4407,9 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "has_observed_savings": metrics["observed_savings_usd"] > 0,
             "has_fresh_evidence": not metrics["stale_evidence"],
             "has_no_invalidation_skips": metrics["invalidation_skipped_count"] == 0,
+            "has_supported_shapes": metrics["unsupported_shape_count"] == 0,
+            "has_no_fallbacks": metrics["fallback_count"] == 0,
+            "has_no_errors": metrics["error_count"] == 0,
             "metadata_only": True,
             "aggregate_only": True,
         },
@@ -4390,6 +4433,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "decision": decision,
             "promotion_allowed": promotion_allowed,
             "rollback_required": rollback_required,
+            "keep_staged": decision == "keep-staged",
             "keep_blocked": decision == "keep-blocked",
             "staged_canary_count": metrics["staged_canary_count"],
             "observed_row_count": metrics["observed_row_count"],
@@ -4399,6 +4443,10 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "miss_count": metrics["miss_count"],
             "bypass_count": metrics["bypass_count"],
             "invalidation_skipped_count": metrics["invalidation_skipped_count"],
+            "unsupported_shape_count": metrics["unsupported_shape_count"],
+            "retry_count": metrics["retry_count"],
+            "fallback_count": metrics["fallback_count"],
+            "error_count": metrics["error_count"],
             "projected_hits": metrics["projected_hits"],
             "observed_hits": metrics["observed_hits"],
             "projected_savings_usd": metrics["projected_savings_usd"],
@@ -4408,6 +4456,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "stale_evidence": metrics["stale_evidence"],
             "policy_source": entry["policy_source"],
             "target_local_rule_file": "cache_rules.yaml",
+            "target_local_policy_section": "cache.pattern_rules",
             "source_canary_policy_file": "cache_canary_policy.yaml",
             "policy_files_written": False,
             "cache_entries_written": False,
@@ -4420,7 +4469,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "privacy": _cache_replay_evidence_privacy(),
         },
         "acceptance": {
-            "records_durable_decision": decision in {"promote", "rollback", "keep-blocked"},
+            "records_durable_decision": decision in {"widen", "rollback", "keep-staged", "keep-blocked"},
             "reports_hit_recovery": metrics["observed_hits"] >= 0 and metrics["projected_hits"] >= 0,
             "reports_holdout_coverage": metrics["holdout_count"] >= 0,
             "drafts_local_policy_patch_or_blocker": bool(local_policy_patch) or bool(reason_codes),

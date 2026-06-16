@@ -1145,6 +1145,8 @@ class RequestShapeRollupTests(unittest.TestCase):
             text_chars=6_000,
             cost=0.01,
             baseline=0.01,
+            retry_count=1,
+            routing_extra={"fallback_reason": "rate_limited"},
             cache_extra={
                 "pattern_rule": public_pattern_rule,
                 "cache_replay_canary": applied_canary,
@@ -1244,6 +1246,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(evidence["summary"]["miss_count"], 1)
         self.assertEqual(evidence["summary"]["bypass_count"], 1)
         self.assertEqual(evidence["summary"]["invalidation_skipped_count"], 1)
+        self.assertEqual(evidence["summary"]["retry_count"], 1)
+        self.assertEqual(evidence["summary"]["fallback_count"], 1)
+        self.assertEqual(evidence["summary"]["error_count"], 0)
         self.assertEqual(evidence["summary"]["observed_hits"], 1)
         self.assertEqual(evidence["summary"]["observed_savings_usd"], 0.03)
         self.assertEqual(evidence["summary"]["projected_hits"], 2)
@@ -1251,6 +1256,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         blockers = {item["value"]: item["count"] for item in evidence["blocker_breakdown"]}
         self.assertEqual(blockers["session-scope-missing"], 1)
         self.assertEqual(blockers["dependency-changed"], 1)
+        self.assertEqual(blockers["fallback-observed"], 1)
         canary_statuses = {item["value"]: item["count"] for item in evidence["canary_status_breakdown"]}
         self.assertEqual(canary_statuses["applied"], 2)
         self.assertEqual(canary_statuses["holdout"], 1)
@@ -1319,7 +1325,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(payload["privacy"]["aggregate_only"])
         self.assertNotIn(str(policy_path), stdout.getvalue())
 
-    def test_cache_replay_policy_decision_promotes_observed_hit_with_holdout(self) -> None:
+    def test_cache_replay_policy_decision_widens_observed_hit_with_holdout(self) -> None:
         for cost in (0.01, 0.03, 0.02):
             self._log_call(
                 provider="openai",
@@ -1436,10 +1442,32 @@ class RequestShapeRollupTests(unittest.TestCase):
             limit=20,
         )
         decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+        stdout = io.StringIO()
+        code = cli.request_shape_cache_replay_policy_decision_cli(
+            [
+                "--db",
+                self.db_path,
+                "--limit",
+                "20",
+                "--rules-path",
+                str(policy_path),
+            ],
+            stdout=stdout,
+        )
+        cli_decision = json.loads(stdout.getvalue())
 
         self.assertEqual(decision["schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
-        self.assertEqual(decision["decision"], "promote")
+        self.assertEqual(decision["decision"], "widen")
+        self.assertEqual(code, 0)
+        self.assertEqual(cli_decision["schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
+        self.assertEqual(cli_decision["decision"], "widen")
+        self.assertEqual(cli_decision["summary"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertTrue(cli_decision["privacy"]["metadata_only"])
+        self.assertTrue(cli_decision["privacy"]["aggregate_only"])
+        self.assertNotIn(str(policy_path), stdout.getvalue())
         self.assertTrue(decision["summary"]["promotion_allowed"])
+        self.assertFalse(decision["summary"]["keep_staged"])
+        self.assertFalse(decision["summary"]["keep_blocked"])
         self.assertFalse(decision["summary"]["policy_files_written"])
         self.assertFalse(decision["summary"]["cache_entries_written"])
         self.assertEqual(decision["summary"]["applied_count"], 1)
@@ -1447,7 +1475,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["summary"]["observed_hits"], 1)
         self.assertEqual(decision["summary"]["observed_savings_usd"], 0.03)
         top = decision["top_decision"]
-        self.assertEqual(top["local_policy_patch"]["patch_type"], "promote_openai_exact_cache_replay_canary")
+        self.assertEqual(top["decision_options"], ["widen", "rollback", "keep-staged", "keep-blocked"])
+        self.assertEqual(top["local_policy_patch"]["patch_type"], "widen_openai_exact_cache_replay_canary")
         self.assertEqual(top["local_policy_patch"]["target_local_rule_file"], "cache_rules.yaml")
         promoted_rule = top["local_policy_patch"]["pattern_rules"][0]
         self.assertEqual(promoted_rule["conditions"]["source_surface"], "openai_responses")
@@ -1477,6 +1506,158 @@ class RequestShapeRollupTests(unittest.TestCase):
             rule["candidate_id"],
         ):
             self.assertNotIn(forbidden, rendered)
+
+    def test_cache_replay_policy_decision_keeps_staged_for_insufficient_holdout(self) -> None:
+        evidence = {
+            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "status": "observed",
+            "staged_canary_count": 1,
+            "staged_canaries": [
+                {
+                    "shape": {
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "category": "chat",
+                        "workflow_phase": "chat",
+                        "text_bucket": "2k_8k_chars",
+                        "token_bucket": "500_2k_tokens",
+                        "stream": False,
+                        "has_tools": False,
+                    },
+                    "ttl_seconds": 3600,
+                }
+            ],
+            "summary": {
+                "observed_row_count": 1,
+                "applied_count": 1,
+                "holdout_count": 0,
+                "exact_hit_count": 1,
+                "miss_count": 0,
+                "observed_hits": 1,
+                "projected_hits": 2,
+                "observed_savings_usd": 0.03,
+                "projected_savings_usd": 0.06,
+                "invalidation_skipped_count": 0,
+                "unsupported_shape_count": 0,
+                "retry_count": 0,
+                "fallback_count": 0,
+                "error_count": 0,
+            },
+            "stale_evidence": {"stale": False, "age_hours": 1.0},
+            "blocker_breakdown": [],
+        }
+
+        decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+
+        self.assertEqual(decision["decision"], "keep-staged")
+        self.assertTrue(decision["summary"]["keep_staged"])
+        self.assertFalse(decision["summary"]["keep_blocked"])
+        self.assertFalse(decision["summary"]["promotion_allowed"])
+        self.assertEqual(decision["top_decision"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertIn("missing-holdout-coverage", decision["reason_codes"])
+        self.assertIsNone(decision["top_decision"]["local_policy_patch"])
+        self.assertTrue(decision["privacy"]["metadata_only"])
+        self.assertTrue(decision["privacy"]["aggregate_only"])
+
+    def test_cache_replay_policy_decision_keeps_staged_for_zero_hit_canary(self) -> None:
+        evidence = {
+            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "status": "observed",
+            "staged_canary_count": 1,
+            "staged_canaries": [
+                {
+                    "shape": {
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "category": "chat",
+                        "workflow_phase": "chat",
+                        "text_bucket": "2k_8k_chars",
+                        "token_bucket": "500_2k_tokens",
+                        "stream": False,
+                        "has_tools": False,
+                    },
+                    "ttl_seconds": 3600,
+                }
+            ],
+            "summary": {
+                "observed_row_count": 3,
+                "applied_count": 2,
+                "holdout_count": 1,
+                "exact_hit_count": 0,
+                "miss_count": 2,
+                "observed_hits": 0,
+                "projected_hits": 2,
+                "observed_savings_usd": 0.0,
+                "projected_savings_usd": 0.06,
+                "invalidation_skipped_count": 0,
+                "unsupported_shape_count": 0,
+                "retry_count": 0,
+                "fallback_count": 0,
+                "error_count": 0,
+            },
+            "stale_evidence": {"stale": False, "age_hours": 1.0},
+            "blocker_breakdown": [],
+        }
+
+        decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+
+        self.assertEqual(decision["decision"], "keep-staged")
+        self.assertTrue(decision["summary"]["keep_staged"])
+        self.assertFalse(decision["summary"]["promotion_allowed"])
+        self.assertIn("missing-observed-cache-hits", decision["reason_codes"])
+        self.assertIn("missing-observed-cache-savings", decision["reason_codes"])
+        self.assertEqual(decision["top_decision"]["recommended_next_action"], "keep-openai-exact-cache-replay-canary-staged")
+
+    def test_cache_replay_policy_decision_keeps_blocked_for_invalidation_risk(self) -> None:
+        evidence = {
+            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "status": "observed",
+            "staged_canary_count": 1,
+            "staged_canaries": [
+                {
+                    "shape": {
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "category": "chat",
+                        "workflow_phase": "chat",
+                        "text_bucket": "2k_8k_chars",
+                        "token_bucket": "500_2k_tokens",
+                        "stream": False,
+                        "has_tools": False,
+                    },
+                    "ttl_seconds": 3600,
+                }
+            ],
+            "summary": {
+                "observed_row_count": 3,
+                "applied_count": 1,
+                "holdout_count": 1,
+                "exact_hit_count": 1,
+                "miss_count": 0,
+                "observed_hits": 1,
+                "projected_hits": 2,
+                "observed_savings_usd": 0.03,
+                "projected_savings_usd": 0.06,
+                "invalidation_skipped_count": 1,
+                "unsupported_shape_count": 0,
+                "retry_count": 0,
+                "fallback_count": 0,
+                "error_count": 0,
+            },
+            "stale_evidence": {"stale": False, "age_hours": 1.0},
+            "blocker_breakdown": [{"value": "dependency-changed", "count": 1}],
+        }
+
+        decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+
+        self.assertEqual(decision["decision"], "keep-blocked")
+        self.assertTrue(decision["summary"]["keep_blocked"])
+        self.assertFalse(decision["summary"]["keep_staged"])
+        self.assertFalse(decision["summary"]["promotion_allowed"])
+        self.assertIn("invalidation-or-stale-risk-observed", decision["reason_codes"])
+        self.assertIn("dependency-changed", decision["reason_codes"])
+        self.assertEqual(decision["top_decision"]["coverage"]["has_no_invalidation_skips"], False)
+        self.assertIsNone(decision["top_decision"]["local_policy_patch"])
 
     def test_cache_replay_policy_decision_rolls_back_stale_evidence(self) -> None:
         evidence = {
