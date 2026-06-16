@@ -852,6 +852,7 @@ def _validate_crunch_policy(policy: dict[str, Any], errors: list[dict[str, str]]
     _validate_instruction_section_deduplication(policy.get("instruction_section_deduplication"), errors, base=base)
     _validate_repeated_provider_scaffolding(policy.get("repeated_provider_scaffolding"), errors, base=base)
     _validate_crunch_pattern_rules(policy.get("pattern_rules"), errors, base=base)
+    _validate_managed_activation_drafts(policy.get("managed_activation_drafts"), errors, base=base, expected_section="crunch")
     _validate_pattern_recommendation(policy, errors, base=base, expected_section="crunch")
 
 
@@ -1190,6 +1191,7 @@ def _validate_cache_policy(policy: dict[str, Any], errors: list[dict[str, str]])
     if "max_paths" in file_watch:
         _validate_intish(errors, f"{base}.file_watch.max_paths", file_watch["max_paths"], min_value=0)
     _validate_cache_pattern_rules(policy.get("pattern_rules"), errors, base=base)
+    _validate_managed_activation_drafts(policy.get("managed_activation_drafts"), errors, base=base, expected_section="cache")
     _validate_pattern_recommendation(policy, errors, base=base, expected_section="cache")
 
 
@@ -1386,6 +1388,83 @@ def _validate_pattern_recommendation(
                 f"{base}.recommendation.{list_key}[{index}]",
                 expected_section=expected_section,
             )
+
+
+def _validate_managed_activation_drafts(
+    value: Any,
+    errors: list[dict[str, str]],
+    *,
+    base: str,
+    expected_section: str,
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        _add_error(errors, f"{base}.managed_activation_drafts", "expected list")
+        return
+    expected_rule_file = f"{expected_section}_rules.yaml"
+    for index, item in enumerate(value):
+        path = f"{base}.managed_activation_drafts[{index}]"
+        if not isinstance(item, dict):
+            _add_error(errors, path, "expected object")
+            continue
+        if item.get("schema") not in (None, "agentflow.managed_activation_policy_draft_entry.v1"):
+            _add_error(errors, f"{path}.schema", "expected managed activation draft entry schema")
+        if item.get("status") not in (None, "review-required"):
+            _add_error(errors, f"{path}.status", "expected review-required")
+        if item.get("policy_source") not in (None, "managed-recommended"):
+            _add_error(errors, f"{path}.policy_source", "expected managed-recommended")
+        if item.get("policy_section") not in (None, expected_section):
+            _add_error(errors, f"{path}.policy_section", f"expected {expected_section}")
+        if item.get("local_action_family") not in (None, expected_section):
+            _add_error(errors, f"{path}.local_action_family", f"expected {expected_section}")
+        if item.get("target_local_rule_file") not in (None, expected_rule_file):
+            _add_error(errors, f"{path}.target_local_rule_file", f"expected {expected_rule_file}")
+        for key in (
+            "bundle_id",
+            "action_id",
+            "draft_id",
+            "recommendation_id",
+            "activation_mode",
+            "local_executor_family",
+        ):
+            if key in item and item[key] not in (None, ""):
+                _validate_non_empty_string(errors, f"{path}.{key}", item[key])
+        if "activation_order" in item:
+            _validate_intish(errors, f"{path}.activation_order", item["activation_order"], min_value=0)
+        if "confidence" in item:
+            _validate_floatish(errors, f"{path}.confidence", item["confidence"], min_value=0.0, max_value=1.0)
+        for key in (
+            "required_local_review",
+            "managed_enforced",
+            "feature_only",
+            "locally_executed",
+            "provider_forwarding",
+            "server_content_processing",
+        ):
+            if key in item:
+                _validate_boolish(errors, f"{path}.{key}", item[key])
+        for key in (
+            "local_policy_draft",
+            "expected_savings",
+            "required_coverage",
+            "rollback_criteria",
+            "keep_staged_criteria",
+            "risk_summary",
+            "candidate_bucket",
+            "provenance",
+            "source_bundle_provenance",
+            "privacy",
+        ):
+            if key in item and not isinstance(item[key], dict):
+                _add_error(errors, f"{path}.{key}", "expected object")
+        if "apply_after" in item:
+            apply_after = item["apply_after"]
+            if not isinstance(apply_after, list):
+                _add_error(errors, f"{path}.apply_after", "expected list")
+            else:
+                for apply_index, apply_item in enumerate(apply_after):
+                    _validate_non_empty_string(errors, f"{path}.apply_after[{apply_index}]", apply_item)
 
 
 def _validate_routing_experiment_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
@@ -4136,6 +4215,8 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
         ):
             if isinstance(policy.get(key), dict):
                 payload[key] = policy[key]
+        if isinstance(policy.get("managed_activation_drafts"), list):
+            payload["managed_activation_drafts"] = policy["managed_activation_drafts"]
         if local_summary_rule is not None:
             payload["old_context_summarization"] = local_summary_rule
         else:
@@ -4148,6 +4229,8 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
         payload = {key: policy[key] for key in ("exact_cache", "semantic_cache", "file_watch") if isinstance(policy.get(key), dict)}
         if isinstance(policy.get("pattern_rules"), list):
             payload["pattern_rules"] = policy["pattern_rules"]
+        if isinstance(policy.get("managed_activation_drafts"), list):
+            payload["managed_activation_drafts"] = policy["managed_activation_drafts"]
         return payload
     if section == "routing_experiments":
         experiment_policy = policy.get("policy")

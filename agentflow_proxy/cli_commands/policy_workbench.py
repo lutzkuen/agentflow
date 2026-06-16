@@ -934,6 +934,144 @@ def policy_draft_validate_cli(
     return 0 if result.get("ok") else 1
 
 
+def managed_activation_bundle_stage_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Stage a managed feature-only activation bundle as local cache/crunch policy draft metadata"
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Managed activation bundle JSON/YAML path, or '-' for stdin. Default: stdin.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_CONFIG_DIR"),
+        help="Config directory used for validation dry-runs. Default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB"),
+        help="Optional SQLite metadata database path for validation impact review.",
+    )
+    parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Stage draft metadata without running staged draft validation.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print import JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    if args.path == "-":
+        raw = stdin.read()
+    else:
+        try:
+            raw = Path(args.path).read_text(encoding="utf-8")
+        except OSError as exc:
+            result = {
+                "schema": "agentflow.managed_activation_bundle_import.v1",
+                "ok": False,
+                "status": "rejected",
+                "dry_run": True,
+                "summary": {
+                    "action_count": 0,
+                    "staged_count": 0,
+                    "skipped_count": 0,
+                    "omitted_count": 0,
+                    "rejected_count": 1,
+                },
+                "staged": [],
+                "skipped": [],
+                "omitted": [],
+                "rejected": [{"reason_codes": ["read-failed"], "message": str(exc)}],
+                "wrote_active_policy_files": False,
+                "reloaded_modules": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "error": {"type": "read_failed", "message": str(exc), "errors": [{"path": args.path, "message": str(exc)}]},
+            }
+            _write_json(stdout, result)
+            return 1
+
+    from agentflow_proxy.policy_files import parse_policy_payload
+    from agentflow_proxy.managed_activation_bundles import stage_managed_activation_bundle
+    from agentflow_proxy.policy_events import log_policy_event
+
+    payload, parse_error = parse_policy_payload(raw)
+    if parse_error:
+        result = {
+            "schema": "agentflow.managed_activation_bundle_import.v1",
+            "ok": False,
+            "status": "rejected",
+            "dry_run": True,
+            "summary": {
+                "action_count": 0,
+                "staged_count": 0,
+                "skipped_count": 0,
+                "omitted_count": 0,
+                "rejected_count": 1,
+            },
+            "staged": [],
+            "skipped": [],
+            "omitted": [],
+            "rejected": [{"reason_codes": ["parse-failed"], "message": "bundle could not be parsed"}],
+            "wrote_active_policy_files": False,
+            "reloaded_modules": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "error": {"type": "parse_failed", "message": "managed activation bundle could not be parsed", "errors": parse_error["errors"]},
+        }
+    else:
+        result = asyncio.run(stage_managed_activation_bundle(
+            payload,
+            workspace=args.workspace,
+            config_dir=args.config_dir,
+            db_path=args.db,
+            validate=not args.skip_validation,
+        ))
+
+    log_policy_event(
+        "managed-activation-bundle-stage",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "path": args.path,
+            "bundle_id": result.get("bundle_id"),
+            "staged_count": (result.get("summary") or {}).get("staged_count") if isinstance(result.get("summary"), dict) else 0,
+            "skipped_count": (result.get("summary") or {}).get("skipped_count") if isinstance(result.get("summary"), dict) else 0,
+            "omitted_count": (result.get("summary") or {}).get("omitted_count") if isinstance(result.get("summary"), dict) else 0,
+            "rejected_count": (result.get("summary") or {}).get("rejected_count") if isinstance(result.get("summary"), dict) else 0,
+            "wrote_active_policy_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if result.get("ok") else 1
+
+
 async def _reload_policy_state_via_url(url: str, *, timeout: float) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url)
@@ -1119,4 +1257,3 @@ def _write_policy_draft_apply_result(stream: Any, payload: dict[str, Any], *, pr
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     else:
         _write_json(stream, payload)
-

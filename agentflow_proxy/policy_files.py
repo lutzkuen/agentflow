@@ -151,7 +151,9 @@ _RAW_POLICY_PAYLOAD_ALLOWED_KEYS = {
     "raw_request_ids_included",
     "raw_terminal_text_included",
     "raw_commands_included",
+    "raw_messages_included",
     "raw_paths_included",
+    "raw_request_bodies_included",
 }
 
 
