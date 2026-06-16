@@ -356,6 +356,47 @@ def _file_result(plan: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_entries(result: dict[str, Any]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for item in result.get("applied") or []:
+        if not isinstance(item, dict):
+            continue
+        entries.append({
+            "status": item.get("status"),
+            "local_action_family": item.get("local_action_family"),
+            "action_id": item.get("action_id"),
+            "draft_id": item.get("draft_id"),
+            "recommendation_id": item.get("recommendation_id"),
+            "target_local_rule_file": item.get("target_local_rule_file"),
+        })
+    for item in result.get("skipped") or []:
+        if not isinstance(item, dict):
+            continue
+        entries.append({
+            "status": "skipped",
+            "local_action_family": item.get("local_action_family"),
+            "action_id": item.get("action_id"),
+            "draft_id": item.get("draft_id"),
+            "recommendation_id": item.get("recommendation_id"),
+            "reason": item.get("reason"),
+        })
+    for item in result.get("rejected") or []:
+        if not isinstance(item, dict):
+            continue
+        entry = item.get("entry") if isinstance(item.get("entry"), dict) else {}
+        error = item.get("error") if isinstance(item.get("error"), dict) else {}
+        entries.append({
+            "status": "failed",
+            "local_action_family": entry.get("local_action_family"),
+            "action_id": entry.get("action_id"),
+            "draft_id": entry.get("draft_id"),
+            "recommendation_id": entry.get("recommendation_id"),
+            "target_local_rule_file": entry.get("target_local_rule_file"),
+            "reason": error.get("type"),
+        })
+    return entries
+
+
 def _event_details(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "source": "managed-activation-bundle-apply",
@@ -369,6 +410,7 @@ def _event_details(result: dict[str, Any]) -> dict[str, Any]:
         "changed_sections": result.get("changed_sections", []),
         "changed_files": [item.get("path") for item in result.get("files", []) if isinstance(item, dict) and item.get("changed")],
         "backup_paths": [item.get("path") for item in result.get("backups", []) if isinstance(item, dict) and item.get("path")],
+        "entries": _compact_entries(result),
         "reloaded_modules": False,
         "verification_ok": True,
         "validation_status": "pass" if result.get("ok") else "fail",

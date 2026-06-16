@@ -496,6 +496,7 @@ def build_local_activation_outcome_summary(
     limit: int = 1000,
     config_dir: str | Path | None = None,
     activation_reports: list[dict[str, Any]] | None = None,
+    managed_activation_bundle_apply_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     rows = _fetch_rows(store_obj, limit=limit)
     summaries = {section: _empty_row(section, config_dir) for section in ("routing", "crunch", "cache")}
@@ -609,6 +610,14 @@ def build_local_activation_outcome_summary(
         },
         "privacy": _privacy(),
     }
+    if managed_activation_bundle_apply_events is not None:
+        from agentflow_proxy.managed_activation_bundle_apply_outcomes import (
+            build_managed_activation_bundle_apply_outcomes,
+        )
+
+        result["managed_activation_bundle_apply_outcomes"] = build_managed_activation_bundle_apply_outcomes(
+            managed_activation_bundle_apply_events
+        )
     violations = managed_egress_violations(result)
     result["egress_guard"] = {
         "schema": "agentflow.managed_egress_guard.v1",

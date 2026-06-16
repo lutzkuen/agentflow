@@ -5724,6 +5724,12 @@ def local_activation_outcome_summary_cli(argv: Sequence[str] | None = None, *, s
         help="Directory containing local AgentFlow policy rule files, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
     )
     parser.add_argument(
+        "--policy-event-limit",
+        type=int,
+        default=500,
+        help="Recent local policy events to inspect for managed activation bundle apply outcomes, default: 500",
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="Pretty-print JSON instead of emitting one compact line.",
@@ -5733,6 +5739,7 @@ def local_activation_outcome_summary_cli(argv: Sequence[str] | None = None, *, s
     stdout = stdout if stdout is not None else sys.stdout
 
     from agentflow_proxy.local_activation_outcomes import build_local_activation_outcome_summary
+    from agentflow_proxy.policy_events import recent_policy_events
     from agentflow_proxy.request_shape_rollups import (
         build_request_shape_cache_replay_evidence_report,
         build_request_shape_cache_replay_policy_decision_report,
@@ -5758,14 +5765,47 @@ def local_activation_outcome_summary_cli(argv: Sequence[str] | None = None, *, s
             limit=max(args.limit, 1000),
         )
         activation_reports.append(build_request_shape_cache_replay_policy_decision_report(cache_evidence))
+        policy_events = recent_policy_events(limit=args.policy_event_limit).get("events", [])
         result = build_local_activation_outcome_summary(
             store,
             limit=args.limit,
             config_dir=args.config_dir,
             activation_reports=activation_reports,
+            managed_activation_bundle_apply_events=policy_events,
         )
     finally:
         store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if not bool((result.get("egress_guard") or {}).get("blocked")) else 1
+
+
+def managed_activation_bundle_apply_outcomes_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Export feature-only managed activation bundle apply/skip/rollback outcomes from local policy events"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent local policy events to inspect, default: 500",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.managed_activation_bundle_apply_outcomes import (
+        build_managed_activation_bundle_apply_outcomes,
+    )
+
+    result = build_managed_activation_bundle_apply_outcomes(limit=args.limit)
     if args.pretty:
         stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
     else:

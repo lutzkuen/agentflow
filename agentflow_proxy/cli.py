@@ -163,6 +163,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     request_shape_cache_replay_policy_decision_cli,
     managed_recommendation_handoff_cli,
     local_activation_outcome_summary_cli,
+    managed_activation_bundle_apply_outcomes_cli,
     cache_replay_cohorts_cli,
     cache_smoke_diagnostic_cli,
     cache_replay_dry_run_cli,
@@ -999,6 +1000,10 @@ def managed_recommendation_handoff_main() -> None:
 
 def local_activation_outcome_summary_main() -> None:
     raise SystemExit(local_activation_outcome_summary_cli())
+
+
+def managed_activation_bundle_apply_outcomes_main() -> None:
+    raise SystemExit(managed_activation_bundle_apply_outcomes_cli())
 
 
 def cache_replay_cohorts_main() -> None:
