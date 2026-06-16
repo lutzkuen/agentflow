@@ -1843,6 +1843,8 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         for item in (report.get("missing_measurements") or activation_follow_up.get("missing_measurements") or [])
         if sanitize_value(item)
     ][:10]
+    rules = report.get("rules") if isinstance(report.get("rules"), list) else []
+    top_rule = next((item for item in rules if isinstance(item, dict)), {})
     return {
         "report_key": report_key,
         "schema": sanitize_value(report.get("schema")),
@@ -1876,6 +1878,15 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         "graduation_decision": sanitize_value(report.get("graduation_decision") or summary.get("graduation_decision"))
         if is_policy_decision
         else None,
+        "decision_id": sanitize_value(report.get("decision_id") or summary.get("decision_id")),
+        "active_rule_count": _to_int(summary.get("active_rule_count")),
+        "widened_rule_count": _to_int(summary.get("widened_rule_count")),
+        "active_rule_ref": sanitize_value(top_rule.get("rule_ref") or top_rule.get("rule_id")) if top_rule else None,
+        "active_rule_source": sanitize_value(top_rule.get("policy_source") or summary.get("policy_source")),
+        "active_rule_decision_id": sanitize_value(top_rule.get("decision_id")) if top_rule else None,
+        "active_rule_source_evidence_schema": sanitize_value(top_rule.get("source_evidence_schema")) if top_rule else None,
+        "target_local_rule_file": sanitize_value(summary.get("target_local_rule_file") or report.get("rule_file")),
+        "target_local_policy_section": sanitize_value(summary.get("target_local_policy_section") or report.get("target_local_policy_section")),
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -2054,8 +2065,14 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
             reports.append(aggregate_rollup)
     reports.sort(
         key=lambda item: (
+            item.get("report_key") == "active_crunch_rule_coverage"
+            and (
+                _to_int(item.get("applied_count")) > 0
+                or _to_float(item.get("projected_saved_usd")) > 0
+                or _to_int(item.get("projected_saved_tokens")) > 0
+                or _to_int(item.get("projected_saved_chars")) > 0
+            ),
             item.get("report_key") == "request_shape_crunch_policy_decision",
-            item.get("report_key") == "active_crunch_rule_coverage",
             item.get("report_key") == "request_shape_crunch_canary_impact",
             _to_float(item.get("projected_saved_usd")),
             _to_int(item.get("projected_saved_tokens")),
@@ -3086,6 +3103,7 @@ def _loop_state_rank(state: str) -> int:
         "replay-ready": 1,
         "canary-staged": 1,
         "measured-savings": 2,
+        "measured-active": 2,
         "projected-savings": 3,
         "ranked-evidence": 4,
         "missing-evidence": 5,
@@ -3099,7 +3117,7 @@ def _loop_missing_state(state: str) -> bool:
 
 
 def _loop_progress_state(state: str) -> bool:
-    return state in {"activation-ready", "replay-ready", "canary-staged", "measured-savings", "projected-savings", "ranked-evidence", "superseded"}
+    return state in {"activation-ready", "replay-ready", "canary-staged", "measured-savings", "measured-active", "projected-savings", "ranked-evidence", "superseded"}
 
 
 def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
@@ -3111,6 +3129,8 @@ def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
         return "safety-stopped"
     if state in {"blocked", "missing-evidence"}:
         return "blocked"
+    if state in {"applied", "active", "measured-active"}:
+        return "applied"
     if _to_int(stage.get("applied_count")) > 0 and _to_int(stage.get("holdout_count")) > 0:
         return "holdout"
     if _to_int(stage.get("applied_count")) > 0:
@@ -3333,6 +3353,22 @@ def build_evidence_to_activation_next_action_ledger(
             entry["local_handoff_reason"] = sanitize_value(stage.get("local_handoff_reason"))
         if stage.get("activation_follow_up_evidence_schema"):
             entry["activation_follow_up_evidence_schema"] = sanitize_value(stage.get("activation_follow_up_evidence_schema"))
+        if stage.get("active_rule_count") is not None:
+            entry["active_rule_count"] = _to_int(stage.get("active_rule_count"))
+        if stage.get("widened_rule_count") is not None:
+            entry["widened_rule_count"] = _to_int(stage.get("widened_rule_count"))
+        if stage.get("active_rule_ref"):
+            entry["active_rule_ref"] = sanitize_value(stage.get("active_rule_ref"))
+        if stage.get("active_rule_source"):
+            entry["active_rule_source"] = sanitize_value(stage.get("active_rule_source"))
+        if stage.get("active_rule_decision_id"):
+            entry["active_rule_decision_id"] = sanitize_value(stage.get("active_rule_decision_id"))
+        if stage.get("active_rule_source_evidence_schema"):
+            entry["active_rule_source_evidence_schema"] = sanitize_value(stage.get("active_rule_source_evidence_schema"))
+        if stage.get("target_local_rule_file"):
+            entry["target_local_rule_file"] = sanitize_value(stage.get("target_local_rule_file"))
+        if stage.get("target_local_policy_section"):
+            entry["target_local_policy_section"] = sanitize_value(stage.get("target_local_policy_section"))
         if stage.get("activation_state"):
             entry["activation_state"] = sanitize_value(stage.get("activation_state"))
         if stage.get("activation_mode"):
@@ -3911,6 +3947,17 @@ def _request_shape_crunch_progress_report(stats_summary: dict[str, Any]) -> dict
         reports.append(top_report)
     reports.extend(row for row in signal.get("reports") or [] if isinstance(row, dict))
     for report in reports:
+        if report.get("report_key") != "active_crunch_rule_coverage":
+            continue
+        if _to_int(report.get("widened_rule_count")) <= 0:
+            continue
+        if (
+            _to_int(report.get("applied_count")) > 0
+            or _to_int(report.get("projected_saved_tokens")) > 0
+            or _to_float(report.get("projected_saved_usd")) > 0
+        ):
+            return report
+    for report in reports:
         if report.get("report_key") == "request_shape_crunch_policy_decision":
             return report
     for report in reports:
@@ -3959,6 +4006,12 @@ def _request_shape_crunch_progress_state(progress: dict[str, Any]) -> str:
         if decision == "blocked":
             return "blocked"
         return "measured-savings"
+    if progress.get("report_key") == "active_crunch_rule_coverage":
+        if _to_int(progress.get("applied_count")) > 0 or _to_int(progress.get("projected_saved_tokens")) > 0:
+            return "measured-active"
+        if progress.get("missing_measurements"):
+            return "missing-evidence"
+        return "projected-savings"
     return "measurement-required"
 
 
@@ -4016,6 +4069,15 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
         stage["activation_follow_up_evidence_schema"] = sanitize_value(progress.get("schema"))
         stage["applied_count"] = _to_int(progress.get("applied_count"))
         stage["holdout_count"] = _to_int(progress.get("holdout_count"))
+        if progress.get("report_key") == "active_crunch_rule_coverage":
+            stage["active_rule_count"] = _to_int(progress.get("active_rule_count"))
+            stage["widened_rule_count"] = _to_int(progress.get("widened_rule_count"))
+            stage["active_rule_ref"] = sanitize_value(progress.get("active_rule_ref"))
+            stage["active_rule_source"] = sanitize_value(progress.get("active_rule_source"))
+            stage["active_rule_decision_id"] = sanitize_value(progress.get("active_rule_decision_id"))
+            stage["active_rule_source_evidence_schema"] = sanitize_value(progress.get("active_rule_source_evidence_schema"))
+            stage["target_local_rule_file"] = sanitize_value(progress.get("target_local_rule_file"))
+            stage["target_local_policy_section"] = sanitize_value(progress.get("target_local_policy_section"))
         stage["projected_saved_usd"] = round(
             _to_float(progress.get("projected_saved_usd") or stage.get("projected_saved_usd")),
             8,

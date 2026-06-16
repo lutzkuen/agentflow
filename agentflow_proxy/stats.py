@@ -202,9 +202,13 @@ def _active_crunch_rule_coverage() -> dict[str, Any] | None:
         rollout = item.get("rollout") if isinstance(item.get("rollout"), dict) else {}
         rules.append({
             "rank": len(rules) + 1,
+            "rule_id": public_label(item.get("id") or f"request-shape-crunch-rule-{len(rules) + 1}", "request-shape-crunch-rule"),
+            "rule_ref": public_id(item.get("id") or f"request-shape-crunch-rule-{len(rules) + 1}", prefix="rule"),
             "policy_source": source,
             "decision": public_label(decision_value or "unknown", "unknown"),
             "graduation_decision": public_label(decision.get("graduation_decision") or decision_value or "unknown", "unknown"),
+            "decision_id": public_label(decision.get("decision_id") or "unknown", "unknown"),
+            "source_evidence_schema": public_label(decision.get("source_evidence_schema") or "unknown", "unknown"),
             "applied_count": rule_applied,
             "holdout_count": rule_holdout,
             "skipped_count": rule_skipped,
