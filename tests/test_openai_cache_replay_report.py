@@ -275,6 +275,64 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertFalse(decision["privacy"]["cache_keys_included"])
         self.assertFalse(decision["privacy"]["request_ids_included"])
 
+    def test_openai_cache_replay_readiness_keeps_staged_for_warmup_misses_with_holdout(self) -> None:
+        for _ in range(24):
+            self._log_openai_call(
+                cache_status="miss",
+                cache_reason="cache-warmup-miss",
+                cost=0.03,
+                cost_baseline=0.03,
+                cache_extra=self._cache_replay_meta(
+                    canary_status="applied",
+                    cohort="canary_applied",
+                    reason="cache-warmup-miss",
+                    projected=0.0021535,
+                ),
+            )
+        for _ in range(16):
+            self._log_openai_call(
+                cache_status="bypassed",
+                cache_reason="canary_holdout",
+                cost=0.03,
+                cost_baseline=0.03,
+                cache_extra=self._cache_replay_meta(
+                    canary_status="holdout",
+                    cohort="canary_holdout",
+                    reason="canary_holdout",
+                    projected=0.0021535,
+                ),
+            )
+
+        report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=100, impact_limit=100)
+        decision = report["promotion_decision"]
+        blockers = {row["value"]: row["count"] for row in decision["applied_miss_blocker_breakdown"]}
+
+        self.assertEqual(decision["schema"], "agentflow.openai_cache_replay_promotion_decision.v1")
+        self.assertEqual(decision["decision"], "keep-staged")
+        self.assertEqual(decision["reason"], "cache-warmup-miss")
+        self.assertEqual(decision["recommended_next_action"], "keep-openai-exact-cache-replay-canary-staged")
+        self.assertTrue(decision["keep_staged"])
+        self.assertFalse(decision["promotion_allowed"])
+        self.assertEqual(decision["coverage"]["applied_count"], 24)
+        self.assertEqual(decision["coverage"]["holdout_count"], 16)
+        self.assertEqual(decision["coverage"]["miss_count"], 24)
+        self.assertEqual(decision["coverage"]["observed_hits"], 0)
+        self.assertEqual(decision["summary"]["top_applied_miss_blocker"], "cache-warmup-miss")
+        self.assertEqual(blockers["cache-warmup-miss"], 24)
+        self.assertIn("cache-warmup-miss", decision["reason_codes"])
+        self.assertIn("applied-miss:cache-warmup-miss", decision["reason_codes"])
+        self.assertEqual(report["summary"]["promotion_decision"], "keep-staged")
+        self.assertEqual(report["summary"]["promotion_blocker"], "cache-warmup-miss")
+        self.assertTrue(decision["privacy"]["metadata_only"])
+        self.assertTrue(decision["privacy"]["aggregate_only"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("raw-cache-key-secret", rendered)
+        self.assertNotIn("raw-openai-session-must-not-leak", rendered)
+        self.assertFalse(decision["privacy"]["cache_keys_included"])
+        self.assertFalse(decision["privacy"]["request_ids_included"])
+        self.assertFalse(decision["privacy"]["session_ids_included"])
+
     def test_openai_cache_replay_readiness_widens_positive_applied_and_holdout_canary(self) -> None:
         for index, baseline in enumerate((0.03, 0.04)):
             call_id = self._log_openai_call(

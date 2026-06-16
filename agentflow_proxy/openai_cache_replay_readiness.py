@@ -309,6 +309,21 @@ def _sum_candidate_cohort_metric(candidates: list[dict[str, Any]], key: str) -> 
     return total
 
 
+def _applied_miss_blocker_counts(candidates: list[dict[str, Any]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for candidate in candidates:
+        metrics = candidate.get("cohort_metrics") if isinstance(candidate.get("cohort_metrics"), dict) else {}
+        applied = metrics.get("applied") if isinstance(metrics.get("applied"), dict) else {}
+        if _as_int(applied.get("miss_count")) <= 0:
+            continue
+        for row in applied.get("remaining_blocker_breakdown") or []:
+            if not isinstance(row, dict):
+                continue
+            value = str(row.get("value") or "unknown")
+            counts[value] += _as_int(row.get("count"))
+    return counts
+
+
 def _any_stale_candidate(candidates: list[dict[str, Any]]) -> bool:
     for candidate in candidates:
         stale = candidate.get("stale_evidence") if isinstance(candidate.get("stale_evidence"), dict) else {}
@@ -326,6 +341,7 @@ def _promotion_reason_codes(
     holdout_count: int,
     observed_hits: int,
     observed_savings: float,
+    applied_miss_blockers: Counter[str],
 ) -> list[str]:
     codes: list[str] = []
     reason_rows = (
@@ -347,6 +363,11 @@ def _promotion_reason_codes(
         codes.append("missing-observed-cache-hits")
     if observed_savings <= 0:
         codes.append("missing-observed-cache-savings")
+    if applied_count > 0 and observed_hits <= 0 and applied_miss_blockers:
+        codes.append("applied-cache-replay-miss-observed")
+        for blocker in sorted(applied_miss_blockers, key=lambda item: (-applied_miss_blockers[item], item))[:3]:
+            codes.append(blocker)
+            codes.append(f"applied-miss:{blocker}")
     if _any_stale_candidate(candidates):
         codes.append("stale-cache-replay-evidence")
     if decision == "widen":
@@ -391,6 +412,8 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
     invalidated_count = _as_int(summary.get("invalidated_count"))
     error_count = _sum_candidate_cohort_metric(candidates, "error_count")
     retry_count = _sum_candidate_cohort_metric(candidates, "retry_attempts")
+    applied_miss_blockers = _applied_miss_blocker_counts(candidates)
+    top_applied_miss_blocker = _counter_rows(applied_miss_blockers)[0]["value"] if applied_miss_blockers else None
     fallback_count = 0
     status = str(promotion.get("status") or summary.get("local_promotion_status") or "")
 
@@ -416,6 +439,7 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
         holdout_count=holdout_count,
         observed_hits=observed_hits,
         observed_savings=observed_savings,
+        applied_miss_blockers=applied_miss_blockers,
     )
     if decision == "rollback" and not any(code in reason_codes for code in ("stale-cache-replay-evidence", "safety-stop-observed")):
         reason_codes.append("cache-replay-regression-or-safety-blocker")
@@ -425,6 +449,8 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
         "rollback": "cache-replay-rollback-required",
         "no-op": "missing-cache-replay-canary-lifecycle-evidence",
     }[decision]
+    if decision == "keep-staged" and top_applied_miss_blocker:
+        reason = str(top_applied_miss_blocker)
     coverage = {
         "schema": "agentflow.openai_cache_replay_promotion_decision_coverage.v1",
         "observed_replay_metadata_rows": observed_rows,
@@ -445,6 +471,7 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
         "metadata_only": True,
         "aggregate_only": True,
     }
+    applied_miss_breakdown = _counter_rows(applied_miss_blockers)
     return {
         "schema": PROMOTION_DECISION_SCHEMA,
         "decision_id": _promotion_decision_id(decision, coverage, reason_codes),
@@ -466,6 +493,7 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
             "no-op": "collect-openai-cache-replay-canary-evidence",
         }[decision],
         "coverage": coverage,
+        "applied_miss_blocker_breakdown": applied_miss_breakdown,
         "outcomes": {
             "projected_hits": _as_int(summary.get("projected_hits")),
             "observed_hits": observed_hits,
@@ -473,6 +501,15 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
             "observed_savings_usd": round(observed_savings, 8),
             "first_real_hit_status": summary.get("first_real_hit_status"),
             "first_real_hit_observed": bool(summary.get("first_real_hit_observed")),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "summary": {
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "miss_count": _as_int(summary.get("miss_count")),
+            "observed_hits": observed_hits,
+            "top_applied_miss_blocker": top_applied_miss_blocker,
             "metadata_only": True,
             "aggregate_only": True,
         },

@@ -224,6 +224,7 @@ def _empty_cohort() -> dict[str, Any]:
         "bypass_skipped_count": 0,
         "invalidation_count": 0,
         "stale_dependency_count": 0,
+        "remaining_blocker_buckets": Counter(),
     }
 
 
@@ -251,6 +252,7 @@ def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
         "miss_count": _as_int(raw.get("miss_count")),
         "bypass_skipped_count": _as_int(raw.get("bypass_skipped_count")),
         "stale_dependency_count": _as_int(raw.get("stale_dependency_count")),
+        "remaining_blocker_breakdown": _counter_rows(raw.get("remaining_blocker_buckets") or Counter()),
     }
 
 
@@ -482,6 +484,7 @@ def _add_row(
     candidate["reason_buckets"][_reason_code(cache.get("reason") or canary.get("reason"), "unknown")] += 1
     remaining_blocker = _remaining_blocker(cache, canary, cohort)
     if remaining_blocker:
+        raw["remaining_blocker_buckets"][remaining_blocker] += 1
         candidate["remaining_blocker_buckets"][remaining_blocker] += 1
     if cache.get("invalidation_reason"):
         candidate["invalidation_reason_buckets"][_reason_code(cache.get("invalidation_reason"))] += 1
