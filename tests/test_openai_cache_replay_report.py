@@ -175,6 +175,54 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         )
         return call_id
 
+    def _cache_replay_meta(
+        self,
+        *,
+        candidate_id: str = "openai-cache-readiness-candidate",
+        rule_id: str = "openai-cache-readiness-rule",
+        canary_status: str,
+        cohort: str,
+        reason: str,
+        projected: float = 0.03,
+    ) -> dict[str, object]:
+        rule: dict[str, object] = {
+            "rule_id": rule_id,
+            "candidate_id": candidate_id,
+            "policy_source": "local-manual",
+            "scope": "session",
+            "canary": {
+                "enabled": True,
+                "selected": cohort == "canary_applied",
+                "cohort": cohort,
+                "fraction": 0.5,
+                "unit": "session",
+                "status": canary_status,
+                "pattern_hashes": ["sha256:" + "f" * 64],
+            },
+            "graduation": {
+                "source_schema": "agentflow.openai_cache_replay_opportunity.v1",
+                "projected_hits": 10,
+                "projected_savings_usd": projected,
+                "sample_count": 10,
+            },
+        }
+        return {
+            "pattern_rule": rule,
+            "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
+            "cache_replay_canary": {
+                "schema": "agentflow.cache_replay_canary_decision.v1",
+                "rule_id": rule_id,
+                "candidate_id": candidate_id,
+                "policy_source": "local-manual",
+                "status": canary_status,
+                "reason": reason,
+                "canary": rule["canary"],
+                "canary_cohort": cohort,
+                "projected_input_savings_usd": projected,
+            },
+            "estimated_saved_cost_usd": projected,
+        }
+
     def test_openai_cache_replay_impact_recommends_stage_when_canary_evidence_is_missing(self) -> None:
         report = build_openai_cache_replay_impact_report(self.store, limit=20)
 
@@ -192,6 +240,123 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertFalse(evidence["privacy"]["raw_request_bodies_included"])
         self.assertFalse(evidence["privacy"]["cache_keys_included"])
         self.assertFalse(evidence["provider_calls_made"])
+
+    def test_openai_cache_replay_readiness_keeps_staged_for_holdout_only_canary(self) -> None:
+        for _ in range(2):
+            self._log_openai_call(
+                cache_status="bypassed",
+                cache_reason="canary_holdout",
+                cost=0.03,
+                cost_baseline=0.03,
+                cache_extra=self._cache_replay_meta(
+                    canary_status="holdout",
+                    cohort="canary_holdout",
+                    reason="canary_holdout",
+                ),
+            )
+
+        report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
+        decision = report["promotion_decision"]
+
+        self.assertEqual(decision["schema"], "agentflow.openai_cache_replay_promotion_decision.v1")
+        self.assertEqual(decision["decision"], "keep-staged")
+        self.assertTrue(decision["keep_staged"])
+        self.assertFalse(decision["promotion_allowed"])
+        self.assertEqual(decision["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(decision["coverage"]["applied_count"], 0)
+        self.assertEqual(decision["coverage"]["holdout_count"], 2)
+        self.assertFalse(decision["coverage"]["has_applied_coverage"])
+        self.assertTrue(decision["coverage"]["has_holdout_coverage"])
+        self.assertIn("insufficient-applied-coverage", decision["reason_codes"])
+        self.assertEqual(report["summary"]["promotion_decision"], "keep-staged")
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("sha256:" + "f" * 64, rendered)
+        self.assertNotIn("raw-openai-session-must-not-leak", rendered)
+        self.assertFalse(decision["privacy"]["cache_keys_included"])
+        self.assertFalse(decision["privacy"]["request_ids_included"])
+
+    def test_openai_cache_replay_readiness_widens_positive_applied_and_holdout_canary(self) -> None:
+        for index, baseline in enumerate((0.03, 0.04)):
+            call_id = self._log_openai_call(
+                cache_status="hit",
+                cache_reason="exact-match",
+                cache_hit=1,
+                cost=0.0,
+                cost_baseline=baseline,
+                cache_extra=self._cache_replay_meta(
+                    canary_status="applied",
+                    cohort="canary_applied",
+                    reason="dependency-stable",
+                    projected=baseline,
+                ),
+            )
+            self._capture_openai_provider_adoption(call_id, tool_id=f"readiness_cache_apply_{index}")
+        holdout_call_id = self._log_openai_call(
+            cache_status="bypassed",
+            cache_reason="canary_holdout",
+            cost=0.03,
+            cost_baseline=0.03,
+            cache_extra=self._cache_replay_meta(
+                canary_status="holdout",
+                cohort="canary_holdout",
+                reason="canary_holdout",
+            ),
+        )
+        self._capture_openai_provider_adoption(holdout_call_id, tool_id="readiness_cache_holdout")
+
+        report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
+        decision = report["promotion_decision"]
+
+        self.assertEqual(decision["decision"], "widen")
+        self.assertTrue(decision["promotion_allowed"])
+        self.assertFalse(decision["rollback_required"])
+        self.assertEqual(decision["recommended_next_action"], "widen-openai-exact-cache-replay-policy")
+        self.assertEqual(decision["coverage"]["applied_count"], 2)
+        self.assertEqual(decision["coverage"]["holdout_count"], 1)
+        self.assertEqual(decision["coverage"]["observed_hits"], 2)
+        self.assertGreater(decision["outcomes"]["observed_savings_usd"], 0)
+        self.assertIn("target-savings-met", decision["reason_codes"])
+        self.assertEqual(report["summary"]["promotion_allowed"], True)
+
+    def test_openai_cache_replay_readiness_rolls_back_stale_canary_evidence(self) -> None:
+        for index, baseline in enumerate((0.03, 0.04)):
+            self._log_openai_call(
+                cache_status="hit",
+                cache_reason="exact-match",
+                cache_hit=1,
+                cost=0.0,
+                cost_baseline=baseline,
+                created_at=f"2026-01-01T00:0{index}:00+00:00",
+                cache_extra=self._cache_replay_meta(
+                    canary_status="applied",
+                    cohort="canary_applied",
+                    reason="dependency-stable",
+                    projected=baseline,
+                ),
+            )
+        self._log_openai_call(
+            cache_status="bypassed",
+            cache_reason="canary_holdout",
+            cost=0.03,
+            cost_baseline=0.03,
+            created_at="2026-01-01T00:02:00+00:00",
+            cache_extra=self._cache_replay_meta(
+                canary_status="holdout",
+                cohort="canary_holdout",
+                reason="canary_holdout",
+            ),
+        )
+
+        report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
+        decision = report["promotion_decision"]
+
+        self.assertEqual(decision["decision"], "rollback")
+        self.assertTrue(decision["rollback_required"])
+        self.assertFalse(decision["promotion_allowed"])
+        self.assertEqual(decision["recommended_next_action"], "disable-openai-exact-cache-replay-canary")
+        self.assertTrue(decision["stale_evidence"]["stale"])
+        self.assertIn("stale-cache-replay-evidence", decision["reason_codes"])
+        self.assertEqual(report["summary"]["rollback_required"], True)
 
     def _capture_openai_provider_adoption(self, fulfilled_call_id: str, *, tool_id: str) -> None:
         capture_provider_tool_adoption(

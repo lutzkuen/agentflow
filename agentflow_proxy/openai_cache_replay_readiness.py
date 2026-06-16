@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -13,10 +14,11 @@ from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay
 from agentflow_proxy.openai_cache_replay_report import _as_float, _as_int, build_openai_cache_replay_report
 from agentflow_proxy.paths import agentflow_config_path
 from agentflow_proxy.public_metadata import public_path_state
-from agentflow_proxy.store import utc_now
+from agentflow_proxy.store import stable_json, utc_now
 
 
 SCHEMA = "agentflow.openai_cache_replay_readiness.v1"
+PROMOTION_DECISION_SCHEMA = "agentflow.openai_cache_replay_promotion_decision.v1"
 
 
 def _privacy_summary() -> dict[str, Any]:
@@ -297,6 +299,197 @@ def _impact_candidate_rows(impact: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _sum_candidate_cohort_metric(candidates: list[dict[str, Any]], key: str) -> int:
+    total = 0
+    for candidate in candidates:
+        metrics = candidate.get("cohort_metrics") if isinstance(candidate.get("cohort_metrics"), dict) else {}
+        for cohort in metrics.values():
+            if isinstance(cohort, dict):
+                total += _as_int(cohort.get(key))
+    return total
+
+
+def _any_stale_candidate(candidates: list[dict[str, Any]]) -> bool:
+    for candidate in candidates:
+        stale = candidate.get("stale_evidence") if isinstance(candidate.get("stale_evidence"), dict) else {}
+        if stale.get("stale"):
+            return True
+    return False
+
+
+def _promotion_reason_codes(
+    *,
+    decision: str,
+    impact: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    applied_count: int,
+    holdout_count: int,
+    observed_hits: int,
+    observed_savings: float,
+) -> list[str]:
+    codes: list[str] = []
+    reason_rows = (
+        impact.get("quality_gate", {}).get("reason_code_counts")
+        if isinstance(impact.get("quality_gate"), dict)
+        else []
+    )
+    for row in reason_rows or []:
+        if isinstance(row, dict) and row.get("value"):
+            codes.append(str(row.get("value")))
+    for candidate in candidates:
+        for value in candidate.get("reason_codes") or []:
+            codes.append(str(value))
+    if applied_count <= 0:
+        codes.append("insufficient-applied-coverage")
+    if holdout_count <= 0:
+        codes.append("insufficient-holdout-coverage")
+    if observed_hits <= 0:
+        codes.append("missing-observed-cache-hits")
+    if observed_savings <= 0:
+        codes.append("missing-observed-cache-savings")
+    if _any_stale_candidate(candidates):
+        codes.append("stale-cache-replay-evidence")
+    if decision == "widen":
+        codes.append("target-savings-met")
+    if decision == "no-op" and not codes:
+        codes.append("missing-cache-replay-canary-lifecycle-evidence")
+    normalized: list[str] = []
+    for code in codes:
+        if code == "insufficient-applied-samples":
+            code = "insufficient-applied-coverage"
+        elif code == "insufficient-holdout-samples":
+            code = "insufficient-holdout-coverage"
+        if code not in normalized:
+            normalized.append(code)
+    return normalized
+
+
+def _promotion_decision_id(decision: str, coverage: dict[str, Any], reason_codes: list[str]) -> str:
+    basis = {
+        "schema": PROMOTION_DECISION_SCHEMA,
+        "decision": decision,
+        "coverage": {
+            "applied_count": coverage.get("applied_count"),
+            "holdout_count": coverage.get("holdout_count"),
+            "observed_hits": coverage.get("observed_hits"),
+        },
+        "reason_codes": reason_codes,
+    }
+    return f"openai-cache-replay-promotion:{hashlib.sha256(stable_json(basis).encode('utf-8')).hexdigest()[:16]}"
+
+
+def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
+    summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    promotion = impact.get("local_promotion_evidence") if isinstance(impact.get("local_promotion_evidence"), dict) else {}
+    candidates = [row for row in impact.get("candidates") or [] if isinstance(row, dict)]
+    applied_count = _as_int(summary.get("applied_count"))
+    holdout_count = _as_int(summary.get("holdout_count"))
+    observed_rows = _as_int(summary.get("observed_openai_cache_replay_metadata_row_count"))
+    observed_hits = _as_int(summary.get("actual_hits"))
+    observed_savings = _as_float(summary.get("actual_saved_cost_usd") or summary.get("observed_savings_usd"))
+    safety_stop_count = _as_int(summary.get("safety_stop_count"))
+    invalidated_count = _as_int(summary.get("invalidated_count"))
+    error_count = _sum_candidate_cohort_metric(candidates, "error_count")
+    retry_count = _sum_candidate_cohort_metric(candidates, "retry_attempts")
+    fallback_count = 0
+    status = str(promotion.get("status") or summary.get("local_promotion_status") or "")
+
+    decision = "no-op"
+    if not observed_rows:
+        decision = "no-op"
+    elif safety_stop_count or status == "rollback-required":
+        decision = "rollback"
+    elif _any_stale_candidate(candidates):
+        decision = "rollback"
+    elif status == "promotion-ready" and applied_count > 0 and holdout_count > 0 and observed_hits > 0 and observed_savings > 0:
+        decision = "widen"
+    elif applied_count or holdout_count:
+        decision = "keep-staged"
+    else:
+        decision = "no-op"
+
+    reason_codes = _promotion_reason_codes(
+        decision=decision,
+        impact=impact,
+        candidates=candidates,
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        observed_hits=observed_hits,
+        observed_savings=observed_savings,
+    )
+    if decision == "rollback" and not any(code in reason_codes for code in ("stale-cache-replay-evidence", "safety-stop-observed")):
+        reason_codes.append("cache-replay-regression-or-safety-blocker")
+    reason = reason_codes[0] if reason_codes else {
+        "widen": "cache-replay-promotion-ready",
+        "keep-staged": "cache-replay-needs-more-coverage",
+        "rollback": "cache-replay-rollback-required",
+        "no-op": "missing-cache-replay-canary-lifecycle-evidence",
+    }[decision]
+    coverage = {
+        "schema": "agentflow.openai_cache_replay_promotion_decision_coverage.v1",
+        "observed_replay_metadata_rows": observed_rows,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "observed_hits": observed_hits,
+        "miss_count": _as_int(summary.get("miss_count")),
+        "bypass_count": _as_int(summary.get("bypass_skipped_count")),
+        "error_count": error_count,
+        "fallback_count": fallback_count,
+        "retry_count": retry_count,
+        "invalidated_count": invalidated_count,
+        "safety_stop_count": safety_stop_count,
+        "has_applied_coverage": applied_count > 0,
+        "has_holdout_coverage": holdout_count > 0,
+        "has_observed_hits": observed_hits > 0,
+        "has_observed_savings": observed_savings > 0,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    return {
+        "schema": PROMOTION_DECISION_SCHEMA,
+        "decision_id": _promotion_decision_id(decision, coverage, reason_codes),
+        "decision": decision,
+        "reason": reason,
+        "reason_codes": reason_codes,
+        "decision_options": ["widen", "keep-staged", "rollback", "no-op"],
+        "promotion_allowed": decision == "widen",
+        "rollback_required": decision == "rollback",
+        "keep_staged": decision == "keep-staged",
+        "read_only": True,
+        "target_local_rule_file": "cache_rules.yaml",
+        "target_local_policy_section": "cache.pattern_rules",
+        "source_canary_policy_file": "cache_canary_policy.yaml",
+        "recommended_next_action": {
+            "widen": "widen-openai-exact-cache-replay-policy",
+            "keep-staged": "keep-openai-exact-cache-replay-canary-staged",
+            "rollback": "disable-openai-exact-cache-replay-canary",
+            "no-op": "collect-openai-cache-replay-canary-evidence",
+        }[decision],
+        "coverage": coverage,
+        "outcomes": {
+            "projected_hits": _as_int(summary.get("projected_hits")),
+            "observed_hits": observed_hits,
+            "projected_savings_usd": round(_as_float(summary.get("projected_saved_usd") or summary.get("projected_savings_usd")), 8),
+            "observed_savings_usd": round(observed_savings, 8),
+            "first_real_hit_status": summary.get("first_real_hit_status"),
+            "first_real_hit_observed": bool(summary.get("first_real_hit_observed")),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "stale_evidence": {
+            "stale": _any_stale_candidate(candidates),
+            "candidate_count": sum(
+                1
+                for candidate in candidates
+                if isinstance(candidate.get("stale_evidence"), dict) and candidate["stale_evidence"].get("stale")
+            ),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _privacy_summary(),
+    }
+
+
 def _opportunity_candidate_rows(opportunity: dict[str, Any], *, limit: int = 8) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in opportunity.get("candidates") or []:
@@ -354,6 +547,7 @@ def build_openai_cache_replay_readiness_report(
     opportunity_rows = _opportunity_candidate_rows(opportunity) if not impact_rows else []
     verdict_counts = _verdict_counts(impact)
     blocker_counts = _breakdown_map(opportunity.get("blocker_reason_breakdown"))
+    promotion_decision = _promotion_decision_from_impact(impact)
     staged_policy = _staged_canary_policy_diagnostics(
         store_obj,
         limit=max(opportunity_limit, impact_limit),
@@ -394,6 +588,10 @@ def build_openai_cache_replay_readiness_report(
                 8,
             ),
             "observed_savings_usd": imp.get("observed_savings_usd"),
+            "promotion_decision": promotion_decision["decision"],
+            "promotion_blocker": promotion_decision["reason"],
+            "promotion_allowed": promotion_decision["promotion_allowed"],
+            "rollback_required": promotion_decision["rollback_required"],
             "staged_canary_policy_status": staged_policy.get("status"),
             "top_blockers": _counter_rows(Counter(blocker_counts))[:6],
         },
@@ -415,6 +613,7 @@ def build_openai_cache_replay_readiness_report(
             if isinstance(impact.get("quality_gate"), dict)
             else []
         ) or [],
+        "promotion_decision": promotion_decision,
         "candidates": impact_rows + opportunity_rows,
         "source_reports": {
             "opportunity_schema": opportunity.get("schema"),
