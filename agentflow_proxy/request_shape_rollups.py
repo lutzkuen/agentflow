@@ -18,6 +18,8 @@ ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
 REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
 REPLAY_INVALIDATION_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence.v1"
 REPLAY_INVALIDATION_EVIDENCE_COHORT_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence_cohort.v1"
+REPLAY_SKIPPED_OPENAI_BLOCKERS_SCHEMA = "agentflow.request_shape_skipped_openai_cache_replay_blockers.v1"
+REPLAY_SKIPPED_OPENAI_BLOCKER_ROW_SCHEMA = "agentflow.request_shape_skipped_openai_cache_replay_blocker.v1"
 REPLAY_BLOCKER_CLASSIFICATION_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification.v1"
 REPLAY_BLOCKER_CLASSIFICATION_ROW_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification_row.v1"
 REPLAY_CACHE_CANARY_ACTION_SCHEMA = "agentflow.request_shape_cache_replay_canary_action.v1"
@@ -4807,6 +4809,201 @@ def build_request_shape_cache_invalidation_evidence_report(
     }
 
 
+def _skipped_openai_cache_replay_next_action(blocker: str) -> str:
+    code = public_label(blocker, "unknown")
+    if code in {"invalidation-evidence-missing", "unsafe-tool-calls-without-invalidation"}:
+        return "add-invalidation-evidence"
+    if code in {"tools-present", "tool-call-cache-disabled"}:
+        return "keep-tool-cache-disabled"
+    if code in {"streaming-replay-not-supported", "unsupported-streaming-shape"}:
+        return "wait-for-streaming-replay-support"
+    if code == "unsupported-endpoint":
+        return "unsupported-endpoint"
+    if code == "insufficient-repeat-evidence":
+        return "collect-more-repeat-evidence"
+    if code == "already-cache-hit":
+        return "already-cache-hit"
+    return "keep-cache-replay-blocked"
+
+
+def _primary_skipped_openai_cache_replay_next_action(blockers: list[str], reason: str) -> str:
+    candidates = [public_label(item, "unknown") for item in blockers if public_label(item, "unknown") != "unknown"]
+    if not candidates and public_label(reason, "unknown") != "unknown":
+        candidates = [public_label(reason, "unknown")]
+    action_priority = {
+        "add-invalidation-evidence": 0,
+        "keep-tool-cache-disabled": 1,
+        "wait-for-streaming-replay-support": 2,
+        "unsupported-endpoint": 3,
+        "collect-more-repeat-evidence": 4,
+        "already-cache-hit": 5,
+        "keep-cache-replay-blocked": 6,
+    }
+    actions = sorted(
+        {_skipped_openai_cache_replay_next_action(blocker) for blocker in candidates},
+        key=lambda action: (action_priority.get(action, 99), action),
+    )
+    return actions[0] if actions else "keep-cache-replay-blocked"
+
+
+def build_request_shape_skipped_openai_cache_replay_blockers_report(
+    cohorts: list[dict[str, Any]],
+    *,
+    limit: int = 25,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    blocker_counts: dict[str, int] = {}
+    next_action_counts: dict[str, int] = {}
+    source_surface_counts: dict[str, int] = {}
+    endpoint_counts: dict[str, int] = {}
+    sample_count_total = 0
+
+    for cohort in cohorts:
+        if not isinstance(cohort, dict):
+            continue
+        if public_label(cohort.get("provider_family"), "unknown") != "openai":
+            continue
+        if public_label(cohort.get("readiness"), "unknown") != "skipped":
+            continue
+        sample_count = _as_int(cohort.get("row_count") or cohort.get("sample_count"))
+        if sample_count <= 0:
+            continue
+        reason = public_label(cohort.get("reason"), "unknown")
+        blocker_codes = sorted(
+            {
+                public_label(item, "unknown")
+                for item in cohort.get("blockers") or []
+                if public_label(item, "unknown") != "unknown"
+            }
+        )
+        if not blocker_codes and reason != "unknown":
+            blocker_codes = [reason]
+        next_action = _primary_skipped_openai_cache_replay_next_action(blocker_codes, reason)
+        blocker_actions = [
+            {
+                "blocker_code": blocker,
+                "next_action": _skipped_openai_cache_replay_next_action(blocker),
+            }
+            for blocker in blocker_codes
+        ]
+        sample_count_total += sample_count
+        _increment(next_action_counts, next_action, sample_count)
+        _increment(source_surface_counts, cohort.get("source_surface"), sample_count)
+        _increment(endpoint_counts, cohort.get("endpoint"), sample_count)
+        for blocker in blocker_codes:
+            _increment(blocker_counts, blocker, sample_count)
+        rows.append(
+            {
+                "schema": REPLAY_SKIPPED_OPENAI_BLOCKER_ROW_SCHEMA,
+                "rank": 0,
+                "provider_family": "openai",
+                "source_surface": public_label(cohort.get("source_surface"), "unknown"),
+                "endpoint": public_label(cohort.get("endpoint"), "unknown"),
+                "category": public_label(cohort.get("category"), "unknown"),
+                "workflow_phase": public_label(cohort.get("workflow_phase"), "unknown"),
+                "stream": bool(cohort.get("stream")),
+                "has_tools": bool(cohort.get("has_tools")),
+                "cache_status": public_label(cohort.get("cache_status"), "unknown"),
+                "routing_status": public_label(cohort.get("routing_status"), "unknown"),
+                "text_bucket": public_label(cohort.get("text_bucket"), "unknown"),
+                "token_bucket": public_label(cohort.get("token_bucket"), "unknown"),
+                "sample_count": sample_count,
+                "row_count": sample_count,
+                "projected_hits": _as_int(cohort.get("projected_hits")),
+                "projected_savings_usd": round(_as_float(cohort.get("projected_savings_usd")), 6),
+                "reason": reason,
+                "blocker_codes": blocker_codes,
+                "blocker_actions": blocker_actions,
+                "next_action": next_action,
+                "tool_cache_replay_enabled": False,
+                "streaming_replay_enabled": False,
+                "emits_cache_apply_action": False,
+                "requires_operator_apply": False,
+                "aggregate_only": True,
+                "metadata_only": True,
+                "privacy": _replayability_privacy(),
+            }
+        )
+
+    action_priority = {
+        "add-invalidation-evidence": 5,
+        "keep-tool-cache-disabled": 4,
+        "wait-for-streaming-replay-support": 3,
+        "unsupported-endpoint": 2,
+        "collect-more-repeat-evidence": 1,
+    }
+    rows.sort(
+        key=lambda item: (
+            action_priority.get(str(item.get("next_action")), 0),
+            _as_float(item.get("projected_savings_usd")),
+            _as_int(item.get("projected_hits")),
+            _as_int(item.get("sample_count")),
+            str(item.get("source_surface")),
+            str(item.get("endpoint")),
+            str(item.get("category")),
+        ),
+        reverse=True,
+    )
+    capped_limit = max(1, min(_as_int(limit) or 25, 1000))
+    for rank, row in enumerate(rows[:capped_limit], start=1):
+        row["rank"] = rank
+
+    blocker_breakdown = _breakdown(blocker_counts)
+    next_action_breakdown = _breakdown(next_action_counts)
+    return {
+        "schema": REPLAY_SKIPPED_OPENAI_BLOCKERS_SCHEMA,
+        "status": "ranked" if rows else "no-skipped-openai-cache-replay-cohorts",
+        "read_only": True,
+        "wrote_store": False,
+        "wrote_local_files": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "next_action": next_action_breakdown[0]["value"] if next_action_breakdown else "keep-cache-replay-observing",
+        "summary": {
+            "skipped_openai_cohort_count": len(rows),
+            "sample_count": sample_count_total,
+            "projected_hits": sum(_as_int(row.get("projected_hits")) for row in rows),
+            "projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in rows), 6),
+            "top_blocker_code": blocker_breakdown[0]["value"] if blocker_breakdown else None,
+            "top_next_action": next_action_breakdown[0]["value"] if next_action_breakdown else None,
+            "cache_apply_action_count": 0,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+        },
+        "source_surface_breakdown": _breakdown(source_surface_counts),
+        "endpoint_breakdown": _breakdown(endpoint_counts),
+        "blocker_breakdown": blocker_breakdown,
+        "next_action_breakdown": next_action_breakdown,
+        "cohorts": rows[:capped_limit],
+        "acceptance": {
+            "has_ranked_skipped_openai_cohorts": bool(rows),
+            "has_rank": all(_as_int(row.get("rank")) > 0 for row in rows[:capped_limit]),
+            "has_blocker_codes": all(bool(row.get("blocker_codes")) for row in rows[:capped_limit]),
+            "has_sample_count": all(_as_int(row.get("sample_count")) > 0 for row in rows[:capped_limit]),
+            "has_deterministic_next_action": all(bool(row.get("next_action")) for row in rows[:capped_limit]),
+            "covers_required_blockers": all(
+                code in blocker_counts
+                for code in (
+                    "invalidation-evidence-missing",
+                    "tools-present",
+                    "unsafe-tool-calls-without-invalidation",
+                    "streaming-replay-not-supported",
+                )
+            ),
+            "emits_no_cache_apply_actions": True,
+            "tool_and_streaming_replay_remain_disabled": all(
+                not bool(row.get("tool_cache_replay_enabled")) and not bool(row.get("streaming_replay_enabled"))
+                for row in rows
+            ),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _replayability_privacy(),
+    }
+
+
 def build_request_shape_cache_replayability_dry_run(
     rollups: list[dict[str, Any]],
     *,
@@ -4898,6 +5095,10 @@ def build_request_shape_cache_replayability_dry_run(
         cohorts,
         limit=capped_limit,
     )
+    skipped_openai_blockers = build_request_shape_skipped_openai_cache_replay_blockers_report(
+        cohorts,
+        limit=capped_limit,
+    )
     return {
         "schema": REPLAYABILITY_DRY_RUN_SCHEMA,
         "status": "ranked" if cohorts else "no-replayability-cohorts",
@@ -4919,10 +5120,15 @@ def build_request_shape_cache_replayability_dry_run(
         "skipped_reason_breakdown": _breakdown(reason_counts),
         "blocker_breakdown": blocker_breakdown,
         "cache_invalidation_evidence": invalidation_evidence,
+        "skipped_openai_blockers": skipped_openai_blockers,
         "acceptance": {
             "emits_durable_invalidation_evidence": invalidation_evidence["schema"] == REPLAY_INVALIDATION_EVIDENCE_SCHEMA,
+            "emits_skipped_openai_blocker_ranking": skipped_openai_blockers["schema"] == REPLAY_SKIPPED_OPENAI_BLOCKERS_SCHEMA,
             "has_ranked_blocker_cohorts": bool(
                 invalidation_evidence.get("acceptance", {}).get("has_ranked_blocker_cohorts")
+            ),
+            "has_ranked_skipped_openai_cohorts": bool(
+                skipped_openai_blockers.get("acceptance", {}).get("has_ranked_skipped_openai_cohorts")
             ),
             "tool_and_streaming_replay_remain_disabled": bool(
                 invalidation_evidence.get("acceptance", {}).get("tool_and_streaming_replay_remain_disabled")

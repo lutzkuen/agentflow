@@ -386,6 +386,16 @@ class RequestShapeRollupTests(unittest.TestCase):
             baseline=0.02,
         )
         self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="tool-light",
+            workflow_phase="tool-light",
             stream=0,
             has_tools=True,
             cache_status="skipped",
@@ -395,9 +405,14 @@ class RequestShapeRollupTests(unittest.TestCase):
             baseline=0.04,
         )
         self._log_call(
+            provider="openai",
             path="/v1/unknown",
             source_surface="unknown_surface",
             endpoint="unknown_endpoint",
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
             category="chat",
             workflow_phase="chat",
             stream=0,
@@ -413,6 +428,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         dry_run = report["cache_replayability_dry_run"]
         classification = report["cache_replay_blocker_classification"]
         invalidation_evidence = dry_run["cache_invalidation_evidence"]
+        skipped_openai = dry_run["skipped_openai_blockers"]
 
         self.assertEqual(dry_run["schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(dry_run["summary"]["replay_ready_cohort_count"], 1)
@@ -448,9 +464,66 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(dry_run["privacy"]["request_fingerprints_included"])
         self.assertFalse(dry_run["privacy"]["individual_candidate_ids_included"])
         self.assertTrue(dry_run["acceptance"]["emits_durable_invalidation_evidence"])
+        self.assertTrue(dry_run["acceptance"]["emits_skipped_openai_blocker_ranking"])
         self.assertTrue(dry_run["acceptance"]["has_ranked_blocker_cohorts"])
+        self.assertTrue(dry_run["acceptance"]["has_ranked_skipped_openai_cohorts"])
         self.assertTrue(dry_run["acceptance"]["tool_and_streaming_replay_remain_disabled"])
         self.assertTrue(dry_run["acceptance"]["has_local_file_backed_policy_compatibility"])
+
+        self.assertEqual(
+            skipped_openai["schema"],
+            "agentflow.request_shape_skipped_openai_cache_replay_blockers.v1",
+        )
+        self.assertEqual(skipped_openai["status"], "ranked")
+        self.assertTrue(skipped_openai["read_only"])
+        self.assertEqual(skipped_openai["summary"]["skipped_openai_cohort_count"], 3)
+        self.assertEqual(skipped_openai["summary"]["cache_entries_written"], 0)
+        self.assertFalse(skipped_openai["summary"]["policy_files_written"])
+        self.assertEqual(skipped_openai["summary"]["cache_apply_action_count"], 0)
+        self.assertTrue(skipped_openai["acceptance"]["has_ranked_skipped_openai_cohorts"])
+        self.assertTrue(skipped_openai["acceptance"]["has_rank"])
+        self.assertTrue(skipped_openai["acceptance"]["has_blocker_codes"])
+        self.assertTrue(skipped_openai["acceptance"]["has_sample_count"])
+        self.assertTrue(skipped_openai["acceptance"]["has_deterministic_next_action"])
+        self.assertTrue(skipped_openai["acceptance"]["covers_required_blockers"])
+        self.assertTrue(skipped_openai["acceptance"]["emits_no_cache_apply_actions"])
+        self.assertTrue(skipped_openai["acceptance"]["tool_and_streaming_replay_remain_disabled"])
+        self.assertTrue(skipped_openai["privacy"]["metadata_only"])
+        self.assertTrue(skipped_openai["privacy"]["aggregate_only"])
+        self.assertFalse(skipped_openai["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(skipped_openai["privacy"]["cache_keys_included"])
+        skipped_actions = {item["value"] for item in skipped_openai["next_action_breakdown"]}
+        self.assertIn("add-invalidation-evidence", skipped_actions)
+        self.assertIn("wait-for-streaming-replay-support", skipped_actions)
+        self.assertIn("unsupported-endpoint", skipped_actions)
+        skipped_blockers = {item["value"] for item in skipped_openai["blocker_breakdown"]}
+        self.assertIn("invalidation-evidence-missing", skipped_blockers)
+        self.assertIn("tools-present", skipped_blockers)
+        self.assertIn("unsafe-tool-calls-without-invalidation", skipped_blockers)
+        self.assertIn("streaming-replay-not-supported", skipped_blockers)
+        tool_blocker_row = next(row for row in skipped_openai["cohorts"] if row["has_tools"])
+        self.assertEqual(tool_blocker_row["sample_count"], 1)
+        self.assertEqual(tool_blocker_row["next_action"], "add-invalidation-evidence")
+        per_blocker_actions = {
+            item["blocker_code"]: item["next_action"]
+            for item in tool_blocker_row["blocker_actions"]
+        }
+        self.assertEqual(per_blocker_actions["tools-present"], "keep-tool-cache-disabled")
+        self.assertEqual(
+            per_blocker_actions["unsafe-tool-calls-without-invalidation"],
+            "add-invalidation-evidence",
+        )
+        rendered_skipped_openai = json.dumps(skipped_openai, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+        ):
+            self.assertNotIn(forbidden, rendered_skipped_openai)
 
         self.assertEqual(invalidation_evidence["schema"], "agentflow.request_shape_cache_invalidation_evidence.v1")
         self.assertEqual(invalidation_evidence["status"], "ranked")
