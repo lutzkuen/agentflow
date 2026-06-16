@@ -4179,6 +4179,91 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertNotIn("raw-policy-secret-should-not-leak", rendered)
         self.assertNotIn(str(rules_path), rendered)
 
+    def test_crunch_activation_evidence_emits_keep_active_duplicate_suppression(self) -> None:
+        decision_id = "request-shape-crunch-policy-decision:keep-active"
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "crunch_rules.yaml"
+            rules_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "request_shape_repeated_context_canaries": {
+                            "enabled": True,
+                            "rules": [
+                                {
+                                    "id": "raw-keep-active-policy-secret-should-not-leak",
+                                    "enabled": True,
+                                    "policy_source": "local-manual",
+                                    "policy_decision": {
+                                        "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                        "decision_id": decision_id,
+                                        "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                        "decision": "widen",
+                                        "graduation_decision": "widen",
+                                        "applied_count": 107,
+                                        "holdout_count": 40,
+                                        "observed_saved_tokens": 8606129,
+                                        "observed_saved_usd": 25.818387,
+                                        "error_rate_delta": 0.0,
+                                        "retry_rate_delta": 0.0,
+                                        "fallback_rate_delta": 0.0,
+                                        "safety_stop_state": "none",
+                                        "widened_canary_fraction": 0.30,
+                                        "holdout_fraction": 0.10,
+                                    },
+                                    "rollout": {"canary_fraction": 0.30, "holdout_fraction": 0.10},
+                                    "safety_gates": {"max_rollout_fraction": 0.30},
+                                }
+                            ],
+                        }
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            payload = build_request_shape_crunch_activation_evidence_report(
+                crunch_policy_decision={
+                    "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "decision": "widen",
+                    "graduation_decision": "widen",
+                    "decision_id": decision_id,
+                    "summary": {
+                        "decision": "widen",
+                        "graduation_decision": "widen",
+                        "decision_id": decision_id,
+                        "applied_count": 107,
+                        "holdout_count": 40,
+                        "observed_saved_tokens": 8606129,
+                        "observed_saved_usd": 25.818387,
+                        "coverage": {
+                            "skipped_count": 280,
+                            "fallback_count": 0,
+                            "safety_stop_count": 0,
+                            "rollback_count": 0,
+                        },
+                    },
+                },
+                crunch_canary_impact={"schema": "agentflow.request_shape_crunch_canary_impact.v1", "summary": {}},
+                rules_path=rules_path,
+            )
+
+        self.assertEqual(payload["status"], "active-rule-evidence-observed")
+        self.assertEqual(payload["next_action"], "keep-active")
+        self.assertEqual(payload["summary"]["post_widening_status"], "post-widening-active-at-max-rollout")
+        self.assertEqual(payload["summary"]["post_widening_next_action"], "keep-active")
+        follow_up = payload["activation_follow_up"]
+        self.assertEqual(follow_up["activation_state"], "measured-active")
+        self.assertEqual(follow_up["next_action"], "keep-active")
+        duplicate_suppression = payload["duplicate_suppression"]
+        self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
+        self.assertTrue(duplicate_suppression["suppresses_generic_crunch_activation_issue"])
+        self.assertEqual(duplicate_suppression["matching_local_policy"], "crunch_rules")
+        self.assertEqual(duplicate_suppression["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertTrue(str(duplicate_suppression["fingerprint"]).startswith("activation:"))
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw-keep-active-policy-secret-should-not-leak", rendered)
+        self.assertNotIn(str(rules_path), rendered)
+
     def test_crunch_activation_evidence_requests_rollback_for_post_widening_regression(self) -> None:
         decision_id = "request-shape-crunch-policy-decision:rollback-case"
         with tempfile.TemporaryDirectory() as tmp:

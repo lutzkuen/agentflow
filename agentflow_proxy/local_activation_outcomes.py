@@ -14,6 +14,7 @@ SCHEMA = "agentflow.local_activation_outcome_summary.v1"
 OUTCOME_SCHEMA = "agentflow.local_activation_outcome_summary_row.v1"
 PRIVACY_SCHEMA = "agentflow.local_activation_outcome_summary_privacy.v1"
 CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
+CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "agentflow.request_shape_crunch_activation_evidence.v1"
 CACHE_REPLAY_POLICY_DECISION_SCHEMA = "agentflow.request_shape_cache_replay_policy_decision.v1"
 
 RULE_FILES = {
@@ -275,6 +276,9 @@ def _finalize_row(row: dict[str, Any], blockers: Counter[str]) -> dict[str, Any]
         {"code": code, "count": count}
         for code, count in blockers.most_common(8)
     ]
+    current_action = str(row.get("next_action") or "").strip()
+    if current_action and current_action != "review-local-activation-outcome":
+        return row
     if row["applied_count"]:
         row["next_action"] = "compare-applied-holdout-and-promote-or-keep-blocked"
     elif row["holdout_count"]:
@@ -282,6 +286,60 @@ def _finalize_row(row: dict[str, Any], blockers: Counter[str]) -> dict[str, Any]
     elif row["row_count"]:
         row["next_action"] = "stage-or-review-local-policy-activation"
     return row
+
+
+def _activation_keep_active_duplicate_suppression(
+    *,
+    decision_id: str | None,
+    active_rule_ref: str | None,
+    target_local_rule_file: str,
+    target_local_policy_section: str,
+) -> dict[str, Any]:
+    fingerprint_source = "|".join(
+        part
+        for part in (
+            "crunch",
+            decision_id or "",
+            active_rule_ref or "",
+            target_local_rule_file,
+            target_local_policy_section,
+        )
+        if part
+    )
+    return {
+        "schema": "agentflow.local_activation_keep_active_duplicate_suppression.v1",
+        "suppresses_new_activation_issue": True,
+        "suppresses_generic_crunch_activation_issue": True,
+        "reason": "repeated-context-crunch-active-at-max-rollout",
+        "activation_ref": public_id(fingerprint_source or "crunch-keep-active", prefix="activation", fallback="activation:unknown"),
+        "matching_local_policy": "crunch_rules",
+        "target_local_rule_file": target_local_rule_file,
+        "target_local_policy_section": target_local_policy_section,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _safe_local_duplicate_suppression(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    if not value:
+        return {}
+    result: dict[str, Any] = {
+        "schema": public_label(value.get("schema"), "agentflow.local_activation_keep_active_duplicate_suppression.v1"),
+        "suppresses_new_activation_issue": bool(value.get("suppresses_new_activation_issue")),
+        "suppresses_generic_crunch_activation_issue": bool(value.get("suppresses_generic_crunch_activation_issue")),
+        "reason": public_label(value.get("reason"), "unknown"),
+        "matching_local_policy": public_label(value.get("matching_local_policy"), "unknown"),
+        "target_local_rule_file": public_label(value.get("target_local_rule_file"), "crunch_rules.yaml"),
+        "target_local_policy_section": public_label(value.get("target_local_policy_section"), "crunch.rules"),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    activation_ref = public_label(value.get("activation_ref"), "") or public_label(value.get("fingerprint"), "")
+    if activation_ref:
+        result["activation_ref"] = activation_ref
+    return result
 
 
 def _first_dict(*values: Any) -> dict[str, Any]:
@@ -381,6 +439,116 @@ def _apply_crunch_policy_decision_report(row: dict[str, Any], blockers: Counter[
     return True
 
 
+def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Counter[str], report: dict[str, Any]) -> bool:
+    if report.get("schema") != CRUNCH_ACTIVATION_EVIDENCE_SCHEMA:
+        return False
+    summary = _first_dict(report.get("summary"))
+    rules = report.get("rules") if isinstance(report.get("rules"), list) else []
+    top_rule = next((item for item in rules if isinstance(item, dict)), {})
+    decision_id = str(report.get("decision_id") or summary.get("decision_id") or "") or None
+    applied = _as_int(summary.get("applied_count"))
+    holdout = _as_int(summary.get("holdout_count"))
+    skipped = _as_int(summary.get("skipped_count"))
+    safety_stop_count = _as_int(summary.get("safety_stop_count"))
+    rollback_count = _as_int(summary.get("rollback_count"))
+    fallback_count = _as_int(summary.get("fallback_count"))
+    observed_tokens = _as_int(summary.get("observed_saved_tokens") or summary.get("projected_saved_tokens"))
+    observed_savings = _as_float(summary.get("observed_saved_usd") or summary.get("projected_saved_usd"))
+    row_count = applied + holdout + skipped
+    if row_count <= 0:
+        row_count = _as_int(summary.get("matched_count") or summary.get("rows_considered"))
+
+    target_rule_file = public_label(summary.get("target_local_rule_file") or "crunch_rules.yaml", "crunch_rules.yaml")
+    target_policy_section = public_label(summary.get("target_local_policy_section") or "crunch.rules", "crunch.rules")
+    post_status = public_label(summary.get("post_widening_status"), "unknown")
+    post_next_action = public_label(
+        summary.get("post_widening_next_action") or summary.get("next_action") or report.get("next_action"),
+        "review-local-activation-outcome",
+    )
+    keep_active = post_next_action == "keep-active" and post_status == "post-widening-active-at-max-rollout"
+    active_rule_ref = str(top_rule.get("rule_ref") or top_rule.get("rule_id") or "") or None
+
+    row["row_count"] = max(_as_int(row.get("row_count")), row_count)
+    row["applied_count"] = max(_as_int(row.get("applied_count")), applied)
+    row["holdout_count"] = max(_as_int(row.get("holdout_count")), holdout)
+    row["skipped_count"] = max(_as_int(row.get("skipped_count")), skipped)
+    row["safety_stopped_count"] = max(_as_int(row.get("safety_stopped_count")), safety_stop_count)
+    row["rollback_count"] = max(_as_int(row.get("rollback_count")), rollback_count)
+    row["fallback_count"] = max(_as_int(row.get("fallback_count")), fallback_count)
+    row["observed_savings_usd"] = max(_as_float(row.get("observed_savings_usd")), observed_savings)
+    row["projected_savings_usd"] = max(_as_float(row.get("projected_savings_usd")), observed_savings)
+    row["observed_saved_tokens"] = max(_as_int(row.get("observed_saved_tokens")), observed_tokens)
+    row["projected_saved_tokens"] = max(_as_int(row.get("projected_saved_tokens")), observed_tokens)
+    row["source_evidence_schema"] = CRUNCH_ACTIVATION_EVIDENCE_SCHEMA
+    row["source_decision_id"] = decision_id
+    row["source_decision"] = public_label(report.get("decision") or summary.get("decision"), "unknown")
+    row["graduation_decision"] = public_label(report.get("graduation_decision") or summary.get("graduation_decision"), "unknown")
+    row["safety_stop_state"] = public_label(summary.get("safety_stop_state"), "none")
+    row["target_local_rule_file"] = target_rule_file
+    row["target_local_policy_section"] = target_policy_section
+    row["active_rule_count"] = _as_int(summary.get("active_rule_count"))
+    row["widened_rule_count"] = _as_int(summary.get("widened_rule_count"))
+    row["active_rule_ref"] = public_label(active_rule_ref, "unknown") if active_rule_ref else None
+    row["active_rule_source"] = public_label(top_rule.get("policy_source") or summary.get("policy_source"), "unknown")
+    row["active_rule_decision_id"] = public_label(top_rule.get("decision_id") or decision_id, "unknown")
+    source_reports = report.get("source_reports") if isinstance(report.get("source_reports"), dict) else {}
+    row["active_rule_source_evidence_schema"] = public_label(
+        top_rule.get("source_evidence_schema") or source_reports.get("active_rule_source_evidence_schema"),
+        "unknown",
+    )
+    row["post_widening_status"] = post_status
+    row["post_widening_next_action"] = post_next_action
+    row["post_widening_reason_codes"] = [
+        public_label(item, "unknown")
+        for item in (summary.get("post_widening_reason_codes") or [])
+        if public_label(item, "unknown") != "unknown"
+    ]
+    row["outcome"] = "keep-active" if keep_active else post_next_action
+    row["next_action"] = post_next_action
+    row["error_rate_delta"] = round(_as_float(summary.get("error_rate_delta")), 6)
+    row["retry_rate_delta"] = round(_as_float(summary.get("retry_rate_delta")), 6)
+    row["fallback_rate_delta"] = round(_as_float(summary.get("fallback_rate_delta")), 6)
+    row["coverage"] = {
+        "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+        "source_schema": CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "observed_count": row_count,
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "skipped_count": skipped,
+        "safety_stop_count": safety_stop_count,
+        "rollback_count": rollback_count,
+        "fallback_count": fallback_count,
+        "error_rate_delta": row["error_rate_delta"],
+        "retry_rate_delta": row["retry_rate_delta"],
+        "fallback_rate_delta": row["fallback_rate_delta"],
+        "canary_fraction": round(_as_float(summary.get("canary_fraction")), 6),
+        "max_rollout_fraction": round(_as_float(summary.get("max_rollout_fraction")), 6),
+    }
+    duplicate_suppression = report.get("duplicate_suppression")
+    if not isinstance(duplicate_suppression, dict):
+        follow_up = report.get("activation_follow_up") if isinstance(report.get("activation_follow_up"), dict) else {}
+        duplicate_suppression = follow_up.get("duplicate_suppression") if isinstance(follow_up.get("duplicate_suppression"), dict) else {}
+    row["duplicate_suppression"] = _safe_local_duplicate_suppression(duplicate_suppression) or _activation_keep_active_duplicate_suppression(
+        decision_id=decision_id,
+        active_rule_ref=active_rule_ref,
+        target_local_rule_file=target_rule_file,
+        target_local_policy_section=target_policy_section,
+    )
+    row["source_report"] = {
+        "schema": CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
+        "status": public_label(report.get("status"), "unknown"),
+        "decision": row["source_decision"],
+        "post_widening_status": post_status,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    for code in _reason_codes(row["post_widening_reason_codes"], summary):
+        blockers[code] += 1
+    return True
+
+
 def _apply_cache_policy_decision_report(row: dict[str, Any], blockers: Counter[str], report: dict[str, Any]) -> bool:
     if report.get("schema") != CACHE_REPLAY_POLICY_DECISION_SCHEMA:
         return False
@@ -462,6 +630,9 @@ def _apply_policy_decision_reports(
     applied = 0
     for report in activation_reports:
         if not isinstance(report, dict):
+            continue
+        if _apply_crunch_activation_evidence_report(summaries["crunch"], blockers["crunch"], report):
+            applied += 1
             continue
         if _apply_crunch_policy_decision_report(summaries["crunch"], blockers["crunch"], report):
             applied += 1
@@ -572,7 +743,7 @@ def build_local_activation_outcome_summary(
     result = {
         "schema": SCHEMA,
         "generated_at": utc_now(),
-        "status": "tracked" if rows else "no-local-traffic",
+        "status": "tracked" if rows or policy_decision_report_count else "no-local-traffic",
         "read_only": True,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
@@ -586,7 +757,8 @@ def build_local_activation_outcome_summary(
                 {
                     row["local_action_family"]
                     for row in outcome_summaries
-                    if row.get("source_evidence_schema") in {CRUNCH_POLICY_DECISION_SCHEMA, CACHE_REPLAY_POLICY_DECISION_SCHEMA}
+                    if row.get("source_evidence_schema")
+                    in {CRUNCH_ACTIVATION_EVIDENCE_SCHEMA, CRUNCH_POLICY_DECISION_SCHEMA, CACHE_REPLAY_POLICY_DECISION_SCHEMA}
                 }
             ),
             "applied_count": sum(_as_int(row.get("applied_count")) for row in outcome_summaries),
@@ -602,6 +774,7 @@ def build_local_activation_outcome_summary(
             "source": "local-activation-outcome-summary",
             "supported_local_action_families": ["routing", "crunch", "cache"],
             "source_policy_decision_schemas": [
+                CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
                 CRUNCH_POLICY_DECISION_SCHEMA,
                 CACHE_REPLAY_POLICY_DECISION_SCHEMA,
             ],

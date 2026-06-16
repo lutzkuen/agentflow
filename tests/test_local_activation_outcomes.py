@@ -262,6 +262,103 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertTrue(by_family["cache"]["coverage"]["metadata_only"])
         self.assertTrue(by_family["cache"]["coverage"]["aggregate_only"])
 
+    def test_summary_emits_keep_active_outcome_for_crunch_activation_evidence(self):
+        activation_evidence = {
+            "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+            "status": "active-rule-evidence-observed",
+            "decision": "widen",
+            "graduation_decision": "widen",
+            "decision_id": "request-shape-crunch-policy-decision:fixture",
+            "next_action": "keep-active",
+            "summary": {
+                "active_rule_count": 1,
+                "matching_active_rule_count": 1,
+                "widened_rule_count": 1,
+                "matching_widened_rule_count": 1,
+                "decision": "widen",
+                "graduation_decision": "widen",
+                "decision_id": "request-shape-crunch-policy-decision:fixture",
+                "applied_count": 107,
+                "holdout_count": 40,
+                "skipped_count": 280,
+                "fallback_count": 0,
+                "safety_stop_count": 0,
+                "rollback_count": 0,
+                "error_rate_delta": 0.0,
+                "retry_rate_delta": 0.0,
+                "fallback_rate_delta": 0.0,
+                "safety_stop_state": "none",
+                "observed_saved_tokens": 8606129,
+                "observed_saved_usd": 25.818387,
+                "policy_source": "local-manual",
+                "canary_fraction": 0.3,
+                "max_rollout_fraction": 0.3,
+                "post_widening_status": "post-widening-active-at-max-rollout",
+                "post_widening_next_action": "keep-active",
+                "post_widening_reason_codes": [],
+                "target_local_rule_file": "crunch_rules.yaml",
+                "target_local_policy_section": "crunch.rules",
+            },
+            "rules": [
+                {
+                    "rank": 1,
+                    "rule_ref": "rule:public",
+                    "policy_source": "local-manual",
+                    "decision": "widen",
+                    "decision_id": "request-shape-crunch-policy-decision:fixture",
+                    "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                }
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                report = build_local_activation_outcome_summary(
+                    store,
+                    limit=20,
+                    config_dir=tmp,
+                    activation_reports=[activation_evidence],
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(report["schema"], "agentflow.local_activation_outcome_summary.v1")
+        self.assertEqual(report["status"], "tracked")
+        self.assertEqual(report["egress_guard"]["status"], "passed")
+        self.assertEqual(report["summary"]["policy_decision_report_count"], 1)
+        self.assertEqual(report["summary"]["policy_decision_families"], ["crunch"])
+        by_family = {row["local_action_family"]: row for row in report["outcome_summaries"]}
+        crunch = by_family["crunch"]
+        self.assertEqual(crunch["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(crunch["source_decision"], "widen")
+        self.assertEqual(crunch["outcome"], "keep-active")
+        self.assertEqual(crunch["next_action"], "keep-active")
+        self.assertEqual(crunch["applied_count"], 107)
+        self.assertEqual(crunch["holdout_count"], 40)
+        self.assertEqual(crunch["skipped_count"], 280)
+        self.assertEqual(crunch["observed_saved_tokens"], 8606129)
+        self.assertAlmostEqual(crunch["observed_savings_usd"], 25.818387)
+        self.assertEqual(crunch["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(crunch["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(crunch["post_widening_status"], "post-widening-active-at-max-rollout")
+        self.assertEqual(crunch["post_widening_next_action"], "keep-active")
+        self.assertEqual(crunch["coverage"]["applied_count"], 107)
+        self.assertEqual(crunch["coverage"]["holdout_count"], 40)
+        self.assertEqual(crunch["coverage"]["safety_stop_count"], 0)
+        self.assertEqual(crunch["coverage"]["fallback_count"], 0)
+        duplicate_suppression = crunch["duplicate_suppression"]
+        self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
+        self.assertTrue(duplicate_suppression["suppresses_generic_crunch_activation_issue"])
+        self.assertEqual(duplicate_suppression["matching_local_policy"], "crunch_rules")
+        self.assertTrue(str(duplicate_suppression["activation_ref"]).startswith("activation:"))
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn(str(Path(tmp).resolve()), rendered)
+
     def test_cli_emits_local_activation_outcome_summary(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")

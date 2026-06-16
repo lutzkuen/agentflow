@@ -5766,8 +5766,11 @@ def local_activation_outcome_summary_cli(argv: Sequence[str] | None = None, *, s
             persist=False,
             run_id="local-activation-outcome-summary",
         )
+        crunch_activation_evidence = rollups.get("crunch_activation_evidence")
         crunch_policy_decision = rollups.get("crunch_policy_decision")
-        if isinstance(crunch_policy_decision, dict):
+        if isinstance(crunch_activation_evidence, dict):
+            activation_reports.append(crunch_activation_evidence)
+        elif isinstance(crunch_policy_decision, dict):
             activation_reports.append(crunch_policy_decision)
         cache_canary_rules = Path(args.config_dir).expanduser() / "cache_canary_policy.yaml"
         cache_evidence = build_request_shape_cache_replay_evidence_report(

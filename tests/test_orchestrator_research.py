@@ -3342,6 +3342,18 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                                 "aggregate_only": True,
                             }
                         ],
+                        "duplicate_suppression": {
+                            "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                            "suppresses_new_activation_issue": True,
+                            "suppresses_generic_crunch_activation_issue": True,
+                            "reason": "repeated-context-crunch-active-at-max-rollout",
+                            "fingerprint": "activation:public",
+                            "matching_local_policy": "crunch_rules",
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "target_local_policy_section": "crunch.rules",
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                        },
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "crunch_policy_decision": {
@@ -3409,6 +3421,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(signal["top_report"]["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(signal["top_report"]["post_widening_next_action"], "keep-active")
         self.assertEqual(signal["top_report"]["missing_measurements"], [])
+        self.assertTrue(signal["top_report"]["duplicate_suppression"]["suppresses_new_activation_issue"])
         loop = stats_summary["evidence_to_activation_loop"]
         crunch_stage = next(item for item in loop["levers"] if item["lever"] == "crunch")
         self.assertEqual(crunch_stage["state"], "measured-active")
@@ -3421,6 +3434,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(crunch_stage["error_rate_delta"], 0.0)
         self.assertEqual(crunch_stage["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(crunch_stage["post_widening_next_action"], "keep-active")
+        self.assertTrue(crunch_stage["duplicate_suppression"]["suppresses_generic_crunch_activation_issue"])
         request_shape_stage = next(item for item in loop["levers"] if item["lever"] == "request-shape-rollups")
         self.assertEqual(request_shape_stage["state"], "measured-active")
         self.assertEqual(request_shape_stage["active_rule_count"], 1)
@@ -3429,6 +3443,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(request_shape_stage["holdout_count"], 40)
         self.assertEqual(request_shape_stage["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(request_shape_stage["post_widening_next_action"], "keep-active")
+        self.assertTrue(request_shape_stage["duplicate_suppression"]["suppresses_new_activation_issue"])
         ledger = stats_summary["evidence_to_activation_next_action_ledger"]
         crunch_entry = next(item for item in ledger["entries"] if item["lever"] == "crunch")
         self.assertEqual(crunch_entry["state"], "measured-active")
@@ -3440,6 +3455,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(crunch_entry["holdout_count"], 40)
         self.assertEqual(crunch_entry["safety_stop_count"], 0)
         self.assertEqual(crunch_entry["projected_saved_usd"], 25.818387)
+        self.assertTrue(crunch_entry["duplicate_suppression"]["suppresses_generic_crunch_activation_issue"])
         entry = next(item for item in ledger["entries"] if item["lever"] == "request-shape-rollups")
         self.assertEqual(entry["state"], "measured-active")
         self.assertEqual(entry["current_status"], "applied")
@@ -3450,6 +3466,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(entry["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(entry["post_widening_next_action"], "keep-active")
         self.assertEqual(entry["active_rule_source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertTrue(entry["duplicate_suppression"]["suppresses_new_activation_issue"])
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw-request-secret", rendered)
 

@@ -1918,9 +1918,18 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         "missing_measurements": report_missing,
         "canary_already_staged": bool(activation_follow_up.get("canary_already_staged")),
         "canary_already_applied": bool(activation_follow_up.get("canary_already_applied")),
-        "duplicate_suppression": sanitize_value(activation_follow_up.get("duplicate_suppression"))
-        if isinstance(activation_follow_up.get("duplicate_suppression"), dict)
-        else {},
+        "duplicate_suppression": (
+            sanitize_value(
+                activation_follow_up.get("duplicate_suppression")
+                if isinstance(activation_follow_up.get("duplicate_suppression"), dict)
+                else report.get("duplicate_suppression")
+            )
+            if (
+                isinstance(activation_follow_up.get("duplicate_suppression"), dict)
+                or isinstance(report.get("duplicate_suppression"), dict)
+            )
+            else {}
+        ),
         "decision": sanitize_value(report.get("decision") or summary.get("decision")) if is_policy_decision or is_activation_evidence else None,
         "graduation_decision": sanitize_value(report.get("graduation_decision") or summary.get("graduation_decision"))
         if is_policy_decision or is_activation_evidence
@@ -4104,6 +4113,8 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
                 "projected_saved_tokens": _to_int(top_report.get("projected_saved_tokens")),
             }
         )
+        if isinstance(top_report.get("duplicate_suppression"), dict):
+            stage["duplicate_suppression"] = sanitize_value(top_report.get("duplicate_suppression"))
     return stage
 
 
@@ -4274,6 +4285,8 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
             stage["active_rule_source_evidence_schema"] = sanitize_value(progress.get("active_rule_source_evidence_schema"))
             stage["target_local_rule_file"] = sanitize_value(progress.get("target_local_rule_file"))
             stage["target_local_policy_section"] = sanitize_value(progress.get("target_local_policy_section"))
+        if isinstance(progress.get("duplicate_suppression"), dict):
+            stage["duplicate_suppression"] = sanitize_value(progress.get("duplicate_suppression"))
         stage["projected_saved_usd"] = round(
             _to_float(progress.get("projected_saved_usd") or stage.get("projected_saved_usd")),
             8,

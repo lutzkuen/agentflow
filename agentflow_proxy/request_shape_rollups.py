@@ -2185,6 +2185,61 @@ def build_request_shape_crunch_activation_evidence_report(
         status = "missing-crunch-activation-evidence"
         next_action = "measure-request-shape-crunch-canary-impact"
         missing_measurements = ["applied-and-holdout-crunch-decision-coverage"]
+    active_rule_ref = str(top_rule.get("rule_ref") or top_rule.get("rule_id") or "") or None
+    keep_active_outcome = (
+        status == "active-rule-evidence-observed"
+        and post_widening_status == "post-widening-active-at-max-rollout"
+        and post_widening_next_action == "keep-active"
+    )
+    duplicate_suppression = {
+        "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+        "suppresses_new_activation_issue": keep_active_outcome,
+        "suppresses_generic_crunch_activation_issue": keep_active_outcome,
+        "reason": "repeated-context-crunch-active-at-max-rollout" if keep_active_outcome else None,
+        "fingerprint": public_id(
+            "|".join(
+                part
+                for part in (
+                    "crunch",
+                    decision_id,
+                    active_rule_ref or "",
+                    "crunch_rules.yaml",
+                    "crunch.rules",
+                )
+                if part
+            ),
+            prefix="activation",
+            fallback="activation:unknown",
+        ),
+        "matching_local_policy": "crunch_rules" if keep_active_outcome else None,
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    activation_follow_up = {
+        "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
+        "status": "keep-active-outcome-recorded" if keep_active_outcome else status,
+        "savings_status": "active-rule-evidence-observed" if keep_active_outcome else status,
+        "report_key": "request_shape_crunch_activation_evidence",
+        "evidence_schema": CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
+        "activation_state": "measured-active" if keep_active_outcome else ("missing-measurement" if missing_measurements else "measured-savings"),
+        "activation_mode": "active-local-policy",
+        "next_action": next_action,
+        "target_local_policy": "crunch_rules",
+        "policy_section": "crunch",
+        "local_file_backed": True,
+        "projected_saved_tokens": observed_saved_tokens,
+        "projected_saved_usd": round(observed_saved_usd, 6),
+        "canary_applied_rows": applied_count,
+        "canary_holdout_rows": holdout_count,
+        "canary_already_staged": has_active_decision_rule,
+        "canary_already_applied": applied_count > 0,
+        "no_op_reason": "repeated-context-crunch-active-at-max-rollout" if keep_active_outcome else None,
+        "duplicate_suppression": duplicate_suppression,
+        "missing_measurements": missing_measurements,
+        "privacy": _crunch_opportunity_privacy(),
+    }
 
     return {
         "schema": CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
@@ -2240,6 +2295,8 @@ def build_request_shape_crunch_activation_evidence_report(
             "next_action": next_action,
         },
         "rules": evidence_rules[:5],
+        "activation_follow_up": activation_follow_up,
+        "duplicate_suppression": duplicate_suppression,
         "missing_measurements": missing_measurements,
         "privacy": _crunch_opportunity_privacy(),
     }
