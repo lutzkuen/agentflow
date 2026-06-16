@@ -2324,6 +2324,53 @@ def _request_shape_crunch_policy_apply_decision(
     return None
 
 
+def _crunch_policy_decision_application_fingerprint(decision: dict[str, Any]) -> str:
+    metrics = decision.get("metrics") if isinstance(decision.get("metrics"), dict) else {}
+    coverage = metrics.get("coverage") if isinstance(metrics.get("coverage"), dict) else {}
+    payload = {
+        "schema": "agentflow.request_shape_crunch_policy_decision_application_fingerprint.v1",
+        "decision_id": decision.get("decision_id"),
+        "decision": decision.get("decision"),
+        "policy_id": decision.get("policy_id"),
+        "cohort_id": decision.get("cohort_id"),
+        "graduation_decision": decision.get("graduation_decision"),
+        "applied_count": _as_int(metrics.get("applied_count")),
+        "holdout_count": _as_int(metrics.get("holdout_count")),
+        "observed_count": _as_int(coverage.get("observed_count")),
+        "skipped_count": _as_int(coverage.get("skipped_count")),
+        "observed_saved_tokens": _as_int(metrics.get("observed_saved_tokens")),
+        "observed_saved_usd": round(_as_float(metrics.get("observed_saved_usd")), 8),
+        "error_rate_delta": round(_as_float(metrics.get("error_rate_delta")), 6),
+        "retry_rate_delta": round(_as_float(metrics.get("retry_rate_delta")), 6),
+        "fallback_rate_delta": round(_as_float(metrics.get("fallback_rate_delta")), 6),
+        "safety_stop_count": _as_int(metrics.get("safety_stop_count")),
+        "rollback_count": _as_int(metrics.get("rollback_count")),
+    }
+    digest = hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()[:16]
+    return f"request-shape-crunch-policy-apply:{digest}"
+
+
+def _crunch_policy_decision_legacy_metadata_matches(existing: dict[str, Any], decision: dict[str, Any]) -> bool:
+    metrics = decision.get("metrics") if isinstance(decision.get("metrics"), dict) else {}
+    checks = {
+        "applied_count": _as_int(metrics.get("applied_count")),
+        "holdout_count": _as_int(metrics.get("holdout_count")),
+        "observed_saved_tokens": _as_int(metrics.get("observed_saved_tokens")),
+        "observed_saved_usd": round(_as_float(metrics.get("observed_saved_usd")), 8),
+        "error_rate_delta": round(_as_float(metrics.get("error_rate_delta")), 6),
+        "retry_rate_delta": round(_as_float(metrics.get("retry_rate_delta")), 6),
+        "fallback_rate_delta": round(_as_float(metrics.get("fallback_rate_delta")), 6),
+        "safety_stop_state": public_label(decision.get("safety_stop_state") or "none", "none"),
+    }
+    for key, value in checks.items():
+        if isinstance(value, float):
+            if round(_as_float(existing.get(key)), 8 if key == "observed_saved_usd" else 6) != value:
+                return False
+        elif existing.get(key) != value:
+            return False
+    return True
+
+
 def _widened_fraction(current: Any, *, widen_fraction: float, max_canary_fraction: float, holdout_fraction: float) -> float:
     current_value = _bounded_fraction(current, DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION)
     step = _bounded_fraction(widen_fraction, DEFAULT_CRUNCH_CANARY_WIDEN_FRACTION)
@@ -2402,7 +2449,18 @@ def apply_request_shape_crunch_policy_decision(
     previous_canary = _bounded_fraction(rollout.get("canary_fraction", rollout.get("fraction")), DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION)
     holdout = _bounded_fraction(rollout.get("holdout_fraction"), DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION)
     existing_policy_decision = target_rule.get("policy_decision") if isinstance(target_rule.get("policy_decision"), dict) else {}
-    already_applied = existing_policy_decision.get("decision_id") == decision_identifier
+    application_fingerprint = _crunch_policy_decision_application_fingerprint(decision)
+    existing_application_fingerprint = str(existing_policy_decision.get("application_fingerprint") or "")
+    already_applied = (
+        existing_policy_decision.get("decision_id") == decision_identifier
+        and (
+            existing_application_fingerprint == application_fingerprint
+            or (
+                not existing_application_fingerprint
+                and _crunch_policy_decision_legacy_metadata_matches(existing_policy_decision, decision)
+            )
+        )
+    )
     widened_canary = previous_canary if already_applied else _widened_fraction(
         previous_canary,
         widen_fraction=widen_fraction,
@@ -2446,6 +2504,7 @@ def apply_request_shape_crunch_policy_decision(
         "policy_decision": {
             "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
             "decision_id": decision_identifier,
+            "application_fingerprint": application_fingerprint,
             "source_evidence_schema": CRUNCH_POLICY_DECISION_SCHEMA,
             "decision": "widen",
             "graduation_decision": public_label(decision.get("graduation_decision") or "widen", "widen"),
@@ -2503,6 +2562,7 @@ def apply_request_shape_crunch_policy_decision(
         "policy_id": policy_id,
         "cohort_id": cohort_id,
         "decision_id": decision_identifier,
+        "application_fingerprint": application_fingerprint,
         "previous_canary_fraction": previous_canary,
         "canary_fraction": widened_canary,
         "holdout_fraction": holdout,
@@ -2514,6 +2574,7 @@ def apply_request_shape_crunch_policy_decision(
             "policy_id": policy_id,
             "cohort_id": cohort_id,
             "decision_id": decision_identifier,
+            "application_fingerprint": application_fingerprint,
             "previous_canary_fraction": previous_canary,
             "canary_fraction": widened_canary,
             "holdout_fraction": holdout,

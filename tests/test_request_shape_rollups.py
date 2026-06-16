@@ -3122,6 +3122,44 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(applied_again["wrote_policy_files"])
         self.assertEqual(applied_again["canary_fraction"], 0.2)
 
+        fresh_decision = build_request_shape_crunch_policy_decision_report(
+            build_request_shape_crunch_canary_impact_report(
+                [
+                    impact_row("applied", saved_tokens=2_000, saved_chars=8_000, saved_usd=0.0125),
+                    impact_row("applied", saved_tokens=3_000, saved_chars=12_000, saved_usd=0.0185),
+                    impact_row("holdout"),
+                ]
+            )
+        )
+        self.assertEqual(fresh_decision["decision_id"], decision_id)
+        fresh_apply = apply_request_shape_crunch_policy_decision(
+            fresh_decision,
+            rules_path=rules_path,
+            decision_id=decision_id,
+        )
+        self.assertTrue(fresh_apply["ok"])
+        self.assertFalse(fresh_apply["already_applied"])
+        self.assertTrue(fresh_apply["wrote_policy_files"])
+        self.assertEqual(fresh_apply["previous_canary_fraction"], 0.2)
+        self.assertEqual(fresh_apply["canary_fraction"], 0.3)
+        fresh_rules = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+        fresh_widened = fresh_rules["request_shape_repeated_context_canaries"]["rules"][0]
+        self.assertEqual(fresh_widened["rollout"]["canary_fraction"], 0.3)
+        self.assertEqual(fresh_widened["policy_decision"]["decision_id"], decision_id)
+        self.assertEqual(fresh_widened["policy_decision"]["observed_saved_tokens"], 5_000)
+        self.assertEqual(fresh_widened["policy_decision"]["applied_count"], 2)
+        self.assertIn("application_fingerprint", fresh_widened["policy_decision"])
+
+        fresh_apply_again = apply_request_shape_crunch_policy_decision(
+            fresh_decision,
+            rules_path=rules_path,
+            decision_id=decision_id,
+        )
+        self.assertTrue(fresh_apply_again["ok"])
+        self.assertTrue(fresh_apply_again["already_applied"])
+        self.assertFalse(fresh_apply_again["wrote_policy_files"])
+        self.assertEqual(fresh_apply_again["canary_fraction"], 0.3)
+
     def test_crunch_policy_decision_rolls_back_on_safety_stop(self) -> None:
         lifecycle = {
             "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",

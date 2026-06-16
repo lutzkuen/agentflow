@@ -359,7 +359,7 @@ request_shape_repeated_context_canaries:
       rollout:
         schema: agentflow.request_shape_crunch_canary_rollout.v1
         canary_enabled: true
-        canary_fraction: 0.20
+        canary_fraction: 0.30
         holdout_fraction: 0.10
         canary_salt: local-repeated-context-crunch-canary-a8814a13d90e
         canary_unit: request_shape_cohort
@@ -383,24 +383,25 @@ request_shape_repeated_context_canaries:
         file_paths_included: false
         tool_payloads_included: false
         holdout_required: true
-        max_rollout_fraction: 0.20
+        max_rollout_fraction: 0.30
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       policy_decision:
         schema: agentflow.request_shape_crunch_policy_decision_rule_metadata.v1
         decision_id: request-shape-crunch-policy-decision:9db327d1abdec766
+        application_fingerprint: request-shape-crunch-policy-apply:1dbdbd84d69d16f6
         source_evidence_schema: agentflow.request_shape_crunch_policy_decision.v1
         decision: widen
         graduation_decision: widen
-        applied_count: 2
-        holdout_count: 7
-        observed_saved_tokens: 2298
-        observed_saved_usd: 0.006894
+        applied_count: 26
+        holdout_count: 17
+        observed_saved_tokens: 1647683
+        observed_saved_usd: 4.943049
         error_rate_delta: 0.0
         retry_rate_delta: 0.0
         fallback_rate_delta: 0.0
         safety_stop_state: none
-        previous_canary_fraction: 0.10
-        widened_canary_fraction: 0.20
+        previous_canary_fraction: 0.20
+        widened_canary_fraction: 0.30
         holdout_fraction: 0.10
         metadata_only: true
         aggregate_only: true
