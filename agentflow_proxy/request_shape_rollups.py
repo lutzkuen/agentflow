@@ -3396,34 +3396,53 @@ def _request_shape_cache_replay_canary_action(
         rollout_fraction=rollout,
         holdout_fraction=holdout,
     )
+    shape = {
+        "provider_family": cohort.get("provider_family"),
+        "source_surface": cohort.get("source_surface"),
+        "endpoint": cohort.get("endpoint"),
+        "category": cohort.get("category"),
+        "workflow_phase": cohort.get("workflow_phase"),
+        "stream": bool(cohort.get("stream")),
+        "has_tools": bool(cohort.get("has_tools")),
+        "cache_status": cohort.get("cache_status"),
+        "routing_status": cohort.get("routing_status"),
+        "text_bucket": cohort.get("text_bucket"),
+        "token_bucket": cohort.get("token_bucket"),
+        "readiness": cohort.get("readiness"),
+        "reason": cohort.get("reason"),
+    }
+    target_cache_policy = {
+        "schema": "agentflow.request_shape_cache_replay_target_policy.v1",
+        "policy_section": "cache.pattern_rules",
+        "target_local_policy": "cache_canary_policy",
+        "target_local_rule_file": "cache_canary_policy.yaml",
+        "policy_source": "local-manual",
+        "local_file_backed": True,
+        "managed_dependency": "optional",
+        "rules_path_included": False,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
     return {
         "schema": REPLAY_CACHE_CANARY_ACTION_SCHEMA,
         "action_type": "stage-local-openai-cache-replay-canary",
         "target_local_policy": "cache_canary_policy",
+        "target_cache_policy": target_cache_policy,
+        "target_local_rule_file": "cache_canary_policy.yaml",
         "policy_section": "cache",
         "policy_id": policy_id,
         "cohort_id": cohort_id,
+        "rank": _as_int(cohort.get("rank")),
+        "cohort_rank": _as_int(cohort.get("rank")),
         "candidate_count": candidate_count,
+        "eligible_cohort_count": candidate_count,
         "cohort_row_count": _as_int(cohort.get("row_count")),
         "rollout_fraction": round(rollout, 6),
         "holdout_fraction": round(holdout, 6),
         "canary_fraction": round(rollout, 6),
         "policy_source": "local-manual",
-        "conditions": {
-            "provider_family": cohort.get("provider_family"),
-            "source_surface": cohort.get("source_surface"),
-            "endpoint": cohort.get("endpoint"),
-            "category": cohort.get("category"),
-            "workflow_phase": cohort.get("workflow_phase"),
-            "stream": bool(cohort.get("stream")),
-            "has_tools": bool(cohort.get("has_tools")),
-            "cache_status": cohort.get("cache_status"),
-            "routing_status": cohort.get("routing_status"),
-            "text_bucket": cohort.get("text_bucket"),
-            "token_bucket": cohort.get("token_bucket"),
-            "readiness": cohort.get("readiness"),
-            "reason": cohort.get("reason"),
-        },
+        "shape": shape,
+        "conditions": shape,
         "ttl_seconds": DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS,
         "invalidation": {
             "schema": "agentflow.request_shape_cache_replay_invalidation_assumptions.v1",
@@ -3648,6 +3667,7 @@ def build_request_shape_cache_replay_canary_stage_report(
         and _as_int(cohort.get("projected_hits")) > 0
         and _as_float(cohort.get("projected_savings_usd")) > 0
     ]
+    top_stageable_cohorts = cohorts[:1]
     actions = [
         _request_shape_cache_replay_canary_action(
             cohort,
@@ -3655,7 +3675,7 @@ def build_request_shape_cache_replay_canary_stage_report(
             rollout_fraction=rollout_fraction,
             holdout_fraction=holdout_fraction,
         )
-        for cohort in cohorts
+        for cohort in top_stageable_cohorts
     ]
     skipped_guards = _cache_replay_stage_skipped_guard_summary(
         [cohort for cohort in dry_run.get("cohorts") or [] if isinstance(cohort, dict)]
@@ -3681,6 +3701,7 @@ def build_request_shape_cache_replay_canary_stage_report(
         "reason": reason,
         "next_action": next_action,
         "staged_canary_count": len(actions),
+        "eligible_stageable_cohort_count": len(cohorts),
         "stage_actions": actions,
         "top_stage_action": top_action,
         "top_cohort": top_cohort,
@@ -3699,7 +3720,21 @@ def build_request_shape_cache_replay_canary_stage_report(
             "blocker_breakdown": dry_run.get("blocker_breakdown"),
         },
         "acceptance": {
+            "stages_single_top_ranked_cohort": len(actions) == 1 and bool(top_action and _as_int(top_action.get("rank")) == _as_int((top_cohort or {}).get("rank"))),
             "has_replay_ready_openai_responses_cohort": bool(actions),
+            "has_rank": bool(top_action and _as_int(top_action.get("rank")) > 0),
+            "has_shape_buckets": bool(
+                top_action
+                and isinstance(top_action.get("shape"), dict)
+                and bool(top_action["shape"].get("text_bucket"))
+                and bool(top_action["shape"].get("token_bucket"))
+            ),
+            "has_target_cache_policy_metadata": bool(
+                top_action
+                and isinstance(top_action.get("target_cache_policy"), dict)
+                and top_action["target_cache_policy"].get("target_local_rule_file") == "cache_canary_policy.yaml"
+                and top_action["target_cache_policy"].get("policy_section") == "cache.pattern_rules"
+            ),
             "has_projected_hits": bool(top_action and _as_int(top_action.get("projected_hits")) > 0),
             "has_projected_savings": bool(top_action and _as_float(top_action.get("projected_savings_usd")) > 0),
             "writes_no_provider_bodies": bool(top_action and not top_action["safety_gates"]["provider_bodies_included"]),
@@ -3837,6 +3872,20 @@ def apply_request_shape_cache_replay_canary_action(
         "policy_source": "local-manual",
         "candidate_id": cohort_id,
         "description": "Local OpenAI Responses exact-cache replay canary staged from aggregate request-shape evidence.",
+        "target_cache_policy": action.get("target_cache_policy")
+        if isinstance(action.get("target_cache_policy"), dict)
+        else {
+            "schema": "agentflow.request_shape_cache_replay_target_policy.v1",
+            "policy_section": "cache.pattern_rules",
+            "target_local_policy": "cache_canary_policy",
+            "target_local_rule_file": "cache_canary_policy.yaml",
+            "policy_source": "local-manual",
+            "local_file_backed": True,
+            "managed_dependency": "optional",
+            "rules_path_included": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
         "conditions": rule_conditions,
         "action": {
             "type": "exact_cache_pattern",
@@ -3878,6 +3927,9 @@ def apply_request_shape_cache_replay_canary_action(
             "text_bucket": conditions.get("text_bucket"),
             "token_bucket": conditions.get("token_bucket"),
             "sample_count": _as_int(action.get("cohort_row_count")),
+            "rank": _as_int(action.get("rank") or action.get("cohort_rank")),
+            "cohort_rank": _as_int(action.get("cohort_rank") or action.get("rank")),
+            "shape": action.get("shape") if isinstance(action.get("shape"), dict) else conditions,
             "projected_hits": _as_int(action.get("projected_hits")),
             "projected_savings_usd": round(_as_float(action.get("projected_savings_usd")), 6),
             "aggregate_only": True,

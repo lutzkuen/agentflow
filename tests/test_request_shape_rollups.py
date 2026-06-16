@@ -735,7 +735,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["dry_run"])
         self.assertTrue(report["read_only"])
         self.assertEqual(report["staged_canary_count"], 1)
+        self.assertEqual(report["eligible_stageable_cohort_count"], 1)
+        self.assertTrue(report["acceptance"]["stages_single_top_ranked_cohort"])
         self.assertTrue(report["acceptance"]["has_replay_ready_openai_responses_cohort"])
+        self.assertTrue(report["acceptance"]["has_rank"])
+        self.assertTrue(report["acceptance"]["has_shape_buckets"])
+        self.assertTrue(report["acceptance"]["has_target_cache_policy_metadata"])
         self.assertTrue(report["acceptance"]["has_projected_hits"])
         self.assertTrue(report["acceptance"]["has_projected_savings"])
         self.assertTrue(report["acceptance"]["writes_no_provider_bodies"])
@@ -752,6 +757,15 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(action["schema"], "agentflow.request_shape_cache_replay_canary_action.v1")
         self.assertEqual(action["action_type"], "stage-local-openai-cache-replay-canary")
         self.assertEqual(action["target_local_policy"], "cache_canary_policy")
+        self.assertEqual(action["target_local_rule_file"], "cache_canary_policy.yaml")
+        self.assertEqual(action["target_cache_policy"]["schema"], "agentflow.request_shape_cache_replay_target_policy.v1")
+        self.assertEqual(action["target_cache_policy"]["policy_section"], "cache.pattern_rules")
+        self.assertEqual(action["target_cache_policy"]["target_local_rule_file"], "cache_canary_policy.yaml")
+        self.assertFalse(action["target_cache_policy"]["rules_path_included"])
+        self.assertEqual(action["rank"], 1)
+        self.assertEqual(action["cohort_rank"], 1)
+        self.assertEqual(action["shape"]["text_bucket"], "2k_8k_chars")
+        self.assertEqual(action["shape"]["token_bucket"], "500_2k_tokens")
         self.assertEqual(action["conditions"]["provider_family"], "openai")
         self.assertEqual(action["conditions"]["source_surface"], "openai_responses")
         self.assertEqual(action["conditions"]["endpoint"], "responses")
@@ -833,6 +847,74 @@ class RequestShapeRollupTests(unittest.TestCase):
             "/tmp/private/source.py",
         ):
             self.assertNotIn(forbidden, rendered)
+
+    def test_cache_replay_canary_stage_selects_only_top_ranked_replay_ready_cohort(self) -> None:
+        for cost in (0.01, 0.03, 0.02):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
+        for cost in (0.20, 0.25, 0.30, 0.35):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=12_000,
+                cost=cost,
+                baseline=cost,
+            )
+
+        report = build_request_shape_cache_replay_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="2026-06-16-cache-replay-top-only",
+            rollout_fraction=0.10,
+            holdout_fraction=0.10,
+        )
+
+        self.assertEqual(report["status"], "staged")
+        self.assertEqual(report["eligible_stageable_cohort_count"], 2)
+        self.assertEqual(report["staged_canary_count"], 1)
+        self.assertEqual(len(report["stage_actions"]), 1)
+        self.assertTrue(report["acceptance"]["stages_single_top_ranked_cohort"])
+        action = report["top_stage_action"]
+        self.assertEqual(action["rank"], 1)
+        self.assertEqual(action["cohort_rank"], 1)
+        self.assertEqual(action["shape"]["text_bucket"], "8k_32k_chars")
+        self.assertEqual(action["shape"]["token_bucket"], "2k_8k_tokens")
+        self.assertEqual(action["conditions"]["text_bucket"], "8k_32k_chars")
+        self.assertGreater(action["projected_hits"], 0)
+        self.assertGreater(action["projected_savings_usd"], 0)
+        self.assertEqual(action["target_cache_policy"]["target_local_policy"], "cache_canary_policy")
+        self.assertEqual(action["target_cache_policy"]["target_local_rule_file"], "cache_canary_policy.yaml")
+        self.assertEqual(report["top_cohort"]["rank"], 1)
+        self.assertEqual(report["top_cohort"]["text_bucket"], "8k_32k_chars")
 
     def test_cache_replay_canary_stage_cli_emits_direct_stage_payload(self) -> None:
         for cost in (0.01, 0.03, 0.02):
@@ -946,6 +1028,10 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(rule["id"], result["policy_id"])
         self.assertEqual(rule["policy_source"], "local-manual")
         self.assertEqual(rule["candidate_id"], result["cohort_id"])
+        self.assertEqual(rule["target_cache_policy"]["schema"], "agentflow.request_shape_cache_replay_target_policy.v1")
+        self.assertEqual(rule["target_cache_policy"]["policy_section"], "cache.pattern_rules")
+        self.assertEqual(rule["target_cache_policy"]["target_local_rule_file"], "cache_canary_policy.yaml")
+        self.assertFalse(rule["target_cache_policy"]["rules_path_included"])
         self.assertEqual(rule["conditions"]["pattern_hashes"], ["sha256:*"])
         self.assertEqual(rule["conditions"]["provider_family"], "openai")
         self.assertEqual(rule["conditions"]["source_surface"], "openai_responses")
@@ -960,6 +1046,10 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(rule["rollout"]["canary_fraction"], 0.05)
         self.assertEqual(rule["rollout"]["holdout_fraction"], 0.2)
         self.assertEqual(rule["graduation"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(rule["graduation"]["rank"], 1)
+        self.assertEqual(rule["graduation"]["cohort_rank"], 1)
+        self.assertEqual(rule["graduation"]["shape"]["text_bucket"], "2k_8k_chars")
+        self.assertEqual(rule["graduation"]["shape"]["token_bucket"], "500_2k_tokens")
         self.assertEqual(rule["graduation"]["projected_hits"], 2)
         self.assertTrue(rule["graduation"]["aggregate_only"])
         self.assertEqual(rule["invalidation"]["strategy"], "session-scoped-exact-non-tool")
