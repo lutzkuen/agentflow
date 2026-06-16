@@ -1166,6 +1166,35 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(duplicate_suppression["missing_holdout_coverage"])
         self.assertTrue(str(duplicate_suppression["fingerprint"]).startswith("activation:"))
 
+        burndown = plan["evidence"]["activation_safety_stop_burndown"]
+        self.assertEqual(burndown["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(burndown["summary"]["anthropic_routing_safety_stop_count"], 51)
+        self.assertIn("activation_safety_stop_burndown", plan["evidence"]["inspected_sources"])
+        burndown_group = next(row for row in burndown["groups"] if row["source"] == "pass_through_routing_report")
+        self.assertEqual(burndown_group["burndown_status"], "safety-stop-active")
+        self.assertEqual(burndown_group["safety_stop_count"], 51)
+        self.assertEqual(burndown_group["source_surface"], "unknown")
+        self.assertEqual(burndown_group["endpoint"], "unknown")
+        self.assertTrue(burndown_group["missing_applied_coverage"])
+        self.assertTrue(burndown_group["missing_holdout_coverage"])
+        self.assertIn("rollback_proof", burndown_group["needed_resolution"])
+        self.assertTrue(burndown_group["duplicate_suppression"]["suppresses_new_activation_issue"])
+
+        burndown_entry = next(
+            row
+            for row in ledger["entries"]
+            if row.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
+            and row.get("local_action_family") == "routing"
+        )
+        self.assertEqual(burndown_entry["current_status"], "keep-blocked")
+        self.assertEqual(burndown_entry["safety_stop_count"], 51)
+        self.assertEqual(burndown_entry["source_surface"], "unknown")
+        self.assertEqual(burndown_entry["endpoint"], "unknown")
+        self.assertTrue(burndown_entry["missing_applied_coverage"])
+        self.assertTrue(burndown_entry["missing_holdout_coverage"])
+        self.assertEqual(burndown_entry["safety_stop_breakdown"][0]["reason_code"], "thinking-routing-guard")
+        self.assertTrue(burndown_entry["duplicate_suppression"]["suppresses_new_activation_issue"])
+
         routing_candidate = next(
             row for row in plan["evidence"]["optimization_candidates"]
             if row["lever"] == "routing"
@@ -1235,6 +1264,20 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         routing_entry = next(row for row in ledger["entries"] if row["lever"] == "routing")
         self.assertEqual(routing_entry["current_status"], "projected")
         self.assertEqual(routing_entry["issue_worthy_status"], "ready")
+        burndown = plan["evidence"]["activation_safety_stop_burndown"]
+        self.assertEqual(burndown["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(burndown["status"], "no-safety-stop-evidence")
+        self.assertEqual(burndown["groups"], [])
+        self.assertEqual(burndown["summary"]["anthropic_routing_safety_stop_count"], 0)
+        self.assertNotIn("activation_safety_stop_burndown", plan["evidence"]["inspected_sources"])
+        self.assertFalse(
+            [
+                row
+                for row in ledger["entries"]
+                if row.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
+                and row.get("keep_blocked_reason")
+            ]
+        )
 
         routing_candidate = next(
             row for row in plan["evidence"]["optimization_candidates"]

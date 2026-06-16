@@ -145,9 +145,19 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertFalse(group["stage_allowed"])
         self.assertFalse(group["active_policy_changed"])
         self.assertFalse(group["wrote_active_policy_files"])
+        self.assertEqual(group["burndown_status"], "safety-stop-active")
         self.assertEqual(group["safety_stop_breakdown"][0]["count"], 98)
         self.assertTrue(group["safety_stop_breakdown"][0]["missing_applied_coverage"])
         self.assertTrue(group["safety_stop_breakdown"][0]["missing_holdout_coverage"])
+        duplicate_suppression = group["duplicate_suppression"]
+        self.assertEqual(
+            duplicate_suppression["schema"],
+            "agentflow.anthropic_routing_activation_issue_duplicate_suppression.v1",
+        )
+        self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
+        self.assertEqual(duplicate_suppression["safety_stop_count"], 98)
+        self.assertTrue(duplicate_suppression["missing_applied_coverage"])
+        self.assertTrue(duplicate_suppression["missing_holdout_coverage"])
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertTrue(report["privacy"]["aggregate_only"])
 

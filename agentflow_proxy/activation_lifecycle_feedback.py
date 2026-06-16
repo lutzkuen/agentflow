@@ -935,6 +935,29 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         observed_count = sum(_as_int(counts.get(key)) for key in ("canary_applied", "canary_holdout", "safety_stopped", "skipped", "bypassed_or_disabled", "unknown"))
     savings_per_1000 = _as_float(bucket.get("estimated_savings_per_1000_calls_usd"))
     keep_blocked_reason = durable if next_state == "keep-blocked" else "anthropic-routing-safety-stop-cleared"
+    missing_applied = applied_count <= 0 or "missing-applied-coverage" in blockers
+    missing_holdout = holdout_count <= 0 or "missing-holdout-coverage" in blockers
+    suppression_material = {
+        "schema": PASS_THROUGH_ROUTING_SCHEMA,
+        "provider": "anthropic",
+        "source_surface": _safe_label(bucket.get("source_surface"), "unknown"),
+        "endpoint": _safe_endpoint(bucket.get("endpoint"), "unknown"),
+        "requested_model": _safe_label(bucket.get("requested_model"), "unknown"),
+        "candidate_target_model": _safe_label(bucket.get("candidate_target_model") or bucket.get("target_model"), "unknown"),
+        "activation_gate": "anthropic-routing-safety-stop-burndown",
+    }
+    duplicate_suppression = {
+        "schema": "agentflow.anthropic_routing_activation_issue_duplicate_suppression.v1",
+        "reason": "anthropic-routing-safety-stop-burndown-not-cleared",
+        "fingerprint": public_id(json.dumps(suppression_material, sort_keys=True), prefix="activation"),
+        "suppresses_new_activation_issue": next_state == "keep-blocked",
+        "suppresses_ready_issue_until": "safety_stop_count_zero_and_applied_holdout_coverage_present",
+        "safety_stop_count": safety_stop_count,
+        "missing_applied_coverage": missing_applied,
+        "missing_holdout_coverage": missing_holdout,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
     return {
         "source": "pass_through_routing_report",
         "source_schema": lifecycle.get("schema") or PASS_THROUGH_ROUTING_SCHEMA,
@@ -983,8 +1006,10 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "blocker_codes": blockers,
         "reason_breakdown": _sanitized_reason_breakdown(lifecycle.get("blocker_reason_breakdown")) or [{"value": primary_reason, "count": max(1, safety_stop_count)}],
         "safety_stop_breakdown": safety_breakdown,
-        "missing_applied_coverage": applied_count <= 0 or "missing-applied-coverage" in blockers,
-        "missing_holdout_coverage": holdout_count <= 0 or "missing-holdout-coverage" in blockers,
+        "missing_applied_coverage": missing_applied,
+        "missing_holdout_coverage": missing_holdout,
+        "duplicate_suppression": duplicate_suppression,
+        "burndown_status": "safety-stop-active" if next_state == "keep-blocked" else next_state,
         "promotion_allowed": next_state == "unblock-ready",
         "stage_allowed": next_state == "unblock-ready",
         "active_policy_changed": False,

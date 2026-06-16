@@ -1079,6 +1079,30 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
         "safety_stop_count": count,
         "safety_stopped_count": count,
     }
+    for source_key in (
+        "source_surface",
+        "endpoint",
+        "category",
+        "workflow_phase",
+        "requested_model",
+        "required_local_executor",
+    ):
+        value = group.get(source_key)
+        if value not in (None, "", [], {}):
+            stage[source_key] = value
+    target_model = group.get("target_model") or group.get("candidate_target_model")
+    if target_model not in (None, "", [], {}):
+        stage["candidate_target_model"] = target_model
+    if group.get("safety_stop_breakdown"):
+        stage["safety_stop_breakdown"] = group.get("safety_stop_breakdown")
+    if isinstance(group.get("duplicate_suppression"), dict):
+        stage["duplicate_suppression"] = group.get("duplicate_suppression")
+    if group.get("missing_applied_coverage") is not None:
+        stage["missing_applied_coverage"] = bool(group.get("missing_applied_coverage"))
+    if group.get("missing_holdout_coverage") is not None:
+        stage["missing_holdout_coverage"] = bool(group.get("missing_holdout_coverage"))
+    if group.get("burndown_status"):
+        stage["burndown_status"] = group.get("burndown_status")
     policy_ref = str(group.get("policy_ref") or "").strip()
     if policy_ref and policy_ref != "unknown":
         stage["policy_ref"] = policy_ref
@@ -3339,10 +3363,19 @@ def build_evidence_to_activation_next_action_ledger(
             entry["duplicate_suppression"] = sanitize_value(stage.get("duplicate_suppression"))
         if stage.get("source"):
             entry["source"] = sanitize_value(stage.get("source"))
+        for source_key in ("source_surface", "endpoint", "category", "workflow_phase", "required_local_executor"):
+            if stage.get(source_key):
+                entry[source_key] = sanitize_value(stage.get(source_key))
         if stage.get("requested_model"):
             entry["requested_model"] = sanitize_value(stage.get("requested_model"))
         if stage.get("candidate_target_model"):
             entry["candidate_target_model"] = sanitize_value(stage.get("candidate_target_model"))
+        if stage.get("missing_applied_coverage") is not None:
+            entry["missing_applied_coverage"] = bool(stage.get("missing_applied_coverage"))
+        if stage.get("missing_holdout_coverage") is not None:
+            entry["missing_holdout_coverage"] = bool(stage.get("missing_holdout_coverage"))
+        if stage.get("burndown_status"):
+            entry["burndown_status"] = sanitize_value(stage.get("burndown_status"))
         if stage.get("omitted_reason"):
             entry["omitted_reason"] = sanitize_value(stage.get("omitted_reason"))
         if stage.get("follow_up_owner"):
@@ -7482,14 +7515,18 @@ def build_research_plan(
         summary,
     )
     activation_safety_stop_burndown = None
-    if diagnostics:
+    if diagnostics or isinstance(summary.get("pass_through_routing_report"), dict):
         from agentflow_proxy.activation_lifecycle_feedback import build_activation_safety_stop_burndown
 
+        stats_summary: dict[str, Any] = {}
+        if isinstance(summary.get("pass_through_routing_report"), dict):
+            stats_summary["pass_through_routing_report"] = summary["pass_through_routing_report"]
         activation_safety_stop_burndown = build_activation_safety_stop_burndown(
             research_plan={
                 "schema": SCHEMA,
                 "evidence": {
                     "repeated_diagnostics": diagnostics,
+                    "stats_summary": stats_summary,
                 },
             }
         )
