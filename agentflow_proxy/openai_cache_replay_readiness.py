@@ -312,6 +312,15 @@ def _sum_candidate_cohort_metric(candidates: list[dict[str, Any]], key: str) -> 
 def _applied_miss_blocker_counts(candidates: list[dict[str, Any]]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for candidate in candidates:
+        used_miss_reasons = False
+        for row in candidate.get("miss_reason_breakdown") or []:
+            if not isinstance(row, dict):
+                continue
+            value = str(row.get("value") or "unknown")
+            counts[value] += _as_int(row.get("count"))
+            used_miss_reasons = True
+        if used_miss_reasons:
+            continue
         metrics = candidate.get("cohort_metrics") if isinstance(candidate.get("cohort_metrics"), dict) else {}
         applied = metrics.get("applied") if isinstance(metrics.get("applied"), dict) else {}
         if _as_int(applied.get("miss_count")) <= 0:
@@ -493,6 +502,7 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
             "no-op": "collect-openai-cache-replay-canary-evidence",
         }[decision],
         "coverage": coverage,
+        "miss_reason_breakdown": applied_miss_breakdown,
         "applied_miss_blocker_breakdown": applied_miss_breakdown,
         "outcomes": {
             "projected_hits": _as_int(summary.get("projected_hits")),
@@ -510,6 +520,7 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
             "miss_count": _as_int(summary.get("miss_count")),
             "observed_hits": observed_hits,
             "top_applied_miss_blocker": top_applied_miss_blocker,
+            "top_miss_reason": top_applied_miss_blocker,
             "metadata_only": True,
             "aggregate_only": True,
         },

@@ -333,6 +333,99 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertFalse(decision["privacy"]["request_ids_included"])
         self.assertFalse(decision["privacy"]["session_ids_included"])
 
+    def test_openai_cache_replay_impact_classifies_applied_miss_reasons_without_raw_metadata(self) -> None:
+        cases = [
+            (
+                "exact-pattern-miss",
+                {
+                    "cache_replay_store": {
+                        "status": "stored",
+                        "reason": "compatible-success-response",
+                        "cache_key_included": False,
+                    }
+                },
+                "cache-warmup-miss",
+            ),
+            (
+                "exact-pattern-miss",
+                {
+                    "cache_replay_store": {
+                        "status": "skipped",
+                        "reason": "responses-output-missing",
+                        "cache_key_included": False,
+                    }
+                },
+                "cache-write-absence",
+            ),
+            ("ttl-expired-without-tool-result", {}, "ttl-expiry"),
+            (
+                "exact-pattern-miss",
+                {"pattern_rules": {"skip_reasons": [{"reason": "pattern-hash-mismatch"}]}},
+                "fingerprint-drift",
+            ),
+            ("normalization-drift", {}, "normalization-mismatch"),
+            (
+                "exact-pattern-miss",
+                {"file_dependency_audit": self._audit(reason="file-dependency-missing", safe=False)},
+                "invalidation-evidence-missing",
+            ),
+            ("exact-cache-disabled", {"status": "disabled"}, "cache-policy-disabled"),
+            ("holdout-bypass", {}, "holdout-bypass"),
+        ]
+        for cache_reason, extra, _expected in cases:
+            meta = self._cache_replay_meta(
+                canary_status="applied",
+                cohort="canary_applied",
+                reason=cache_reason,
+                projected=0.0021535,
+            )
+            meta.update(extra)
+            self._log_openai_call(
+                cache_status=str(extra.get("status") or "miss"),
+                cache_reason=cache_reason,
+                cost=0.03,
+                cost_baseline=0.03,
+                cache_extra=meta,
+            )
+        self._log_openai_call(
+            cache_status="bypassed",
+            cache_reason="canary_holdout",
+            cost=0.03,
+            cost_baseline=0.03,
+            cache_extra=self._cache_replay_meta(
+                canary_status="holdout",
+                cohort="canary_holdout",
+                reason="canary_holdout",
+                projected=0.0021535,
+            ),
+        )
+
+        impact = build_openai_cache_replay_impact_report(self.store, limit=50)
+        readiness = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=50, impact_limit=50)
+        impact_reasons = {row["value"]: row["count"] for row in impact["miss_reason_breakdown"]}
+        decision_reasons = {row["value"]: row["count"] for row in readiness["promotion_decision"]["miss_reason_breakdown"]}
+
+        self.assertEqual(impact["summary"]["applied_count"], len(cases))
+        self.assertEqual(impact["summary"]["holdout_count"], 1)
+        self.assertEqual(impact["summary"]["miss_count"], len(cases) - 1)
+        for _cache_reason, _extra, expected in cases:
+            self.assertGreaterEqual(impact_reasons[expected], 1)
+            self.assertGreaterEqual(decision_reasons[expected], 1)
+        self.assertEqual(impact["local_promotion_evidence"]["outcomes"]["miss_reason_breakdown"], impact["miss_reason_breakdown"])
+        self.assertEqual(
+            readiness["promotion_decision"]["applied_miss_blocker_breakdown"],
+            readiness["promotion_decision"]["miss_reason_breakdown"],
+        )
+        self.assertTrue(readiness["promotion_decision"]["privacy"]["metadata_only"])
+        self.assertTrue(readiness["promotion_decision"]["privacy"]["aggregate_only"])
+        rendered = json.dumps({"impact": impact, "readiness": readiness}, sort_keys=True)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("raw-cache-key-secret", rendered)
+        self.assertNotIn("raw-openai-session-must-not-leak", rendered)
+        self.assertFalse(impact["privacy"]["cache_keys_included"])
+        self.assertFalse(readiness["promotion_decision"]["privacy"]["request_ids_included"])
+        self.assertFalse(readiness["promotion_decision"]["privacy"]["session_ids_included"])
+
     def test_openai_cache_replay_readiness_widens_positive_applied_and_holdout_canary(self) -> None:
         for index, baseline in enumerate((0.03, 0.04)):
             call_id = self._log_openai_call(

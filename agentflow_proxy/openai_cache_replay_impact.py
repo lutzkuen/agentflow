@@ -225,6 +225,7 @@ def _empty_cohort() -> dict[str, Any]:
         "invalidation_count": 0,
         "stale_dependency_count": 0,
         "remaining_blocker_buckets": Counter(),
+        "miss_reason_buckets": Counter(),
     }
 
 
@@ -253,6 +254,7 @@ def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
         "bypass_skipped_count": _as_int(raw.get("bypass_skipped_count")),
         "stale_dependency_count": _as_int(raw.get("stale_dependency_count")),
         "remaining_blocker_breakdown": _counter_rows(raw.get("remaining_blocker_buckets") or Counter()),
+        "miss_reason_breakdown": _counter_rows(raw.get("miss_reason_buckets") or Counter()),
     }
 
 
@@ -325,6 +327,7 @@ def _new_candidate(candidate_id: str, rule_id: str | None, rule: dict[str, Any],
         "stale_dependency_buckets": Counter(),
         "reason_buckets": Counter(),
         "remaining_blocker_buckets": Counter(),
+        "miss_reason_buckets": Counter(),
         "provider_adoption_observations": [],
         "latest_observed_at": None,
         "oldest_observed_at": None,
@@ -380,6 +383,94 @@ def _remaining_blocker(cache: dict[str, Any], canary: dict[str, Any], cohort: st
     if status in {"miss", "bypassed", "skipped", "disabled", "blocked", "invalidated"}:
         return _reason_code(reason, "cache-replay-not-hit")
     return None
+
+
+def _cache_replay_store_meta(cache: dict[str, Any]) -> dict[str, Any]:
+    value = cache.get("cache_replay_store")
+    return value if isinstance(value, dict) else {}
+
+
+def _cache_replay_miss_reason_inputs(cache: dict[str, Any], canary: dict[str, Any]) -> set[str]:
+    reasons = {
+        _reason_code(value)
+        for value in (
+            cache.get("reason"),
+            canary.get("reason"),
+            cache.get("invalidation_reason"),
+            _cache_replay_store_meta(cache).get("reason"),
+        )
+        if _reason_code(value) != "unknown"
+    }
+    pattern_rules = cache.get("pattern_rules") if isinstance(cache.get("pattern_rules"), dict) else {}
+    for item in pattern_rules.get("skip_reasons") or []:
+        if isinstance(item, dict):
+            reason = _reason_code(item.get("reason"))
+            if reason != "unknown":
+                reasons.add(reason)
+    return reasons
+
+
+def _applied_miss_reasons(row: dict[str, Any], cache: dict[str, Any], canary: dict[str, Any]) -> list[str]:
+    reasons = _cache_replay_miss_reason_inputs(cache, canary)
+    pattern_rule = _cache_replay_rule(cache)
+    store_meta = _cache_replay_store_meta(cache)
+    store_status = _reason_code(store_meta.get("status"))
+    cache_status = _reason_code(cache.get("status"))
+    canary_status = _reason_code(canary.get("status"))
+    audit = canary.get("dependency_audit")
+    if not isinstance(audit, dict):
+        audit = cache.get("file_dependency_audit") if isinstance(cache.get("file_dependency_audit"), dict) else {}
+
+    miss_reasons: set[str] = set()
+    if canary_status == "holdout" or any("holdout" in reason for reason in reasons):
+        miss_reasons.add("holdout-bypass")
+    if cache_status == "disabled" or any("disabled" in reason or reason.endswith("-off") for reason in reasons):
+        miss_reasons.add("cache-policy-disabled")
+    if any("ttl" in reason or "expired" in reason for reason in reasons):
+        miss_reasons.add("ttl-expiry")
+    if any("normalization" in reason for reason in reasons):
+        miss_reasons.add("normalization-mismatch")
+    if "pattern-hash-mismatch" in reasons:
+        miss_reasons.add("fingerprint-drift")
+    cohort_mismatch_reasons = {
+        "source-surface-mismatch",
+        "source_surface-mismatch",
+        "endpoint-mismatch",
+        "category-mismatch",
+        "workflow-phase-mismatch",
+        "workflow_phase-mismatch",
+        "text-bucket-mismatch",
+        "text_bucket-mismatch",
+        "token-bucket-mismatch",
+        "token_bucket-mismatch",
+        "cohort-mismatch",
+        "replayability-gate-mismatch",
+    }
+    if any(reason in cohort_mismatch_reasons for reason in reasons) or not pattern_rule:
+        miss_reasons.add("cohort-mismatch")
+    if (
+        cache.get("invalidated")
+        or cache.get("invalidation_reason")
+        or any(
+            reason.startswith("dependency-")
+            or reason.startswith("file-dependency-")
+            or "invalidation" in reason
+            for reason in reasons
+        )
+        or (isinstance(audit, dict) and audit.get("safe_invalidation_evidence") is False)
+    ):
+        miss_reasons.add("invalidation-evidence-missing")
+    if store_status == "stored" or "cache-warmup-miss" in reasons:
+        miss_reasons.add("cache-warmup-miss")
+    elif store_status == "skipped":
+        miss_reasons.add("cache-write-absence")
+    elif _as_int(row.get("status_code"), 200) >= 400:
+        miss_reasons.add("upstream-error-before-cache-write")
+    elif cache_status == "miss":
+        miss_reasons.add("cache-write-absence")
+    if not miss_reasons:
+        miss_reasons.add("uncategorized-applied-cache-miss")
+    return sorted(miss_reasons)
 
 
 def _dependency_health(cache: dict[str, Any]) -> tuple[str, list[str]]:
@@ -483,6 +574,10 @@ def _add_row(
         candidate["stale_dependency_buckets"][reason] += 1
     candidate["reason_buckets"][_reason_code(cache.get("reason") or canary.get("reason"), "unknown")] += 1
     remaining_blocker = _remaining_blocker(cache, canary, cohort)
+    if cohort == "applied" and not (_as_int(row.get("cache_hit")) or cache_status == "hit"):
+        for miss_reason in _applied_miss_reasons(row, cache, canary):
+            raw["miss_reason_buckets"][miss_reason] += 1
+            candidate["miss_reason_buckets"][miss_reason] += 1
     if remaining_blocker:
         raw["remaining_blocker_buckets"][remaining_blocker] += 1
         candidate["remaining_blocker_buckets"][remaining_blocker] += 1
@@ -662,6 +757,8 @@ def _candidate_local_promotion_evidence(item: dict[str, Any]) -> dict[str, Any]:
             "observed_hits": _as_int(item.get("actual_hits")),
             "miss_count": _as_int(item.get("miss_count")),
             "bypass_skipped_count": _as_int(item.get("bypass_skipped_count")),
+            "miss_reason_breakdown": item.get("miss_reason_breakdown") or [],
+            "top_miss_reason": item.get("top_miss_reason"),
             "hit_realization_rate": (item.get("canary_hit_measurement") or {}).get("hit_realization_rate")
             if isinstance(item.get("canary_hit_measurement"), dict)
             else None,
@@ -746,6 +843,8 @@ def _local_promotion_evidence(
             "observed_hits": actual_hits,
             "miss_count": _as_int(summary.get("miss_count")),
             "bypass_skipped_count": _as_int(summary.get("bypass_skipped_count")),
+            "miss_reason_breakdown": summary.get("miss_reason_breakdown") or [],
+            "top_miss_reason": summary.get("top_miss_reason"),
             "hit_realization_rate": _ratio(float(actual_hits), float(projected_hits)),
         },
         "savings": {
@@ -932,7 +1031,9 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "stale_dependency_breakdown": _counter_rows(candidate["stale_dependency_buckets"]),
         "reason_code_breakdown": _counter_rows(candidate["reason_buckets"]),
         "remaining_blocker_breakdown": _counter_rows(candidate["remaining_blocker_buckets"]),
+        "miss_reason_breakdown": _counter_rows(candidate["miss_reason_buckets"]),
         "top_remaining_blocker": _top_counter_value(candidate["remaining_blocker_buckets"]),
+        "top_miss_reason": _top_counter_value(candidate["miss_reason_buckets"]),
         "canary": candidate.get("canary") or {"pattern_hashes_included": False},
         "oldest_observed_at": candidate.get("oldest_observed_at"),
         "latest_observed_at": candidate.get("latest_observed_at"),
@@ -1017,11 +1118,14 @@ def build_openai_cache_replay_impact_report(
     verdict_counts = Counter(str(item.get("verdict") or "unknown") for item in quality_gates)
     reason_counts: Counter[str] = Counter()
     remaining_blocker_counts: Counter[str] = Counter()
+    miss_reason_counts: Counter[str] = Counter()
     for item in quality_gates:
         for reason in item.get("reason_codes") or []:
             reason_counts[str(reason)] += 1
         for row in item.get("remaining_blocker_breakdown") or []:
             remaining_blocker_counts[str(row.get("value") or "unknown")] += _as_int(row.get("count"))
+        for row in item.get("miss_reason_breakdown") or []:
+            miss_reason_counts[str(row.get("value") or "unknown")] += _as_int(row.get("count"))
 
     top_level_gate = {
         "schema": QUALITY_GATE_SCHEMA,
@@ -1077,6 +1181,8 @@ def build_openai_cache_replay_impact_report(
         "miss_count": sum(_as_int(item.get("miss_count")) for item in quality_gates),
         "bypass_skipped_count": sum(_as_int(item.get("bypass_skipped_count")) for item in quality_gates),
         "top_remaining_blocker": _top_counter_value(remaining_blocker_counts),
+        "top_miss_reason": _top_counter_value(miss_reason_counts),
+        "miss_reason_breakdown": _counter_rows(miss_reason_counts),
         "observed_savings_usd": round(sum(_as_float(item.get("observed_savings_usd")) for item in quality_gates), 8),
         "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in quality_gates), 8),
         "canary_hit_measurement": _aggregate_canary_hit_measurements(quality_gates),
@@ -1110,6 +1216,7 @@ def build_openai_cache_replay_impact_report(
         "recommended_local_action": promotion_evidence["recommended_local_action"],
         "cohort_breakdown": _counter_rows(cohort_counts),
         "remaining_blocker_breakdown": _counter_rows(remaining_blocker_counts),
+        "miss_reason_breakdown": _counter_rows(miss_reason_counts),
         "quality_gate": top_level_gate,
         "candidates": quality_gates,
         "privacy": {

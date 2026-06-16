@@ -3409,6 +3409,10 @@ def build_evidence_to_activation_next_action_ledger(
             entry["safety_stop_breakdown"] = sanitize_value(stage.get("safety_stop_breakdown"))
         if isinstance(stage.get("duplicate_suppression"), dict):
             entry["duplicate_suppression"] = sanitize_value(stage.get("duplicate_suppression"))
+        if isinstance(stage.get("miss_reason_breakdown"), list):
+            entry["miss_reason_breakdown"] = sanitize_value(stage.get("miss_reason_breakdown"))
+        if stage.get("top_miss_reason"):
+            entry["top_miss_reason"] = sanitize_value(stage.get("top_miss_reason"))
         if isinstance(stage.get("unblock_criteria"), dict):
             entry["unblock_criteria"] = sanitize_value(stage.get("unblock_criteria"))
         if stage.get("source"):
@@ -3878,6 +3882,8 @@ def _request_shape_cache_replay_evidence_loop_stage(stats_summary: dict[str, Any
         "actual_hits": actual_hits,
         "actual_saved_cost_usd": round(actual_saved, 8),
         "miss_count": _to_int(summary.get("miss_count")),
+        "miss_reason_breakdown": sanitize_value(evidence.get("applied_miss_blocker_breakdown") or evidence.get("miss_reason_breakdown") or []),
+        "top_miss_reason": sanitize_value(summary.get("top_applied_miss_blocker") or summary.get("top_miss_reason")),
         "bypass_skipped_count": _to_int(summary.get("bypass_count") or summary.get("unsupported_shape_count")),
         "projected_hits": _to_int(summary.get("projected_hits") or top_canary.get("projected_hits")),
         "projected_saved_usd": round(_to_float(summary.get("projected_savings_usd") or top_canary.get("projected_savings_usd")), 8),
@@ -3901,6 +3907,13 @@ def _openai_cache_replay_impact_loop_stage(stats_summary: dict[str, Any]) -> dic
     actual_hits = _to_int(candidate.get("actual_hits") or candidate.get("actual_hit_count") or summary.get("actual_hits"))
     actual_saved = _to_float(candidate.get("actual_saved_cost_usd") or summary.get("actual_saved_cost_usd"))
     blockers = _cache_replay_blockers_from_candidate(candidate, impact)
+    miss_reason_breakdown = (
+        candidate.get("miss_reason_breakdown")
+        if isinstance(candidate.get("miss_reason_breakdown"), list)
+        else impact.get("miss_reason_breakdown")
+        if isinstance(impact.get("miss_reason_breakdown"), list)
+        else []
+    )
     state = _cache_replay_observed_state(
         actual_hits=actual_hits,
         observed_savings=actual_saved,
@@ -3932,6 +3945,8 @@ def _openai_cache_replay_impact_loop_stage(stats_summary: dict[str, Any]) -> dic
         "actual_hits": actual_hits,
         "actual_saved_cost_usd": round(actual_saved, 8),
         "miss_count": _to_int(candidate.get("miss_count") or summary.get("miss_count")),
+        "miss_reason_breakdown": sanitize_value(miss_reason_breakdown),
+        "top_miss_reason": sanitize_value(candidate.get("top_miss_reason") or summary.get("top_miss_reason")),
         "bypass_skipped_count": _to_int(candidate.get("bypass_skipped_count") or summary.get("bypass_skipped_count")),
         "projected_hits": _to_int(candidate.get("projected_hits") or summary.get("projected_hits")),
         "projected_saved_usd": round(_to_float(candidate.get("projected_saved_usd") or summary.get("projected_saved_usd")), 8),
@@ -3962,6 +3977,14 @@ def _openai_cache_replay_readiness_loop_stage(stats_summary: dict[str, Any]) -> 
     blockers = [str(item) for item in top.get("reason_codes") or [] if str(item or "").strip()]
     if not blockers and readiness.get("state_reason"):
         blockers = [str(readiness.get("state_reason"))]
+    decision = readiness.get("promotion_decision") if isinstance(readiness.get("promotion_decision"), dict) else {}
+    miss_reason_breakdown = (
+        decision.get("miss_reason_breakdown")
+        if isinstance(decision.get("miss_reason_breakdown"), list)
+        else decision.get("applied_miss_blocker_breakdown")
+        if isinstance(decision.get("applied_miss_blocker_breakdown"), list)
+        else []
+    )
     state = _cache_replay_observed_state(
         actual_hits=0,
         observed_savings=actual_saved,
@@ -3980,6 +4003,8 @@ def _openai_cache_replay_readiness_loop_stage(stats_summary: dict[str, Any]) -> 
         "applied_count": applied,
         "holdout_count": holdout,
         "actual_saved_cost_usd": round(actual_saved, 8),
+        "miss_reason_breakdown": sanitize_value(miss_reason_breakdown),
+        "top_miss_reason": sanitize_value((decision.get("summary") or {}).get("top_miss_reason") if isinstance(decision.get("summary"), dict) else None),
         "projected_saved_usd": round(_to_float(top.get("projected_savings_usd") or summary.get("projected_savings_usd")), 8),
         "cohort_bucket": sanitize_value(
             "/".join(str(part) for part in (top.get("endpoint"), top.get("category")) if part)

@@ -4761,6 +4761,7 @@ def build_request_shape_cache_replay_evidence_report(
         "cache_status_breakdown": _breakdown(cache_status_counts),
         "canary_status_breakdown": _breakdown(canary_status_counts),
         "blocker_breakdown": _breakdown(blocker_counts),
+        "miss_reason_breakdown": applied_miss_blocker_breakdown,
         "applied_miss_blocker_breakdown": applied_miss_blocker_breakdown,
         "stale_evidence": {
             "max_age_hours": float(max_age_hours),
