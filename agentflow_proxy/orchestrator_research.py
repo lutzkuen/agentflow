@@ -1065,6 +1065,7 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
         "lever": "activation-feedback",
         "local_action_family": action_family,
         "state": next_state,
+        "status": group.get("status") or ("blocked" if next_state == "keep-blocked" else next_state),
         "evidence_source": "agentflow.activation_safety_stop_burndown.v1",
         "next_action": group.get("next_action") or "review-activation-feedback-safety-stop-and-record-keep-blocked-reason",
         "blocker_codes": [reason],
@@ -3400,6 +3401,8 @@ def build_evidence_to_activation_next_action_ledger(
             entry["next_state"] = sanitize_value(stage.get("next_state"))
         if stage.get("next_state_reason"):
             entry["next_state_reason"] = sanitize_value(stage.get("next_state_reason"))
+        if stage.get("status"):
+            entry["status"] = sanitize_value(stage.get("status"))
         if stage.get("safety_stop_count"):
             entry["safety_stop_count"] = _to_int(stage.get("safety_stop_count"))
         if stage.get("safety_stop_breakdown"):

@@ -1009,6 +1009,7 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "source": "pass_through_routing_report",
         "source_schema": lifecycle.get("schema") or PASS_THROUGH_ROUTING_SCHEMA,
         "action_family": "routing",
+        "status": "unblock-ready" if next_state == "unblock-ready" else "blocked",
         "blocker_code": primary_reason,
         "safety_stop_reason": primary_reason,
         "keep_blocked_reason": keep_blocked_reason,

@@ -1172,6 +1172,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("activation_safety_stop_burndown", plan["evidence"]["inspected_sources"])
         burndown_group = next(row for row in burndown["groups"] if row["source"] == "pass_through_routing_report")
         self.assertEqual(burndown_group["burndown_status"], "safety-stop-active")
+        self.assertEqual(burndown_group["status"], "blocked")
         self.assertEqual(burndown_group["safety_stop_count"], 51)
         self.assertEqual(burndown_group["source_surface"], "unknown")
         self.assertEqual(burndown_group["endpoint"], "unknown")
@@ -1197,6 +1198,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             and row.get("local_action_family") == "routing"
         )
         self.assertEqual(burndown_entry["current_status"], "keep-blocked")
+        self.assertEqual(burndown_entry["status"], "blocked")
         self.assertEqual(burndown_entry["safety_stop_count"], 51)
         self.assertEqual(burndown_entry["source_surface"], "unknown")
         self.assertEqual(burndown_entry["endpoint"], "unknown")

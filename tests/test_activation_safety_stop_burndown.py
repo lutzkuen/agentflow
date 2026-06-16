@@ -119,6 +119,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         group = report["groups"][0]
         self.assertEqual(group["source"], "pass_through_routing_report")
         self.assertEqual(group["action_family"], "routing")
+        self.assertEqual(group["status"], "blocked")
         self.assertEqual(group["provider"], "anthropic")
         self.assertEqual(group["requested_model"], "claude-sonnet-4-6")
         self.assertEqual(group["target_model"], "claude-haiku-4-5-20251001")
@@ -179,6 +180,14 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertEqual(duplicate_suppression["safety_stop_count"], 390)
         self.assertTrue(duplicate_suppression["missing_applied_coverage"])
         self.assertTrue(duplicate_suppression["missing_holdout_coverage"])
+        self.assertEqual(
+            duplicate_suppression["reason"],
+            "anthropic-routing-safety-stop-burndown-not-cleared",
+        )
+        self.assertEqual(
+            duplicate_suppression["suppresses_ready_issue_until"],
+            "safety_stop_count_zero_and_applied_holdout_coverage_present",
+        )
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertTrue(report["privacy"]["aggregate_only"])
 
