@@ -3312,6 +3312,86 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("crunch-canary-lifecycle-metadata", report["missing_measurements"])
         self.assertFalse(report["privacy"]["raw_prompts_included"])
 
+    def test_crunch_canary_impact_emits_durable_action_for_fresh_staged_holdout(self) -> None:
+        lifecycle = {
+            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "policy_id": "local-repeated-context-crunch-canary-fresh",
+            "cohort_id": "request-shape-crunch:anthropic:messages:tool-result:fresh",
+            "status": "holdout",
+            "cohort": "canary_holdout",
+            "reason": "selected-holdout",
+            "policy_source": "local-manual",
+            "source_evidence_schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "source_evidence_schemas": [
+                "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                "agentflow.request_shape_follow_up_candidates.v1",
+            ],
+            "staged_at": "2026-06-16T18:00:00+00:00",
+            "projected_saved_tokens": 12_000,
+            "projected_saved_usd": 0.036,
+            "rollback_metadata_present": True,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+        report = build_request_shape_crunch_canary_impact_report(
+            [
+                {
+                    "created_at": utc_now(),
+                    "provider_family": "anthropic",
+                    "provider": "anthropic",
+                    "source_surface": "anthropic_messages",
+                    "endpoint": "messages",
+                    "category": "tool-result",
+                    "workflow_phase": "thinking",
+                    "stream": True,
+                    "has_tools": True,
+                    "text_bucket": "gte_128k_chars",
+                    "token_bucket": "lt_500_tokens",
+                    "cache_status": "skipped",
+                    "routing_status": "passthrough",
+                    "requested_model": "claude-sonnet-4-6",
+                    "routed_model": "claude-sonnet-4-6",
+                    "actual_input_tokens": 20_000,
+                    "input_tokens_est": 20_000,
+                    "text_chars": 80_000,
+                    "cost_est_usd": 0.08,
+                    "status_code": 200,
+                    "retry_count": 0,
+                    "latency_ms": 125,
+                    "crunch_json": stable_json(
+                        {
+                            "changed": False,
+                            "tokens_saved_est": 0,
+                            "request_shape_repeated_context_canary": lifecycle,
+                        }
+                    ),
+                }
+            ]
+        )
+
+        self.assertEqual(report["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(report["summary"]["candidate_count"], 1)
+        self.assertEqual(report["summary"]["applied_count"], 0)
+        self.assertEqual(report["summary"]["holdout_count"], 1)
+        self.assertEqual(report["summary"]["cohort_family_action_count"], 1)
+        self.assertEqual(report["summary"]["freshly_staged_cohort_count"], 1)
+        self.assertEqual(report["summary"]["top_durable_next_action"], "measure-more")
+        action = report["cohort_family_actions"][0]
+        self.assertEqual(action["schema"], "agentflow.request_shape_crunch_canary_cohort_family_action.v1")
+        self.assertEqual(action["durable_next_action"], "measure-more")
+        self.assertEqual(action["applied_count"], 0)
+        self.assertEqual(action["holdout_count"], 1)
+        self.assertEqual(action["projected_saved_tokens"], 12_000)
+        self.assertEqual(action["projected_saved_usd"], 0.036)
+        self.assertEqual(action["source_evidence_schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertEqual(action["staged_at"], "2026-06-16T18:00:00+00:00")
+        self.assertIn("applied-crunch-canary-coverage", action["missing_measurements"])
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["durable_next_action"], "measure-more")
+        self.assertEqual(candidate["missing_measurements"], ["applied-crunch-canary-coverage"])
+        self.assertTrue(candidate["rollback_metadata_present"])
+        self.assertFalse(report["privacy"]["provider_bodies_included"])
+
     def test_crunch_canary_impact_cli_returns_no_applied_coverage_status(self) -> None:
         self._log_call()
 

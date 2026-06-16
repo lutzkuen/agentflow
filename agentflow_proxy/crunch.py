@@ -1416,6 +1416,8 @@ def _parse_request_shape_repeated_context_canary_rules_yaml(
             "projected_saved_usd": float(item.get("projected_saved_usd") or 0.0),
             "safety_gates": item.get("safety_gates") if isinstance(item.get("safety_gates"), dict) else {},
             "lifecycle_metadata": item.get("lifecycle_metadata") if isinstance(item.get("lifecycle_metadata"), dict) else {},
+            "rollback_metadata": item.get("rollback_metadata") if isinstance(item.get("rollback_metadata"), dict) else {},
+            "staged_at": str(item.get("staged_at") or "") or None,
         })
     return rules
 
@@ -1970,6 +1972,8 @@ def _evaluate_request_shape_repeated_context_canaries(
             "policy_source": public_label(rule.get("policy_source"), "unknown"),
             "rollout_fraction": lifecycle.get("rollout_fraction"),
             "holdout_fraction": lifecycle.get("holdout_fraction"),
+            "staged_at": rule.get("staged_at"),
+            "source_evidence_schema": public_label(rule.get("source_evidence_schema"), "unknown"),
             "metadata_only": True,
         }
         if lifecycle.get("mismatched_conditions"):
@@ -1989,6 +1993,16 @@ def _evaluate_request_shape_repeated_context_canaries(
                 **lifecycle,
                 "policy_source": rule_meta["policy_source"],
                 "source_evidence_schema": public_label(rule.get("source_evidence_schema"), "unknown"),
+                "source_evidence_schemas": [
+                    public_label(schema, "unknown")
+                    for schema in rule.get("source_evidence_schemas") or []
+                    if public_label(schema, "unknown") != "unknown"
+                ],
+                "staged_at": rule.get("staged_at"),
+                "projected_saved_chars": _safe_int(rule.get("projected_saved_chars")),
+                "projected_saved_tokens": _safe_int(rule.get("projected_saved_tokens")),
+                "projected_saved_usd": float(rule.get("projected_saved_usd") or 0.0),
+                "rollback_metadata_present": bool(rule.get("rollback_metadata")),
                 "metadata_only": True,
                 "aggregate_only": True,
                 "raw_prompts_included": False,

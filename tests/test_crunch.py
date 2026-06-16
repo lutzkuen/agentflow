@@ -312,6 +312,11 @@ request_shape_repeated_context_canaries:
       policy_source: local-manual
       cohort_id: request-shape-crunch:anthropic:messages:tool-result:test
       source_evidence_schema: agentflow.request_shape_crunch_opportunity_dry_run.v1
+      source_evidence_schemas:
+        - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      projected_saved_tokens: 1234
+      projected_saved_usd: 0.0037
+      staged_at: '2026-06-16T18:00:00+00:00'
       conditions:
         provider_family: anthropic
         source_surface: anthropic_messages
@@ -385,9 +390,13 @@ request_shape_repeated_context_canaries:
             self.assertEqual(applied_lifecycle["cohort"], "canary_applied")
             self.assertEqual(holdout_lifecycle["cohort"], "canary_holdout")
             self.assertEqual(applied_lifecycle["policy_id"], "local-repeated-context-crunch-canary-test")
+            self.assertEqual(applied_lifecycle["staged_at"], "2026-06-16T18:00:00+00:00")
+            self.assertEqual(applied_lifecycle["source_evidence_schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
+            self.assertEqual(applied_lifecycle["projected_saved_tokens"], 1234)
             self.assertEqual(applied_meta["applied_count"], 1)
             self.assertEqual(holdout_meta["holdout_count"], 1)
             self.assertEqual(applied_meta["rules"][0]["policy_source"], "local-manual")
+            self.assertEqual(applied_meta["rules"][0]["staged_at"], "2026-06-16T18:00:00+00:00")
             rendered = json.dumps({"applied": applied_meta, "holdout": holdout_meta}, sort_keys=True)
             self.assertNotIn("private tool output", rendered)
             self.assertNotIn("raw-tool-id-must-not-leak", rendered)

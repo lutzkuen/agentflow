@@ -607,6 +607,14 @@ def _crunch_canary_lifecycle_from_meta(crunch: dict[str, Any]) -> dict[str, Any]
                 "cohort": cohort,
                 "policy_id": public_label(meta.get("policy_id"), "unknown"),
                 "cohort_id": public_label(meta.get("cohort_id"), "unknown"),
+                "policy_source": public_label(meta.get("policy_source"), "local-manual"),
+                "source_evidence_schema": public_label(meta.get("source_evidence_schema"), "unknown"),
+                "source_evidence_schemas": _public_label_list(meta.get("source_evidence_schemas")),
+                "staged_at": meta.get("staged_at") if isinstance(meta.get("staged_at"), str) else None,
+                "projected_saved_chars": _as_int(meta.get("projected_saved_chars")),
+                "projected_saved_tokens": _as_int(meta.get("projected_saved_tokens")),
+                "projected_saved_usd": round(_as_float(meta.get("projected_saved_usd")), 8),
+                "rollback_metadata_present": bool(meta.get("rollback_metadata_present")),
                 "safety_stop": bool(meta.get("safety_stop")) or status == "safety-stopped",
             }
     return None
@@ -710,6 +718,13 @@ def _empty_crunch_impact_candidate(policy_id: str, cohort_id: str, row: dict[str
             "routing_status": row.get("routing_status"),
         },
         "policy_source": public_label(lifecycle.get("policy_source") or "local-manual", "local-manual"),
+        "source_evidence_schema": public_label(lifecycle.get("source_evidence_schema"), "unknown"),
+        "source_evidence_schemas": _public_label_list(lifecycle.get("source_evidence_schemas")),
+        "staged_at": lifecycle.get("staged_at") if isinstance(lifecycle.get("staged_at"), str) else None,
+        "projected_saved_chars": _as_int(lifecycle.get("projected_saved_chars")),
+        "projected_saved_tokens": _as_int(lifecycle.get("projected_saved_tokens")),
+        "projected_saved_usd": round(_as_float(lifecycle.get("projected_saved_usd")), 8),
+        "rollback_metadata_present": bool(lifecycle.get("rollback_metadata_present")),
         "cohorts": {
             "canary_applied": _empty_crunch_impact_cohort(),
             "canary_holdout": _empty_crunch_impact_cohort(),
@@ -902,6 +917,43 @@ def _crunch_impact_graduation_decision(
     return "keep-staged"
 
 
+def _crunch_impact_durable_next_action(
+    *,
+    impact_recommendation: str | None,
+    reason_codes: list[str],
+    applied_count: int,
+    holdout_count: int,
+) -> str:
+    if impact_recommendation == "promotion-ready":
+        return "widen"
+    if impact_recommendation == "rollback":
+        return "rollback"
+    if impact_recommendation == "keep-blocked":
+        return "blocked"
+    if impact_recommendation == "collect-more-evidence":
+        return "measure-more" if applied_count > 0 or holdout_count > 0 else "keep-staged"
+    if reason_codes:
+        return "blocked"
+    return "keep-staged"
+
+
+def _crunch_impact_missing_measurements_for_candidate(
+    *,
+    applied_count: int,
+    holdout_count: int,
+    saved_tokens: int,
+    saved_usd: float,
+) -> list[str]:
+    missing: list[str] = []
+    if applied_count <= 0:
+        missing.append("applied-crunch-canary-coverage")
+    if holdout_count <= 0:
+        missing.append("holdout-crunch-canary-coverage")
+    if applied_count > 0 and saved_tokens <= 0 and saved_usd <= 0:
+        missing.append("applied-crunch-savings-measurement")
+    return missing
+
+
 def _crunch_impact_coverage(
     *,
     applied_count: int,
@@ -1053,6 +1105,18 @@ def build_request_shape_crunch_canary_impact_report(
             holdout_count=_as_int(holdout.get("count")),
             reason_codes=reasons,
         )
+        durable_next_action = _crunch_impact_durable_next_action(
+            impact_recommendation=impact_recommendation,
+            applied_count=_as_int(applied.get("count")),
+            holdout_count=_as_int(holdout.get("count")),
+            reason_codes=reasons,
+        )
+        candidate_missing_measurements = _crunch_impact_missing_measurements_for_candidate(
+            applied_count=_as_int(applied.get("count")),
+            holdout_count=_as_int(holdout.get("count")),
+            saved_tokens=_as_int(applied.get("saved_tokens")),
+            saved_usd=_as_float(applied.get("saved_usd")),
+        )
         _increment(verdict_counts, verdict)
         if verdict != "widen-ready":
             for reason in reasons:
@@ -1077,6 +1141,14 @@ def build_request_shape_crunch_canary_impact_report(
                 "cohort_id": raw["cohort_id"],
                 "cohort_metadata": raw["cohort_metadata"],
                 "policy_source": raw["policy_source"],
+                "source_evidence_schema": raw.get("source_evidence_schema"),
+                "source_evidence_schemas": raw.get("source_evidence_schemas") or [],
+                "staged_at": raw.get("staged_at"),
+                "freshly_staged": bool(raw.get("staged_at")),
+                "projected_saved_chars": _as_int(raw.get("projected_saved_chars")),
+                "projected_saved_tokens": _as_int(raw.get("projected_saved_tokens")),
+                "projected_saved_usd": round(_as_float(raw.get("projected_saved_usd")), 8),
+                "rollback_metadata_present": bool(raw.get("rollback_metadata_present")),
                 "observed_count": observed_count,
                 "applied_count": _as_int(applied.get("count")),
                 "holdout_count": _as_int(holdout.get("count")),
@@ -1113,8 +1185,10 @@ def build_request_shape_crunch_canary_impact_report(
                 "graduation_decision": graduation_decision,
                 "recommended_next_action": recommended_next_action,
                 "next_action": public_next_action,
+                "durable_next_action": durable_next_action,
                 "top_blocker": top_blocker if verdict != "widen-ready" else None,
                 "reason_codes": reasons,
+                "missing_measurements": candidate_missing_measurements,
                 "coverage": coverage,
                 "applied_vs_holdout_coverage": coverage,
                 "promotion_metadata": {
@@ -1126,7 +1200,9 @@ def build_request_shape_crunch_canary_impact_report(
                     "graduation_decision": graduation_decision,
                     "recommended_next_action": recommended_next_action,
                     "next_action": public_next_action,
+                    "durable_next_action": durable_next_action,
                     "reason_codes": reasons,
+                    "missing_measurements": candidate_missing_measurements,
                     "applied_count": _as_int(applied.get("count")),
                     "holdout_count": _as_int(holdout.get("count")),
                     "safety_stop_count": _as_int(safety.get("count")),
@@ -1177,6 +1253,38 @@ def build_request_shape_crunch_canary_impact_report(
     total_safety = sum(_as_int(item.get("safety_stop_count")) for item in finalized)
     total_rollback = sum(_as_int(item.get("rollback_count")) for item in finalized)
     total_unknown = sum(_as_int((item.get("cohorts") or {}).get("unknown", {}).get("count")) for item in finalized)
+    cohort_family_actions = [
+        {
+            "schema": "agentflow.request_shape_crunch_canary_cohort_family_action.v1",
+            "rank": item.get("rank"),
+            "policy_id": item.get("policy_id"),
+            "cohort_id": item.get("cohort_id"),
+            "cohort_family": "crunch",
+            "policy_source": item.get("policy_source"),
+            "source_evidence_schema": item.get("source_evidence_schema"),
+            "staged_at": item.get("staged_at"),
+            "freshly_staged": bool(item.get("freshly_staged")),
+            "applied_count": _as_int(item.get("applied_count")),
+            "holdout_count": _as_int(item.get("holdout_count")),
+            "saved_tokens": _as_int(item.get("saved_tokens")),
+            "saved_usd": round(_as_float(item.get("saved_usd")), 8),
+            "projected_saved_tokens": _as_int(item.get("projected_saved_tokens")),
+            "projected_saved_usd": round(_as_float(item.get("projected_saved_usd")), 8),
+            "impact_recommendation": item.get("impact_recommendation"),
+            "graduation_decision": item.get("graduation_decision"),
+            "durable_next_action": item.get("durable_next_action"),
+            "next_action": item.get("next_action"),
+            "recommended_next_action": item.get("recommended_next_action"),
+            "reason_codes": item.get("reason_codes") or [],
+            "missing_measurements": item.get("missing_measurements") or [],
+            "coverage": item.get("coverage"),
+            "privacy": _crunch_opportunity_privacy(),
+        }
+        for item in finalized
+    ]
+    durable_action_counts: dict[str, int] = {}
+    for action in cohort_family_actions:
+        _increment(durable_action_counts, action.get("durable_next_action") or "unknown")
     coverage = _crunch_impact_coverage(
         applied_count=total_applied,
         holdout_count=total_holdout,
@@ -1251,6 +1359,10 @@ def build_request_shape_crunch_canary_impact_report(
             "graduation_decision": top_graduation_decision,
             "top_graduation_decision": top_graduation_decision,
             "recommended_next_action": str(finalized[0].get("recommended_next_action") or "") if finalized else "stage-repeated-context-crunch-canary",
+            "top_durable_next_action": str(finalized[0].get("durable_next_action") or "") if finalized else "keep-staged",
+            "durable_next_action_breakdown": _breakdown(durable_action_counts),
+            "cohort_family_action_count": len(cohort_family_actions),
+            "freshly_staged_cohort_count": sum(1 for item in finalized if item.get("freshly_staged")),
             "coverage": coverage,
             "applied_vs_holdout_coverage": coverage,
             "cohort_counts": {
@@ -1268,7 +1380,9 @@ def build_request_shape_crunch_canary_impact_report(
         },
         "verdict_breakdown": _breakdown(verdict_counts),
         "impact_recommendation_breakdown": recommendation_breakdown,
+        "durable_next_action_breakdown": _breakdown(durable_action_counts),
         "blocker_reason_breakdown": blocker_breakdown,
+        "cohort_family_actions": cohort_family_actions,
         "candidates": finalized,
         "activation_lifecycle_feedback": _crunch_impact_activation_lifecycle_feedback(finalized),
         "privacy": _crunch_opportunity_privacy(),
