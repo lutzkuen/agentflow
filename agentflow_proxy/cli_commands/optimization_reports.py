@@ -5146,7 +5146,7 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
     )
     parser.add_argument(
         "--rules-path",
-        help="Crunch rules YAML file to update when --apply is used. Defaults to AGENTFLOW_CRUNCH_RULES or ~/.agentflow/crunch_rules.yaml.",
+        help="Crunch rules YAML file used for duplicate suppression and updated when --apply is used. Defaults to AGENTFLOW_CRUNCH_RULES, config/crunch_rules.yaml, ~/.agentflow/crunch_rules.yaml, then bundled defaults.",
     )
     parser.add_argument(
         "--pretty",
@@ -5172,6 +5172,7 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
             persist_rollups=args.persist_rollups,
             rollout_fraction=args.rollout_fraction,
             holdout_fraction=args.holdout_fraction,
+            rules_path=args.rules_path,
         )
     finally:
         store.conn.close()
