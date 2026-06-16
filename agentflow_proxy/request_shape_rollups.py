@@ -878,6 +878,28 @@ def _crunch_impact_next_action(
     return "keep-observing"
 
 
+def _crunch_impact_graduation_decision(
+    *,
+    impact_recommendation: str | None,
+    applied_count: int,
+    holdout_count: int,
+    reason_codes: list[str],
+) -> str:
+    if impact_recommendation == "promotion-ready":
+        return "widen"
+    if impact_recommendation == "rollback":
+        return "rollback"
+    if impact_recommendation == "collect-more-evidence":
+        return "keep-staged"
+    if impact_recommendation == "keep-blocked":
+        return "keep-blocked"
+    if applied_count <= 0 or holdout_count <= 0:
+        return "keep-staged"
+    if reason_codes:
+        return "keep-blocked"
+    return "keep-staged"
+
+
 def _crunch_impact_coverage(
     *,
     applied_count: int,
@@ -1023,6 +1045,12 @@ def build_request_shape_crunch_canary_impact_report(
             holdout_count=_as_int(holdout.get("count")),
             reason_codes=reasons,
         )
+        graduation_decision = _crunch_impact_graduation_decision(
+            impact_recommendation=impact_recommendation,
+            applied_count=_as_int(applied.get("count")),
+            holdout_count=_as_int(holdout.get("count")),
+            reason_codes=reasons,
+        )
         _increment(verdict_counts, verdict)
         if verdict != "widen-ready":
             for reason in reasons:
@@ -1080,6 +1108,7 @@ def build_request_shape_crunch_canary_impact_report(
                 "verdict": verdict,
                 "impact_recommendation": impact_recommendation,
                 "promotion_recommendation": impact_recommendation,
+                "graduation_decision": graduation_decision,
                 "recommended_next_action": recommended_next_action,
                 "next_action": public_next_action,
                 "top_blocker": top_blocker if verdict != "widen-ready" else None,
@@ -1092,6 +1121,7 @@ def build_request_shape_crunch_canary_impact_report(
                     "local_action_family": "crunch",
                     "target_local_policy": "crunch_rules",
                     "impact_recommendation": impact_recommendation,
+                    "graduation_decision": graduation_decision,
                     "recommended_next_action": recommended_next_action,
                     "next_action": public_next_action,
                     "reason_codes": reasons,
@@ -1137,6 +1167,7 @@ def build_request_shape_crunch_canary_impact_report(
     top_next_action = None
     if finalized:
         top_next_action = str(finalized[0].get("next_action") or "")
+    top_graduation_decision = str(finalized[0].get("graduation_decision") or "") if finalized else "keep-staged"
     total_applied = sum(_as_int(item.get("applied_count")) for item in finalized)
     total_holdout = sum(_as_int(item.get("holdout_count")) for item in finalized)
     total_skipped = sum(_as_int((item.get("cohorts") or {}).get("skipped", {}).get("count")) for item in finalized)
@@ -1173,6 +1204,7 @@ def build_request_shape_crunch_canary_impact_report(
         "ok": True,
         "read_only": True,
         "next_action": top_next_action or "stage-canary-first",
+        "graduation_decision": top_graduation_decision,
         "recommended_next_action": str(finalized[0].get("recommended_next_action") or "") if finalized else "stage-repeated-context-crunch-canary",
         "missing_measurements": missing_measurements,
         "summary": {
@@ -1214,6 +1246,8 @@ def build_request_shape_crunch_canary_impact_report(
             "top_blocker_code": blocker_breakdown[0]["value"] if blocker_breakdown else None,
             "next_action": top_next_action or "stage-canary-first",
             "top_next_action": top_next_action or "stage-canary-first",
+            "graduation_decision": top_graduation_decision,
+            "top_graduation_decision": top_graduation_decision,
             "recommended_next_action": str(finalized[0].get("recommended_next_action") or "") if finalized else "stage-repeated-context-crunch-canary",
             "coverage": coverage,
             "applied_vs_holdout_coverage": coverage,
