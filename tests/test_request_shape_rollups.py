@@ -3749,6 +3749,23 @@ class RequestShapeRollupTests(unittest.TestCase):
                                         "holdout_count": 17,
                                         "observed_saved_tokens": 1647683,
                                         "observed_saved_usd": 4.943049,
+                                        "error_rate_delta": 0.0,
+                                        "retry_rate_delta": 0.0,
+                                        "fallback_rate_delta": 0.0,
+                                        "safety_stop_state": "none",
+                                        "previous_canary_fraction": 0.20,
+                                        "widened_canary_fraction": 0.30,
+                                        "holdout_fraction": 0.10,
+                                    },
+                                    "rollout": {
+                                        "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+                                        "canary_fraction": 0.30,
+                                        "holdout_fraction": 0.10,
+                                    },
+                                    "safety_gates": {
+                                        "metadata_only": True,
+                                        "aggregate_only": True,
+                                        "max_rollout_fraction": 0.50,
                                     },
                                 }
                             ],
@@ -3798,17 +3815,99 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["active_rule_count"], 1)
         self.assertEqual(payload["summary"]["matching_active_rule_count"], 1)
         self.assertEqual(payload["summary"]["widened_rule_count"], 1)
+        self.assertEqual(payload["next_action"], "widen-further")
+        self.assertEqual(payload["summary"]["post_widening_status"], "post-widening-widen-ready")
+        self.assertEqual(payload["summary"]["post_widening_next_action"], "widen-further")
         self.assertEqual(payload["summary"]["applied_count"], 77)
         self.assertEqual(payload["summary"]["holdout_count"], 30)
+        self.assertEqual(payload["summary"]["skipped_count"], 218)
         self.assertEqual(payload["summary"]["observed_saved_tokens"], 5965139)
         self.assertAlmostEqual(payload["summary"]["observed_saved_usd"], 17.895417)
+        self.assertEqual(payload["summary"]["error_rate_delta"], 0.0)
+        self.assertEqual(payload["summary"]["retry_rate_delta"], 0.0)
+        self.assertEqual(payload["summary"]["fallback_rate_delta"], 0.0)
         self.assertEqual(payload["summary"]["safety_stop_count"], 0)
+        self.assertEqual(payload["summary"]["canary_fraction"], 0.3)
+        self.assertEqual(payload["summary"]["max_rollout_fraction"], 0.5)
         self.assertEqual(payload["summary"]["target_local_rule_file"], "crunch_rules.yaml")
         self.assertTrue(payload["privacy"]["metadata_only"])
         self.assertTrue(payload["privacy"]["aggregate_only"])
         rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("raw-policy-secret-should-not-leak", rendered)
         self.assertNotIn(str(rules_path), rendered)
+
+    def test_crunch_activation_evidence_requests_rollback_for_post_widening_regression(self) -> None:
+        decision_id = "request-shape-crunch-policy-decision:rollback-case"
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "crunch_rules.yaml"
+            rules_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "request_shape_repeated_context_canaries": {
+                            "enabled": True,
+                            "rules": [
+                                {
+                                    "id": "raw-rollback-policy-secret-should-not-leak",
+                                    "enabled": True,
+                                    "policy_source": "local-manual",
+                                    "policy_decision": {
+                                        "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                        "decision_id": decision_id,
+                                        "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                        "decision": "widen",
+                                        "graduation_decision": "widen",
+                                        "applied_count": 10,
+                                        "holdout_count": 5,
+                                        "observed_saved_tokens": 1000,
+                                        "observed_saved_usd": 0.003,
+                                        "error_rate_delta": 0.25,
+                                        "retry_rate_delta": 0.0,
+                                        "fallback_rate_delta": 0.0,
+                                        "safety_stop_state": "none",
+                                        "widened_canary_fraction": 0.30,
+                                    },
+                                    "rollout": {"canary_fraction": 0.30, "holdout_fraction": 0.10},
+                                    "safety_gates": {"max_rollout_fraction": 0.50},
+                                }
+                            ],
+                        }
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            payload = build_request_shape_crunch_activation_evidence_report(
+                crunch_policy_decision={
+                    "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "decision": "widen",
+                    "graduation_decision": "widen",
+                    "decision_id": decision_id,
+                    "summary": {
+                        "decision": "widen",
+                        "graduation_decision": "widen",
+                        "decision_id": decision_id,
+                        "applied_count": 10,
+                        "holdout_count": 5,
+                        "observed_saved_tokens": 1000,
+                        "observed_saved_usd": 0.003,
+                        "error_rate_delta": 0.25,
+                        "retry_rate_delta": 0.0,
+                        "fallback_rate_delta": 0.0,
+                        "coverage": {"fallback_count": 0, "safety_stop_count": 0, "rollback_count": 0},
+                    },
+                },
+                crunch_canary_impact={"schema": "agentflow.request_shape_crunch_canary_impact.v1", "summary": {}},
+                rules_path=rules_path,
+            )
+
+        self.assertEqual(payload["status"], "active-rule-evidence-observed")
+        self.assertEqual(payload["next_action"], "rollback")
+        self.assertEqual(payload["summary"]["post_widening_status"], "post-widening-rollback-required")
+        self.assertEqual(payload["summary"]["post_widening_next_action"], "rollback")
+        self.assertEqual(payload["summary"]["post_widening_reason_codes"], ["error-rate-regression"])
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw-rollback-policy-secret-should-not-leak", rendered)
 
     def test_crunch_policy_decision_cli_keeps_blocked_without_canary_metadata(self) -> None:
         self._log_call()

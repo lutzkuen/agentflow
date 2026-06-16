@@ -3312,12 +3312,21 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "fallback_count": 0,
                             "safety_stop_count": 0,
                             "rollback_count": 0,
+                            "error_rate_delta": 0.0,
+                            "retry_rate_delta": 0.0,
+                            "fallback_rate_delta": 0.0,
+                            "safety_stop_state": "none",
                             "observed_saved_tokens": 5965139,
                             "observed_saved_usd": 17.895417,
                             "policy_source": "local-manual",
+                            "canary_fraction": 0.3,
+                            "max_rollout_fraction": 0.5,
+                            "post_widening_status": "post-widening-widen-ready",
+                            "post_widening_next_action": "widen-further",
+                            "post_widening_reason_codes": [],
                             "target_local_rule_file": "crunch_rules.yaml",
                             "target_local_policy_section": "crunch.rules",
-                            "next_action": "monitor-post-widening-crunch-activation",
+                            "next_action": "widen-further",
                         },
                         "rules": [
                             {
@@ -3395,6 +3404,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(signal["top_report"]["projected_saved_tokens"], 5965139)
         self.assertEqual(signal["top_report"]["active_rule_count"], 1)
         self.assertEqual(signal["top_report"]["widened_rule_count"], 1)
+        self.assertEqual(signal["top_report"]["post_widening_status"], "post-widening-widen-ready")
+        self.assertEqual(signal["top_report"]["post_widening_next_action"], "widen-further")
         self.assertEqual(signal["top_report"]["missing_measurements"], [])
         loop = stats_summary["evidence_to_activation_loop"]
         crunch_stage = next(item for item in loop["levers"] if item["lever"] == "crunch")
@@ -3406,6 +3417,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(request_shape_stage["widened_rule_count"], 1)
         self.assertEqual(request_shape_stage["applied_count"], 77)
         self.assertEqual(request_shape_stage["holdout_count"], 30)
+        self.assertEqual(request_shape_stage["post_widening_status"], "post-widening-widen-ready")
+        self.assertEqual(request_shape_stage["post_widening_next_action"], "widen-further")
         ledger = stats_summary["evidence_to_activation_next_action_ledger"]
         entry = next(item for item in ledger["entries"] if item["lever"] == "request-shape-rollups")
         self.assertEqual(entry["state"], "measured-active")
@@ -3414,6 +3427,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(entry["widened_rule_count"], 1)
         self.assertEqual(entry["applied_count"], 77)
         self.assertEqual(entry["holdout_count"], 30)
+        self.assertEqual(entry["post_widening_status"], "post-widening-widen-ready")
+        self.assertEqual(entry["post_widening_next_action"], "widen-further")
         self.assertEqual(entry["active_rule_source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw-request-secret", rendered)

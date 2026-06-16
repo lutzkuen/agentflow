@@ -1892,6 +1892,20 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         "projected_saved_usd": round(projected_usd, 6),
         "projected_saved_tokens": projected_tokens,
         "projected_saved_chars": projected_chars,
+        "error_rate_delta": round(_to_float(summary.get("error_rate_delta")), 6),
+        "retry_rate_delta": round(_to_float(summary.get("retry_rate_delta")), 6),
+        "fallback_rate_delta": round(_to_float(summary.get("fallback_rate_delta")), 6),
+        "safety_stop_count": _to_int(summary.get("safety_stop_count")),
+        "fallback_count": _to_int(summary.get("fallback_count")),
+        "rollback_count": _to_int(summary.get("rollback_count")),
+        "safety_stop_state": sanitize_value(summary.get("safety_stop_state")),
+        "post_widening_status": sanitize_value(summary.get("post_widening_status")),
+        "post_widening_next_action": sanitize_value(summary.get("post_widening_next_action")),
+        "post_widening_reason_codes": sanitize_value(
+            [str(item) for item in summary.get("post_widening_reason_codes") or [] if str(item or "").strip()]
+        ),
+        "canary_fraction": round(_to_float(summary.get("canary_fraction")), 6),
+        "max_rollout_fraction": round(_to_float(summary.get("max_rollout_fraction")), 6),
         "activation_state": activation_state,
         "activation_mode": sanitize_value(activation_follow_up.get("activation_mode")),
         "follow_up_status": sanitize_value(activation_follow_up.get("status")),
@@ -3323,6 +3337,15 @@ def build_evidence_to_activation_next_action_ledger(
             "sample_count": _to_int(stage.get("sample_count")),
             "applied_count": _to_int(stage.get("applied_count")),
             "holdout_count": _to_int(stage.get("holdout_count")),
+            "fallback_count": _to_int(stage.get("fallback_count")),
+            "safety_stop_count": _to_int(stage.get("safety_stop_count")),
+            "rollback_count": _to_int(stage.get("rollback_count")),
+            "error_rate_delta": round(_to_float(stage.get("error_rate_delta")), 6),
+            "retry_rate_delta": round(_to_float(stage.get("retry_rate_delta")), 6),
+            "fallback_rate_delta": round(_to_float(stage.get("fallback_rate_delta")), 6),
+            "post_widening_status": sanitize_value(stage.get("post_widening_status")),
+            "post_widening_next_action": sanitize_value(stage.get("post_widening_next_action")),
+            "post_widening_reason_codes": sanitize_value(stage.get("post_widening_reason_codes")),
             "projected_hits": _to_int(stage.get("projected_hits")),
             "actual_hits": _to_int(stage.get("actual_hits")),
             "actual_saved_cost_usd": round(_to_float(stage.get("actual_saved_cost_usd")), 8),
@@ -4154,6 +4177,17 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
         stage["activation_follow_up_evidence_schema"] = sanitize_value(progress.get("schema"))
         stage["applied_count"] = _to_int(progress.get("applied_count"))
         stage["holdout_count"] = _to_int(progress.get("holdout_count"))
+        stage["fallback_count"] = _to_int(progress.get("fallback_count"))
+        stage["safety_stop_count"] = _to_int(progress.get("safety_stop_count"))
+        stage["rollback_count"] = _to_int(progress.get("rollback_count"))
+        stage["error_rate_delta"] = round(_to_float(progress.get("error_rate_delta")), 6)
+        stage["retry_rate_delta"] = round(_to_float(progress.get("retry_rate_delta")), 6)
+        stage["fallback_rate_delta"] = round(_to_float(progress.get("fallback_rate_delta")), 6)
+        stage["post_widening_status"] = sanitize_value(progress.get("post_widening_status"))
+        stage["post_widening_next_action"] = sanitize_value(progress.get("post_widening_next_action"))
+        stage["post_widening_reason_codes"] = sanitize_value(progress.get("post_widening_reason_codes"))
+        stage["canary_fraction"] = round(_to_float(progress.get("canary_fraction")), 6)
+        stage["max_rollout_fraction"] = round(_to_float(progress.get("max_rollout_fraction")), 6)
         if progress.get("report_key") in {"active_crunch_rule_coverage", "request_shape_crunch_activation_evidence"}:
             stage["active_rule_count"] = _to_int(progress.get("active_rule_count"))
             stage["widened_rule_count"] = _to_int(progress.get("widened_rule_count"))

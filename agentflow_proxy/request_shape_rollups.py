@@ -1902,6 +1902,8 @@ def _active_request_shape_crunch_rules(rules_path: str | Path | None = None) -> 
         decision = item.get("policy_decision") if isinstance(item.get("policy_decision"), dict) else {}
         if decision.get("schema") != "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1":
             continue
+        rollout = item.get("rollout") if isinstance(item.get("rollout"), dict) else {}
+        safety_gates = item.get("safety_gates") if isinstance(item.get("safety_gates"), dict) else {}
         decision_value = public_label(decision.get("decision") or "unknown", "unknown")
         rules.append(
             {
@@ -1918,11 +1920,74 @@ def _active_request_shape_crunch_rules(rules_path: str | Path | None = None) -> 
                 "blocked_count": _as_int(decision.get("blocked_count")),
                 "observed_saved_tokens": _as_int(decision.get("observed_saved_tokens")),
                 "observed_saved_usd": round(_as_float(decision.get("observed_saved_usd")), 8),
+                "error_rate_delta": round(_as_float(decision.get("error_rate_delta")), 6),
+                "retry_rate_delta": round(_as_float(decision.get("retry_rate_delta")), 6),
+                "fallback_rate_delta": round(_as_float(decision.get("fallback_rate_delta")), 6),
+                "safety_stop_state": public_label(decision.get("safety_stop_state") or "none", "none"),
+                "previous_canary_fraction": round(_as_float(decision.get("previous_canary_fraction")), 6),
+                "canary_fraction": round(
+                    _as_float(decision.get("widened_canary_fraction") or rollout.get("canary_fraction")),
+                    6,
+                ),
+                "holdout_fraction": round(
+                    _as_float(decision.get("holdout_fraction") or rollout.get("holdout_fraction")),
+                    6,
+                ),
+                "max_rollout_fraction": round(
+                    _as_float(safety_gates.get("max_rollout_fraction"), DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION),
+                    6,
+                ),
                 "metadata_only": True,
                 "aggregate_only": True,
             }
         )
     return rules
+
+
+def _crunch_activation_post_widening_decision(
+    *,
+    applied_count: int,
+    holdout_count: int,
+    observed_saved_tokens: int,
+    observed_saved_usd: float,
+    fallback_count: int,
+    safety_stop_count: int,
+    rollback_count: int,
+    error_rate_delta: float,
+    retry_rate_delta: float,
+    fallback_rate_delta: float,
+    canary_fraction: float,
+    max_rollout_fraction: float,
+) -> tuple[str, str, list[str]]:
+    blockers: list[str] = []
+    if safety_stop_count > 0:
+        blockers.append("safety-stop-observed")
+    if rollback_count > 0:
+        blockers.append("rollback-observed")
+    if fallback_count > 0 or fallback_rate_delta > 0:
+        blockers.append("fallback-observed")
+    if error_rate_delta > DEFAULT_CRUNCH_CANARY_ROLLBACK_ERROR_RATE:
+        blockers.append("error-rate-regression")
+    if retry_rate_delta > DEFAULT_CRUNCH_CANARY_ROLLBACK_RETRY_RATE_DELTA:
+        blockers.append("retry-rate-regression")
+    if blockers:
+        return "post-widening-rollback-required", "rollback", blockers
+
+    missing: list[str] = []
+    if applied_count <= 0:
+        missing.append("post-widening-applied-coverage")
+    if holdout_count <= 0:
+        missing.append("post-widening-holdout-coverage")
+    if observed_saved_tokens <= 0 and observed_saved_usd <= 0:
+        missing.append("post-widening-savings-observation")
+    if missing:
+        return "post-widening-measurement-incomplete", "keep-active", missing
+
+    if max_rollout_fraction > 0 and canary_fraction >= max_rollout_fraction:
+        return "post-widening-active-at-max-rollout", "keep-active", []
+    if max_rollout_fraction > 0 and canary_fraction > 0 and canary_fraction < max_rollout_fraction:
+        return "post-widening-widen-ready", "widen-further", []
+    return "post-widening-active-observed", "monitor-post-widening-crunch-activation", []
 
 
 def build_request_shape_crunch_activation_evidence_report(
@@ -1942,24 +2007,60 @@ def build_request_shape_crunch_activation_evidence_report(
     evidence_rules = matching_rules or active_rules
     top_rule = evidence_rules[0] if evidence_rules else {}
 
-    applied_count = _as_int(decision_summary.get("applied_count") or impact_summary.get("applied_count"))
-    holdout_count = _as_int(decision_summary.get("holdout_count") or impact_summary.get("holdout_count"))
-    skipped_count = _as_int((decision_summary.get("coverage") or {}).get("skipped_count") if isinstance(decision_summary.get("coverage"), dict) else impact_summary.get("skipped_count"))
-    observed_saved_tokens = _as_int(decision_summary.get("observed_saved_tokens") or impact_summary.get("saved_tokens"))
-    observed_saved_usd = _as_float(decision_summary.get("observed_saved_usd") or impact_summary.get("saved_usd"))
+    applied_count = _as_int(decision_summary.get("applied_count") or impact_summary.get("applied_count") or top_rule.get("applied_count"))
+    holdout_count = _as_int(decision_summary.get("holdout_count") or impact_summary.get("holdout_count") or top_rule.get("holdout_count"))
     coverage = decision_summary.get("coverage") if isinstance(decision_summary.get("coverage"), dict) else {}
+    skipped_count = _as_int(coverage.get("skipped_count") or impact_summary.get("skipped_count") or top_rule.get("skipped_count"))
+    observed_saved_tokens = _as_int(
+        decision_summary.get("observed_saved_tokens")
+        or impact_summary.get("saved_tokens")
+        or top_rule.get("observed_saved_tokens")
+    )
+    observed_saved_usd = _as_float(
+        decision_summary.get("observed_saved_usd")
+        or impact_summary.get("saved_usd")
+        or top_rule.get("observed_saved_usd")
+    )
     safety_stop_count = _as_int(coverage.get("safety_stop_count") or impact_summary.get("safety_stop_count"))
     rollback_count = _as_int(coverage.get("rollback_count") or impact_summary.get("rollback_count"))
     fallback_count = _as_int(coverage.get("fallback_count") or impact_summary.get("fallback_count"))
+    error_rate_delta = round(
+        _as_float(decision_summary.get("error_rate_delta") if "error_rate_delta" in decision_summary else top_rule.get("error_rate_delta")),
+        6,
+    )
+    retry_rate_delta = round(
+        _as_float(decision_summary.get("retry_rate_delta") if "retry_rate_delta" in decision_summary else top_rule.get("retry_rate_delta")),
+        6,
+    )
+    fallback_rate_delta = round(
+        _as_float(decision_summary.get("fallback_rate_delta") if "fallback_rate_delta" in decision_summary else top_rule.get("fallback_rate_delta")),
+        6,
+    )
+    canary_fraction = _as_float(top_rule.get("canary_fraction"))
+    max_rollout_fraction = _as_float(top_rule.get("max_rollout_fraction"), DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION)
     widened_rule_count = sum(1 for rule in active_rules if rule.get("decision") == "widen")
     matching_widened_rule_count = sum(1 for rule in matching_rules if rule.get("decision") == "widen")
     decision = public_label(crunch_policy_decision.get("decision") or decision_summary.get("decision") or "unknown", "unknown")
     has_active_decision_rule = bool(matching_rules)
     has_measured_decision = applied_count > 0 and holdout_count > 0
-    if has_active_decision_rule and has_measured_decision and safety_stop_count <= 0 and rollback_count <= 0:
+    post_widening_status, post_widening_next_action, post_widening_reasons = _crunch_activation_post_widening_decision(
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        observed_saved_tokens=observed_saved_tokens,
+        observed_saved_usd=observed_saved_usd,
+        fallback_count=fallback_count,
+        safety_stop_count=safety_stop_count,
+        rollback_count=rollback_count,
+        error_rate_delta=error_rate_delta,
+        retry_rate_delta=retry_rate_delta,
+        fallback_rate_delta=fallback_rate_delta,
+        canary_fraction=canary_fraction,
+        max_rollout_fraction=max_rollout_fraction,
+    )
+    if has_active_decision_rule and has_measured_decision:
         status = "active-rule-evidence-observed"
-        next_action = "monitor-post-widening-crunch-activation"
-        missing_measurements: list[str] = []
+        next_action = post_widening_next_action
+        missing_measurements = post_widening_reasons if post_widening_status == "post-widening-measurement-incomplete" else []
     elif has_measured_decision:
         status = "policy-decision-without-active-rule"
         next_action = "inspect-crunch-rule-file-activation"
@@ -2001,9 +2102,20 @@ def build_request_shape_crunch_activation_evidence_report(
             "fallback_count": fallback_count,
             "safety_stop_count": safety_stop_count,
             "rollback_count": rollback_count,
+            "error_rate_delta": error_rate_delta,
+            "retry_rate_delta": retry_rate_delta,
+            "fallback_rate_delta": fallback_rate_delta,
+            "safety_stop_state": public_label(top_rule.get("safety_stop_state") or decision_summary.get("safety_stop_state") or "none", "none"),
             "observed_saved_tokens": observed_saved_tokens,
             "observed_saved_usd": round(observed_saved_usd, 8),
             "policy_source": public_label(top_rule.get("policy_source") or decision_summary.get("policy_source") or "local-manual", "local-manual"),
+            "previous_canary_fraction": round(_as_float(top_rule.get("previous_canary_fraction")), 6),
+            "canary_fraction": round(canary_fraction, 6),
+            "holdout_fraction": round(_as_float(top_rule.get("holdout_fraction")), 6),
+            "max_rollout_fraction": round(max_rollout_fraction, 6),
+            "post_widening_status": post_widening_status,
+            "post_widening_next_action": post_widening_next_action,
+            "post_widening_reason_codes": post_widening_reasons,
             "target_local_rule_file": "crunch_rules.yaml",
             "target_local_policy_section": "crunch.rules",
             "policy_files_written": False,
