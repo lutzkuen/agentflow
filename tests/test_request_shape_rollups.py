@@ -1632,7 +1632,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(decision["privacy"]["metadata_only"])
         self.assertTrue(decision["privacy"]["aggregate_only"])
 
-    def test_cache_replay_policy_decision_keeps_staged_for_zero_hit_canary(self) -> None:
+    def test_cache_replay_policy_decision_keeps_blocked_for_applied_miss_with_holdout(self) -> None:
         evidence = {
             "schema": "agentflow.request_shape_cache_replay_evidence.v1",
             "status": "observed",
@@ -1653,15 +1653,15 @@ class RequestShapeRollupTests(unittest.TestCase):
                 }
             ],
             "summary": {
-                "observed_row_count": 3,
-                "applied_count": 2,
-                "holdout_count": 1,
+                "observed_row_count": 5,
+                "applied_count": 1,
+                "holdout_count": 4,
                 "exact_hit_count": 0,
-                "miss_count": 2,
+                "miss_count": 1,
                 "observed_hits": 0,
-                "projected_hits": 2,
+                "projected_hits": 35,
                 "observed_savings_usd": 0.0,
-                "projected_savings_usd": 0.06,
+                "projected_savings_usd": 0.075373,
                 "invalidation_skipped_count": 0,
                 "unsupported_shape_count": 0,
                 "retry_count": 0,
@@ -1674,12 +1674,27 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         decision = build_request_shape_cache_replay_policy_decision_report(evidence)
 
-        self.assertEqual(decision["decision"], "keep-staged")
-        self.assertTrue(decision["summary"]["keep_staged"])
+        self.assertEqual(decision["decision"], "keep-blocked")
+        self.assertEqual(decision["next_action"], "keep-cache-replay-blocked")
+        self.assertEqual(decision["summary"]["next_action"], "keep-cache-replay-blocked")
+        self.assertTrue(decision["summary"]["keep_blocked"])
+        self.assertFalse(decision["summary"]["keep_staged"])
         self.assertFalse(decision["summary"]["promotion_allowed"])
+        self.assertEqual(decision["summary"]["applied_count"], 1)
+        self.assertEqual(decision["summary"]["holdout_count"], 4)
+        self.assertEqual(decision["summary"]["miss_count"], 1)
+        self.assertEqual(decision["summary"]["projected_hits"], 35)
         self.assertIn("missing-observed-cache-hits", decision["reason_codes"])
         self.assertIn("missing-observed-cache-savings", decision["reason_codes"])
-        self.assertEqual(decision["top_decision"]["recommended_next_action"], "keep-openai-exact-cache-replay-canary-staged")
+        self.assertIn("applied-cache-replay-miss-observed", decision["reason_codes"])
+        self.assertEqual(decision["top_decision"]["reason"], "applied-cache-replay-miss-observed")
+        self.assertEqual(decision["top_decision"]["recommended_next_action"], "keep-cache-replay-blocked")
+        self.assertEqual(decision["top_decision"]["next_action"], "keep-cache-replay-blocked")
+        self.assertEqual(decision["top_decision"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(decision["top_decision"]["target_local_policy_section"], "cache.pattern_rules")
+        self.assertIsNone(decision["top_decision"]["local_policy_patch"])
+        self.assertTrue(decision["privacy"]["metadata_only"])
+        self.assertTrue(decision["privacy"]["aggregate_only"])
 
     def test_cache_replay_policy_decision_keeps_blocked_for_invalidation_risk(self) -> None:
         evidence = {

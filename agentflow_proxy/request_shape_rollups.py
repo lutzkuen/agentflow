@@ -4249,6 +4249,8 @@ def _cache_replay_policy_reason_codes(evidence: dict[str, Any] | None) -> list[s
         codes.append("missing-observed-cache-hits")
     if metrics["observed_savings_usd"] <= 0:
         codes.append("missing-observed-cache-savings")
+    if metrics["applied_count"] > 0 and metrics["holdout_count"] > 0 and metrics["miss_count"] > 0 and metrics["observed_hits"] <= 0:
+        codes.append("applied-cache-replay-miss-observed")
     if metrics["stale_evidence"]:
         codes.append("stale-cache-replay-evidence")
     if metrics["invalidation_skipped_count"] > 0:
@@ -4287,6 +4289,8 @@ def _cache_replay_policy_decision_value(evidence: dict[str, Any] | None) -> str:
         and metrics["observed_savings_usd"] > 0
     ):
         return "widen"
+    if metrics["applied_count"] > 0 and metrics["holdout_count"] > 0 and metrics["miss_count"] > 0:
+        return "keep-blocked"
     return "keep-staged"
 
 
@@ -4296,7 +4300,18 @@ def _cache_replay_policy_decision_reason(evidence: dict[str, Any] | None, decisi
     if decision == "rollback":
         return "stale-cache-replay-evidence"
     codes = _cache_replay_policy_reason_codes(evidence)
+    if decision == "keep-blocked" and "applied-cache-replay-miss-observed" in codes:
+        return "applied-cache-replay-miss-observed"
     return codes[0] if codes else "cache-replay-promotion-blocked"
+
+
+def _cache_replay_policy_recommended_next_action(decision: str) -> str:
+    return {
+        "widen": "promote-cache-replay-rule",
+        "rollback": "rollback-cache-replay-rule",
+        "keep-staged": "keep-cache-replay-canary-staged",
+        "keep-blocked": "keep-cache-replay-blocked",
+    }[decision]
 
 
 def _cache_replay_policy_rollback_metadata(evidence: dict[str, Any] | None, decision: str) -> dict[str, Any]:
@@ -4435,6 +4450,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
     metrics = _cache_replay_policy_decision_metrics(evidence)
     reason = _cache_replay_policy_decision_reason(evidence, decision)
     reason_codes = _cache_replay_policy_reason_codes(evidence)
+    recommended_next_action = _cache_replay_policy_recommended_next_action(decision)
     rollback_metadata = _cache_replay_policy_rollback_metadata(evidence, decision)
     local_policy_patch = _cache_replay_policy_patch(evidence, decision)
     promotion_allowed = decision == "widen"
@@ -4445,13 +4461,8 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "decision": decision,
         "reason": reason,
         "reason_codes": reason_codes,
-        "recommended_next_action": {
-            "widen": "widen-openai-exact-cache-replay-policy",
-            "rollback": "disable-openai-exact-cache-replay-canary",
-            "keep-staged": "keep-openai-exact-cache-replay-canary-staged",
-            "keep-blocked": "keep-openai-exact-cache-replay-blocked",
-        }[decision],
-        "next_action": "apply-local-cache-policy-patch-after-review" if decision in {"widen", "rollback"} else "keep-observing",
+        "recommended_next_action": recommended_next_action,
+        "next_action": recommended_next_action,
         "target_local_policy": "cache_rules",
         "target_local_rule_file": "cache_rules.yaml",
         "target_local_policy_section": "cache.pattern_rules",
@@ -4490,10 +4501,12 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "decision": decision,
         "reason": reason,
         "reason_codes": reason_codes,
+        "next_action": recommended_next_action,
         "top_decision": entry,
         "decisions": [entry],
         "summary": {
             "decision": decision,
+            "next_action": recommended_next_action,
             "promotion_allowed": promotion_allowed,
             "rollback_required": rollback_required,
             "keep_staged": decision == "keep-staged",
