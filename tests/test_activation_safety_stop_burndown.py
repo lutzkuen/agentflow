@@ -15,6 +15,142 @@ from agentflow_proxy.store import Store, stable_json, utc_now
 
 
 class ActivationSafetyStopBurndownTests(unittest.TestCase):
+    def _anthropic_routing_safety_stop_plan(self) -> dict:
+        return {
+            "schema": "agentflow.orchestrator_research_plan.v1",
+            "evidence": {
+                "stats_summary": {
+                    "pass_through_routing_report": {
+                        "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+                        "buckets": [
+                            {
+                                "rank": 1,
+                                "provider": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "endpoint": "/v1/messages",
+                                "requested_model": "claude-sonnet-4-6",
+                                "routed_model": "claude-sonnet-4-6",
+                                "candidate_target_model": "claude-haiku-4-5-20251001",
+                                "category": "tool-result",
+                                "workflow_phase": "unknown",
+                                "sample_count": 1250,
+                                "actionability": "actionable",
+                                "required_local_executor": "anthropic-routing-rules",
+                                "estimated_savings_per_1000_calls_usd": 4.5,
+                                "anthropic_canary_lifecycle_evidence": {
+                                    "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+                                    "status": "matched",
+                                    "matched_count": 1250,
+                                    "observed_count": 98,
+                                    "cohort_counts": {
+                                        "canary_applied": 0,
+                                        "canary_holdout": 0,
+                                        "safety_stopped": 98,
+                                        "skipped": 0,
+                                        "bypassed_or_disabled": 0,
+                                        "unknown": 0,
+                                    },
+                                    "coverage": {
+                                        "matched_count": 1250,
+                                        "observed_rate": 0.0784,
+                                        "applied_rate": 0.0,
+                                        "holdout_rate": 0.0,
+                                    },
+                                    "error_count": 0,
+                                    "retry_count": 0,
+                                    "fallback_count": 0,
+                                    "latest_observed_at": "2026-06-15T20:00:15.598631+00:00",
+                                    "stale_evidence": {"stale": False, "age_hours": 4.0, "max_age_hours": 72.0},
+                                    "blocker_codes": [
+                                        "missing-applied-coverage",
+                                        "missing-holdout-coverage",
+                                        "safety-stop-observed",
+                                    ],
+                                    "blocker_reason_breakdown": [
+                                        {"value": "missing-applied-coverage", "count": 1250},
+                                        {"value": "missing-holdout-coverage", "count": 1250},
+                                        {"value": "safety-stop-observed", "count": 98},
+                                    ],
+                                    "safety_stop_breakdown": [
+                                        {
+                                            "category": "tool-result",
+                                            "count": 98,
+                                            "durable_blocked_reason": "anthropic-routing-safety-stop-local-canary-safety-stop-keep-blocked",
+                                            "endpoint": "/v1/messages",
+                                            "executor_compatible": True,
+                                            "expected_local_executor": "anthropic-routing-rules",
+                                            "missing_applied_coverage": True,
+                                            "missing_holdout_coverage": True,
+                                            "next_action": "keep-anthropic-routing-blocked-until-safety-stop-burndown",
+                                            "reason_code": "local-canary-safety-stop",
+                                            "source_surface": "anthropic_messages",
+                                            "workflow_phase": "unknown",
+                                        }
+                                    ],
+                                    "durable_blocked_reason": "anthropic-routing-safety-stop-local-canary-safety-stop-keep-blocked",
+                                    "next_action": "keep-anthropic-routing-blocked-until-safety-stop-burndown",
+                                },
+                            }
+                        ],
+                        "privacy": {
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                            "raw_prompts_included": False,
+                            "provider_bodies_included": False,
+                            "request_ids_included": False,
+                            "session_ids_included": False,
+                        },
+                    }
+                }
+            },
+        }
+
+    def test_anthropic_routing_safety_stop_plan_keeps_activation_blocked(self):
+        report = build_activation_safety_stop_burndown(
+            research_plan=self._anthropic_routing_safety_stop_plan()
+        )
+
+        self.assertEqual(report["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(report["status"], "ranked")
+        self.assertEqual(report["summary"]["anthropic_routing_safety_stop_count"], 98)
+        self.assertEqual(report["summary"]["top_next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
+        self.assertEqual(report["summary"]["top_next_state"], "keep-blocked")
+
+        group = report["groups"][0]
+        self.assertEqual(group["source"], "pass_through_routing_report")
+        self.assertEqual(group["action_family"], "routing")
+        self.assertEqual(group["provider"], "anthropic")
+        self.assertEqual(group["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(group["target_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(group["source_surface"], "anthropic_messages")
+        self.assertEqual(group["endpoint"], "/v1/messages")
+        self.assertEqual(group["category"], "tool-result")
+        self.assertEqual(group["safety_stop_count"], 98)
+        self.assertEqual(group["matched_count"], 1250)
+        self.assertEqual(group["applied_count"], 0)
+        self.assertEqual(group["holdout_count"], 0)
+        self.assertEqual(group["coverage"]["applied_rate"], 0.0)
+        self.assertEqual(group["coverage"]["holdout_rate"], 0.0)
+        self.assertFalse(group["stale_evidence"]["stale"])
+        self.assertEqual(
+            group["durable_blocked_reason"],
+            "anthropic-routing-safety-stop-local-canary-safety-stop-keep-blocked",
+        )
+        self.assertEqual(group["blocker_code"], "local-canary-safety-stop")
+        self.assertEqual(group["next_action_class"], "continue-blocked")
+        self.assertIn("applied_coverage", group["needed_resolution"])
+        self.assertIn("holdout_coverage", group["needed_resolution"])
+        self.assertIn("rollback_proof", group["needed_resolution"])
+        self.assertFalse(group["promotion_allowed"])
+        self.assertFalse(group["stage_allowed"])
+        self.assertFalse(group["active_policy_changed"])
+        self.assertFalse(group["wrote_active_policy_files"])
+        self.assertEqual(group["safety_stop_breakdown"][0]["count"], 98)
+        self.assertTrue(group["safety_stop_breakdown"][0]["missing_applied_coverage"])
+        self.assertTrue(group["safety_stop_breakdown"][0]["missing_holdout_coverage"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+
     def test_lifecycle_safety_stop_groups_have_specific_next_action(self):
         result = {
             "schema": "fixture.activation.apply.v1",
@@ -187,6 +323,28 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertEqual(report["schema"], "agentflow.activation_safety_stop_burndown.v1")
         self.assertEqual(report["summary"]["safety_stop_count"], 3)
         self.assertEqual(report["summary"]["top_next_action"], "review-activation-feedback-safety-stop-and-record-keep-blocked-reason")
+
+    def test_cli_reads_anthropic_routing_safety_stop_from_plan_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "agentflow.sqlite3"
+            store = Store(str(db_path))
+            store.conn.close()
+            plan_path = Path(tmp) / "plan.json"
+            plan_path.write_text(json.dumps(self._anthropic_routing_safety_stop_plan()), encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.activation_safety_stop_burndown_cli(
+                ["--db", str(db_path), "--plan-json", str(plan_path), "--pretty"],
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(report["summary"]["anthropic_routing_safety_stop_count"], 98)
+        self.assertEqual(report["summary"]["top_next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
+        self.assertFalse(report["groups"][0]["promotion_allowed"])
+        self.assertFalse(report["groups"][0]["stage_allowed"])
 
 
 if __name__ == "__main__":

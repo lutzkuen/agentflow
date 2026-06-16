@@ -14,6 +14,7 @@ from agentflow_proxy.store import utc_now
 QUEUE_META_SCHEMA = "agentflow.activation_staged_lifecycle_feedback_queue_meta.v1"
 SUMMARY_SCHEMA = "agentflow.activation_staged_lifecycle_feedback_summary.v1"
 SAFETY_STOP_BURNDOWN_SCHEMA = "agentflow.activation_safety_stop_burndown.v1"
+PASS_THROUGH_ROUTING_SCHEMA = "agentflow.pass_through_routing_activation_candidates.v1"
 
 RAW_REASON_HINTS = {
     "api",
@@ -84,6 +85,15 @@ def _as_int(value: Any) -> int:
 
 def _safe_label(value: Any, fallback: str = "unknown") -> str:
     return public_label(value, fallback)
+
+
+def _safe_endpoint(value: Any, fallback: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if text in {"/v1/messages", "/v1/responses", "messages", "responses", "chat/completions"}:
+        return text
+    if text.startswith("/v1/") and len(text) <= 64 and not any(char.isspace() for char in text):
+        return text
+    return _safe_label(text, fallback)
 
 
 def _safe_id(value: Any, *, prefix: str, fallback: str = "unknown") -> str:
@@ -770,6 +780,267 @@ def _safety_group_from_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any] 
     }
 
 
+def _routing_report_from_plan(plan: dict[str, Any]) -> dict[str, Any] | None:
+    if plan.get("schema") == PASS_THROUGH_ROUTING_SCHEMA:
+        return plan
+    evidence = plan.get("evidence") if isinstance(plan.get("evidence"), dict) else {}
+    report = evidence.get("pass_through_routing_report")
+    if isinstance(report, dict):
+        return report
+    stats_summary = evidence.get("stats_summary") if isinstance(evidence.get("stats_summary"), dict) else {}
+    report = stats_summary.get("pass_through_routing_report")
+    if isinstance(report, dict):
+        return report
+    report = plan.get("pass_through_routing_report")
+    if isinstance(report, dict):
+        return report
+    return None
+
+
+def _sanitized_breakdown(rows: Any) -> list[dict[str, Any]]:
+    clean: list[dict[str, Any]] = []
+    if not isinstance(rows, list):
+        return clean
+    for row in rows[:20]:
+        if not isinstance(row, dict):
+            continue
+        item = {
+            "reason_code": _reason_code(row.get("reason_code") or row.get("value") or row.get("reason")) or "unknown",
+            "count": _as_int(row.get("count") or row.get("event_count") or row.get("safety_stop_count")),
+            "source_surface": _safe_label(row.get("source_surface"), "unknown"),
+            "endpoint": _safe_endpoint(row.get("endpoint"), "unknown"),
+            "category": _safe_label(row.get("category"), "unknown"),
+            "workflow_phase": _safe_label(row.get("workflow_phase"), "unknown"),
+            "expected_local_executor": _safe_label(row.get("expected_local_executor"), "unknown"),
+            "executor_compatible": bool(row.get("executor_compatible")),
+            "missing_applied_coverage": bool(row.get("missing_applied_coverage")),
+            "missing_holdout_coverage": bool(row.get("missing_holdout_coverage")),
+            "durable_blocked_reason": _reason_code(row.get("durable_blocked_reason")) or None,
+            "next_action": _safe_label(row.get("next_action"), "unknown"),
+        }
+        clean.append({key: value for key, value in item.items() if value not in (None, "", "unknown")})
+    return clean
+
+
+def _sanitized_reason_breakdown(rows: Any) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    clean: list[dict[str, Any]] = []
+    for row in rows[:20]:
+        if not isinstance(row, dict):
+            continue
+        code = _reason_code(row.get("value") or row.get("reason_code") or row.get("reason"))
+        if code:
+            clean.append({"value": code, "count": _as_int(row.get("count") or 1)})
+    return clean
+
+
+def _anthropic_routing_next_action(
+    *,
+    safety_stop_count: int,
+    blockers: list[str],
+    stale: bool,
+    applied_count: int,
+    holdout_count: int,
+    explicit: Any,
+) -> tuple[str, str, str]:
+    blocker_set = set(blockers)
+    if safety_stop_count > 0 or "safety-stop-observed" in blocker_set:
+        explicit_action = _safe_label(explicit, "keep-anthropic-routing-blocked-until-safety-stop-burndown")
+        if explicit_action in {"unknown", ""}:
+            explicit_action = "keep-anthropic-routing-blocked-until-safety-stop-burndown"
+        return (
+            explicit_action,
+            "keep-blocked",
+            "safety-stop-requires-safer-threshold-or-executor-guard-and-rollback-proof",
+        )
+    if stale:
+        return (
+            "refresh-anthropic-routing-lifecycle-evidence",
+            "retry-later",
+            "safety-stop-awaits-fresh-lifecycle-or-holdout-evidence",
+        )
+    if applied_count <= 0 or holdout_count <= 0 or {"missing-applied-coverage", "missing-holdout-coverage"} & blocker_set:
+        return (
+            "collect-anthropic-routing-applied-holdout-coverage",
+            "retry-later",
+            "missing-applied-or-holdout-coverage",
+        )
+    return (
+        "unblock-for-bounded-anthropic-routing-canary",
+        "unblock-ready",
+        "safety-stop-burndown-clean-with-applied-and-holdout-coverage",
+    )
+
+
+def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, Any] | None:
+    if str(bucket.get("provider") or "").strip().lower() != "anthropic":
+        return None
+    lifecycle = bucket.get("anthropic_canary_lifecycle_evidence")
+    if not isinstance(lifecycle, dict):
+        return None
+    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    coverage = lifecycle.get("coverage") if isinstance(lifecycle.get("coverage"), dict) else {}
+    stale_evidence = lifecycle.get("stale_evidence") if isinstance(lifecycle.get("stale_evidence"), dict) else {}
+    safety_stop_count = _as_int(counts.get("safety_stopped"))
+    blockers = sorted({
+        _reason_code(item) or str(item)
+        for item in (list(lifecycle.get("blocker_codes") or []) + list(bucket.get("blocker_codes") or []))
+        if str(item or "").strip()
+    })
+    if safety_stop_count <= 0 and "safety-stop-observed" not in blockers:
+        return None
+
+    applied_count = _as_int(counts.get("canary_applied"))
+    holdout_count = _as_int(counts.get("canary_holdout"))
+    stale = bool(stale_evidence.get("stale"))
+    next_action, next_state, next_state_reason = _anthropic_routing_next_action(
+        safety_stop_count=safety_stop_count,
+        blockers=blockers,
+        stale=stale,
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        explicit=lifecycle.get("next_action") or bucket.get("next_action"),
+    )
+    safety_breakdown = _sanitized_breakdown(lifecycle.get("safety_stop_breakdown"))
+    primary_reason = (
+        safety_breakdown[0].get("reason_code")
+        if safety_breakdown
+        else ("safety-stop-observed" if safety_stop_count > 0 else _primary_safety_reason(blockers))
+    )
+    durable = (
+        _reason_code(lifecycle.get("durable_blocked_reason"))
+        or (safety_breakdown[0].get("durable_blocked_reason") if safety_breakdown else None)
+        or "anthropic-routing-safety-stop-keep-blocked"
+    )
+    needed = []
+    if applied_count <= 0 or "missing-applied-coverage" in blockers:
+        needed.append("applied_coverage")
+    if holdout_count <= 0 or "missing-holdout-coverage" in blockers:
+        needed.append("holdout_coverage")
+    if stale:
+        needed.append("fresh_lifecycle_evidence")
+    if safety_stop_count > 0 or "safety-stop-observed" in blockers:
+        needed.extend(["safety_stop_reason_review", "safer_threshold_or_executor_guard", "rollback_proof"])
+    needed = sorted(set(needed))
+    workflow_phase = _safe_label(bucket.get("workflow_phase"), "unknown")
+    if workflow_phase == "unknown" and safety_breakdown:
+        workflow_phase = _safe_label(safety_breakdown[0].get("workflow_phase"), "unknown")
+    if workflow_phase == "unknown" and _safe_label(bucket.get("category"), "unknown") == "tool-result":
+        workflow_phase = "tool-execution"
+
+    matched_count = _as_int(lifecycle.get("matched_count") or coverage.get("matched_count") or bucket.get("sample_count"))
+    observed_count = _as_int(lifecycle.get("observed_count"))
+    if observed_count <= 0:
+        observed_count = sum(_as_int(counts.get(key)) for key in ("canary_applied", "canary_holdout", "safety_stopped", "skipped", "bypassed_or_disabled", "unknown"))
+    savings_per_1000 = _as_float(bucket.get("estimated_savings_per_1000_calls_usd"))
+    keep_blocked_reason = durable if next_state == "keep-blocked" else "anthropic-routing-safety-stop-cleared"
+    return {
+        "source": "pass_through_routing_report",
+        "source_schema": lifecycle.get("schema") or PASS_THROUGH_ROUTING_SCHEMA,
+        "action_family": "routing",
+        "blocker_code": primary_reason,
+        "safety_stop_reason": primary_reason,
+        "keep_blocked_reason": keep_blocked_reason,
+        "durable_blocked_reason": durable,
+        "next_state": next_state,
+        "next_state_reason": next_state_reason,
+        "stale_status": "stale" if stale else "fresh",
+        "repeated_noop_status": "unknown",
+        "file_backed_representation_status": "present",
+        "needed_resolution": needed,
+        "next_action": next_action,
+        "next_action_class": "continue-blocked" if next_state == "keep-blocked" else ("unblock-bounded-canary" if next_state == "unblock-ready" else "stage-safer-threshold"),
+        "provider": "anthropic",
+        "source_surface": _safe_label(bucket.get("source_surface"), "unknown"),
+        "endpoint": _safe_endpoint(bucket.get("endpoint"), "unknown"),
+        "category": _safe_label(bucket.get("category"), "unknown"),
+        "workflow_phase": workflow_phase,
+        "requested_model": _safe_label(bucket.get("requested_model"), "unknown"),
+        "target_model": _safe_label(bucket.get("candidate_target_model") or bucket.get("target_model"), "unknown"),
+        "required_local_executor": _safe_label(bucket.get("required_local_executor") or (safety_breakdown[0].get("expected_local_executor") if safety_breakdown else None), "unknown"),
+        "event_count": observed_count,
+        "sample_count": _as_int(bucket.get("sample_count") or bucket.get("count")),
+        "matched_count": matched_count,
+        "observed_count": observed_count,
+        "safety_stop_count": safety_stop_count,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "error_count": _as_int(lifecycle.get("error_count")),
+        "retry_count": _as_int(lifecycle.get("retry_count")),
+        "fallback_count": _as_int(lifecycle.get("fallback_count")),
+        "coverage": {
+            "matched_count": matched_count,
+            "observed_rate": _as_float(coverage.get("observed_rate")),
+            "applied_rate": _as_float(coverage.get("applied_rate")),
+            "holdout_rate": _as_float(coverage.get("holdout_rate")),
+        },
+        "stale_evidence": {
+            "stale": stale,
+            "age_hours": stale_evidence.get("age_hours") if isinstance(stale_evidence.get("age_hours"), (int, float, type(None))) else None,
+            "max_age_hours": stale_evidence.get("max_age_hours") if isinstance(stale_evidence.get("max_age_hours"), (int, float, type(None))) else 72.0,
+        },
+        "blocker_codes": blockers,
+        "reason_breakdown": _sanitized_reason_breakdown(lifecycle.get("blocker_reason_breakdown")) or [{"value": primary_reason, "count": max(1, safety_stop_count)}],
+        "safety_stop_breakdown": safety_breakdown,
+        "missing_applied_coverage": applied_count <= 0 or "missing-applied-coverage" in blockers,
+        "missing_holdout_coverage": holdout_count <= 0 or "missing-holdout-coverage" in blockers,
+        "promotion_allowed": next_state == "unblock-ready",
+        "stage_allowed": next_state == "unblock-ready",
+        "active_policy_changed": False,
+        "wrote_active_policy_files": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "savings_per_1000_calls_usd": round(savings_per_1000, 6),
+        "savings_estimate_usd": round((savings_per_1000 * matched_count) / 1000.0, 8) if savings_per_1000 > 0 else 0.0,
+        "policy_ref": _public_ref(
+            {
+                "provider": "anthropic",
+                "requested_model": bucket.get("requested_model"),
+                "target_model": bucket.get("candidate_target_model") or bucket.get("target_model"),
+                "category": bucket.get("category"),
+                "endpoint": bucket.get("endpoint"),
+            },
+            prefix="policy",
+        ),
+    }
+
+
+def _anthropic_routing_groups_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:
+    if report.get("schema") != PASS_THROUGH_ROUTING_SCHEMA:
+        return []
+    groups: list[dict[str, Any]] = []
+    for bucket in report.get("buckets") or []:
+        if not isinstance(bucket, dict):
+            continue
+        group = _anthropic_routing_group_from_bucket(bucket)
+        if group is not None:
+            groups.append(group)
+    groups.sort(
+        key=lambda item: (
+            -_as_int(item.get("matched_count")),
+            -_as_int(item.get("sample_count")),
+            str(item.get("source_surface") or ""),
+            str(item.get("endpoint") or ""),
+        )
+    )
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, int]] = set()
+    for group in groups:
+        key = (
+            str(group.get("durable_blocked_reason") or group.get("keep_blocked_reason") or ""),
+            str(group.get("requested_model") or ""),
+            str(group.get("target_model") or ""),
+            str(group.get("category") or ""),
+            _as_int(group.get("safety_stop_count")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(group)
+    return deduped
+
+
 def _safety_group_sort_key(group: dict[str, Any]) -> tuple[float, int, int, str]:
     score = (
         _as_int(group.get("safety_stop_count")) * 10.0
@@ -806,6 +1077,9 @@ def build_activation_safety_stop_burndown(
             group = _safety_group_from_diagnostic(diagnostic)
             if group is not None:
                 groups.append(group)
+    routing_report = _routing_report_from_plan(plan)
+    if isinstance(routing_report, dict):
+        groups.extend(_anthropic_routing_groups_from_report(routing_report))
 
     groups.sort(key=_safety_group_sort_key, reverse=True)
     ranked: list[dict[str, Any]] = []
@@ -835,6 +1109,14 @@ def build_activation_safety_stop_burndown(
             "top_next_state_reason": top.get("next_state_reason"),
             "top_next_action": top.get("next_action"),
             "next_actions": next_actions,
+            "anthropic_routing_safety_stop_count": sum(
+                _as_int(group.get("safety_stop_count"))
+                for group in ranked
+                if group.get("source") == "pass_through_routing_report" and group.get("action_family") == "routing"
+            ),
+            "blocked_activation_count": sum(
+                1 for group in ranked if group.get("next_state") == "keep-blocked"
+            ),
         },
         "groups": ranked,
         "privacy": _safety_privacy_summary(),
