@@ -1097,6 +1097,11 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
         stage["safety_stop_breakdown"] = group.get("safety_stop_breakdown")
     if isinstance(group.get("duplicate_suppression"), dict):
         stage["duplicate_suppression"] = group.get("duplicate_suppression")
+    if isinstance(group.get("unblock_criteria"), dict):
+        stage["unblock_criteria"] = group.get("unblock_criteria")
+    for gate_key in ("promotion_allowed", "stage_allowed", "active_policy_changed", "wrote_active_policy_files"):
+        if group.get(gate_key) is not None:
+            stage[gate_key] = bool(group.get(gate_key))
     if group.get("missing_applied_coverage") is not None:
         stage["missing_applied_coverage"] = bool(group.get("missing_applied_coverage"))
     if group.get("missing_holdout_coverage") is not None:
@@ -3378,6 +3383,8 @@ def build_evidence_to_activation_next_action_ledger(
             entry["safety_stop_breakdown"] = sanitize_value(stage.get("safety_stop_breakdown"))
         if isinstance(stage.get("duplicate_suppression"), dict):
             entry["duplicate_suppression"] = sanitize_value(stage.get("duplicate_suppression"))
+        if isinstance(stage.get("unblock_criteria"), dict):
+            entry["unblock_criteria"] = sanitize_value(stage.get("unblock_criteria"))
         if stage.get("source"):
             entry["source"] = sanitize_value(stage.get("source"))
         for source_key in ("source_surface", "endpoint", "category", "workflow_phase", "required_local_executor"):
@@ -3393,6 +3400,9 @@ def build_evidence_to_activation_next_action_ledger(
             entry["missing_holdout_coverage"] = bool(stage.get("missing_holdout_coverage"))
         if stage.get("burndown_status"):
             entry["burndown_status"] = sanitize_value(stage.get("burndown_status"))
+        for gate_key in ("promotion_allowed", "stage_allowed", "active_policy_changed", "wrote_active_policy_files"):
+            if stage.get(gate_key) is not None:
+                entry[gate_key] = bool(stage.get(gate_key))
         if stage.get("omitted_reason"):
             entry["omitted_reason"] = sanitize_value(stage.get("omitted_reason"))
         if stage.get("follow_up_owner"):
@@ -3441,7 +3451,17 @@ def build_evidence_to_activation_next_action_ledger(
             entry["prior_issue"] = matched
             if not any(_issue_number(issue) == matched.get("number") and _is_open(issue) for issue in existing_issues):
                 entry["issue_status"] = "closed-issue-seen"
-        entries.append({key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in {"sample_count", "applied_count", "holdout_count", "projected_saved_usd"}})
+        preserved_empty_keys = {
+            "sample_count",
+            "applied_count",
+            "holdout_count",
+            "projected_saved_usd",
+            "promotion_allowed",
+            "stage_allowed",
+            "active_policy_changed",
+            "wrote_active_policy_files",
+        }
+        entries.append({key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in preserved_empty_keys})
 
     entries.sort(
         key=lambda item: (

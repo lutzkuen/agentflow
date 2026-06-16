@@ -873,6 +873,51 @@ def _anthropic_routing_next_action(
     )
 
 
+def _anthropic_routing_unblock_criteria(
+    *,
+    safety_stop_count: int,
+    applied_count: int,
+    holdout_count: int,
+    missing_applied: bool,
+    missing_holdout: bool,
+    needed_resolution: list[str],
+    promotion_allowed: bool,
+    stage_allowed: bool,
+    next_state: str,
+) -> dict[str, Any]:
+    needed = {str(item or "") for item in needed_resolution}
+    safety_stop_clear = safety_stop_count <= 0 and "safety_stop_reason_review" not in needed
+    applied_coverage_present = applied_count > 0 and not missing_applied and "applied_coverage" not in needed
+    holdout_coverage_present = holdout_count > 0 and not missing_holdout and "holdout_coverage" not in needed
+    safer_guard_present = "safer_threshold_or_executor_guard" not in needed
+    rollback_proof_present = "rollback_proof" not in needed
+    ready = (
+        safety_stop_clear
+        and applied_coverage_present
+        and holdout_coverage_present
+        and safer_guard_present
+        and rollback_proof_present
+        and promotion_allowed
+        and stage_allowed
+        and next_state == "unblock-ready"
+    )
+    return {
+        "schema": "agentflow.anthropic_routing_safety_stop_unblock_criteria.v1",
+        "status": "unblock-ready" if ready else "blocked",
+        "safety_stop_count_zero": safety_stop_clear,
+        "applied_coverage_present": applied_coverage_present,
+        "holdout_coverage_present": holdout_coverage_present,
+        "safer_threshold_or_executor_guard_present": safer_guard_present,
+        "rollback_proof_present": rollback_proof_present,
+        "promotion_allowed": promotion_allowed,
+        "stage_allowed": stage_allowed,
+        "suppresses_ready_issue_until": "safety_stop_count_zero_and_applied_holdout_coverage_present",
+        "needed_resolution": needed_resolution,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
 def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, Any] | None:
     if str(bucket.get("provider") or "").strip().lower() != "anthropic":
         return None
@@ -937,6 +982,8 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
     keep_blocked_reason = durable if next_state == "keep-blocked" else "anthropic-routing-safety-stop-cleared"
     missing_applied = applied_count <= 0 or "missing-applied-coverage" in blockers
     missing_holdout = holdout_count <= 0 or "missing-holdout-coverage" in blockers
+    promotion_allowed = next_state == "unblock-ready"
+    stage_allowed = next_state == "unblock-ready"
     suppression_material = {
         "schema": PASS_THROUGH_ROUTING_SCHEMA,
         "provider": "anthropic",
@@ -1010,8 +1057,19 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "missing_holdout_coverage": missing_holdout,
         "duplicate_suppression": duplicate_suppression,
         "burndown_status": "safety-stop-active" if next_state == "keep-blocked" else next_state,
-        "promotion_allowed": next_state == "unblock-ready",
-        "stage_allowed": next_state == "unblock-ready",
+        "promotion_allowed": promotion_allowed,
+        "stage_allowed": stage_allowed,
+        "unblock_criteria": _anthropic_routing_unblock_criteria(
+            safety_stop_count=safety_stop_count,
+            applied_count=applied_count,
+            holdout_count=holdout_count,
+            missing_applied=missing_applied,
+            missing_holdout=missing_holdout,
+            needed_resolution=needed,
+            promotion_allowed=promotion_allowed,
+            stage_allowed=stage_allowed,
+            next_state=next_state,
+        ),
         "active_policy_changed": False,
         "wrote_active_policy_files": False,
         "provider_calls_made": False,

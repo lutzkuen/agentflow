@@ -41,18 +41,18 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
                                     "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
                                     "status": "matched",
                                     "matched_count": 1250,
-                                    "observed_count": 98,
+                                    "observed_count": 390,
                                     "cohort_counts": {
                                         "canary_applied": 0,
                                         "canary_holdout": 0,
-                                        "safety_stopped": 98,
+                                        "safety_stopped": 390,
                                         "skipped": 0,
                                         "bypassed_or_disabled": 0,
                                         "unknown": 0,
                                     },
                                     "coverage": {
                                         "matched_count": 1250,
-                                        "observed_rate": 0.0784,
+                                        "observed_rate": 0.312,
                                         "applied_rate": 0.0,
                                         "holdout_rate": 0.0,
                                     },
@@ -69,12 +69,12 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
                                     "blocker_reason_breakdown": [
                                         {"value": "missing-applied-coverage", "count": 1250},
                                         {"value": "missing-holdout-coverage", "count": 1250},
-                                        {"value": "safety-stop-observed", "count": 98},
+                                        {"value": "safety-stop-observed", "count": 390},
                                     ],
                                     "safety_stop_breakdown": [
                                         {
                                             "category": "tool-result",
-                                            "count": 98,
+                                            "count": 390,
                                             "durable_blocked_reason": "anthropic-routing-safety-stop-local-canary-safety-stop-keep-blocked",
                                             "endpoint": "/v1/messages",
                                             "executor_compatible": True,
@@ -112,7 +112,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
 
         self.assertEqual(report["schema"], "agentflow.activation_safety_stop_burndown.v1")
         self.assertEqual(report["status"], "ranked")
-        self.assertEqual(report["summary"]["anthropic_routing_safety_stop_count"], 98)
+        self.assertEqual(report["summary"]["anthropic_routing_safety_stop_count"], 390)
         self.assertEqual(report["summary"]["top_next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
         self.assertEqual(report["summary"]["top_next_state"], "keep-blocked")
 
@@ -125,7 +125,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertEqual(group["source_surface"], "anthropic_messages")
         self.assertEqual(group["endpoint"], "/v1/messages")
         self.assertEqual(group["category"], "tool-result")
-        self.assertEqual(group["safety_stop_count"], 98)
+        self.assertEqual(group["safety_stop_count"], 390)
         self.assertEqual(group["matched_count"], 1250)
         self.assertEqual(group["applied_count"], 0)
         self.assertEqual(group["holdout_count"], 0)
@@ -146,16 +146,37 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertFalse(group["active_policy_changed"])
         self.assertFalse(group["wrote_active_policy_files"])
         self.assertEqual(group["burndown_status"], "safety-stop-active")
-        self.assertEqual(group["safety_stop_breakdown"][0]["count"], 98)
+        self.assertEqual(group["safety_stop_breakdown"][0]["count"], 390)
         self.assertTrue(group["safety_stop_breakdown"][0]["missing_applied_coverage"])
         self.assertTrue(group["safety_stop_breakdown"][0]["missing_holdout_coverage"])
+        unblock = group["unblock_criteria"]
+        self.assertEqual(unblock["schema"], "agentflow.anthropic_routing_safety_stop_unblock_criteria.v1")
+        self.assertEqual(unblock["status"], "blocked")
+        self.assertFalse(unblock["safety_stop_count_zero"])
+        self.assertFalse(unblock["applied_coverage_present"])
+        self.assertFalse(unblock["holdout_coverage_present"])
+        self.assertFalse(unblock["safer_threshold_or_executor_guard_present"])
+        self.assertFalse(unblock["rollback_proof_present"])
+        self.assertFalse(unblock["promotion_allowed"])
+        self.assertFalse(unblock["stage_allowed"])
+        self.assertIn("safety_stop_reason_review", unblock["needed_resolution"])
+        self.assertIn("safer_threshold_or_executor_guard", unblock["needed_resolution"])
+        self.assertIn("rollback_proof", unblock["needed_resolution"])
+        self.assertIn("applied_coverage", unblock["needed_resolution"])
+        self.assertIn("holdout_coverage", unblock["needed_resolution"])
+        self.assertEqual(
+            unblock["suppresses_ready_issue_until"],
+            "safety_stop_count_zero_and_applied_holdout_coverage_present",
+        )
+        self.assertTrue(unblock["metadata_only"])
+        self.assertTrue(unblock["aggregate_only"])
         duplicate_suppression = group["duplicate_suppression"]
         self.assertEqual(
             duplicate_suppression["schema"],
             "agentflow.anthropic_routing_activation_issue_duplicate_suppression.v1",
         )
         self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
-        self.assertEqual(duplicate_suppression["safety_stop_count"], 98)
+        self.assertEqual(duplicate_suppression["safety_stop_count"], 390)
         self.assertTrue(duplicate_suppression["missing_applied_coverage"])
         self.assertTrue(duplicate_suppression["missing_holdout_coverage"])
         self.assertTrue(report["privacy"]["metadata_only"])
@@ -351,7 +372,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertEqual(code, 0)
         report = json.loads(stdout.getvalue())
         self.assertEqual(report["schema"], "agentflow.activation_safety_stop_burndown.v1")
-        self.assertEqual(report["summary"]["anthropic_routing_safety_stop_count"], 98)
+        self.assertEqual(report["summary"]["anthropic_routing_safety_stop_count"], 390)
         self.assertEqual(report["summary"]["top_next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
         self.assertFalse(report["groups"][0]["promotion_allowed"])
         self.assertFalse(report["groups"][0]["stage_allowed"])

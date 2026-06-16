@@ -1178,6 +1178,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(burndown_group["missing_applied_coverage"])
         self.assertTrue(burndown_group["missing_holdout_coverage"])
         self.assertIn("rollback_proof", burndown_group["needed_resolution"])
+        self.assertFalse(burndown_group["promotion_allowed"])
+        self.assertFalse(burndown_group["stage_allowed"])
+        unblock = burndown_group["unblock_criteria"]
+        self.assertEqual(unblock["schema"], "agentflow.anthropic_routing_safety_stop_unblock_criteria.v1")
+        self.assertEqual(unblock["status"], "blocked")
+        self.assertFalse(unblock["safety_stop_count_zero"])
+        self.assertFalse(unblock["applied_coverage_present"])
+        self.assertFalse(unblock["holdout_coverage_present"])
+        self.assertFalse(unblock["safer_threshold_or_executor_guard_present"])
+        self.assertFalse(unblock["rollback_proof_present"])
         self.assertTrue(burndown_group["duplicate_suppression"]["suppresses_new_activation_issue"])
 
         burndown_entry = next(
@@ -1194,6 +1204,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(burndown_entry["missing_holdout_coverage"])
         self.assertEqual(burndown_entry["safety_stop_breakdown"][0]["reason_code"], "thinking-routing-guard")
         self.assertTrue(burndown_entry["duplicate_suppression"]["suppresses_new_activation_issue"])
+        self.assertFalse(burndown_entry["promotion_allowed"])
+        self.assertFalse(burndown_entry["stage_allowed"])
+        self.assertFalse(burndown_entry["active_policy_changed"])
+        self.assertFalse(burndown_entry["wrote_active_policy_files"])
+        self.assertEqual(burndown_entry["unblock_criteria"]["status"], "blocked")
+        self.assertFalse(burndown_entry["unblock_criteria"]["safety_stop_count_zero"])
+        self.assertFalse(burndown_entry["unblock_criteria"]["applied_coverage_present"])
+        self.assertFalse(burndown_entry["unblock_criteria"]["holdout_coverage_present"])
+        self.assertFalse(burndown_entry["unblock_criteria"]["promotion_allowed"])
+        self.assertFalse(burndown_entry["unblock_criteria"]["stage_allowed"])
 
         routing_candidate = next(
             row for row in plan["evidence"]["optimization_candidates"]
