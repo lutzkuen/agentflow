@@ -5140,9 +5140,16 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
         help="Candidate holdout fraction to encode in the staged action, default: 0.10",
     )
     parser.add_argument(
+        "--max-new-canaries",
+        type=int,
+        default=10,
+        help="Maximum number of unsuppressed cohorts to stage in this run, default: 10. "
+        "Remaining stageable cohorts are picked up on the next run once earlier ones are applied.",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
-        help="Write the staged canary action to a local crunch rules YAML file. Default is read-only.",
+        help="Write the staged canary action(s) to a local crunch rules YAML file. Default is read-only.",
     )
     parser.add_argument(
         "--rules-path",
@@ -5160,6 +5167,7 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
     from agentflow_proxy.paths import agentflow_config_path
     from agentflow_proxy.request_shape_rollups import (
         apply_request_shape_crunch_canary_action,
+        apply_request_shape_crunch_canary_actions,
         build_request_shape_crunch_canary_stage_report,
     )
 
@@ -5173,13 +5181,14 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
             rollout_fraction=args.rollout_fraction,
             holdout_fraction=args.holdout_fraction,
             rules_path=args.rules_path,
+            max_new_canaries=args.max_new_canaries,
         )
     finally:
         store.conn.close()
     if args.apply:
         rules_path = Path(args.rules_path or os.getenv("AGENTFLOW_CRUNCH_RULES") or agentflow_config_path("crunch_rules.yaml"))
-        action = result.get("top_stage_action") if isinstance(result.get("top_stage_action"), dict) else None
-        if action is None:
+        actions = [action for action in result.get("stage_actions") or [] if isinstance(action, dict)]
+        if not actions:
             apply_result = {
                 "schema": "agentflow.request_shape_crunch_canary_apply.v1",
                 "ok": False,
@@ -5188,8 +5197,10 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
                 "rules_path_included": False,
                 "errors": [{"path": "$.top_stage_action", "message": "no stageable request-shape crunch canary action"}],
             }
+        elif len(actions) == 1:
+            apply_result = apply_request_shape_crunch_canary_action(actions[0], rules_path=rules_path)
         else:
-            apply_result = apply_request_shape_crunch_canary_action(action, rules_path=rules_path)
+            apply_result = apply_request_shape_crunch_canary_actions(actions, rules_path=rules_path)
         result["apply_result"] = apply_result
         result["read_only"] = False
         result["dry_run"] = False

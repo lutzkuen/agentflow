@@ -13,6 +13,7 @@ from agentflow_proxy import cli
 from agentflow_proxy.request_shape_rollups import (
     apply_request_shape_cache_replay_canary_action,
     apply_request_shape_crunch_canary_action,
+    apply_request_shape_crunch_canary_actions,
     apply_request_shape_crunch_policy_decision,
     build_request_shape_cache_replay_canary_stage_report,
     build_request_shape_cache_replay_evidence_report,
@@ -2638,6 +2639,133 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(report["duplicate_suppression"]["suppresses_new_stage_action"])
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertNotIn(str(rules_path), json.dumps(report, sort_keys=True))
+
+    def test_crunch_canary_stage_stages_all_remaining_unsuppressed_cohorts_in_one_run(self) -> None:
+        for text_chars, workflow_phase in (
+            (20_000, "thinking"),
+            (80_000, "thinking"),
+            (132_000, "thinking"),
+        ):
+            for _ in range(3):
+                self._log_call(
+                    stream=1,
+                    has_tools=True,
+                    cache_status="skipped",
+                    cache_reason="streaming tools-disabled",
+                    routing_reason="keep requested model for thinking request",
+                    workflow_phase=workflow_phase,
+                    text_chars=text_chars,
+                    cost=0.10,
+                    baseline=0.10,
+                )
+
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=50,
+            run_id="multi-cohort-stage-first",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+            rules_path=rules_path,
+        )
+
+        self.assertEqual(report["status"], "staged")
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["staged_canary_count"], 3)
+        self.assertEqual(len(report["stage_actions"]), 3)
+        self.assertEqual(report["duplicate_suppression"]["suppressed_existing_cohort_count"], 0)
+        self.assertEqual(report["duplicate_suppression"]["stageable_unsuppressed_cohort_count"], 3)
+        self.assertEqual(report["duplicate_suppression"]["newly_staged_cohort_count"], 3)
+        self.assertFalse(report["duplicate_suppression"]["suppresses_new_stage_action"])
+        self.assertTrue(report["acceptance"]["stages_all_unsuppressed_cohorts_within_bound"])
+        self.assertTrue(report["acceptance"]["does_not_restage_suppressed_or_existing_widened_cohorts"])
+        cohort_ids = {action["cohort_id"] for action in report["stage_actions"]}
+        self.assertEqual(len(cohort_ids), 3)
+        text_buckets = {action["conditions"]["text_bucket"] for action in report["stage_actions"]}
+        self.assertEqual(text_buckets, {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"})
+        for action in report["stage_actions"]:
+            self.assertGreater(action["projected_saved_tokens"], 0)
+            self.assertEqual(action["target_local_policy"], "crunch_rules")
+
+        apply_result = apply_request_shape_crunch_canary_actions(report["stage_actions"], rules_path=rules_path)
+        self.assertTrue(apply_result["ok"])
+        self.assertEqual(apply_result["applied_count"], 3)
+        self.assertEqual(apply_result["failed_count"], 0)
+        self.assertTrue(apply_result["wrote_policy_files"])
+        rules = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+        staged_rules = rules["request_shape_repeated_context_canaries"]["rules"]
+        self.assertEqual(len(staged_rules), 3)
+        self.assertEqual({rule["id"] for rule in staged_rules}, {action["policy_id"] for action in report["stage_actions"]})
+
+        second_report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=50,
+            run_id="multi-cohort-stage-second",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+            rules_path=rules_path,
+        )
+
+        self.assertEqual(second_report["status"], "no-stageable-cohort")
+        self.assertEqual(second_report["staged_canary_count"], 0)
+        self.assertEqual(second_report["stage_actions"], [])
+        self.assertEqual(second_report["duplicate_suppression"]["suppressed_existing_cohort_count"], 3)
+        self.assertEqual(second_report["duplicate_suppression"]["stageable_unsuppressed_cohort_count"], 0)
+        self.assertEqual(second_report["duplicate_suppression"]["newly_staged_cohort_count"], 0)
+        self.assertTrue(second_report["duplicate_suppression"]["suppresses_new_stage_action"])
+
+        second_apply_result = apply_request_shape_crunch_canary_actions(second_report["stage_actions"], rules_path=rules_path)
+        self.assertEqual(second_apply_result["applied_count"], 0)
+        rules_after_idempotent_rerun = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(rules_after_idempotent_rerun["request_shape_repeated_context_canaries"]["rules"]), 3)
+
+        rendered = json.dumps(report, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_crunch_canary_stage_bounds_new_canaries_per_run(self) -> None:
+        for text_chars, workflow_phase in (
+            (20_000, "thinking"),
+            (80_000, "thinking"),
+            (132_000, "thinking"),
+        ):
+            for _ in range(3):
+                self._log_call(
+                    stream=1,
+                    has_tools=True,
+                    cache_status="skipped",
+                    cache_reason="streaming tools-disabled",
+                    routing_reason="keep requested model for thinking request",
+                    workflow_phase=workflow_phase,
+                    text_chars=text_chars,
+                    cost=0.10,
+                    baseline=0.10,
+                )
+
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=50,
+            run_id="bounded-multi-cohort-stage",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+            rules_path=Path(self.tmpdir.name) / "missing-crunch-rules.yaml",
+            max_new_canaries=2,
+        )
+
+        self.assertEqual(report["status"], "staged")
+        self.assertEqual(report["staged_canary_count"], 2)
+        self.assertEqual(len(report["stage_actions"]), 2)
+        self.assertEqual(report["duplicate_suppression"]["stageable_unsuppressed_cohort_count"], 3)
+        self.assertEqual(report["duplicate_suppression"]["newly_staged_cohort_count"], 2)
+        self.assertEqual(report["duplicate_suppression"]["stage_action_limit"], 2)
+        self.assertTrue(report["acceptance"]["stages_all_unsuppressed_cohorts_within_bound"])
 
     def test_crunch_canary_stage_prefers_unsuppressed_stage_action_over_existing_measurement(self) -> None:
         for _ in range(3):
