@@ -310,7 +310,9 @@ def _rule_from_request_shape_cohort(
         "category": cohort.get("category"),
         "workflow_phase": cohort.get("workflow_phase"),
         "text_bucket": cohort.get("text_bucket"),
-        "token_bucket": cohort.get("token_bucket"),
+        # token_bucket is intentionally omitted: the OpenAI feature unit does not
+        # populate a bare "token_bucket" key in pattern_features, so the pattern
+        # matcher in cache.py would always fail this condition.
         "has_tools": False,
         "stream": False,
         "replayability_levels": ["features_only", "local-exact-response"],

@@ -3502,6 +3502,51 @@ def _cache_replay_row_matches_staged_rules(
     return graduation.get("source_schema") == REPLAYABILITY_DRY_RUN_SCHEMA or projection.get("source_schema") == REPLAYABILITY_DRY_RUN_SCHEMA
 
 
+def _row_shape_matches_staged_rule(row: dict[str, Any], routing: dict[str, Any], rule: dict[str, Any]) -> bool:
+    """True when a row's shape attributes match a staged rule's conditions.
+
+    Intentionally skips token_bucket (not populated in the OpenAI feature unit)
+    and replayability_levels (requires canary metadata to evaluate).  Used as a
+    fallback when _cache_replay_row_matches_staged_rules finds no strict match,
+    so rows processed before the canary rule was loaded are classified as bypass.
+    """
+    provider = str(row.get("provider") or "anthropic").lower()
+    if provider != "openai":
+        return False
+    conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    feature: dict[str, Any] = {}
+    for key in ("openai_feature_unit", "openai_preflight_unit", "openai_local_feature_unit"):
+        candidate = routing.get(key)
+        if isinstance(candidate, dict):
+            feature = candidate
+            break
+    row_surface = str(row.get("source_surface") or feature.get("source_surface") or "")
+    row_endpoint = str(row.get("endpoint") or feature.get("endpoint") or "")
+    row_category = str(row.get("category") or feature.get("category") or "")
+    row_text_bucket = str(feature.get("text_bucket") or "")
+    for cond_key, actual in (
+        ("source_surface", row_surface),
+        ("endpoint", row_endpoint),
+        ("category", row_category),
+        ("text_bucket", row_text_bucket),
+    ):
+        expected = conditions.get(cond_key)
+        if expected is None:
+            continue
+        expected_set = {str(v).lower() for v in ([expected] if isinstance(expected, str) else list(expected))}
+        if expected_set and str(actual).lower() not in expected_set:
+            return False
+    if "stream" in conditions:
+        row_stream = bool(int(row.get("stream") or 0))
+        if bool(conditions["stream"]) != row_stream:
+            return False
+    if "has_tools" in conditions:
+        row_has_tools = bool(routing.get("has_tools") or feature.get("has_tools"))
+        if bool(conditions["has_tools"]) != row_has_tools:
+            return False
+    return True
+
+
 def _cache_replay_evidence_class(row: dict[str, Any], cache_meta: dict[str, Any]) -> tuple[str, str]:
     replay_canary = (
         cache_meta.get("cache_replay_canary")
@@ -3631,6 +3676,31 @@ def build_request_shape_cache_replay_evidence_report(
         if observed_at and (latest_observed is None or observed_at > latest_observed):
             latest_observed = observed_at
 
+    # Shape-based bypass detection: when no rows matched by canary metadata,
+    # scan for rows whose cohort shape matches the staged rule but whose
+    # cache_json lacks canary metadata (e.g. the proxy hasn't reloaded yet,
+    # or the token_bucket condition in the rule can't be evaluated at runtime).
+    # These are counted as bypass outcomes so lifecycle counts are nonzero and
+    # the next_action becomes a narrower, more actionable signal than the
+    # generic collect-cache-replay-canary-traffic.
+    shape_bypass_count = 0
+    if observed_rows == 0 and staged_rules:
+        for row in rows:
+            cache_meta = _json_obj(row.get("cache_json"))
+            if not cache_meta:
+                continue
+            routing = _json_obj(row.get("routing_json"))
+            for rule in staged_rules:
+                if _row_shape_matches_staged_rule(row, routing, rule):
+                    shape_bypass_count += 1
+                    lifecycle_counts["bypass_count"] += 1
+                    _increment(blocker_counts, "canary-rule-not-active")
+                    observed_at = _parse_utc(row.get("created_at"))
+                    if observed_at and (latest_observed is None or observed_at > latest_observed):
+                        latest_observed = observed_at
+                    break
+    observed_rows += shape_bypass_count
+
     now = _parse_utc(utc_now()) or datetime.now(timezone.utc)
     staged_times = [
         parsed
@@ -3652,6 +3722,12 @@ def build_request_shape_cache_replay_evidence_report(
         status = "staged-no-traffic"
         reason = "missing-observed-cache-replay-traffic"
         next_action = "collect-cache-replay-canary-traffic"
+    elif shape_bypass_count > 0 and observed_rows == shape_bypass_count:
+        # All observed rows match the cohort shape but have no canary metadata,
+        # meaning the canary rule is staged but not yet active in the proxy.
+        status = "staged-bypass"
+        reason = "canary-rule-not-active-in-proxy"
+        next_action = "activate-cache-replay-canary-in-proxy"
     else:
         status = "observed"
         reason = "cache-replay-canary-evidence-observed"
