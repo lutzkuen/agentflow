@@ -4711,6 +4711,29 @@ def _cache_replay_policy_decision_top_canary(evidence: dict[str, Any]) -> dict[s
     return {}
 
 
+_CACHE_REPLAY_NON_BLOCKING_APPLIED_MISS_BLOCKERS = {"cache-warmup-miss"}
+_CACHE_REPLAY_APPLIED_MISS_BLOCKER_PRIORITY = (
+    "invalidation-risk",
+    "fingerprint-drift",
+    "cache-write-absence",
+    "cohort-mismatch",
+    "normalization-mismatch",
+    "ttl-expiry",
+    "upstream-error-before-cache-write",
+    "uncategorized-applied-cache-miss",
+)
+
+
+def _cache_replay_top_blocking_applied_miss_blocker(blockers: list[str]) -> str | None:
+    blocking = [blocker for blocker in blockers if blocker not in _CACHE_REPLAY_NON_BLOCKING_APPLIED_MISS_BLOCKERS]
+    if not blocking:
+        return None
+    for preferred in _CACHE_REPLAY_APPLIED_MISS_BLOCKER_PRIORITY:
+        if preferred in blocking:
+            return preferred
+    return sorted(blocking)[0]
+
+
 def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> dict[str, Any]:
     summary = evidence.get("summary") if isinstance(evidence, dict) and isinstance(evidence.get("summary"), dict) else {}
     stale = evidence.get("stale_evidence") if isinstance(evidence, dict) and isinstance(evidence.get("stale_evidence"), dict) else {}
@@ -4725,6 +4748,12 @@ def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> di
     observed_savings = _as_float(summary.get("observed_savings_usd"))
     projected_hits = _as_int(summary.get("projected_hits"))
     projected_savings = _as_float(summary.get("projected_savings_usd"))
+    applied_miss_blocker_values = [
+        public_label(item.get("value"), "unknown")
+        for item in applied_miss_blockers
+        if isinstance(item, dict) and _as_int(item.get("count")) > 0
+    ]
+    applied_miss_blocker_values = [value for value in applied_miss_blocker_values if value != "unknown"]
     return {
         "schema": "agentflow.request_shape_cache_replay_policy_decision_metrics.v1",
         "staged_canary_count": _as_int(evidence.get("staged_canary_count")) if isinstance(evidence, dict) else 0,
@@ -4748,11 +4777,42 @@ def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> di
         "top_applied_miss_blocker": applied_miss_blockers[0].get("value")
         if applied_miss_blockers and isinstance(applied_miss_blockers[0], dict)
         else summary.get("top_applied_miss_blocker"),
+        "top_blocking_applied_miss_blocker": _cache_replay_top_blocking_applied_miss_blocker(applied_miss_blocker_values),
         "stale_evidence": bool(stale.get("stale")),
         "evidence_age_hours": stale.get("age_hours"),
         "metadata_only": True,
         "aggregate_only": True,
     }
+
+
+def _cache_replay_applied_miss_blocker_values(evidence: dict[str, Any] | None) -> list[str]:
+    if not isinstance(evidence, dict):
+        return []
+    breakdown = evidence.get("applied_miss_blocker_breakdown")
+    if not isinstance(breakdown, list):
+        return []
+    values: list[str] = []
+    for item in breakdown:
+        if not isinstance(item, dict):
+            continue
+        value = public_label(item.get("value"), "unknown")
+        if value != "unknown" and _as_int(item.get("count")) > 0:
+            values.append(value)
+    return list(dict.fromkeys(values))
+
+
+def _cache_replay_warmup_only_applied_miss(evidence: dict[str, Any] | None) -> bool:
+    metrics = _cache_replay_policy_decision_metrics(evidence)
+    blockers = _cache_replay_applied_miss_blocker_values(evidence)
+    if not blockers:
+        return False
+    return (
+        metrics["applied_count"] > 0
+        and metrics["holdout_count"] > 0
+        and metrics["miss_count"] > 0
+        and metrics["observed_hits"] <= 0
+        and all(blocker == "cache-warmup-miss" for blocker in blockers)
+    )
 
 
 def _cache_replay_policy_reason_codes(evidence: dict[str, Any] | None) -> list[str]:
@@ -4772,6 +4832,8 @@ def _cache_replay_policy_reason_codes(evidence: dict[str, Any] | None) -> list[s
         codes.append("missing-observed-cache-savings")
     if metrics["applied_count"] > 0 and metrics["holdout_count"] > 0 and metrics["miss_count"] > 0 and metrics["observed_hits"] <= 0:
         codes.append("applied-cache-replay-miss-observed")
+        if _cache_replay_warmup_only_applied_miss(evidence):
+            codes.append("cache-warmup-miss")
     if metrics["stale_evidence"]:
         codes.append("stale-cache-replay-evidence")
     if metrics["invalidation_skipped_count"] > 0:
@@ -4821,6 +4883,8 @@ def _cache_replay_policy_decision_value(evidence: dict[str, Any] | None) -> str:
     ):
         return "widen"
     if metrics["applied_count"] > 0 and metrics["holdout_count"] > 0 and metrics["miss_count"] > 0:
+        if _cache_replay_warmup_only_applied_miss(evidence):
+            return "keep-staged"
         return "keep-blocked"
     return "keep-staged"
 
@@ -4830,7 +4894,12 @@ def _cache_replay_policy_decision_reason(evidence: dict[str, Any] | None, decisi
         return "cache-replay-canary-hit-recovery-observed"
     if decision == "rollback":
         return "stale-cache-replay-evidence"
+    metrics = _cache_replay_policy_decision_metrics(evidence)
     codes = _cache_replay_policy_reason_codes(evidence)
+    if decision == "keep-staged" and "cache-warmup-miss" in codes:
+        return "cache-warmup-miss"
+    if decision == "keep-blocked" and metrics.get("top_blocking_applied_miss_blocker"):
+        return str(metrics["top_blocking_applied_miss_blocker"])
     if decision == "keep-blocked" and "applied-cache-replay-miss-observed" in codes:
         return "applied-cache-replay-miss-observed"
     return codes[0] if codes else "cache-replay-promotion-blocked"
@@ -5066,6 +5135,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "hit_observation_rate": metrics["hit_observation_rate"],
             "savings_realization_ratio": metrics["savings_realization_ratio"],
             "top_applied_miss_blocker": metrics["top_applied_miss_blocker"],
+            "top_blocking_applied_miss_blocker": metrics["top_blocking_applied_miss_blocker"],
             "stale_evidence": metrics["stale_evidence"],
             "policy_source": entry["policy_source"],
             "target_local_rule_file": "cache_rules.yaml",

@@ -1952,6 +1952,71 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(decision["privacy"]["metadata_only"])
         self.assertTrue(decision["privacy"]["aggregate_only"])
 
+    def test_cache_replay_policy_decision_keeps_staged_for_warmup_only_applied_misses(self) -> None:
+        evidence = {
+            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "status": "observed",
+            "staged_canary_count": 1,
+            "staged_canaries": [
+                {
+                    "shape": {
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "category": "chat",
+                        "workflow_phase": "chat",
+                        "text_bucket": "2k_8k_chars",
+                        "token_bucket": "500_2k_tokens",
+                        "stream": False,
+                        "has_tools": False,
+                    },
+                    "ttl_seconds": 3600,
+                }
+            ],
+            "summary": {
+                "observed_row_count": 28,
+                "applied_count": 24,
+                "holdout_count": 4,
+                "exact_hit_count": 0,
+                "miss_count": 24,
+                "observed_hits": 0,
+                "projected_hits": 35,
+                "observed_savings_usd": 0.0,
+                "projected_savings_usd": 0.075373,
+                "top_applied_miss_blocker": "cache-warmup-miss",
+                "invalidation_skipped_count": 0,
+                "unsupported_shape_count": 0,
+                "retry_count": 0,
+                "fallback_count": 0,
+                "error_count": 0,
+            },
+            "applied_miss_blocker_breakdown": [{"value": "cache-warmup-miss", "count": 24}],
+            "stale_evidence": {"stale": False, "age_hours": 2.5},
+            "blocker_breakdown": [],
+        }
+
+        decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+
+        self.assertEqual(decision["decision"], "keep-staged")
+        self.assertEqual(decision["reason"], "cache-warmup-miss")
+        self.assertEqual(decision["next_action"], "keep-cache-replay-canary-staged")
+        self.assertTrue(decision["summary"]["keep_staged"])
+        self.assertFalse(decision["summary"]["keep_blocked"])
+        self.assertFalse(decision["summary"]["promotion_allowed"])
+        self.assertEqual(decision["summary"]["applied_count"], 24)
+        self.assertEqual(decision["summary"]["holdout_count"], 4)
+        self.assertEqual(decision["summary"]["miss_count"], 24)
+        self.assertEqual(decision["summary"]["projected_hits"], 35)
+        self.assertEqual(decision["summary"]["top_applied_miss_blocker"], "cache-warmup-miss")
+        self.assertIn("cache-warmup-miss", decision["reason_codes"])
+        self.assertIn("applied-miss:cache-warmup-miss", decision["reason_codes"])
+        self.assertEqual(decision["top_decision"]["reason"], "cache-warmup-miss")
+        self.assertEqual(decision["top_decision"]["recommended_next_action"], "keep-cache-replay-canary-staged")
+        self.assertIsNone(decision["top_decision"]["local_policy_patch"])
+        self.assertTrue(decision["acceptance"]["records_durable_decision"])
+        self.assertTrue(decision["acceptance"]["reports_applied_miss_blocker_breakdown"])
+        self.assertTrue(decision["privacy"]["metadata_only"])
+        self.assertTrue(decision["privacy"]["aggregate_only"])
+
     def test_cache_replay_policy_decision_keeps_blocked_for_invalidation_risk(self) -> None:
         evidence = {
             "schema": "agentflow.request_shape_cache_replay_evidence.v1",
