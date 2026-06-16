@@ -712,6 +712,66 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(cache_module, "CACHE_PATTERN_RULES", old_rules))
         return rules[0]
 
+    def _enable_staged_openai_cache_replay_shape_rule(self, *, canary_fraction=1.0, holdout_fraction=0.0):
+        rule = {
+            "id": "request-shape-cache-replay-test-policy",
+            "enabled": True,
+            "policy_source": "local-manual",
+            "candidate_id": "request-shape-cache-replay-test-cohort",
+            "conditions": {
+                "pattern_hashes": ["sha256:*"],
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "has_tools": False,
+                "stream": False,
+                "replayability_levels": ["features_only", "local-exact-response"],
+            },
+            "rollout": {
+                "schema": "agentflow.pattern_policy_rollout.v1",
+                "recommendation_mode": "openai-cache-replay-request-shape-canary",
+                "canary_enabled": True,
+                "canary_fraction": canary_fraction,
+                "holdout_fraction": holdout_fraction,
+                "canary_salt": "request-shape-cache-replay-test-policy",
+                "canary_unit": "request_fingerprint",
+            },
+            "action": {
+                "type": "exact_cache_pattern",
+                "allow_tool_calls": False,
+                "safe_invalidation": False,
+                "streaming": False,
+                "scope": "session",
+                "min_call_count": 2,
+                "ttl_seconds": 3600,
+            },
+            "graduation": {
+                "schema": "agentflow.request_shape_cache_replay_shape_activation.v1",
+                "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                "source_reason": "replay-ready-exact-non-tool-shape",
+                "cohort_id": "request-shape-cache-replay-test-cohort",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "projected_hits": 35,
+                "projected_savings_usd": 0.075373,
+                "sample_count": 36,
+                "aggregate_only": True,
+            },
+        }
+        rules = cache_module.normalize_cache_pattern_rules([rule])
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        cache_module.CACHE_PATTERN_RULES = tuple(rules)
+        self.addCleanup(lambda: setattr(cache_module, "CACHE_PATTERN_RULES", old_rules))
+        return rules[0]
+
     def test_openai_cache_pattern_rule_preserves_sanitized_graduation_projection(self):
         rules = cache_module.normalize_cache_pattern_rules([
             {
@@ -977,6 +1037,60 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         rendered = json.dumps(canary, sort_keys=True)
         self.assertNotIn("raw projection prompt must not leak", rendered)
         self.assertNotIn("raw-openai-session-must-not-leak", rendered)
+
+    def test_staged_openai_cache_replay_shape_canary_records_applied_and_holdout_lifecycle(self):
+        applied_body = {
+            "model": "gpt-5.4-mini",
+            "input": " ".join(["Summarize the stable release checklist for this replay canary."] * 90),
+        }
+        holdout_body = {
+            "model": "gpt-5.4-mini",
+            "input": " ".join(["Summarize the stable rollout checklist for this replay holdout."] * 90),
+        }
+        self._enable_staged_openai_cache_replay_shape_rule(canary_fraction=1.0, holdout_fraction=0.0)
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            applied = TestClient(server.app).post(
+                "/v1/responses",
+                json=applied_body,
+                headers={"x-session-id": "raw-openai-session-must-not-leak"},
+            )
+
+        self.assertEqual(applied.status_code, 200)
+        [applied_row] = server.store.conn.execute("select cache_hit, cache_json, routing_json from calls").fetchall()
+        self.assertEqual(applied_row["cache_hit"], 0)
+        applied_cache = json.loads(applied_row["cache_json"])
+        applied_routing = json.loads(applied_row["routing_json"])
+        self.assertEqual(applied_cache["status"], "miss")
+        self.assertEqual(applied_cache["reason"], "exact-pattern-miss")
+        self.assertEqual(applied_cache["cache_replay_canary"]["status"], "applied")
+        self.assertEqual(applied_cache["cache_replay_canary"]["canary_cohort"], "canary_applied")
+        self.assertEqual(applied_cache["cache_replay_canary"]["projection"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(applied_cache["pattern_rule"]["rule_id"], "request-shape-cache-replay-test-policy")
+        self.assertEqual(applied_routing["managed_pattern_features"]["token_bucket"], "1k_4k_tokens")
+        self.assertNotIn("canary-rule-not-active", json.dumps(applied_cache, sort_keys=True))
+
+        server.store.conn.execute("delete from calls")
+        server.store.conn.commit()
+        self._enable_staged_openai_cache_replay_shape_rule(canary_fraction=0.0, holdout_fraction=1.0)
+        CapturingOpenAIClient.calls = []
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            holdout = TestClient(server.app).post(
+                "/v1/responses",
+                json=holdout_body,
+                headers={"x-session-id": "raw-openai-session-must-not-leak"},
+            )
+
+        self.assertEqual(holdout.status_code, 200)
+        self.assertEqual(len(CapturingOpenAIClient.calls), 1)
+        [holdout_row] = server.store.conn.execute("select cache_hit, cache_json from calls").fetchall()
+        self.assertEqual(holdout_row["cache_hit"], 0)
+        holdout_cache = json.loads(holdout_row["cache_json"])
+        self.assertEqual(holdout_cache["cache_replay_canary"]["status"], "holdout")
+        self.assertEqual(holdout_cache["cache_replay_canary"]["canary_cohort"], "canary_holdout")
+        self.assertEqual(holdout_cache["cache_replay_canary"]["reason"], "canary_holdout")
+        self.assertNotIn("canary-rule-not-active", json.dumps(holdout_cache, sort_keys=True))
 
     def test_openai_cache_replay_canary_serves_cached_chat_response(self):
         request_body = {

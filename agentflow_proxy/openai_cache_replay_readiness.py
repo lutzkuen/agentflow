@@ -75,7 +75,7 @@ def _canary_policy_candidates() -> list[Path]:
     paths: list[Path] = []
     env_path = os.getenv("AGENTFLOW_CACHE_CANARY_POLICY")
     if env_path:
-        paths.append(Path(env_path).expanduser())
+        return [Path(env_path).expanduser()]
     paths.append(Path.cwd() / "config" / "cache_canary_policy.yaml")
     paths.append(agentflow_config_path("cache_canary_policy.yaml"))
     return paths

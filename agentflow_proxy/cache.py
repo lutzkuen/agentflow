@@ -89,6 +89,14 @@ def _first_existing_rule_path(filename: str, env_name: str) -> Path | None:
     return None
 
 
+def _first_existing_cache_canary_policy_path() -> Path | None:
+    env_path = os.getenv("AGENTFLOW_CACHE_CANARY_POLICY")
+    if env_path:
+        path = Path(env_path)
+        return path if path.exists() else None
+    return _first_existing_rule_path("cache_canary_policy.yaml", "AGENTFLOW_CACHE_CANARY_POLICY")
+
+
 def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
     exact = data.get("exact_cache") or {}
     if isinstance(exact, dict):
@@ -128,7 +136,7 @@ def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> di
 
 
 def _apply_cache_canary_overlay(policy: dict[str, Any]) -> str | None:
-    path = _first_existing_rule_path("cache_canary_policy.yaml", "AGENTFLOW_CACHE_CANARY_POLICY")
+    path = _first_existing_cache_canary_policy_path()
     if path is None:
         return None
     with open(path, encoding="utf-8") as f:
@@ -564,6 +572,64 @@ def _condition_matches(conditions: dict[str, Any], key: str, actual: Any) -> boo
     return str(actual or "").lower() in {value.lower() for value in expected_values}
 
 
+_TOKEN_BUCKET_RANGES: dict[str, tuple[int | None, int | None]] = {
+    "lt_500_tokens": (0, 500),
+    "500_2k_tokens": (500, 2_000),
+    "2k_8k_tokens": (2_000, 8_000),
+    "8k_32k_tokens": (8_000, 32_000),
+    "gte_32k_tokens": (32_000, None),
+    "lt_1k_tokens": (0, 1_000),
+    "1k_4k_tokens": (1_000, 4_000),
+    "4k_16k_tokens": (4_000, 16_000),
+    "16k_64k_tokens": (16_000, 64_000),
+    "gte_64k_tokens": (64_000, None),
+}
+
+
+def _ranges_overlap(left: tuple[int | None, int | None], right: tuple[int | None, int | None]) -> bool:
+    left_min, left_max = left
+    right_min, right_max = right
+    low = max(left_min or 0, right_min or 0)
+    if left_max is None and right_max is None:
+        return True
+    high_values = [value for value in (left_max, right_max) if value is not None]
+    return low < min(high_values)
+
+
+def _bucket_condition_matches(conditions: dict[str, Any], key: str, actual: Any) -> bool:
+    expected = conditions.get(key)
+    if expected is None:
+        return True
+    expected_values = _string_list(expected)
+    if not expected_values:
+        return True
+    actual_text = str(actual or "").lower()
+    if key != "token_bucket":
+        return actual_text in {value.lower() for value in expected_values}
+    actual_range = _TOKEN_BUCKET_RANGES.get(actual_text)
+    for value in expected_values:
+        expected_text = value.lower()
+        if actual_text == expected_text:
+            return True
+        expected_range = _TOKEN_BUCKET_RANGES.get(expected_text)
+        if actual_range and expected_range and _ranges_overlap(actual_range, expected_range):
+            return True
+    return False
+
+
+def _provider_family_from_pattern_features(pattern_features: dict[str, Any] | None) -> str:
+    if not isinstance(pattern_features, dict):
+        return ""
+    if pattern_features.get("provider_family") is not None:
+        return str(pattern_features.get("provider_family") or "")
+    surface = str(pattern_features.get("source_surface") or "").lower()
+    if surface.startswith("openai"):
+        return "openai"
+    if surface.startswith("anthropic"):
+        return "anthropic"
+    return ""
+
+
 def _cacheability_from_pattern_features(pattern_features: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(pattern_features, dict):
         return {}
@@ -698,8 +764,12 @@ def _cache_pattern_rule_match(
         if excluded_categories and str((pattern_features or {}).get("category") or "").lower() in excluded_categories:
             skip_reasons.append({"rule_id": rule_id, "reason": "category-excluded"})
             continue
+        if not _condition_matches(conditions, "provider_family", _provider_family_from_pattern_features(pattern_features)):
+            skip_reasons.append({"rule_id": rule_id, "reason": "provider-family-mismatch"})
+            continue
         for key in ("workflow_phase", "source_surface", "endpoint", "app_family", "text_bucket", "token_bucket"):
-            if not _condition_matches(conditions, key, (pattern_features or {}).get(key)):
+            condition_matches = _bucket_condition_matches if key == "token_bucket" else _condition_matches
+            if not condition_matches(conditions, key, (pattern_features or {}).get(key)):
                 skip_reasons.append({"rule_id": rule_id, "reason": f"{key}-mismatch"})
                 break
         else:
