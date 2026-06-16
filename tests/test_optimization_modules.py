@@ -652,6 +652,8 @@ class OptimizationModuleTests(unittest.TestCase):
         *,
         candidate_id: str = "openai-canary-candidate",
         cohort: str,
+        canary_status: str | None = None,
+        canary_reason: str | None = None,
         status_code: int = 200,
         retry_count: int = 0,
         latency_ms: int = 1000,
@@ -663,8 +665,24 @@ class OptimizationModuleTests(unittest.TestCase):
         fallback_reason: str | None = None,
         action_id: str = "test-openai-canary-action",
         rule_id: str = "test-openai-canary-policy",
+        requested_model: str = "gpt-5-codex",
+        target_model: str = "gpt-5-mini",
+        category: str = "chat",
     ):
-        status = "applied" if cohort == "canary_applied" else "holdout" if cohort == "canary_holdout" else "safety_stopped"
+        status = canary_status or (
+            "applied"
+            if cohort == "canary_applied"
+            else "holdout"
+            if cohort == "canary_holdout"
+            else "safety_stopped"
+        )
+        reason = canary_reason or (
+            "selected-canary"
+            if status == "applied"
+            else "selected-holdout"
+            if status == "holdout"
+            else "safety-stop-tripped"
+        )
         canary = {
             "enabled": True,
             "policy_id": rule_id,
@@ -674,14 +692,14 @@ class OptimizationModuleTests(unittest.TestCase):
             "candidate_id": candidate_id,
             "status": status,
             "cohort": cohort,
-            "reason": "selected-canary" if status == "applied" else "selected-holdout" if status == "holdout" else "safety-stop-tripped",
-            "original_model": "gpt-5-codex",
-            "requested_model": "gpt-5-codex",
-            "target_model": "gpt-5-mini",
-            "actual_forwarded_model": "gpt-5-mini" if status == "applied" and not fallback_reason else "gpt-5-codex",
+            "reason": reason,
+            "original_model": requested_model,
+            "requested_model": requested_model,
+            "target_model": target_model,
+            "actual_forwarded_model": target_model if status == "applied" and not fallback_reason else requested_model,
             "source_surface": "openai_provider_request",
             "app_family": "generic_openai",
-            "category": "chat",
+            "category": category,
             "text_bucket": "lt_2k",
             "token_bucket": "lt_2k",
             "projected_input_savings_usd": projected_savings,
@@ -699,7 +717,7 @@ class OptimizationModuleTests(unittest.TestCase):
             id=f"openai-canary-impact-{cohort}-{suffix}",
             created_at=created_at,
             path="/v1/responses",
-            requested_model="gpt-5-codex",
+            requested_model=requested_model,
             routed_model=canary["actual_forwarded_model"],
             stream=0,
             cache_hit=0,
@@ -718,7 +736,7 @@ class OptimizationModuleTests(unittest.TestCase):
             request_json=None,
             response_json=None,
             session_id="raw-openai-session-secret",
-            category="chat",
+            category=category,
             retry_count=retry_count,
             provider="openai",
             source_surface="openai_responses",
@@ -800,6 +818,96 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(promoted["cohort_counts"]["canary_holdout"], 1)
         self.assertIn("target-savings-met", promoted["reason_codes"])
         self._assert_privacy_clean(promotion)
+
+    def test_openai_canary_impact_routes_classified_skipped_unknown_rows_to_single_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                for idx in range(14):
+                    self._log_openai_canary_call(
+                        store,
+                        candidate_id="gpt54-tool-light-canary",
+                        cohort="canary_applied",
+                        suffix=f"a{idx}",
+                        requested_model="gpt-5.4",
+                        target_model="gpt-5.4-mini",
+                        category="tool-light",
+                    )
+                for idx in range(13):
+                    self._log_openai_canary_call(
+                        store,
+                        candidate_id="gpt54-tool-light-canary",
+                        cohort="canary_holdout",
+                        suffix=f"h{idx}",
+                        cost_est=0.003,
+                        cost_baseline=0.003,
+                        requested_model="gpt-5.4",
+                        target_model="gpt-5.4-mini",
+                        category="tool-light",
+                    )
+                for idx in range(145):
+                    self._log_openai_canary_call(
+                        store,
+                        candidate_id="gpt54-tool-light-canary",
+                        cohort="skipped",
+                        canary_status="not_selected",
+                        canary_reason="outside-canary-fraction",
+                        suffix=f"s{idx}",
+                        cost_est=0.003,
+                        cost_baseline=0.003,
+                        requested_model="gpt-5.4",
+                        target_model="gpt-5.4-mini",
+                        category="tool-light",
+                    )
+                for idx in range(6):
+                    self._log_openai_canary_call(
+                        store,
+                        candidate_id="gpt54-tool-light-canary",
+                        cohort="mystery",
+                        canary_status="mystery",
+                        canary_reason="missing-status",
+                        suffix=f"u{idx}",
+                        cost_est=0.003,
+                        cost_baseline=0.003,
+                        requested_model="gpt-5.4",
+                        target_model="gpt-5.4-mini",
+                        category="tool-light",
+                    )
+                impact = build_openai_canary_impact_report(
+                    store,
+                    limit=200,
+                    now=datetime(2026, 6, 10, 5, tzinfo=timezone.utc),
+                )
+            finally:
+                store.conn.close()
+
+        candidate = impact["candidates"][0]
+        self.assertEqual(candidate["cohort_counts"]["canary_applied"], 14)
+        self.assertEqual(candidate["cohort_counts"]["canary_holdout"], 13)
+        self.assertEqual(candidate["cohort_counts"]["skipped"], 145)
+        self.assertEqual(candidate["cohort_counts"]["unknown"], 6)
+        verdict = candidate["routing_promotion_verdict"]
+        self.assertEqual(verdict["schema"], "agentflow.openai_routing_promotion_verdict.v1")
+        self.assertEqual(verdict["verdict"], "keep-staged")
+        self.assertEqual(verdict["next_action"], "classify-openai-routing-canary-skipped-unknown")
+        self.assertIn("unknown-canary-lifecycle-rows", verdict["reason_codes"])
+        self.assertIn("unclassified-canary-lifecycle-rows", verdict["reason_codes"])
+        reason_counts = {row["value"]: row["count"] for row in verdict["reason_code_breakdown"]}
+        self.assertEqual(reason_counts["unknown-canary-lifecycle-rows"], 6)
+        self.assertEqual(reason_counts["unclassified-canary-lifecycle-rows"], 6)
+        classification = verdict["skipped_unknown_classification"]
+        self.assertEqual(classification["safe_bypass_count"], 145)
+        self.assertEqual(classification["unclassified_count"], 6)
+        self.assertEqual(verdict["evidence"]["applied_count"], 14)
+        self.assertEqual(verdict["evidence"]["holdout_count"], 13)
+        self.assertEqual(verdict["evidence"]["safety_stop_count"], 0)
+        self.assertEqual(verdict["evidence"]["error_count"], 0)
+        self.assertEqual(verdict["evidence"]["fallback_count"], 0)
+        self.assertEqual(verdict["evidence"]["retry_count"], 0)
+        self.assertFalse(verdict["privacy"]["raw_prompts_included"])
+        self.assertFalse(verdict["privacy"]["request_ids_included"])
+        self.assertFalse(verdict["privacy"]["cache_keys_included"])
+        self._assert_privacy_clean(impact)
 
     def test_openai_canary_impact_verdicts_cover_regression_stale_and_insufficient(self):
         scenarios = (

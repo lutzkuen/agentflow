@@ -16,6 +16,7 @@ from agentflow_proxy.store import utc_now
 
 SCHEMA = "agentflow.openai_canary_impact.v1"
 VERDICT_SCHEMA = "agentflow.openai_canary_promotion_verdict.v1"
+ROUTING_PROMOTION_VERDICT_SCHEMA = "agentflow.openai_routing_promotion_verdict.v1"
 
 _REASON_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")
 
@@ -93,6 +94,10 @@ def _counter_rows(counter: Counter[str]) -> list[dict[str, Any]]:
     ]
 
 
+def _counter_total(counter: Counter[str]) -> int:
+    return sum(_as_int(value) for value in counter.values())
+
+
 def _empty_cohort() -> dict[str, Any]:
     return {
         "count": 0,
@@ -152,6 +157,45 @@ def _cohort_name(canary: dict[str, Any]) -> str:
     if status in {"not_selected", "skipped"} or cohort == "skipped":
         return "skipped"
     return "unknown"
+
+
+def _canary_reason(canary: dict[str, Any]) -> str:
+    return str(canary.get("reason") or canary.get("status") or canary.get("cohort") or "unknown").strip() or "unknown"
+
+
+def _classify_canary_lifecycle_reason(cohort: str, canary: dict[str, Any]) -> tuple[str, str]:
+    reason = _canary_reason(canary)
+    status = str(canary.get("status") or "").strip()
+    reason_l = reason.lower()
+    if cohort in {"canary_applied", "canary_holdout"}:
+        return "covered", reason
+    if cohort == "safety_stopped" or "safety-stop" in reason_l:
+        return "promotion_blocker", reason
+    if cohort == "unknown":
+        return "unclassified", reason
+    if cohort == "skipped" and reason_l in {
+        "outside-canary-fraction",
+        "outside-canary-and-holdout",
+        "not-selected",
+        "not_selected",
+    }:
+        return "safe_bypass", reason
+    if status in {"disabled", "noop"} or reason_l in {"disabled", "noop", "canary-disabled", "openai-routing-disabled"}:
+        return "safe_bypass", reason
+    unsupported_markers = {
+        "category-not-enabled",
+        "request-too-small",
+        "request-too-large",
+        "requested-model-not-enabled",
+        "streaming-not-enabled",
+        "tool-request-not-enabled",
+        "token-estimate-too-small",
+        "token-estimate-too-large",
+        "workflow-phase-not-enabled",
+    }
+    if status == "ineligible" or reason_l in unsupported_markers:
+        return "unsupported_shape", reason
+    return "promotion_blocker", reason
 
 
 def _observed_savings(row: dict[str, Any], canary: dict[str, Any], cohort: str) -> float:
@@ -233,6 +277,12 @@ def _new_aggregate(candidate_id: str, canary: dict[str, Any]) -> dict[str, Any]:
         },
         "status_buckets": Counter(),
         "reason_buckets": Counter(),
+        "skipped_reason_buckets": Counter(),
+        "unknown_reason_buckets": Counter(),
+        "safe_bypass_reason_buckets": Counter(),
+        "unsupported_shape_reason_buckets": Counter(),
+        "promotion_blocker_reason_buckets": Counter(),
+        "unclassified_reason_buckets": Counter(),
         "category_buckets": Counter(),
         "endpoint_buckets": Counter(),
         "cache_interactions": Counter(),
@@ -268,6 +318,20 @@ def _add_row(
 
     aggregate["status_buckets"][_status_bucket(row.get("status_code"))] += 1
     aggregate["reason_buckets"][_reason_code(canary.get("reason"))] += 1
+    classification, classified_reason = _classify_canary_lifecycle_reason(cohort, canary)
+    if cohort == "skipped":
+        aggregate["skipped_reason_buckets"][classified_reason] += 1
+    if cohort == "unknown":
+        aggregate["unknown_reason_buckets"][classified_reason] += 1
+    if cohort in {"skipped", "unknown", "bypassed_or_disabled"}:
+        if classification == "safe_bypass":
+            aggregate["safe_bypass_reason_buckets"][classified_reason] += 1
+        elif classification == "unsupported_shape":
+            aggregate["unsupported_shape_reason_buckets"][classified_reason] += 1
+        elif classification == "promotion_blocker":
+            aggregate["promotion_blocker_reason_buckets"][classified_reason] += 1
+        elif classification == "unclassified":
+            aggregate["unclassified_reason_buckets"][classified_reason] += 1
     aggregate["category_buckets"][_reason_code(canary.get("category") or row.get("category"), "unknown")] += 1
     aggregate["endpoint_buckets"][_reason_code(row.get("endpoint") or row.get("source_surface"), "unknown")] += 1
 
@@ -363,6 +427,152 @@ def _decide_verdict(
     return {"verdict": verdict, "reason_codes": sorted(set(reason_codes)), "warning_codes": sorted(set(warning_codes))}
 
 
+def _skipped_unknown_classification(aggregate: dict[str, Any]) -> dict[str, Any]:
+    safe_bypass_count = _counter_total(aggregate["safe_bypass_reason_buckets"])
+    unsupported_shape_count = _counter_total(aggregate["unsupported_shape_reason_buckets"])
+    promotion_blocker_count = _counter_total(aggregate["promotion_blocker_reason_buckets"])
+    unclassified_count = _counter_total(aggregate["unclassified_reason_buckets"])
+    return {
+        "schema": "agentflow.openai_routing_canary_skipped_unknown_classification.v1",
+        "safe_bypass_count": safe_bypass_count,
+        "unsupported_shape_count": unsupported_shape_count,
+        "promotion_blocker_count": promotion_blocker_count,
+        "unclassified_count": unclassified_count,
+        "classified_count": safe_bypass_count + unsupported_shape_count + promotion_blocker_count,
+        "requires_operator_review": bool(unsupported_shape_count or promotion_blocker_count or unclassified_count),
+        "safe_bypass_reason_breakdown": _counter_rows(aggregate["safe_bypass_reason_buckets"]),
+        "unsupported_shape_reason_breakdown": _counter_rows(aggregate["unsupported_shape_reason_buckets"]),
+        "promotion_blocker_reason_breakdown": _counter_rows(aggregate["promotion_blocker_reason_buckets"]),
+        "unclassified_reason_breakdown": _counter_rows(aggregate["unclassified_reason_buckets"]),
+    }
+
+
+def _routing_promotion_verdict(
+    aggregate: dict[str, Any],
+    *,
+    cohorts: dict[str, dict[str, Any]],
+    stale: dict[str, Any],
+) -> dict[str, Any]:
+    applied = cohorts["canary_applied"]
+    holdout = cohorts["canary_holdout"]
+    safety = cohorts["safety_stopped"]
+    skipped = cohorts["skipped"]
+    bypassed = cohorts["bypassed_or_disabled"]
+    unknown = cohorts["unknown"]
+    classification = _skipped_unknown_classification(aggregate)
+    reasons: Counter[str] = Counter()
+
+    applied_count = _as_int(applied.get("count"))
+    holdout_count = _as_int(holdout.get("count"))
+    observed_count = sum(_as_int(cohort.get("count")) for cohort in cohorts.values())
+    total_error_count = sum(_as_int(cohort.get("error_count")) for cohort in cohorts.values())
+    total_fallback_count = sum(_as_int(cohort.get("fallback_count")) for cohort in cohorts.values())
+    total_retry_count = sum(_as_int(cohort.get("retry_count")) for cohort in cohorts.values())
+    if observed_count <= 0:
+        reasons["missing-canary-lifecycle-evidence"] += 1
+    if applied_count <= 0:
+        reasons["missing-applied-coverage"] += 1
+    if holdout_count <= 0:
+        reasons["missing-holdout-coverage"] += 1
+    if _as_int(safety.get("count")):
+        reasons["safety-stop-observed"] += _as_int(safety.get("count"))
+    if total_error_count:
+        reasons["error-observed"] += total_error_count
+    if total_fallback_count:
+        reasons["fallback-observed"] += total_fallback_count
+    if total_retry_count:
+        reasons["retry-observed"] += total_retry_count
+    if _as_int(unknown.get("count")):
+        reasons["unknown-canary-lifecycle-rows"] += _as_int(unknown.get("count"))
+    if _as_int(classification.get("unclassified_count")):
+        reasons["unclassified-canary-lifecycle-rows"] += _as_int(classification.get("unclassified_count"))
+    if _as_int(classification.get("unsupported_shape_count")):
+        reasons["skipped-canary-unsupported-shape"] += _as_int(classification.get("unsupported_shape_count"))
+    if _as_int(classification.get("promotion_blocker_count")):
+        reasons["skipped-canary-promotion-blocker"] += _as_int(classification.get("promotion_blocker_count"))
+    if stale.get("stale"):
+        reasons["stale-evidence"] += observed_count
+    if _as_float(applied.get("observed_savings_usd")) <= 0 and _as_float(applied.get("projected_savings_usd")) <= 0:
+        reasons["non-positive-observed-or-projected-savings"] += 1
+
+    hard_blockers = {
+        "safety-stop-observed",
+        "error-observed",
+        "fallback-observed",
+        "retry-observed",
+        "skipped-canary-promotion-blocker",
+        "non-positive-observed-or-projected-savings",
+    }
+    keep_staged_reasons = {
+        "missing-canary-lifecycle-evidence",
+        "missing-applied-coverage",
+        "missing-holdout-coverage",
+        "unknown-canary-lifecycle-rows",
+        "unclassified-canary-lifecycle-rows",
+        "skipped-canary-unsupported-shape",
+        "stale-evidence",
+    }
+    reason_codes = sorted(reasons)
+    if any(reason in hard_blockers for reason in reason_codes):
+        verdict = "blocked"
+        next_action = "review-openai-routing-canary-blockers"
+    elif any(reason in keep_staged_reasons for reason in reason_codes):
+        verdict = "keep-staged"
+        if "skipped-canary-unsupported-shape" in reasons:
+            next_action = "narrow-openai-routing-canary-shape"
+        elif "unknown-canary-lifecycle-rows" in reasons or "unclassified-canary-lifecycle-rows" in reasons:
+            next_action = "classify-openai-routing-canary-skipped-unknown"
+        else:
+            next_action = "collect-openai-routing-canary-evidence"
+    else:
+        verdict = "promotion-ready"
+        next_action = "draft-openai-routing-rule"
+        reason_codes = ["promotion-ready"]
+        reasons["promotion-ready"] += 1
+
+    return {
+        "schema": ROUTING_PROMOTION_VERDICT_SCHEMA,
+        "optimization_family": "openai_local_routing",
+        "action_family": "routing",
+        "verdict": verdict,
+        "promotion_ready": verdict == "promotion-ready",
+        "next_action": next_action,
+        "reason_codes": reason_codes,
+        "reason_code_breakdown": _counter_rows(reasons),
+        "skipped_reason_breakdown": _counter_rows(aggregate["skipped_reason_buckets"]),
+        "unknown_reason_breakdown": _counter_rows(aggregate["unknown_reason_buckets"]),
+        "skipped_unknown_classification": classification,
+        "evidence": {
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": _as_int(skipped.get("count")),
+            "bypassed_or_disabled_count": _as_int(bypassed.get("count")),
+            "unknown_count": _as_int(unknown.get("count")),
+            "safety_stop_count": _as_int(safety.get("count")),
+            "error_count": total_error_count,
+            "fallback_count": total_fallback_count,
+            "retry_count": total_retry_count,
+            "observed_count": observed_count,
+            "observed_savings_usd": round(_as_float(applied.get("observed_savings_usd")), 8),
+            "projected_savings_usd": round(sum(_as_float(cohort.get("projected_savings_usd")) for cohort in cohorts.values()), 8),
+            "latest_observed_at": aggregate.get("latest_observed_at"),
+            "oldest_observed_at": aggregate.get("oldest_observed_at"),
+            "stale_evidence": stale,
+        },
+        "quality_gates": {
+            "requires_applied_coverage": True,
+            "requires_holdout_coverage": True,
+            "requires_classified_skipped_unknown_rows": True,
+            "requires_zero_safety_stops": True,
+            "requires_zero_errors": True,
+            "requires_zero_fallbacks": True,
+            "requires_zero_retries": True,
+            "requires_positive_savings": True,
+        },
+        "privacy": _privacy_summary(),
+    }
+
+
 def _finalize_candidate(
     aggregate: dict[str, Any],
     *,
@@ -423,6 +633,7 @@ def _finalize_candidate(
         thresholds=thresholds,
         provider_adoption_gate=provider_adoption_gate,
     )
+    routing_verdict = _routing_promotion_verdict(aggregate, cohorts=cohorts, stale=stale)
     projected_total = sum(_as_float(cohort.get("projected_savings_usd")) for cohort in cohorts.values())
     observed_total = _as_float(applied.get("observed_savings_usd"))
     return {
@@ -451,6 +662,9 @@ def _finalize_candidate(
         "crunch_interaction_counts": _counter_rows(aggregate["crunch_interactions"]),
         "status_buckets": _counter_rows(aggregate["status_buckets"]),
         "reason_buckets": _counter_rows(aggregate["reason_buckets"]),
+        "skipped_reason_buckets": _counter_rows(aggregate["skipped_reason_buckets"]),
+        "unknown_reason_buckets": _counter_rows(aggregate["unknown_reason_buckets"]),
+        "skipped_unknown_classification": routing_verdict["skipped_unknown_classification"],
         "category_buckets": _counter_rows(aggregate["category_buckets"]),
         "endpoint_buckets": _counter_rows(aggregate["endpoint_buckets"]),
         "oldest_observed_at": aggregate.get("oldest_observed_at"),
@@ -461,6 +675,7 @@ def _finalize_candidate(
         "verdict": decision["verdict"],
         "reason_codes": decision["reason_codes"],
         "warning_codes": decision["warning_codes"],
+        "routing_promotion_verdict": routing_verdict,
         "next_action": {
             "widen": "widen_local_openai_canary",
             "hold": "keep_current_openai_canary_fraction",
@@ -524,10 +739,17 @@ def build_openai_canary_impact_report(
     candidates.sort(key=lambda item: (str(item.get("verdict")), str(item.get("candidate_id"))))
 
     verdict_counts = Counter(str(item.get("verdict") or "unknown") for item in candidates)
+    routing_verdict_counts = Counter(
+        str((item.get("routing_promotion_verdict") or {}).get("verdict") or "unknown")
+        for item in candidates
+    )
     reason_counts: Counter[str] = Counter()
+    routing_reason_counts: Counter[str] = Counter()
     for item in candidates:
         for reason in item.get("reason_codes") or []:
             reason_counts[str(reason)] += 1
+        for reason in (item.get("routing_promotion_verdict") or {}).get("reason_codes") or []:
+            routing_reason_counts[str(reason)] += 1
     try:
         from agentflow_proxy.activation_lifecycle_feedback import activation_lifecycle_feedback_summary
 
@@ -567,6 +789,8 @@ def build_openai_canary_impact_report(
             "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in candidates), 8),
             "verdict_counts": _counter_rows(verdict_counts),
             "reason_code_counts": _counter_rows(reason_counts),
+            "routing_promotion_verdict_counts": _counter_rows(routing_verdict_counts),
+            "routing_promotion_reason_code_counts": _counter_rows(routing_reason_counts),
         },
         "candidates": candidates,
         "activation_lifecycle_feedback": lifecycle_feedback,
