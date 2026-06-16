@@ -3281,7 +3281,7 @@ def build_evidence_to_activation_next_action_ledger(
             stage.get("issue_worthy_status")
             or (
                 "blocked"
-                if current_status in {"blocked", "safety-stopped"}
+                if current_status in {"blocked", "safety-stopped", "keep-blocked", "retry-later"}
                 else "ready"
                 if current_status in {"staged", "projected", "measured", "closed-issue-seen"}
                 else "evidence-ready"
@@ -3315,6 +3315,8 @@ def build_evidence_to_activation_next_action_ledger(
             entry["safety_stop_count"] = _to_int(stage.get("safety_stop_count"))
         if stage.get("safety_stop_breakdown"):
             entry["safety_stop_breakdown"] = sanitize_value(stage.get("safety_stop_breakdown"))
+        if isinstance(stage.get("duplicate_suppression"), dict):
+            entry["duplicate_suppression"] = sanitize_value(stage.get("duplicate_suppression"))
         if stage.get("source"):
             entry["source"] = sanitize_value(stage.get("source"))
         if stage.get("requested_model"):
@@ -3458,7 +3460,31 @@ def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     else:
         state = "no-op" if actionability == "already-cheapest" else "blocked"
         next_action = "keep-routing-no-op-reason"
-    return {
+    safety_stop_count = sum(_to_int(row.get("count")) for row in safety_breakdown)
+    applied_missing = _to_int((lifecycle.get("cohort_counts") or {}).get("canary_applied")) <= 0
+    holdout_missing = _to_int((lifecycle.get("cohort_counts") or {}).get("canary_holdout")) <= 0
+    duplicate_suppression = None
+    if provider == "anthropic" and state == "keep-blocked":
+        suppression_material = {
+            "schema": report.get("schema"),
+            "provider": provider,
+            "requested_model": top.get("requested_model"),
+            "candidate_target_model": top.get("candidate_target_model"),
+            "activation_gate": "anthropic-routing-safety-stop-burndown",
+        }
+        duplicate_suppression = {
+            "schema": "agentflow.anthropic_routing_activation_issue_duplicate_suppression.v1",
+            "reason": "anthropic-routing-safety-stop-burndown-not-cleared",
+            "fingerprint": public_id(json.dumps(suppression_material, sort_keys=True), prefix="activation"),
+            "suppresses_new_activation_issue": True,
+            "suppresses_ready_issue_until": "safety_stop_count_zero_and_applied_holdout_coverage_present",
+            "safety_stop_count": safety_stop_count,
+            "missing_applied_coverage": applied_missing,
+            "missing_holdout_coverage": holdout_missing,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+    stage = {
         "lever": "routing",
         "state": state,
         "evidence_source": report.get("schema"),
@@ -3470,8 +3496,10 @@ def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         "requested_model": top.get("requested_model"),
         "candidate_target_model": top.get("candidate_target_model"),
         "savings_per_1000_calls_usd": _to_float(top.get("estimated_savings_per_1000_calls_usd")),
-        "safety_stop_count": sum(_to_int(row.get("count")) for row in safety_breakdown),
+        "safety_stop_count": safety_stop_count,
         "safety_stop_breakdown": sanitize_value(safety_breakdown),
+        "duplicate_suppression": duplicate_suppression,
+        "issue_worthy_status": "blocked" if state == "keep-blocked" else None,
         "keep_blocked_reason": sanitize_value(
             lifecycle.get("durable_blocked_reason")
             or (safety_breakdown[0].get("durable_blocked_reason") if safety_breakdown else None)
@@ -3496,6 +3524,7 @@ def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
             else []
         ),
     }
+    return {key: value for key, value in stage.items() if value not in (None, [], "")}
 
 
 def _cache_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
@@ -5319,36 +5348,76 @@ def _routing_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
             count = _to_int(top.get("sample_count"))
             target = str(top.get("candidate_target_model") or "")
             requested = str(top.get("requested_model") or "unknown")
+            provider = str(top.get("provider") or "unknown")
+            lifecycle = _routing_lifecycle_evidence(top) or {}
+            lifecycle_counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+            lifecycle_blockers = [str(item) for item in lifecycle.get("blocker_codes") or [] if str(item or "").strip()]
+            safety_stop_count = _to_int(lifecycle_counts.get("safety_stopped"))
+            applied_count = _to_int(lifecycle_counts.get("canary_applied"))
+            holdout_count = _to_int(lifecycle_counts.get("canary_holdout"))
+            safety_stop_blocked = (
+                provider == "anthropic"
+                and actionability == "actionable"
+                and bool(target)
+                and (
+                    safety_stop_count > 0
+                    or "safety-stop-observed" in lifecycle_blockers
+                )
+            )
             blocker = (
                 f"pass-through-routing-{actionability}"
                 if actionability != "actionable"
+                else "pass-through-routing-activation-blocked-until-safety-stop-burndown"
+                if safety_stop_blocked
                 else "pass-through-routing-activation-candidate"
             )
-            return _candidate(
+            projected_signal = {
+                "report_schema": pass_through_report.get("schema"),
+                "actionability": actionability,
+                "sample_count": count,
+                "requested_model": requested,
+                "candidate_target_model": top.get("candidate_target_model"),
+                "required_local_executor": top.get("required_local_executor"),
+                "estimated_savings_per_1000_calls_usd": top.get("estimated_savings_per_1000_calls_usd"),
+                "no_op_reason": top.get("no_op_reason"),
+                "actionability_breakdown": pass_through_report.get("actionability_breakdown"),
+            }
+            if safety_stop_blocked:
+                projected_signal["activation_gate"] = {
+                    "schema": "agentflow.anthropic_routing_activation_issue_gate.v1",
+                    "status": "suppressed-until-safety-stop-burndown-clears",
+                    "safety_stop_count": safety_stop_count,
+                    "applied_count": applied_count,
+                    "holdout_count": holdout_count,
+                    "blocker_codes": lifecycle_blockers,
+                    "next_action": lifecycle.get("next_action")
+                    or "keep-anthropic-routing-blocked-until-safety-stop-burndown",
+                    "privacy": _candidate_privacy(),
+                }
+            candidate = _candidate(
                 lever="routing",
                 provider_surface_bucket=_surface_bucket(top, fallback="mixed"),
                 blocker=blocker,
                 estimated_savings_path=(
+                    "Suppress duplicate Anthropic activation issues until safety stops are zero and applied/holdout coverage exists."
+                    if safety_stop_blocked
+                    else
                     f"Stage a local routing canary from {requested} to {target} for the ranked pass-through bucket."
                     if target
                     else f"Keep {requested} pass-through explicit with a no-op reason before creating activation work."
                 ),
-                projected_savings_signal={
-                    "report_schema": pass_through_report.get("schema"),
-                    "actionability": actionability,
-                    "sample_count": count,
-                    "requested_model": requested,
-                    "candidate_target_model": top.get("candidate_target_model"),
-                    "required_local_executor": top.get("required_local_executor"),
-                    "estimated_savings_per_1000_calls_usd": top.get("estimated_savings_per_1000_calls_usd"),
-                    "no_op_reason": top.get("no_op_reason"),
-                    "actionability_breakdown": pass_through_report.get("actionability_breakdown"),
-                },
+                projected_savings_signal=projected_signal,
                 confidence="medium" if actionability == "actionable" else "low",
                 sequencing="Use the ranked pass-through bucket before generic routing activation issues; already-cheapest and safety-blocked buckets should remain explicit no-ops.",
-                safety_status="review-required" if actionability == "actionable" else "blocked",
+                safety_status="blocked" if safety_stop_blocked else "review-required" if actionability == "actionable" else "blocked",
                 score=float(count) + (1000.0 if actionability == "actionable" else 0.0),
             )
+            if safety_stop_blocked:
+                candidate["issue_generation_status"] = "suppressed-anthropic-routing-safety-stop-burndown"
+                candidate["issue_generation_suppression_reason"] = (
+                    "anthropic-routing-activation-suppressed-until-safety-stop-count-zero-and-applied-holdout-coverage-present"
+                )
+            return candidate
 
     routing_rows = stats_summary.get("routing_top")
     if not isinstance(routing_rows, list) or not routing_rows:

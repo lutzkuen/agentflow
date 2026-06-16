@@ -1149,14 +1149,103 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
         routing_entry = next(row for row in ledger["entries"] if row["lever"] == "routing")
         self.assertEqual(routing_entry["current_status"], "keep-blocked")
+        self.assertEqual(routing_entry["issue_worthy_status"], "blocked")
         self.assertEqual(
             routing_entry["keep_blocked_reason"],
             "anthropic-routing-safety-stop-thinking-routing-guard-keep-blocked",
         )
         self.assertEqual(routing_entry["safety_stop_breakdown"][0]["reason_code"], "thinking-routing-guard")
+        duplicate_suppression = routing_entry["duplicate_suppression"]
+        self.assertEqual(
+            duplicate_suppression["schema"],
+            "agentflow.anthropic_routing_activation_issue_duplicate_suppression.v1",
+        )
+        self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
+        self.assertEqual(duplicate_suppression["safety_stop_count"], 51)
+        self.assertTrue(duplicate_suppression["missing_applied_coverage"])
+        self.assertTrue(duplicate_suppression["missing_holdout_coverage"])
+        self.assertTrue(str(duplicate_suppression["fingerprint"]).startswith("activation:"))
+
+        routing_candidate = next(
+            row for row in plan["evidence"]["optimization_candidates"]
+            if row["lever"] == "routing"
+        )
+        self.assertEqual(
+            routing_candidate["issue_generation_status"],
+            "suppressed-anthropic-routing-safety-stop-burndown",
+        )
+        created_titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn(
+            "Stage routing evidence for claude-sonnet-4-6 to claude-haiku-4-5-20251001",
+            created_titles,
+        )
 
         rendered = json.dumps(plan)
         self.assertNotIn("secret-anthropic-safety-session-id", rendered)
+
+    def test_pass_through_routing_report_treats_clean_anthropic_lifecycle_as_activation_ready(self):
+        observed_at = datetime.now(timezone.utc).isoformat()
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 44,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-sonnet-4-6",
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "c": 40,
+                        "anthropic_canary_holdout_count": 4,
+                        "anthropic_canary_latest_observed_at": observed_at,
+                    },
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-haiku-4-5-20251001",
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "c": 4,
+                        "anthropic_canary_applied_count": 4,
+                        "anthropic_canary_latest_observed_at": observed_at,
+                    },
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        routing_stage = next(
+            row for row in plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]["levers"]
+            if row["lever"] == "routing"
+        )
+        self.assertEqual(routing_stage["state"], "ranked-evidence")
+        self.assertEqual(routing_stage["next_action"], "stage-anthropic-routing-canary")
+        self.assertEqual(routing_stage["safety_stop_count"], 0)
+        self.assertNotIn("duplicate_suppression", routing_stage)
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        routing_entry = next(row for row in ledger["entries"] if row["lever"] == "routing")
+        self.assertEqual(routing_entry["current_status"], "projected")
+        self.assertEqual(routing_entry["issue_worthy_status"], "ready")
+
+        routing_candidate = next(
+            row for row in plan["evidence"]["optimization_candidates"]
+            if row["lever"] == "routing"
+        )
+        self.assertNotIn("issue_generation_status", routing_candidate)
+        created_titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertIn(
+            "Stage routing evidence for claude-sonnet-4-6 to claude-haiku-4-5-20251001",
+            created_titles,
+        )
 
     def test_evidence_to_activation_loop_tracks_missing_local_cohort_evidence(self):
         plan = build_research_plan(
