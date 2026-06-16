@@ -243,6 +243,12 @@ def _empty_lifecycle() -> dict[str, Any]:
         "retry_count": 0,
         "fallback_count": 0,
         "reason_counts": {},
+        "skipped_reason_counts": {},
+        "unknown_reason_counts": {},
+        "safe_bypass_reason_counts": {},
+        "unsupported_shape_reason_counts": {},
+        "promotion_blocker_reason_counts": {},
+        "unclassified_reason_counts": {},
         "oldest_observed_at": None,
         "latest_observed_at": None,
     }
@@ -258,12 +264,65 @@ def _canary_matches_candidate(bucket: dict[str, Any], canary: dict[str, Any]) ->
     return True
 
 
+def _canary_reason(canary: dict[str, Any]) -> str:
+    return str(canary.get("reason") or canary.get("status") or canary.get("cohort") or "unknown").strip() or "unknown"
+
+
+def _classify_canary_lifecycle_reason(cohort: str, canary: dict[str, Any]) -> tuple[str, str]:
+    reason = _canary_reason(canary)
+    status = str(canary.get("status") or "").strip()
+    reason_l = reason.lower()
+    if cohort in {"canary_applied", "canary_holdout"}:
+        return "covered", reason
+    if cohort == "safety_stopped" or "safety-stop" in reason_l:
+        return "promotion_blocker", reason
+    if cohort == "unknown":
+        return "unclassified", reason
+    if cohort == "skipped" and reason_l in {
+        "outside-canary-fraction",
+        "outside-canary-and-holdout",
+        "not-selected",
+        "not_selected",
+    }:
+        return "safe_bypass", reason
+    if status in {"disabled", "noop"} or reason_l in {"disabled", "noop", "canary-disabled", "openai-routing-disabled"}:
+        return "safe_bypass", reason
+    unsupported_markers = {
+        "category-not-enabled",
+        "request-too-small",
+        "request-too-large",
+        "requested-model-not-enabled",
+        "streaming-not-enabled",
+        "tool-request-not-enabled",
+        "token-estimate-too-small",
+        "token-estimate-too-large",
+        "workflow-phase-not-enabled",
+    }
+    if status == "ineligible" or reason_l in unsupported_markers:
+        return "unsupported_shape", reason
+    return "promotion_blocker", reason
+
+
 def _add_canary_lifecycle(bucket: dict[str, Any], row: dict[str, Any], canary: dict[str, Any]) -> None:
     if not canary or not _canary_matches_candidate(bucket, canary):
         return
     lifecycle = bucket.setdefault("openai_canary_lifecycle", _empty_lifecycle())
     cohort = _canary_cohort(canary)
     lifecycle["cohort_counts"][cohort] = _as_int(lifecycle["cohort_counts"].get(cohort)) + 1
+    classification, classified_reason = _classify_canary_lifecycle_reason(cohort, canary)
+    if cohort == "skipped":
+        _increment(lifecycle["skipped_reason_counts"], classified_reason)
+    if cohort == "unknown":
+        _increment(lifecycle["unknown_reason_counts"], classified_reason)
+    if cohort in {"skipped", "unknown", "bypassed_or_disabled"}:
+        if classification == "safe_bypass":
+            _increment(lifecycle["safe_bypass_reason_counts"], classified_reason)
+        elif classification == "unsupported_shape":
+            _increment(lifecycle["unsupported_shape_reason_counts"], classified_reason)
+        elif classification == "promotion_blocker":
+            _increment(lifecycle["promotion_blocker_reason_counts"], classified_reason)
+        elif classification == "unclassified":
+            _increment(lifecycle["unclassified_reason_counts"], classified_reason)
     status_code = _as_int(row.get("status_code"), -1)
     if status_code >= 400:
         lifecycle["error_count"] += 1
@@ -289,6 +348,13 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
     applied = _as_int(counts.get("canary_applied"))
     holdout = _as_int(counts.get("canary_holdout"))
     safety_stopped = _as_int(counts.get("safety_stopped"))
+    skipped = _as_int(counts.get("skipped"))
+    bypassed = _as_int(counts.get("bypassed_or_disabled"))
+    unknown = _as_int(counts.get("unknown"))
+    safe_bypass_count = sum(_as_int(value) for value in (raw.get("safe_bypass_reason_counts") or {}).values())
+    unsupported_shape_count = sum(_as_int(value) for value in (raw.get("unsupported_shape_reason_counts") or {}).values())
+    promotion_blocker_count = sum(_as_int(value) for value in (raw.get("promotion_blocker_reason_counts") or {}).values())
+    unclassified_count = sum(_as_int(value) for value in (raw.get("unclassified_reason_counts") or {}).values())
     latest = _parse_time(raw.get("latest_observed_at"))
     age_hours = None
     stale = False
@@ -311,6 +377,14 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
         blocker_counts["fallback-observed"] = _as_int(raw.get("fallback_count"))
     if safety_stopped:
         blocker_counts["safety-stop-observed"] = safety_stopped
+    if unknown:
+        blocker_counts["unknown-canary-lifecycle-rows"] = unknown
+    if unsupported_shape_count:
+        blocker_counts["skipped-canary-unsupported-shape"] = unsupported_shape_count
+    if promotion_blocker_count:
+        blocker_counts["skipped-canary-promotion-blocker"] = promotion_blocker_count
+    if unclassified_count:
+        blocker_counts["unclassified-canary-lifecycle-rows"] = unclassified_count
     if stale:
         blocker_counts["stale-evidence"] = observed
 
@@ -322,9 +396,9 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
             "canary_applied": applied,
             "canary_holdout": holdout,
             "safety_stopped": safety_stopped,
-            "skipped": _as_int(counts.get("skipped")),
-            "bypassed_or_disabled": _as_int(counts.get("bypassed_or_disabled")),
-            "unknown": _as_int(counts.get("unknown")),
+            "skipped": skipped,
+            "bypassed_or_disabled": bypassed,
+            "unknown": unknown,
         },
         "coverage": {
             "matched_count": matched_count,
@@ -343,6 +417,21 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
             "max_age_hours": DEFAULT_MAX_EVIDENCE_AGE_HOURS,
         },
         "reason_breakdown": _breakdown(raw.get("reason_counts") or {}),
+        "skipped_reason_breakdown": _breakdown(raw.get("skipped_reason_counts") or {}),
+        "unknown_reason_breakdown": _breakdown(raw.get("unknown_reason_counts") or {}),
+        "skipped_unknown_classification": {
+            "schema": "agentflow.openai_routing_canary_skipped_unknown_classification.v1",
+            "safe_bypass_count": safe_bypass_count,
+            "unsupported_shape_count": unsupported_shape_count,
+            "promotion_blocker_count": promotion_blocker_count,
+            "unclassified_count": unclassified_count,
+            "classified_count": safe_bypass_count + unsupported_shape_count + promotion_blocker_count,
+            "requires_operator_review": bool(unknown or unsupported_shape_count or promotion_blocker_count or unclassified_count),
+            "safe_bypass_reason_breakdown": _breakdown(raw.get("safe_bypass_reason_counts") or {}),
+            "unsupported_shape_reason_breakdown": _breakdown(raw.get("unsupported_shape_reason_counts") or {}),
+            "promotion_blocker_reason_breakdown": _breakdown(raw.get("promotion_blocker_reason_counts") or {}),
+            "unclassified_reason_breakdown": _breakdown(raw.get("unclassified_reason_counts") or {}),
+        },
         "blocker_codes": sorted(blocker_counts),
         "blocker_reason_breakdown": _breakdown(blocker_counts),
         "privacy": {
@@ -395,9 +484,20 @@ def _routing_rule_metadata(bucket: dict[str, Any]) -> dict[str, Any]:
 
 def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> dict[str, Any]:
     counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    classification = (
+        lifecycle.get("skipped_unknown_classification")
+        if isinstance(lifecycle.get("skipped_unknown_classification"), dict)
+        else {}
+    )
     applied = _as_int(counts.get("canary_applied"))
     holdout = _as_int(counts.get("canary_holdout"))
     safety = _as_int(counts.get("safety_stopped"))
+    skipped = _as_int(counts.get("skipped"))
+    bypassed = _as_int(counts.get("bypassed_or_disabled"))
+    unknown = _as_int(counts.get("unknown"))
+    unsupported_shape_count = _as_int(classification.get("unsupported_shape_count"))
+    promotion_blocker_count = _as_int(classification.get("promotion_blocker_count"))
+    unclassified_count = _as_int(classification.get("unclassified_count"))
     observed = _as_int(lifecycle.get("observed_count"))
     error_count = _as_int(lifecycle.get("error_count"))
     fallback_count = _as_int(lifecycle.get("fallback_count"))
@@ -429,6 +529,14 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
         reason_codes.append("retry-observed")
     if stale:
         reason_codes.append("stale-evidence")
+    if unknown:
+        reason_codes.append("unknown-canary-lifecycle-rows")
+    if unclassified_count:
+        reason_codes.append("unclassified-canary-lifecycle-rows")
+    if unsupported_shape_count:
+        reason_codes.append("skipped-canary-unsupported-shape")
+    if promotion_blocker_count:
+        reason_codes.append("skipped-canary-promotion-blocker")
     if estimated_savings <= 0:
         reason_codes.append("non-positive-estimated-savings")
     for blocker in candidate_blockers:
@@ -439,18 +547,35 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
             reason_codes.append(blocker)
 
     unique_reasons = sorted(set(reason_codes))
-    blocking_reasons = [reason for reason in unique_reasons if reason not in missing_evidence]
-    if applied > 0 and holdout > 0 and not blocking_reasons and estimated_savings > 0:
+    staged_review_reasons = missing_evidence | {
+        "unknown-canary-lifecycle-rows",
+        "unclassified-canary-lifecycle-rows",
+        "skipped-canary-unsupported-shape",
+    }
+    hard_blocking_reasons = [
+        reason
+        for reason in unique_reasons
+        if reason not in staged_review_reasons
+    ]
+    if applied > 0 and holdout > 0 and not hard_blocking_reasons and not unknown and not unclassified_count and not unsupported_shape_count and estimated_savings > 0:
         decision = "promote"
         next_action = "promote-openai-routing-rule-draft"
         reason = "promotion-ready"
-    elif blocking_reasons:
-        decision = "keep-blocked"
+    elif hard_blocking_reasons:
+        decision = "blocked"
         next_action = "review-openai-routing-canary-blockers"
-        reason = blocking_reasons[0]
+        reason = hard_blocking_reasons[0]
+    elif unsupported_shape_count:
+        decision = "narrow"
+        next_action = "narrow-openai-routing-canary-shape"
+        reason = "skipped-canary-unsupported-shape"
     else:
         decision = "keep-staged"
-        next_action = "collect-openai-routing-canary-evidence"
+        next_action = (
+            "classify-openai-routing-canary-skipped-unknown"
+            if unknown or unclassified_count
+            else "collect-openai-routing-canary-evidence"
+        )
         reason = unique_reasons[0] if unique_reasons else "insufficient-promotion-evidence"
 
     return {
@@ -460,10 +585,13 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
         "next_action": next_action,
         "reason": reason,
         "reason_codes": unique_reasons,
-        "decision_options": ["promote", "keep-staged", "keep-blocked"],
+        "decision_options": ["promote", "keep-staged", "narrow", "blocked"],
         "evidence": {
             "applied_count": applied,
             "holdout_count": holdout,
+            "skipped_count": skipped,
+            "bypassed_or_disabled_count": bypassed,
+            "unknown_count": unknown,
             "observed_count": observed,
             "matched_count": _as_int(bucket.get("matched_count")),
             "safety_stop_count": safety,
@@ -474,11 +602,15 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
             "latest_observed_at": lifecycle.get("latest_observed_at"),
             "oldest_observed_at": lifecycle.get("oldest_observed_at"),
             "stale_evidence": lifecycle.get("stale_evidence"),
+            "skipped_reason_breakdown": lifecycle.get("skipped_reason_breakdown") or [],
+            "unknown_reason_breakdown": lifecycle.get("unknown_reason_breakdown") or [],
+            "skipped_unknown_classification": classification,
         },
         "quality_gates": {
             "requires_fresh_evidence": True,
             "requires_applied_coverage": True,
             "requires_holdout_coverage": True,
+            "requires_classified_skipped_unknown_rows": True,
             "requires_zero_safety_stops": True,
             "requires_zero_errors": True,
             "requires_zero_fallbacks": True,
@@ -780,7 +912,7 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
     )
     promotion_ready_count = sum(1 for item in candidates if (item.get("promotion_readiness") or {}).get("decision") == "promote")
     keep_staged_count = sum(1 for item in candidates if (item.get("promotion_readiness") or {}).get("decision") == "keep-staged")
-    keep_blocked_count = sum(1 for item in candidates if (item.get("promotion_readiness") or {}).get("decision") == "keep-blocked")
+    keep_blocked_count = sum(1 for item in candidates if (item.get("promotion_readiness") or {}).get("decision") in {"blocked", "keep-blocked"})
     for item in candidates:
         for blocker in item.get("blocker_reason_breakdown") or []:
             _increment(blocker_totals, blocker["value"], _as_int(blocker.get("count")))

@@ -258,7 +258,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(lifecycle["cohort_counts"]["bypassed_or_disabled"], 1)
         self.assertEqual(lifecycle["coverage"]["matched_count"], 8)
         readiness = candidate["promotion_readiness"]
-        self.assertEqual(readiness["decision"], "keep-blocked")
+        self.assertEqual(readiness["decision"], "blocked")
         self.assertEqual(readiness["evidence"]["applied_count"], 3)
         self.assertEqual(readiness["evidence"]["holdout_count"], 2)
         self.assertEqual(readiness["evidence"]["observed_count"], 8)
@@ -294,6 +294,152 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertFalse(readiness["privacy"]["request_ids_included"])
         self.assertFalse(readiness["privacy"]["session_ids_included"])
         self.assertFalse(readiness["privacy"]["tool_payloads_included"])
+
+    def test_gpt54_tool_light_canary_classifies_skipped_and_unknown_before_promotion(self) -> None:
+        def canary(canary_cohort: str, **extra: object) -> dict[str, object]:
+            status = "applied" if canary_cohort == "canary_applied" else "holdout"
+            if canary_cohort == "skipped":
+                status = "not_selected"
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-v1",
+                "target_candidate_id": "openai-route:responses:gpt-5:tool-light:tools:nonstream:1_5k-6k:1k-4k:to-gpt-5-4-mini",
+                "status": status,
+                "cohort": canary_cohort,
+                "reason": "outside-canary-fraction" if canary_cohort == "skipped" else "selected-canary",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if canary_cohort == "canary_applied" else "gpt-5.4",
+                "category": "tool-light",
+                "canary_fraction": 0.15,
+                "holdout_fraction": 0.10,
+                **extra,
+            }
+
+        for _ in range(6):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+            )
+        for _ in range(7):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout", reason="selected-holdout"),
+            )
+        for _ in range(3):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("skipped"),
+            )
+        self._log_openai_call(
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4",
+            category="tool-light",
+            text_chars=4000,
+            has_tools=True,
+            openai_canary=canary("unknown", status="mystery", cohort="mystery", reason="missing-status"),
+        )
+
+        result = build_openai_routing_report(self.store, limit=30)
+
+        candidate = result["candidates"][0]
+        lifecycle = candidate["openai_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 6)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 7)
+        self.assertEqual(lifecycle["cohort_counts"]["skipped"], 3)
+        self.assertEqual(lifecycle["cohort_counts"]["unknown"], 1)
+        self.assertEqual(lifecycle["skipped_reason_breakdown"], [{"value": "outside-canary-fraction", "count": 3}])
+        self.assertEqual(lifecycle["unknown_reason_breakdown"], [{"value": "missing-status", "count": 1}])
+        classification = lifecycle["skipped_unknown_classification"]
+        self.assertEqual(classification["safe_bypass_count"], 3)
+        self.assertEqual(classification["unclassified_count"], 1)
+        self.assertTrue(classification["requires_operator_review"])
+
+        readiness = candidate["promotion_readiness"]
+        self.assertEqual(readiness["decision"], "keep-staged")
+        self.assertFalse(readiness["promotion_ready"])
+        self.assertEqual(readiness["next_action"], "classify-openai-routing-canary-skipped-unknown")
+        self.assertIn("unknown-canary-lifecycle-rows", readiness["reason_codes"])
+        self.assertEqual(readiness["evidence"]["applied_count"], 6)
+        self.assertEqual(readiness["evidence"]["holdout_count"], 7)
+        self.assertEqual(readiness["evidence"]["skipped_count"], 3)
+        self.assertEqual(readiness["evidence"]["unknown_count"], 1)
+        self.assertTrue(readiness["quality_gates"]["requires_classified_skipped_unknown_rows"])
+        self.assertEqual(result["summary"]["promotion_ready_count"], 0)
+        self.assertEqual(result["summary"]["keep_staged_count"], 1)
+
+    def test_gpt54_tool_light_canary_narrows_unsupported_skipped_rows_before_promotion(self) -> None:
+        def canary(canary_cohort: str, **extra: object) -> dict[str, object]:
+            status = "applied" if canary_cohort == "canary_applied" else "holdout"
+            if canary_cohort == "skipped":
+                status = "skipped"
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-v1",
+                "target_candidate_id": "openai-route:responses:gpt-5:tool-light:tools:nonstream:1_5k-6k:1k-4k:to-gpt-5-4-mini",
+                "status": status,
+                "cohort": canary_cohort,
+                "reason": "request-too-large" if canary_cohort == "skipped" else "selected-canary",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if canary_cohort == "canary_applied" else "gpt-5.4",
+                "category": "tool-light",
+                "canary_fraction": 0.15,
+                "holdout_fraction": 0.10,
+                **extra,
+            }
+
+        for _ in range(6):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+            )
+        for _ in range(7):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout", reason="selected-holdout"),
+            )
+        self._log_openai_call(
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4",
+            category="tool-light",
+            text_chars=4000,
+            has_tools=True,
+            openai_canary=canary("skipped"),
+        )
+
+        result = build_openai_routing_report(self.store, limit=30)
+
+        candidate = result["candidates"][0]
+        lifecycle = candidate["openai_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["skipped_reason_breakdown"], [{"value": "request-too-large", "count": 1}])
+        classification = lifecycle["skipped_unknown_classification"]
+        self.assertEqual(classification["unsupported_shape_count"], 1)
+        readiness = candidate["promotion_readiness"]
+        self.assertEqual(readiness["decision"], "narrow")
+        self.assertEqual(readiness["next_action"], "narrow-openai-routing-canary-shape")
+        self.assertIn("skipped-canary-unsupported-shape", readiness["reason_codes"])
+        self.assertEqual(result["summary"]["promotion_ready_count"], 0)
 
     def test_gpt54_tool_light_canary_promotion_readiness_promotes_healthy_evidence(self) -> None:
         def canary(cohort: str) -> dict[str, object]:
