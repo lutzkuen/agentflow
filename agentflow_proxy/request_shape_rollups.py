@@ -4123,6 +4123,90 @@ def _cache_replay_evidence_class(row: dict[str, Any], cache_meta: dict[str, Any]
     return "bypassed", reason
 
 
+def _cache_replay_applied_miss_blockers(row: dict[str, Any], cache_meta: dict[str, Any]) -> list[str]:
+    replay_canary = (
+        cache_meta.get("cache_replay_canary")
+        if isinstance(cache_meta.get("cache_replay_canary"), dict)
+        else {}
+    )
+    pattern_rule = cache_meta.get("pattern_rule") if isinstance(cache_meta.get("pattern_rule"), dict) else {}
+    pattern_rules = cache_meta.get("pattern_rules") if isinstance(cache_meta.get("pattern_rules"), dict) else {}
+    store_meta = (
+        cache_meta.get("cache_replay_store")
+        if isinstance(cache_meta.get("cache_replay_store"), dict)
+        else {}
+    )
+    reasons = {
+        public_label(value, "unknown")
+        for value in (
+            cache_meta.get("reason"),
+            replay_canary.get("reason"),
+            cache_meta.get("invalidation_reason"),
+            store_meta.get("reason"),
+        )
+        if public_label(value, "unknown") != "unknown"
+    }
+    for item in pattern_rules.get("skip_reasons") or []:
+        if isinstance(item, dict):
+            reason = public_label(item.get("reason"), "unknown")
+            if reason != "unknown":
+                reasons.add(reason)
+    audit = replay_canary.get("dependency_audit")
+    if not isinstance(audit, dict):
+        audit = cache_meta.get("file_dependency_audit") if isinstance(cache_meta.get("file_dependency_audit"), dict) else {}
+
+    blockers: set[str] = set()
+    if any("ttl" in reason or "expired" in reason for reason in reasons):
+        blockers.add("ttl-expiry")
+    if (
+        cache_meta.get("invalidated")
+        or cache_meta.get("cache_replay_blocker_reasons")
+        or any(reason.startswith("dependency-") or "invalidation" in reason for reason in reasons)
+        or (isinstance(audit, dict) and audit.get("safe_invalidation_evidence") is False)
+    ):
+        blockers.add("invalidation-risk")
+    mismatch_reasons = {
+        reason
+        for reason in reasons
+        if reason.endswith("-mismatch")
+        or reason in {
+            "cohort-mismatch",
+            "category-excluded",
+            "unsupported-endpoint",
+            "replayability-gate-mismatch",
+        }
+    }
+    if "pattern-hash-mismatch" in mismatch_reasons:
+        blockers.add("fingerprint-drift")
+    cohort_mismatch_reasons = {
+        "source_surface-mismatch",
+        "endpoint-mismatch",
+        "category-mismatch",
+        "workflow_phase-mismatch",
+        "text_bucket-mismatch",
+        "token_bucket-mismatch",
+        "cohort-mismatch",
+    }
+    if any(reason in mismatch_reasons for reason in cohort_mismatch_reasons):
+        blockers.add("cohort-mismatch")
+    if any("normalization" in reason for reason in reasons):
+        blockers.add("normalization-mismatch")
+    if not pattern_rule:
+        blockers.add("cohort-mismatch")
+    store_status = public_label(store_meta.get("status"), "unknown")
+    if store_status == "stored":
+        blockers.add("cache-warmup-miss")
+    elif store_status == "skipped":
+        blockers.add("cache-write-absence")
+    elif _as_int(row.get("status_code"), 200) >= 400:
+        blockers.add("upstream-error-before-cache-write")
+    elif cache_meta.get("status") == "miss":
+        blockers.add("cache-write-absence")
+    if not blockers:
+        blockers.add("uncategorized-applied-cache-miss")
+    return sorted(blockers)
+
+
 def _cache_replay_row_observed_savings(row: dict[str, Any], cache_meta: dict[str, Any], evidence_class: str) -> float:
     if evidence_class != "exact_hit":
         return 0.0
@@ -4161,6 +4245,7 @@ def build_request_shape_cache_replay_evidence_report(
         "error_count": 0,
     }
     blocker_counts: dict[str, int] = {}
+    applied_miss_blocker_counts: dict[str, int] = {}
     cache_status_counts: dict[str, int] = {}
     canary_status_counts: dict[str, int] = {}
     observed_rows = 0
@@ -4196,6 +4281,8 @@ def build_request_shape_cache_replay_evidence_report(
         elif evidence_class == "miss":
             lifecycle_counts["canary_applied_count"] += 1
             lifecycle_counts["miss_count"] += 1
+            for blocker in _cache_replay_applied_miss_blockers(row, cache_meta):
+                _increment(applied_miss_blocker_counts, blocker)
         elif evidence_class == "applied":
             lifecycle_counts["canary_applied_count"] += 1
         elif evidence_class == "holdout":
@@ -4295,6 +4382,7 @@ def build_request_shape_cache_replay_evidence_report(
         if isinstance(rule.get("graduation"), dict)
     )
     observed_hits = lifecycle_counts["exact_hit_count"]
+    applied_miss_blocker_breakdown = _breakdown(applied_miss_blocker_counts)
     return {
         "schema": REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA,
         "status": status,
@@ -4330,11 +4418,13 @@ def build_request_shape_cache_replay_evidence_report(
             "hit_observation_rate": round(observed_hits / float(lifecycle_counts["canary_applied_count"]), 6)
             if lifecycle_counts["canary_applied_count"] else 0.0,
             "top_blocker": _breakdown(blocker_counts)[0]["value"] if blocker_counts else None,
+            "top_applied_miss_blocker": applied_miss_blocker_breakdown[0]["value"] if applied_miss_blocker_breakdown else None,
         },
         "lifecycle_counts": lifecycle_counts,
         "cache_status_breakdown": _breakdown(cache_status_counts),
         "canary_status_breakdown": _breakdown(canary_status_counts),
         "blocker_breakdown": _breakdown(blocker_counts),
+        "applied_miss_blocker_breakdown": applied_miss_blocker_breakdown,
         "stale_evidence": {
             "max_age_hours": float(max_age_hours),
             "latest_observed_at": latest_observed.isoformat() if latest_observed else None,
@@ -4349,6 +4439,7 @@ def build_request_shape_cache_replay_evidence_report(
             "reports_projected_vs_observed_hits": projected_hits >= 0 and observed_hits >= 0,
             "reports_observed_savings_estimate": True,
             "reports_blocker_breakdown": isinstance(_breakdown(blocker_counts), list),
+            "reports_applied_miss_blocker_breakdown": isinstance(applied_miss_blocker_breakdown, list),
             "reports_stale_evidence_metadata": True,
             "aggregate_only": True,
         },
@@ -4400,6 +4491,11 @@ def _cache_replay_policy_decision_top_canary(evidence: dict[str, Any]) -> dict[s
 def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> dict[str, Any]:
     summary = evidence.get("summary") if isinstance(evidence, dict) and isinstance(evidence.get("summary"), dict) else {}
     stale = evidence.get("stale_evidence") if isinstance(evidence, dict) and isinstance(evidence.get("stale_evidence"), dict) else {}
+    applied_miss_blockers = (
+        evidence.get("applied_miss_blocker_breakdown")
+        if isinstance(evidence, dict) and isinstance(evidence.get("applied_miss_blocker_breakdown"), list)
+        else []
+    )
     applied = _as_int(summary.get("applied_count"))
     holdout = _as_int(summary.get("holdout_count"))
     observed_hits = _as_int(summary.get("observed_hits"))
@@ -4426,6 +4522,9 @@ def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> di
         "observed_savings_usd": round(observed_savings, 6),
         "hit_observation_rate": round(_as_float(summary.get("hit_observation_rate")), 6),
         "savings_realization_ratio": round(observed_savings / projected_savings, 6) if projected_savings > 0 else 0.0,
+        "top_applied_miss_blocker": applied_miss_blockers[0].get("value")
+        if applied_miss_blockers and isinstance(applied_miss_blockers[0], dict)
+        else summary.get("top_applied_miss_blocker"),
         "stale_evidence": bool(stale.get("stale")),
         "evidence_age_hours": stale.get("age_hours"),
         "metadata_only": True,
@@ -4468,6 +4567,16 @@ def _cache_replay_policy_reason_codes(evidence: dict[str, Any] | None) -> list[s
             code = public_label(item.get("value"), "unknown")
             if code != "unknown":
                 codes.append(code)
+    applied_miss_breakdown = (
+        evidence.get("applied_miss_blocker_breakdown")
+        if isinstance(evidence.get("applied_miss_blocker_breakdown"), list)
+        else []
+    )
+    for item in applied_miss_breakdown[:3]:
+        if isinstance(item, dict):
+            code = public_label(item.get("value"), "unknown")
+            if code != "unknown":
+                codes.append(f"applied-miss:{code}")
     return list(dict.fromkeys(codes))
 
 
@@ -4687,6 +4796,11 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "aggregate_only": True,
         },
         "metrics": metrics,
+        "applied_miss_blocker_breakdown": (
+            evidence.get("applied_miss_blocker_breakdown")
+            if isinstance(evidence.get("applied_miss_blocker_breakdown"), list)
+            else []
+        ),
         "rollback_metadata": rollback_metadata,
         "local_policy_patch": local_policy_patch,
         "privacy": _cache_replay_policy_decision_privacy(),
@@ -4728,6 +4842,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "observed_savings_usd": metrics["observed_savings_usd"],
             "hit_observation_rate": metrics["hit_observation_rate"],
             "savings_realization_ratio": metrics["savings_realization_ratio"],
+            "top_applied_miss_blocker": metrics["top_applied_miss_blocker"],
             "stale_evidence": metrics["stale_evidence"],
             "policy_source": entry["policy_source"],
             "target_local_rule_file": "cache_rules.yaml",
@@ -4740,6 +4855,11 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "schema": evidence.get("schema"),
             "status": evidence.get("status"),
             "summary": evidence.get("summary") if isinstance(evidence.get("summary"), dict) else {},
+            "applied_miss_blocker_breakdown": (
+                evidence.get("applied_miss_blocker_breakdown")
+                if isinstance(evidence.get("applied_miss_blocker_breakdown"), list)
+                else []
+            ),
             "stale_evidence": evidence.get("stale_evidence") if isinstance(evidence.get("stale_evidence"), dict) else {},
             "privacy": _cache_replay_evidence_privacy(),
         },
@@ -4747,6 +4867,9 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "records_durable_decision": decision in {"widen", "rollback", "keep-staged", "keep-blocked"},
             "reports_hit_recovery": metrics["observed_hits"] >= 0 and metrics["projected_hits"] >= 0,
             "reports_holdout_coverage": metrics["holdout_count"] >= 0,
+            "reports_applied_miss_blocker_breakdown": isinstance(
+                evidence.get("applied_miss_blocker_breakdown"), list
+            ),
             "drafts_local_policy_patch_or_blocker": bool(local_policy_patch) or bool(reason_codes),
             "targets_file_backed_cache_policy": entry["target_local_rule_file"] == "cache_rules.yaml",
             "keeps_tool_and_streaming_replay_blocked": bool(

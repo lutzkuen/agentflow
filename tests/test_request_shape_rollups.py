@@ -1353,6 +1353,158 @@ class RequestShapeRollupTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, rendered)
 
+    def test_cache_replay_evidence_ranks_applied_miss_blockers_without_raw_metadata(self) -> None:
+        for cost in (0.01, 0.03, 0.02):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
+        stage = build_request_shape_cache_replay_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="2026-06-16-cache-replay-applied-miss-blockers",
+            rollout_fraction=0.75,
+            holdout_fraction=0.25,
+        )
+        policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
+        apply_request_shape_cache_replay_canary_action(stage["top_stage_action"], rules_path=policy_path)
+        written = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+        rule = written["pattern_rules"][0]
+        public_pattern_rule = {
+            "rule_id": rule["id"],
+            "candidate_id": rule["candidate_id"],
+            "policy_source": "local-manual",
+            "scope": "session",
+            "allow_tool_calls": False,
+            "safe_invalidation": False,
+            "rollout": rule["rollout"],
+            "canary": {"enabled": True, "selected": True, "cohort": "canary_applied"},
+            "graduation": rule["graduation"],
+        }
+        applied_canary = {
+            "schema": "agentflow.cache_replay_canary_decision.v1",
+            "rule_id": rule["id"],
+            "candidate_id": rule["candidate_id"],
+            "policy_source": "local-manual",
+            "scope": "session",
+            "canary": {"enabled": True, "selected": True, "cohort": "canary_applied"},
+            "canary_cohort": "canary_applied",
+            "status": "applied",
+            "reason": "no-dependency-required",
+            "projection": rule["graduation"],
+        }
+        for cache_reason, extra in (
+            ("exact-pattern-miss", {"cache_replay_store": {"status": "stored", "reason": "compatible-success-response"}}),
+            ("exact-pattern-miss", {"pattern_rules": {"skip_reasons": [{"reason": "pattern-hash-mismatch"}]}}),
+            ("ttl-expired-without-tool-result", {}),
+        ):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason=cache_reason,
+                text_chars=6_000,
+                cost=0.01,
+                baseline=0.01,
+                cache_extra={
+                    "pattern_rule": public_pattern_rule,
+                    "cache_replay_canary": applied_canary,
+                    **extra,
+                },
+            )
+        holdout_canary = {
+            **applied_canary,
+            "canary": {"enabled": True, "selected": False, "cohort": "canary_holdout"},
+            "canary_cohort": "canary_holdout",
+            "status": "holdout",
+            "reason": "canary_holdout",
+        }
+        self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="chat",
+            workflow_phase="chat",
+            stream=0,
+            has_tools=False,
+            cache_status="miss",
+            cache_reason="canary_holdout",
+            text_chars=6_000,
+            cost=0.01,
+            baseline=0.01,
+            cache_extra={
+                "pattern_rule": {**public_pattern_rule, "canary": holdout_canary["canary"]},
+                "cache_replay_canary": holdout_canary,
+            },
+        )
+
+        evidence = build_request_shape_cache_replay_evidence_report(
+            self.store,
+            rules_path=policy_path,
+            limit=20,
+        )
+        decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+
+        self.assertEqual(evidence["summary"]["applied_count"], 3)
+        self.assertEqual(evidence["summary"]["holdout_count"], 1)
+        self.assertEqual(evidence["summary"]["miss_count"], 3)
+        self.assertEqual(evidence["summary"]["observed_hits"], 0)
+        self.assertEqual(evidence["summary"]["projected_hits"], 2)
+        applied_miss_blockers = {item["value"]: item["count"] for item in evidence["applied_miss_blocker_breakdown"]}
+        self.assertEqual(applied_miss_blockers["cache-write-absence"], 2)
+        self.assertEqual(applied_miss_blockers["cache-warmup-miss"], 1)
+        self.assertEqual(applied_miss_blockers["fingerprint-drift"], 1)
+        self.assertEqual(applied_miss_blockers["ttl-expiry"], 1)
+        self.assertEqual(evidence["summary"]["top_applied_miss_blocker"], "cache-write-absence")
+        self.assertTrue(evidence["acceptance"]["reports_applied_miss_blocker_breakdown"])
+        self.assertEqual(decision["decision"], "keep-blocked")
+        self.assertIn("applied-cache-replay-miss-observed", decision["reason_codes"])
+        self.assertIn("applied-miss:cache-write-absence", decision["reason_codes"])
+        self.assertTrue(decision["acceptance"]["reports_applied_miss_blocker_breakdown"])
+        rendered = json.dumps({"evidence": evidence, "decision": decision}, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+            rule["id"],
+            rule["candidate_id"],
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_cache_replay_evidence_cli_reads_policy_overlay(self) -> None:
         for cost in (0.01, 0.03, 0.02):
             self._log_call(
