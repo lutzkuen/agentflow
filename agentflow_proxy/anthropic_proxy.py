@@ -732,23 +732,19 @@ def _prepare_anthropic_shadow_request(
     _strip_model_incompatible_params(shadow_body, sanitization, primary_model)
     if sanitization.get("stripped_params"):
         diagnostics["stripped_params"] = sanitization["stripped_params"]
+    if model_tier(shadow_model) == "haiku":
+        diagnostics["candidate_would_strip_thinking_history"] = True
+        pre_sanitization_tool_audit = _anthropic_shadow_tool_result_audit(shadow_body)
+        if int(pre_sanitization_tool_audit.get("thinking_blocks_before_tool_results") or 0) > 0:
+            diagnostics["pre_sanitization_tool_result_audit"] = pre_sanitization_tool_audit
+        shadow_body, stripped_thinking = strip_thinking_history_blocks(shadow_body)
+        if stripped_thinking:
+            diagnostics["thinking_history_blocks_stripped"] = stripped_thinking
     tool_audit = _anthropic_shadow_tool_result_audit(shadow_body)
     diagnostics["tool_result_audit"] = tool_audit
     if tool_audit["status"] == "unsupported":
         diagnostics.update({"status": "unsupported", "reason": tool_audit["reason"]})
         return None, diagnostics
-    if model_tier(shadow_model) == "haiku":
-        diagnostics["candidate_would_strip_thinking_history"] = True
-        if int(tool_audit.get("tool_result_from_thinking_turn_count") or 0) > 0:
-            diagnostics.update({
-                "status": "unsupported",
-                "reason": "tool-result-thinking-continuation",
-                "thinking_history_blocks_detected": tool_audit.get("thinking_blocks_before_tool_results"),
-            })
-            return None, diagnostics
-        shadow_body, stripped_thinking = strip_thinking_history_blocks(shadow_body)
-        if stripped_thinking:
-            diagnostics["thinking_history_blocks_stripped"] = stripped_thinking
     empty_assistant_count = _assistant_empty_content_count(shadow_body)
     if empty_assistant_count:
         diagnostics.update({

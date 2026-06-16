@@ -130,7 +130,7 @@ def _assistant_tool_use_seen(messages: list[Any]) -> bool:
 def _has_assistant_thinking_history(body: dict[str, Any]) -> bool:
     for msg in body.get("messages") or []:
         if isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
-            if any(isinstance(b, dict) and b.get("type") == "thinking" for b in msg["content"]):
+            if any(isinstance(b, dict) and b.get("type") in {"thinking", "redacted_thinking"} for b in msg["content"]):
                 return True
     return False
 
@@ -266,13 +266,17 @@ def _thinking_gate_meta(body: dict[str, Any], category: str) -> dict[str, Any]:
 
 
 def strip_thinking_history_blocks(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Remove type=='thinking' blocks from assistant messages; returns (modified_body, n_stripped)."""
+    """Remove thinking-history blocks from assistant messages; returns (modified_body, n_stripped)."""
     import copy
     body = copy.deepcopy(body)
     n_stripped = 0
     for msg in body.get("messages") or []:
         if isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
-            filtered = [b for b in msg["content"] if not (isinstance(b, dict) and b.get("type") == "thinking")]
+            filtered = [
+                b
+                for b in msg["content"]
+                if not (isinstance(b, dict) and b.get("type") in {"thinking", "redacted_thinking"})
+            ]
             n_stripped += len(msg["content"]) - len(filtered)
             msg["content"] = filtered
     return body, n_stripped

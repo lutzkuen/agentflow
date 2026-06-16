@@ -160,6 +160,34 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(meta["thinking_gate"]["status"], "blocked")
         self.assertEqual(meta["thinking_gate"]["reason"], "assistant-thinking-history")
 
+    def test_redacted_thinking_history_is_gated_and_stripped_with_thinking_history(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "reasoning"},
+                        {"type": "redacted_thinking", "data": "redacted"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                },
+            ],
+        }
+
+        routed, meta = route_model(body)
+        stripped, stripped_count = router_module.strip_thinking_history_blocks(body)
+
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertEqual(meta["thinking_gate"]["status"], "blocked")
+        self.assertEqual(meta["thinking_gate"]["reason"], "assistant-thinking-history")
+        self.assertEqual(stripped_count, 2)
+        self.assertEqual([block["type"] for block in stripped["messages"][0]["content"]], ["tool_use"])
+
     def test_workflow_phase_classifier_identifies_planning_turn(self):
         body = {
             "model": SONNET_DEFAULT,

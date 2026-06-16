@@ -653,7 +653,7 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertNotIn("tool output secret", serialized)
         self.assertNotIn("secret.py", serialized)
 
-    def test_streamed_tool_result_shadow_skips_thinking_continuation_before_provider_call(self):
+    def test_streamed_tool_result_shadow_sanitizes_thinking_continuation_before_provider_call(self):
         request_body = {
             "model": "claude-sonnet-4-6",
             "max_tokens": 32,
@@ -664,6 +664,7 @@ class StreamingCacheTest(unittest.TestCase):
                     "role": "assistant",
                     "content": [
                         {"type": "thinking", "thinking": "private current reasoning secret", "signature": "sig-secret"},
+                        {"type": "redacted_thinking", "data": "redacted reasoning secret"},
                         {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "secret.py"}},
                     ],
                 },
@@ -685,29 +686,40 @@ class StreamingCacheTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body, b"".join(STREAM_FRAMES))
-        self.assertEqual(FakeShadowStreamingClient.post_calls, 0)
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
+        shadow_payload = FakeShadowStreamingClient.post_payloads[0]
+        self.assertEqual(shadow_payload["model"], "claude-haiku-4-5-20251001")
+        self.assertFalse(shadow_payload["stream"])
+        assistant_blocks = shadow_payload["messages"][0]["content"]
+        self.assertEqual([block["type"] for block in assistant_blocks], ["tool_use"])
         [call] = server.store.conn.execute("select routing_json from calls").fetchall()
         experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
-        self.assertEqual(experiment_meta["reason"], "streaming-shadow-unsupported-shape")
-        self.assertEqual(experiment_meta["status"], "shadow-unsupported-shape")
-        self.assertIn("unsupported-shadow-shape-tool-result-thinking-continuation", experiment_meta["reason_codes"])
+        self.assertEqual(experiment_meta["reason"], "streaming-shadow-sampled")
+        self.assertEqual(experiment_meta["status"], "compared")
+        self.assertNotIn("shadow-http-400", experiment_meta["reason_codes"])
+        self.assertNotIn("unsupported-shadow-shape-tool-result-thinking-continuation", experiment_meta["reason_codes"])
 
         [sample] = server.store.conn.execute(
             "select shadow_status_code, error, experiment_json from routing_experiments"
         ).fetchall()
-        self.assertIsNone(sample["shadow_status_code"])
-        self.assertEqual(sample["error"], "shadow-unsupported-shape:tool-result-thinking-continuation")
+        self.assertEqual(sample["shadow_status_code"], 200)
+        self.assertIsNone(sample["error"])
         experiment_json = json.loads(sample["experiment_json"])
         preflight = experiment_json["shadow_request_preflight"]
-        self.assertEqual(preflight["status"], "unsupported")
-        self.assertEqual(preflight["reason"], "tool-result-thinking-continuation")
+        self.assertEqual(preflight["status"], "ok")
+        self.assertIsNone(preflight["reason"])
         self.assertTrue(preflight["candidate_would_strip_thinking_history"])
-        self.assertEqual(preflight["tool_result_audit"]["tool_result_from_thinking_turn_count"], 1)
+        self.assertEqual(preflight["thinking_history_blocks_stripped"], 2)
+        self.assertEqual(preflight["pre_sanitization_tool_result_audit"]["tool_result_from_thinking_turn_count"], 1)
+        self.assertEqual(preflight["pre_sanitization_tool_result_audit"]["thinking_blocks_before_tool_results"], 2)
+        self.assertEqual(preflight["tool_result_audit"]["tool_result_from_thinking_turn_count"], 0)
+        self.assertEqual(preflight["tool_result_audit"]["status"], "ok")
         self.assertFalse(preflight["raw_request_included"])
         self.assertFalse(preflight["tool_payloads_included"])
         serialized = json.dumps(experiment_json, sort_keys=True)
         self.assertNotIn("private current reasoning secret", serialized)
         self.assertNotIn("sig-secret", serialized)
+        self.assertNotIn("redacted reasoning secret", serialized)
         self.assertNotIn("tool output secret", serialized)
         self.assertNotIn("toolu_1", serialized)
         self.assertNotIn("secret.py", serialized)
