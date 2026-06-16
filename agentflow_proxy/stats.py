@@ -90,6 +90,179 @@ def _json_obj_has_value(raw: Any) -> bool:
     return bool(value) if isinstance(value, dict) else True
 
 
+def _metadata_only_privacy() -> dict[str, bool]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "provider_bodies_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "cache_keys_included": False,
+        "file_paths_included": False,
+        "absolute_paths_included": False,
+        "tool_payloads_included": False,
+    }
+
+
+def _crunch_rule_candidate_paths() -> list[Path]:
+    candidates: list[Path] = []
+    env_path = os.getenv("AGENTFLOW_CRUNCH_RULES")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path.cwd() / "config" / "crunch_rules.yaml")
+    candidates.append(agentflow_config_path("crunch_rules.yaml"))
+    candidates.append(Path(__file__).parent / "crunch_rules.yaml")
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
+
+
+def _active_crunch_rule_coverage() -> dict[str, Any] | None:
+    loaded_path: Path | None = None
+    loaded: dict[str, Any] | None = None
+    for path in _crunch_rule_candidate_paths():
+        if not path.exists():
+            continue
+        try:
+            value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {
+                "schema": "agentflow.active_crunch_rule_coverage.v1",
+                "status": "unreadable-rule-file",
+                "rule_file": "crunch_rules.yaml",
+                "target_local_policy": "crunch_rules",
+                "target_local_policy_section": "crunch.rules",
+                "summary": {
+                    "active_rule_count": 0,
+                    "widened_rule_count": 0,
+                    "applied_count": 0,
+                    "holdout_count": 0,
+                    "skipped_count": 0,
+                    "blocked_count": 0,
+                    "observed_saved_chars": 0,
+                    "observed_saved_tokens": 0,
+                    "observed_saved_usd": 0.0,
+                    "no_op_reason": "unreadable-crunch-rule-file",
+                    "next_action": "inspect-crunch-rule-file",
+                },
+                "rules": [],
+                "missing_measurements": ["active-crunch-rule-coverage"],
+                "privacy": _metadata_only_privacy(),
+            }
+        if isinstance(value, dict):
+            loaded_path = path
+            loaded = value
+            break
+    if loaded is None:
+        return None
+
+    section = loaded.get("request_shape_repeated_context_canaries")
+    raw_rules = section.get("rules") if isinstance(section, dict) and isinstance(section.get("rules"), list) else []
+    rules: list[dict[str, Any]] = []
+    policy_sources: dict[str, int] = {}
+    decisions: dict[str, int] = {}
+    applied_count = 0
+    holdout_count = 0
+    skipped_count = 0
+    blocked_count = 0
+    observed_saved_chars = 0
+    observed_saved_tokens = 0
+    observed_saved_usd = 0.0
+
+    for item in raw_rules:
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            continue
+        decision = item.get("policy_decision") if isinstance(item.get("policy_decision"), dict) else {}
+        decision_value = str(decision.get("decision") or "").strip()
+        if decision.get("schema") != "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1":
+            continue
+        source = public_label(item.get("policy_source") or "local-manual", "local-manual")
+        policy_sources[source] = policy_sources.get(source, 0) + 1
+        decisions[decision_value or "unknown"] = decisions.get(decision_value or "unknown", 0) + 1
+        rule_applied = _as_int(decision.get("applied_count"))
+        rule_holdout = _as_int(decision.get("holdout_count"))
+        rule_skipped = _as_int(decision.get("skipped_count"))
+        rule_blocked = _as_int(decision.get("blocked_count"))
+        rule_tokens = _as_int(decision.get("observed_saved_tokens"))
+        rule_chars = _as_int(decision.get("observed_saved_chars"))
+        applied_count += rule_applied
+        holdout_count += rule_holdout
+        skipped_count += rule_skipped
+        blocked_count += rule_blocked
+        observed_saved_tokens += rule_tokens
+        observed_saved_chars += rule_chars
+        observed_saved_usd += _as_float(decision.get("observed_saved_usd"))
+        rollout = item.get("rollout") if isinstance(item.get("rollout"), dict) else {}
+        rules.append({
+            "rank": len(rules) + 1,
+            "policy_source": source,
+            "decision": public_label(decision_value or "unknown", "unknown"),
+            "graduation_decision": public_label(decision.get("graduation_decision") or decision_value or "unknown", "unknown"),
+            "applied_count": rule_applied,
+            "holdout_count": rule_holdout,
+            "skipped_count": rule_skipped,
+            "blocked_count": rule_blocked,
+            "observed_saved_chars": rule_chars,
+            "observed_saved_tokens": rule_tokens,
+            "observed_saved_usd": round(_as_float(decision.get("observed_saved_usd")), 8),
+            "canary_fraction": round(_as_float(rollout.get("canary_fraction") or rollout.get("fraction")), 6),
+            "holdout_fraction": round(_as_float(rollout.get("holdout_fraction")), 6),
+            "metadata_only": True,
+            "aggregate_only": True,
+        })
+
+    active_rule_count = len(rules)
+    widened_rule_count = sum(1 for item in rules if item.get("decision") == "widen")
+    has_applied = applied_count > 0 or observed_saved_tokens > 0 or observed_saved_chars > 0 or observed_saved_usd > 0
+    status = "observed" if has_applied else "no-applied-coverage"
+    no_op_reason = None if has_applied else "no-applied-coverage"
+    missing = [] if has_applied else ["no-applied-coverage"]
+    return {
+        "schema": "agentflow.active_crunch_rule_coverage.v1",
+        "status": status,
+        "rule_file": "crunch_rules.yaml",
+        "rules_path_included": False,
+        "target_local_policy": "crunch_rules",
+        "target_local_policy_section": "crunch.rules",
+        "summary": {
+            "active_rule_count": active_rule_count,
+            "widened_rule_count": widened_rule_count,
+            "rule_count": len(raw_rules),
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": skipped_count,
+            "blocked_count": blocked_count,
+            "observed_saved_chars": observed_saved_chars,
+            "observed_saved_tokens": observed_saved_tokens,
+            "observed_saved_usd": round(observed_saved_usd, 8),
+            "policy_source_breakdown": [
+                {"value": key, "count": value}
+                for key, value in sorted(policy_sources.items(), key=lambda pair: (-pair[1], pair[0]))
+            ],
+            "decision_breakdown": [
+                {"value": key, "count": value}
+                for key, value in sorted(decisions.items(), key=lambda pair: (-pair[1], pair[0]))
+            ],
+            "policy_source": rules[0]["policy_source"] if rules else None,
+            "target_local_rule_file": "crunch_rules.yaml",
+            "target_local_policy_section": "crunch.rules",
+            "no_op_reason": no_op_reason,
+            "next_action": "rank-observed-crunch-family-follow-up" if has_applied else "inspect-active-crunch-rule-coverage",
+        },
+        "rules": rules[:10],
+        "missing_measurements": missing,
+        "privacy": _metadata_only_privacy(),
+        "loaded_rule_file": loaded_path.name if loaded_path is not None else "crunch_rules.yaml",
+    }
+
+
 def _copy_policy(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
@@ -17530,6 +17703,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     today_start = _utc_today_start_iso()
     old_context_summary_opportunity = await stats_old_context_summary(store_obj)
     sqlite_maintenance = await stats_sqlite_maintenance(store_obj)
+    active_crunch_rule_coverage = _active_crunch_rule_coverage()
 
     def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -18248,6 +18422,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "crunch_savings_usd": round(crunch_savings, 6),
             "today_crunch_savings_usd": round(today_crunch_savings, 6),
             "avg_crunch_ratio": round(avg_crunch_ratio, 4),
+            "active_crunch_rule_coverage": active_crunch_rule_coverage,
             "old_context_summary_applied_count": summary_applied_count,
             "today_old_context_summary_applied_count": today_summary_applied_count,
             "old_context_summary_created_count": summary_created_count,
@@ -18334,6 +18509,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "cache_replay_activation_health": cache_replay_activation_health,
         "streaming_cache_hit_recovery": streaming_cache_hit_recovery,
         "old_context_summary_opportunity": old_context_summary_opportunity,
+        "active_crunch_rule_coverage": active_crunch_rule_coverage,
         "provider_prompt_cache_accounting": prompt_cache_accounting,
         "sqlite_maintenance": sqlite_maintenance,
         "pattern_decision_breakdown": pattern_decision_breakdown,

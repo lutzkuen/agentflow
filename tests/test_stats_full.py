@@ -86,6 +86,63 @@ class StatsFullTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, rendered)
 
+    def test_stats_full_exposes_active_crunch_rule_coverage_after_widening(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = os.path.join(tmp, "crunch_rules.yaml")
+            with open(rules_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    """
+enabled: true
+request_shape_repeated_context_canaries:
+  enabled: true
+  schema: agentflow.request_shape_repeated_context_canaries.v1
+  rules:
+    - id: raw-policy-secret-should-not-leak
+      enabled: true
+      policy_source: local-manual
+      cohort_id: raw-cohort-secret-should-not-leak
+      rollout:
+        canary_enabled: true
+        canary_fraction: 0.2
+        holdout_fraction: 0.1
+      policy_decision:
+        schema: agentflow.request_shape_crunch_policy_decision_rule_metadata.v1
+        decision: widen
+        graduation_decision: widen
+        applied_count: 7
+        holdout_count: 8
+        skipped_count: 59
+        blocked_count: 0
+        observed_saved_chars: 42952
+        observed_saved_tokens: 10738
+        observed_saved_usd: 0.032214
+        metadata_only: true
+        aggregate_only: true
+"""
+                )
+            with patch.dict(os.environ, {"AGENTFLOW_CRUNCH_RULES": rules_path}, clear=False):
+                result = asyncio.run(stats_views.stats_full(server.store))
+
+        coverage = result["active_crunch_rule_coverage"]
+        self.assertEqual(coverage["schema"], "agentflow.active_crunch_rule_coverage.v1")
+        self.assertEqual(coverage["status"], "observed")
+        self.assertEqual(coverage["rule_file"], "crunch_rules.yaml")
+        self.assertFalse(coverage["rules_path_included"])
+        self.assertEqual(coverage["summary"]["active_rule_count"], 1)
+        self.assertEqual(coverage["summary"]["widened_rule_count"], 1)
+        self.assertEqual(coverage["summary"]["applied_count"], 7)
+        self.assertEqual(coverage["summary"]["holdout_count"], 8)
+        self.assertEqual(coverage["summary"]["skipped_count"], 59)
+        self.assertEqual(coverage["summary"]["observed_saved_tokens"], 10738)
+        self.assertAlmostEqual(coverage["summary"]["observed_saved_usd"], 0.032214)
+        self.assertTrue(coverage["privacy"]["metadata_only"])
+        self.assertTrue(coverage["privacy"]["aggregate_only"])
+        self.assertFalse(coverage["privacy"]["raw_prompts_included"])
+        rendered = json.dumps(coverage)
+        self.assertNotIn(tmp, rendered)
+        self.assertNotIn("raw-policy-secret-should-not-leak", rendered)
+        self.assertNotIn("raw-cohort-secret-should-not-leak", rendered)
+
     def test_lightweight_stats_routing_rows_include_openai_canary_lifecycle_counts(self):
         observed_at = datetime.now(timezone.utc).isoformat()
 

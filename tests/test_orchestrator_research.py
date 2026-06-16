@@ -2873,6 +2873,123 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         rendered = json.dumps(plan)
         self.assertNotIn("raw-policy-secret", rendered)
 
+    def test_issue_555_active_crunch_rule_coverage_populates_observed_savings_signal(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "crunch_chars_saved": 0,
+                "crunched_count": 0,
+                "active_crunch_rule_coverage": {
+                    "schema": "agentflow.active_crunch_rule_coverage.v1",
+                    "status": "observed",
+                    "rule_file": "crunch_rules.yaml",
+                    "target_local_policy": "crunch_rules",
+                    "target_local_policy_section": "crunch.rules",
+                    "summary": {
+                        "active_rule_count": 1,
+                        "widened_rule_count": 1,
+                        "applied_count": 7,
+                        "holdout_count": 8,
+                        "skipped_count": 59,
+                        "blocked_count": 0,
+                        "observed_saved_chars": 42952,
+                        "observed_saved_tokens": 10738,
+                        "observed_saved_usd": 0.032214,
+                        "policy_source": "local-manual",
+                        "target_local_rule_file": "crunch_rules.yaml",
+                        "target_local_policy_section": "crunch.rules",
+                        "next_action": "rank-observed-crunch-family-follow-up",
+                    },
+                    "rules": [
+                        {
+                            "policy_source": "local-manual",
+                            "decision": "widen",
+                            "applied_count": 7,
+                            "holdout_count": 8,
+                            "observed_saved_tokens": 10738,
+                            "observed_saved_usd": 0.032214,
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
+        self.assertEqual(signal["schema"], "agentflow.crunch_savings_signal.v1")
+        self.assertEqual(signal["status"], "observed-savings-ranked")
+        self.assertEqual(signal["observed"]["source"], "active_crunch_rule_coverage")
+        self.assertEqual(signal["observed"]["crunched_count"], 7)
+        self.assertEqual(signal["observed"]["crunch_tokens_saved"], 10738)
+        self.assertEqual(signal["observed"]["crunch_chars_saved"], 42952)
+        self.assertEqual(signal["observed"]["crunch_savings_usd"], 0.032214)
+        self.assertEqual(signal["top_report"]["report_key"], "active_crunch_rule_coverage")
+        self.assertEqual(signal["top_report"]["applied_count"], 7)
+        self.assertEqual(signal["top_report"]["holdout_count"], 8)
+        self.assertEqual(signal["top_report"]["skipped_count"], 59)
+        self.assertEqual(signal["top_report"]["blocked_count"], 0)
+        self.assertEqual(signal["top_report"]["savings_status"], "active-rule-coverage-observed")
+        self.assertEqual(signal["missing_measurements"], [])
+        self.assertTrue(signal["privacy"]["metadata_only"])
+        self.assertTrue(signal["privacy"]["aggregate_only"])
+        rendered = json.dumps(plan)
+        self.assertNotIn("/home/lutz/private", rendered)
+        self.assertNotIn("secret raw prompt", rendered.lower())
+
+    def test_issue_555_zero_active_crunch_rule_coverage_has_explicit_no_applied_reason(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 20,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "crunch_chars_saved": 0,
+                "crunched_count": 0,
+                "active_crunch_rule_coverage": {
+                    "schema": "agentflow.active_crunch_rule_coverage.v1",
+                    "status": "no-applied-coverage",
+                    "rule_file": "crunch_rules.yaml",
+                    "summary": {
+                        "active_rule_count": 1,
+                        "widened_rule_count": 1,
+                        "applied_count": 0,
+                        "holdout_count": 4,
+                        "skipped_count": 16,
+                        "blocked_count": 0,
+                        "observed_saved_chars": 0,
+                        "observed_saved_tokens": 0,
+                        "observed_saved_usd": 0.0,
+                        "no_op_reason": "no-applied-coverage",
+                        "next_action": "inspect-active-crunch-rule-coverage",
+                    },
+                    "missing_measurements": ["no-applied-coverage"],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
+        self.assertEqual(signal["status"], "non-positive-projection")
+        self.assertEqual(signal["observed"]["crunched_count"], 0)
+        self.assertEqual(signal["observed"]["crunch_tokens_saved"], 0)
+        self.assertEqual(signal["top_report"]["report_key"], "active_crunch_rule_coverage")
+        self.assertEqual(signal["top_report"]["no_op_reason"], "no-applied-coverage")
+        self.assertEqual(signal["top_report"]["next_action"], "inspect-active-crunch-rule-coverage")
+        self.assertIn("no-applied-coverage", signal["missing_measurements"])
+        self.assertTrue(signal["privacy"]["metadata_only"])
+        self.assertTrue(signal["privacy"]["aggregate_only"])
+
     def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
         plan = build_research_plan(
             issues=[],

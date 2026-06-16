@@ -1500,6 +1500,23 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     cache = stats.get("cache_decision_breakdown")
     if isinstance(cache, list):
         summary["cache_decision_breakdown_top"] = cache[:5]
+    active_crunch = stats.get("active_crunch_rule_coverage")
+    if not isinstance(active_crunch, dict) and isinstance(stats.get("summary"), dict):
+        active_crunch = stats["summary"].get("active_crunch_rule_coverage")
+    if isinstance(active_crunch, dict):
+        summary["active_crunch_rule_coverage"] = {
+            "schema": sanitize_value(active_crunch.get("schema")),
+            "status": sanitize_value(active_crunch.get("status")),
+            "rule_file": sanitize_value(active_crunch.get("rule_file") or "crunch_rules.yaml"),
+            "target_local_policy": sanitize_value(active_crunch.get("target_local_policy") or "crunch_rules"),
+            "target_local_policy_section": sanitize_value(
+                active_crunch.get("target_local_policy_section") or "crunch.rules"
+            ),
+            "summary": sanitize_value(active_crunch.get("summary") if isinstance(active_crunch.get("summary"), dict) else {}),
+            "rules": sanitize_value((active_crunch.get("rules") or [])[:10]),
+            "missing_measurements": sanitize_value(active_crunch.get("missing_measurements") or []),
+            "privacy": sanitize_value(active_crunch.get("privacy") if isinstance(active_crunch.get("privacy"), dict) else {}),
+        }
     ladder = stats.get("cache_zero_hit_blocker_ladder")
     if isinstance(ladder, dict):
         ladder_summary = ladder.get("summary") if isinstance(ladder.get("summary"), dict) else {}
@@ -1631,12 +1648,12 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     crunch_signal = _crunch_savings_signal(stats)
     if crunch_signal is not None:
         summary["crunch_savings_signal"] = crunch_signal
-    managed_health = _managed_recommendation_health_signal(stats, local_summary=summary)
-    if managed_health is not None:
-        summary["managed_recommendation_health"] = managed_health
     shape_signal = _request_shape_rollup_signal(stats)
     if shape_signal is not None:
         summary["request_shape_rollup_candidates"] = shape_signal
+    managed_health = _managed_recommendation_health_signal(stats, local_summary=summary)
+    if managed_health is not None:
+        summary["managed_recommendation_health"] = managed_health
     promotion_blocker = _promotion_blocker_next_action_status(stats)
     if promotion_blocker is not None:
         summary["promotion_blocker_next_action_status"] = promotion_blocker
@@ -1754,6 +1771,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
     applied_count = _first_int(summary, ("applied_count", "crunched_count", "summary_applied_count"))
     holdout_count = _first_int(summary, ("holdout_count", "summary_holdout_count"))
     skipped_count = _first_int(summary, ("skipped_count", "no_op_count", "ineligible_count", "suppressed_count"))
+    blocked_count = _first_int(summary, ("blocked_count", "safety_stop_count", "rollback_count"))
     recommended_action_count = _first_int(summary, ("recommended_action_count", "recommended_count", "planned_count"))
     projected_usd = _first_numeric(
         summary,
@@ -1781,14 +1799,18 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         summary,
         (
             "projected_saved_chars",
+            "observed_saved_chars",
             "estimated_opportunity_saved_chars",
             "total_saved_chars",
             "saved_chars",
         ),
     )
     is_policy_decision = report_key == "request_shape_crunch_policy_decision"
+    is_active_coverage = report_key == "active_crunch_rule_coverage"
     if is_policy_decision:
         status = "policy-decision-emitted"
+    elif is_active_coverage:
+        status = "active-rule-coverage-observed" if applied_count > 0 or projected_usd > 0 or projected_tokens > 0 or projected_chars > 0 else "no-applied-coverage"
     else:
         status = "projected-savings-ranked" if projected_usd > 0 or projected_tokens > 0 or projected_chars > 0 else "no-positive-projection"
     activation_follow_up = report.get("activation_follow_up") if isinstance(report.get("activation_follow_up"), dict) else {}
@@ -1796,6 +1818,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         activation_follow_up.get("no_op_reason")
         or summary.get("no_op_reason")
         or summary.get("top_no_op_reason")
+        or ("no-applied-coverage" if status == "no-applied-coverage" else None)
         or summary.get("top_blocker_reason")
         or summary.get("top_blocker")
         or blocker_value
@@ -1807,6 +1830,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         or summary.get("next_action")
         or summary.get("graduation_decision")
         or summary.get("decision")
+        or ("inspect-active-crunch-rule-coverage" if status == "no-applied-coverage" else None)
         or (
             "rank-crunch-opportunity-follow-up"
             if status == "projected-savings-ranked"
@@ -1829,6 +1853,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         "applied_count": applied_count,
         "holdout_count": holdout_count,
         "skipped_count": skipped_count,
+        "blocked_count": blocked_count,
         "recommended_action_count": recommended_action_count,
         "projected_saved_usd": round(projected_usd, 6),
         "projected_saved_tokens": projected_tokens,
@@ -1985,6 +2010,11 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
     crunched_count = _to_int(stats.get("crunched_count"))
 
     reports: list[dict[str, Any]] = []
+    active_coverage = stats.get("active_crunch_rule_coverage")
+    if isinstance(active_coverage, dict):
+        rollup = _crunch_report_rollup("active_crunch_rule_coverage", active_coverage)
+        if rollup is not None:
+            reports.append(rollup)
     for key in _CRUNCH_OPPORTUNITY_REPORT_KEYS:
         report = stats.get(key)
         if not isinstance(report, dict):
@@ -2025,6 +2055,7 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
     reports.sort(
         key=lambda item: (
             item.get("report_key") == "request_shape_crunch_policy_decision",
+            item.get("report_key") == "active_crunch_rule_coverage",
             item.get("report_key") == "request_shape_crunch_canary_impact",
             _to_float(item.get("projected_saved_usd")),
             _to_int(item.get("projected_saved_tokens")),
@@ -2034,6 +2065,33 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
         reverse=True,
     )
     top_report = reports[0] if reports else None
+    observed_source = "aggregate-crunch-measurement"
+    observed_reports = [
+        report
+        for report in reports
+        if report.get("report_key") in {"active_crunch_rule_coverage", "request_shape_crunch_policy_decision", "request_shape_crunch_canary_impact"}
+    ]
+    observed_reports.sort(
+        key=lambda item: (
+            _to_int(item.get("applied_count")),
+            _to_float(item.get("projected_saved_usd")),
+            _to_int(item.get("projected_saved_tokens")),
+            _to_int(item.get("projected_saved_chars")),
+        ),
+        reverse=True,
+    )
+    observed_report = observed_reports[0] if observed_reports else {}
+    if observed_report:
+        if crunched_count <= 0:
+            crunched_count = _to_int(observed_report.get("applied_count"))
+        if tokens_saved <= 0:
+            tokens_saved = _to_int(observed_report.get("projected_saved_tokens"))
+        if chars_saved <= 0:
+            chars_saved = _to_int(observed_report.get("projected_saved_chars"))
+        if total_savings <= 0:
+            total_savings = _to_float(observed_report.get("projected_saved_usd"))
+        if crunched_count > 0 or tokens_saved > 0 or chars_saved > 0 or total_savings > 0:
+            observed_source = str(observed_report.get("report_key") or "aggregate-crunch-measurement")
     positive_projection = top_report is not None and (
         _to_float(top_report.get("projected_saved_usd")) > 0
         or _to_int(top_report.get("projected_saved_tokens")) > 0
@@ -2052,6 +2110,9 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
     if top_report and top_report.get("report_key") == "request_shape_crunch_policy_decision":
         status = "policy-decision-emitted"
         missing = top_report_missing
+    elif top_report and top_report.get("report_key") == "active_crunch_rule_coverage" and observed_positive:
+        status = "observed-savings-ranked"
+        missing = []
     elif positive_projection:
         status = "projected-savings-ranked"
         if activation_state in {"blocked", "measurement-required", "missing-measurement", "missing-evidence"}:
@@ -2084,6 +2145,7 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
             "crunch_savings_usd": round(total_savings, 6),
             "today_crunch_savings_usd": round(today_savings, 6),
             "avg_crunch_ratio": round(_to_float(stats.get("avg_crunch_ratio")), 6),
+            "source": observed_source,
         },
         "top_report": top_report,
         "report_count": len(reports),
@@ -2279,6 +2341,7 @@ def _managed_local_handoff_stage_rows(stats_summary: dict[str, Any]) -> list[dic
         for stage in (
             _routing_loop_stage(stats_summary),
             _cache_loop_stage(stats_summary),
+            _request_shape_loop_stage(stats_summary),
             _crunch_loop_stage(stats_summary),
         )
         if stage is not None
@@ -2301,9 +2364,15 @@ def _managed_local_handoff_stage_rows(stats_summary: dict[str, Any]) -> list[dic
         )
 
     rows: list[dict[str, Any]] = []
+    seen_families: set[str] = set()
     for stage in sorted(stages, key=score):
         family = str(stage.get("local_action_family") or stage.get("lever") or "unknown")
         representation = _local_file_backed_representation(family)
+        if stage.get("lever") == "request-shape-rollups" and not representation.get("exists"):
+            continue
+        if family in seen_families:
+            continue
+        seen_families.add(family)
         blockers = [str(item) for item in stage.get("blocker_codes") or [] if str(item or "").strip()]
         reason = "managed-recommendation-health-report-missing"
         if blockers:
@@ -3762,6 +3831,16 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     if status == "observed-savings-ranked":
         state = "measured-savings"
         next_action = "produce-crunch-activation-follow-up"
+        shape_signal = stats_summary.get("request_shape_rollup_candidates")
+        shape_summary = shape_signal.get("summary") if isinstance(shape_signal, dict) and isinstance(shape_signal.get("summary"), dict) else {}
+        shape_top = shape_signal.get("top_candidate") if isinstance(shape_signal, dict) and isinstance(shape_signal.get("top_candidate"), dict) else {}
+        shape_action = str(shape_summary.get("top_next_action") or shape_top.get("next_action") or "").strip()
+        shape_family = str(shape_summary.get("top_local_action_family") or shape_top.get("local_action_family") or "").strip()
+        if observed.get("source") == "active_crunch_rule_coverage" and shape_family == "crunch" and shape_action:
+            next_action = shape_action
+            readiness = str(shape_top.get("readiness_state") or "").strip()
+            if readiness:
+                state = readiness
     elif status == "projected-savings-ranked":
         state = "projected-savings"
         next_action = str(top_report.get("next_action") or "produce-crunch-opportunity-measurements")
@@ -5452,7 +5531,13 @@ def _crunch_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         "missing_measurements": [] if today_savings > 0 else ["crunch-opportunity-report", "positive-observed-or-projected-savings"],
         "privacy": _candidate_privacy(),
     }
-    if projected_usd > 0 or projected_tokens > 0 or projected_chars > 0:
+    if status == "observed-savings-ranked" and (today_savings > 0 or total_savings > 0 or tokens_saved > 0 or chars_saved > 0):
+        blocker = "crunch-observed-savings-ranked"
+        path = "Convert observed crunch savings into the next compaction activation or rollout-safety issue."
+        confidence = "medium"
+        score = max(today_savings * 1000.0, total_savings * 250.0, tokens_saved / 10.0, chars_saved / 100.0, 1.0)
+        bucket = "observed-crunch"
+    elif projected_usd > 0 or projected_tokens > 0 or projected_chars > 0:
         blocker = "crunch-projected-savings-ranked"
         path = "Convert the highest projected crunch opportunity report into a dry-run, activation, or rollout-safety follow-up."
         confidence = "medium"
