@@ -3615,6 +3615,29 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
 
+    def test_evidence_activation_plan_discovery_includes_ops_sibling_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package_root = root / "agentflow-runs" / "worktrees" / "run"
+            ops_plan = root / "agentflow_ops" / "runs" / "research" / "latest.plan.json"
+            package_root.mkdir(parents=True)
+            ops_plan.parent.mkdir(parents=True)
+            ops_plan.write_text("{}", encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "AGENTFLOW_RESEARCH_PLAN_JSON": "",
+                    "AGENTFLOW_OPS_ROOT": "",
+                },
+                clear=False,
+            ):
+                candidates = stats_views._evidence_to_activation_plan_candidate_paths(package_root=package_root)
+
+            self.assertIn(ops_plan, candidates)
+            self.assertLess(candidates.index(ops_plan), len(candidates) - 1)
+
 
 if __name__ == "__main__":
     unittest.main()

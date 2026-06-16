@@ -400,19 +400,40 @@ def _post_promotion_policy_draft_dry_run_path() -> Path:
     return agentflow_config_path("post_promotion_policy_draft_dry_run.json")
 
 
-def _evidence_to_activation_plan_path() -> Path:
+def _evidence_to_activation_plan_candidate_paths(package_root: Path | None = None) -> list[Path]:
+    candidates: list[Path] = []
     for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON"):
         raw = os.getenv(name)
         if raw:
-            return Path(raw).expanduser()
+            candidates.append(Path(raw).expanduser())
+            return candidates
     ops_root = os.getenv("AGENTFLOW_OPS_ROOT")
     if ops_root:
-        return Path(ops_root).expanduser() / "runs" / "research" / "latest.plan.json"
-    package_root = Path(__file__).resolve().parents[1]
-    ops_sibling = package_root.parent / "runs" / "research" / "latest.plan.json"
-    if ops_sibling.exists():
-        return ops_sibling
-    return agentflow_config_path("research/latest.plan.json")
+        candidates.append(Path(ops_root).expanduser() / "runs" / "research" / "latest.plan.json")
+        return candidates
+    root = package_root or Path(__file__).resolve().parents[1]
+    candidates.append(root.parent / "runs" / "research" / "latest.plan.json")
+    for parent in (root, *root.parents):
+        candidates.append(parent / "agentflow_ops" / "runs" / "research" / "latest.plan.json")
+    candidates.append(agentflow_config_path("research/latest.plan.json"))
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
+
+
+def _evidence_to_activation_plan_path() -> Path:
+    candidates = _evidence_to_activation_plan_candidate_paths()
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[-1]
 
 
 def _post_promotion_outcome_flush_status_path() -> Path:
