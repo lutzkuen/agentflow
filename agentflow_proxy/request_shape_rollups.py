@@ -5404,6 +5404,26 @@ def _primary_skipped_openai_cache_replay_next_action(blockers: list[str], reason
     return actions[0] if actions else "keep-cache-replay-blocked"
 
 
+def _top_skipped_openai_cache_replay_blocker(
+    rows: list[dict[str, Any]],
+    blocker_breakdown: list[dict[str, Any]],
+) -> str | None:
+    if rows:
+        top_row = rows[0]
+        top_action = str(top_row.get("next_action") or "")
+        blockers = [
+            public_label(item, "unknown")
+            for item in top_row.get("blocker_codes") or []
+            if public_label(item, "unknown") != "unknown"
+        ]
+        for blocker in blockers:
+            if _skipped_openai_cache_replay_next_action(blocker) == top_action:
+                return blocker
+        if blockers:
+            return blockers[0]
+    return blocker_breakdown[0]["value"] if blocker_breakdown else None
+
+
 def build_request_shape_skipped_openai_cache_replay_blockers_report(
     cohorts: list[dict[str, Any]],
     *,
@@ -5415,16 +5435,27 @@ def build_request_shape_skipped_openai_cache_replay_blockers_report(
     source_surface_counts: dict[str, int] = {}
     endpoint_counts: dict[str, int] = {}
     sample_count_total = 0
+    openai_replay_ready_count = 0
+    openai_replay_ready_rows = 0
+    openai_skipped_count = 0
+    openai_skipped_rows = 0
 
     for cohort in cohorts:
         if not isinstance(cohort, dict):
             continue
         if public_label(cohort.get("provider_family"), "unknown") != "openai":
             continue
-        if public_label(cohort.get("readiness"), "unknown") != "skipped":
-            continue
         sample_count = _as_int(cohort.get("row_count") or cohort.get("sample_count"))
         if sample_count <= 0:
+            continue
+        readiness = public_label(cohort.get("readiness"), "unknown")
+        if readiness == "replay-ready":
+            openai_replay_ready_count += 1
+            openai_replay_ready_rows += sample_count
+        elif readiness == "skipped":
+            openai_skipped_count += 1
+            openai_skipped_rows += sample_count
+        if readiness != "skipped":
             continue
         reason = public_label(cohort.get("reason"), "unknown")
         blocker_codes = sorted(
@@ -5508,6 +5539,8 @@ def build_request_shape_skipped_openai_cache_replay_blockers_report(
 
     blocker_breakdown = _breakdown(blocker_counts)
     next_action_breakdown = _breakdown(next_action_counts)
+    top_blocker_code = _top_skipped_openai_cache_replay_blocker(rows, blocker_breakdown)
+    top_blocker_count = blocker_counts.get(top_blocker_code or "", 0)
     return {
         "schema": REPLAY_SKIPPED_OPENAI_BLOCKERS_SCHEMA,
         "status": "ranked" if rows else "no-skipped-openai-cache-replay-cohorts",
@@ -5519,10 +5552,17 @@ def build_request_shape_skipped_openai_cache_replay_blockers_report(
         "next_action": next_action_breakdown[0]["value"] if next_action_breakdown else "keep-cache-replay-observing",
         "summary": {
             "skipped_openai_cohort_count": len(rows),
+            "replay_ready_count": openai_replay_ready_count,
+            "replay_ready_rows": openai_replay_ready_rows,
+            "skipped_count": openai_skipped_count,
+            "skipped_rows": openai_skipped_rows,
             "sample_count": sample_count_total,
+            "affected_rows": sample_count_total,
             "projected_hits": sum(_as_int(row.get("projected_hits")) for row in rows),
             "projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in rows), 6),
-            "top_blocker_code": blocker_breakdown[0]["value"] if blocker_breakdown else None,
+            "top_blocker_code": top_blocker_code,
+            "top_blocker_count": top_blocker_count,
+            "blocker_code_count": len(blocker_counts),
             "top_next_action": next_action_breakdown[0]["value"] if next_action_breakdown else None,
             "cache_apply_action_count": 0,
             "provider_calls_made": 0,
@@ -5541,6 +5581,13 @@ def build_request_shape_skipped_openai_cache_replay_blockers_report(
             "has_blocker_codes": all(bool(row.get("blocker_codes")) for row in rows[:capped_limit]),
             "has_sample_count": all(_as_int(row.get("sample_count")) > 0 for row in rows[:capped_limit]),
             "has_deterministic_next_action": all(bool(row.get("next_action")) for row in rows[:capped_limit]),
+            "has_acceptance_summary_fields": bool(
+                openai_replay_ready_count >= 0
+                and openai_skipped_count >= 0
+                and sample_count_total >= 0
+                and (not rows or blocker_breakdown)
+                and (not rows or next_action_breakdown)
+            ),
             "covers_required_blockers": all(
                 code in blocker_counts
                 for code in (
