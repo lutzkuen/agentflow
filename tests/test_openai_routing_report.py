@@ -160,6 +160,12 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(candidate["current_routed_count"], 0)
         self.assertEqual(candidate["blocked_count"], 0)
         self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
+        readiness = candidate["promotion_readiness"]
+        self.assertEqual(readiness["decision"], "keep-staged")
+        self.assertIn("missing-canary-lifecycle-evidence", readiness["reason_codes"])
+        self.assertEqual(readiness["evidence"]["applied_count"], 0)
+        self.assertEqual(readiness["evidence"]["holdout_count"], 0)
+        self.assertEqual(readiness["routing_rule_metadata"]["target_local_rule_file"], "routing_rules.yaml")
 
     def test_report_names_gpt54_canary_lifecycle_coverage_and_blockers(self) -> None:
         def canary(cohort: str, **extra: object) -> dict[str, object]:
@@ -251,6 +257,19 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(lifecycle["cohort_counts"]["skipped"], 1)
         self.assertEqual(lifecycle["cohort_counts"]["bypassed_or_disabled"], 1)
         self.assertEqual(lifecycle["coverage"]["matched_count"], 8)
+        readiness = candidate["promotion_readiness"]
+        self.assertEqual(readiness["decision"], "keep-blocked")
+        self.assertEqual(readiness["evidence"]["applied_count"], 3)
+        self.assertEqual(readiness["evidence"]["holdout_count"], 2)
+        self.assertEqual(readiness["evidence"]["observed_count"], 8)
+        self.assertEqual(readiness["evidence"]["safety_stop_count"], 1)
+        self.assertEqual(readiness["evidence"]["error_count"], 1)
+        self.assertEqual(readiness["evidence"]["fallback_count"], 1)
+        self.assertEqual(readiness["evidence"]["retry_count"], 1)
+        self.assertIn("safety-stop-observed", readiness["reason_codes"])
+        self.assertIn("error-observed", readiness["reason_codes"])
+        self.assertIn("fallback-observed", readiness["reason_codes"])
+        self.assertIn("retry-observed", readiness["reason_codes"])
         self.assertIn("error-observed", lifecycle["blocker_codes"])
         self.assertIn("retry-observed", lifecycle["blocker_codes"])
         self.assertIn("fallback-observed", lifecycle["blocker_codes"])
@@ -270,6 +289,98 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertFalse(lifecycle["privacy"]["request_ids_included"])
         self.assertFalse(lifecycle["privacy"]["session_ids_included"])
         self.assertFalse(lifecycle["privacy"]["cache_keys_included"])
+        self.assertFalse(readiness["privacy"]["raw_prompts_included"])
+        self.assertFalse(readiness["privacy"]["provider_bodies_included"])
+        self.assertFalse(readiness["privacy"]["request_ids_included"])
+        self.assertFalse(readiness["privacy"]["session_ids_included"])
+        self.assertFalse(readiness["privacy"]["tool_payloads_included"])
+
+    def test_gpt54_tool_light_canary_promotion_readiness_promotes_healthy_evidence(self) -> None:
+        def canary(cohort: str) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-v1",
+                "target_candidate_id": "openai-route:responses:gpt-5:tool-light:tools:nonstream:1_5k-6k:1k-4k:to-gpt-5-4-mini",
+                "status": "applied" if cohort == "canary_applied" else "holdout",
+                "cohort": cohort,
+                "reason": "selected-canary" if cohort == "canary_applied" else "selected-holdout",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if cohort == "canary_applied" else "gpt-5.4",
+                "category": "tool-light",
+                "canary_fraction": 0.15,
+                "holdout_fraction": 0.10,
+            }
+
+        for _ in range(6):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+            )
+        for _ in range(7):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout"),
+            )
+
+        result = build_openai_routing_report(self.store, limit=20)
+
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["requested_model"], "gpt-5.4")
+        self.assertEqual(candidate["target_model"], "gpt-5.4-mini")
+        self.assertEqual(candidate["category"], "tool-light")
+        self.assertEqual(candidate["blocked_count"], 0)
+        self.assertEqual(candidate["blockers"], [])
+        self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
+
+        lifecycle = candidate["openai_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 6)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 7)
+        self.assertEqual(lifecycle["cohort_counts"]["safety_stopped"], 0)
+        self.assertEqual(lifecycle["error_count"], 0)
+        self.assertEqual(lifecycle["fallback_count"], 0)
+        self.assertEqual(lifecycle["retry_count"], 0)
+        self.assertEqual(lifecycle["blocker_codes"], [])
+
+        readiness = candidate["promotion_readiness"]
+        self.assertEqual(readiness["decision"], "promote")
+        self.assertTrue(readiness["promotion_ready"])
+        self.assertEqual(readiness["next_action"], "promote-openai-routing-rule-draft")
+        self.assertEqual(readiness["reason"], "promotion-ready")
+        self.assertEqual(readiness["reason_codes"], [])
+        self.assertEqual(readiness["evidence"]["applied_count"], 6)
+        self.assertEqual(readiness["evidence"]["holdout_count"], 7)
+        self.assertEqual(readiness["evidence"]["observed_count"], 13)
+        self.assertEqual(readiness["evidence"]["safety_stop_count"], 0)
+        self.assertEqual(readiness["evidence"]["error_count"], 0)
+        self.assertEqual(readiness["evidence"]["fallback_count"], 0)
+        self.assertEqual(readiness["evidence"]["retry_count"], 0)
+        self.assertGreater(readiness["evidence"]["estimated_savings_per_1000_calls_usd"], 0)
+        rule = readiness["routing_rule_metadata"]["rule_preview"]
+        self.assertEqual(rule["conditions"]["model_pattern"], "gpt-5.4")
+        self.assertEqual(rule["conditions"]["category"], "tool-light")
+        self.assertTrue(rule["conditions"]["has_tools"])
+        self.assertEqual(rule["action"]["route_to"], "gpt-5.4-mini")
+        self.assertEqual(result["summary"]["promotion_ready_count"], 1)
+        self.assertEqual(result["summary"]["keep_staged_count"], 0)
+        self.assertEqual(result["summary"]["keep_blocked_count"], 0)
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("secret-openai-session", rendered)
+        self.assertFalse(readiness["privacy"]["raw_prompts_included"])
+        self.assertFalse(readiness["privacy"]["provider_bodies_included"])
+        self.assertFalse(readiness["privacy"]["request_ids_included"])
+        self.assertFalse(readiness["privacy"]["session_ids_included"])
+        self.assertFalse(readiness["privacy"]["tool_payloads_included"])
+        self.assertFalse(readiness["privacy"]["cache_keys_included"])
 
     def test_stats_wrapper_and_cli_emit_report(self) -> None:
         for _ in range(5):

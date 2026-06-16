@@ -17,6 +17,7 @@ DEFAULT_MAX_RETRY_RATE = 0.20
 DEFAULT_MAX_EVIDENCE_AGE_HOURS = 72.0
 DEFAULT_SMALL_TEXT_CHARS_LT = 6000
 DEFAULT_TINY_TEXT_CHARS_LT = 1500
+DEFAULT_OPENAI_GPT54_CANARY_TEXT_CHARS_LT = 16000
 
 
 def _env_int(name: str, default: int) -> int:
@@ -28,6 +29,10 @@ def _env_int(name: str, default: int) -> int:
 
 OPENAI_SMALL_TEXT_CHARS_LT = _env_int("AGENTFLOW_OPENAI_SMALL_TEXT_CHARS_LT", DEFAULT_SMALL_TEXT_CHARS_LT)
 OPENAI_TINY_TEXT_CHARS_LT = _env_int("AGENTFLOW_OPENAI_TINY_TEXT_CHARS_LT", DEFAULT_TINY_TEXT_CHARS_LT)
+OPENAI_GPT54_CANARY_TEXT_CHARS_LT = _env_int(
+    "AGENTFLOW_OPENAI_GPT54_CANARY_TEXT_CHARS_LT",
+    DEFAULT_OPENAI_GPT54_CANARY_TEXT_CHARS_LT,
+)
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -155,6 +160,8 @@ def _simulate_openai_route(
     requested_l = requested_model.lower()
     if requested_l == "gpt-5.4" and text_chars < OPENAI_SMALL_TEXT_CHARS_LT and not has_tools:
         return "gpt-5.4-mini", "proposed-canary-default-off", "gpt-5.4-large-to-mini-short-non-tool"
+    if requested_l == "gpt-5.4" and category == "tool-light" and text_chars < OPENAI_GPT54_CANARY_TEXT_CHARS_LT:
+        return "gpt-5.4-mini", "local-openai-routing-canary", "gpt-5.4-large-to-mini-tool-light-canary"
     if requested_l == OPENAI_LARGE_DEFAULT.lower() and text_chars < OPENAI_SMALL_TEXT_CHARS_LT and not has_tools:
         return OPENAI_SMALL_DEFAULT, "existing-threshold", "large-to-small-short-non-tool"
     if requested_l == OPENAI_SMALL_DEFAULT.lower() and text_chars < OPENAI_TINY_TEXT_CHARS_LT and not has_tools:
@@ -173,6 +180,15 @@ def _target_supported(model: str | None) -> bool:
     if not model:
         return False
     return bool(pricing_basis(model, provider="openai").get("cost_known"))
+
+
+def _candidate_allows_tools(bucket: dict[str, Any]) -> bool:
+    return (
+        str(bucket.get("requested_model") or "").lower() == "gpt-5.4"
+        and str(bucket.get("target_model") or "").lower() == "gpt-5.4-mini"
+        and str(bucket.get("category") or "") == "tool-light"
+        and str(bucket.get("simulated_policy") or "") == "local-openai-routing-canary"
+    )
 
 
 def _projected_savings(row: dict[str, Any], requested_model: str, target_model: str, input_tokens: int, output_tokens: int) -> tuple[float, list[str]]:
@@ -342,6 +358,154 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
     }
 
 
+def _routing_rule_metadata(bucket: dict[str, Any]) -> dict[str, Any]:
+    category = str(bucket.get("category") or "unknown")
+    conditions: dict[str, Any] = {
+        "model_pattern": bucket.get("requested_model") or bucket.get("requested_model_family") or "gpt-5.4",
+        "category": category,
+        "source_surface": bucket.get("source_surface") or "openai_responses",
+        "endpoint": bucket.get("endpoint") or "responses",
+        "stream": bool(bucket.get("stream")),
+    }
+    if category == "tool-light":
+        conditions["has_tools"] = True
+        conditions["max_text_chars"] = OPENAI_GPT54_CANARY_TEXT_CHARS_LT
+        conditions["max_input_tokens_est"] = 4000
+    else:
+        conditions["has_tools"] = bool(bucket.get("has_tools"))
+        if category in {"chat", "short-completion"}:
+            conditions["max_text_chars"] = OPENAI_SMALL_TEXT_CHARS_LT
+
+    return {
+        "schema": "agentflow.openai_routing_rule_metadata.v1",
+        "policy_source": "local-manual-review",
+        "target_local_rule_file": "routing_rules.yaml",
+        "target_local_policy_section": "routing.rules",
+        "required_local_executor": "openai-routing-canary",
+        "rule_preview": {
+            "id": f"promote-{bucket.get('candidate_id')}",
+            "conditions": conditions,
+            "action": {
+                "route_to": bucket.get("target_model"),
+                "reason": f"promote OpenAI routing canary {bucket.get('candidate_id')}",
+            },
+        },
+    }
+
+
+def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> dict[str, Any]:
+    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    applied = _as_int(counts.get("canary_applied"))
+    holdout = _as_int(counts.get("canary_holdout"))
+    safety = _as_int(counts.get("safety_stopped"))
+    observed = _as_int(lifecycle.get("observed_count"))
+    error_count = _as_int(lifecycle.get("error_count"))
+    fallback_count = _as_int(lifecycle.get("fallback_count"))
+    retry_count = _as_int(lifecycle.get("retry_count"))
+    stale = bool((lifecycle.get("stale_evidence") or {}).get("stale")) if isinstance(lifecycle.get("stale_evidence"), dict) else False
+    estimated_savings = _as_float(bucket.get("estimated_savings_per_1000_calls_usd"))
+    candidate_blockers = [str(code) for code in bucket.get("blockers") or []]
+    lifecycle_blockers = [str(code) for code in lifecycle.get("blocker_codes") or []]
+    missing_evidence = {
+        "missing-canary-lifecycle-evidence",
+        "missing-applied-coverage",
+        "missing-holdout-coverage",
+    }
+
+    reason_codes: list[str] = []
+    if observed <= 0:
+        reason_codes.append("missing-canary-lifecycle-evidence")
+    if applied <= 0:
+        reason_codes.append("missing-applied-coverage")
+    if holdout <= 0:
+        reason_codes.append("missing-holdout-coverage")
+    if safety:
+        reason_codes.append("safety-stop-observed")
+    if error_count:
+        reason_codes.append("error-observed")
+    if fallback_count:
+        reason_codes.append("fallback-observed")
+    if retry_count:
+        reason_codes.append("retry-observed")
+    if stale:
+        reason_codes.append("stale-evidence")
+    if estimated_savings <= 0:
+        reason_codes.append("non-positive-estimated-savings")
+    for blocker in candidate_blockers:
+        if blocker not in reason_codes:
+            reason_codes.append(blocker)
+    for blocker in lifecycle_blockers:
+        if blocker not in reason_codes:
+            reason_codes.append(blocker)
+
+    unique_reasons = sorted(set(reason_codes))
+    blocking_reasons = [reason for reason in unique_reasons if reason not in missing_evidence]
+    if applied > 0 and holdout > 0 and not blocking_reasons and estimated_savings > 0:
+        decision = "promote"
+        next_action = "promote-openai-routing-rule-draft"
+        reason = "promotion-ready"
+    elif blocking_reasons:
+        decision = "keep-blocked"
+        next_action = "review-openai-routing-canary-blockers"
+        reason = blocking_reasons[0]
+    else:
+        decision = "keep-staged"
+        next_action = "collect-openai-routing-canary-evidence"
+        reason = unique_reasons[0] if unique_reasons else "insufficient-promotion-evidence"
+
+    return {
+        "schema": "agentflow.openai_routing_canary_promotion_readiness.v1",
+        "decision": decision,
+        "promotion_ready": decision == "promote",
+        "next_action": next_action,
+        "reason": reason,
+        "reason_codes": unique_reasons,
+        "decision_options": ["promote", "keep-staged", "keep-blocked"],
+        "evidence": {
+            "applied_count": applied,
+            "holdout_count": holdout,
+            "observed_count": observed,
+            "matched_count": _as_int(bucket.get("matched_count")),
+            "safety_stop_count": safety,
+            "error_count": error_count,
+            "fallback_count": fallback_count,
+            "retry_count": retry_count,
+            "estimated_savings_per_1000_calls_usd": estimated_savings,
+            "latest_observed_at": lifecycle.get("latest_observed_at"),
+            "oldest_observed_at": lifecycle.get("oldest_observed_at"),
+            "stale_evidence": lifecycle.get("stale_evidence"),
+        },
+        "quality_gates": {
+            "requires_fresh_evidence": True,
+            "requires_applied_coverage": True,
+            "requires_holdout_coverage": True,
+            "requires_zero_safety_stops": True,
+            "requires_zero_errors": True,
+            "requires_zero_fallbacks": True,
+            "requires_zero_retries": True,
+            "requires_positive_estimated_savings": True,
+        },
+        "routing_rule_metadata": _routing_rule_metadata(bucket),
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "provider_bodies_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_requests_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "policy_files_written": False,
+        },
+    }
+
+
 def _candidate_id(
     *,
     endpoint: str,
@@ -363,6 +527,7 @@ def _candidate_id(
 def _new_bucket(row: dict[str, Any], *, candidate_id: str, target_model: str, target_policy: str, target_reason: str) -> dict[str, Any]:
     return {
         "candidate_id": candidate_id,
+        "provider": "openai",
         "source_surface": _source_surface(row),
         "endpoint": _endpoint(row),
         "requested_model_family": str(row.get("requested_model_family") or openai_model_family(row.get("requested_model")) or "unknown"),
@@ -434,12 +599,28 @@ def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     bucket["blocker_reason_breakdown"] = _breakdown(blocker_counts)
     bucket["status_breakdown"] = _breakdown(bucket.pop("status_counts", {}))
     bucket["cache_status_breakdown"] = _breakdown(bucket.pop("cache_status_counts", {}))
-    bucket["openai_canary_lifecycle_evidence"] = _finalize_lifecycle(
+    lifecycle = _finalize_lifecycle(
         bucket.pop("openai_canary_lifecycle", None),
         matched_count=matched,
     )
+    bucket["openai_canary_lifecycle_evidence"] = lifecycle
+    bucket["promotion_readiness"] = _promotion_readiness(bucket, lifecycle)
     bucket["suggested_canary_fraction"] = suggested
-    bucket["privacy"] = {"metadata_only": True, "candidate_id_derived_from_raw_body": False}
+    bucket["privacy"] = {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "candidate_id_derived_from_raw_body": False,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "provider_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_requests_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "tool_payloads_included": False,
+        "cache_keys_included": False,
+        "file_paths_included": False,
+    }
     bucket.pop("stream_count", None)
     return bucket
 
@@ -549,7 +730,7 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
         _increment(bucket["cache_status_counts"], cache_status)
 
         row_blockers: list[str] = []
-        if has_tools:
+        if has_tools and not _candidate_allows_tools(bucket):
             row_blockers.append("tools-disabled")
         if requested_family in {"unknown", "other", "none"}:
             row_blockers.append("unknown-model-family")
@@ -597,6 +778,9 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
         for item in candidates
         if ((item.get("openai_canary_lifecycle_evidence") or {}).get("stale_evidence") or {}).get("stale")
     )
+    promotion_ready_count = sum(1 for item in candidates if (item.get("promotion_readiness") or {}).get("decision") == "promote")
+    keep_staged_count = sum(1 for item in candidates if (item.get("promotion_readiness") or {}).get("decision") == "keep-staged")
+    keep_blocked_count = sum(1 for item in candidates if (item.get("promotion_readiness") or {}).get("decision") == "keep-blocked")
     for item in candidates:
         for blocker in item.get("blocker_reason_breakdown") or []:
             _increment(blocker_totals, blocker["value"], _as_int(blocker.get("count")))
@@ -629,6 +813,9 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
             "openai_canary_retry_count": canary_retry_count,
             "openai_canary_fallback_count": canary_fallback_count,
             "openai_canary_stale_evidence_count": canary_stale_evidence_count,
+            "promotion_ready_count": promotion_ready_count,
+            "keep_staged_count": keep_staged_count,
+            "keep_blocked_count": keep_blocked_count,
         },
         "simulation_policy": {
             "schema": "agentflow.openai_routing_simulation_policy.v1",
@@ -645,8 +832,8 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
                 "policy_id": "local-openai-routing-canary-opportunity-v1",
                 "status": "simulated-only",
                 "default_enabled": False,
-                "eligible_categories": ["chat", "short-completion"],
-                "blocked_until_policy_support": ["tool-light"],
+                "eligible_categories": ["chat", "short-completion", "tool-light"],
+                "blocked_until_policy_support": [],
             },
             "quality_gate_policy": {
                 "min_samples": DEFAULT_MIN_SAMPLES,
