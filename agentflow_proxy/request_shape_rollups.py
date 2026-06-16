@@ -2777,18 +2777,18 @@ def _request_shape_crunch_follow_up(
         activation_mode = "review-required"
         blocker = "canary-safety-stopped"
         no_op_reason = "matching-repeated-context-crunch-canary-safety-stopped"
-    elif canary_applied_rows > 0 or canary_holdout_rows > 0:
-        activation_state = "measurement-required"
-        next_action = "measure-repeated-context-crunch-canary-impact"
-        activation_mode = "staged-canary-measurement"
-        blocker = "missing-crunch-canary-impact-measurement"
-        no_op_reason = "matching-repeated-context-crunch-canary-already-staged"
     elif recommended_action_count > 0:
         activation_state = "activation-ready"
         next_action = "stage-repeated-context-crunch-canary"
         activation_mode = "canary-candidate"
         blocker = None
         no_op_reason = None
+    elif canary_applied_rows > 0 or canary_holdout_rows > 0:
+        activation_state = "measurement-required"
+        next_action = "measure-repeated-context-crunch-canary-impact"
+        activation_mode = "staged-canary-measurement"
+        blocker = "missing-crunch-canary-impact-measurement"
+        no_op_reason = "matching-repeated-context-crunch-canary-already-staged"
     elif status == "no-repeated-context-crunch-cohorts":
         activation_state = "missing-evidence"
         next_action = "rank-repeated-context-crunch-dry-run"

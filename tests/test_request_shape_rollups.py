@@ -2397,6 +2397,121 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertNotIn(str(rules_path), json.dumps(report, sort_keys=True))
 
+    def test_crunch_canary_stage_prefers_unsuppressed_stage_action_over_existing_measurement(self) -> None:
+        for _ in range(3):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=80_000,
+                cost=0.08,
+                baseline=0.08,
+            )
+        first_report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="measurement-and-stage-first",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+            rules_path=Path(self.tmpdir.name) / "missing-crunch-rules.yaml",
+        )
+        existing_action = first_report["top_stage_action"]
+        features = dict(existing_action["conditions"])
+        selected: dict[str, dict[str, object]] = {}
+        for index in range(5000):
+            lifecycle = request_shape_crunch_canary_lifecycle(
+                existing_action,
+                {**features, "cohort_sample_id": f"sample-{index}"},
+            )
+            if lifecycle["status"] in {"applied", "holdout"}:
+                selected.setdefault(str(lifecycle["status"]), lifecycle)
+            if {"applied", "holdout"} <= set(selected):
+                break
+        self.assertIn("applied", selected)
+        self.assertIn("holdout", selected)
+
+        self.store.conn.execute("delete from calls")
+        self.store.conn.commit()
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming tools-disabled",
+            routing_reason="keep requested model for thinking request",
+            workflow_phase="thinking",
+            text_chars=80_000,
+            cost=0.08,
+            baseline=0.08,
+            crunch_extra={"request_shape_repeated_context_canary": selected["applied"]},
+        )
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming tools-disabled",
+            routing_reason="keep requested model for thinking request",
+            workflow_phase="thinking",
+            text_chars=80_000,
+            cost=0.07,
+            baseline=0.07,
+            crunch_extra={"request_shape_repeated_context_canary": selected["holdout"]},
+        )
+        for _ in range(3):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=132_000,
+                cost=0.20,
+                baseline=0.20,
+            )
+
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+        apply_result = apply_request_shape_crunch_canary_action(existing_action, rules_path=rules_path)
+        self.assertTrue(apply_result["ok"])
+
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="measurement-and-stage-second",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+            rules_path=rules_path,
+        )
+
+        self.assertEqual(report["status"], "staged")
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["staged_canary_count"], 1)
+        self.assertEqual(report["top_stage_action"]["conditions"]["text_bucket"], "gte_128k_chars")
+        self.assertNotEqual(report["top_stage_action"]["cohort_id"], existing_action["cohort_id"])
+        source = report["source_report"]["activation_follow_up"]
+        self.assertEqual(source["activation_state"], "activation-ready")
+        self.assertEqual(source["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertTrue(source["canary_already_staged"])
+        self.assertTrue(source["canary_already_applied"])
+        self.assertFalse(source["duplicate_suppression"]["suppresses_new_stage_action"])
+        self.assertGreaterEqual(
+            source["duplicate_suppression"]["suppressed_existing_cohort_count"],
+            1,
+        )
+        self.assertGreaterEqual(
+            source["duplicate_suppression"]["stageable_unsuppressed_cohort_count"],
+            1,
+        )
+        self.assertEqual(
+            report["duplicate_suppression"]["schema"],
+            "agentflow.request_shape_crunch_stage_duplicate_suppression_summary.v1",
+        )
+        self.assertFalse(report["duplicate_suppression"]["suppresses_new_stage_action"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertNotIn(str(rules_path), json.dumps(report, sort_keys=True))
+
     def test_crunch_canary_stage_keeps_safety_stopped_cohort_out_of_applied_holdout_split(self) -> None:
         safety_lifecycle = {
             "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
