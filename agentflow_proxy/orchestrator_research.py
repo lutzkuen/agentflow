@@ -3481,6 +3481,12 @@ def build_evidence_to_activation_next_action_ledger(
             "sample_count",
             "applied_count",
             "holdout_count",
+            "fallback_count",
+            "safety_stop_count",
+            "rollback_count",
+            "error_rate_delta",
+            "retry_rate_delta",
+            "fallback_rate_delta",
             "projected_saved_usd",
             "promotion_allowed",
             "stage_allowed",
@@ -3992,12 +3998,26 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     if status == "observed-savings-ranked":
         state = "measured-savings"
         next_action = "produce-crunch-activation-follow-up"
+        if top_report.get("report_key") == "request_shape_crunch_activation_evidence":
+            progress_state = _request_shape_crunch_progress_state(top_report)
+            if progress_state:
+                state = progress_state
+            next_action = str(
+                top_report.get("post_widening_next_action")
+                or top_report.get("next_action")
+                or "monitor-post-widening-crunch-activation"
+            )
         shape_signal = stats_summary.get("request_shape_rollup_candidates")
         shape_summary = shape_signal.get("summary") if isinstance(shape_signal, dict) and isinstance(shape_signal.get("summary"), dict) else {}
         shape_top = shape_signal.get("top_candidate") if isinstance(shape_signal, dict) and isinstance(shape_signal.get("top_candidate"), dict) else {}
         shape_action = str(shape_summary.get("top_next_action") or shape_top.get("next_action") or "").strip()
         shape_family = str(shape_summary.get("top_local_action_family") or shape_top.get("local_action_family") or "").strip()
-        if observed.get("source") == "active_crunch_rule_coverage" and shape_family == "crunch" and shape_action:
+        if (
+            top_report.get("report_key") != "request_shape_crunch_activation_evidence"
+            and observed.get("source") == "active_crunch_rule_coverage"
+            and shape_family == "crunch"
+            and shape_action
+        ):
             next_action = shape_action
             readiness = str(shape_top.get("readiness_state") or "").strip()
             if readiness:
@@ -4019,7 +4039,7 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         blockers = [str(top_report.get("no_op_reason"))]
     if not blockers and top_report.get("top_blocker"):
         blockers = [str(top_report.get("top_blocker"))]
-    return {
+    stage = {
         "lever": "crunch",
         "state": state,
         "evidence_source": signal.get("schema"),
@@ -4031,6 +4051,35 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         "today_crunch_savings_usd": round(_to_float(observed.get("today_crunch_savings_usd")), 8),
         "projected_saved_usd": round(_to_float(top_report.get("projected_saved_usd")), 8),
     }
+    if top_report.get("report_key") == "request_shape_crunch_activation_evidence":
+        stage.update(
+            {
+                "activation_follow_up_evidence_schema": sanitize_value(top_report.get("schema")),
+                "applied_count": _to_int(top_report.get("applied_count")),
+                "holdout_count": _to_int(top_report.get("holdout_count")),
+                "fallback_count": _to_int(top_report.get("fallback_count")),
+                "safety_stop_count": _to_int(top_report.get("safety_stop_count")),
+                "rollback_count": _to_int(top_report.get("rollback_count")),
+                "error_rate_delta": round(_to_float(top_report.get("error_rate_delta")), 6),
+                "retry_rate_delta": round(_to_float(top_report.get("retry_rate_delta")), 6),
+                "fallback_rate_delta": round(_to_float(top_report.get("fallback_rate_delta")), 6),
+                "post_widening_status": sanitize_value(top_report.get("post_widening_status")),
+                "post_widening_next_action": sanitize_value(top_report.get("post_widening_next_action")),
+                "post_widening_reason_codes": sanitize_value(top_report.get("post_widening_reason_codes")),
+                "canary_fraction": round(_to_float(top_report.get("canary_fraction")), 6),
+                "max_rollout_fraction": round(_to_float(top_report.get("max_rollout_fraction")), 6),
+                "active_rule_count": _to_int(top_report.get("active_rule_count")),
+                "widened_rule_count": _to_int(top_report.get("widened_rule_count")),
+                "active_rule_ref": sanitize_value(top_report.get("active_rule_ref")),
+                "active_rule_source": sanitize_value(top_report.get("active_rule_source")),
+                "active_rule_decision_id": sanitize_value(top_report.get("active_rule_decision_id")),
+                "active_rule_source_evidence_schema": sanitize_value(top_report.get("active_rule_source_evidence_schema")),
+                "target_local_rule_file": sanitize_value(top_report.get("target_local_rule_file")),
+                "target_local_policy_section": sanitize_value(top_report.get("target_local_policy_section")),
+                "projected_saved_tokens": _to_int(top_report.get("projected_saved_tokens")),
+            }
+        )
+    return stage
 
 
 def _request_shape_crunch_progress_report(stats_summary: dict[str, Any]) -> dict[str, Any] | None:

@@ -3298,7 +3298,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "decision": "widen",
                         "graduation_decision": "widen",
                         "decision_id": decision_id,
-                        "next_action": "monitor-post-widening-crunch-activation",
+                        "next_action": "keep-active",
                         "summary": {
                             "active_rule_count": 1,
                             "matching_active_rule_count": 1,
@@ -3307,9 +3307,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "decision": "widen",
                             "graduation_decision": "widen",
                             "decision_id": decision_id,
-                            "applied_count": 77,
-                            "holdout_count": 30,
-                            "skipped_count": 218,
+                            "applied_count": 107,
+                            "holdout_count": 40,
+                            "skipped_count": 280,
                             "blocked_count": 0,
                             "fallback_count": 0,
                             "safety_stop_count": 0,
@@ -3318,17 +3318,17 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "retry_rate_delta": 0.0,
                             "fallback_rate_delta": 0.0,
                             "safety_stop_state": "none",
-                            "observed_saved_tokens": 5965139,
-                            "observed_saved_usd": 17.895417,
+                            "observed_saved_tokens": 8606129,
+                            "observed_saved_usd": 25.818387,
                             "policy_source": "local-manual",
                             "canary_fraction": 0.3,
-                            "max_rollout_fraction": 0.5,
-                            "post_widening_status": "post-widening-widen-ready",
-                            "post_widening_next_action": "widen-further",
+                            "max_rollout_fraction": 0.3,
+                            "post_widening_status": "post-widening-active-at-max-rollout",
+                            "post_widening_next_action": "keep-active",
                             "post_widening_reason_codes": [],
                             "target_local_rule_file": "crunch_rules.yaml",
                             "target_local_policy_section": "crunch.rules",
-                            "next_action": "widen-further",
+                            "next_action": "keep-active",
                         },
                         "rules": [
                             {
@@ -3354,10 +3354,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "decision": "widen",
                             "graduation_decision": "widen",
                             "decision_id": decision_id,
-                            "applied_count": 77,
-                            "holdout_count": 30,
-                            "observed_saved_tokens": 5965139,
-                            "observed_saved_usd": 17.895417,
+                            "applied_count": 107,
+                            "holdout_count": 40,
+                            "observed_saved_tokens": 8606129,
+                            "observed_saved_usd": 25.818387,
                             "safety_stop_state": "none",
                         },
                         "privacy": {"metadata_only": True, "aggregate_only": True},
@@ -3401,36 +3401,54 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(signal["observed"]["source"], "request_shape_crunch_activation_evidence")
         self.assertEqual(signal["top_report"]["report_key"], "request_shape_crunch_activation_evidence")
         self.assertEqual(signal["top_report"]["decision_id"], decision_id)
-        self.assertEqual(signal["top_report"]["applied_count"], 77)
-        self.assertEqual(signal["top_report"]["holdout_count"], 30)
-        self.assertEqual(signal["top_report"]["projected_saved_tokens"], 5965139)
+        self.assertEqual(signal["top_report"]["applied_count"], 107)
+        self.assertEqual(signal["top_report"]["holdout_count"], 40)
+        self.assertEqual(signal["top_report"]["projected_saved_tokens"], 8606129)
         self.assertEqual(signal["top_report"]["active_rule_count"], 1)
         self.assertEqual(signal["top_report"]["widened_rule_count"], 1)
-        self.assertEqual(signal["top_report"]["post_widening_status"], "post-widening-widen-ready")
-        self.assertEqual(signal["top_report"]["post_widening_next_action"], "widen-further")
+        self.assertEqual(signal["top_report"]["post_widening_status"], "post-widening-active-at-max-rollout")
+        self.assertEqual(signal["top_report"]["post_widening_next_action"], "keep-active")
         self.assertEqual(signal["top_report"]["missing_measurements"], [])
         loop = stats_summary["evidence_to_activation_loop"]
         crunch_stage = next(item for item in loop["levers"] if item["lever"] == "crunch")
-        self.assertEqual(crunch_stage["state"], "measured-savings")
-        self.assertNotEqual(crunch_stage["next_action"], "emit-crunch-opportunity-report")
+        self.assertEqual(crunch_stage["state"], "measured-active")
+        self.assertEqual(crunch_stage["next_action"], "keep-active")
+        self.assertEqual(crunch_stage["activation_follow_up_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(crunch_stage["applied_count"], 107)
+        self.assertEqual(crunch_stage["holdout_count"], 40)
+        self.assertEqual(crunch_stage["safety_stop_count"], 0)
+        self.assertEqual(crunch_stage["fallback_count"], 0)
+        self.assertEqual(crunch_stage["error_rate_delta"], 0.0)
+        self.assertEqual(crunch_stage["post_widening_status"], "post-widening-active-at-max-rollout")
+        self.assertEqual(crunch_stage["post_widening_next_action"], "keep-active")
         request_shape_stage = next(item for item in loop["levers"] if item["lever"] == "request-shape-rollups")
         self.assertEqual(request_shape_stage["state"], "measured-active")
         self.assertEqual(request_shape_stage["active_rule_count"], 1)
         self.assertEqual(request_shape_stage["widened_rule_count"], 1)
-        self.assertEqual(request_shape_stage["applied_count"], 77)
-        self.assertEqual(request_shape_stage["holdout_count"], 30)
-        self.assertEqual(request_shape_stage["post_widening_status"], "post-widening-widen-ready")
-        self.assertEqual(request_shape_stage["post_widening_next_action"], "widen-further")
+        self.assertEqual(request_shape_stage["applied_count"], 107)
+        self.assertEqual(request_shape_stage["holdout_count"], 40)
+        self.assertEqual(request_shape_stage["post_widening_status"], "post-widening-active-at-max-rollout")
+        self.assertEqual(request_shape_stage["post_widening_next_action"], "keep-active")
         ledger = stats_summary["evidence_to_activation_next_action_ledger"]
+        crunch_entry = next(item for item in ledger["entries"] if item["lever"] == "crunch")
+        self.assertEqual(crunch_entry["state"], "measured-active")
+        self.assertEqual(crunch_entry["current_status"], "applied")
+        self.assertEqual(crunch_entry["next_action"], "keep-active")
+        self.assertEqual(crunch_entry["post_widening_status"], "post-widening-active-at-max-rollout")
+        self.assertEqual(crunch_entry["post_widening_next_action"], "keep-active")
+        self.assertEqual(crunch_entry["applied_count"], 107)
+        self.assertEqual(crunch_entry["holdout_count"], 40)
+        self.assertEqual(crunch_entry["safety_stop_count"], 0)
+        self.assertEqual(crunch_entry["projected_saved_usd"], 25.818387)
         entry = next(item for item in ledger["entries"] if item["lever"] == "request-shape-rollups")
         self.assertEqual(entry["state"], "measured-active")
         self.assertEqual(entry["current_status"], "applied")
         self.assertEqual(entry["active_rule_count"], 1)
         self.assertEqual(entry["widened_rule_count"], 1)
-        self.assertEqual(entry["applied_count"], 77)
-        self.assertEqual(entry["holdout_count"], 30)
-        self.assertEqual(entry["post_widening_status"], "post-widening-widen-ready")
-        self.assertEqual(entry["post_widening_next_action"], "widen-further")
+        self.assertEqual(entry["applied_count"], 107)
+        self.assertEqual(entry["holdout_count"], 40)
+        self.assertEqual(entry["post_widening_status"], "post-widening-active-at-max-rollout")
+        self.assertEqual(entry["post_widening_next_action"], "keep-active")
         self.assertEqual(entry["active_rule_source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw-request-secret", rendered)
