@@ -96,6 +96,59 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertEqual(rule["action"]["scope"], "session")
         self.assertEqual(rule["action"]["min_call_count"], 5)
 
+    def test_packaged_openai_cache_replay_rule_promotes_applied_while_retaining_holdout(self):
+        rules = list(cache_module.CACHE_PATTERN_RULES)
+        [rule] = [
+            item for item in rules
+            if item.get("id") == "local-openai-cache-replay-promoted-d6ac8a0fa54c1d2f"
+        ]
+
+        self.assertTrue(rule["enabled"])
+        self.assertEqual(rule["policy_source"], "local-manual")
+        self.assertEqual(rule["conditions"]["provider_family"], "openai")
+        self.assertEqual(rule["conditions"]["source_surface"], "openai_responses")
+        self.assertEqual(rule["conditions"]["endpoint"], "responses")
+        self.assertEqual(rule["conditions"]["category"], "chat")
+        self.assertEqual(rule["conditions"]["text_bucket"], "2k_8k_chars")
+        self.assertEqual(rule["conditions"]["token_bucket"], "500_2k_tokens")
+        self.assertFalse(rule["conditions"]["has_tools"])
+        self.assertFalse(rule["conditions"]["stream"])
+        self.assertFalse(rule["action"]["allow_tool_calls"])
+        self.assertFalse(rule["action"]["streaming"])
+        self.assertEqual(rule["action"]["scope"], "session")
+        self.assertEqual(rule["rollout"]["canary_fraction"], 0.95)
+
+        cohorts = set()
+        for index in range(200):
+            features = {
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "has_tools": False,
+                "stream": False,
+                "replayability_level": "features_only",
+                "rollout_unit_hash": f"sha256:{index:064x}",
+                "raw_pattern_strings_included": False,
+            }
+            _, _, meta = cache_module.cache_lookup_meta(has_tool_blocks=False, pattern_features=features)
+            pattern_rule = meta.get("pattern_rule") if isinstance(meta.get("pattern_rule"), dict) else {}
+            replay_canary = (
+                meta.get("cache_replay_canary")
+                if isinstance(meta.get("cache_replay_canary"), dict)
+                else {}
+            )
+            canary = pattern_rule.get("canary") if isinstance(pattern_rule.get("canary"), dict) else replay_canary.get("canary")
+            if isinstance(canary, dict):
+                cohorts.add(canary.get("cohort"))
+            if cohorts >= {"canary_applied", "canary_holdout"}:
+                break
+
+        self.assertIn("canary_applied", cohorts)
+        self.assertIn("canary_holdout", cohorts)
+
     def test_tool_requests_are_skipped_when_tool_cache_disabled(self):
         can_exact, can_semantic, meta = cache_module.cache_lookup_meta(has_tool_blocks=True)
 

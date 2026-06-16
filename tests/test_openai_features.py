@@ -662,6 +662,43 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         )
         return local.routing_meta["managed_pattern_features"]["cache_pattern_hash"]
 
+    def test_openai_pattern_features_include_hashed_rollout_unit_for_canary_split(self):
+        first = {
+            "model": "gpt-5.4-mini",
+            "input": "Summarize the stable release checklist for cache replay.",
+        }
+        second = {
+            "model": "gpt-5.4-mini",
+            "input": "Summarize the stable release checklist for cache replay with a different suffix.",
+        }
+
+        def diagnostics_for(body):
+            parsed = openai_pipeline.parse_openai_request_body(copy.deepcopy(body), list(server.OPENAI_MODEL_LIST))
+            preflight = openai_pipeline.extract_openai_preflight_features(parsed, path="/v1/responses")
+            local = openai_pipeline.execute_openai_local_policy(
+                raw_body=copy.deepcopy(body),
+                path="/v1/responses",
+                requested_model=parsed.requested_model,
+                category=parsed.category,
+                stream=parsed.stream,
+                session_id="test-session",
+                preflight=preflight,
+                policy_decision={},
+                store_obj=server.store,
+            )
+            return local.routing_meta["managed_pattern_features"]
+
+        first_features = diagnostics_for(first)
+        second_features = diagnostics_for(second)
+
+        self.assertTrue(first_features["rollout_unit_hash"].startswith("sha256:"))
+        self.assertTrue(first_features["rollout_unit_hash_included"])
+        self.assertFalse(first_features["raw_request_fingerprint_included"])
+        self.assertNotEqual(first_features["rollout_unit_hash"], second_features["rollout_unit_hash"])
+        rendered = json.dumps({"first": first_features, "second": second_features}, sort_keys=True)
+        self.assertNotIn(first["input"], rendered)
+        self.assertNotIn(second["input"], rendered)
+
     def _enable_openai_cache_replay_rule(
         self,
         pattern_hash,

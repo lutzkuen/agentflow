@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
 from agentflow_proxy.recommendations import build_optimization_unit, build_outcome_feedback
 from agentflow_proxy.router import extract_text
+from agentflow_proxy.store import stable_json
 from agentflow_proxy.terminal_features import terminal_log_features_from_text
 
 
@@ -348,6 +350,11 @@ def build_openai_request_feature_unit(
     unit["input_features"]["routed_model_family"] = unit["routed_model_family"]
     unit["input_features"]["terminal_log_features"] = terminal_log_features
     unit["input_features"]["prompt_difficulty_features"] = prompt_difficulty_features
+    rollout_unit_hash = "sha256:" + hashlib.sha256(
+        stable_json({"path": path, "body": body}).encode("utf-8")
+    ).hexdigest()
+    unit["input_features"]["pattern_features"]["rollout_unit_hash"] = rollout_unit_hash
+    unit["pattern_features"]["rollout_unit_hash"] = rollout_unit_hash
     unit.setdefault("tool_features", {}).update(tool_features)
     return unit
 

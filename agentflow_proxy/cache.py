@@ -942,6 +942,14 @@ def _attach_skipped_cache_replay_canary(meta: dict[str, Any], selected_skip: dic
     }
 
 
+def _select_cache_replay_canary_skip(skip_reasons: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for item in reversed(skip_reasons):
+        reason = str(item.get("reason") or "")
+        if reason in {"canary_holdout", LOCAL_CANARY_SAFETY_STOP_REASON}:
+            return item
+    return None
+
+
 def cache_hit_decision_meta(
     reason: str,
     *,
@@ -1795,7 +1803,7 @@ def cache_lookup_meta(
         if managed_profile.get("semantic_threshold") is not None:
             meta["semantic_threshold"] = float(managed_profile["semantic_threshold"])
     if pattern_skip_reasons:
-        selected_skip = pattern_skip_reasons[-1]
+        selected_skip = _select_cache_replay_canary_skip(pattern_skip_reasons) or pattern_skip_reasons[-1]
         _attach_skipped_cache_replay_canary(meta, selected_skip)
     return exact_enabled, semantic_enabled, meta
 
@@ -1823,15 +1831,16 @@ def streaming_cache_lookup_meta(
     )
     if pattern_rule and CACHE_ENABLED and base_exact_enabled:
         exact_enabled = True
+    selected_skip = _select_cache_replay_canary_skip(pattern_skip_reasons)
     if exact_enabled:
         status = "miss"
         reason = "streaming-exact-pattern-miss"
-    elif pattern_skip_reasons and str(pattern_skip_reasons[-1].get("reason") or "") in {
+    elif selected_skip and str(selected_skip.get("reason") or "") in {
         "canary_holdout",
         LOCAL_CANARY_SAFETY_STOP_REASON,
     }:
         status = "skipped"
-        reason = str(pattern_skip_reasons[-1].get("reason"))
+        reason = str(selected_skip.get("reason"))
     elif has_tool_blocks and CACHE_ENABLED:
         status = "skipped"
         reason = "streaming-tools-disabled"

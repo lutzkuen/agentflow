@@ -12,6 +12,74 @@ file_watch:
   #   that carry no explicit path references in the request body.  Off by default: only enable
   #   when local files are known to be the relevant dependency signal for repeated shapes.
 pattern_rules:
+  # Promoted from the replay-ready OpenAI Responses cache canary after the
+  # holdout-only sample showed the 10% threshold needed applied coverage.
+  # This remains exact, non-streaming, non-tool, session-scoped replay only.
+  - id: local-openai-cache-replay-promoted-d6ac8a0fa54c1d2f
+    enabled: true
+    policy_source: local-manual
+    candidate_id: request-shape-cache-replay:responses:chat:8e210a2f5680d16d
+    description: Promoted OpenAI Responses exact-cache replay rule from local request-shape canary evidence.
+    conditions:
+      pattern_hashes:
+        - "sha256:*"
+      provider_family: openai
+      source_surface: openai_responses
+      endpoint: responses
+      category: chat
+      workflow_phase: chat
+      text_bucket: 2k_8k_chars
+      token_bucket: 500_2k_tokens
+      has_tools: false
+      stream: false
+      replayability_levels:
+        - features_only
+        - local-exact-response
+    action:
+      type: exact_cache_pattern
+      allow_tool_calls: false
+      safe_invalidation: false
+      streaming: false
+      scope: session
+      min_call_count: 2
+      ttl_seconds: 3600
+    rollout:
+      schema: agentflow.pattern_policy_rollout.v1
+      recommendation_mode: openai-cache-replay-request-shape-canary
+      canary_enabled: true
+      canary_fraction: 0.95
+      holdout_fraction: 0.05
+      canary_salt: local-openai-cache-replay-promoted-d6ac8a0fa54c1d2f
+      canary_unit: rollout_unit_hash
+      local_feedback_fields:
+        - cache_hit
+        - status_code
+        - retry_count
+        - latency_ms
+        - cost_est_usd
+        - cost_baseline_usd
+        - cache_replay_canary
+        - invalidation_reason
+    graduation:
+      schema: agentflow.request_shape_cache_replay_policy_graduation.v1
+      source_schema: agentflow.request_shape_cache_replay_evidence.v1
+      source_verdict: promote-applied-coverage
+      source_surface: openai_responses
+      endpoint: responses
+      category: chat
+      workflow_phase: chat
+      text_bucket: 2k_8k_chars
+      token_bucket: 500_2k_tokens
+      sample_count: 4
+      applied_count: 0
+      holdout_count: 4
+      projected_hits: 35
+      observed_hits: 0
+      projected_savings_usd: 0.075373
+      observed_savings_usd: 0.0
+      aggregate_only: true
+      graduated_at: "2026-06-16T09:00:00+00:00"
+
   # Reviewed local streaming replay for deterministic Claude Code short-completion turns
   # routed to Haiku. This remains narrow: streaming only, no tools, no thinking, session
   # scoped, high/static cacheability metadata required, and the fifth matching local

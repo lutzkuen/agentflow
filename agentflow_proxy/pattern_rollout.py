@@ -23,6 +23,7 @@ _SAFE_FEATURE_KEYS = (
     "session_id_hash",
     "workflow_id_hash",
     "request_fingerprint",
+    "rollout_unit_hash",
 )
 
 
