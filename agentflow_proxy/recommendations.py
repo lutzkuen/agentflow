@@ -54,6 +54,83 @@ CACHE_REPLAY_LIFECYCLE_SOURCE_SURFACE = "cache_replay_lifecycle"
 TERMINAL_OUTPUT_COMPACTION_LIFECYCLE_SOURCE_SURFACE = "terminal_output_compaction_lifecycle"
 
 TOKEN_CHARS = 4
+POLICY_DECISION_NON_FEATURE_INPUT_KEYS = {
+    "body",
+    "cache_key",
+    "cache_keys",
+    "chat_completion",
+    "chat_completions",
+    "choice",
+    "choices",
+    "completion",
+    "command",
+    "commands",
+    "content",
+    "developer",
+    "file_content",
+    "file_contents",
+    "function_call",
+    "function_calls",
+    "input",
+    "message",
+    "messages",
+    "normalized_pattern",
+    "old_context",
+    "old_context_summary",
+    "old_context_summary_text",
+    "old_contexts",
+    "openai_request",
+    "openai_requests",
+    "openai_response",
+    "openai_responses",
+    "output",
+    "path",
+    "pattern_body",
+    "pattern_text",
+    "policy_content",
+    "policy_contents",
+    "policy_file_content",
+    "policy_file_contents",
+    "prompt",
+    "provider_bodies",
+    "provider_body",
+    "provider_request",
+    "provider_response",
+    "raw_old_context",
+    "raw_payload",
+    "raw_payloads",
+    "raw_policy",
+    "raw_policy_file",
+    "raw_policy_yaml",
+    "raw_prompt",
+    "raw_request",
+    "raw_response",
+    "raw_session_id",
+    "raw_session_ids",
+    "request",
+    "request_body",
+    "request_fingerprint",
+    "request_fingerprints",
+    "request_id",
+    "request_ids",
+    "response",
+    "response_body",
+    "rules_yaml",
+    "session_id",
+    "session_ids",
+    "summary_content",
+    "summary_prompt",
+    "summary_prompts",
+    "summary_request",
+    "summary_text",
+    "system",
+    "system_prompt",
+    "text",
+    "tool_payload",
+    "tool_payloads",
+    "transcript",
+    "transcripts",
+}
 CHAR_BUCKETS = (
     (2_000, "lt_2k_chars"),
     (8_000, "2k_8k_chars"),
@@ -880,8 +957,9 @@ def disabled_recommendation_meta() -> dict[str, Any]:
 
 
 def _policy_decision_preflight_payload(unit: dict[str, Any]) -> dict[str, Any]:
-    input_features = dict(unit.get("input_features") or {})
-    path_hint = input_features.pop("path", None)
+    raw_input_features = unit.get("input_features") if isinstance(unit.get("input_features"), dict) else {}
+    path_hint = raw_input_features.get("path")
+    input_features = _policy_decision_input_features(raw_input_features)
     requested_actions = input_features.get("requested_local_actions")
     if not isinstance(requested_actions, list):
         requested_actions = ["routing"]
@@ -911,6 +989,25 @@ def _policy_decision_preflight_payload(unit: dict[str, Any]) -> dict[str, Any]:
         "replayability_level": "features_only",
     }
     return _sanitize_features(payload)
+
+
+def _policy_decision_input_features(value: Any) -> dict[str, Any]:
+    """Return endpoint-safe feature fields for /v1/policy-decision input_features."""
+
+    def prune(item: Any) -> Any:
+        if isinstance(item, dict):
+            cleaned: dict[str, Any] = {}
+            for key, child in item.items():
+                key_text = str(key)
+                if key_text.lower() in POLICY_DECISION_NON_FEATURE_INPUT_KEYS:
+                    continue
+                cleaned[key_text] = prune(child)
+            return cleaned
+        if isinstance(item, list):
+            return [prune(child) for child in item]
+        return item
+
+    return prune(value) if isinstance(value, dict) else {}
 
 
 def _copy_policy_decision_response_fields(body: dict[str, Any]) -> dict[str, Any]:

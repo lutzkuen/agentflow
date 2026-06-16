@@ -9,6 +9,7 @@ import httpx
 
 from agentflow_proxy import recommendations
 from agentflow_proxy.crunch import crunch_body
+from agentflow_proxy.optimization import openai_features
 from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
 
 
@@ -565,6 +566,67 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["route_down_probability"], 0.93)
         self.assertEqual(meta["model_artifact_version"], "routing-predictor-v1-abcd")
         self.assertEqual(meta["predictor_rule_id"], "routing-evidence:anthropic:sonnet->haiku")
+
+    def test_policy_decision_fetch_omits_openai_non_feature_input_diagnostics(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        FakeAsyncClient.response = FakeResponse(body={
+            "schema": "agentflow.policy_decision.v1",
+            "policy_id": "feature-policy-decision:openai:1",
+            "confidence": 0.91,
+            "provider_forwarding": False,
+            "server_content_processing": False,
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+            "routing": {
+                "status": "recommended",
+                "target_model": "gpt-5.4-mini",
+                "confidence": 0.91,
+                "route_down_probability": 0.91,
+                "recommended_mode": "shadow",
+                "model_artifact_version": "routing-predictor-v1-openai",
+                "reason_codes": ["active-routing-predictor-model"],
+            },
+        })
+        unit = openai_features.build_openai_preflight_feature_unit(
+            body={
+                "model": "gpt-5.4",
+                "input": [
+                    {"type": "message", "content": "older raw OpenAI context"},
+                    {"type": "message", "content": "older raw OpenAI context two"},
+                    {"type": "message", "content": "older raw OpenAI context three"},
+                    {"type": "message", "content": "older raw OpenAI context four"},
+                    {"type": "message", "content": "current request"},
+                ],
+                "stream": False,
+            },
+            path="/v1/responses",
+            requested_model="gpt-5.4",
+            routing_meta={
+                "text_chars": 4096,
+                "has_tools": False,
+                "category": "chat",
+                "workflow_phase": "chat",
+            },
+            category="chat",
+            stream=False,
+            input_tokens_est=1024,
+        )
+        self.assertIn("old_context", unit["input_features"])
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_policy_decision(unit))
+
+        sent = FakeAsyncClient.last_json
+        self.assertEqual(meta["status"], "received")
+        self.assertEqual(sent["source_surface"], "openai_responses")
+        self.assertEqual(sent["input_features"]["api_endpoint"], "responses")
+        self.assertNotIn("old_context", self._keys_in(sent["input_features"]))
+        self.assertNotIn("input", self._keys_in(sent["input_features"]))
+        self.assertNotIn("messages", self._keys_in(sent["input_features"]))
+        self.assertNotIn("prompt", self._keys_in(sent["input_features"]))
+        self.assertIn("terminal_log_features", sent["input_features"])
+        self.assertIn("prompt_difficulty_features", sent["input_features"])
 
     def test_policy_decision_fetch_fails_closed_on_timeout_and_schema_mismatch(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
