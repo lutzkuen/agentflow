@@ -3312,6 +3312,161 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("crunch-canary-lifecycle-metadata", report["missing_measurements"])
         self.assertFalse(report["privacy"]["raw_prompts_included"])
 
+    def test_crunch_canary_impact_classifies_remaining_activation_ready_cohorts(self) -> None:
+        measured_lifecycle = {
+            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "policy_id": "local-repeated-context-crunch-canary-measured",
+            "cohort_id": "request-shape-crunch:anthropic:messages:tool-result:measured",
+            "status": "applied",
+            "cohort": "canary_applied",
+            "reason": "selected-canary",
+            "policy_source": "local-manual",
+            "source_evidence_schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "projected_saved_tokens": 10_000,
+            "projected_saved_usd": 0.03,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+        holdout_lifecycle = dict(measured_lifecycle, status="holdout", cohort="canary_holdout")
+        opportunity_report = {
+            "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "cohorts": [
+                {
+                    "rank": 1,
+                    "cohort_id": measured_lifecycle["cohort_id"],
+                    "policy_id": measured_lifecycle["policy_id"],
+                    "readiness": "canary-staged",
+                    "row_count": 2,
+                    "projected_saved_tokens": 10_000,
+                    "projected_saved_usd": 0.03,
+                    "crunch_canary_lifecycle": {"applied_count": 1, "holdout_count": 1},
+                },
+                {
+                    "rank": 2,
+                    "cohort_id": "request-shape-crunch:anthropic:messages:tool-result:stageable",
+                    "policy_id": "local-repeated-context-crunch-canary-stageable",
+                    "readiness": "measurement-ready",
+                    "row_count": 4,
+                    "projected_saved_tokens": 8_000,
+                    "projected_saved_usd": 0.024,
+                    "duplicate_suppression": {"suppresses_new_stage_action": False, "suppressed": False},
+                },
+                {
+                    "rank": 3,
+                    "cohort_id": "request-shape-crunch:anthropic:messages:tool-result:staged",
+                    "policy_id": "local-repeated-context-crunch-canary-staged",
+                    "readiness": "measurement-ready",
+                    "row_count": 3,
+                    "projected_saved_tokens": 6_000,
+                    "projected_saved_usd": 0.018,
+                    "duplicate_suppression": {
+                        "suppresses_new_stage_action": True,
+                        "suppressed": True,
+                        "reason": "matching-repeated-context-crunch-canary-already-staged-in-local-policy",
+                        "matching_local_policy": "crunch_rules",
+                    },
+                },
+                {
+                    "rank": 4,
+                    "cohort_id": "request-shape-crunch:anthropic:messages:tool-result:blocked",
+                    "policy_id": "local-repeated-context-crunch-canary-blocked",
+                    "readiness": "skipped",
+                    "reason": "insufficient-repeat-evidence",
+                    "blockers": ["insufficient-repeat-evidence"],
+                    "row_count": 1,
+                    "projected_saved_tokens": 0,
+                    "projected_saved_usd": 0.0,
+                },
+            ],
+            "recommended_actions": [
+                {
+                    "action_type": "stage-local-repeated-context-crunch-canary",
+                    "policy_id": "local-repeated-context-crunch-canary-stageable",
+                    "cohort_id": "request-shape-crunch:anthropic:messages:tool-result:stageable",
+                    "conditions": {
+                        "provider_family": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "category": "tool-result",
+                        "workflow_phase": "thinking",
+                        "stream": True,
+                        "has_tools": True,
+                    },
+                    "rollout_fraction": 0.1,
+                    "holdout_fraction": 0.1,
+                    "projected_saved_tokens": 8_000,
+                    "projected_saved_usd": 0.024,
+                    "source_evidence_schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                }
+            ],
+        }
+        base_row = {
+            "created_at": utc_now(),
+            "provider_family": "anthropic",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "endpoint": "messages",
+            "category": "tool-result",
+            "workflow_phase": "thinking",
+            "stream": True,
+            "has_tools": True,
+            "text_bucket": "gte_128k_chars",
+            "token_bucket": "lt_500_tokens",
+            "actual_input_tokens": 20_000,
+            "input_tokens_est": 20_000,
+            "text_chars": 80_000,
+            "cost_est_usd": 0.08,
+            "status_code": 200,
+            "retry_count": 0,
+            "latency_ms": 125,
+        }
+        report = build_request_shape_crunch_canary_impact_report(
+            [
+                {
+                    **base_row,
+                    "crunch_json": stable_json(
+                        {
+                            "changed": True,
+                            "before_chars": 80_000,
+                            "after_chars": 72_000,
+                            "saved_chars": 8_000,
+                            "tokens_saved_est": 2_000,
+                            "request_shape_repeated_context_canary": measured_lifecycle,
+                        }
+                    ),
+                },
+                {
+                    **base_row,
+                    "crunch_json": stable_json({"request_shape_repeated_context_canary": holdout_lifecycle}),
+                },
+            ],
+            opportunity_report=opportunity_report,
+        )
+
+        measurements = report["activation_ready_measurements"]
+        self.assertEqual(measurements["schema"], "agentflow.request_shape_crunch_activation_ready_measurements.v1")
+        self.assertEqual(measurements["status"], "classified")
+        self.assertEqual(measurements["measured_count"], 1)
+        self.assertEqual(measurements["keep_staged_count"], 1)
+        self.assertEqual(measurements["stageable_count"], 1)
+        self.assertEqual(measurements["blocked_count"], 1)
+        self.assertEqual(measurements["bounded_stage_recommendation_count"], 1)
+        self.assertEqual(report["summary"]["measured_cohort_count"], 1)
+        self.assertEqual(report["summary"]["keep_staged_cohort_count"], 1)
+        self.assertEqual(report["summary"]["stageable_cohort_count"], 1)
+        self.assertEqual(report["summary"]["blocked_cohort_count"], 1)
+        states = {item["cohort_id"]: item["state"] for item in measurements["cohorts"]}
+        self.assertEqual(states[measured_lifecycle["cohort_id"]], "measured")
+        self.assertEqual(states["request-shape-crunch:anthropic:messages:tool-result:stageable"], "stageable")
+        self.assertEqual(states["request-shape-crunch:anthropic:messages:tool-result:staged"], "keep-staged")
+        self.assertEqual(states["request-shape-crunch:anthropic:messages:tool-result:blocked"], "blocked")
+        stage_follow_up = measurements["bounded_stage_recommendations"][0]
+        self.assertEqual(stage_follow_up["target_local_policy"], "crunch_rules")
+        self.assertEqual(stage_follow_up["conditions"]["category"], "tool-result")
+        self.assertTrue(stage_follow_up["privacy"]["metadata_only"])
+        self.assertTrue(measurements["privacy"]["aggregate_only"])
+        self.assertFalse(json.loads(json.dumps(report))["privacy"]["raw_prompts_included"])
+
     def test_crunch_canary_impact_emits_durable_action_for_fresh_staged_holdout(self) -> None:
         lifecycle = {
             "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
