@@ -1711,6 +1711,111 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-cache-issue-534-secret", rendered)
         self.assertNotIn("/tmp/private-issue-534.py", rendered)
 
+    def test_issue_544_request_shape_widening_proposal_is_action_specific(self):
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    544,
+                    "Rank request-shape blockers into local action cohorts",
+                    ["backlog", "status:ready", "priority:p1", "privacy"],
+                    state="CLOSED",
+                    closed="2026-06-16T01:00:00Z",
+                )
+            ],
+            stats={
+                "calls": 3130,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 1000, "rollup_count": 32},
+                    "follow_up_candidates": {
+                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "status": "candidates-ranked",
+                        "summary": {
+                            "ranked_candidate_count": 1,
+                            "top_next_action": "stage-repeated-context-crunch-canary",
+                            "top_local_action_family": "crunch",
+                        },
+                        "blocker_cohorts": [
+                            {
+                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "provider_family": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "endpoint": "messages",
+                                "category": "tool-result",
+                                "workflow_phase": "thinking",
+                                "stream": True,
+                                "has_tools": True,
+                                "cache_status": "skipped",
+                                "routing_status": "passthrough",
+                                "row_count": 388,
+                                "sample_count": 388,
+                                "projected_saved_tokens": 843452,
+                                "projected_savings_usd": 2.530359,
+                                "candidate_work_classes": ["crunch", "repeated_context", "replayability"],
+                                "blocker_codes": [
+                                    "thinking-routing-guard",
+                                    "tool-call-cache-disabled",
+                                    "unsupported-streaming-shape",
+                                ],
+                                "request_id": "raw-request-shape-issue-544-secret",
+                                "session_id": "raw-session-issue-544-secret",
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "crunch_policy_decision": {
+                        "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                        "status": "decided",
+                        "decision": "widen",
+                        "graduation_decision": "widen",
+                        "summary": {
+                            "decision": "widen",
+                            "graduation_decision": "widen",
+                            "applied_count": 2,
+                            "holdout_count": 7,
+                            "observed_saved_tokens": 2298,
+                            "observed_saved_usd": 0.006894,
+                            "safety_stop_state": "none",
+                        },
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        shape_signal = stats_summary["request_shape_rollup_candidates"]
+        top_cohort = shape_signal["local_action_cohorts"][0]
+        self.assertEqual(top_cohort["rank"], 1)
+        self.assertEqual(top_cohort["local_action_family"], "crunch")
+        self.assertEqual(top_cohort["readiness_state"], "activation-ready")
+        self.assertEqual(top_cohort["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(top_cohort["sample_count"], 388)
+        self.assertEqual(top_cohort["projected_saved_tokens"], 843452)
+        self.assertAlmostEqual(top_cohort["projected_savings_usd"], 2.530359)
+        self.assertEqual(top_cohort["blocker_reason"], "thinking-routing-guard")
+        self.assertTrue(shape_signal["privacy"]["metadata_only"])
+        self.assertTrue(shape_signal["privacy"]["aggregate_only"])
+
+        ledger = stats_summary["evidence_to_activation_next_action_ledger"]
+        request_shape_entry = next(item for item in ledger["entries"] if item["lever"] == "request-shape-rollups")
+        self.assertEqual(request_shape_entry["local_action_family"], "crunch")
+        self.assertEqual(request_shape_entry["next_action"], "widen")
+        self.assertEqual(request_shape_entry["legacy_issue_title"], "Apply measured request-shape crunch widening to local rules")
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn("Rank request-shape blockers into local action cohorts", titles)
+        self.assertTrue(
+            any(title.startswith("Apply measured request-shape crunch widening") for title in titles),
+            titles,
+        )
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-request-shape-issue-544-secret", rendered)
+        self.assertNotIn("raw-session-issue-544-secret", rendered)
+
     def test_recent_trusted_closed_issue_suppresses_same_stage_proposal(self):
         stale_title = "Stage cache replay canary for replay-ready on openai/openai_responses/responses"
         plan = build_research_plan(
@@ -3271,9 +3376,27 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("repeated_context", top["candidate_work_classes"])
         self.assertIn("replayability", top["candidate_work_classes"])
         self.assertIn("unsupported-streaming-shape", top["blocker_codes"])
+        self.assertEqual(top["local_action_family"], "crunch")
+        self.assertEqual(top["readiness_state"], "activation-ready")
+        self.assertEqual(top["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(top["sample_count"], 24)
+        self.assertEqual(top["blocker_reason"], "unsupported-streaming-shape")
+        self.assertEqual(signal["local_action_cohorts"][0], top)
+        self.assertEqual(
+            signal["summary"]["local_action_family_breakdown"][0],
+            {"value": "crunch", "count": 24},
+        )
+        self.assertEqual(
+            signal["summary"]["readiness_breakdown"][0],
+            {"value": "activation-ready", "count": 26},
+        )
+        self.assertEqual(
+            signal["summary"]["next_action_breakdown"][0],
+            {"value": "stage-repeated-context-crunch-canary", "count": 24},
+        )
 
         shape_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "request-shape-rollups")
-        self.assertEqual(shape_candidate["blocker"], "request-shape-stage-repeated-context-crunch-canary")
+        self.assertEqual(shape_candidate["blocker"], "request-shape-crunch-stage-repeated-context-crunch-canary")
         self.assertEqual(shape_candidate["provider_surface_bucket"], "anthropic/anthropic_messages/messages")
         self.assertEqual(shape_candidate["projected_savings_signal"]["top_candidate"]["row_count"], 24)
         self.assertTrue(shape_candidate["privacy"]["metadata_only"])

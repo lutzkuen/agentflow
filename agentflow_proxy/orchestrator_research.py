@@ -2696,6 +2696,62 @@ def _request_shape_next_action(classes: list[str], blockers: list[str]) -> str:
     return "keep-observability-only"
 
 
+def _request_shape_local_action_family(
+    classes: list[str],
+    blockers: list[str],
+    next_action: str,
+    explicit: Any = None,
+) -> str:
+    value = str(explicit or "").strip()
+    if value:
+        return sanitize_value(value)
+    action = next_action.lower().replace("_", "-")
+    class_set = set(classes)
+    blocker_set = set(blockers)
+    if "crunch" in action or {"repeated_context", "crunch"}.issubset(class_set):
+        return "crunch"
+    if (
+        "cache" in action
+        or "replay" in action
+        or "invalidation" in action
+        or "tool-call-cache-disabled" in blocker_set
+        or "replayability" in class_set
+    ):
+        return "cache"
+    if "routing" in action or "thinking-routing-guard" in blocker_set or "routing" in class_set:
+        return "routing"
+    return "observability"
+
+
+def _request_shape_readiness_state(row: dict[str, Any], next_action: str) -> str:
+    explicit = str(row.get("readiness_state") or row.get("readiness") or "").strip()
+    if explicit:
+        return sanitize_value(explicit)
+    action = next_action.lower().replace("_", "-")
+    blockers = {str(item) for item in row.get("blocker_codes") or [] if str(item or "").strip()}
+    if "measure" in action:
+        return "measurement-required"
+    if "blocked" in action or "safety" in action:
+        return "blocked"
+    if action.startswith(("stage-", "widen", "apply-", "add-")):
+        return "activation-ready"
+    if action.startswith("collect-") or "thinking-routing-guard" in blockers:
+        return "needs-lifecycle-evidence"
+    if blockers:
+        return "ranked-evidence"
+    return "observability-only"
+
+
+def _request_shape_blocker_reason(row: dict[str, Any], blockers: list[str], next_action: str) -> str:
+    for key in ("actionability_reason", "reason", "no_op_reason"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return sanitize_value(value)
+    if blockers:
+        return sanitize_value(blockers[0])
+    return sanitize_value(next_action or "request-shape-ranked")
+
+
 def _request_shape_candidate_row(row: dict[str, Any], *, source_schema: Any, rank: int) -> dict[str, Any]:
     classes = _shape_row_classes(row)
     blockers = [sanitize_value(str(item)) for item in row.get("blocker_codes") or [] if str(item or "").strip()]
@@ -2712,8 +2768,9 @@ def _request_shape_candidate_row(row: dict[str, Any], *, source_schema: Any, ran
     error_count = _to_int(row.get("error_count"))
     retry_count = _to_int(row.get("retry_count"))
     next_action = sanitize_value(row.get("next_action") or _request_shape_next_action(classes, blockers))
-    readiness = sanitize_value(row.get("readiness_state"))
-    local_action_family = sanitize_value(row.get("local_action_family"))
+    readiness = _request_shape_readiness_state(row, next_action)
+    local_action_family = _request_shape_local_action_family(classes, blockers, next_action, row.get("local_action_family"))
+    blocker_reason = _request_shape_blocker_reason(row, blockers, next_action)
     return {
         "schema": sanitize_value(row.get("schema")),
         "rank": rank,
@@ -2746,6 +2803,7 @@ def _request_shape_candidate_row(row: dict[str, Any], *, source_schema: Any, ran
         "blocker_codes": sorted(set(blockers)),
         "readiness_state": readiness,
         "local_action_family": local_action_family,
+        "blocker_reason": blocker_reason,
         "actionability_reason": sanitize_value(row.get("actionability_reason")),
         "next_action": next_action,
         "_score": (
@@ -2809,19 +2867,25 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
     ranked.sort(key=lambda item: (_to_float(item.get("_score")), _to_int(item.get("row_count"))), reverse=True)
     class_counts: Counter[str] = Counter()
     blocker_counts: Counter[str] = Counter()
+    family_counts: Counter[str] = Counter()
+    readiness_counts: Counter[str] = Counter()
+    next_action_counts: Counter[str] = Counter()
     for rank, row in enumerate(ranked[:10], start=1):
         row["rank"] = rank
         for value in row.get("candidate_work_classes") or []:
             class_counts[str(value)] += _to_int(row.get("row_count"))
         for value in row.get("blocker_codes") or []:
             blocker_counts[str(value)] += _to_int(row.get("row_count"))
+        family_counts[str(row.get("local_action_family") or "unknown")] += _to_int(row.get("row_count"))
+        readiness_counts[str(row.get("readiness_state") or "unknown")] += _to_int(row.get("row_count"))
+        next_action_counts[str(row.get("next_action") or "unknown")] += _to_int(row.get("row_count"))
     clean_ranked = []
     for row in ranked[:10]:
         clean = dict(row)
         clean.pop("_score", None)
         if not clean.get("schema"):
             clean.pop("schema", None)
-        for optional in ("readiness_state", "local_action_family", "actionability_reason"):
+        for optional in ("actionability_reason",):
             if not clean.get(optional):
                 clean.pop(optional, None)
         clean_ranked.append(clean)
@@ -2868,9 +2932,22 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
                 {"value": key, "count": value}
                 for key, value in sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))
             ],
+            "local_action_family_breakdown": [
+                {"value": key, "count": value}
+                for key, value in sorted(family_counts.items(), key=lambda item: (-item[1], item[0]))
+            ],
+            "readiness_breakdown": [
+                {"value": key, "count": value}
+                for key, value in sorted(readiness_counts.items(), key=lambda item: (-item[1], item[0]))
+            ],
+            "next_action_breakdown": [
+                {"value": key, "count": value}
+                for key, value in sorted(next_action_counts.items(), key=lambda item: (-item[1], item[0]))
+            ],
         },
         "top_candidate": clean_ranked[0] if clean_ranked else None,
         "candidates": clean_ranked,
+        "local_action_cohorts": clean_ranked,
         "missing_measurements": [] if clean_ranked else ["ranked_request_shape_rollup"],
         "privacy": {
             "metadata_only": True,
@@ -3043,7 +3120,12 @@ def _legacy_issue_title_for_ledger_entry(entry: dict[str, Any]) -> str:
         return f"Rank crunch savings follow-up for {blocker}"
     if lever == "request-shape-rollups":
         next_action = str(entry.get("next_action") or "")
-        if "crunch" in next_action:
+        action_family = str(entry.get("local_action_family") or "")
+        if "widen" in next_action and action_family == "crunch":
+            return "Apply measured request-shape crunch widening to local rules"
+        if "measure" in next_action and action_family == "crunch":
+            return "Measure request-shape repeated-context crunch canary impact"
+        if "crunch" in next_action or action_family == "crunch":
             return "Stage request-shape repeated-context crunch canary"
         if "cache" in next_action or "replay" in next_action:
             return "Stage request-shape cache replay cohort"
@@ -5542,9 +5624,14 @@ def _request_shape_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | 
             ledger_next_action = str(request_shape_ledger.get("next_action") or "").strip()
             if ledger_next_action:
                 next_action = ledger_next_action
-        blocker = f"request-shape-{next_action}"
+        ledger_family = str((request_shape_ledger or {}).get("local_action_family") or "").strip()
+        family = ledger_family or str(top.get("local_action_family") or "")
+        action_parts = ["request-shape"]
+        if family:
+            action_parts.append(family)
+        action_parts.append(next_action)
+        blocker = "-".join(action_parts)
         readiness = str((request_shape_ledger or {}).get("state") or top.get("readiness_state") or "")
-        family = str(top.get("local_action_family") or "")
         path = (
             f"Use the top aggregate request-shape cohort to advance `{next_action}` for the local `{family or 'policy'}` path."
         )
@@ -5872,6 +5959,8 @@ def _candidate_title(candidate: dict[str, Any]) -> str:
         return "Rank managed recommendation omission reasons for local policy handoff"
     if lever == "request-shape-rollups":
         blocker_text = blocker.replace("request-shape-", "")
+        if "widen" in blocker_text and "crunch" in blocker_text:
+            return "Apply measured request-shape crunch widening to local rules"
         if "measure" in blocker_text and "crunch" in blocker_text:
             return "Measure request-shape repeated-context crunch canary impact"
         if "safety" in blocker_text and "crunch" in blocker_text:
@@ -6406,6 +6495,17 @@ def _evidence_ledger_action_title(entry: dict[str, Any]) -> str:
         return f"{base} ({_evidence_ledger_title_token(entry)})"
     if lever == "request-shape-rollups":
         base = "Advance repeated-context cohort from evidence-to-activation ledger"
+        family = str(entry.get("local_action_family") or "").strip()
+        if ("widen" in action or "apply" in action) and family == "crunch":
+            base = "Apply measured request-shape crunch widening from evidence-to-activation ledger"
+        elif ("measure" in action or "impact" in action) and family == "crunch":
+            base = "Measure request-shape crunch canary from evidence-to-activation ledger"
+        elif "crunch" in action or family == "crunch":
+            base = "Stage request-shape repeated-context crunch canary from evidence-to-activation ledger"
+        elif "cache" in action or "replay" in action or family == "cache":
+            base = "Advance request-shape cache replay cohort from evidence-to-activation ledger"
+        elif "routing" in action or family == "routing":
+            base = "Advance request-shape routing lifecycle evidence from evidence-to-activation ledger"
         return f"{base} ({_evidence_ledger_title_token(entry)})"
     if lever == "managed-recommendation":
         base = "Advance managed recommendation handoff from evidence-to-activation ledger"
@@ -6438,6 +6538,9 @@ def _proposal_from_evidence_to_activation_ledger(stats_summary: dict[str, Any]) 
     lever_label = lever.replace("_", "-")
     if lever_label in {"routing", "cache", "crunch"}:
         labels.append(lever_label)
+    action_family_label = str(entry.get("local_action_family") or "").strip().replace("_", "-")
+    if action_family_label in {"routing", "cache", "crunch"}:
+        labels.append(action_family_label)
     labels.append("privacy")
     closed_note = ""
     prior = entry.get("prior_issue") if isinstance(entry.get("prior_issue"), dict) else {}
