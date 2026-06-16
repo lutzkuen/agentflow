@@ -16,6 +16,7 @@ EVIDENCE_TO_ACTIVATION_BURNDOWN_SCHEMA = "agentflow.evidence_to_activation_burnd
 EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger.v1"
 EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger_entry.v1"
 LOW_BACKLOG_MILESTONE_TITLE = "Rank next savings milestone from local telemetry evidence gaps"
+OPENAI_MIN_HOLDOUT_VOLUME = 10
 
 SENSITIVE_VALUE = "[REDACTED]"
 SENSITIVE_ID = "[REDACTED_ID]"
@@ -4861,12 +4862,17 @@ def _aggregate_openai_canary_lifecycle_evidence(row: dict[str, Any], *, sample_c
         stale = stale or age_hours > 72.0
 
     blockers: Counter[str] = Counter()
+    integrity_warnings: Counter[str] = Counter()
     if observed == 0:
         blockers["missing-canary-lifecycle-evidence"] = sample_count
     if applied == 0:
         blockers["missing-applied-coverage"] = sample_count
     if holdout == 0:
         blockers["missing-holdout-coverage"] = sample_count
+        if 0 < observed < OPENAI_MIN_HOLDOUT_VOLUME:
+            blockers["insufficient-volume-for-holdout"] = max(observed, sample_count)
+    if sample_count > 0 and observed > sample_count:
+        integrity_warnings["lifecycle-observed-count-exceeds-matched-count"] = observed
     if error_count:
         blockers["error-observed"] = error_count
     if retry_count:
@@ -4892,9 +4898,9 @@ def _aggregate_openai_canary_lifecycle_evidence(row: dict[str, Any], *, sample_c
         },
         "coverage": {
             "matched_count": sample_count,
-            "observed_rate": round(observed / sample_count, 6) if sample_count else 0.0,
-            "applied_rate": round(applied / sample_count, 6) if sample_count else 0.0,
-            "holdout_rate": round(holdout / sample_count, 6) if sample_count else 0.0,
+            "observed_rate": round(min(observed, sample_count) / sample_count, 6) if sample_count else 0.0,
+            "applied_rate": round(min(applied, sample_count) / sample_count, 6) if sample_count else 0.0,
+            "holdout_rate": round(min(holdout, sample_count) / sample_count, 6) if sample_count else 0.0,
         },
         "error_count": error_count,
         "retry_count": retry_count,
@@ -4909,6 +4915,11 @@ def _aggregate_openai_canary_lifecycle_evidence(row: dict[str, Any], *, sample_c
         "blocker_reason_breakdown": [
             {"value": key, "count": value}
             for key, value in sorted(blockers.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "integrity_warning_codes": sorted(integrity_warnings),
+        "integrity_warning_breakdown": [
+            {"value": key, "count": value}
+            for key, value in sorted(integrity_warnings.items(), key=lambda item: (-item[1], item[0]))
         ],
         "privacy": {
             "metadata_only": True,
@@ -5096,11 +5107,17 @@ _ANTHROPIC_CANARY_COUNTER_FIELDS = (
 )
 
 
-def _pass_through_lifecycle_key(row: dict[str, Any], target_model: str | None = None) -> tuple[str, str, str]:
+def _pass_through_lifecycle_key(row: dict[str, Any], target_model: str | None = None) -> tuple[str, ...]:
     provider = _routing_lower(row.get("provider")) or "unknown"
     requested = _routing_text(row.get("requested_model")) or "unknown"
     target = _routing_text(target_model or row.get("candidate_target_model") or row.get("target_model") or row.get("routed_model")) or "unknown"
-    return provider, requested, target
+    if provider != "openai":
+        return provider, requested, target
+    source_surface = _routing_lower(row.get("source_surface") or row.get("surface")) or "unknown"
+    endpoint = _routing_lower(row.get("endpoint")) or "unknown"
+    category = _routing_lower(row.get("category")) or "unknown"
+    phase = _routing_lower(row.get("phase") or row.get("workflow_phase")) or "unknown"
+    return provider, requested, target, source_surface, endpoint, category, phase
 
 
 def _merge_openai_canary_lifecycle_counts(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:

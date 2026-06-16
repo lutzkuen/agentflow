@@ -17,6 +17,7 @@ from agentflow_proxy.store import utc_now
 SCHEMA = "agentflow.openai_canary_impact.v1"
 VERDICT_SCHEMA = "agentflow.openai_canary_promotion_verdict.v1"
 ROUTING_PROMOTION_VERDICT_SCHEMA = "agentflow.openai_routing_promotion_verdict.v1"
+DEFAULT_MIN_HOLDOUT_VOLUME = 10
 
 _REASON_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")
 
@@ -474,6 +475,8 @@ def _routing_promotion_verdict(
         reasons["missing-applied-coverage"] += 1
     if holdout_count <= 0:
         reasons["missing-holdout-coverage"] += 1
+        if 0 < observed_count < DEFAULT_MIN_HOLDOUT_VOLUME:
+            reasons["insufficient-volume-for-holdout"] += max(observed_count, 1)
     if _as_int(safety.get("count")):
         reasons["safety-stop-observed"] += _as_int(safety.get("count"))
     if total_error_count:
@@ -507,6 +510,7 @@ def _routing_promotion_verdict(
         "missing-canary-lifecycle-evidence",
         "missing-applied-coverage",
         "missing-holdout-coverage",
+        "insufficient-volume-for-holdout",
         "unknown-canary-lifecycle-rows",
         "unclassified-canary-lifecycle-rows",
         "skipped-canary-unsupported-shape",

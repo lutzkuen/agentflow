@@ -909,6 +909,42 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertFalse(verdict["privacy"]["cache_keys_included"])
         self._assert_privacy_clean(impact)
 
+    def test_openai_canary_impact_keeps_low_volume_tool_heavy_without_holdout_staged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                for idx in range(2):
+                    self._log_openai_canary_call(
+                        store,
+                        candidate_id="gpt54-tool-heavy-canary",
+                        cohort="canary_applied",
+                        suffix=f"a{idx}",
+                        requested_model="gpt-5.4",
+                        target_model="gpt-5.4-mini",
+                        category="tool-heavy",
+                    )
+                impact = build_openai_canary_impact_report(
+                    store,
+                    limit=10,
+                    now=datetime(2026, 6, 10, 5, tzinfo=timezone.utc),
+                )
+            finally:
+                store.conn.close()
+
+        candidate = impact["candidates"][0]
+        self.assertEqual(candidate["cohort_counts"]["canary_applied"], 2)
+        self.assertEqual(candidate["cohort_counts"]["canary_holdout"], 0)
+        verdict = candidate["routing_promotion_verdict"]
+        self.assertEqual(verdict["verdict"], "keep-staged")
+        self.assertFalse(verdict["promotion_ready"])
+        self.assertIn("missing-holdout-coverage", verdict["reason_codes"])
+        self.assertIn("insufficient-volume-for-holdout", verdict["reason_codes"])
+        self.assertEqual(verdict["next_action"], "collect-openai-routing-canary-evidence")
+        self.assertEqual(verdict["evidence"]["applied_count"], 2)
+        self.assertEqual(verdict["evidence"]["holdout_count"], 0)
+        self.assertEqual(impact["summary"]["routing_promotion_verdict_counts"], [{"value": "keep-staged", "count": 1}])
+        self._assert_privacy_clean(impact)
+
     def test_openai_canary_impact_verdicts_cover_regression_stale_and_insufficient(self):
         scenarios = (
             ("insufficient", "needs_eval", "insufficient-holdout-samples"),

@@ -18,6 +18,7 @@ DEFAULT_MAX_EVIDENCE_AGE_HOURS = 72.0
 DEFAULT_SMALL_TEXT_CHARS_LT = 6000
 DEFAULT_TINY_TEXT_CHARS_LT = 1500
 DEFAULT_OPENAI_GPT54_CANARY_TEXT_CHARS_LT = 16000
+DEFAULT_MIN_HOLDOUT_VOLUME = 10
 
 
 def _env_int(name: str, default: int) -> int:
@@ -261,6 +262,24 @@ def _canary_matches_candidate(bucket: dict[str, Any], canary: dict[str, Any]) ->
         return False
     if target and target != str(bucket.get("target_model") or "").lower():
         return False
+    canary_category = str(canary.get("category") or "").strip().lower()
+    bucket_category = str(bucket.get("category") or "").strip().lower()
+    if canary_category and bucket_category and canary_category != bucket_category:
+        return False
+    surface_aliases = {
+        "openai_provider_request": "openai",
+        "openai-provider-request": "openai",
+        "openai_responses": "openai",
+        "openai-responses": "openai",
+    }
+    canary_surface = surface_aliases.get(str(canary.get("source_surface") or "").strip().lower(), str(canary.get("source_surface") or "").strip().lower())
+    bucket_surface = surface_aliases.get(str(bucket.get("source_surface") or "").strip().lower(), str(bucket.get("source_surface") or "").strip().lower())
+    if canary_surface and bucket_surface and canary_surface != bucket_surface:
+        return False
+    canary_endpoint = str(canary.get("endpoint") or "").strip().lower()
+    bucket_endpoint = str(bucket.get("endpoint") or "").strip().lower()
+    if canary_endpoint and bucket_endpoint and canary_endpoint != bucket_endpoint:
+        return False
     return True
 
 
@@ -363,12 +382,17 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
         stale = age_hours > DEFAULT_MAX_EVIDENCE_AGE_HOURS
 
     blocker_counts: dict[str, int] = {}
+    integrity_warnings: dict[str, int] = {}
     if observed == 0:
         blocker_counts["missing-canary-lifecycle-evidence"] = matched_count
     if applied == 0:
         blocker_counts["missing-applied-coverage"] = matched_count
     if holdout == 0:
         blocker_counts["missing-holdout-coverage"] = matched_count
+        if 0 < observed < DEFAULT_MIN_HOLDOUT_VOLUME:
+            blocker_counts["insufficient-volume-for-holdout"] = max(observed, matched_count)
+    if matched_count > 0 and observed > matched_count:
+        integrity_warnings["lifecycle-observed-count-exceeds-matched-count"] = observed
     if _as_int(raw.get("error_count")):
         blocker_counts["error-observed"] = _as_int(raw.get("error_count"))
     if _as_int(raw.get("retry_count")):
@@ -402,9 +426,9 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
         },
         "coverage": {
             "matched_count": matched_count,
-            "observed_rate": round(observed / matched_count, 6) if matched_count else 0.0,
-            "applied_rate": round(applied / matched_count, 6) if matched_count else 0.0,
-            "holdout_rate": round(holdout / matched_count, 6) if matched_count else 0.0,
+            "observed_rate": round(min(observed, matched_count) / matched_count, 6) if matched_count else 0.0,
+            "applied_rate": round(min(applied, matched_count) / matched_count, 6) if matched_count else 0.0,
+            "holdout_rate": round(min(holdout, matched_count) / matched_count, 6) if matched_count else 0.0,
         },
         "error_count": _as_int(raw.get("error_count")),
         "retry_count": _as_int(raw.get("retry_count")),
@@ -434,6 +458,8 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
         },
         "blocker_codes": sorted(blocker_counts),
         "blocker_reason_breakdown": _breakdown(blocker_counts),
+        "integrity_warning_codes": sorted(integrity_warnings),
+        "integrity_warning_breakdown": _breakdown(integrity_warnings),
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,

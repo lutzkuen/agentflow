@@ -929,6 +929,78 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("secret-holdout-session-id", rendered)
         self.assertNotIn("secret-applied-request-id", rendered)
 
+    def test_pass_through_routing_report_keeps_openai_lifecycle_shape_specific_for_low_volume_holdout(self):
+        observed_at = datetime.now(timezone.utc).isoformat()
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 17,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "category": "tool-heavy",
+                        "workflow_phase": "unknown",
+                        "c": 2,
+                    },
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4-mini",
+                        "category": "tool-heavy",
+                        "workflow_phase": "unknown",
+                        "c": 2,
+                        "openai_canary_applied_count": 2,
+                        "openai_canary_latest_observed_at": observed_at,
+                    },
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4-mini",
+                        "category": "tool-light",
+                        "workflow_phase": "unknown",
+                        "c": 13,
+                        "openai_canary_applied_count": 13,
+                        "openai_canary_latest_observed_at": observed_at,
+                    },
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        report = plan["evidence"]["stats_summary"]["pass_through_routing_report"]
+        candidate = next(
+            bucket
+            for bucket in report["buckets"]
+            if bucket["provider"] == "openai"
+            and bucket["requested_model"] == "gpt-5.4"
+            and bucket["category"] == "tool-heavy"
+        )
+        lifecycle = candidate["openai_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 2)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 0)
+        self.assertEqual(lifecycle["coverage"]["matched_count"], 2)
+        self.assertLessEqual(lifecycle["coverage"]["observed_rate"], 1.0)
+        self.assertLessEqual(lifecycle["coverage"]["applied_rate"], 1.0)
+        self.assertIn("missing-holdout-coverage", lifecycle["blocker_codes"])
+        self.assertIn("insufficient-volume-for-holdout", lifecycle["blocker_codes"])
+        self.assertNotIn("lifecycle-observed-count-exceeds-matched-count", lifecycle["integrity_warning_codes"])
+        self.assertEqual(report["summary"]["openai_canary_applied_count"], 2)
+        self.assertEqual(report["summary"]["openai_canary_holdout_count"], 0)
+
+        rendered = json.dumps(plan)
+        self.assertNotIn("secret", rendered)
+
     def test_pass_through_routing_report_names_anthropic_lifecycle_blockers(self):
         plan = build_research_plan(
             issues=[],
