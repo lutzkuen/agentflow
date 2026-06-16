@@ -5312,11 +5312,38 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
         action="store_true",
         help="Do not append the metadata-only repeated-context crunch decision to the local outcome ledger.",
     )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply the measured widen decision to a local crunch rules YAML file. Default is read-only.",
+    )
+    parser.add_argument(
+        "--rules-path",
+        help="Crunch rules YAML file to update when --apply is used. Defaults to AGENTFLOW_CRUNCH_RULES or ~/.agentflow/crunch_rules.yaml.",
+    )
+    parser.add_argument(
+        "--decision-id",
+        help="Optional decision id that must match the measured widen decision before local policy is updated.",
+    )
+    parser.add_argument(
+        "--widen-fraction",
+        type=float,
+        default=0.10,
+        help="Canary rollout fraction to add when --apply is used, default: 0.10.",
+    )
+    parser.add_argument(
+        "--max-canary-fraction",
+        type=float,
+        default=0.50,
+        help="Maximum widened canary rollout fraction when --apply is used, default: 0.50.",
+    )
     args = parser.parse_args(argv)
 
     stdout = stdout if stdout is not None else sys.stdout
 
+    from agentflow_proxy.paths import agentflow_config_path
     from agentflow_proxy.request_shape_rollups import (
+        apply_request_shape_crunch_policy_decision,
         build_request_shape_crunch_canary_impact_report,
         build_request_shape_crunch_policy_decision_report,
         build_request_shape_rollups_report,
@@ -5347,6 +5374,24 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
             result["wrote_store"] = bool(ledger.get("wrote_store"))
     finally:
         store.conn.close()
+    if args.apply:
+        rules_path = Path(args.rules_path or os.getenv("AGENTFLOW_CRUNCH_RULES") or agentflow_config_path("crunch_rules.yaml"))
+        apply_result = apply_request_shape_crunch_policy_decision(
+            result,
+            rules_path=rules_path,
+            decision_id=args.decision_id,
+            widen_fraction=args.widen_fraction,
+            max_canary_fraction=args.max_canary_fraction,
+        )
+        result["apply_result"] = apply_result
+        result["read_only"] = False
+        result["dry_run"] = False
+        result["ok"] = bool(result.get("ok")) and bool(apply_result.get("ok"))
+        result["summary"]["policy_files_written"] = bool(apply_result.get("wrote_policy_files"))
+        if apply_result.get("ok"):
+            result["status"] = "decided-and-applied"
+            result["reason"] = "applied-measured-repeated-context-crunch-widening"
+            result["next_action"] = "monitor-widened-repeated-context-crunch-canary"
     result["source_rollups"] = {
         "schema": rollups.get("schema"),
         "summary": {

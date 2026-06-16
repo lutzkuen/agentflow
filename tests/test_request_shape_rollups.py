@@ -13,6 +13,7 @@ from agentflow_proxy import cli
 from agentflow_proxy.request_shape_rollups import (
     apply_request_shape_cache_replay_canary_action,
     apply_request_shape_crunch_canary_action,
+    apply_request_shape_crunch_policy_decision,
     build_request_shape_cache_replay_canary_stage_report,
     build_request_shape_cache_replay_evidence_report,
     build_request_shape_cache_replay_policy_decision_report,
@@ -2668,6 +2669,171 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(decision["privacy"]["provider_bodies_included"])
         self.assertFalse(decision["privacy"]["request_ids_included"])
         self.assertFalse(decision["privacy"]["session_ids_included"])
+
+    def test_crunch_policy_decision_apply_widens_local_rule_with_rollback_metadata(self) -> None:
+        def impact_row(status: str, *, saved_tokens: int = 0, saved_chars: int = 0, saved_usd: float = 0.0) -> dict[str, object]:
+            lifecycle = {
+                "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+                "policy_id": "policy-promote",
+                "cohort_id": "cohort-promote",
+                "status": status,
+                "cohort": "canary_applied" if status == "applied" else "canary_holdout",
+                "reason": status,
+                "policy_source": "local-manual",
+                "metadata_only": True,
+            }
+            crunch_json = {
+                "changed": saved_tokens > 0,
+                "before_chars": 80_000,
+                "after_chars": max(0, 80_000 - saved_chars),
+                "saved_chars": saved_chars,
+                "tokens_saved_est": saved_tokens,
+                "request_shape_repeated_context_canary": lifecycle,
+            }
+            if saved_usd:
+                crunch_json["savings_usd"] = saved_usd
+            return {
+                "created_at": utc_now(),
+                "provider_family": "anthropic",
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "endpoint": "messages",
+                "category": "tool-result",
+                "workflow_phase": "thinking",
+                "stream": True,
+                "has_tools": True,
+                "text_bucket": "gte_128k_chars",
+                "token_bucket": "lt_500_tokens",
+                "cache_status": "skipped",
+                "routing_status": "passthrough",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-sonnet-4-6",
+                "actual_input_tokens": 20_000,
+                "input_tokens_est": 20_000,
+                "text_chars": 80_000,
+                "cost_est_usd": 0.08,
+                "status_code": 200,
+                "retry_count": 0,
+                "latency_ms": 125,
+                "crunch_json": stable_json(crunch_json),
+            }
+
+        decision = build_request_shape_crunch_policy_decision_report(
+            build_request_shape_crunch_canary_impact_report(
+                [
+                    impact_row("applied", saved_tokens=2_000, saved_chars=8_000, saved_usd=0.0125),
+                    impact_row("holdout"),
+                ]
+            )
+        )
+        decision_id = decision["decision_id"]
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+        rules_path.parent.mkdir()
+        rules_path.write_text(
+            yaml.safe_dump(
+                {
+                    "enabled": True,
+                    "request_shape_repeated_context_canaries": {
+                        "enabled": True,
+                        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+                        "rules": [
+                            {
+                                "id": "policy-promote",
+                                "enabled": True,
+                                "policy_source": "local-manual",
+                                "cohort_id": "cohort-promote",
+                                "conditions": {
+                                    "provider_family": "anthropic",
+                                    "source_surface": "anthropic_messages",
+                                    "endpoint": "messages",
+                                    "category": "tool-result",
+                                    "workflow_phase": "thinking",
+                                    "stream": True,
+                                    "has_tools": True,
+                                    "text_bucket": "gte_128k_chars",
+                                    "token_bucket": "lt_500_tokens",
+                                    "cache_status": "skipped",
+                                    "routing_status": "passthrough",
+                                },
+                                "rollout": {
+                                    "canary_enabled": True,
+                                    "canary_fraction": 0.10,
+                                    "holdout_fraction": 0.10,
+                                    "canary_salt": "policy-promote",
+                                    "canary_unit": "request_shape_cohort",
+                                },
+                                "safety_gates": {
+                                    "metadata_only": True,
+                                    "aggregate_only": True,
+                                    "raw_prompts_included": False,
+                                    "provider_bodies_included": False,
+                                    "request_ids_included": False,
+                                    "session_ids_included": False,
+                                    "cache_keys_included": False,
+                                },
+                            }
+                        ],
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        dry_apply = apply_request_shape_crunch_policy_decision(
+            decision,
+            rules_path=rules_path,
+            dry_run=True,
+            decision_id=decision_id,
+        )
+        self.assertTrue(dry_apply["ok"])
+        self.assertFalse(dry_apply["wrote_policy_files"])
+        self.assertEqual(dry_apply["decision_id"], decision_id)
+        self.assertEqual(dry_apply["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(dry_apply["previous_canary_fraction"], 0.1)
+        self.assertEqual(dry_apply["canary_fraction"], 0.2)
+        self.assertEqual(dry_apply["widened_cohort"]["cohort_id"], "cohort-promote")
+        self.assertEqual(dry_apply["rollback_metadata"]["rollback_action_type"], "disable_repeated_context_crunch_canary")
+        self.assertTrue(dry_apply["privacy"]["metadata_only"])
+        self.assertTrue(dry_apply["privacy"]["aggregate_only"])
+        self.assertFalse(dry_apply["privacy"]["raw_prompts_included"])
+        self.assertFalse(dry_apply["privacy"]["provider_bodies_included"])
+        self.assertFalse(dry_apply["privacy"]["request_ids_included"])
+        self.assertFalse(dry_apply["privacy"]["session_ids_included"])
+        self.assertEqual(
+            yaml.safe_load(rules_path.read_text(encoding="utf-8"))["request_shape_repeated_context_canaries"]["rules"][0]["rollout"]["canary_fraction"],
+            0.10,
+        )
+
+        applied = apply_request_shape_crunch_policy_decision(
+            decision,
+            rules_path=rules_path,
+            decision_id=decision_id,
+        )
+        self.assertTrue(applied["ok"])
+        self.assertTrue(applied["wrote_policy_files"])
+        rules = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+        widened = rules["request_shape_repeated_context_canaries"]["rules"][0]
+        self.assertEqual(widened["rollout"]["canary_fraction"], 0.2)
+        self.assertEqual(widened["rollout"]["holdout_fraction"], 0.1)
+        self.assertEqual(widened["policy_decision"]["decision_id"], decision_id)
+        self.assertEqual(widened["policy_decision"]["source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(widened["policy_decision"]["observed_saved_tokens"], 2_000)
+        self.assertEqual(widened["rollback_metadata"]["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertTrue(widened["rollback_metadata"]["required_for_promotion"])
+        self.assertTrue(widened["privacy"]["metadata_only"])
+        self.assertFalse(widened["privacy"]["raw_prompts_included"])
+
+        applied_again = apply_request_shape_crunch_policy_decision(
+            decision,
+            rules_path=rules_path,
+            decision_id=decision_id,
+        )
+        self.assertTrue(applied_again["ok"])
+        self.assertTrue(applied_again["already_applied"])
+        self.assertEqual(applied_again["status"], "already-applied")
+        self.assertFalse(applied_again["wrote_policy_files"])
+        self.assertEqual(applied_again["canary_fraction"], 0.2)
 
     def test_crunch_policy_decision_rolls_back_on_safety_stop(self) -> None:
         lifecycle = {

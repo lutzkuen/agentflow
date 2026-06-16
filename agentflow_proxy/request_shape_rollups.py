@@ -32,6 +32,7 @@ CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
 CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
 CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
 CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
+CRUNCH_POLICY_DECISION_APPLY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_apply.v1"
 CRUNCH_POLICY_DECISION_LEDGER_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger.v1"
 CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger_entry.v1"
 FOLLOW_UP_CANDIDATES_SCHEMA = "agentflow.request_shape_follow_up_candidates.v1"
@@ -42,6 +43,8 @@ REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE = 0.05
 DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION = 0.10
 DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION = 0.10
 DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS = 72.0
+DEFAULT_CRUNCH_CANARY_WIDEN_FRACTION = 0.10
+DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION = 0.50
 DEFAULT_CACHE_REPLAY_CANARY_ROLLOUT_FRACTION = 0.10
 DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION = 0.10
 DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS = 3600
@@ -2078,6 +2081,242 @@ def apply_request_shape_crunch_canary_action(
         "cohort_id": action.get("cohort_id"),
         "canary_fraction": canary_rule["rollout"]["canary_fraction"],
         "holdout_fraction": canary_rule["rollout"]["holdout_fraction"],
+        "rules_path_included": False,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _request_shape_crunch_policy_apply_error(
+    *,
+    dry_run: bool,
+    errors: list[dict[str, str]],
+) -> dict[str, Any]:
+    return {
+        "schema": CRUNCH_POLICY_DECISION_APPLY_SCHEMA,
+        "ok": False,
+        "dry_run": bool(dry_run),
+        "wrote_policy_files": False,
+        "rules_path_included": False,
+        "errors": errors,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _request_shape_crunch_policy_apply_decision(
+    decision_report: dict[str, Any],
+    *,
+    decision_id: str | None = None,
+) -> dict[str, Any] | None:
+    decisions = decision_report.get("decisions") if isinstance(decision_report.get("decisions"), list) else []
+    if decision_id:
+        for item in decisions:
+            if isinstance(item, dict) and item.get("decision_id") == decision_id:
+                return item
+    top = decision_report.get("top_decision") if isinstance(decision_report.get("top_decision"), dict) else None
+    if top is not None:
+        return top
+    for item in decisions:
+        if isinstance(item, dict):
+            return item
+    return None
+
+
+def _widened_fraction(current: Any, *, widen_fraction: float, max_canary_fraction: float, holdout_fraction: float) -> float:
+    current_value = _bounded_fraction(current, DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION)
+    step = _bounded_fraction(widen_fraction, DEFAULT_CRUNCH_CANARY_WIDEN_FRACTION)
+    max_fraction = _bounded_fraction(max_canary_fraction, DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION)
+    max_fraction = min(max_fraction, max(0.0, 1.0 - holdout_fraction))
+    return round(min(max_fraction, current_value + step), 6)
+
+
+def apply_request_shape_crunch_policy_decision(
+    decision_report: dict[str, Any],
+    *,
+    rules_path: str | Path,
+    dry_run: bool = False,
+    decision_id: str | None = None,
+    widen_fraction: float = DEFAULT_CRUNCH_CANARY_WIDEN_FRACTION,
+    max_canary_fraction: float = DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION,
+) -> dict[str, Any]:
+    errors: list[dict[str, str]] = []
+    if decision_report.get("schema") != CRUNCH_POLICY_DECISION_SCHEMA:
+        errors.append({"path": "$.schema", "message": "unsupported request-shape crunch policy decision schema"})
+    decision = _request_shape_crunch_policy_apply_decision(decision_report, decision_id=decision_id)
+    if decision is None:
+        errors.append({"path": "$.top_decision", "message": "missing request-shape crunch policy decision"})
+        return _request_shape_crunch_policy_apply_error(dry_run=dry_run, errors=errors)
+    if decision_id and decision.get("decision_id") != decision_id:
+        errors.append({"path": "$.decision_id", "message": "requested decision id was not found"})
+    if decision.get("decision") != "widen":
+        errors.append({"path": "$.decision", "message": "only widen decisions can update local crunch rollout"})
+    if not decision.get("promotion_allowed"):
+        errors.append({"path": "$.promotion_allowed", "message": "widen decision is not promotion allowed"})
+    rollback_metadata = decision.get("rollback_metadata") if isinstance(decision.get("rollback_metadata"), dict) else {}
+    if not rollback_metadata.get("present"):
+        errors.append({"path": "$.rollback_metadata", "message": "widen decision requires rollback metadata"})
+    privacy = decision.get("privacy") if isinstance(decision.get("privacy"), dict) else {}
+    rollback_privacy = rollback_metadata.get("privacy") if isinstance(rollback_metadata.get("privacy"), dict) else {}
+    for key in ("raw_prompts_included", "provider_bodies_included", "request_ids_included", "session_ids_included", "cache_keys_included", "tool_payloads_included"):
+        if privacy.get(key) or rollback_privacy.get(key):
+            errors.append({"path": f"$.privacy.{key}", "message": "request-shape crunch policy decision is not metadata-only"})
+
+    policy_id = str(decision.get("policy_id") or "")
+    cohort_id = str(decision.get("cohort_id") or "")
+    decision_identifier = str(decision.get("decision_id") or decision_id or "")
+    if not policy_id:
+        errors.append({"path": "$.policy_id", "message": "widen decision is missing target policy id"})
+    if not cohort_id:
+        errors.append({"path": "$.cohort_id", "message": "widen decision is missing target cohort id"})
+    if not decision_identifier:
+        errors.append({"path": "$.decision_id", "message": "widen decision is missing decision id"})
+
+    path = Path(rules_path)
+    existing: dict[str, Any] = {}
+    if path.exists():
+        import yaml
+
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        existing = loaded if isinstance(loaded, dict) else {}
+    section = existing.get("request_shape_repeated_context_canaries") if isinstance(existing, dict) else None
+    rules = section.get("rules") if isinstance(section, dict) and isinstance(section.get("rules"), list) else []
+    target_index: int | None = None
+    target_rule: dict[str, Any] | None = None
+    for index, item in enumerate(rules):
+        if not isinstance(item, dict):
+            continue
+        if item.get("id") == policy_id or item.get("policy_id") == policy_id or item.get("cohort_id") == cohort_id:
+            target_index = index
+            target_rule = item
+            break
+    if target_rule is None:
+        errors.append({"path": "$.request_shape_repeated_context_canaries.rules", "message": "matching staged crunch canary rule was not found"})
+    if errors:
+        return _request_shape_crunch_policy_apply_error(dry_run=dry_run, errors=errors)
+
+    assert target_index is not None
+    assert target_rule is not None
+    rollout = target_rule.get("rollout") if isinstance(target_rule.get("rollout"), dict) else {}
+    previous_canary = _bounded_fraction(rollout.get("canary_fraction", rollout.get("fraction")), DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION)
+    holdout = _bounded_fraction(rollout.get("holdout_fraction"), DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION)
+    existing_policy_decision = target_rule.get("policy_decision") if isinstance(target_rule.get("policy_decision"), dict) else {}
+    already_applied = existing_policy_decision.get("decision_id") == decision_identifier
+    widened_canary = previous_canary if already_applied else _widened_fraction(
+        previous_canary,
+        widen_fraction=widen_fraction,
+        max_canary_fraction=max_canary_fraction,
+        holdout_fraction=holdout,
+    )
+    updated_rule = dict(target_rule)
+    updated_rollout = dict(rollout)
+    updated_rollout.update({
+        "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+        "canary_enabled": True,
+        "canary_fraction": widened_canary,
+        "holdout_fraction": holdout,
+        "canary_salt": str(updated_rollout.get("canary_salt") or policy_id),
+        "canary_unit": str(updated_rollout.get("canary_unit") or "request_shape_cohort"),
+    })
+    safety_gates = updated_rule.get("safety_gates") if isinstance(updated_rule.get("safety_gates"), dict) else {}
+    updated_safety_gates = dict(safety_gates)
+    updated_safety_gates.update({
+        "metadata_only": True,
+        "aggregate_only": True,
+        "local_file_backed": True,
+        "local_only": True,
+        "holdout_required": holdout > 0,
+        "max_rollout_fraction": max(widened_canary, _as_float(updated_safety_gates.get("max_rollout_fraction"))),
+        "raw_prompts_included": False,
+        "provider_bodies_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "cache_keys_included": False,
+        "tool_payloads_included": False,
+    })
+    metrics = decision.get("metrics") if isinstance(decision.get("metrics"), dict) else {}
+    updated_rule.update({
+        "id": policy_id,
+        "enabled": True,
+        "policy_source": public_label(decision.get("policy_source") or target_rule.get("policy_source") or "local-manual", "local-manual"),
+        "cohort_id": cohort_id,
+        "rollout": updated_rollout,
+        "safety_gates": updated_safety_gates,
+        "policy_decision": {
+            "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+            "decision_id": decision_identifier,
+            "source_evidence_schema": CRUNCH_POLICY_DECISION_SCHEMA,
+            "decision": "widen",
+            "graduation_decision": public_label(decision.get("graduation_decision") or "widen", "widen"),
+            "applied_count": _as_int(metrics.get("applied_count")),
+            "holdout_count": _as_int(metrics.get("holdout_count")),
+            "observed_saved_tokens": _as_int(metrics.get("observed_saved_tokens")),
+            "observed_saved_usd": round(_as_float(metrics.get("observed_saved_usd")), 8),
+            "error_rate_delta": round(_as_float(metrics.get("error_rate_delta")), 6),
+            "retry_rate_delta": round(_as_float(metrics.get("retry_rate_delta")), 6),
+            "fallback_rate_delta": round(_as_float(metrics.get("fallback_rate_delta")), 6),
+            "safety_stop_state": public_label(decision.get("safety_stop_state") or "none", "none"),
+            "previous_canary_fraction": previous_canary,
+            "widened_canary_fraction": widened_canary,
+            "holdout_fraction": holdout,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "rollback_metadata": {
+            **rollback_metadata,
+            "policy_files_written": not dry_run,
+            "target_policy_id": policy_id,
+            "target_cohort_id": cohort_id,
+            "target_local_rule_file": "crunch_rules.yaml",
+            "privacy": _crunch_opportunity_privacy(),
+        },
+        "widened_at": utc_now(),
+        "privacy": _crunch_opportunity_privacy(),
+    })
+    updated_rules = list(rules)
+    updated_rules[target_index] = updated_rule
+    updated_section = dict(section) if isinstance(section, dict) else {}
+    updated_section.update({
+        "enabled": True,
+        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+        "rules": updated_rules,
+    })
+    updated = dict(existing)
+    updated["request_shape_repeated_context_canaries"] = updated_section
+    if not dry_run and not already_applied:
+        import yaml
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(updated, sort_keys=False), encoding="utf-8")
+
+    return {
+        "schema": CRUNCH_POLICY_DECISION_APPLY_SCHEMA,
+        "ok": True,
+        "status": "already-applied" if already_applied else "applied" if not dry_run else "drafted",
+        "dry_run": bool(dry_run),
+        "wrote_policy_files": not dry_run and not already_applied,
+        "already_applied": already_applied,
+        "target_local_policy": "crunch_rules",
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "policy_id": policy_id,
+        "cohort_id": cohort_id,
+        "decision_id": decision_identifier,
+        "previous_canary_fraction": previous_canary,
+        "canary_fraction": widened_canary,
+        "holdout_fraction": holdout,
+        "widen_fraction": round(_bounded_fraction(widen_fraction, DEFAULT_CRUNCH_CANARY_WIDEN_FRACTION), 6),
+        "max_canary_fraction": round(_bounded_fraction(max_canary_fraction, DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION), 6),
+        "rollback_metadata": updated_rule["rollback_metadata"],
+        "widened_cohort": {
+            "schema": "agentflow.request_shape_crunch_policy_decision_widened_cohort.v1",
+            "policy_id": policy_id,
+            "cohort_id": cohort_id,
+            "decision_id": decision_identifier,
+            "previous_canary_fraction": previous_canary,
+            "canary_fraction": widened_canary,
+            "holdout_fraction": holdout,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
         "rules_path_included": False,
         "privacy": _crunch_opportunity_privacy(),
     }
