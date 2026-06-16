@@ -1232,6 +1232,23 @@ def _codex_stale_risk_skip_reason(params: dict[str, Any], file_dependency_audit_
     return None
 
 
+def _codex_stateless_shadow_phase_classification(params: dict[str, Any]) -> dict[str, Any]:
+    phase_reason = _codex_summary_phase_reason(params)
+    if phase_reason:
+        return {
+            "workflow_phase": "summary",
+            "workflow_phase_reason": phase_reason,
+            "shadow_replay_shape": "stateless-summary-text-only",
+            "shadow_supported": True,
+        }
+    return {
+        "workflow_phase": "stateless_text",
+        "workflow_phase_reason": "self-contained-text-only-turn",
+        "shadow_replay_shape": "stateless-text-only",
+        "shadow_supported": True,
+    }
+
+
 def _codex_stateless_shadow_skip_reason(params: dict[str, Any]) -> str | None:
     unknown_keys = sorted(str(key) for key in params if str(key) not in _CODEX_SHADOW_KNOWN_PARAM_KEYS)
     if unknown_keys:
@@ -1252,12 +1269,56 @@ def _codex_stateless_shadow_skip_reason(params: dict[str, Any]) -> str | None:
         return "file-path-reference"
     if _CODEX_STALE_RISK_TEXT_RE.search(text):
         return "stale-risk-reference"
-    if not _codex_summary_phase_reason(params):
-        return "workflow-phase-not-stateless-summary"
     deterministic, reason = _deterministic_sampling(params)
     if not deterministic:
         return reason or "non-deterministic-sampling"
     return None
+
+
+def _codex_shadow_size_gate_meta(
+    experiment_meta: dict[str, Any] | None,
+    *,
+    input_text_chars: int,
+) -> dict[str, Any]:
+    experiment_meta = experiment_meta if isinstance(experiment_meta, dict) else {}
+    min_chars = int(experiment_meta.get("min_text_chars") or 0)
+    max_chars = int(experiment_meta.get("max_text_chars") or 0)
+    if input_text_chars < min_chars:
+        status = "too-small"
+    elif max_chars > 0 and input_text_chars > max_chars:
+        status = "too-large"
+    else:
+        status = "within-bounds"
+    return {
+        "schema": "agentflow.codex_shadow_request_size_gate.v1",
+        "status": status,
+        "input_text_chars": input_text_chars,
+        "min_text_chars": min_chars,
+        "min_text_chars_scope": experiment_meta.get("min_text_chars_scope") or "global",
+        "max_text_chars": max_chars,
+        "max_text_chars_scope": experiment_meta.get("max_text_chars_scope") or "global",
+        "sample_rate": experiment_meta.get("sample_rate"),
+        "sample_rate_scope": experiment_meta.get("sample_rate_scope"),
+        "eligibility_overrides_applied": experiment_meta.get("eligibility_overrides_applied") or [],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+        },
+    }
+
+
+def _attach_codex_shadow_size_gate(
+    experiment_meta: dict[str, Any],
+    *,
+    input_text_chars: int,
+) -> None:
+    experiment_meta["request_size_gate"] = _codex_shadow_size_gate_meta(
+        experiment_meta,
+        input_text_chars=input_text_chars,
+    )
 
 
 _CODEX_SHADOW_UNSUPPORTED_SHAPE_REASONS = {
@@ -1318,6 +1379,13 @@ def _codex_shadow_preflight(
             "credentials_included": False,
         },
     }
+    phase_classification = _codex_stateless_shadow_phase_classification(params) if text else {
+        "workflow_phase": "unknown",
+        "workflow_phase_reason": "empty-input",
+        "shadow_replay_shape": "none",
+        "shadow_supported": False,
+    }
+    meta["workflow_phase_classification"] = phase_classification
     if not CODEX_APP_SHADOW_EXECUTION:
         meta["reason"] = "shadow-execution-disabled"
         return None, meta
@@ -1353,7 +1421,7 @@ def _codex_shadow_preflight(
         body["top_p"] = top_p
     meta.update({
         "status": "executable",
-        "reason": "stateless-summary-text-only-replay",
+        "reason": f"{phase_classification['shadow_replay_shape']}-replay",
         "request_shape": {
             "endpoint": "/v1/responses",
             "input_kind": "text",
@@ -1361,6 +1429,8 @@ def _codex_shadow_preflight(
             "thread_state_included": False,
             "instructions_included": False,
             "max_output_tokens_included": "max_output_tokens" in body,
+            "workflow_phase": phase_classification["workflow_phase"],
+            "workflow_phase_reason": phase_classification["workflow_phase_reason"],
         },
     })
     return body, meta
@@ -3265,6 +3335,10 @@ def _attach_codex_routing_experiment_pending(
     if result is None:
         return
     experiment_meta, routing_meta = result
+    _attach_codex_shadow_size_gate(
+        experiment_meta,
+        input_text_chars=int(routing_meta.get("text_chars") or _input_text_chars(params.get("input"))),
+    )
     if request_id is None and experiment_meta.get("sampled"):
         experiment_meta = dict(experiment_meta)
         experiment_meta.update({
@@ -3279,6 +3353,7 @@ def _attach_codex_routing_experiment_pending(
             params,
             shadow_model=str(experiment_meta.get("shadow_model") or ""),
         )
+        shadow_preflight["request_size_gate"] = experiment_meta.get("request_size_gate")
         experiment_meta["shadow_request_preflight"] = shadow_preflight
         if shadow_preflight.get("status") != "executable":
             experiment_meta = dict(experiment_meta)
@@ -3434,7 +3509,9 @@ async def _maybe_run_codex_routing_experiment(
     experiment_id = str(uuid.uuid4())
     shadow_model = str(experiment_meta.get("shadow_model") or "")
     primary_model = str(experiment_meta.get("primary_model") or routing_meta.get("requested_model") or "")
+    _attach_codex_shadow_size_gate(experiment_meta, input_text_chars=input_text_chars)
     shadow_body, shadow_preflight = _codex_shadow_preflight(params, shadow_model=shadow_model)
+    shadow_preflight["request_size_gate"] = experiment_meta.get("request_size_gate")
     experiment_meta["shadow_request_preflight"] = shadow_preflight
 
     shadow_status_code: int | None = None

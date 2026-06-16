@@ -2603,6 +2603,12 @@ summary_model_hint:
         self.assertIsNone(experiment_json["shadow_limitation"])
         self.assertEqual(experiment_json["shadow_request_preflight"]["status"], "executable")
         self.assertEqual(experiment_json["shadow_request_preflight"]["reason"], "stateless-summary-text-only-replay")
+        self.assertEqual(
+            experiment_json["shadow_request_preflight"]["workflow_phase_classification"]["workflow_phase"],
+            "summary",
+        )
+        self.assertEqual(experiment_json["request_size_gate"]["status"], "within-bounds")
+        self.assertEqual(experiment_json["request_size_gate"]["max_text_chars_scope"], "global")
         self.assertIn("cwd", experiment_json["shadow_request_preflight"]["omitted_turn_fields"])
         self.assertIn("runtimeWorkspaceRoots", experiment_json["shadow_request_preflight"]["omitted_turn_fields"])
         self.assertFalse(experiment_json["shadow_request_preflight"]["privacy"]["raw_prompts_included"])
@@ -2645,6 +2651,154 @@ summary_model_hint:
         self.assertEqual(candidate["compared_samples"], 1)
         self.assertEqual(candidate["shadow_error_samples"], 0)
         self.assertEqual(report["summary"]["sample_mode_counts"], {"shadow_candidate_pass_through": 1})
+
+    def test_codex_routing_experiment_executes_stateless_non_summary_shadow(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-stateless-text",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": "Explain the tradeoff between local proxy routing and exact caching."}],
+                "temperature": 0,
+            },
+        }
+        response = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-stateless-text",
+            "result": {"message": "Routing changes model cost; exact caching avoids repeated calls."},
+        }
+        optimization_metadata = {
+            "routing": {
+                "status": "skipped",
+                "reason": "keep requested Codex model",
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-codex",
+                "workflow_phase": "unknown",
+                "model_field": "model",
+            },
+            "crunch": {"status": "skipped", "reason": "no-change", "applied": False},
+            "cache": {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False},
+        }
+
+        def sampled_decision(body, routing_meta, *, stream, provider, source_surface, store_obj):
+            return {
+                "schema": "agentflow.routing_experiment_decision.v1",
+                "enabled": True,
+                "mode": "shadow_candidate_pass_through",
+                "status": "selected",
+                "sampled": True,
+                "reason": "sampled-shadow-candidate-pass-through",
+                "counterfactual": True,
+                "shadow_only": True,
+                "provider": provider,
+                "source_surface": source_surface,
+                "requested_model": routing_meta["requested_model"],
+                "routed_model": "gpt-5-mini",
+                "primary_model": routing_meta["requested_model"],
+                "shadow_model": "gpt-5-mini",
+                "user_visible_model": routing_meta["requested_model"],
+                "category": "codex-turn",
+                "workflow_phase": routing_meta["workflow_phase"],
+                "text_chars": routing_meta["text_chars"],
+                "min_text_chars": 0,
+                "max_text_chars": 8000,
+                "min_text_chars_scope": "global",
+                "max_text_chars_scope": "global",
+                "daily_budget_usd": 10.0,
+                "budget_spent_usd": 0.0,
+                "budget_remaining_usd": 10.0,
+                "similarity_threshold": 0.86,
+                "privacy": {
+                    "metadata_only": True,
+                    "raw_prompts_included": False,
+                    "raw_responses_included": False,
+                    "request_ids_included": False,
+                    "session_ids_included": False,
+                    "file_paths_included": False,
+                },
+            }
+
+        async def fake_shadow_executor(shadow_body, *, shadow_model):
+            self.assertEqual(shadow_model, "gpt-5-mini")
+            self.assertEqual(shadow_body["model"], "gpt-5-mini")
+            self.assertFalse(shadow_body["store"])
+            self.assertEqual(shadow_body["input"], "Explain the tradeoff between local proxy routing and exact caching.")
+            return {
+                "status_code": 200,
+                "response_body": {
+                    "output_text": "Routing changes model cost; exact caching avoids repeated calls.",
+                    "usage": {"input_tokens": 12, "output_tokens": 8},
+                },
+                "latency_ms": 21,
+                "cost_est_usd": 0.00008,
+                "error": None,
+            }
+
+        async def run_fixture():
+            with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+                test_store = Store(tmp.name)
+                try:
+                    request_started = {}
+                    pending = {}
+                    with (
+                        patch.object(codex_app_proxy, "store", test_store),
+                        patch.object(codex_app_proxy, "routing_experiment_decision", side_effect=sampled_decision),
+                        patch.object(codex_app_proxy, "_codex_shadow_api_key", return_value="test-key"),
+                        patch.object(codex_app_proxy, "_execute_codex_stateless_shadow_request", side_effect=fake_shadow_executor),
+                    ):
+                        start_event_id = codex_app_proxy._record_message(
+                            json.dumps(message),
+                            direction="client_to_server",
+                            session_id="session-routing-experiment-stateless-text",
+                            request_started=request_started,
+                            optimization_metadata=optimization_metadata,
+                        )
+                        codex_app_proxy._attach_codex_routing_experiment_pending(
+                            json.dumps(message),
+                            optimization_metadata=optimization_metadata,
+                            start_event_id=start_event_id,
+                            pending_routing_experiments=pending,
+                        )
+                        self.assertIn("turn-routing-experiment-stateless-text", pending)
+                        await codex_app_proxy._maybe_run_codex_routing_experiment(
+                            json.dumps(response),
+                            request_started=request_started,
+                            pending_routing_experiments=pending,
+                        )
+                    experiment = dict(test_store.conn.execute("select * from routing_experiments").fetchone())
+                    queue_row = dict(test_store.conn.execute(
+                        "select source_surface, endpoint, status, payload_json from managed_outcome_feedback_queue"
+                    ).fetchone())
+                    routing_row = dict(test_store.conn.execute(
+                        "select routing_json from codex_app_events where id = ?",
+                        (start_event_id,),
+                    ).fetchone())
+                    return experiment, queue_row, json.loads(routing_row["routing_json"])
+                finally:
+                    test_store.conn.close()
+
+        experiment, queue_row, routing = asyncio.run(run_fixture())
+
+        self.assertEqual(experiment["source_surface"], "codex_turn")
+        self.assertEqual(experiment["primary_status_code"], 200)
+        self.assertEqual(experiment["shadow_status_code"], 200)
+        self.assertIsNone(experiment["error"])
+        experiment_json = json.loads(experiment["experiment_json"])
+        self.assertEqual(experiment_json["status"], "compared")
+        self.assertEqual(experiment_json["shadow_request_preflight"]["status"], "executable")
+        self.assertEqual(experiment_json["shadow_request_preflight"]["reason"], "stateless-text-only-replay")
+        phase = experiment_json["shadow_request_preflight"]["workflow_phase_classification"]
+        self.assertEqual(phase["workflow_phase"], "stateless_text")
+        self.assertTrue(phase["shadow_supported"])
+        self.assertEqual(experiment_json["request_size_gate"]["status"], "within-bounds")
+        self.assertEqual(experiment_json["request_size_gate"]["max_text_chars"], 8000)
+        self.assertEqual(queue_row["source_surface"], "routing_experiment_outcome")
+        payload = json.loads(queue_row["payload_json"])
+        self.assertEqual(payload["source_surface"], "codex_turn")
+        self.assertEqual(payload["outcome"]["status"], "compared")
+        self.assertTrue(payload["outcome"]["compared"])
+        self.assertEqual(routing["routing_experiment"]["managed_feedback"]["status"], "queued")
 
     def test_codex_routing_experiment_stateful_turn_is_unavailable_not_shadow_error(self):
         message = {
@@ -3247,6 +3401,11 @@ summary_model_hint:
         self.assertEqual(experiment["reason"], "request-too-large")
         self.assertFalse(experiment["sampled"])
         self.assertEqual(experiment["text_chars"], 33000)
+        self.assertEqual(experiment["request_size_gate"]["status"], "too-large")
+        self.assertEqual(experiment["request_size_gate"]["input_text_chars"], 33000)
+        self.assertEqual(experiment["request_size_gate"]["max_text_chars"], 8000)
+        self.assertEqual(experiment["request_size_gate"]["max_text_chars_scope"], "global")
+        self.assertFalse(experiment["request_size_gate"]["privacy"]["raw_prompts_included"])
 
     def test_codex_routing_experiment_skip_is_visible_without_sample_rows(self):
         message = {
