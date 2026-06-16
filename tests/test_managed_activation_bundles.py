@@ -3,17 +3,74 @@ from __future__ import annotations
 import io
 import json
 import unittest
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import yaml
 
 from agentflow_proxy import cli
+from agentflow_proxy.managed_activation_apply import apply_staged_managed_activation_bundle
 from agentflow_proxy.managed_activation_bundles import stage_managed_activation_bundle_sync
+from agentflow_proxy.policy_workbench import rollback_policy_apply
 
 
 def _action(family: str, order: int, *, apply_after: list[str] | None = None) -> dict[str, object]:
     draft_id = f"{family}-draft-fixture"
+    if family == "cache":
+        target_policy_section = "cache.pattern_rules"
+        local_policy_patch = {
+            "pattern_rules": [
+                {
+                    "id": "managed-cache-replay-fixture",
+                    "enabled": True,
+                    "policy_source": "managed-recommended",
+                    "candidate_id": "managed-cache-replay-fixture",
+                    "conditions": {
+                        "pattern_hashes": ["sha256:fixture-cache-pattern"],
+                        "source_surface": "openai_responses",
+                        "category": "chat",
+                        "has_tools": False,
+                        "stream": False,
+                    },
+                    "action": {
+                        "type": "exact_cache_pattern",
+                        "allow_tool_calls": False,
+                        "safe_invalidation": False,
+                        "streaming": False,
+                    },
+                }
+            ]
+        }
+    else:
+        target_policy_section = "anthropic_thinking_history_compaction.rules"
+        local_policy_patch = {
+            "anthropic_thinking_history_compaction": {
+                "rules": [
+                    {
+                        "id": "managed-crunch-thinking-fixture",
+                        "enabled": True,
+                        "policy_source": "managed-recommended",
+                        "candidate_id": "managed-crunch-thinking-fixture",
+                        "conditions": {
+                            "source_surface": "anthropic_messages",
+                            "category": "tool-result",
+                            "text_bucket": "gte_128k_chars",
+                            "model_pattern": "sonnet",
+                            "has_tools": True,
+                            "stream": True,
+                        },
+                        "action": {
+                            "type": "compact_thinking_history_block",
+                            "min_text_chars": 128000,
+                            "min_block_chars": 2000,
+                            "similarity_threshold": 0.95,
+                            "preserve_tool_protocol": True,
+                        },
+                    }
+                ]
+            }
+        }
     return {
         "schema": "agentflow.local_activation_policy_bundle_action.v1",
         "action_id": f"local-activation-policy-bundle-action:{family}:fixture",
@@ -95,6 +152,8 @@ def _action(family: str, order: int, *, apply_after: list[str] | None = None) ->
             "local_action_family": family,
             "candidate_family": f"{family}-policy-rule",
             "rule_file": f"{family}-rules.yaml",
+            "target_local_policy_section": target_policy_section,
+            "local_policy_patch": local_policy_patch,
             "next_action": "widen",
             "candidate_bucket": {"policy_section": family, "source_decision": "widen"},
             "decision_provenance": {
@@ -247,6 +306,18 @@ def _bundle() -> dict[str, object]:
 
 
 class ManagedActivationBundleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        self.tmp = TemporaryDirectory()
+        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+
+    def tearDown(self) -> None:
+        if self.old_event_log is None:
+            os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+        else:
+            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+        self.tmp.cleanup()
+
     def test_import_stages_cache_and_crunch_policy_draft_metadata(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "drafts"
@@ -290,6 +361,7 @@ class ManagedActivationBundleTests(unittest.TestCase):
                 self.assertFalse(entry["provider_forwarding"])
                 self.assertFalse(entry["server_content_processing"])
                 self.assertEqual(entry["local_policy_draft"]["status"], "review-required")
+                self.assertIn("local_policy_patch", entry["local_policy_draft"])
 
     def test_import_rejects_content_bearing_bundle_before_writing_workspace(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -325,6 +397,161 @@ class ManagedActivationBundleTests(unittest.TestCase):
             self.assertEqual(code, 0, result)
             self.assertTrue(result["ok"])
             self.assertEqual(result["summary"]["staged_count"], 2)
+
+    def test_apply_selected_staged_managed_activation_drafts_and_rollback(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "drafts"
+            config_dir = Path(tmp) / "config"
+            config_dir.mkdir()
+            (config_dir / "cache_rules.yaml").write_text(
+                "exact_cache:\n  enabled: true\npattern_rules: []\n",
+                encoding="utf-8",
+            )
+            (config_dir / "crunch_rules.yaml").write_text(
+                "enabled: true\nanthropic_thinking_history_compaction:\n  rules: []\n",
+                encoding="utf-8",
+            )
+
+            staged = stage_managed_activation_bundle_sync(
+                _bundle(),
+                workspace=workspace,
+                config_dir=config_dir,
+            )
+            self.assertTrue(staged["ok"], staged)
+
+            for row in staged["staged"]:
+                dry_run = apply_staged_managed_activation_bundle(
+                    str(row["draft_id"]),
+                    workspace=workspace,
+                    config_dir=config_dir,
+                    dry_run=True,
+                )
+                self.assertTrue(dry_run["ok"], dry_run)
+                self.assertEqual(dry_run["status"], "dry-run")
+                self.assertTrue(dry_run["files"][0]["diff"])
+                self.assertFalse(dry_run["privacy"]["policy_files_written"])
+
+                applied = apply_staged_managed_activation_bundle(
+                    str(row["draft_id"]),
+                    workspace=workspace,
+                    config_dir=config_dir,
+                    apply_id=f"apply-{row['local_action_family']}",
+                )
+                self.assertTrue(applied["ok"], applied)
+                self.assertEqual(applied["status"], "applied")
+                self.assertEqual(applied["changed_sections"], [row["local_action_family"]])
+                self.assertTrue(applied["rollback_command"])
+                self.assertFalse(applied["provider_calls_made"] if "provider_calls_made" in applied else False)
+                self.assertFalse(applied["privacy"]["managed_server_calls_made"])
+
+            cache_payload = yaml.safe_load((config_dir / "cache_rules.yaml").read_text(encoding="utf-8"))
+            cache_rule = cache_payload["pattern_rules"][0]
+            self.assertEqual(cache_rule["policy_source"], "managed-recommended")
+            self.assertEqual(cache_rule["managed_activation_apply"]["action_id"], "local-activation-policy-bundle-action:cache:fixture")
+            self.assertTrue(cache_rule["managed_activation_apply"]["rollback_ready"])
+
+            crunch_payload = yaml.safe_load((config_dir / "crunch_rules.yaml").read_text(encoding="utf-8"))
+            crunch_rule = crunch_payload["anthropic_thinking_history_compaction"]["rules"][0]
+            self.assertEqual(crunch_rule["policy_source"], "managed-recommended")
+            self.assertEqual(crunch_rule["managed_activation_apply"]["action_id"], "local-activation-policy-bundle-action:crunch:fixture")
+
+            async def reload_state() -> dict[str, object]:
+                policies: dict[str, object] = {}
+                for section, filename in (("cache", "cache_rules.yaml"), ("crunch", "crunch_rules.yaml")):
+                    path = config_dir / filename
+                    digest = None
+                    if path.exists():
+                        import hashlib
+
+                        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    policies[section] = {
+                        "file": {
+                            "loaded": {"sha256": digest},
+                            "current": {"sha256": digest},
+                            "reload_required": False,
+                        }
+                    }
+                return {"ok": True, "policies": policies}
+
+            import asyncio
+
+            for section in ("cache", "crunch"):
+                rolled_back = asyncio.run(rollback_policy_apply(
+                    f"apply-{section}",
+                    config_dir=config_dir,
+                    sections=[section],
+                    reload_policy_state=reload_state,
+                ))
+                self.assertTrue(rolled_back["ok"], rolled_back)
+
+            self.assertEqual(
+                yaml.safe_load((config_dir / "cache_rules.yaml").read_text(encoding="utf-8"))["pattern_rules"],
+                [],
+            )
+            self.assertEqual(
+                yaml.safe_load((config_dir / "crunch_rules.yaml").read_text(encoding="utf-8"))["anthropic_thinking_history_compaction"]["rules"],
+                [],
+            )
+
+    def test_apply_cli_writes_selected_managed_activation_draft(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "drafts"
+            config_dir = Path(tmp) / "config"
+            config_dir.mkdir()
+            (config_dir / "cache_rules.yaml").write_text("pattern_rules: []\n", encoding="utf-8")
+
+            staged = stage_managed_activation_bundle_sync(
+                _bundle(),
+                workspace=workspace,
+                config_dir=config_dir,
+            )
+            cache_row = next(row for row in staged["staged"] if row["local_action_family"] == "cache")
+            stdout = io.StringIO()
+
+            code = cli.managed_activation_bundle_apply_cli(
+                [
+                    "--workspace",
+                    str(workspace),
+                    "--config-dir",
+                    str(config_dir),
+                    "--draft-id",
+                    "cache-draft-fixture",
+                    str(cache_row["draft_id"]),
+                ],
+                stdout=stdout,
+            )
+
+            result = json.loads(stdout.getvalue())
+            self.assertEqual(code, 0, result)
+            self.assertTrue(result["ok"])
+            payload = yaml.safe_load((config_dir / "cache_rules.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(payload["pattern_rules"][0]["draft_id"], "cache-draft-fixture")
+
+    def test_apply_rejects_unsupported_target_rule_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "drafts"
+            config_dir = Path(tmp) / "config"
+            config_dir.mkdir()
+            staged = stage_managed_activation_bundle_sync(
+                _bundle(),
+                workspace=workspace,
+                config_dir=config_dir,
+            )
+            cache_row = next(row for row in staged["staged"] if row["local_action_family"] == "cache")
+            bundle_path = Path(cache_row["stage"]["bundle_path"])
+            bundle_payload = yaml.safe_load(bundle_path.read_text(encoding="utf-8"))
+            bundle_payload["policies"]["cache"]["managed_activation_drafts"][0]["target_local_rule_file"] = "routing_rules.yaml"
+            bundle_path.write_text(yaml.safe_dump(bundle_payload, sort_keys=False), encoding="utf-8")
+
+            result = apply_staged_managed_activation_bundle(
+                str(cache_row["draft_id"]),
+                workspace=workspace,
+                config_dir=config_dir,
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["rejected"][0]["error"]["type"], "unsupported-target-rule-file")
 
 
 if __name__ == "__main__":

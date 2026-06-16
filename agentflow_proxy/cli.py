@@ -43,6 +43,7 @@ from agentflow_proxy.cli_commands.policy_workbench import (
     _managed_policy_query,
     _reload_policy_state_via_url,
     _write_policy_draft_apply_result,
+    managed_activation_bundle_apply_cli,
     managed_activation_bundle_stage_cli,
     policy_apply_cli,
     policy_draft_apply_cli,
@@ -682,6 +683,10 @@ def policy_draft_validate_main() -> None:
 
 def managed_activation_bundle_stage_main() -> None:
     raise SystemExit(managed_activation_bundle_stage_cli())
+
+
+def managed_activation_bundle_apply_main() -> None:
+    raise SystemExit(managed_activation_bundle_apply_cli())
 
 
 def openai_optimization_draft_dry_run_main() -> None:

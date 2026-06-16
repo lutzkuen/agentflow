@@ -1072,6 +1072,85 @@ def managed_activation_bundle_stage_cli(
     return 0 if result.get("ok") else 1
 
 
+def managed_activation_bundle_apply_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Apply selected staged managed activation bundle drafts to local cache/crunch rule files"
+    )
+    parser.add_argument(
+        "draft",
+        help="Staged draft ID, draft directory, draft.json path, or policy_bundle.json path created by agentflow-managed-activation-bundle-stage.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local rule files, default: ~/.agentflow.",
+    )
+    parser.add_argument(
+        "--action-id",
+        action="append",
+        default=[],
+        help="Apply only the staged managed activation action with this action ID. Repeat to select multiple actions.",
+    )
+    parser.add_argument(
+        "--draft-id",
+        action="append",
+        default=[],
+        help="Apply only the staged managed activation entry with this draft ID. Repeat to select multiple drafts.",
+    )
+    parser.add_argument(
+        "--recommendation-id",
+        action="append",
+        default=[],
+        help="Apply only the staged managed activation entry with this recommendation ID. Repeat to select multiple recommendations.",
+    )
+    parser.add_argument(
+        "--apply-id",
+        help="Optional deterministic apply transaction ID. Defaults to a timestamped local ID.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the local rule-file diff without writing files or backups.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print apply JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    from agentflow_proxy.managed_activation_apply import apply_staged_managed_activation_bundle
+
+    selectors = [*args.action_id, *args.draft_id, *args.recommendation_id]
+    result = apply_staged_managed_activation_bundle(
+        args.draft,
+        workspace=args.workspace,
+        config_dir=args.config_dir,
+        selectors=selectors,
+        dry_run=args.dry_run,
+        apply_id=args.apply_id,
+    )
+    stream = stdout if result.get("ok") else stderr
+    if args.pretty:
+        stream.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, result)
+    return 0 if result.get("ok") else 1
+
+
 async def _reload_policy_state_via_url(url: str, *, timeout: float) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url)
