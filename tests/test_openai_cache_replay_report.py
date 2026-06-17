@@ -319,6 +319,19 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(decision["coverage"]["observed_hits"], 0)
         self.assertEqual(decision["summary"]["top_applied_miss_blocker"], "cache-warmup-miss")
         self.assertEqual(blockers["cache-warmup-miss"], 24)
+        self.assertEqual(decision["hit_recovery"]["schema"], "agentflow.openai_cache_replay_hit_recovery.v1")
+        self.assertEqual(decision["hit_recovery"]["status"], "awaiting-live-hit")
+        self.assertEqual(decision["hit_recovery"]["applied_count"], 24)
+        self.assertEqual(decision["hit_recovery"]["holdout_count"], 16)
+        self.assertEqual(decision["hit_recovery"]["observed_hits"], 0)
+        self.assertEqual(
+            decision["invalidation_safety"]["schema"],
+            "agentflow.openai_cache_replay_invalidation_safety.v1",
+        )
+        self.assertEqual(decision["invalidation_safety"]["status"], "passed")
+        self.assertTrue(decision["invalidation_safety"]["safe_for_promotion"])
+        self.assertEqual(decision["coverage"]["invalidation_skipped_count"], 0)
+        self.assertTrue(decision["coverage"]["has_clean_invalidation_safety"])
         self.assertIn("cache-warmup-miss", decision["reason_codes"])
         self.assertIn("applied-miss:cache-warmup-miss", decision["reason_codes"])
         self.assertEqual(report["summary"]["promotion_decision"], "keep-staged")
@@ -466,8 +479,88 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(decision["coverage"]["holdout_count"], 1)
         self.assertEqual(decision["coverage"]["observed_hits"], 2)
         self.assertGreater(decision["outcomes"]["observed_savings_usd"], 0)
+        self.assertEqual(decision["hit_recovery"]["status"], "hit-recovered")
+        self.assertEqual(decision["hit_recovery"]["observed_hits"], 2)
+        self.assertEqual(decision["invalidation_safety"]["status"], "passed")
+        self.assertTrue(decision["invalidation_safety"]["safe_for_promotion"])
+        self.assertEqual(decision["coverage"]["invalidation_skipped_count"], 0)
         self.assertIn("target-savings-met", decision["reason_codes"])
         self.assertEqual(report["summary"]["promotion_allowed"], True)
+
+    def test_openai_cache_replay_readiness_rolls_back_failed_invalidation_safety(self) -> None:
+        for index, baseline in enumerate((0.03, 0.04)):
+            call_id = self._log_openai_call(
+                category="tool-light",
+                has_tools=True,
+                cache_status="hit",
+                cache_reason="exact-match",
+                cache_hit=1,
+                cost=0.0,
+                cost_baseline=baseline,
+                cache_extra=self._cache_replay_meta(
+                    candidate_id="openai-tool-cache-invalidation",
+                    rule_id="openai-tool-cache-invalidation-rule",
+                    canary_status="applied",
+                    cohort="canary_applied",
+                    reason="dependency-stable",
+                    projected=baseline,
+                ),
+            )
+            self._capture_openai_provider_adoption(call_id, tool_id=f"tool_cache_apply_{index}")
+        holdout_call_id = self._log_openai_call(
+            category="tool-light",
+            has_tools=True,
+            cache_status="bypassed",
+            cache_reason="canary_holdout",
+            cost=0.03,
+            cost_baseline=0.03,
+            cache_extra=self._cache_replay_meta(
+                candidate_id="openai-tool-cache-invalidation",
+                rule_id="openai-tool-cache-invalidation-rule",
+                canary_status="holdout",
+                cohort="canary_holdout",
+                reason="canary_holdout",
+            ),
+        )
+        self._capture_openai_provider_adoption(holdout_call_id, tool_id="tool_cache_holdout")
+        self._log_openai_call(
+            category="tool-light",
+            has_tools=True,
+            cache_status="invalidated",
+            cache_reason="dependency-changed",
+            cost=0.03,
+            cost_baseline=0.03,
+            cache_extra={
+                **self._cache_replay_meta(
+                    candidate_id="openai-tool-cache-invalidation",
+                    rule_id="openai-tool-cache-invalidation-rule",
+                    canary_status="invalidated",
+                    cohort="canary_applied",
+                    reason="dependency-changed",
+                ),
+                "invalidated": True,
+                "invalidation_reason": "dependency-changed",
+                "file_dependency_audit": self._audit(reason="dependency-changed", safe=False),
+            },
+        )
+
+        report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
+        decision = report["promotion_decision"]
+
+        self.assertEqual(decision["decision"], "rollback")
+        self.assertTrue(decision["rollback_required"])
+        self.assertFalse(decision["promotion_allowed"])
+        self.assertEqual(decision["recommended_next_action"], "disable-openai-exact-cache-replay-canary")
+        self.assertEqual(decision["hit_recovery"]["status"], "hit-recovered")
+        self.assertEqual(decision["hit_recovery"]["observed_hits"], 2)
+        self.assertEqual(decision["invalidation_safety"]["status"], "failed")
+        self.assertFalse(decision["invalidation_safety"]["safe_for_promotion"])
+        self.assertEqual(decision["invalidation_safety"]["invalidated_count"], 1)
+        self.assertEqual(decision["coverage"]["invalidation_skipped_count"], 1)
+        self.assertFalse(decision["coverage"]["has_clean_invalidation_safety"])
+        self.assertIn("invalidation-safety-failed", decision["reason_codes"])
+        self.assertIn("invalidation-skipped-observed", decision["reason_codes"])
+        self.assertEqual(report["summary"]["rollback_required"], True)
 
     def test_openai_cache_replay_readiness_rolls_back_stale_canary_evidence(self) -> None:
         for index, baseline in enumerate((0.03, 0.04)):

@@ -21,6 +21,8 @@ SCHEMA = "agentflow.openai_cache_replay_impact.v1"
 QUALITY_GATE_SCHEMA = "agentflow.openai_cache_replay_quality_gate.v1"
 LIFECYCLE_SCHEMA = "agentflow.openai_cache_replay_lifecycle_feedback.v1"
 LOCAL_PROMOTION_EVIDENCE_SCHEMA = "agentflow.openai_cache_replay_local_promotion_evidence.v1"
+HIT_RECOVERY_SCHEMA = "agentflow.openai_cache_replay_hit_recovery.v1"
+INVALIDATION_SAFETY_SCHEMA = "agentflow.openai_cache_replay_invalidation_safety.v1"
 
 DEFAULT_MIN_APPLIED_SAMPLES = 2
 DEFAULT_MIN_HOLDOUT_SAMPLES = 1
@@ -710,6 +712,137 @@ def _aggregate_canary_hit_measurements(quality_gates: list[dict[str, Any]]) -> d
     }
 
 
+def _hit_recovery_from_measurement(measurement: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": HIT_RECOVERY_SCHEMA,
+        "status": "hit-recovered" if _as_int(measurement.get("observed_hits")) > 0 else "awaiting-live-hit",
+        "first_real_hit_status": measurement.get("first_real_hit_status"),
+        "first_real_hit_observed": bool(measurement.get("first_real_hit_observed")),
+        "projected_hits": _as_int(measurement.get("projected_hits")),
+        "observed_hits": _as_int(measurement.get("observed_hits")),
+        "projected_saved_usd": round(_as_float(measurement.get("projected_saved_usd")), 8),
+        "observed_saved_usd": round(_as_float(measurement.get("observed_saved_usd")), 8),
+        "hit_realization_rate": measurement.get("hit_realization_rate"),
+        "savings_realization_rate": measurement.get("savings_realization_rate"),
+        "applied_count": _as_int(measurement.get("applied_count")),
+        "holdout_count": _as_int(measurement.get("holdout_count")),
+        "applied_miss_count": _as_int(measurement.get("applied_miss_count")),
+        "holdout_forwarded_count": _as_int(measurement.get("holdout_forwarded_count")),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _privacy_summary(),
+    }
+
+
+def _candidate_invalidation_safety(
+    *,
+    cohorts: dict[str, dict[str, Any]],
+    stale_dependency_breakdown: list[dict[str, Any]],
+    invalidation_reason_breakdown: list[dict[str, Any]],
+    applied_count: int,
+    holdout_count: int,
+) -> dict[str, Any]:
+    invalidated_count = _as_int(cohorts["invalidated"].get("count"))
+    safety_stop_count = _as_int(cohorts["safety_stop"].get("count"))
+    stale_dependency_count = sum(_as_int(row.get("count")) for row in stale_dependency_breakdown if isinstance(row, dict))
+    invalidation_skipped_count = max(invalidated_count, stale_dependency_count)
+    has_coverage = applied_count > 0 and holdout_count > 0
+    safe_for_promotion = has_coverage and invalidation_skipped_count == 0 and safety_stop_count == 0
+    if invalidation_skipped_count or safety_stop_count:
+        status = "failed"
+    elif has_coverage:
+        status = "passed"
+    else:
+        status = "insufficient-coverage"
+    reason_codes: list[str] = []
+    if applied_count <= 0:
+        reason_codes.append("insufficient-applied-coverage")
+    if holdout_count <= 0:
+        reason_codes.append("insufficient-holdout-coverage")
+    if invalidated_count:
+        reason_codes.append("invalidation-skipped-observed")
+    if stale_dependency_count:
+        reason_codes.append("stale-dependency-observed")
+    if safety_stop_count:
+        reason_codes.append("safety-stop-observed")
+    if not reason_codes and safe_for_promotion:
+        reason_codes.append("invalidation-safety-clean")
+    return {
+        "schema": INVALIDATION_SAFETY_SCHEMA,
+        "status": status,
+        "safe_for_promotion": safe_for_promotion,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "invalidated_count": invalidated_count,
+        "invalidation_skipped_count": invalidation_skipped_count,
+        "stale_dependency_count": stale_dependency_count,
+        "safety_stop_count": safety_stop_count,
+        "reason_codes": reason_codes,
+        "invalidation_reason_breakdown": invalidation_reason_breakdown,
+        "stale_dependency_breakdown": stale_dependency_breakdown,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _privacy_summary(),
+    }
+
+
+def _aggregate_invalidation_safety(quality_gates: list[dict[str, Any]]) -> dict[str, Any]:
+    measurements = [
+        item.get("invalidation_safety")
+        for item in quality_gates
+        if isinstance(item.get("invalidation_safety"), dict)
+    ]
+    applied_count = sum(_as_int(item.get("applied_count")) for item in measurements)
+    holdout_count = sum(_as_int(item.get("holdout_count")) for item in measurements)
+    invalidated_count = sum(_as_int(item.get("invalidated_count")) for item in measurements)
+    stale_dependency_count = sum(_as_int(item.get("stale_dependency_count")) for item in measurements)
+    invalidation_skipped_count = sum(
+        max(_as_int(item.get("invalidated_count")), _as_int(item.get("stale_dependency_count")))
+        for item in measurements
+    )
+    safety_stop_count = sum(_as_int(item.get("safety_stop_count")) for item in measurements)
+    has_coverage = applied_count > 0 and holdout_count > 0
+    safe_for_promotion = has_coverage and invalidation_skipped_count == 0 and safety_stop_count == 0
+    if invalidation_skipped_count or safety_stop_count:
+        status = "failed"
+    elif has_coverage:
+        status = "passed"
+    else:
+        status = "insufficient-coverage"
+    reason_counts: Counter[str] = Counter()
+    invalidation_reasons: Counter[str] = Counter()
+    stale_reasons: Counter[str] = Counter()
+    for item in measurements:
+        for code in item.get("reason_codes") or []:
+            reason_counts[str(code)] += 1
+        for row in item.get("invalidation_reason_breakdown") or []:
+            if isinstance(row, dict):
+                invalidation_reasons[str(row.get("value") or "unknown")] += _as_int(row.get("count"))
+        for row in item.get("stale_dependency_breakdown") or []:
+            if isinstance(row, dict):
+                stale_reasons[str(row.get("value") or "unknown")] += _as_int(row.get("count"))
+    if not reason_counts and safe_for_promotion:
+        reason_counts["invalidation-safety-clean"] = 1
+    return {
+        "schema": INVALIDATION_SAFETY_SCHEMA,
+        "status": status,
+        "candidate_count": len(measurements),
+        "safe_for_promotion": safe_for_promotion,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "invalidated_count": invalidated_count,
+        "invalidation_skipped_count": invalidation_skipped_count,
+        "stale_dependency_count": stale_dependency_count,
+        "safety_stop_count": safety_stop_count,
+        "reason_code_breakdown": _counter_rows(reason_counts),
+        "invalidation_reason_breakdown": _counter_rows(invalidation_reasons),
+        "stale_dependency_breakdown": _counter_rows(stale_reasons),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _privacy_summary(),
+    }
+
+
 def _candidate_local_promotion_evidence(item: dict[str, Any]) -> dict[str, Any]:
     verdict = str(item.get("verdict") or "unknown")
     blockers = sorted(
@@ -763,6 +896,8 @@ def _candidate_local_promotion_evidence(item: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item.get("canary_hit_measurement"), dict)
             else None,
         },
+        "hit_recovery": item.get("hit_recovery") or {},
+        "invalidation_safety": item.get("invalidation_safety") or {},
         "savings": {
             "projected_saved_usd": round(_as_float(item.get("projected_saved_usd")), 8),
             "observed_saved_usd": round(_as_float(item.get("actual_saved_cost_usd")), 8),
@@ -847,6 +982,8 @@ def _local_promotion_evidence(
             "top_miss_reason": summary.get("top_miss_reason"),
             "hit_realization_rate": _ratio(float(actual_hits), float(projected_hits)),
         },
+        "hit_recovery": summary.get("hit_recovery") or {},
+        "invalidation_safety": summary.get("invalidation_safety") or {},
         "savings": {
             "projected_hits": projected_hits,
             "projected_saved_usd": round(projected_saved_usd, 8),
@@ -984,6 +1121,16 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         observed_savings_usd=observed,
         legacy_projected_savings_usd=projected,
     )
+    hit_recovery = _hit_recovery_from_measurement(canary_hit_measurement)
+    stale_dependency_breakdown = _counter_rows(candidate["stale_dependency_buckets"])
+    invalidation_reason_breakdown = _counter_rows(candidate["invalidation_reason_buckets"])
+    invalidation_safety = _candidate_invalidation_safety(
+        cohorts=cohorts,
+        stale_dependency_breakdown=stale_dependency_breakdown,
+        invalidation_reason_breakdown=invalidation_reason_breakdown,
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+    )
     return {
         "schema": QUALITY_GATE_SCHEMA,
         "candidate_id": candidate["candidate_id"],
@@ -1019,6 +1166,8 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "observed_savings_usd": round(observed, 8),
         "projected_savings_usd": round(projected, 8),
         "canary_hit_measurement": canary_hit_measurement,
+        "hit_recovery": hit_recovery,
+        "invalidation_safety": invalidation_safety,
         "first_real_hit_status": canary_hit_measurement["first_real_hit_status"],
         "first_real_hit_observed": canary_hit_measurement["first_real_hit_observed"],
         "status_code_breakdown": _counter_rows(candidate["status_buckets"]),
@@ -1026,9 +1175,9 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "category_breakdown": _counter_rows(candidate["category_buckets"]),
         "workflow_phase_breakdown": _counter_rows(candidate["workflow_phase_buckets"]),
         "cache_decision_breakdown": _counter_rows(candidate["cache_decision_buckets"]),
-        "invalidation_reason_breakdown": _counter_rows(candidate["invalidation_reason_buckets"]),
+        "invalidation_reason_breakdown": invalidation_reason_breakdown,
         "dependency_health_breakdown": _counter_rows(candidate["dependency_health_buckets"]),
-        "stale_dependency_breakdown": _counter_rows(candidate["stale_dependency_buckets"]),
+        "stale_dependency_breakdown": stale_dependency_breakdown,
         "reason_code_breakdown": _counter_rows(candidate["reason_buckets"]),
         "remaining_blocker_breakdown": _counter_rows(candidate["remaining_blocker_buckets"]),
         "miss_reason_breakdown": _counter_rows(candidate["miss_reason_buckets"]),
@@ -1147,6 +1296,8 @@ def build_openai_cache_replay_impact_report(
                 "bypass_skipped_count": item.get("bypass_skipped_count") or 0,
                 "first_real_hit_status": item.get("first_real_hit_status"),
                 "first_real_hit_observed": bool(item.get("first_real_hit_observed")),
+                "hit_recovery": item.get("hit_recovery") or {},
+                "invalidation_safety": item.get("invalidation_safety") or {},
                 "top_remaining_blocker": item.get("top_remaining_blocker"),
                 "observed_savings_usd": item.get("observed_savings_usd"),
                 "projected_savings_usd": item.get("projected_savings_usd"),
@@ -1186,7 +1337,9 @@ def build_openai_cache_replay_impact_report(
         "observed_savings_usd": round(sum(_as_float(item.get("observed_savings_usd")) for item in quality_gates), 8),
         "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in quality_gates), 8),
         "canary_hit_measurement": _aggregate_canary_hit_measurements(quality_gates),
+        "invalidation_safety": _aggregate_invalidation_safety(quality_gates),
     }
+    summary["hit_recovery"] = _hit_recovery_from_measurement(summary["canary_hit_measurement"])
     summary["first_real_hit_status"] = summary["canary_hit_measurement"]["first_real_hit_status"]
     summary["first_real_hit_observed"] = summary["canary_hit_measurement"]["first_real_hit_observed"]
     summary["first_real_hit_candidate_count"] = summary["canary_hit_measurement"]["first_real_hit_candidate_count"]
@@ -1259,6 +1412,8 @@ def build_openai_cache_replay_lifecycle_feedback(result: dict[str, Any]) -> dict
                 "observed_savings_usd": item.get("observed_savings_usd"),
                 "projected_savings_usd": item.get("projected_savings_usd"),
                 "canary_hit_measurement": item.get("canary_hit_measurement") or {},
+                "hit_recovery": item.get("hit_recovery") or {},
+                "invalidation_safety": item.get("invalidation_safety") or {},
                 "endpoint": item.get("endpoint"),
                 "category": item.get("category"),
                 "workflow_phase": item.get("workflow_phase"),

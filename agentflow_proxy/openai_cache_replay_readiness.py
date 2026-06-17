@@ -341,6 +341,57 @@ def _any_stale_candidate(candidates: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _candidate_stale_dependency_count(candidates: list[dict[str, Any]]) -> int:
+    total = 0
+    for candidate in candidates:
+        safety = candidate.get("invalidation_safety") if isinstance(candidate.get("invalidation_safety"), dict) else {}
+        total += _as_int(safety.get("stale_dependency_count"))
+    return total
+
+
+def _invalidation_safety_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
+    summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    safety = summary.get("invalidation_safety") if isinstance(summary.get("invalidation_safety"), dict) else {}
+    if safety:
+        return safety
+    return {
+        "schema": "agentflow.openai_cache_replay_invalidation_safety.v1",
+        "status": "insufficient-coverage",
+        "candidate_count": 0,
+        "safe_for_promotion": False,
+        "applied_count": _as_int(summary.get("applied_count")),
+        "holdout_count": _as_int(summary.get("holdout_count")),
+        "invalidated_count": _as_int(summary.get("invalidated_count")),
+        "invalidation_skipped_count": _as_int(summary.get("invalidated_count")),
+        "stale_dependency_count": 0,
+        "safety_stop_count": _as_int(summary.get("safety_stop_count")),
+        "reason_code_breakdown": [],
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _privacy_summary(),
+    }
+
+
+def _hit_recovery_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
+    summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    recovery = summary.get("hit_recovery") if isinstance(summary.get("hit_recovery"), dict) else {}
+    if recovery:
+        return recovery
+    return {
+        "schema": "agentflow.openai_cache_replay_hit_recovery.v1",
+        "status": "awaiting-live-hit",
+        "first_real_hit_status": summary.get("first_real_hit_status"),
+        "first_real_hit_observed": bool(summary.get("first_real_hit_observed")),
+        "projected_hits": _as_int(summary.get("projected_hits")),
+        "observed_hits": _as_int(summary.get("actual_hits")),
+        "projected_saved_usd": round(_as_float(summary.get("projected_saved_usd")), 8),
+        "observed_saved_usd": round(_as_float(summary.get("actual_saved_cost_usd") or summary.get("observed_savings_usd")), 8),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _privacy_summary(),
+    }
+
+
 def _promotion_reason_codes(
     *,
     decision: str,
@@ -351,6 +402,7 @@ def _promotion_reason_codes(
     observed_hits: int,
     observed_savings: float,
     applied_miss_blockers: Counter[str],
+    invalidation_safety: dict[str, Any],
 ) -> list[str]:
     codes: list[str] = []
     reason_rows = (
@@ -379,6 +431,14 @@ def _promotion_reason_codes(
             codes.append(f"applied-miss:{blocker}")
     if _any_stale_candidate(candidates):
         codes.append("stale-cache-replay-evidence")
+    if _as_int(invalidation_safety.get("invalidated_count")):
+        codes.append("invalidation-skipped-observed")
+    if _as_int(invalidation_safety.get("stale_dependency_count")):
+        codes.append("stale-dependency-observed")
+    if _as_int(invalidation_safety.get("safety_stop_count")):
+        codes.append("safety-stop-observed")
+    if invalidation_safety and not invalidation_safety.get("safe_for_promotion") and str(invalidation_safety.get("status")) == "failed":
+        codes.append("invalidation-safety-failed")
     if decision == "widen":
         codes.append("target-savings-met")
     if decision == "no-op" and not codes:
@@ -419,6 +479,9 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
     observed_savings = _as_float(summary.get("actual_saved_cost_usd") or summary.get("observed_savings_usd"))
     safety_stop_count = _as_int(summary.get("safety_stop_count"))
     invalidated_count = _as_int(summary.get("invalidated_count"))
+    stale_dependency_count = _candidate_stale_dependency_count(candidates)
+    hit_recovery = _hit_recovery_from_impact(impact)
+    invalidation_safety = _invalidation_safety_from_impact(impact)
     error_count = _sum_candidate_cohort_metric(candidates, "error_count")
     retry_count = _sum_candidate_cohort_metric(candidates, "retry_attempts")
     applied_miss_blockers = _applied_miss_blocker_counts(candidates)
@@ -429,11 +492,18 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
     decision = "no-op"
     if not observed_rows:
         decision = "no-op"
-    elif safety_stop_count or status == "rollback-required":
+    elif safety_stop_count or invalidated_count or stale_dependency_count or status == "rollback-required":
         decision = "rollback"
     elif _any_stale_candidate(candidates):
         decision = "rollback"
-    elif status == "promotion-ready" and applied_count > 0 and holdout_count > 0 and observed_hits > 0 and observed_savings > 0:
+    elif (
+        status == "promotion-ready"
+        and applied_count > 0
+        and holdout_count > 0
+        and observed_hits > 0
+        and observed_savings > 0
+        and invalidation_safety.get("safe_for_promotion")
+    ):
         decision = "widen"
     elif applied_count or holdout_count:
         decision = "keep-staged"
@@ -449,6 +519,7 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
         observed_hits=observed_hits,
         observed_savings=observed_savings,
         applied_miss_blockers=applied_miss_blockers,
+        invalidation_safety=invalidation_safety,
     )
     if decision == "rollback" and not any(code in reason_codes for code in ("stale-cache-replay-evidence", "safety-stop-observed")):
         reason_codes.append("cache-replay-regression-or-safety-blocker")
@@ -473,10 +544,13 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
         "retry_count": retry_count,
         "invalidated_count": invalidated_count,
         "safety_stop_count": safety_stop_count,
+        "stale_dependency_count": stale_dependency_count,
+        "invalidation_skipped_count": _as_int(invalidation_safety.get("invalidation_skipped_count")),
         "has_applied_coverage": applied_count > 0,
         "has_holdout_coverage": holdout_count > 0,
         "has_observed_hits": observed_hits > 0,
         "has_observed_savings": observed_savings > 0,
+        "has_clean_invalidation_safety": bool(invalidation_safety.get("safe_for_promotion")),
         "metadata_only": True,
         "aggregate_only": True,
     }
@@ -514,11 +588,15 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
             "metadata_only": True,
             "aggregate_only": True,
         },
+        "hit_recovery": hit_recovery,
+        "invalidation_safety": invalidation_safety,
         "summary": {
             "applied_count": applied_count,
             "holdout_count": holdout_count,
             "miss_count": _as_int(summary.get("miss_count")),
             "observed_hits": observed_hits,
+            "invalidation_skipped_count": _as_int(invalidation_safety.get("invalidation_skipped_count")),
+            "stale_dependency_count": stale_dependency_count,
             "top_applied_miss_blocker": top_applied_miss_blocker,
             "top_miss_reason": top_applied_miss_blocker,
             "metadata_only": True,
