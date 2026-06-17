@@ -3477,12 +3477,113 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(states["request-shape-crunch:anthropic:messages:tool-result:stageable"], "stageable")
         self.assertEqual(states["request-shape-crunch:anthropic:messages:tool-result:staged"], "keep-staged")
         self.assertEqual(states["request-shape-crunch:anthropic:messages:tool-result:blocked"], "blocked")
+        staged_row = next(
+            item
+            for item in measurements["cohorts"]
+            if item["cohort_id"] == "request-shape-crunch:anthropic:messages:tool-result:staged"
+        )
+        self.assertEqual(staged_row["sample_count"], 3)
+        self.assertEqual(staged_row["next_action"], "measure-repeated-context-crunch-canary-impact")
+        self.assertEqual(staged_row["applied_count"], 0)
+        self.assertEqual(staged_row["holdout_count"], 0)
+        self.assertEqual(staged_row["safety_stop_count"], 0)
+        self.assertIn("applied-crunch-canary-coverage", staged_row["missing_measurements"])
         stage_follow_up = measurements["bounded_stage_recommendations"][0]
         self.assertEqual(stage_follow_up["target_local_policy"], "crunch_rules")
         self.assertEqual(stage_follow_up["conditions"]["category"], "tool-result")
         self.assertTrue(stage_follow_up["privacy"]["metadata_only"])
         self.assertTrue(measurements["privacy"]["aggregate_only"])
         self.assertFalse(json.loads(json.dumps(report))["privacy"]["raw_prompts_included"])
+
+    def test_crunch_canary_impact_names_high_cost_thinking_measurement_row(self) -> None:
+        cohort_id = "request-shape-crunch:anthropic:unknown:tool-result:high-cost-thinking"
+        opportunity_report = {
+            "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "cohorts": [
+                {
+                    "rank": 1,
+                    "cohort_id": cohort_id,
+                    "policy_id": "local-repeated-context-crunch-canary-thinking",
+                    "readiness": "canary-staged",
+                    "reason": "repeated-context-crunch-canary-applied-and-holdout",
+                    "provider_family": "anthropic",
+                    "source_surface": "anthropic_messages",
+                    "endpoint": "unknown",
+                    "category": "tool-result",
+                    "workflow_phase": "thinking",
+                    "stream": True,
+                    "has_tools": True,
+                    "cache_status": "skipped",
+                    "routing_status": "passthrough",
+                    "text_bucket": "gte_128k_chars",
+                    "token_bucket": "lt_500_tokens",
+                    "row_count": 446,
+                    "projected_saved_tokens": 1_860_651,
+                    "projected_saved_chars": 7_442_604,
+                    "projected_saved_usd": 5.581954,
+                    "current_conservative_tokens_saved": 0,
+                    "current_conservative_chars_saved": 0,
+                    "current_conservative_savings_usd": 0.0,
+                    "evidence_blocker_codes": [
+                        "tool-call-cache-disabled",
+                        "unsupported-streaming-shape",
+                    ],
+                    "crunch_canary_lifecycle": {
+                        "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+                        "policy_id": "local-repeated-context-crunch-canary-thinking",
+                        "cohort_id": cohort_id,
+                        "applied_count": 99,
+                        "holdout_count": 39,
+                        "skipped_count": 308,
+                        "fallback_count": 0,
+                        "rollback_count": 0,
+                        "safety_stopped_count": 0,
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    },
+                    "duplicate_suppression": {
+                        "suppresses_new_stage_action": True,
+                        "suppressed": True,
+                        "reason": "matching-repeated-context-crunch-canary-canary-staged",
+                        "matching_local_policy": "crunch_rules",
+                    },
+                }
+            ],
+            "recommended_actions": [],
+        }
+
+        report = build_request_shape_crunch_canary_impact_report([], opportunity_report=opportunity_report)
+
+        rows = report["activation_ready_measurements"]["cohorts"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["schema"], "agentflow.request_shape_crunch_activation_ready_cohort_measurement.v1")
+        self.assertEqual(row["cohort_id"], cohort_id)
+        self.assertEqual(row["state"], "keep-staged")
+        self.assertEqual(row["next_action"], "measure-repeated-context-crunch-canary-impact")
+        self.assertEqual(row["provider_family"], "anthropic")
+        self.assertEqual(row["source_surface"], "anthropic_messages")
+        self.assertEqual(row["category"], "tool-result")
+        self.assertEqual(row["workflow_phase"], "thinking")
+        self.assertEqual(row["text_bucket"], "gte_128k_chars")
+        self.assertEqual(row["token_bucket"], "lt_500_tokens")
+        self.assertEqual(row["sample_count"], 446)
+        self.assertEqual(row["applied_count"], 99)
+        self.assertEqual(row["holdout_count"], 39)
+        self.assertEqual(row["skipped_count"], 308)
+        self.assertEqual(row["fallback_count"], 0)
+        self.assertEqual(row["retry_count"], 0)
+        self.assertEqual(row["rollback_count"], 0)
+        self.assertEqual(row["safety_stop_count"], 0)
+        self.assertEqual(row["projected_saved_tokens"], 1_860_651)
+        self.assertEqual(row["projected_saved_usd"], 5.581954)
+        self.assertIn("crunch-canary-impact-observed-savings", row["missing_measurements"])
+        self.assertIn("tool-call-cache-disabled", row["evidence_blocker_codes"])
+        self.assertTrue(row["privacy"]["metadata_only"])
+        self.assertTrue(row["privacy"]["aggregate_only"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertFalse(report["privacy"]["request_ids_included"])
 
     def test_crunch_canary_impact_emits_durable_action_for_fresh_staged_holdout(self) -> None:
         lifecycle = {

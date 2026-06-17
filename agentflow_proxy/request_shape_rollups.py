@@ -1098,6 +1098,7 @@ def _crunch_impact_activation_ready_measurements(
         cohort_id = public_label(cohort.get("cohort_id"), "unknown")
         measured = measured_by_cohort.get(cohort_id)
         readiness = public_label(cohort.get("readiness"), "unknown")
+        lifecycle = cohort.get("crunch_canary_lifecycle") if isinstance(cohort.get("crunch_canary_lifecycle"), dict) else {}
         duplicate = cohort.get("duplicate_suppression") if isinstance(cohort.get("duplicate_suppression"), dict) else {}
         blockers = _public_label_list(cohort.get("blockers") or cohort.get("evidence_blocker_codes"))
         if measured and (
@@ -1126,6 +1127,31 @@ def _crunch_impact_activation_ready_measurements(
             reason_codes = blockers or [public_label(cohort.get("reason"), "unknown")]
         projected_tokens += _as_int(cohort.get("projected_saved_tokens"))
         projected_savings += _as_float(cohort.get("projected_saved_usd"))
+        applied_count = _as_int(measured.get("applied_count")) if measured else _as_int(lifecycle.get("applied_count"))
+        holdout_count = _as_int(measured.get("holdout_count")) if measured else _as_int(lifecycle.get("holdout_count"))
+        skipped_count = (
+            _as_int((measured.get("cohorts") or {}).get("skipped", {}).get("count"))
+            if measured
+            else _as_int(lifecycle.get("skipped_count"))
+        )
+        fallback_count = _as_int(measured.get("fallback_count")) if measured else _as_int(lifecycle.get("fallback_count"))
+        safety_stop_count = _as_int(measured.get("safety_stop_count")) if measured else _as_int(lifecycle.get("safety_stopped_count"))
+        rollback_count = _as_int(measured.get("rollback_count")) if measured else _as_int(lifecycle.get("rollback_count"))
+        retry_count = (
+            _as_int(measured.get("applied_retry_count")) + _as_int(measured.get("holdout_retry_count"))
+            if measured
+            else _as_int(lifecycle.get("retry_count"))
+        )
+        observed_saved_tokens = _as_int(measured.get("saved_tokens")) if measured else 0
+        observed_saved_usd = round(_as_float(measured.get("saved_usd")), 8) if measured else 0.0
+        missing_measurements = _public_label_list(measured.get("missing_measurements")) if measured else []
+        if applied_count <= 0:
+            missing_measurements.append("applied-crunch-canary-coverage")
+        if holdout_count <= 0:
+            missing_measurements.append("holdout-crunch-canary-coverage")
+        if applied_count > 0 and observed_saved_tokens <= 0 and observed_saved_usd <= 0:
+            missing_measurements.append("crunch-canary-impact-observed-savings")
+        missing_measurements = sorted(set(missing_measurements))
         _increment(state_counts, state)
         rows.append(
             {
@@ -1136,15 +1162,37 @@ def _crunch_impact_activation_ready_measurements(
                 "state": state,
                 "readiness": readiness,
                 "next_action": next_action,
+                "provider_family": public_label(cohort.get("provider_family"), "unknown"),
+                "source_surface": public_label(cohort.get("source_surface"), "unknown"),
+                "endpoint": public_label(cohort.get("endpoint"), "unknown"),
+                "category": public_label(cohort.get("category"), "unknown"),
+                "workflow_phase": public_label(cohort.get("workflow_phase"), "unknown"),
+                "stream": bool(cohort.get("stream")),
+                "has_tools": bool(cohort.get("has_tools")),
+                "cache_status": public_label(cohort.get("cache_status"), "unknown"),
+                "routing_status": public_label(cohort.get("routing_status"), "unknown"),
+                "text_bucket": public_label(cohort.get("text_bucket"), "unknown"),
+                "token_bucket": public_label(cohort.get("token_bucket"), "unknown"),
+                "sample_count": _as_int(cohort.get("row_count")),
                 "row_count": _as_int(cohort.get("row_count")),
                 "projected_saved_tokens": _as_int(cohort.get("projected_saved_tokens")),
                 "projected_saved_usd": round(_as_float(cohort.get("projected_saved_usd")), 8),
-                "observed_saved_tokens": _as_int(measured.get("saved_tokens")) if measured else 0,
-                "observed_saved_usd": round(_as_float(measured.get("saved_usd")), 8) if measured else 0.0,
-                "applied_count": _as_int(measured.get("applied_count")) if measured else _as_int((cohort.get("crunch_canary_lifecycle") or {}).get("applied_count")) if isinstance(cohort.get("crunch_canary_lifecycle"), dict) else 0,
-                "holdout_count": _as_int(measured.get("holdout_count")) if measured else _as_int((cohort.get("crunch_canary_lifecycle") or {}).get("holdout_count")) if isinstance(cohort.get("crunch_canary_lifecycle"), dict) else 0,
-                "safety_stop_count": _as_int(measured.get("safety_stop_count")) if measured else _as_int((cohort.get("crunch_canary_lifecycle") or {}).get("safety_stopped_count")) if isinstance(cohort.get("crunch_canary_lifecycle"), dict) else 0,
+                "projected_saved_chars": _as_int(cohort.get("projected_saved_chars")),
+                "current_conservative_saved_tokens": _as_int(cohort.get("current_conservative_tokens_saved")),
+                "current_conservative_saved_chars": _as_int(cohort.get("current_conservative_chars_saved")),
+                "current_conservative_saved_usd": round(_as_float(cohort.get("current_conservative_savings_usd")), 8),
+                "observed_saved_tokens": observed_saved_tokens,
+                "observed_saved_usd": observed_saved_usd,
+                "applied_count": applied_count,
+                "holdout_count": holdout_count,
+                "skipped_count": skipped_count,
+                "fallback_count": fallback_count,
+                "retry_count": retry_count,
+                "rollback_count": rollback_count,
+                "safety_stop_count": safety_stop_count,
                 "reason_codes": [code for code in reason_codes if code and code != "unknown"],
+                "missing_measurements": missing_measurements,
+                "evidence_blocker_codes": blockers,
                 "duplicate_suppression": {
                     "suppressed": bool(duplicate.get("suppressed") or duplicate.get("suppresses_new_stage_action")),
                     "reason": public_label(duplicate.get("reason"), "unknown"),
