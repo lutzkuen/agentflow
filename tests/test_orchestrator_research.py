@@ -11,6 +11,7 @@ from agentflow_proxy import cli
 from agentflow_proxy.orchestrator_research import (
     build_evidence_to_activation_burndown,
     build_evidence_to_activation_next_action_ledger,
+    build_local_activation_next_action_queue,
     build_research_plan,
     _dedupe_create_issue_proposals_with_metadata,
 )
@@ -1796,6 +1797,158 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         rendered = json.dumps(ledger, sort_keys=True)
         self.assertNotIn("raw-ledger-policy-secret", rendered)
         self.assertNotIn("req-ledger-secret", rendered)
+
+    def test_local_activation_next_action_queue_ranks_savings_and_unblock_reasons(self):
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:crunch",
+                    "lever": "crunch",
+                    "local_action_family": "crunch",
+                    "state": "measured-active",
+                    "current_status": "applied",
+                    "next_action": "keep-active",
+                    "blocker_codes": ["repeated-context-crunch-active-at-max-rollout"],
+                    "sample_count": 2657,
+                    "applied_count": 107,
+                    "holdout_count": 40,
+                    "crunch_savings_usd": 25.818387,
+                    "projected_saved_usd": 25.818387,
+                    "target_local_rule_file": "crunch_rules.yaml",
+                    "target_local_policy_section": "crunch.rules",
+                    "duplicate_suppression": {
+                        "reason": "repeated-context-crunch-active-at-max-rollout",
+                        "suppresses_new_activation_issue": True,
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    },
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 2,
+                    "fingerprint": "activation:routing",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "state": "keep-staged",
+                    "current_status": "holdout",
+                    "next_action": "collect-openai-routing-canary-evidence",
+                    "blocker_codes": ["unknown-canary-lifecycle-rows"],
+                    "sample_count": 414,
+                    "applied_count": 21,
+                    "holdout_count": 18,
+                    "savings_per_1000_calls_usd": 4.375,
+                    "target_local_rule_file": "routing_rules.yaml",
+                    "target_local_policy_section": "routing.rules",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 3,
+                    "fingerprint": "activation:tool-cache",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "state": "ranked-evidence",
+                    "current_status": "projected",
+                    "next_action": "collect-file-invalidation-evidence",
+                    "blocker_codes": [
+                        "invalidation-evidence-missing",
+                        "tools-present",
+                        "unsafe-tool-calls-without-invalidation",
+                    ],
+                    "sample_count": 183,
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "request_id": "req-queue-secret",
+                    "session_id": "session-queue-secret",
+                    "cache_key": "cache-queue-secret",
+                    "file_path": "/tmp/private-queue.py",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 4,
+                    "fingerprint": "activation:retired-cache",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "state": "retired-no-repeat",
+                    "current_status": "superseded",
+                    "next_action": "retire-cache-replay-canary-no-repeat",
+                    "blocker_codes": [
+                        "retire-staged-no-repeat",
+                        "repeat-window-elapsed-no-live-repeat",
+                    ],
+                    "sample_count": 75,
+                    "applied_count": 28,
+                    "holdout_count": 47,
+                    "projected_saved_usd": 0.075373,
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "duplicate_suppression": {
+                        "reason": "synthetic-hit-recovery-proven-live-traffic-no-repeat-retired",
+                        "suppresses_new_cache_replay_stage_issue": True,
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    },
+                },
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        queue = build_local_activation_next_action_queue(
+            {"evidence_to_activation_next_action_ledger": ledger}
+        )
+
+        self.assertEqual(queue["schema"], "agentflow.local_activation_next_action_queue.v1")
+        self.assertEqual(queue["status"], "ranked")
+        self.assertEqual(
+            [(entry["lever"], entry["next_action"]) for entry in queue["entries"]],
+            [
+                ("crunch", "keep-active"),
+                ("routing", "collect-openai-routing-canary-evidence"),
+                ("cache", "collect-file-invalidation-evidence"),
+                ("cache", "retire-cache-replay-canary-no-repeat"),
+            ],
+        )
+        self.assertEqual(queue["entries"][0]["realized_savings_usd"], 25.818387)
+        self.assertEqual(queue["entries"][0]["unblock_reason"], "repeated-context-crunch-active-at-max-rollout")
+        self.assertEqual(queue["entries"][0]["duplicate_suppression_status"], "suppressed")
+        self.assertEqual(queue["entries"][1]["projected_savings_usd"], 1.81125)
+        self.assertEqual(queue["entries"][1]["unblock_reason"], "unknown-canary-lifecycle-rows")
+        self.assertEqual(queue["entries"][2]["unblock_reason"], "invalidation-evidence-missing")
+        self.assertEqual(queue["entries"][3]["current_status"], "superseded")
+        self.assertEqual(queue["entries"][3]["duplicate_suppression_status"], "suppressed")
+        self.assertEqual(queue["summary"]["top_lever"], "crunch")
+        self.assertEqual(queue["summary"]["top_unblock_reason"], "repeated-context-crunch-active-at-max-rollout")
+        self.assertTrue(queue["privacy"]["metadata_only"])
+        self.assertTrue(queue["privacy"]["aggregate_only"])
+        self.assertFalse(queue["privacy"]["raw_prompts_included"])
+        self.assertFalse(queue["privacy"]["provider_bodies_included"])
+        self.assertFalse(queue["privacy"]["cache_keys_included"])
+        self.assertFalse(queue["privacy"]["request_ids_included"])
+        self.assertFalse(queue["privacy"]["session_ids_included"])
+        self.assertFalse(queue["privacy"]["tenant_ids_included"])
+        self.assertFalse(queue["privacy"]["tool_payloads_included"])
+        self.assertFalse(queue["privacy"]["file_paths_included"])
+        self.assertFalse(queue["privacy"]["absolute_paths_included"])
+
+        report = build_evidence_to_activation_burndown(
+            {
+                "schema": "agentflow.orchestrator_research_plan.v1",
+                "evidence": {"stats_summary": {"evidence_to_activation_next_action_ledger": ledger}},
+            },
+            now=NOW,
+        )
+        self.assertEqual(
+            report["next_action_queue"]["entries"][0]["next_action"],
+            "keep-active",
+        )
+        rendered = json.dumps({"queue": queue, "report": report}, sort_keys=True)
+        self.assertNotIn("req-queue-secret", rendered)
+        self.assertNotIn("session-queue-secret", rendered)
+        self.assertNotIn("cache-queue-secret", rendered)
+        self.assertNotIn("/tmp/private-queue.py", rendered)
 
     def test_repeated_activation_feedback_blockers_become_durable_ledger_entries(self):
         with TemporaryDirectory() as tmp:

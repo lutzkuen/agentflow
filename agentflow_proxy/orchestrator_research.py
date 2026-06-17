@@ -15,6 +15,8 @@ SCHEMA = "agentflow.orchestrator_research_plan.v1"
 EVIDENCE_TO_ACTIVATION_BURNDOWN_SCHEMA = "agentflow.evidence_to_activation_burndown.v1"
 EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger.v1"
 EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger_entry.v1"
+LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "agentflow.local_activation_next_action_queue.v1"
+LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_next_action_queue_entry.v1"
 LOW_BACKLOG_MILESTONE_TITLE = "Rank next savings milestone from local telemetry evidence gaps"
 OPENAI_MIN_HOLDOUT_VOLUME = 10
 
@@ -3912,6 +3914,8 @@ def build_evidence_to_activation_next_action_ledger(
             "bypass_skipped_count": _to_int(stage.get("bypass_skipped_count")),
             "savings_per_1000_calls_usd": round(_to_float(stage.get("savings_per_1000_calls_usd")), 8),
             "projected_saved_usd": round(_to_float(stage.get("projected_saved_usd") or stage.get("projected_saved_cost_usd")), 8),
+            "crunch_savings_usd": round(_to_float(stage.get("crunch_savings_usd")), 8),
+            "today_crunch_savings_usd": round(_to_float(stage.get("today_crunch_savings_usd")), 8),
             "expected_savings_path": _ledger_expected_savings_path(stage),
             "legacy_issue_title": _legacy_issue_title_for_ledger_entry(stage),
         }
@@ -4081,6 +4085,8 @@ def build_evidence_to_activation_next_action_ledger(
             "retry_rate_delta",
             "fallback_rate_delta",
             "projected_saved_usd",
+            "crunch_savings_usd",
+            "today_crunch_savings_usd",
             "promotion_allowed",
             "stage_allowed",
             "active_policy_changed",
@@ -4162,6 +4168,239 @@ def _refresh_ledger_summary(ledger: dict[str, Any]) -> dict[str, Any]:
     refreshed = dict(ledger)
     refreshed["summary"] = summary
     return refreshed
+
+
+def _queue_duplicate_suppression_status(entry: dict[str, Any]) -> str:
+    suppression = entry.get("duplicate_suppression")
+    if not isinstance(suppression, dict):
+        return "none"
+    for key, value in suppression.items():
+        if str(key).startswith("suppresses_") and value is True:
+            return "suppressed"
+    return "present"
+
+
+def _queue_unblock_reason(entry: dict[str, Any]) -> str:
+    blockers = [str(item) for item in entry.get("blocker_codes") or [] if str(item or "").strip()]
+    if blockers:
+        return sanitize_value(blockers[0])
+    for key in (
+        "promotion_blocker",
+        "observed_hit_blocker",
+        "top_miss_reason",
+        "reason",
+        "omitted_reason",
+        "keep_blocked_reason",
+    ):
+        value = str(entry.get(key) or "").strip()
+        if value:
+            return sanitize_value(value)
+    suppression = entry.get("duplicate_suppression")
+    if isinstance(suppression, dict) and suppression.get("reason"):
+        return sanitize_value(suppression.get("reason"))
+    status = str(entry.get("current_status") or entry.get("state") or "inspect-local-evidence").strip()
+    return sanitize_value(status)
+
+
+def _queue_projected_savings(entry: dict[str, Any]) -> float:
+    projected = _to_float(entry.get("projected_saved_usd") or entry.get("projected_savings_usd"))
+    if projected > 0:
+        return projected
+    savings_per_1000 = _to_float(entry.get("savings_per_1000_calls_usd"))
+    sample_count = _to_int(entry.get("sample_count"))
+    if savings_per_1000 > 0 and sample_count > 0:
+        return savings_per_1000 * sample_count / 1000.0
+    return 0.0
+
+
+def _queue_realized_savings(entry: dict[str, Any], projected: float) -> float:
+    for key in (
+        "actual_saved_cost_usd",
+        "observed_savings_usd",
+        "observed_saved_usd",
+        "crunch_savings_usd",
+        "today_crunch_savings_usd",
+    ):
+        value = _to_float(entry.get(key))
+        if value > 0:
+            return value
+    if str(entry.get("current_status") or "") in {"applied", "measured", "holdout"} and projected > 0:
+        return projected
+    return 0.0
+
+
+def _queue_rank_bucket(entry: dict[str, Any], realized: float, projected: float) -> int:
+    status = str(entry.get("current_status") or "").strip()
+    state = str(entry.get("state") or "").strip()
+    if status in {"superseded"} or state in {"no-op", "retired-no-repeat", "superseded"}:
+        return 3
+    if realized > 0:
+        return 0
+    if projected > 0 or _to_float(entry.get("savings_per_1000_calls_usd")) > 0:
+        return 1
+    return 2
+
+
+def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    projected = round(_queue_projected_savings(entry), 8)
+    realized = round(_queue_realized_savings(entry, projected), 8)
+    blocker_codes = sanitize_value([str(item) for item in entry.get("blocker_codes") or [] if str(item or "").strip()])
+    duplicate_status = _queue_duplicate_suppression_status(entry)
+    suppression = entry.get("duplicate_suppression") if isinstance(entry.get("duplicate_suppression"), dict) else {}
+    clean = {
+        "schema": LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA,
+        "rank": 0,
+        "ledger_rank": _to_int(entry.get("rank")),
+        "fingerprint": sanitize_value(entry.get("fingerprint")),
+        "lever": sanitize_value(entry.get("lever") or "unknown"),
+        "local_action_family": sanitize_value(entry.get("local_action_family") or entry.get("lever") or "unknown"),
+        "state": sanitize_value(entry.get("state") or "unknown"),
+        "current_status": sanitize_value(entry.get("current_status") or "unknown"),
+        "issue_worthy_status": sanitize_value(entry.get("issue_worthy_status") or "review"),
+        "next_action": sanitize_value(entry.get("next_action") or "inspect-local-evidence"),
+        "unblock_reason": _queue_unblock_reason(entry),
+        "blocker_codes": blocker_codes,
+        "sample_count": _to_int(entry.get("sample_count")),
+        "applied_count": _to_int(entry.get("applied_count")),
+        "holdout_count": _to_int(entry.get("holdout_count")),
+        "fallback_count": _to_int(entry.get("fallback_count")),
+        "safety_stop_count": _to_int(entry.get("safety_stop_count")),
+        "rollback_count": _to_int(entry.get("rollback_count")),
+        "realized_savings_usd": realized,
+        "projected_savings_usd": projected,
+        "savings_per_1000_calls_usd": round(_to_float(entry.get("savings_per_1000_calls_usd")), 8),
+        "target_local_rule_file": sanitize_value(entry.get("target_local_rule_file")),
+        "target_local_policy_section": sanitize_value(entry.get("target_local_policy_section")),
+        "duplicate_suppression_status": duplicate_status,
+        "duplicate_suppression_reason": sanitize_value(suppression.get("reason")) if suppression else None,
+        "evidence_schema": sanitize_value(entry.get("evidence_schema")),
+        "expected_savings_path": sanitize_value(entry.get("expected_savings_path")),
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "provider_bodies_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "tenant_ids_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "absolute_paths_included": False,
+            "individual_candidate_ids_included": False,
+        },
+    }
+    preserved_empty_keys = {
+        "rank",
+        "ledger_rank",
+        "sample_count",
+        "applied_count",
+        "holdout_count",
+        "fallback_count",
+        "safety_stop_count",
+        "rollback_count",
+        "realized_savings_usd",
+        "projected_savings_usd",
+        "savings_per_1000_calls_usd",
+    }
+    return {key: value for key, value in clean.items() if value not in (None, "", [], 0) or key in preserved_empty_keys}
+
+
+def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    """Rank local activation next actions by realized savings and unblock reason."""
+    ledger = (
+        stats_summary
+        if isinstance(stats_summary.get("entries"), list)
+        and stats_summary.get("schema") == EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA
+        else stats_summary.get("evidence_to_activation_next_action_ledger")
+        if isinstance(stats_summary.get("evidence_to_activation_next_action_ledger"), dict)
+        else None
+    )
+    if not isinstance(ledger, dict):
+        return None
+    entries = [
+        _local_activation_next_action_queue_entry(entry)
+        for entry in ledger.get("entries") or []
+        if isinstance(entry, dict)
+    ]
+    if not entries:
+        return None
+    entries.sort(
+        key=lambda item: (
+            _queue_rank_bucket(item, _to_float(item.get("realized_savings_usd")), _to_float(item.get("projected_savings_usd"))),
+            -_to_float(item.get("realized_savings_usd")),
+            -_to_float(item.get("projected_savings_usd")),
+            -_to_float(item.get("savings_per_1000_calls_usd")),
+            -_to_int(item.get("sample_count")),
+            str(item.get("lever") or ""),
+            str(item.get("next_action") or ""),
+        )
+    )
+    for rank, item in enumerate(entries, start=1):
+        item["rank"] = rank
+
+    top = entries[0]
+    blocker_counts: Counter[str] = Counter()
+    lever_counts: Counter[str] = Counter(str(item.get("lever") or "unknown") for item in entries)
+    status_counts: Counter[str] = Counter(str(item.get("current_status") or "unknown") for item in entries)
+    for item in entries:
+        reason = str(item.get("unblock_reason") or "").strip()
+        if reason:
+            blocker_counts[reason] += 1
+        for code in item.get("blocker_codes") or []:
+            blocker_counts[str(code)] += 1
+
+    result = {
+        "schema": LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA,
+        "status": "ranked",
+        "source_schema": ledger.get("schema"),
+        "summary": {
+            "queued_action_count": len(entries),
+            "top_lever": top.get("lever"),
+            "top_state": top.get("state"),
+            "top_current_status": top.get("current_status"),
+            "top_next_action": top.get("next_action"),
+            "top_unblock_reason": top.get("unblock_reason"),
+            "top_realized_savings_usd": top.get("realized_savings_usd"),
+            "top_projected_savings_usd": top.get("projected_savings_usd"),
+            "total_realized_savings_usd": round(sum(_to_float(item.get("realized_savings_usd")) for item in entries), 8),
+            "total_projected_savings_usd": round(sum(_to_float(item.get("projected_savings_usd")) for item in entries), 8),
+            "lever_counts": [{"value": key, "count": count} for key, count in sorted(lever_counts.items())],
+            "status_counts": [{"value": key, "count": count} for key, count in sorted(status_counts.items())],
+            "unblock_reason_counts": [
+                {"value": key, "count": count}
+                for key, count in sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))[:20]
+            ],
+        },
+        "entries": entries[:20],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "provider_bodies_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "tenant_ids_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "absolute_paths_included": False,
+            "individual_candidate_ids_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "policy_files_written": False,
+            "read_only": True,
+        },
+    }
+    return sanitize_value(result)
 
 
 def _merge_precomputed_ledger_context(
@@ -5711,6 +5950,13 @@ def build_evidence_to_activation_burndown(
             "absolute_paths_included": False,
         },
     }
+    next_action_queue = (
+        stats_summary.get("local_activation_next_action_queue")
+        if isinstance(stats_summary.get("local_activation_next_action_queue"), dict)
+        else build_local_activation_next_action_queue(stats_summary)
+    )
+    if isinstance(next_action_queue, dict):
+        result["next_action_queue"] = next_action_queue
     return sanitize_value(result)
 
 
@@ -9249,6 +9495,9 @@ def build_research_plan(
         summary["evidence_to_activation_next_action_ledger"] = activation_ledger
     elif precomputed_activation_ledger is not None:
         summary["evidence_to_activation_next_action_ledger"] = precomputed_activation_ledger
+    activation_queue = build_local_activation_next_action_queue(summary)
+    if activation_queue is not None:
+        summary["local_activation_next_action_queue"] = activation_queue
     candidate_diagnostics, safety_stop_suppressed_diagnostics = _without_suppressed_safety_stop_diagnostics(
         diagnostics,
         activation_safety_stop_burndown,
@@ -9395,6 +9644,8 @@ def build_research_plan(
         inspected_sources.append("promotion_blocker_next_action_status")
     if "evidence_to_activation_next_action_ledger" in summary:
         inspected_sources.append("evidence_to_activation_next_action_ledger")
+    if "local_activation_next_action_queue" in summary:
+        inspected_sources.append("local_activation_next_action_queue")
     if "promotion_outcome_feedback" in summary:
         inspected_sources.append("promotion_outcome_feedback")
     if diagnostics:
