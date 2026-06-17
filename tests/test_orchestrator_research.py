@@ -2142,6 +2142,204 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(suppressed["suppression_kind"], "closed-prior-issue")
         self.assertEqual(suppressed["existing_issue"]["number"], 616)
 
+    def test_recent_closed_issue_with_same_fingerprint_allows_advanced_next_action(self):
+        proposal = {
+            "repo": "lutzkuen/agentflow",
+            "title": "Advance cache next action from evidence-to-activation ledger (evidence abc123456789)",
+            "labels": ["backlog", "status:ready", "cache"],
+            "body": "## Evidence\n\n- Fingerprint: activation:abc123456789\n- Top next action: review-cache-replay-canary-promotion-readiness\n",
+        }
+
+        deduped, suppression = _dedupe_create_issue_proposals_with_metadata(
+            [proposal],
+            existing_issues=[
+                issue(
+                    537,
+                    "Stage cache replay canary from evidence-to-activation ledger (evidence abc123456789)",
+                    ["backlog", "status:ready", "cache"],
+                    state="CLOSED",
+                    closed="2026-06-11T08:20:00Z",
+                    body="Resolved predecessor.\n\nFingerprint: activation:abc123456789\nNext action: `stage-cache-replay-canary`\n",
+                )
+            ],
+            trusted_author="lutzkuen",
+            now=NOW,
+        )
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["closed_lifecycle_predecessor"]["number"], 537)
+        self.assertEqual(deduped[0]["closed_lifecycle_predecessor_reason"], "same-fingerprint-next-action-progressed")
+        self.assertEqual(suppression["fingerprint_match_count"], 0)
+        self.assertEqual(suppression["closed_prior_issue_count"], 0)
+
+    def test_saved_research_plan_summary_ranks_advanced_lifecycle_titles(self):
+        now = datetime(2026, 6, 17, 4, 30, tzinfo=timezone.utc)
+        closed_issues = [
+            issue(
+                533,
+                "Rank next savings milestone from local telemetry evidence gaps",
+                ["backlog", "status:ready", "priority:p1"],
+                state="CLOSED",
+                closed="2026-06-15T21:24:02Z",
+            ),
+            issue(
+                537,
+                "Stage cache replay canary from evidence-to-activation ledger (evidence 243c92b5d91f)",
+                ["backlog", "status:ready", "cache"],
+                state="CLOSED",
+                closed="2026-06-15T23:14:38Z",
+                body="Fingerprint: activation:243c92b5d91f9149\nNext action: `stage-cache-replay-canary`\n",
+            ),
+            issue(
+                593,
+                "Stage Anthropic messages repeated-context crunch cohort with holdout",
+                ["backlog", "status:ready", "crunch"],
+                state="CLOSED",
+                closed="2026-06-17T01:13:35Z",
+            ),
+            issue(
+                595,
+                "Rank remaining replay-ready cache cohorts after current canary decision",
+                ["backlog", "status:ready", "cache"],
+                state="CLOSED",
+                closed="2026-06-17T02:13:23Z",
+            ),
+        ]
+        stats_summary = {
+            "calls": 3685,
+            "cache_hits": 1,
+            "cache_hit_rate": 0.00027,
+            "evidence_to_activation_next_action_ledger": {
+                "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                "status": "tracked",
+                "summary": {"tracked_entry_count": 1, "closed_issue_seen_count": 1},
+                "entries": [
+                    {
+                        "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                        "fingerprint": "activation:243c92b5d91f9149",
+                        "lever": "cache",
+                        "local_action_family": "cache",
+                        "evidence_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                        "cohort_bucket": "openai_responses/responses/chat",
+                        "current_status": "holdout",
+                        "state": "replay-ready",
+                        "next_action": "review-cache-replay-canary-promotion-readiness",
+                        "issue_status": "closed-issue-seen",
+                        "prior_issue": {
+                            "repo": "lutzkuen/agentflow",
+                            "number": 595,
+                            "title": "Rank remaining replay-ready cache cohorts after current canary decision",
+                            "url": "https://github.com/lutzkuen/agentflow/issues/595",
+                        },
+                        "expected_savings_path": "Move cache replay evidence toward the next local replay decision.",
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    }
+                ],
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            "request_shape_rollup_candidates": {
+                "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                "status": "candidates-ranked",
+                "summary": {
+                    "calls": 3685,
+                    "ranked_candidate_count": 1,
+                    "top_next_action": "keep-active",
+                    "top_local_action_family": "crunch",
+                },
+                "top_candidate": {
+                    "local_action_family": "crunch",
+                    "next_action": "keep-active",
+                    "readiness_state": "measured-active",
+                    "candidate_work_classes": ["crunch", "repeated_context"],
+                    "provider_surface_bucket": "anthropic/anthropic_messages/messages",
+                    "row_count": 155,
+                    "sample_count": 155,
+                    "projected_savings_usd": 1.027594,
+                    "blocker_codes": ["repeated-context-crunch-active-at-max-rollout"],
+                },
+                "cache_replayability_dry_run": {
+                    "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                    "status": "ranked",
+                    "summary": {
+                        "replay_ready_cohort_count": 7,
+                        "remaining_replay_ready_cohort_count": 5,
+                        "remaining_replay_ready_rows": 39,
+                        "remaining_projected_hits": 34,
+                        "remaining_projected_savings_usd": 0.077742,
+                    },
+                    "cohorts": [
+                        {
+                            "readiness": "replay-ready",
+                            "remaining_replay_ready": True,
+                            "provider_family": "openai",
+                            "source_surface": "openai_responses",
+                            "endpoint": "responses",
+                            "category": "chat",
+                            "workflow_phase": "chat",
+                            "stream": False,
+                            "has_tools": False,
+                            "cache_status": "miss",
+                            "row_count": 10,
+                            "projected_hits": 9,
+                            "projected_savings_usd": 0.031711,
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            "crunch_savings_signal": {
+                "schema": "agentflow.crunch_savings_signal.v1",
+                "status": "observed-savings-ranked",
+                "calls": 3685,
+                "observed": {"crunch_savings_usd": 25.818387, "crunch_tokens_saved": 8606129},
+                "top_report": {"report_key": "request_shape_crunch_activation_evidence", "next_action": "keep-active"},
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+        }
+
+        plan = build_research_plan(
+            issues=closed_issues,
+            stats=stats_summary,
+            threshold=3,
+            now=now,
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertTrue(
+            any(title.startswith("Advance cache next action from evidence-to-activation ledger") for title in titles),
+            titles,
+        )
+        self.assertIn("Stage remaining replay-ready cache cohort for replay-ready on openai/openai_responses/responses", titles)
+        self.assertIn("Advance remaining replay-ready cache cohort into local replay evidence", titles)
+        self.assertIn("Record request-shape repeated-context crunch keep-active outcome", titles)
+        for stale_title in (
+            "Rank next savings milestone from local telemetry evidence gaps",
+            "Stage cache replay canary from evidence-to-activation ledger (evidence 243c92b5d91f)",
+            "Stage Anthropic messages repeated-context crunch cohort with holdout",
+            "Rank remaining replay-ready cache cohorts after current canary decision",
+            "Stage cache replay canary for replay-ready on openai/openai_responses/responses",
+            "Turn replay-ready cache candidate into local replay evidence",
+            "Stage request-shape repeated-context crunch canary",
+        ):
+            self.assertNotIn(stale_title, titles)
+
+        ledger_issue = next(
+            item for item in plan["backlog_changes"]["create_issues"]
+            if item["title"].startswith("Advance cache next action from evidence-to-activation ledger")
+        )
+        self.assertEqual(ledger_issue["closed_lifecycle_predecessor"]["number"], 537)
+        self.assertIn("Continues closed predecessor: #595", ledger_issue["body"])
+        self.assertIn("Top next action: review-cache-replay-canary-promotion-readiness", ledger_issue["body"])
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        self.assertGreaterEqual(ledger["summary"]["closed_issue_seen_count"], 1)
+        cache_entry = next(
+            entry for entry in ledger["entries"]
+            if entry.get("fingerprint") == "activation:243c92b5d91f9149"
+        )
+        self.assertEqual(cache_entry["prior_issue"]["number"], 595)
+
     def test_open_legacy_ledger_issue_suppresses_duplicate_proposal(self):
         stale_title = "Stage cache replay canary for activation-ready on openai/openai_responses/responses"
         plan = build_research_plan(

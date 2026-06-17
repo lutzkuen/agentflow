@@ -1574,6 +1574,21 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
         "avg_crunch_ratio",
     )
     summary = {key: stats[key] for key in keys if key in stats}
+    for key in (
+        "pass_through_routing_report",
+        "request_shape_cache_replay_evidence",
+        "crunch_savings_signal",
+        "request_shape_rollup_candidates",
+        "managed_recommendation_health",
+        "promotion_blocker_next_action_status",
+        "post_promotion_priority_delta_status",
+        "promotion_outcome_feedback",
+        "evidence_to_activation_loop",
+        "evidence_to_activation_next_action_ledger",
+    ):
+        value = stats.get(key)
+        if isinstance(value, dict):
+            summary[key] = value
     routing = stats.get("routing")
     if isinstance(routing, list):
         summary["routing_top"] = routing[:5]
@@ -1728,22 +1743,38 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
             if isinstance(openai_cache_readiness.get("privacy"), dict)
             else {},
         }
-    crunch_signal = _crunch_savings_signal(stats)
+    crunch_signal = None if isinstance(stats.get("crunch_savings_signal"), dict) else _crunch_savings_signal(stats)
     if crunch_signal is not None:
         summary["crunch_savings_signal"] = crunch_signal
-    shape_signal = _request_shape_rollup_signal(stats)
+    shape_signal = (
+        None
+        if isinstance(stats.get("request_shape_rollup_candidates"), dict)
+        else _request_shape_rollup_signal(stats)
+    )
     if shape_signal is not None:
         summary["request_shape_rollup_candidates"] = shape_signal
-    managed_health = _managed_recommendation_health_signal(stats, local_summary=summary)
+    managed_health = (
+        None
+        if isinstance(stats.get("managed_recommendation_health"), dict)
+        else _managed_recommendation_health_signal(stats, local_summary=summary)
+    )
     if managed_health is not None:
         summary["managed_recommendation_health"] = managed_health
-    promotion_blocker = _promotion_blocker_next_action_status(stats)
+    promotion_blocker = (
+        None
+        if isinstance(stats.get("promotion_blocker_next_action_status"), dict)
+        else _promotion_blocker_next_action_status(stats)
+    )
     if promotion_blocker is not None:
         summary["promotion_blocker_next_action_status"] = promotion_blocker
-    post_promotion_priority = _post_promotion_priority_status(stats)
+    post_promotion_priority = (
+        None
+        if isinstance(stats.get("post_promotion_priority_delta_status"), dict)
+        else _post_promotion_priority_status(stats)
+    )
     if post_promotion_priority is not None:
         summary["post_promotion_priority_delta_status"] = post_promotion_priority
-    promotion_feedback = stats.get("promotion_outcome_feedback")
+    promotion_feedback = None if isinstance(stats.get("promotion_outcome_feedback"), dict) else stats.get("promotion_outcome_feedback")
     if not isinstance(promotion_feedback, dict):
         promotion_report = stats.get("promotion_report")
         if isinstance(promotion_report, dict):
@@ -1758,7 +1789,7 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
             "summary": feedback_summary,
             "privacy": promotion_feedback.get("privacy") if isinstance(promotion_feedback.get("privacy"), dict) else {},
         }
-    activation_loop = _evidence_to_activation_loop(summary)
+    activation_loop = None if isinstance(stats.get("evidence_to_activation_loop"), dict) else _evidence_to_activation_loop(summary)
     if activation_loop is not None:
         summary["evidence_to_activation_loop"] = activation_loop
     return summary
@@ -3321,6 +3352,8 @@ def _legacy_issue_title_for_ledger_entry(entry: dict[str, Any]) -> str:
     blockers = [str(item) for item in entry.get("blocker_codes") or [] if str(item or "").strip()]
     blocker = blockers[0] if blockers else str(entry.get("state") or "candidate")
     if lever == "cache":
+        if blocker == "remaining-replay-ready":
+            return "Advance remaining replay-ready cache cohort into local replay evidence"
         return f"Turn {blocker} cache candidate into local replay evidence"
     if lever == "routing":
         requested = str(entry.get("requested_model") or "").strip()
@@ -3609,6 +3642,89 @@ def build_evidence_to_activation_next_action_ledger(
         },
     }
     return sanitize_value(result)
+
+
+def _refresh_ledger_summary(ledger: dict[str, Any]) -> dict[str, Any]:
+    entries = [entry for entry in ledger.get("entries") or [] if isinstance(entry, dict)]
+    top = entries[0] if entries else {}
+    status_counts = Counter(str(entry.get("current_status") or "unknown") for entry in entries)
+    issue_status_counts = Counter(str(entry.get("issue_status") or "none") for entry in entries)
+    summary = dict(ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {})
+    summary.update(
+        {
+            "tracked_entry_count": len(entries),
+            "closed_issue_seen_count": sum(1 for entry in entries if entry.get("issue_status") == "closed-issue-seen"),
+            "top_lever": top.get("lever"),
+            "top_current_status": top.get("current_status"),
+            "top_next_action": top.get("next_action"),
+            "top_blocker_codes": top.get("blocker_codes") or [],
+            "top_expected_savings_path": top.get("expected_savings_path"),
+            "status_counts": [{"status": status, "count": count} for status, count in sorted(status_counts.items())],
+            "issue_status_counts": [
+                {"status": status, "count": count}
+                for status, count in sorted(issue_status_counts.items())
+                if status != "none"
+            ],
+        }
+    )
+    refreshed = dict(ledger)
+    refreshed["summary"] = summary
+    return refreshed
+
+
+def _merge_precomputed_ledger_context(
+    ledger: dict[str, Any],
+    precomputed_ledger: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(precomputed_ledger, dict):
+        return ledger
+    prior_by_fingerprint = {
+        str(entry.get("fingerprint") or ""): entry
+        for entry in precomputed_ledger.get("entries") or []
+        if isinstance(entry, dict) and str(entry.get("fingerprint") or "")
+    }
+    if not prior_by_fingerprint:
+        return ledger
+    merged_entries: list[dict[str, Any]] = []
+    seen_fingerprints: set[str] = set()
+    for entry in ledger.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        merged = dict(entry)
+        fingerprint = str(entry.get("fingerprint") or "")
+        if fingerprint:
+            seen_fingerprints.add(fingerprint)
+        prior = prior_by_fingerprint.get(fingerprint)
+        if isinstance(prior, dict):
+            for key in (
+                "next_action",
+                "current_status",
+                "state",
+                "evidence_schema",
+                "cohort_bucket",
+                "expected_savings_path",
+            ):
+                if prior.get(key):
+                    merged[key] = sanitize_value(prior.get(key))
+            for key in (
+                "lifecycle_progressed_from_next_action",
+                "lifecycle_progressed_from_evidence_schema",
+                "lifecycle_progressed_from_cohort_bucket",
+            ):
+                if prior.get(key) and not merged.get(key):
+                    merged[key] = sanitize_value(prior.get(key))
+            for key in ("prior_issue", "issue_status"):
+                if prior.get(key):
+                    merged[key] = sanitize_value(prior.get(key))
+            if prior.get("issue_status") == "closed-issue-seen" and prior.get("prior_issue"):
+                merged["issue_status"] = "closed-issue-seen"
+        merged_entries.append(merged)
+    for fingerprint, prior in prior_by_fingerprint.items():
+        if fingerprint not in seen_fingerprints:
+            merged_entries.append(sanitize_value(prior))
+    merged_ledger = dict(ledger)
+    merged_ledger["entries"] = merged_entries
+    return _refresh_ledger_summary(merged_ledger)
 
 
 def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
@@ -5846,8 +5962,12 @@ def _cache_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         replay_rows = [row for row in shape_replay.get("cohorts") or [] if isinstance(row, dict)]
         top_replay = replay_rows[0] if replay_rows else {}
         ready = _to_int(replay_summary.get("replay_ready_cohort_count")) > 0 or top_replay.get("readiness") == "replay-ready"
+        remaining_ready = (
+            bool(top_replay.get("remaining_replay_ready"))
+            or _to_int(replay_summary.get("remaining_replay_ready_cohort_count")) > 0
+        )
         blockers = [str(item) for item in top_replay.get("blockers") or [] if str(item or "").strip()]
-        replay_blocker = "replay-ready" if ready else str(
+        replay_blocker = "remaining-replay-ready" if remaining_ready else "replay-ready" if ready else str(
             replay_summary.get("top_blocker_code")
             or (blockers[0] if blockers else top_replay.get("reason"))
             or "cache-replayability-evidence-missing"
@@ -6315,6 +6435,10 @@ _PUBLIC_FINGERPRINT_RE = re.compile(
     r"\b(?:activation|diagnostic|policy|rule|cohort|candidate):[a-z0-9][a-z0-9_.:-]{6,}\b",
     re.IGNORECASE,
 )
+_LIFECYCLE_ACTION_RE = re.compile(
+    r"(?:\b(?:top\s+)?next\s+action\b|next_action)\s*[:=]\s*`?([a-z0-9_.:-]+)`?",
+    re.IGNORECASE,
+)
 
 
 def _proposal_fingerprints(item: dict[str, Any]) -> set[str]:
@@ -6332,6 +6456,31 @@ def _proposal_fingerprints(item: dict[str, Any]) -> set[str]:
     for match in _PUBLIC_FINGERPRINT_RE.findall(body):
         fingerprints.add(redact_text(match.strip().lower()))
     return {fingerprint for fingerprint in fingerprints if fingerprint}
+
+
+def _proposal_lifecycle_actions(item: dict[str, Any]) -> set[str]:
+    actions: set[str] = set()
+    for value in (
+        item.get("next_action"),
+        item.get("top_next_action"),
+        item.get("lifecycle_next_action"),
+    ):
+        if isinstance(value, str) and value.strip():
+            actions.add(value.strip().lower().replace("_", "-"))
+    body = str(item.get("body") or "")
+    for match in _LIFECYCLE_ACTION_RE.findall(body):
+        action = match.strip().lower().replace("_", "-")
+        if action:
+            actions.add(action)
+    return actions
+
+
+def _closed_issue_is_lifecycle_predecessor(proposal: dict[str, Any], issue: dict[str, Any] | None) -> bool:
+    if issue is None or _is_open(issue):
+        return False
+    proposal_actions = _proposal_lifecycle_actions(proposal)
+    issue_actions = _proposal_lifecycle_actions(issue)
+    return bool(proposal_actions and issue_actions and proposal_actions.isdisjoint(issue_actions))
 
 
 def _dedupe_create_issue_proposals(
@@ -6391,6 +6540,21 @@ def _dedupe_create_issue_proposals_with_metadata(
             matched_issue = existing_by_key.get(key) or (
                 existing_by_fingerprint.get(matched_fingerprint) if matched_fingerprint else None
             )
+            if (
+                key not in seen
+                and matched_fingerprint is not None
+                and _closed_issue_is_lifecycle_predecessor(proposal, matched_issue)
+            ):
+                progressed = dict(proposal)
+                progressed["closed_lifecycle_predecessor"] = _issue_ref(matched_issue) if matched_issue is not None else None
+                progressed["closed_lifecycle_predecessor_reason"] = "same-fingerprint-next-action-progressed"
+                progressed["closed_lifecycle_predecessor_fingerprint"] = sanitize_value(matched_fingerprint)
+                seen.add(key)
+                seen_fingerprints.update(proposal_fingerprints)
+                deduped.append(progressed)
+                if len(deduped) >= max_count:
+                    break
+                continue
             reason = "exact-title-already-exists" if key in seen else "evidence-fingerprint-already-exists"
             row = {
                 "title": sanitize_value(proposal.get("title")),
@@ -6444,6 +6608,8 @@ def _candidate_title(candidate: dict[str, Any]) -> str:
     blocker = str(candidate.get("blocker") or "candidate").replace("_", "-")
     signal = candidate.get("projected_savings_signal") if isinstance(candidate.get("projected_savings_signal"), dict) else {}
     if lever == "cache":
+        if blocker == "remaining-replay-ready":
+            return "Advance remaining replay-ready cache cohort into local replay evidence"
         return f"Turn {blocker} cache candidate into local replay evidence"
     if lever == "routing":
         requested = str(signal.get("requested_model") or "").strip()
@@ -6459,6 +6625,8 @@ def _candidate_title(candidate: dict[str, Any]) -> str:
         return "Rank managed recommendation omission reasons for local policy handoff"
     if lever == "request-shape-rollups":
         blocker_text = blocker.replace("request-shape-", "")
+        if "keep-active" in blocker_text and "crunch" in blocker_text:
+            return "Record request-shape repeated-context crunch keep-active outcome"
         if "widen" in blocker_text and "crunch" in blocker_text:
             return "Apply measured request-shape crunch widening to local rules"
         if "measure" in blocker_text and "crunch" in blocker_text:
@@ -7013,6 +7181,24 @@ def _evidence_ledger_action_title(entry: dict[str, Any]) -> str:
     return f"Advance {lever} next action from evidence-to-activation ledger ({_evidence_ledger_title_token(entry)})"
 
 
+def _ledger_entry_has_progressed_next_action(entry: dict[str, Any]) -> bool:
+    action = str(entry.get("next_action") or "").lower().replace("_", "-")
+    previous = str(entry.get("fingerprint_next_action") or entry.get("lifecycle_progressed_from_next_action") or "").lower().replace("_", "-")
+    if previous and action and action != previous:
+        return True
+    return any(token in action for token in ("review-", "measure-", "keep-active", "promotion-readiness", "widen", "apply"))
+
+
+def _ledger_entry_successor_rank(entry: dict[str, Any]) -> int:
+    action = str(entry.get("next_action") or "").lower().replace("_", "-")
+    lever = str(entry.get("lever") or "").lower().replace("_", "-")
+    if lever == "cache" and "review-cache-replay-canary-promotion-readiness" in action:
+        return 0
+    if _ledger_entry_has_progressed_next_action(entry):
+        return 1
+    return 2
+
+
 def _proposal_from_evidence_to_activation_ledger(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     ledger = stats_summary.get("evidence_to_activation_next_action_ledger")
     if not isinstance(ledger, dict):
@@ -7028,6 +7214,12 @@ def _proposal_from_evidence_to_activation_ledger(stats_summary: dict[str, Any]) 
     ]
     if not advanced:
         return None
+    advanced.sort(
+        key=lambda item: (
+            _ledger_entry_successor_rank(item),
+            _to_int(item.get("rank"), 999),
+        )
+    )
     entry = advanced[0]
     next_action = str(entry.get("next_action") or "").strip()
     if not next_action:
@@ -7557,6 +7749,8 @@ def _proposal_from_cache_replay_blocker(stats_summary: dict[str, Any]) -> dict[s
     activation_mode = "activation-candidate" if is_activation_action else "research-only"
     if aggregate_only_ladder:
         title = f"Collect cache replay evidence for {cohort}"
+    elif source == "request_shape_cache_replayability_dry_run" and bool(row.get("remaining_replay_ready")):
+        title = f"Stage remaining replay-ready cache cohort for {cohort}"
     else:
         title_template = _CACHE_ACTION_ISSUE_TITLES.get(action_family, _CACHE_ACTION_ISSUE_TITLES["instrument-cache-decision"])
         title = title_template.format(cohort=cohort)
@@ -7761,6 +7955,11 @@ def build_research_plan(
     ready_issues = [issue for issue in issue_list if _is_actionable_ready(issue, trusted_author)]
     blocked_stale = _stale_blocked_issues(issue_list, trusted_author=trusted_author, now=now, stale_days=stale_days)
     summary = _stats_summary(stats)
+    precomputed_activation_ledger = (
+        summary.get("evidence_to_activation_next_action_ledger")
+        if isinstance(summary.get("evidence_to_activation_next_action_ledger"), dict)
+        else None
+    )
     diagnostics = _resolve_unclassified_diagnostics(
         _resolve_aggregate_only_diagnostics(_diagnostics_from_logs(log_sources), summary),
         summary,
@@ -7788,7 +7987,10 @@ def build_research_plan(
         safety_stop_burndown=activation_safety_stop_burndown,
     )
     if activation_ledger is not None:
+        activation_ledger = _merge_precomputed_ledger_context(activation_ledger, precomputed_activation_ledger)
         summary["evidence_to_activation_next_action_ledger"] = activation_ledger
+    elif precomputed_activation_ledger is not None:
+        summary["evidence_to_activation_next_action_ledger"] = precomputed_activation_ledger
     candidate_diagnostics, safety_stop_suppressed_diagnostics = _without_suppressed_safety_stop_diagnostics(
         diagnostics,
         activation_safety_stop_burndown,
