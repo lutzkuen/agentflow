@@ -2907,9 +2907,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "observed_hits": 0,
                 "projected_savings_usd": 0.075373,
                 "observed_savings_usd": 0.0,
-                "top_applied_miss_blocker": "cache-warmup-miss",
+                "top_applied_miss_blocker": "first-seen-cache-warmup",
             },
-            "applied_miss_blocker_breakdown": [{"value": "cache-warmup-miss", "count": 25}],
+            "applied_miss_blocker_breakdown": [{"value": "first-seen-cache-warmup", "count": 25}],
             "stale_evidence": {"stale": False, "age_hours": 0.2},
             "privacy": {
                 "metadata_only": True,
@@ -2928,13 +2928,15 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             "decision": "keep-staged",
             "promotion_decision": "keep-staged-warmup",
             "promotion_readiness": "keep-staged-warmup",
-            "reason": "cache-warmup-miss",
+            "reason": "first-seen-cache-warmup",
+            "promotion_blocker": "first-seen-cache-warmup",
+            "observed_hit_blocker": "first-seen-cache-warmup",
             "reason_codes": [
                 "missing-observed-cache-hits",
                 "missing-observed-cache-savings",
                 "applied-cache-replay-miss-observed",
-                "cache-warmup-miss",
-                "applied-miss:cache-warmup-miss",
+                "first-seen-cache-warmup",
+                "applied-miss:first-seen-cache-warmup",
             ],
             "next_action": "keep-cache-replay-canary-staged",
             "summary": {
@@ -2958,7 +2960,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "observed_hits": 0,
                 "projected_savings_usd": 0.075373,
                 "observed_savings_usd": 0.0,
-                "top_applied_miss_blocker": "cache-warmup-miss",
+                "top_applied_miss_blocker": "first-seen-cache-warmup",
+                "promotion_blocker": "first-seen-cache-warmup",
+                "observed_hit_blocker": "first-seen-cache-warmup",
                 "target_local_rule_file": "cache_rules.yaml",
                 "target_local_policy_section": "cache.pattern_rules",
             },
@@ -2966,7 +2970,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "decision_id": "cache-replay-policy-decision:public",
                 "target_local_rule_file": "cache_rules.yaml",
                 "target_local_policy_section": "cache.pattern_rules",
-                "applied_miss_blocker_breakdown": [{"value": "cache-warmup-miss", "count": 25}],
+                "applied_miss_blocker_breakdown": [{"value": "first-seen-cache-warmup", "count": 25}],
                 "local_policy_patch": None,
             },
             "source_evidence": {
@@ -3011,7 +3015,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(cache["next_action"], "keep-cache-replay-canary-staged")
         self.assertEqual(cache["policy_decision"], "keep-staged")
         self.assertEqual(cache["promotion_decision"], "keep-staged-warmup")
-        self.assertIn("cache-warmup-miss", cache["blocker_codes"])
+        self.assertEqual(cache["promotion_blocker"], "first-seen-cache-warmup")
+        self.assertEqual(cache["observed_hit_blocker"], "first-seen-cache-warmup")
+        self.assertIn("first-seen-cache-warmup", cache["blocker_codes"])
         self.assertEqual(cache["applied_count"], 25)
         self.assertEqual(cache["holdout_count"], 18)
         self.assertEqual(cache["actual_hits"], 0)
@@ -3026,10 +3032,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(cache_entry["fingerprint_next_action"], "stage-cache-replay-canary")
         self.assertEqual(cache_entry["fingerprint_evidence_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(cache_entry["fingerprint_cohort_bucket"], "cache:10_99")
+        self.assertEqual(cache_entry["fingerprint"], "activation:243c92b5d91f9149")
         self.assertEqual(cache_entry["policy_decision"], "keep-staged")
         self.assertEqual(cache_entry["promotion_readiness"], "keep-staged-warmup")
-        self.assertIn("cache-warmup-miss", cache_entry["blocker_codes"])
-        self.assertEqual(cache_entry["top_miss_reason"], "cache-warmup-miss")
+        self.assertIn("first-seen-cache-warmup", cache_entry["blocker_codes"])
+        self.assertEqual(cache_entry["top_miss_reason"], "first-seen-cache-warmup")
+        self.assertEqual(cache_entry["promotion_blocker"], "first-seen-cache-warmup")
+        self.assertEqual(cache_entry["observed_hit_blocker"], "first-seen-cache-warmup")
         self.assertEqual(cache_entry["target_local_rule_file"], "cache_rules.yaml")
 
         rendered = json.dumps(plan, sort_keys=True)

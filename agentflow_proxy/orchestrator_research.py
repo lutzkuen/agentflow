@@ -3824,6 +3824,10 @@ def build_evidence_to_activation_next_action_ledger(
             entry["miss_reason_breakdown"] = sanitize_value(stage.get("miss_reason_breakdown"))
         if stage.get("top_miss_reason"):
             entry["top_miss_reason"] = sanitize_value(stage.get("top_miss_reason"))
+        if stage.get("observed_hit_blocker"):
+            entry["observed_hit_blocker"] = sanitize_value(stage.get("observed_hit_blocker"))
+        if stage.get("promotion_blocker"):
+            entry["promotion_blocker"] = sanitize_value(stage.get("promotion_blocker"))
         if isinstance(stage.get("unblock_criteria"), dict):
             entry["unblock_criteria"] = sanitize_value(stage.get("unblock_criteria"))
         for review_key in (
@@ -4452,6 +4456,19 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         or summary.get("top_blocking_applied_miss_blocker")
         or reason
     )
+    observed_hit_blocker = (
+        summary.get("observed_hit_blocker")
+        or decision_report.get("observed_hit_blocker")
+        or summary.get("promotion_blocker")
+        or decision_report.get("promotion_blocker")
+        or (top_miss_reason if _to_int(summary.get("observed_hits") or evidence_summary.get("observed_hits")) <= 0 else None)
+    )
+    promotion_blocker = (
+        summary.get("promotion_blocker")
+        or decision_report.get("promotion_blocker")
+        or observed_hit_blocker
+        or reason
+    )
 
     return {
         "lever": "cache",
@@ -4472,6 +4489,8 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         "miss_count": _to_int(summary.get("miss_count") or evidence_summary.get("miss_count")),
         "miss_reason_breakdown": sanitize_value(miss_breakdown),
         "top_miss_reason": sanitize_value(top_miss_reason),
+        "observed_hit_blocker": sanitize_value(observed_hit_blocker),
+        "promotion_blocker": sanitize_value(promotion_blocker),
         "bypass_skipped_count": _to_int(summary.get("bypass_count") or evidence_summary.get("bypass_count") or evidence_summary.get("unsupported_shape_count")),
         "projected_hits": _to_int(summary.get("projected_hits") or evidence_summary.get("projected_hits") or top_canary.get("projected_hits")),
         "projected_saved_usd": round(_to_float(summary.get("projected_savings_usd") or evidence_summary.get("projected_savings_usd") or top_canary.get("projected_savings_usd")), 8),

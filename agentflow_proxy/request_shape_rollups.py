@@ -6002,6 +6002,30 @@ def _cache_replay_policy_decision_reason(evidence: dict[str, Any] | None, decisi
     return codes[0] if codes else "cache-replay-promotion-blocked"
 
 
+def _cache_replay_policy_promotion_blocker(
+    evidence: dict[str, Any] | None,
+    decision: str,
+    promotion_readiness: str,
+    reason: str,
+) -> str | None:
+    if promotion_readiness == "promotion-ready":
+        return None
+    if decision == "keep-staged" and _cache_replay_warmup_only_applied_miss(evidence):
+        metrics = _cache_replay_policy_decision_metrics(evidence)
+        return str(metrics.get("top_applied_miss_blocker") or reason or "first-seen-cache-warmup")
+    return reason or None
+
+
+def _cache_replay_policy_observed_hit_blocker(
+    evidence: dict[str, Any] | None,
+    promotion_blocker: str | None,
+) -> str | None:
+    metrics = _cache_replay_policy_decision_metrics(evidence)
+    if metrics["observed_hits"] > 0:
+        return None
+    return promotion_blocker or "missing-observed-cache-hits"
+
+
 def _cache_replay_policy_recommended_next_action(decision: str) -> str:
     return {
         "widen": "promote-cache-replay-rule",
@@ -6194,6 +6218,13 @@ def build_request_shape_cache_replay_policy_decision_report(
     recommended_next_action = _cache_replay_policy_recommended_next_action(decision)
     promotion_decision = _cache_replay_canary_promotion_decision(evidence, decision)
     promotion_readiness = _cache_replay_policy_promotion_readiness(evidence, decision)
+    promotion_blocker = _cache_replay_policy_promotion_blocker(
+        evidence,
+        decision,
+        promotion_readiness,
+        reason,
+    )
+    observed_hit_blocker = _cache_replay_policy_observed_hit_blocker(evidence, promotion_blocker)
     duplicate_suppression = _cache_replay_policy_duplicate_suppression(
         decision,
         promotion_readiness,
@@ -6214,6 +6245,8 @@ def build_request_shape_cache_replay_policy_decision_report(
         "impact_recommendation": promotion_readiness,
         "promotion_recommendation": promotion_readiness,
         "reason": reason,
+        "promotion_blocker": promotion_blocker,
+        "observed_hit_blocker": observed_hit_blocker,
         "reason_codes": reason_codes,
         "recommended_next_action": recommended_next_action,
         "next_action": recommended_next_action,
@@ -6279,6 +6312,8 @@ def build_request_shape_cache_replay_policy_decision_report(
         "impact_recommendation": promotion_readiness,
         "promotion_recommendation": promotion_readiness,
         "reason": reason,
+        "promotion_blocker": promotion_blocker,
+        "observed_hit_blocker": observed_hit_blocker,
         "reason_codes": reason_codes,
         "next_action": recommended_next_action,
         "top_decision": entry,
@@ -6322,6 +6357,8 @@ def build_request_shape_cache_replay_policy_decision_report(
             "savings_realization_ratio": metrics["savings_realization_ratio"],
             "top_applied_miss_blocker": metrics["top_applied_miss_blocker"],
             "top_blocking_applied_miss_blocker": metrics["top_blocking_applied_miss_blocker"],
+            "promotion_blocker": promotion_blocker,
+            "observed_hit_blocker": observed_hit_blocker,
             "stale_evidence": metrics["stale_evidence"],
             "policy_source": entry["policy_source"],
             "target_local_rule_file": "cache_rules.yaml",
@@ -6356,6 +6393,7 @@ def build_request_shape_cache_replay_policy_decision_report(
             "reports_applied_miss_blocker_breakdown": isinstance(
                 evidence.get("applied_miss_blocker_breakdown"), list
             ),
+            "reports_observed_hit_blocker": bool(observed_hit_blocker) or metrics["observed_hits"] > 0,
             "drafts_local_policy_patch_or_blocker": bool(local_policy_patch) or bool(reason_codes),
             "targets_file_backed_cache_policy": entry["target_local_rule_file"] == "cache_rules.yaml",
             "suppresses_generic_replay_ready_issue_recreation": duplicate_suppression[

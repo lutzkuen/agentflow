@@ -2879,14 +2879,14 @@ class RequestShapeRollupTests(unittest.TestCase):
                 "projected_hits": 35,
                 "observed_savings_usd": 0.0,
                 "projected_savings_usd": 0.075373,
-                "top_applied_miss_blocker": "cache-warmup-miss",
+                "top_applied_miss_blocker": "first-seen-cache-warmup",
                 "invalidation_skipped_count": 0,
                 "unsupported_shape_count": 0,
                 "retry_count": 0,
                 "fallback_count": 0,
                 "error_count": 0,
             },
-            "applied_miss_blocker_breakdown": [{"value": "cache-warmup-miss", "count": 24}],
+            "applied_miss_blocker_breakdown": [{"value": "first-seen-cache-warmup", "count": 24}],
             "stale_evidence": {"stale": False, "age_hours": 2.5},
             "blocker_breakdown": [],
         }
@@ -2900,7 +2900,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["promotion_decision"], "keep-staged-warmup")
         self.assertEqual(decision["promotion_readiness"], "keep-staged-warmup")
         self.assertEqual(decision["impact_recommendation"], "keep-staged-warmup")
-        self.assertEqual(decision["reason"], "cache-warmup-miss")
+        self.assertEqual(decision["reason"], "first-seen-cache-warmup")
+        self.assertEqual(decision["promotion_blocker"], "first-seen-cache-warmup")
+        self.assertEqual(decision["observed_hit_blocker"], "first-seen-cache-warmup")
         self.assertEqual(decision["next_action"], "keep-cache-replay-canary-staged")
         self.assertTrue(decision["summary"]["keep_staged_warmup"])
         self.assertEqual(decision["summary"]["promotion_readiness"], "keep-staged-warmup")
@@ -2917,9 +2919,11 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["summary"]["synthetic_hit_recovery_exact_hit_count"], 1)
         self.assertEqual(decision["summary"]["synthetic_hit_recovery_status"], "hit-recovered")
         self.assertTrue(decision["summary"]["target_matches_hit_recovery_shape"])
-        self.assertEqual(decision["summary"]["top_applied_miss_blocker"], "cache-warmup-miss")
-        self.assertIn("cache-warmup-miss", decision["reason_codes"])
-        self.assertIn("applied-miss:cache-warmup-miss", decision["reason_codes"])
+        self.assertEqual(decision["summary"]["top_applied_miss_blocker"], "first-seen-cache-warmup")
+        self.assertEqual(decision["summary"]["promotion_blocker"], "first-seen-cache-warmup")
+        self.assertEqual(decision["summary"]["observed_hit_blocker"], "first-seen-cache-warmup")
+        self.assertIn("first-seen-cache-warmup", decision["reason_codes"])
+        self.assertIn("applied-miss:first-seen-cache-warmup", decision["reason_codes"])
         self.assertEqual(decision["hit_recovery_metrics"]["source_schema"], "agentflow.cache_replay_hit_recovery_smoke.v1")
         self.assertTrue(decision["hit_recovery_metrics"]["hit_recovery_demonstrated"])
         self.assertEqual(decision["hit_recovery_metrics"]["synthetic_exact_hit_count"], 1)
@@ -2935,7 +2939,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["top_decision"]["promotion_decision"], "keep-staged-warmup")
         self.assertEqual(decision["top_decision"]["promotion_readiness"], "keep-staged-warmup")
         self.assertEqual(decision["top_decision"]["promotion_decision_options"], ["promote", "keep-staged-warmup", "keep-blocked"])
-        self.assertEqual(decision["top_decision"]["reason"], "cache-warmup-miss")
+        self.assertEqual(decision["top_decision"]["reason"], "first-seen-cache-warmup")
+        self.assertEqual(decision["top_decision"]["promotion_blocker"], "first-seen-cache-warmup")
+        self.assertEqual(decision["top_decision"]["observed_hit_blocker"], "first-seen-cache-warmup")
         self.assertEqual(decision["top_decision"]["recommended_next_action"], "keep-cache-replay-canary-staged")
         self.assertEqual(decision["top_decision"]["coverage"]["applied_count"], 24)
         self.assertEqual(decision["top_decision"]["coverage"]["holdout_count"], 16)
@@ -2948,6 +2954,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(decision["acceptance"]["emits_explicit_promotion_readiness"])
         self.assertTrue(decision["acceptance"]["reports_synthetic_hit_recovery_smoke"])
         self.assertTrue(decision["acceptance"]["reports_applied_miss_blocker_breakdown"])
+        self.assertTrue(decision["acceptance"]["reports_observed_hit_blocker"])
         self.assertTrue(decision["acceptance"]["suppresses_generic_replay_ready_issue_recreation"])
         self.assertTrue(decision["privacy"]["metadata_only"])
         self.assertTrue(decision["privacy"]["aggregate_only"])
