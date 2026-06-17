@@ -79,6 +79,40 @@ class RequestShapeRollupTests(unittest.TestCase):
             },
         }
 
+    def _dependency_audit(
+        self,
+        *,
+        reason: str | None = None,
+        safe: bool = False,
+        fingerprint_available: bool = False,
+    ) -> dict[str, object]:
+        return {
+            "schema": "agentflow.cache_file_dependency_audit.v1",
+            "file_watch_enabled": True,
+            "snapshot_root_policy": "cwd-relative",
+            "root_path_included": False,
+            "snapshot_count": 1 if fingerprint_available else 0,
+            "snapshot_count_bucket": "1" if fingerprint_available else "0",
+            "candidate_path_count_bucket": "1" if fingerprint_available else "0",
+            "raw_candidate_path_count_bucket": "1" if fingerprint_available else "0",
+            "distinct_candidate_path_count_bucket": "1" if fingerprint_available else "0",
+            "max_paths": 128,
+            "cap_exceeded": False,
+            "cap_trimmed": False,
+            "dependency_capture_reason": "complete",
+            "present_path_count": 1 if fingerprint_available else 0,
+            "missing_path_count": 0,
+            "changed_path_count": 1 if reason == "dependency-changed" else 0,
+            "deleted_path_count": 0,
+            "created_path_count": 0,
+            "invalidation_reason": reason,
+            "safe_invalidation_evidence": safe,
+            "file_dependency_evidence_available": fingerprint_available,
+            "paths_included": False,
+            "path_hashes_included": False,
+            "raw_stat_values_included": False,
+        }
+
     def _log_call(
         self,
         *,
@@ -672,6 +706,113 @@ class RequestShapeRollupTests(unittest.TestCase):
             "/tmp/private/source.py",
         ):
             self.assertNotIn(forbidden, rendered_invalidation)
+
+    def test_openai_tool_cache_blockers_record_sanitized_dependency_states_without_apply(self) -> None:
+        stable_audit = self._dependency_audit(safe=True, fingerprint_available=True)
+        stale_audit = self._dependency_audit(
+            reason="dependency-changed",
+            safe=False,
+            fingerprint_available=True,
+        )
+        shared = {
+            "provider": "openai",
+            "path": "/v1/responses",
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "requested_model": "gpt-5.4",
+            "routed_model": "gpt-5.4",
+            "requested_model_family": "gpt-5",
+            "routed_model_family": "gpt-5",
+            "category": "tool-light",
+            "workflow_phase": "tool-light",
+            "stream": 0,
+            "has_tools": True,
+            "cache_status": "skipped",
+            "cache_reason": "tools-disabled",
+            "cost": 0.04,
+            "baseline": 0.04,
+        }
+        self._log_call(
+            **shared,
+            text_chars=6_000,
+            cache_extra={
+                "file_dependency_audit": stable_audit,
+                "file_dependency_fingerprint": {
+                    "schema": "agentflow.cache_file_dependency_fingerprint.v1",
+                    "fingerprint_available": True,
+                    "fingerprint_sha256": "sha256:raw-stable-dependency-fingerprint-must-not-leak",
+                    "paths_included": False,
+                },
+                "file_dependency_fingerprint_available": True,
+                "file_dependency_evidence_available": True,
+                "safe_invalidation_evidence": True,
+            },
+        )
+        self._log_call(
+            **shared,
+            text_chars=12_000,
+            cache_extra={
+                "file_dependency_audit": stale_audit,
+                "file_dependency_fingerprint": {
+                    "schema": "agentflow.cache_file_dependency_fingerprint.v1",
+                    "fingerprint_available": True,
+                    "fingerprint_sha256": "sha256:raw-stale-dependency-fingerprint-must-not-leak",
+                    "paths_included": False,
+                },
+                "file_dependency_fingerprint_available": True,
+                "file_dependency_evidence_available": True,
+                "safe_invalidation_evidence": False,
+            },
+        )
+        self._log_call(**shared, text_chars=24_000)
+
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="dependency-states")
+        skipped = report["cache_replayability_dry_run"]["skipped_openai_blockers"]
+        invalidation = report["cache_replayability_dry_run"]["cache_invalidation_evidence"]
+
+        self.assertEqual(skipped["summary"]["cache_apply_action_count"], 0)
+        self.assertFalse(skipped["summary"]["policy_files_written"])
+        self.assertTrue(skipped["acceptance"]["emits_no_cache_apply_actions"])
+        by_status = {row["file_dependency_status"]: row for row in skipped["cohorts"]}
+        self.assertIn("stable", by_status)
+        self.assertIn("invalidated", by_status)
+        self.assertIn("missing", by_status)
+
+        stable_row = by_status["stable"]
+        self.assertEqual(stable_row["next_action"], "rank-safe-tool-cache-replay-readiness")
+        self.assertTrue(stable_row["safe_invalidation_evidence"])
+        self.assertTrue(stable_row["file_dependency_fingerprint_available"])
+        self.assertIn("safe-invalidation-evidence-present", stable_row["blocker_codes"])
+        self.assertNotIn("invalidation-evidence-missing", stable_row["blocker_codes"])
+        self.assertFalse(stable_row["tool_cache_replay_enabled"])
+
+        stale_row = by_status["invalidated"]
+        self.assertEqual(stale_row["next_action"], "refresh-invalidation-evidence")
+        self.assertIn("stale-dependency-evidence", stale_row["blocker_codes"])
+        self.assertFalse(stale_row["safe_invalidation_evidence"])
+
+        missing_row = by_status["missing"]
+        self.assertEqual(missing_row["next_action"], "add-invalidation-evidence")
+        self.assertIn("invalidation-evidence-missing", missing_row["blocker_codes"])
+
+        invalidation_by_status = {row["file_dependency_status"]: row for row in invalidation["cohorts"]}
+        self.assertEqual(
+            invalidation_by_status["stable"]["next_action"],
+            "rank-safe-tool-cache-replay-readiness",
+        )
+        self.assertEqual(
+            invalidation_by_status["invalidated"]["next_action"],
+            "refresh-file-invalidation-evidence",
+        )
+
+        rendered = json.dumps([skipped, invalidation], sort_keys=True)
+        self.assertNotIn("raw-stable-dependency-fingerprint-must-not-leak", rendered)
+        self.assertNotIn("raw-stale-dependency-fingerprint-must-not-leak", rendered)
+        self.assertNotIn("raw-request-fingerprint-must-not-leak", rendered)
+        self.assertNotIn("raw-cache-key-must-not-leak", rendered)
+        self.assertFalse(skipped["privacy"]["cache_keys_included"])
+        self.assertFalse(skipped["privacy"]["request_ids_included"])
+        self.assertFalse(skipped["privacy"]["session_ids_included"])
 
     def test_cache_replayability_ranks_remaining_replay_ready_after_handled_policy(self) -> None:
         for cost in (0.01, 0.03, 0.02):

@@ -306,6 +306,126 @@ def _cache_status(row: dict[str, Any], cache: dict[str, Any]) -> str:
     return "hit" if _as_int(row.get("cache_hit")) else "missing"
 
 
+def _sanitized_file_dependency_audit(cache: dict[str, Any]) -> dict[str, Any]:
+    audit = cache.get("file_dependency_audit")
+    if isinstance(audit, dict):
+        safe = bool(audit.get("safe_invalidation_evidence"))
+        return {
+            "schema": str(audit.get("schema") or "agentflow.cache_file_dependency_audit.v1"),
+            "file_watch_enabled": bool(audit.get("file_watch_enabled")),
+            "snapshot_root_policy": public_label(audit.get("snapshot_root_policy"), "unknown"),
+            "root_path_included": False,
+            "snapshot_count": _as_int(audit.get("snapshot_count")),
+            "snapshot_count_bucket": public_label(audit.get("snapshot_count_bucket"), "unknown"),
+            "candidate_path_count_bucket": public_label(audit.get("candidate_path_count_bucket"), "unknown"),
+            "raw_candidate_path_count_bucket": public_label(audit.get("raw_candidate_path_count_bucket"), "unknown"),
+            "distinct_candidate_path_count_bucket": public_label(
+                audit.get("distinct_candidate_path_count_bucket") or audit.get("candidate_path_count_bucket"),
+                "unknown",
+            ),
+            "max_paths": _as_int(audit.get("max_paths")),
+            "cap_exceeded": bool(audit.get("cap_exceeded")),
+            "cap_trimmed": bool(audit.get("cap_trimmed")),
+            "dependency_capture_reason": public_label(audit.get("dependency_capture_reason"), "unknown"),
+            "present_path_count": _as_int(audit.get("present_path_count")),
+            "missing_path_count": _as_int(audit.get("missing_path_count")),
+            "changed_path_count": _as_int(audit.get("changed_path_count")),
+            "deleted_path_count": _as_int(audit.get("deleted_path_count")),
+            "created_path_count": _as_int(audit.get("created_path_count")),
+            "invalidation_reason": public_label(audit.get("invalidation_reason"), "none"),
+            "safe_invalidation_evidence": safe,
+            "file_dependency_evidence_available": bool(audit.get("file_dependency_evidence_available") or safe),
+            "paths_included": False,
+            "path_hashes_included": False,
+            "raw_stat_values_included": False,
+        }
+    evidence = bool(cache.get("file_dependency_evidence_available") or cache.get("safe_invalidation_evidence"))
+    return {
+        "schema": "agentflow.cache_file_dependency_audit.v1",
+        "file_watch_enabled": bool(cache.get("file_watch_enabled")),
+        "snapshot_root_policy": "unknown",
+        "root_path_included": False,
+        "snapshot_count": _as_int(cache.get("file_dependency_count")),
+        "snapshot_count_bucket": public_label(cache.get("file_dependency_count_bucket"), "unknown"),
+        "candidate_path_count_bucket": "unknown",
+        "raw_candidate_path_count_bucket": "unknown",
+        "distinct_candidate_path_count_bucket": "unknown",
+        "max_paths": 0,
+        "cap_exceeded": False,
+        "cap_trimmed": False,
+        "dependency_capture_reason": "complete" if evidence else "file-dependency-missing",
+        "present_path_count": _as_int(cache.get("file_dependency_count")),
+        "missing_path_count": 0,
+        "changed_path_count": 0,
+        "deleted_path_count": 0,
+        "created_path_count": 0,
+        "invalidation_reason": public_label(cache.get("invalidation_reason"), "none"),
+        "safe_invalidation_evidence": bool(cache.get("safe_invalidation_evidence")),
+        "file_dependency_evidence_available": evidence,
+        "paths_included": False,
+        "path_hashes_included": False,
+        "raw_stat_values_included": False,
+    }
+
+
+def _file_dependency_status(audit: dict[str, Any]) -> str:
+    reason = public_label(audit.get("invalidation_reason"), "none")
+    if audit.get("cap_exceeded"):
+        return "invalidated"
+    if reason in {"dependency-changed", "dependency-deleted", "dependency-created", "dependency-cap-exceeded"}:
+        return "invalidated"
+    if audit.get("safe_invalidation_evidence"):
+        return "stable"
+    if reason in {"file-dependency-missing", "dependency-missing", "file-watch-disabled"}:
+        return "missing"
+    if not audit.get("file_dependency_evidence_available"):
+        return "missing"
+    return "unknown"
+
+
+def _file_dependency_fingerprint_available(cache: dict[str, Any]) -> bool:
+    fingerprint = cache.get("file_dependency_fingerprint")
+    if isinstance(fingerprint, dict):
+        return bool(fingerprint.get("fingerprint_available") or fingerprint.get("fingerprint_sha256"))
+    return bool(cache.get("file_dependency_fingerprint_available") or cache.get("file_dependency_fingerprint_sha256"))
+
+
+def _merge_file_dependency_audit(left: dict[str, Any] | None, right: dict[str, Any]) -> dict[str, Any]:
+    if not left:
+        return {
+            **right,
+            "paths_included": False,
+            "path_hashes_included": False,
+            "raw_stat_values_included": False,
+            "root_path_included": False,
+        }
+    merged = {**left}
+    for key in (
+        "snapshot_count",
+        "present_path_count",
+        "missing_path_count",
+        "changed_path_count",
+        "deleted_path_count",
+        "created_path_count",
+    ):
+        merged[key] = _as_int(merged.get(key)) + _as_int(right.get(key))
+    merged["cap_exceeded"] = bool(merged.get("cap_exceeded") or right.get("cap_exceeded"))
+    merged["cap_trimmed"] = bool(merged.get("cap_trimmed") or right.get("cap_trimmed"))
+    merged["safe_invalidation_evidence"] = bool(
+        merged.get("safe_invalidation_evidence") or right.get("safe_invalidation_evidence")
+    )
+    merged["file_dependency_evidence_available"] = bool(
+        merged.get("file_dependency_evidence_available") or right.get("file_dependency_evidence_available")
+    )
+    if public_label(merged.get("invalidation_reason"), "none") == "none":
+        merged["invalidation_reason"] = right.get("invalidation_reason")
+    merged["paths_included"] = False
+    merged["path_hashes_included"] = False
+    merged["raw_stat_values_included"] = False
+    merged["root_path_included"] = False
+    return merged
+
+
 def _routing_status(row: dict[str, Any], routing: dict[str, Any]) -> str:
     requested = str(row.get("requested_model") or routing.get("requested_model") or "")
     routed = str(row.get("routed_model") or routing.get("routed_model") or requested)
@@ -346,6 +466,7 @@ def _blocker_codes(
     routing_status: str,
     stream: bool,
     has_tools: bool,
+    file_dependency_status: str = "missing",
 ) -> list[str]:
     blockers: set[str] = set()
     reason = str(cache.get("reason") or "").lower()
@@ -355,6 +476,15 @@ def _blocker_codes(
         blockers.add("unsupported-streaming-shape")
     if has_tools and ("tools-disabled" in reason or "tool" in reason and "disabled" in reason):
         blockers.add("tool-call-cache-disabled")
+    if has_tools:
+        if file_dependency_status == "stable":
+            blockers.add("safe-invalidation-evidence-present")
+        elif file_dependency_status == "invalidated":
+            blockers.add("stale-dependency-evidence")
+        elif file_dependency_status == "missing":
+            blockers.add("invalidation-evidence-missing")
+        else:
+            blockers.add("dependency-evidence-unknown")
     if "semantic" in reason and "disabled" in reason:
         blockers.add("semantic-cache-disabled")
     if cache_status in {"miss", "missing"} or "exact-miss" in reason:
@@ -2039,6 +2169,9 @@ def _new_group(basis: dict[str, Any], *, candidate_id: str, rollup_key: str) -> 
         "cost_bucket_counts": {},
         "savings_bucket_counts": {},
         "cache_reason_counts": {},
+        "file_dependency_status_counts": {},
+        "file_dependency_fingerprint_availability_counts": {},
+        "file_dependency_audit": None,
         "crunch_canary_lifecycle_counts": {},
         "crunch_canary_policy_counts": {},
     }
@@ -2047,6 +2180,9 @@ def _new_group(basis: dict[str, Any], *, candidate_id: str, rollup_key: str) -> 
 def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
     candidate_family_counts = group.pop("candidate_family_counts", {})
     blocker_counts = group.pop("blocker_counts", {})
+    file_dependency_status_counts = group.pop("file_dependency_status_counts", {})
+    file_dependency_fingerprint_counts = group.pop("file_dependency_fingerprint_availability_counts", {})
+    file_dependency_audit = group.pop("file_dependency_audit", None)
     crunch_canary_lifecycle_counts = group.pop("crunch_canary_lifecycle_counts", {})
     crunch_canary_policy_counts = group.pop("crunch_canary_policy_counts", {})
     candidate_families = sorted(candidate_family_counts)
@@ -2069,6 +2205,8 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
         "cache_reason_breakdown": _breakdown(group.pop("cache_reason_counts", {})),
         "candidate_family_breakdown": _breakdown(candidate_family_counts),
         "blocker_breakdown": _breakdown(blocker_counts),
+        "file_dependency_status_breakdown": _breakdown(file_dependency_status_counts),
+        "file_dependency_fingerprint_availability_breakdown": _breakdown(file_dependency_fingerprint_counts),
         "crunch_canary_lifecycle_breakdown": _breakdown(crunch_canary_lifecycle_counts),
         "crunch_canary_policy_breakdown": _breakdown(crunch_canary_policy_counts),
         "candidate_class_breakdown": [{"value": value, "count": _as_int(group.get("row_count"))} for value in candidate_classes],
@@ -2078,6 +2216,11 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
     group["candidate_families"] = candidate_families
     group["candidate_work_classes"] = candidate_classes
     group["blocker_codes"] = blocker_codes
+    group["file_dependency_audit"] = file_dependency_audit
+    group["file_dependency_status_breakdown"] = metadata["file_dependency_status_breakdown"]
+    group["file_dependency_fingerprint_availability_breakdown"] = metadata[
+        "file_dependency_fingerprint_availability_breakdown"
+    ]
     group["cost_est_usd"] = round(_as_float(group.get("cost_est_usd")), 6)
     group["baseline_cost_usd"] = round(_as_float(group.get("baseline_cost_usd")), 6)
     group["observed_savings_usd"] = round(_as_float(group.get("observed_savings_usd")), 6)
@@ -6240,6 +6383,7 @@ def _shape_replayability_decision(row: dict[str, Any]) -> dict[str, Any]:
     cache_status = str(row.get("cache_status") or "unknown")
     stream = bool(row.get("stream"))
     has_tools = bool(row.get("has_tools"))
+    dependency_status = public_label(row.get("file_dependency_status"), "missing")
     blockers: set[str] = set()
 
     if endpoint not in REPLAY_SUPPORTED_ENDPOINTS:
@@ -6252,8 +6396,17 @@ def _shape_replayability_decision(row: dict[str, Any]) -> dict[str, Any]:
         blockers.add("streaming-replay-not-supported")
     if has_tools:
         blockers.add("tools-present")
-        blockers.add("invalidation-evidence-missing")
-        blockers.add("unsafe-tool-calls-without-invalidation")
+        if dependency_status == "stable":
+            blockers.add("safe-invalidation-evidence-present")
+        elif dependency_status == "invalidated":
+            blockers.add("stale-dependency-evidence")
+            blockers.add("unsafe-tool-calls-without-invalidation")
+        elif dependency_status == "missing":
+            blockers.add("invalidation-evidence-missing")
+            blockers.add("unsafe-tool-calls-without-invalidation")
+        else:
+            blockers.add("dependency-evidence-unknown")
+            blockers.add("unsafe-tool-calls-without-invalidation")
 
     if not blockers:
         return {
@@ -6267,8 +6420,11 @@ def _shape_replayability_decision(row: dict[str, Any]) -> dict[str, Any]:
         "unsupported-endpoint",
         "already-cache-hit",
         "streaming-replay-not-supported",
+        "stale-dependency-evidence",
         "invalidation-evidence-missing",
         "unsafe-tool-calls-without-invalidation",
+        "dependency-evidence-unknown",
+        "safe-invalidation-evidence-present",
         "tools-present",
         "insufficient-repeat-evidence",
     )
@@ -6297,6 +6453,14 @@ def _cache_invalidation_next_actions(cohort: dict[str, Any]) -> tuple[str, list[
 
     if readiness == "replay-ready":
         return "exact-non-tool-only", secondary, "ready-exact-non-tool", False
+    if "safe-invalidation-evidence-present" in blockers:
+        if has_tools:
+            secondary.append("keep-tool-cache-blocked")
+        return "rank-safe-tool-cache-replay-readiness", secondary, "safe-invalidation-evidence-present", False
+    if "stale-dependency-evidence" in blockers:
+        if has_tools:
+            secondary.append("keep-tool-cache-blocked")
+        return "refresh-file-invalidation-evidence", secondary, "stale-dependency-evidence", True
     if "invalidation-evidence-missing" in blockers or "unsafe-tool-calls-without-invalidation" in blockers:
         if has_tools:
             secondary.append("keep-tool-cache-blocked")
@@ -6386,7 +6550,12 @@ def build_request_shape_cache_invalidation_evidence_report(
                 "projected_hits": _as_int(cohort.get("projected_hits")),
                 "projected_savings_usd": round(_as_float(cohort.get("projected_savings_usd")), 6),
                 "requires_explicit_invalidation_safety_evidence": requires_invalidation,
-                "safe_invalidation_evidence": False,
+                "file_dependency_status": public_label(cohort.get("file_dependency_status"), "missing"),
+                "file_dependency_fingerprint_available": bool(cohort.get("file_dependency_fingerprint_available")),
+                "file_dependency_audit": cohort.get("file_dependency_audit")
+                if isinstance(cohort.get("file_dependency_audit"), dict)
+                else None,
+                "safe_invalidation_evidence": bool(cohort.get("file_dependency_status") == "stable"),
                 "tool_cache_replay_enabled": False,
                 "streaming_replay_enabled": False,
                 "cache_entries_written": 0,
@@ -6413,6 +6582,8 @@ def build_request_shape_cache_invalidation_evidence_report(
         key=lambda item: (
             {
                 "collect-file-invalidation-evidence": 5,
+                "rank-safe-tool-cache-replay-readiness": 5,
+                "refresh-file-invalidation-evidence": 5,
                 "keep-tool-cache-blocked": 4,
                 "stage-streaming-replay-buffer-fixture": 3,
                 "exact-non-tool-only": 2,
@@ -6490,6 +6661,10 @@ def build_request_shape_cache_invalidation_evidence_report(
 
 def _skipped_openai_cache_replay_next_action(blocker: str) -> str:
     code = public_label(blocker, "unknown")
+    if code == "safe-invalidation-evidence-present":
+        return "rank-safe-tool-cache-replay-readiness"
+    if code == "stale-dependency-evidence":
+        return "refresh-invalidation-evidence"
     if code in {"invalidation-evidence-missing", "unsafe-tool-calls-without-invalidation"}:
         return "add-invalidation-evidence"
     if code in {"tools-present", "tool-call-cache-disabled"}:
@@ -6510,6 +6685,8 @@ def _primary_skipped_openai_cache_replay_next_action(blockers: list[str], reason
     if not candidates and public_label(reason, "unknown") != "unknown":
         candidates = [public_label(reason, "unknown")]
     action_priority = {
+        "rank-safe-tool-cache-replay-readiness": -1,
+        "refresh-invalidation-evidence": -1,
         "add-invalidation-evidence": 0,
         "keep-tool-cache-disabled": 1,
         "wait-for-streaming-replay-support": 2,
@@ -6625,6 +6802,12 @@ def build_request_shape_skipped_openai_cache_replay_blockers_report(
                 "blocker_codes": blocker_codes,
                 "blocker_actions": blocker_actions,
                 "next_action": next_action,
+                "file_dependency_status": public_label(cohort.get("file_dependency_status"), "missing"),
+                "file_dependency_fingerprint_available": bool(cohort.get("file_dependency_fingerprint_available")),
+                "file_dependency_audit": cohort.get("file_dependency_audit")
+                if isinstance(cohort.get("file_dependency_audit"), dict)
+                else None,
+                "safe_invalidation_evidence": bool(cohort.get("file_dependency_status") == "stable"),
                 "tool_cache_replay_enabled": False,
                 "streaming_replay_enabled": False,
                 "emits_cache_apply_action": False,
@@ -6636,6 +6819,8 @@ def build_request_shape_skipped_openai_cache_replay_blockers_report(
         )
 
     action_priority = {
+        "rank-safe-tool-cache-replay-readiness": 5,
+        "refresh-invalidation-evidence": 5,
         "add-invalidation-evidence": 5,
         "keep-tool-cache-disabled": 4,
         "wait-for-streaming-replay-support": 3,
@@ -6795,6 +6980,11 @@ def build_request_shape_cache_replayability_dry_run(
             "has_tools": bool(row.get("has_tools")),
             "cache_status": row.get("cache_status"),
             "routing_status": row.get("routing_status"),
+            "file_dependency_status": row.get("file_dependency_status"),
+            "file_dependency_fingerprint_available": bool(row.get("file_dependency_fingerprint_available")),
+            "file_dependency_audit": row.get("file_dependency_audit")
+            if isinstance(row.get("file_dependency_audit"), dict)
+            else None,
             "text_bucket": row.get("text_bucket"),
             "token_bucket": row.get("token_bucket"),
             "row_count": row_count,
@@ -7664,6 +7854,9 @@ def build_request_shape_rollups_report(
         )
         cache_status = _cache_status(row, cache)
         cache_reason = public_label(cache.get("reason"), "unknown")
+        file_dependency_audit = _sanitized_file_dependency_audit(cache)
+        file_dependency_status = _file_dependency_status(file_dependency_audit)
+        file_dependency_fingerprint_available = _file_dependency_fingerprint_available(cache)
         routing_status = _routing_status(row, routing)
         blockers = _blocker_codes(
             row=row,
@@ -7673,6 +7866,7 @@ def build_request_shape_rollups_report(
             routing_status=routing_status,
             stream=stream,
             has_tools=has_tools,
+            file_dependency_status=file_dependency_status,
         )
         candidate_families = _candidate_families(
             cache_status=cache_status,
@@ -7695,6 +7889,8 @@ def build_request_shape_rollups_report(
             "token_bucket": _token_bucket(input_tokens),
             "cache_status": cache_status,
             "routing_status": routing_status,
+            "file_dependency_status": file_dependency_status,
+            "file_dependency_fingerprint_available": file_dependency_fingerprint_available,
         }
         impact_rows.append(
             {
@@ -7722,12 +7918,21 @@ def build_request_shape_rollups_report(
         group["current_crunch_tokens_saved"] += current_crunch_tokens
         group["current_crunch_chars_saved"] += current_crunch_chars
         group["current_crunch_savings_usd"] += current_crunch_savings
+        group["file_dependency_audit"] = _merge_file_dependency_audit(
+            group.get("file_dependency_audit"),
+            file_dependency_audit,
+        )
         _increment(provider_counts, provider)
         _increment(group["status_counts"], status_bucket)
         _increment(group["retry_bucket_counts"], _retry_bucket(_as_int(row.get("retry_count"))))
         _increment(group["cost_bucket_counts"], _cost_bucket(cost))
         _increment(group["savings_bucket_counts"], _savings_bucket(observed_savings))
         _increment(group["cache_reason_counts"], cache_reason)
+        _increment(group["file_dependency_status_counts"], file_dependency_status)
+        _increment(
+            group["file_dependency_fingerprint_availability_counts"],
+            "available" if file_dependency_fingerprint_available else "missing",
+        )
         for family in candidate_families:
             _increment(candidate_family_counts, family)
             _increment(group["candidate_family_counts"], family)
