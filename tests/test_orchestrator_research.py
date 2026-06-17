@@ -4696,6 +4696,206 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-session-secret", rendered)
         self.assertNotIn("cache-secret", rendered)
 
+    def test_request_shape_replayability_ranks_skipped_blocker_when_remaining_ready_zero(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 3385,
+                "cache_hits": 1,
+                "cache_hit_rate": 0.000295,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 999, "rollup_count": 32},
+                    "rollups": [],
+                    "cache_replayability_dry_run": {
+                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "status": "ranked",
+                        "summary": {
+                            "cohort_count": 32,
+                            "rows_considered": 999,
+                            "replay_ready_cohort_count": 7,
+                            "replay_ready_rows": 108,
+                            "remaining_replay_ready_cohort_count": 0,
+                            "remaining_replay_ready_rows": 0,
+                            "handled_replay_ready_cohort_count": 7,
+                            "handled_replay_ready_rows": 108,
+                            "skipped_cohort_count": 25,
+                            "skipped_rows": 891,
+                            "projected_hits": 101,
+                            "projected_savings_usd": 0.214063,
+                            "remaining_projected_hits": 0,
+                            "remaining_projected_savings_usd": 0.0,
+                            "handled_projected_hits": 101,
+                            "handled_projected_savings_usd": 0.214063,
+                            "top_blocker_code": "invalidation-evidence-missing",
+                        },
+                        "cohorts": [
+                            {
+                                "readiness": "replay-ready",
+                                "reason": "replay-ready-exact-non-tool-shape",
+                                "blockers": [],
+                                "provider_family": "openai",
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "chat",
+                                "workflow_phase": "chat",
+                                "stream": False,
+                                "has_tools": False,
+                                "cache_status": "miss",
+                                "routing_status": "passthrough",
+                                "row_count": 51,
+                                "projected_hits": 50,
+                                "projected_savings_usd": 0.106025,
+                                "handled_by_local_policy": True,
+                                "remaining_replay_ready": False,
+                                "next_action": "already-handled-by-local-cache-policy",
+                                "request_id": "handled-request-secret",
+                            },
+                            {
+                                "readiness": "skipped",
+                                "reason": "invalidation-evidence-missing",
+                                "blockers": [
+                                    "invalidation-evidence-missing",
+                                    "tools-present",
+                                    "unsafe-tool-calls-without-invalidation",
+                                ],
+                                "provider_family": "openai",
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "tool-light",
+                                "workflow_phase": "tool-light",
+                                "stream": False,
+                                "has_tools": True,
+                                "cache_status": "skipped",
+                                "routing_status": "passthrough",
+                                "row_count": 30,
+                                "projected_hits": 0,
+                                "projected_savings_usd": 0.020955,
+                                "cache_key": "skipped-cache-secret",
+                            },
+                        ],
+                        "skipped_openai_blockers": {
+                            "schema": "agentflow.request_shape_skipped_openai_cache_replay_blockers.v1",
+                            "status": "ranked",
+                            "next_action": "add-invalidation-evidence",
+                            "summary": {
+                                "skipped_openai_cohort_count": 3,
+                                "replay_ready_count": 7,
+                                "replay_ready_rows": 108,
+                                "skipped_count": 25,
+                                "skipped_rows": 891,
+                                "sample_count": 891,
+                                "affected_rows": 891,
+                                "projected_hits": 0,
+                                "projected_savings_usd": 0.020955,
+                                "top_blocker_code": "invalidation-evidence-missing",
+                                "top_blocker_count": 30,
+                                "top_next_action": "add-invalidation-evidence",
+                                "cache_apply_action_count": 0,
+                                "cache_entries_written": 0,
+                                "policy_files_written": False,
+                            },
+                            "blocker_breakdown": [
+                                {"value": "invalidation-evidence-missing", "count": 30},
+                                {"value": "tools-present", "count": 30},
+                                {"value": "unsafe-tool-calls-without-invalidation", "count": 30},
+                                {"value": "streaming-replay-not-supported", "count": 15},
+                            ],
+                            "next_action_breakdown": [
+                                {"value": "add-invalidation-evidence", "count": 30},
+                                {"value": "wait-for-streaming-replay-support", "count": 15},
+                            ],
+                            "cohorts": [
+                                {
+                                    "schema": "agentflow.request_shape_skipped_openai_cache_replay_blocker.v1",
+                                    "rank": 1,
+                                    "provider_family": "openai",
+                                    "source_surface": "openai_responses",
+                                    "endpoint": "responses",
+                                    "category": "tool-light",
+                                    "workflow_phase": "tool-light",
+                                    "stream": False,
+                                    "has_tools": True,
+                                    "cache_status": "skipped",
+                                    "routing_status": "passthrough",
+                                    "sample_count": 30,
+                                    "row_count": 30,
+                                    "projected_hits": 0,
+                                    "projected_savings_usd": 0.020955,
+                                    "reason": "invalidation-evidence-missing",
+                                    "blocker_codes": [
+                                        "invalidation-evidence-missing",
+                                        "tools-present",
+                                        "unsafe-tool-calls-without-invalidation",
+                                    ],
+                                    "next_action": "add-invalidation-evidence",
+                                    "tool_cache_replay_enabled": False,
+                                    "streaming_replay_enabled": False,
+                                    "emits_cache_apply_action": False,
+                                    "request_id": "skipped-request-secret",
+                                    "session_id": "skipped-session-secret",
+                                    "cache_key": "skipped-cache-secret",
+                                    "file_path": "/tmp/private-skipped-cache.py",
+                                }
+                            ],
+                            "acceptance": {
+                                "has_ranked_skipped_openai_cohorts": True,
+                                "emits_no_cache_apply_actions": True,
+                                "tool_and_streaming_replay_remain_disabled": True,
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                            },
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        },
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        shape_signal = stats_summary["request_shape_rollup_candidates"]
+        skipped = shape_signal["cache_replayability_dry_run"]["skipped_openai_blockers"]
+        self.assertEqual(skipped["schema"], "agentflow.request_shape_skipped_openai_cache_replay_blockers.v1")
+        self.assertEqual(skipped["summary"]["top_blocker_code"], "invalidation-evidence-missing")
+        self.assertEqual(skipped["summary"]["affected_rows"], 891)
+        self.assertTrue(skipped["privacy"]["metadata_only"])
+        self.assertTrue(skipped["privacy"]["aggregate_only"])
+
+        loop = stats_summary["evidence_to_activation_loop"]
+        cache_stage = next(row for row in loop["levers"] if row["lever"] == "cache")
+        self.assertEqual(cache_stage["state"], "missing-evidence")
+        self.assertEqual(cache_stage["next_action"], "resolve-cache-replayability-blocker")
+        self.assertIn("invalidation-evidence-missing", cache_stage["blocker_codes"])
+        self.assertEqual(cache_stage["sample_count"], 30)
+
+        candidates = plan["evidence"]["optimization_candidates"]
+        cache_candidate = next(row for row in candidates if row["lever"] == "cache")
+        self.assertEqual(cache_candidate["blocker"], "invalidation-evidence-missing")
+        self.assertEqual(cache_candidate["projected_savings_signal"]["remaining_replay_ready_rows"], 0)
+        self.assertEqual(cache_candidate["projected_savings_signal"]["skipped_openai_cohort_count"], 3)
+
+        created = plan["backlog_changes"]["create_issues"]
+        titles = [item["title"] for item in created]
+        self.assertNotIn("Stage cache replay canary for replay-ready on openai/openai_responses/responses", titles)
+        cache_issue = next(item for item in created if item["title"].startswith("Collect cache replay dependency evidence"))
+        self.assertIn("invalidation-evidence-missing on openai/openai_responses/responses", cache_issue["title"])
+        self.assertIn("Source metadata: request_shape_skipped_openai_cache_replay_blockers", cache_issue["body"])
+        self.assertIn("count: 30", cache_issue["body"])
+        self.assertIn("projected_hits: 0", cache_issue["body"])
+        self.assertIn("projected_saved_cost_usd: 0.020955", cache_issue["body"])
+        self.assertIn("cache", cache_issue["labels"])
+
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("handled-request-secret", rendered)
+        self.assertNotIn("skipped-request-secret", rendered)
+        self.assertNotIn("skipped-session-secret", rendered)
+        self.assertNotIn("skipped-cache-secret", rendered)
+        self.assertNotIn("/tmp/private-skipped-cache.py", rendered)
+
     def test_request_shape_replay_ready_cache_evidence_supersedes_zero_hit_candidate(self):
         plan = build_research_plan(
             issues=[],

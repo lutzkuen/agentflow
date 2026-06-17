@@ -3456,6 +3456,11 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
         },
     }
     if replay_dry_run is not None:
+        skipped_openai_blockers = (
+            replay_dry_run.get("skipped_openai_blockers")
+            if isinstance(replay_dry_run.get("skipped_openai_blockers"), dict)
+            else None
+        )
         result["cache_replayability_dry_run"] = {
             "schema": sanitize_value(replay_dry_run.get("schema")),
             "status": sanitize_value(replay_dry_run.get("status")),
@@ -3466,6 +3471,26 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             "cohorts": sanitize_value(replay_cohorts[:5]),
             "privacy": sanitize_value(replay_dry_run.get("privacy") if isinstance(replay_dry_run.get("privacy"), dict) else {}),
         }
+        if skipped_openai_blockers is not None:
+            result["cache_replayability_dry_run"]["skipped_openai_blockers"] = sanitize_value(
+                {
+                    "schema": skipped_openai_blockers.get("schema"),
+                    "status": skipped_openai_blockers.get("status"),
+                    "next_action": skipped_openai_blockers.get("next_action"),
+                    "summary": skipped_openai_blockers.get("summary")
+                    if isinstance(skipped_openai_blockers.get("summary"), dict)
+                    else {},
+                    "blocker_breakdown": skipped_openai_blockers.get("blocker_breakdown") or [],
+                    "next_action_breakdown": skipped_openai_blockers.get("next_action_breakdown") or [],
+                    "cohorts": (skipped_openai_blockers.get("cohorts") or [])[:5],
+                    "acceptance": skipped_openai_blockers.get("acceptance")
+                    if isinstance(skipped_openai_blockers.get("acceptance"), dict)
+                    else {},
+                    "privacy": skipped_openai_blockers.get("privacy")
+                    if isinstance(skipped_openai_blockers.get("privacy"), dict)
+                    else {},
+                }
+            )
     if crunch_policy_decision is not None:
         decision_summary = (
             crunch_policy_decision.get("summary")
@@ -4155,11 +4180,45 @@ def _cache_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     shape_replay = shape_signal.get("cache_replayability_dry_run") if isinstance(shape_signal, dict) else None
     if isinstance(shape_replay, dict):
         summary = shape_replay.get("summary") if isinstance(shape_replay.get("summary"), dict) else {}
-        rows = [row for row in shape_replay.get("cohorts") or [] if isinstance(row, dict)]
+        remaining_rows = [
+            row
+            for row in shape_replay.get("remaining_replay_ready_cohorts") or []
+            if isinstance(row, dict)
+        ]
+        skipped_openai = (
+            shape_replay.get("skipped_openai_blockers")
+            if isinstance(shape_replay.get("skipped_openai_blockers"), dict)
+            else {}
+        )
+        skipped_rows = [
+            row
+            for row in skipped_openai.get("cohorts") or []
+            if isinstance(row, dict)
+        ] if isinstance(skipped_openai, dict) else []
+        rows = remaining_rows or [row for row in shape_replay.get("cohorts") or [] if isinstance(row, dict)]
         top = rows[0] if rows else {}
-        ready = _to_int(summary.get("replay_ready_cohort_count")) > 0 or top.get("readiness") == "replay-ready"
+        remaining_ready_count = _to_int(summary.get("remaining_replay_ready_cohort_count"))
+        remaining_ready_rows = _to_int(summary.get("remaining_replay_ready_rows"))
+        remaining_fields_present = (
+            "remaining_replay_ready_cohort_count" in summary
+            or "remaining_replay_ready_rows" in summary
+        )
+        if remaining_fields_present:
+            ready = remaining_ready_count > 0 or remaining_ready_rows > 0 or bool(top.get("remaining_replay_ready"))
+        else:
+            ready = _to_int(summary.get("replay_ready_cohort_count")) > 0 or top.get("readiness") == "replay-ready"
+        if not ready and skipped_rows:
+            top = skipped_rows[0]
         blockers = [str(item) for item in top.get("blockers") or [] if str(item or "").strip()]
+        for code in top.get("blocker_codes") or []:
+            if str(code or "").strip() and str(code) not in blockers:
+                blockers.append(str(code))
         top_blocker = str(summary.get("top_blocker_code") or (blockers[0] if blockers else "cache-replayability-evidence-missing"))
+        skipped_summary = (
+            skipped_openai.get("summary")
+            if isinstance(skipped_openai, dict) and isinstance(skipped_openai.get("summary"), dict)
+            else {}
+        )
         return {
             "lever": "cache",
             "state": "replay-ready" if ready else "missing-evidence",
@@ -4167,9 +4226,20 @@ def _cache_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
             "local_action_family": "cache",
             "next_action": "stage-cache-replay-canary" if ready else "resolve-cache-replayability-blocker",
             "blocker_codes": [] if ready else blockers or [top_blocker],
-            "sample_count": _to_int(top.get("row_count") or summary.get("rows_considered")),
-            "projected_hits": _to_int(top.get("projected_hits") or summary.get("projected_hits")),
-            "projected_saved_cost_usd": round(_to_float(top.get("projected_savings_usd") or summary.get("projected_savings_usd")), 8),
+            "sample_count": _to_int(top.get("row_count") or top.get("sample_count") or summary.get("rows_considered")),
+            "projected_hits": _to_int(
+                top.get("projected_hits")
+                or (summary.get("remaining_projected_hits") if ready else skipped_summary.get("projected_hits"))
+                or 0
+            ),
+            "projected_saved_cost_usd": round(
+                _to_float(
+                    top.get("projected_savings_usd")
+                    or (summary.get("remaining_projected_savings_usd") if ready else skipped_summary.get("projected_savings_usd"))
+                    or 0.0
+                ),
+                8,
+            ),
         }
 
     ladder = stats_summary.get("cache_zero_hit_blocker_ladder")
@@ -6343,22 +6413,65 @@ def _cache_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         or shape_replay.get("cohorts")
     ):
         replay_summary = shape_replay.get("summary") if isinstance(shape_replay.get("summary"), dict) else {}
-        replay_rows = [row for row in shape_replay.get("cohorts") or [] if isinstance(row, dict)]
+        remaining_rows = [
+            row
+            for row in shape_replay.get("remaining_replay_ready_cohorts") or []
+            if isinstance(row, dict)
+        ]
+        skipped_openai = (
+            shape_replay.get("skipped_openai_blockers")
+            if isinstance(shape_replay.get("skipped_openai_blockers"), dict)
+            else {}
+        )
+        skipped_rows = [
+            row
+            for row in skipped_openai.get("cohorts") or []
+            if isinstance(row, dict)
+        ] if isinstance(skipped_openai, dict) else []
+        replay_rows = remaining_rows or [row for row in shape_replay.get("cohorts") or [] if isinstance(row, dict)]
         top_replay = replay_rows[0] if replay_rows else {}
-        ready = _to_int(replay_summary.get("replay_ready_cohort_count")) > 0 or top_replay.get("readiness") == "replay-ready"
+        remaining_ready_count = _to_int(replay_summary.get("remaining_replay_ready_cohort_count"))
+        remaining_ready_rows = _to_int(replay_summary.get("remaining_replay_ready_rows"))
+        remaining_fields_present = (
+            "remaining_replay_ready_cohort_count" in replay_summary
+            or "remaining_replay_ready_rows" in replay_summary
+        )
+        if remaining_fields_present:
+            ready = remaining_ready_count > 0 or remaining_ready_rows > 0 or bool(top_replay.get("remaining_replay_ready"))
+        else:
+            ready = _to_int(replay_summary.get("replay_ready_cohort_count")) > 0 or top_replay.get("readiness") == "replay-ready"
+        if not ready and skipped_rows:
+            top_replay = skipped_rows[0]
         remaining_ready = (
             bool(top_replay.get("remaining_replay_ready"))
-            or _to_int(replay_summary.get("remaining_replay_ready_cohort_count")) > 0
+            or remaining_ready_count > 0
+            or remaining_ready_rows > 0
         )
         blockers = [str(item) for item in top_replay.get("blockers") or [] if str(item or "").strip()]
+        for code in top_replay.get("blocker_codes") or []:
+            if str(code or "").strip() and str(code) not in blockers:
+                blockers.append(str(code))
         replay_blocker = "remaining-replay-ready" if remaining_ready else "replay-ready" if ready else str(
             replay_summary.get("top_blocker_code")
             or (blockers[0] if blockers else top_replay.get("reason"))
             or "cache-replayability-evidence-missing"
         )
-        replay_hits = _to_int(top_replay.get("projected_hits") or replay_summary.get("projected_hits"))
-        replay_rows_count = _to_int(top_replay.get("row_count") or replay_summary.get("rows_considered"))
-        replay_savings = _to_float(top_replay.get("projected_savings_usd") or replay_summary.get("projected_savings_usd"))
+        skipped_summary = (
+            skipped_openai.get("summary")
+            if isinstance(skipped_openai, dict) and isinstance(skipped_openai.get("summary"), dict)
+            else {}
+        )
+        replay_hits = _to_int(
+            top_replay.get("projected_hits")
+            or (replay_summary.get("remaining_projected_hits") if ready else skipped_summary.get("projected_hits"))
+            or 0
+        )
+        replay_rows_count = _to_int(top_replay.get("row_count") or top_replay.get("sample_count") or replay_summary.get("rows_considered"))
+        replay_savings = _to_float(
+            top_replay.get("projected_savings_usd")
+            or (replay_summary.get("remaining_projected_savings_usd") if ready else skipped_summary.get("projected_savings_usd"))
+            or 0.0
+        )
         replay_bucket_row = dict(top_replay)
         if replay_bucket_row.get("provider") is None and replay_bucket_row.get("provider_family") is not None:
             replay_bucket_row["provider"] = replay_bucket_row.get("provider_family")
@@ -6380,7 +6493,11 @@ def _cache_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
                 "cache_hit_rate": cache_hit_rate,
                 "replay_ready_cohort_count": _to_int(replay_summary.get("replay_ready_cohort_count")),
                 "replay_ready_rows": _to_int(replay_summary.get("replay_ready_rows")),
+                "remaining_replay_ready_rows": remaining_ready_rows,
                 "skipped_cohort_count": _to_int(replay_summary.get("skipped_cohort_count")),
+                "skipped_openai_cohort_count": _to_int(
+                    (skipped_openai.get("summary") if isinstance(skipped_openai.get("summary"), dict) else {}).get("skipped_openai_cohort_count")
+                ) if isinstance(skipped_openai, dict) else 0,
                 "projected_hits": replay_hits,
                 "projected_savings_usd": round(replay_savings, 8),
                 "top_blocker_code": replay_summary.get("top_blocker_code"),
@@ -8132,6 +8249,23 @@ def _cache_cohort_name(row: dict[str, Any]) -> str:
     return blocker
 
 
+def _cache_action_from_skipped_openai_next_action(next_action: Any) -> tuple[str, str]:
+    action = str(next_action or "").strip()
+    if action == "add-invalidation-evidence":
+        return "collect-dependency-evidence", "collect local invalidation and dependency evidence"
+    if action == "collect-more-repeat-evidence":
+        return "accept-non-repeatable-traffic", "collect more repeat evidence before replay activation"
+    if action == "wait-for-streaming-replay-support":
+        return "accept-non-repeatable-traffic", "keep streaming replay blocked until replay support exists"
+    if action == "keep-tool-cache-disabled":
+        return "collect-dependency-evidence", "keep tool-call replay disabled while collecting invalidation evidence"
+    if action == "unsupported-endpoint":
+        return "accept-non-repeatable-traffic", "keep unsupported endpoint replay blocked"
+    if action == "already-cache-hit":
+        return "accept-non-repeatable-traffic", "keep already-hit traffic out of replay activation work"
+    return "instrument-cache-decision", "rank or instrument the cache replay blocker"
+
+
 def _top_cache_replay_issue_row(stats_summary: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     cohorts = stats_summary.get("cache_replay_cohort_ranking")
     if isinstance(cohorts, dict):
@@ -8153,27 +8287,68 @@ def _top_cache_replay_issue_row(stats_summary: dict[str, Any]) -> tuple[dict[str
     shape_signal = stats_summary.get("request_shape_rollup_candidates")
     shape_replay = shape_signal.get("cache_replayability_dry_run") if isinstance(shape_signal, dict) else None
     if isinstance(shape_replay, dict):
-        for row in shape_replay.get("cohorts") or []:
+        replay_summary = shape_replay.get("summary") if isinstance(shape_replay.get("summary"), dict) else {}
+        remaining_rows = (
+            shape_replay.get("remaining_replay_ready_cohorts")
+            if isinstance(shape_replay.get("remaining_replay_ready_cohorts"), list)
+            else []
+        )
+        rows_to_scan = remaining_rows or shape_replay.get("cohorts") or []
+        remaining_replay_ready_rows = _to_int(replay_summary.get("remaining_replay_ready_rows"))
+        remaining_fields_present = (
+            "remaining_replay_ready_cohort_count" in replay_summary
+            or "remaining_replay_ready_rows" in replay_summary
+        )
+        for row in rows_to_scan:
             if not isinstance(row, dict):
                 continue
             readiness = str(row.get("readiness") or "")
-            if readiness not in {"replay-ready", "skipped"}:
+            if readiness != "replay-ready":
+                continue
+            if bool(row.get("handled_by_local_policy")) or row.get("remaining_replay_ready") is False:
                 continue
             blockers = [str(item) for item in row.get("blockers") or [] if str(item or "").strip()]
-            action = "stage-replay-policy" if readiness == "replay-ready" else "collect-dependency-evidence"
             issue_row = dict(row)
-            issue_row["next_action_family"] = action
-            issue_row["next_action_label"] = _CACHE_ACTION_LABELS[action]
+            issue_row["next_action_family"] = "stage-replay-policy"
+            issue_row["next_action_label"] = _CACHE_ACTION_LABELS["stage-replay-policy"]
             issue_row["provider"] = issue_row.get("provider") or issue_row.get("provider_family")
             issue_row["count"] = _to_int(issue_row.get("count") or issue_row.get("row_count"))
             issue_row["projected_saved_cost_usd"] = round(
                 _to_float(issue_row.get("projected_saved_cost_usd") or issue_row.get("projected_savings_usd")),
                 8,
             )
-            issue_row["blocker_code"] = "replay-ready" if readiness == "replay-ready" else (
-                blockers[0] if blockers else str(issue_row.get("reason") or "cache-replayability-evidence-missing")
-            )
+            issue_row["blocker_code"] = "replay-ready" if not blockers else blockers[0]
             return issue_row, "request_shape_cache_replayability_dry_run"
+        skipped_openai = (
+            shape_replay.get("skipped_openai_blockers")
+            if isinstance(shape_replay.get("skipped_openai_blockers"), dict)
+            else {}
+        )
+        if (not remaining_fields_present or remaining_replay_ready_rows <= 0) and isinstance(skipped_openai, dict):
+            skipped_rows = [row for row in skipped_openai.get("cohorts") or [] if isinstance(row, dict)]
+            if skipped_rows:
+                row = dict(skipped_rows[0])
+                action, label = _cache_action_from_skipped_openai_next_action(row.get("next_action"))
+                blockers = [str(item) for item in row.get("blocker_codes") or [] if str(item or "").strip()]
+                row["next_action_family"] = action
+                row["next_action_label"] = label
+                row["provider"] = row.get("provider") or row.get("provider_family")
+                row["count"] = _to_int(row.get("count") or row.get("row_count") or row.get("sample_count"))
+                row["projected_saved_cost_usd"] = round(
+                    _to_float(row.get("projected_saved_cost_usd") or row.get("projected_savings_usd")),
+                    8,
+                )
+                row["blocker_code"] = (
+                    str(row.get("blocker_code") or "").strip()
+                    or (blockers[0] if blockers else str(row.get("reason") or "cache-replayability-blocker"))
+                )
+                row["readiness"] = row.get("readiness") or "skipped"
+                row["local_action_family"] = row.get("local_action_family") or "cache"
+                row["remaining_replay_ready_rows"] = remaining_replay_ready_rows
+                row["skipped_openai_summary"] = sanitize_value(
+                    skipped_openai.get("summary") if isinstance(skipped_openai.get("summary"), dict) else {}
+                )
+                return row, "request_shape_skipped_openai_cache_replay_blockers"
 
     ladder = stats_summary.get("cache_zero_hit_blocker_ladder")
     if isinstance(ladder, dict):
