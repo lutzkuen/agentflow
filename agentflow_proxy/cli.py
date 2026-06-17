@@ -558,6 +558,7 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
         build_request_shape_cache_replay_policy_decision_report,
         build_request_shape_rollups_report,
     )
+    from agentflow_proxy.cache_smoke import build_isolated_cache_replay_hit_recovery_smoke
 
     needs_rollups = not any(
         isinstance(stats.get(key), dict)
@@ -603,7 +604,8 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
             enriched["request_shape_cache_replay_evidence"] = cache_replay_evidence
         if needs_cache_replay_policy_decision and isinstance(cache_replay_evidence, dict):
             enriched["request_shape_cache_replay_policy_decision"] = build_request_shape_cache_replay_policy_decision_report(
-                cache_replay_evidence
+                cache_replay_evidence,
+                hit_recovery_report=build_isolated_cache_replay_hit_recovery_smoke(),
             )
     finally:
         try:

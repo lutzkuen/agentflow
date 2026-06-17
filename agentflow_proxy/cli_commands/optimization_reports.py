@@ -5679,6 +5679,7 @@ def request_shape_cache_replay_policy_decision_cli(argv: Sequence[str] | None = 
         build_request_shape_cache_replay_evidence_report,
         build_request_shape_cache_replay_policy_decision_report,
     )
+    from agentflow_proxy.cache_smoke import build_isolated_cache_replay_hit_recovery_smoke
 
     rules_path = Path(args.rules_path).expanduser() if args.rules_path else Path(args.config_dir).expanduser() / "cache_canary_policy.yaml"
     store = _open_store_for_db(str(args.db))
@@ -5691,7 +5692,10 @@ def request_shape_cache_replay_policy_decision_cli(argv: Sequence[str] | None = 
         )
     finally:
         store.conn.close()
-    result = build_request_shape_cache_replay_policy_decision_report(evidence)
+    result = build_request_shape_cache_replay_policy_decision_report(
+        evidence,
+        hit_recovery_report=build_isolated_cache_replay_hit_recovery_smoke(),
+    )
     result["source_evidence"] = {
         **result["source_evidence"],
         "source": {

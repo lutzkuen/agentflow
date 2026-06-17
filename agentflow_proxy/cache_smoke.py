@@ -487,7 +487,7 @@ def build_cache_replay_hit_recovery_smoke(
     }
 
 
-def _build_isolated_cache_replay_hit_recovery_smoke() -> dict[str, Any]:
+def build_isolated_cache_replay_hit_recovery_smoke() -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as tmp:
         store_obj = SQLiteStore(str(Path(tmp) / "agentflow-cache-hit-recovery-smoke.sqlite3"))
         try:
@@ -627,7 +627,7 @@ def build_cache_smoke_diagnostic(
             "reconstruction_required_for_exact_confirmation": True,
         },
         "selected_cache_row_reconstruction": _key_stability_sample(store_obj, call_rows),
-        "cache_replay_hit_recovery_smoke": _build_isolated_cache_replay_hit_recovery_smoke(),
+        "cache_replay_hit_recovery_smoke": build_isolated_cache_replay_hit_recovery_smoke(),
         "privacy": {
             "metadata_only": True,
             "synthetic_hit_recovery_included": True,

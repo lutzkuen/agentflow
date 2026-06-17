@@ -5657,6 +5657,85 @@ def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> di
     }
 
 
+def _cache_replay_shapes_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if not left or not right:
+        return False
+    comparable_keys = (
+        "provider_family",
+        "source_surface",
+        "endpoint",
+        "category",
+        "workflow_phase",
+        "text_bucket",
+        "token_bucket",
+        "has_tools",
+        "stream",
+    )
+    shared_keys = [key for key in comparable_keys if key in left and key in right]
+    return bool(shared_keys) and all(left.get(key) == right.get(key) for key in shared_keys)
+
+
+def _cache_replay_policy_hit_recovery_metrics(
+    hit_recovery_report: dict[str, Any] | None,
+    evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    top = _cache_replay_policy_decision_top_canary(evidence or {})
+    top_shape = top.get("shape") if isinstance(top.get("shape"), dict) else {}
+    if not isinstance(hit_recovery_report, dict):
+        return {
+            "schema": "agentflow.request_shape_cache_replay_policy_hit_recovery_metrics.v1",
+            "source_schema": None,
+            "status": "unavailable",
+            "reason": "hit-recovery-smoke-not-provided",
+            "hit_recovery_demonstrated": False,
+            "synthetic_exact_hit_count": 0,
+            "synthetic_observed_hits": 0,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "cache_entries_written": False,
+            "target_matches_staged_canary_shape": False,
+            "target_rule_id_included": False,
+            "synthetic_only": True,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+    summary = hit_recovery_report.get("summary") if isinstance(hit_recovery_report.get("summary"), dict) else {}
+    privacy = hit_recovery_report.get("privacy") if isinstance(hit_recovery_report.get("privacy"), dict) else {}
+    target_shape = hit_recovery_report.get("target_shape") if isinstance(hit_recovery_report.get("target_shape"), dict) else {}
+    return {
+        "schema": "agentflow.request_shape_cache_replay_policy_hit_recovery_metrics.v1",
+        "source_schema": hit_recovery_report.get("schema"),
+        "status": public_label(hit_recovery_report.get("status"), "unknown"),
+        "reason": public_label(hit_recovery_report.get("reason"), "unknown"),
+        "hit_recovery_demonstrated": bool(summary.get("hit_recovery_demonstrated")),
+        "synthetic_exact_hit_count": _as_int(summary.get("exact_hit_count")),
+        "synthetic_observed_hits": _as_int(summary.get("observed_hits")),
+        "provider_calls_made": bool(summary.get("provider_calls_made")),
+        "managed_server_calls_made": bool(privacy.get("managed_server_calls_made")),
+        "cache_entries_written": bool(summary.get("cache_entries_written")),
+        "target_shape": {
+            key: target_shape.get(key)
+            for key in (
+                "provider_family",
+                "source_surface",
+                "endpoint",
+                "category",
+                "workflow_phase",
+                "text_bucket",
+                "token_bucket",
+                "has_tools",
+                "stream",
+            )
+            if key in target_shape
+        },
+        "target_matches_staged_canary_shape": _cache_replay_shapes_match(target_shape, top_shape),
+        "target_rule_id_included": False,
+        "synthetic_only": bool(privacy.get("synthetic_only", True)),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
 def _cache_replay_applied_miss_blocker_values(evidence: dict[str, Any] | None) -> list[str]:
     if not isinstance(evidence, dict):
         return []
@@ -5829,6 +5908,27 @@ def _cache_replay_policy_rollback_metadata(evidence: dict[str, Any] | None, deci
     }
 
 
+def _cache_replay_policy_duplicate_suppression(
+    decision: str,
+    promotion_readiness: str,
+    hit_recovery_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    reason = promotion_readiness or decision
+    if promotion_readiness == "keep-staged-warmup" and hit_recovery_metrics.get("hit_recovery_demonstrated"):
+        reason = "synthetic-hit-recovery-proven-live-traffic-warmup-only"
+    return {
+        "schema": "agentflow.request_shape_cache_replay_policy_decision_duplicate_suppression.v1",
+        "reason": reason,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "target_local_policy_section": "cache.pattern_rules",
+        "target_local_rule_file": "cache_rules.yaml",
+        "suppresses_generic_replay_ready_issue": True,
+        "suppresses_new_cache_replay_stage_issue": decision in {"widen", "keep-staged"},
+        "suppresses_generic_cache_replay_activation_issue": decision in {"widen", "keep-staged", "keep-blocked", "rollback"},
+    }
+
+
 def _cache_replay_policy_conditions_from_shape(shape: dict[str, Any]) -> dict[str, Any]:
     conditions = {
         "pattern_hashes": ["sha256:*"],
@@ -5935,15 +6035,25 @@ def _cache_replay_policy_patch(evidence: dict[str, Any] | None, decision: str) -
     }
 
 
-def build_request_shape_cache_replay_policy_decision_report(evidence_report: dict[str, Any]) -> dict[str, Any]:
+def build_request_shape_cache_replay_policy_decision_report(
+    evidence_report: dict[str, Any],
+    *,
+    hit_recovery_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     evidence = evidence_report if isinstance(evidence_report, dict) else {}
     decision = _cache_replay_policy_decision_value(evidence)
     metrics = _cache_replay_policy_decision_metrics(evidence)
+    hit_recovery_metrics = _cache_replay_policy_hit_recovery_metrics(hit_recovery_report, evidence)
     reason = _cache_replay_policy_decision_reason(evidence, decision)
     reason_codes = _cache_replay_policy_reason_codes(evidence)
     recommended_next_action = _cache_replay_policy_recommended_next_action(decision)
     promotion_decision = _cache_replay_canary_promotion_decision(evidence, decision)
     promotion_readiness = _cache_replay_policy_promotion_readiness(evidence, decision)
+    duplicate_suppression = _cache_replay_policy_duplicate_suppression(
+        decision,
+        promotion_readiness,
+        hit_recovery_metrics,
+    )
     rollback_metadata = _cache_replay_policy_rollback_metadata(evidence, decision)
     local_policy_patch = _cache_replay_policy_patch(evidence, decision)
     promotion_allowed = decision == "widen"
@@ -6001,12 +6111,14 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "aggregate_only": True,
         },
         "metrics": metrics,
+        "hit_recovery_metrics": hit_recovery_metrics,
         "applied_miss_blocker_breakdown": (
             evidence.get("applied_miss_blocker_breakdown")
             if isinstance(evidence.get("applied_miss_blocker_breakdown"), list)
             else []
         ),
         "rollback_metadata": rollback_metadata,
+        "duplicate_suppression": duplicate_suppression,
         "local_policy_patch": local_policy_patch,
         "privacy": _cache_replay_policy_decision_privacy(),
     }
@@ -6026,6 +6138,8 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "next_action": recommended_next_action,
         "top_decision": entry,
         "decisions": [entry],
+        "hit_recovery_metrics": hit_recovery_metrics,
+        "duplicate_suppression": duplicate_suppression,
         "summary": {
             "decision": decision,
             "promotion_decision": promotion_decision,
@@ -6056,6 +6170,10 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "projected_savings_usd": metrics["projected_savings_usd"],
             "observed_savings_usd": metrics["observed_savings_usd"],
             "hit_observation_rate": metrics["hit_observation_rate"],
+            "hit_recovery_demonstrated": bool(hit_recovery_metrics.get("hit_recovery_demonstrated")),
+            "synthetic_hit_recovery_exact_hit_count": hit_recovery_metrics["synthetic_exact_hit_count"],
+            "synthetic_hit_recovery_status": hit_recovery_metrics["status"],
+            "target_matches_hit_recovery_shape": bool(hit_recovery_metrics.get("target_matches_staged_canary_shape")),
             "savings_realization_ratio": metrics["savings_realization_ratio"],
             "top_applied_miss_blocker": metrics["top_applied_miss_blocker"],
             "top_blocking_applied_miss_blocker": metrics["top_blocking_applied_miss_blocker"],
@@ -6076,22 +6194,28 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
                 if isinstance(evidence.get("applied_miss_blocker_breakdown"), list)
                 else []
             ),
+            "hit_recovery_metrics": hit_recovery_metrics,
             "stale_evidence": evidence.get("stale_evidence") if isinstance(evidence.get("stale_evidence"), dict) else {},
             "privacy": _cache_replay_evidence_privacy(),
         },
         "acceptance": {
+            "single_durable_decision": True,
             "records_durable_decision": decision in {"widen", "rollback", "keep-staged", "keep-blocked"},
             "emits_explicit_canary_promotion_decision": promotion_decision
             in {"promote", "keep-staged-warmup", "keep-blocked"},
             "emits_explicit_promotion_readiness": promotion_readiness
             in {"promotion-ready", "keep-staged-warmup", "keep-staged", "keep-blocked", "rollback-required"},
             "reports_hit_recovery": metrics["observed_hits"] >= 0 and metrics["projected_hits"] >= 0,
+            "reports_synthetic_hit_recovery_smoke": hit_recovery_metrics["status"] != "unavailable",
             "reports_holdout_coverage": metrics["holdout_count"] >= 0,
             "reports_applied_miss_blocker_breakdown": isinstance(
                 evidence.get("applied_miss_blocker_breakdown"), list
             ),
             "drafts_local_policy_patch_or_blocker": bool(local_policy_patch) or bool(reason_codes),
             "targets_file_backed_cache_policy": entry["target_local_rule_file"] == "cache_rules.yaml",
+            "suppresses_generic_replay_ready_issue_recreation": duplicate_suppression[
+                "suppresses_generic_replay_ready_issue"
+            ],
             "keeps_tool_and_streaming_replay_blocked": bool(
                 local_policy_patch is None
                 or all(

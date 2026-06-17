@@ -41,6 +41,44 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.store.conn.close()
         self.tmpdir.cleanup()
 
+    def _cache_replay_hit_recovery_smoke(self) -> dict[str, object]:
+        return {
+            "schema": "agentflow.cache_replay_hit_recovery_smoke.v1",
+            "status": "hit-recovered",
+            "reason": "synthetic-repeat-exact-cache-hit",
+            "target_rule_id": "local-openai-cache-replay-canary-ae8404ee817f89f4",
+            "target_shape": {
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "has_tools": False,
+                "stream": False,
+            },
+            "summary": {
+                "synthetic_requests": 2,
+                "provider_calls_made": 0,
+                "cache_entries_written": True,
+                "exact_hit_count": 1,
+                "observed_hits": 1,
+                "hit_recovery_demonstrated": True,
+            },
+            "privacy": {
+                "metadata_only": True,
+                "synthetic_only": True,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "raw_request_bodies_included": False,
+                "raw_responses_included": False,
+                "cache_keys_included": False,
+                "request_fingerprints_included": False,
+                "session_ids_included": False,
+            },
+        }
+
     def _log_call(
         self,
         *,
@@ -2013,7 +2051,10 @@ class RequestShapeRollupTests(unittest.TestCase):
             rules_path=policy_path,
             limit=20,
         )
-        decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+        decision = build_request_shape_cache_replay_policy_decision_report(
+            evidence,
+            hit_recovery_report=self._cache_replay_hit_recovery_smoke(),
+        )
 
         self.assertEqual(evidence["summary"]["applied_count"], 3)
         self.assertEqual(evidence["summary"]["holdout_count"], 1)
@@ -2166,7 +2207,10 @@ class RequestShapeRollupTests(unittest.TestCase):
             rules_path=policy_path,
             limit=20,
         )
-        decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+        decision = build_request_shape_cache_replay_policy_decision_report(
+            evidence,
+            hit_recovery_report=self._cache_replay_hit_recovery_smoke(),
+        )
         applied_miss_blockers = {item["value"]: item["count"] for item in evidence["applied_miss_blocker_breakdown"]}
 
         self.assertEqual(evidence["summary"]["applied_count"], 3)
@@ -2601,7 +2645,10 @@ class RequestShapeRollupTests(unittest.TestCase):
             "blocker_breakdown": [],
         }
 
-        decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+        decision = build_request_shape_cache_replay_policy_decision_report(
+            evidence,
+            hit_recovery_report=self._cache_replay_hit_recovery_smoke(),
+        )
 
         self.assertEqual(decision["decision"], "keep-staged")
         self.assertEqual(decision["promotion_decision"], "keep-staged-warmup")
@@ -2620,9 +2667,25 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["summary"]["miss_count"], 24)
         self.assertEqual(decision["summary"]["observed_hits"], 0)
         self.assertEqual(decision["summary"]["projected_hits"], 35)
+        self.assertTrue(decision["summary"]["hit_recovery_demonstrated"])
+        self.assertEqual(decision["summary"]["synthetic_hit_recovery_exact_hit_count"], 1)
+        self.assertEqual(decision["summary"]["synthetic_hit_recovery_status"], "hit-recovered")
+        self.assertTrue(decision["summary"]["target_matches_hit_recovery_shape"])
         self.assertEqual(decision["summary"]["top_applied_miss_blocker"], "cache-warmup-miss")
         self.assertIn("cache-warmup-miss", decision["reason_codes"])
         self.assertIn("applied-miss:cache-warmup-miss", decision["reason_codes"])
+        self.assertEqual(decision["hit_recovery_metrics"]["source_schema"], "agentflow.cache_replay_hit_recovery_smoke.v1")
+        self.assertTrue(decision["hit_recovery_metrics"]["hit_recovery_demonstrated"])
+        self.assertEqual(decision["hit_recovery_metrics"]["synthetic_exact_hit_count"], 1)
+        self.assertFalse(decision["hit_recovery_metrics"]["provider_calls_made"])
+        self.assertTrue(decision["hit_recovery_metrics"]["metadata_only"])
+        self.assertTrue(decision["hit_recovery_metrics"]["synthetic_only"])
+        self.assertFalse(decision["hit_recovery_metrics"]["target_rule_id_included"])
+        self.assertEqual(
+            decision["duplicate_suppression"]["reason"],
+            "synthetic-hit-recovery-proven-live-traffic-warmup-only",
+        )
+        self.assertTrue(decision["duplicate_suppression"]["suppresses_generic_replay_ready_issue"])
         self.assertEqual(decision["top_decision"]["promotion_decision"], "keep-staged-warmup")
         self.assertEqual(decision["top_decision"]["promotion_readiness"], "keep-staged-warmup")
         self.assertEqual(decision["top_decision"]["promotion_decision_options"], ["promote", "keep-staged-warmup", "keep-blocked"])
@@ -2634,11 +2697,17 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["top_decision"]["coverage"]["observed_hits"], 0)
         self.assertIsNone(decision["top_decision"]["local_policy_patch"])
         self.assertTrue(decision["acceptance"]["records_durable_decision"])
+        self.assertTrue(decision["acceptance"]["single_durable_decision"])
         self.assertTrue(decision["acceptance"]["emits_explicit_canary_promotion_decision"])
         self.assertTrue(decision["acceptance"]["emits_explicit_promotion_readiness"])
+        self.assertTrue(decision["acceptance"]["reports_synthetic_hit_recovery_smoke"])
         self.assertTrue(decision["acceptance"]["reports_applied_miss_blocker_breakdown"])
+        self.assertTrue(decision["acceptance"]["suppresses_generic_replay_ready_issue_recreation"])
         self.assertTrue(decision["privacy"]["metadata_only"])
         self.assertTrue(decision["privacy"]["aggregate_only"])
+        rendered = json.dumps(decision, sort_keys=True)
+        self.assertNotIn("local-openai-cache-replay-canary-ae8404ee817f89f4", rendered)
+        self.assertNotIn("raw-request-fingerprint-must-not-leak", rendered)
 
     def test_cache_replay_policy_decision_keeps_blocked_for_invalidation_risk(self) -> None:
         evidence = {
