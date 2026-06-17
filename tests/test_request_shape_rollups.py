@@ -505,6 +505,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         classification = report["cache_replay_blocker_classification"]
         invalidation_evidence = dry_run["cache_invalidation_evidence"]
         skipped_openai = dry_run["skipped_openai_blockers"]
+        tool_replay_evidence = dry_run["tool_replay_evidence"]
 
         self.assertEqual(dry_run["schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(dry_run["summary"]["replay_ready_cohort_count"], 1)
@@ -541,8 +542,11 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(dry_run["privacy"]["individual_candidate_ids_included"])
         self.assertTrue(dry_run["acceptance"]["emits_durable_invalidation_evidence"])
         self.assertTrue(dry_run["acceptance"]["emits_skipped_openai_blocker_ranking"])
+        self.assertTrue(dry_run["acceptance"]["emits_tool_replay_evidence"])
         self.assertTrue(dry_run["acceptance"]["has_ranked_blocker_cohorts"])
         self.assertTrue(dry_run["acceptance"]["has_ranked_skipped_openai_cohorts"])
+        self.assertTrue(dry_run["acceptance"]["has_ranked_tool_cache_replay_evidence"])
+        self.assertTrue(dry_run["acceptance"]["reduces_generic_tools_present_blocker"])
         self.assertTrue(dry_run["acceptance"]["tool_and_streaming_replay_remain_disabled"])
         self.assertTrue(dry_run["acceptance"]["has_local_file_backed_policy_compatibility"])
 
@@ -612,6 +616,49 @@ class RequestShapeRollupTests(unittest.TestCase):
             "/tmp/private/source.py",
         ):
             self.assertNotIn(forbidden, rendered_skipped_openai)
+
+        self.assertEqual(
+            tool_replay_evidence["schema"],
+            "agentflow.request_shape_tool_cache_replay_evidence.v1",
+        )
+        self.assertEqual(tool_replay_evidence["status"], "ranked")
+        self.assertTrue(tool_replay_evidence["read_only"])
+        self.assertEqual(tool_replay_evidence["summary"]["tool_cache_replay_evidence_cohort_count"], 1)
+        self.assertEqual(tool_replay_evidence["summary"]["tools_present_rows"], 1)
+        self.assertEqual(tool_replay_evidence["summary"]["tools_present_replay_evidence_rows"], 1)
+        self.assertEqual(tool_replay_evidence["summary"]["generic_tools_present_blocker_reduced_rows"], 1)
+        self.assertEqual(tool_replay_evidence["summary"]["unsafe_tool_call_blocker_rows"], 1)
+        self.assertEqual(tool_replay_evidence["summary"]["missing_dependency_evidence_rows"], 1)
+        self.assertEqual(tool_replay_evidence["summary"]["cache_entries_written"], 0)
+        self.assertFalse(tool_replay_evidence["summary"]["policy_files_written"])
+        self.assertEqual(tool_replay_evidence["summary"]["cache_apply_action_count"], 0)
+        self.assertTrue(tool_replay_evidence["acceptance"]["has_ranked_tool_cache_replay_evidence"])
+        self.assertTrue(tool_replay_evidence["acceptance"]["reports_tools_present_replay_evidence"])
+        self.assertTrue(tool_replay_evidence["acceptance"]["reduces_generic_tools_present_blocker"])
+        self.assertTrue(tool_replay_evidence["acceptance"]["reports_dependency_evidence_decisions"])
+        self.assertTrue(tool_replay_evidence["acceptance"]["unsafe_or_missing_dependency_keeps_tool_replay_blocked"])
+        self.assertTrue(tool_replay_evidence["acceptance"]["emits_no_cache_apply_actions"])
+        self.assertTrue(tool_replay_evidence["acceptance"]["tool_and_streaming_replay_remain_disabled"])
+        self.assertTrue(tool_replay_evidence["privacy"]["metadata_only"])
+        self.assertTrue(tool_replay_evidence["privacy"]["aggregate_only"])
+        tool_replay_row = tool_replay_evidence["cohorts"][0]
+        self.assertTrue(tool_replay_row["tools_present_replay_evidence"])
+        self.assertTrue(tool_replay_row["generic_tools_present_blocker_reduced"])
+        self.assertEqual(tool_replay_row["evidence_state"], "blocked-missing-dependency-evidence")
+        self.assertEqual(tool_replay_row["next_action"], "collect-file-invalidation-evidence")
+        self.assertEqual(tool_replay_row["dependency_evidence_decision"]["decision"], "missing-dependency-evidence")
+        self.assertFalse(tool_replay_row["tool_cache_replay_enabled"])
+        rendered_tool_replay = json.dumps(tool_replay_evidence, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+        ):
+            self.assertNotIn(forbidden, rendered_tool_replay)
 
         self.assertEqual(invalidation_evidence["schema"], "agentflow.request_shape_cache_invalidation_evidence.v1")
         self.assertEqual(invalidation_evidence["status"], "ranked")
@@ -776,6 +823,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="dependency-states")
         skipped = report["cache_replayability_dry_run"]["skipped_openai_blockers"]
         invalidation = report["cache_replayability_dry_run"]["cache_invalidation_evidence"]
+        tool_replay = report["cache_replayability_dry_run"]["tool_replay_evidence"]
 
         self.assertEqual(skipped["summary"]["cache_apply_action_count"], 0)
         self.assertFalse(skipped["summary"]["policy_files_written"])
@@ -836,8 +884,33 @@ class RequestShapeRollupTests(unittest.TestCase):
             invalidation_by_status["missing"]["dependency_evidence_decision"]["decision"],
             "missing-dependency-evidence",
         )
+        tool_replay_by_status = {row["file_dependency_status"]: row for row in tool_replay["cohorts"]}
+        self.assertEqual(tool_replay["summary"]["stable_dependency_evidence_rows"], 1)
+        self.assertEqual(tool_replay["summary"]["stale_dependency_evidence_rows"], 1)
+        self.assertEqual(tool_replay["summary"]["missing_dependency_evidence_rows"], 1)
+        self.assertEqual(tool_replay["summary"]["tools_present_replay_evidence_rows"], 3)
+        self.assertTrue(tool_replay["acceptance"]["reports_tools_present_replay_evidence"])
+        self.assertTrue(tool_replay["acceptance"]["reduces_generic_tools_present_blocker"])
+        self.assertTrue(tool_replay["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
+        self.assertEqual(
+            tool_replay_by_status["stable"]["evidence_state"],
+            "dependency-gated-review-ready",
+        )
+        self.assertEqual(
+            tool_replay_by_status["stable"]["next_action"],
+            "rank-safe-tool-cache-replay-readiness",
+        )
+        self.assertEqual(
+            tool_replay_by_status["invalidated"]["evidence_state"],
+            "blocked-stale-dependency-evidence",
+        )
+        self.assertEqual(
+            tool_replay_by_status["missing"]["evidence_state"],
+            "blocked-missing-dependency-evidence",
+        )
+        self.assertFalse(any(row["tool_cache_replay_enabled"] for row in tool_replay["cohorts"]))
 
-        rendered = json.dumps([skipped, invalidation], sort_keys=True)
+        rendered = json.dumps([skipped, invalidation, tool_replay], sort_keys=True)
         self.assertNotIn("raw-stable-dependency-fingerprint-must-not-leak", rendered)
         self.assertNotIn("raw-stale-dependency-fingerprint-must-not-leak", rendered)
         self.assertNotIn("raw-request-fingerprint-must-not-leak", rendered)

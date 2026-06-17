@@ -3470,6 +3470,11 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             if isinstance(replay_dry_run.get("skipped_openai_blockers"), dict)
             else None
         )
+        tool_replay_evidence = (
+            replay_dry_run.get("tool_replay_evidence")
+            if isinstance(replay_dry_run.get("tool_replay_evidence"), dict)
+            else None
+        )
         result["cache_replayability_dry_run"] = {
             "schema": sanitize_value(replay_dry_run.get("schema")),
             "status": sanitize_value(replay_dry_run.get("status")),
@@ -3497,6 +3502,28 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
                     else {},
                     "privacy": skipped_openai_blockers.get("privacy")
                     if isinstance(skipped_openai_blockers.get("privacy"), dict)
+                    else {},
+                }
+            )
+        if tool_replay_evidence is not None:
+            result["cache_replayability_dry_run"]["tool_replay_evidence"] = sanitize_value(
+                {
+                    "schema": tool_replay_evidence.get("schema"),
+                    "status": tool_replay_evidence.get("status"),
+                    "next_action": tool_replay_evidence.get("next_action"),
+                    "summary": tool_replay_evidence.get("summary")
+                    if isinstance(tool_replay_evidence.get("summary"), dict)
+                    else {},
+                    "evidence_state_breakdown": tool_replay_evidence.get("evidence_state_breakdown") or [],
+                    "dependency_evidence_decision_breakdown": tool_replay_evidence.get("dependency_evidence_decision_breakdown") or [],
+                    "next_action_breakdown": tool_replay_evidence.get("next_action_breakdown") or [],
+                    "blocker_breakdown": tool_replay_evidence.get("blocker_breakdown") or [],
+                    "cohorts": (tool_replay_evidence.get("cohorts") or [])[:5],
+                    "acceptance": tool_replay_evidence.get("acceptance")
+                    if isinstance(tool_replay_evidence.get("acceptance"), dict)
+                    else {},
+                    "privacy": tool_replay_evidence.get("privacy")
+                    if isinstance(tool_replay_evidence.get("privacy"), dict)
                     else {},
                 }
             )

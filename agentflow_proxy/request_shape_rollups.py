@@ -24,6 +24,8 @@ REPLAY_INVALIDATION_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_invalidatio
 REPLAY_INVALIDATION_EVIDENCE_COHORT_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence_cohort.v1"
 REPLAY_SKIPPED_OPENAI_BLOCKERS_SCHEMA = "agentflow.request_shape_skipped_openai_cache_replay_blockers.v1"
 REPLAY_SKIPPED_OPENAI_BLOCKER_ROW_SCHEMA = "agentflow.request_shape_skipped_openai_cache_replay_blocker.v1"
+REPLAY_TOOL_REPLAY_EVIDENCE_SCHEMA = "agentflow.request_shape_tool_cache_replay_evidence.v1"
+REPLAY_TOOL_REPLAY_EVIDENCE_ROW_SCHEMA = "agentflow.request_shape_tool_cache_replay_evidence_row.v1"
 REPLAY_BLOCKER_CLASSIFICATION_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification.v1"
 REPLAY_BLOCKER_CLASSIFICATION_ROW_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification_row.v1"
 REPLAY_CACHE_CANARY_ACTION_SCHEMA = "agentflow.request_shape_cache_replay_canary_action.v1"
@@ -6998,6 +7000,245 @@ def build_request_shape_skipped_openai_cache_replay_blockers_report(
     }
 
 
+def _tool_cache_replay_evidence_state(
+    *,
+    dependency_decision: str,
+    next_action: str,
+) -> tuple[str, str, str]:
+    if dependency_decision == "stable-dependency-evidence":
+        return (
+            "dependency-gated-review-ready",
+            "safe-invalidation-evidence-present",
+            "rank-safe-tool-cache-replay-readiness",
+        )
+    if dependency_decision == "stale-risk-blocker":
+        return (
+            "blocked-stale-dependency-evidence",
+            "stale-dependency-evidence",
+            "refresh-file-invalidation-evidence",
+        )
+    if dependency_decision == "missing-dependency-evidence":
+        return (
+            "blocked-missing-dependency-evidence",
+            "invalidation-evidence-missing",
+            "collect-file-invalidation-evidence",
+        )
+    return (
+        "blocked-unknown-dependency-evidence",
+        "dependency-evidence-unknown",
+        next_action or "collect-file-invalidation-evidence",
+    )
+
+
+def build_request_shape_tool_cache_replay_evidence_report(
+    cohorts: list[dict[str, Any]],
+    *,
+    limit: int = 25,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    evidence_state_counts: dict[str, int] = {}
+    dependency_decision_counts: dict[str, int] = {}
+    next_action_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    sample_count_total = 0
+    stable_dependency_rows = 0
+    stale_dependency_rows = 0
+    missing_dependency_rows = 0
+    unknown_dependency_rows = 0
+    unsafe_tool_call_blocker_rows = 0
+
+    for cohort in cohorts:
+        if not isinstance(cohort, dict):
+            continue
+        if public_label(cohort.get("provider_family"), "unknown") != "openai":
+            continue
+        if not bool(cohort.get("has_tools")):
+            continue
+        sample_count = _as_int(cohort.get("row_count") or cohort.get("sample_count"))
+        if sample_count <= 0:
+            continue
+        reason = public_label(cohort.get("reason"), "unknown")
+        blocker_codes = sorted(
+            {
+                public_label(item, "unknown")
+                for item in cohort.get("blockers") or []
+                if public_label(item, "unknown") != "unknown"
+            }
+        )
+        if not blocker_codes and reason != "unknown":
+            blocker_codes = [reason]
+        readiness = public_label(cohort.get("readiness"), "unknown")
+        file_dependency_status = public_label(cohort.get("file_dependency_status"), "missing")
+        next_action, secondary_actions, _evidence_status, requires_invalidation = _cache_invalidation_next_actions(cohort)
+        dependency_evidence_decision = _cache_dependency_evidence_decision(
+            file_dependency_status=file_dependency_status,
+            next_action=next_action,
+            requires_invalidation=requires_invalidation,
+            has_tools=True,
+        )
+        dependency_decision = public_label(
+            dependency_evidence_decision.get("decision"),
+            "unknown-dependency-evidence",
+        )
+        evidence_state, evidence_reason, durable_next_action = _tool_cache_replay_evidence_state(
+            dependency_decision=dependency_decision,
+            next_action=next_action,
+        )
+
+        sample_count_total += sample_count
+        _increment(evidence_state_counts, evidence_state, sample_count)
+        _increment(dependency_decision_counts, dependency_decision, sample_count)
+        _increment(next_action_counts, durable_next_action, sample_count)
+        for blocker in blocker_codes:
+            _increment(blocker_counts, blocker, sample_count)
+        if dependency_decision == "stable-dependency-evidence":
+            stable_dependency_rows += sample_count
+        elif dependency_decision == "stale-risk-blocker":
+            stale_dependency_rows += sample_count
+        elif dependency_decision == "missing-dependency-evidence":
+            missing_dependency_rows += sample_count
+        else:
+            unknown_dependency_rows += sample_count
+        if "unsafe-tool-calls-without-invalidation" in blocker_codes:
+            unsafe_tool_call_blocker_rows += sample_count
+
+        rows.append(
+            {
+                "schema": REPLAY_TOOL_REPLAY_EVIDENCE_ROW_SCHEMA,
+                "rank": 0,
+                "provider_family": "openai",
+                "source_surface": public_label(cohort.get("source_surface"), "unknown"),
+                "endpoint": public_label(cohort.get("endpoint"), "unknown"),
+                "category": public_label(cohort.get("category"), "unknown"),
+                "workflow_phase": public_label(cohort.get("workflow_phase"), "unknown"),
+                "stream": bool(cohort.get("stream")),
+                "has_tools": True,
+                "cache_status": public_label(cohort.get("cache_status"), "unknown"),
+                "routing_status": public_label(cohort.get("routing_status"), "unknown"),
+                "text_bucket": public_label(cohort.get("text_bucket"), "unknown"),
+                "token_bucket": public_label(cohort.get("token_bucket"), "unknown"),
+                "sample_count": sample_count,
+                "row_count": sample_count,
+                "readiness": readiness,
+                "reason": reason,
+                "evidence_state": evidence_state,
+                "evidence_reason": evidence_reason,
+                "blocker_codes": blocker_codes,
+                "dependency_evidence_status": dependency_evidence_decision["status"],
+                "dependency_evidence_decision": dependency_evidence_decision,
+                "next_action": durable_next_action,
+                "secondary_next_actions": sorted(set(secondary_actions + ["keep-tool-cache-blocked"])),
+                "file_dependency_status": file_dependency_status,
+                "file_dependency_fingerprint_available": bool(cohort.get("file_dependency_fingerprint_available")),
+                "safe_invalidation_evidence": bool(file_dependency_status == "stable"),
+                "tools_present_replay_evidence": True,
+                "generic_tools_present_blocker_reduced": True,
+                "requires_explicit_invalidation_safety_evidence": dependency_decision != "stable-dependency-evidence",
+                "tool_cache_replay_enabled": False,
+                "streaming_replay_enabled": False,
+                "emits_cache_apply_action": False,
+                "cache_entries_written": 0,
+                "policy_files_written": False,
+                "aggregate_only": True,
+                "metadata_only": True,
+                "privacy": _replayability_privacy(),
+            }
+        )
+
+    rows.sort(
+        key=lambda item: (
+            {
+                "dependency-gated-review-ready": 5,
+                "blocked-stale-dependency-evidence": 4,
+                "blocked-missing-dependency-evidence": 3,
+                "blocked-unknown-dependency-evidence": 2,
+            }.get(str(item.get("evidence_state")), 0),
+            _as_int(item.get("sample_count")),
+            str(item.get("source_surface")),
+            str(item.get("endpoint")),
+            str(item.get("category")),
+        ),
+        reverse=True,
+    )
+    capped_limit = max(1, min(_as_int(limit) or 25, 1000))
+    for rank, row in enumerate(rows[:capped_limit], start=1):
+        row["rank"] = rank
+
+    evidence_state_breakdown = _breakdown(evidence_state_counts)
+    next_action_breakdown = _breakdown(next_action_counts)
+    return {
+        "schema": REPLAY_TOOL_REPLAY_EVIDENCE_SCHEMA,
+        "status": "ranked" if rows else "no-tool-cache-replay-evidence",
+        "read_only": True,
+        "wrote_store": False,
+        "wrote_local_files": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "next_action": next_action_breakdown[0]["value"] if next_action_breakdown else "keep-tool-cache-replay-blocked",
+        "summary": {
+            "tool_cache_replay_evidence_cohort_count": len(rows),
+            "sample_count": sample_count_total,
+            "affected_rows": sample_count_total,
+            "tools_present_rows": sample_count_total,
+            "tools_present_replay_evidence_rows": sample_count_total,
+            "generic_tools_present_blocker_reduced_rows": sample_count_total,
+            "unsafe_tool_call_blocker_rows": unsafe_tool_call_blocker_rows,
+            "stable_dependency_evidence_rows": stable_dependency_rows,
+            "stale_dependency_evidence_rows": stale_dependency_rows,
+            "missing_dependency_evidence_rows": missing_dependency_rows,
+            "unknown_dependency_evidence_rows": unknown_dependency_rows,
+            "dependency_evidence_decision_count": len(dependency_decision_counts),
+            "top_evidence_state": evidence_state_breakdown[0]["value"] if evidence_state_breakdown else None,
+            "top_next_action": next_action_breakdown[0]["value"] if next_action_breakdown else None,
+            "top_blocker_code": _breakdown(blocker_counts)[0]["value"] if blocker_counts else None,
+            "cache_apply_action_count": 0,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+        },
+        "evidence_state_breakdown": evidence_state_breakdown,
+        "dependency_evidence_decision_breakdown": _breakdown(dependency_decision_counts),
+        "next_action_breakdown": next_action_breakdown,
+        "blocker_breakdown": _breakdown(blocker_counts),
+        "cohorts": rows[:capped_limit],
+        "acceptance": {
+            "has_ranked_tool_cache_replay_evidence": bool(rows),
+            "reports_tools_present_replay_evidence": all(bool(row.get("tools_present_replay_evidence")) for row in rows[:capped_limit]),
+            "reduces_generic_tools_present_blocker": all(
+                bool(row.get("generic_tools_present_blocker_reduced")) for row in rows[:capped_limit]
+            ),
+            "reports_dependency_evidence_decisions": all(
+                isinstance(row.get("dependency_evidence_decision"), dict)
+                and bool(row.get("dependency_evidence_decision", {}).get("decision"))
+                for row in rows[:capped_limit]
+            ),
+            "stable_dependency_evidence_does_not_activate_replay": all(
+                row.get("next_action") == "rank-safe-tool-cache-replay-readiness"
+                and not bool(row.get("tool_cache_replay_enabled"))
+                for row in rows
+                if row.get("dependency_evidence_decision", {}).get("decision") == "stable-dependency-evidence"
+            ),
+            "unsafe_or_missing_dependency_keeps_tool_replay_blocked": all(
+                not bool(row.get("tool_cache_replay_enabled"))
+                for row in rows
+                if row.get("dependency_evidence_decision", {}).get("decision")
+                in {"stale-risk-blocker", "missing-dependency-evidence", "unknown-dependency-evidence"}
+            ),
+            "emits_no_cache_apply_actions": True,
+            "tool_and_streaming_replay_remain_disabled": all(
+                not bool(row.get("tool_cache_replay_enabled")) and not bool(row.get("streaming_replay_enabled"))
+                for row in rows
+            ),
+            "no_cache_entries_written": True,
+            "policy_files_written": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _replayability_privacy(),
+    }
+
+
 def build_request_shape_cache_replayability_dry_run(
     rollups: list[dict[str, Any]],
     *,
@@ -7133,6 +7374,10 @@ def build_request_shape_cache_replayability_dry_run(
         cohorts,
         limit=capped_limit,
     )
+    tool_replay_evidence = build_request_shape_tool_cache_replay_evidence_report(
+        cohorts,
+        limit=capped_limit,
+    )
     return {
         "schema": REPLAYABILITY_DRY_RUN_SCHEMA,
         "status": "ranked" if cohorts else "no-replayability-cohorts",
@@ -7168,6 +7413,7 @@ def build_request_shape_cache_replayability_dry_run(
         "blocker_breakdown": blocker_breakdown,
         "cache_invalidation_evidence": invalidation_evidence,
         "skipped_openai_blockers": skipped_openai_blockers,
+        "tool_replay_evidence": tool_replay_evidence,
         "remaining_replay_ready_cohorts": remaining_replay_ready[:capped_limit],
         "handled_replay_ready_cohorts": handled_replay_ready[:capped_limit],
         "handled_policy_summary": {
@@ -7183,6 +7429,7 @@ def build_request_shape_cache_replayability_dry_run(
         "acceptance": {
             "emits_durable_invalidation_evidence": invalidation_evidence["schema"] == REPLAY_INVALIDATION_EVIDENCE_SCHEMA,
             "emits_skipped_openai_blocker_ranking": skipped_openai_blockers["schema"] == REPLAY_SKIPPED_OPENAI_BLOCKERS_SCHEMA,
+            "emits_tool_replay_evidence": tool_replay_evidence["schema"] == REPLAY_TOOL_REPLAY_EVIDENCE_SCHEMA,
             "ranks_remaining_replay_ready_cohorts": all(
                 _as_int(row.get("remaining_rank")) > 0 for row in remaining_replay_ready[:capped_limit]
             ),
@@ -7197,6 +7444,12 @@ def build_request_shape_cache_replayability_dry_run(
             ),
             "has_ranked_skipped_openai_cohorts": bool(
                 skipped_openai_blockers.get("acceptance", {}).get("has_ranked_skipped_openai_cohorts")
+            ),
+            "has_ranked_tool_cache_replay_evidence": bool(
+                tool_replay_evidence.get("acceptance", {}).get("has_ranked_tool_cache_replay_evidence")
+            ),
+            "reduces_generic_tools_present_blocker": bool(
+                tool_replay_evidence.get("acceptance", {}).get("reduces_generic_tools_present_blocker")
             ),
             "tool_and_streaming_replay_remain_disabled": bool(
                 invalidation_evidence.get("acceptance", {}).get("tool_and_streaming_replay_remain_disabled")

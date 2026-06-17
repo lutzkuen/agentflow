@@ -4859,6 +4859,82 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             },
                             "privacy": {"metadata_only": True, "aggregate_only": True},
                         },
+                        "tool_replay_evidence": {
+                            "schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                            "status": "ranked",
+                            "next_action": "collect-file-invalidation-evidence",
+                            "summary": {
+                                "tool_cache_replay_evidence_cohort_count": 1,
+                                "sample_count": 30,
+                                "affected_rows": 30,
+                                "tools_present_rows": 30,
+                                "tools_present_replay_evidence_rows": 30,
+                                "generic_tools_present_blocker_reduced_rows": 30,
+                                "unsafe_tool_call_blocker_rows": 30,
+                                "missing_dependency_evidence_rows": 30,
+                                "top_evidence_state": "blocked-missing-dependency-evidence",
+                                "top_next_action": "collect-file-invalidation-evidence",
+                                "top_blocker_code": "invalidation-evidence-missing",
+                                "cache_apply_action_count": 0,
+                                "cache_entries_written": 0,
+                                "policy_files_written": False,
+                            },
+                            "evidence_state_breakdown": [
+                                {"value": "blocked-missing-dependency-evidence", "count": 30},
+                            ],
+                            "dependency_evidence_decision_breakdown": [
+                                {"value": "missing-dependency-evidence", "count": 30},
+                            ],
+                            "next_action_breakdown": [
+                                {"value": "collect-file-invalidation-evidence", "count": 30},
+                            ],
+                            "blocker_breakdown": [
+                                {"value": "invalidation-evidence-missing", "count": 30},
+                                {"value": "tools-present", "count": 30},
+                                {"value": "unsafe-tool-calls-without-invalidation", "count": 30},
+                            ],
+                            "cohorts": [
+                                {
+                                    "schema": "agentflow.request_shape_tool_cache_replay_evidence_row.v1",
+                                    "rank": 1,
+                                    "provider_family": "openai",
+                                    "source_surface": "openai_responses",
+                                    "endpoint": "responses",
+                                    "category": "tool-light",
+                                    "workflow_phase": "tool-light",
+                                    "has_tools": True,
+                                    "sample_count": 30,
+                                    "row_count": 30,
+                                    "evidence_state": "blocked-missing-dependency-evidence",
+                                    "evidence_reason": "invalidation-evidence-missing",
+                                    "blocker_codes": [
+                                        "invalidation-evidence-missing",
+                                        "tools-present",
+                                        "unsafe-tool-calls-without-invalidation",
+                                    ],
+                                    "next_action": "collect-file-invalidation-evidence",
+                                    "tools_present_replay_evidence": True,
+                                    "generic_tools_present_blocker_reduced": True,
+                                    "tool_cache_replay_enabled": False,
+                                    "streaming_replay_enabled": False,
+                                    "emits_cache_apply_action": False,
+                                    "request_id": "tool-evidence-request-secret",
+                                    "session_id": "tool-evidence-session-secret",
+                                    "cache_key": "tool-evidence-cache-secret",
+                                    "file_path": "/tmp/private-tool-evidence.py",
+                                }
+                            ],
+                            "acceptance": {
+                                "has_ranked_tool_cache_replay_evidence": True,
+                                "reports_tools_present_replay_evidence": True,
+                                "reduces_generic_tools_present_blocker": True,
+                                "emits_no_cache_apply_actions": True,
+                                "tool_and_streaming_replay_remain_disabled": True,
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                            },
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        },
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "privacy": {"metadata_only": True, "aggregate_only": True},
@@ -4876,6 +4952,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(skipped["summary"]["affected_rows"], 891)
         self.assertTrue(skipped["privacy"]["metadata_only"])
         self.assertTrue(skipped["privacy"]["aggregate_only"])
+        tool_replay = shape_signal["cache_replayability_dry_run"]["tool_replay_evidence"]
+        self.assertEqual(tool_replay["schema"], "agentflow.request_shape_tool_cache_replay_evidence.v1")
+        self.assertEqual(tool_replay["summary"]["tools_present_replay_evidence_rows"], 30)
+        self.assertEqual(tool_replay["summary"]["generic_tools_present_blocker_reduced_rows"], 30)
+        self.assertTrue(tool_replay["acceptance"]["reduces_generic_tools_present_blocker"])
+        self.assertTrue(tool_replay["privacy"]["metadata_only"])
+        self.assertTrue(tool_replay["privacy"]["aggregate_only"])
 
         loop = stats_summary["evidence_to_activation_loop"]
         cache_stage = next(row for row in loop["levers"] if row["lever"] == "cache")
@@ -4907,6 +4990,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("skipped-session-secret", rendered)
         self.assertNotIn("skipped-cache-secret", rendered)
         self.assertNotIn("/tmp/private-skipped-cache.py", rendered)
+        self.assertNotIn("tool-evidence-request-secret", rendered)
+        self.assertNotIn("tool-evidence-session-secret", rendered)
+        self.assertNotIn("tool-evidence-cache-secret", rendered)
+        self.assertNotIn("/tmp/private-tool-evidence.py", rendered)
 
     def test_request_shape_replay_ready_cache_evidence_supersedes_zero_hit_candidate(self):
         plan = build_research_plan(
