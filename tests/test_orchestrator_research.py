@@ -1888,6 +1888,99 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-ledger-secret", rendered)
         self.assertNotIn("req-unclassified-secret", rendered)
 
+    def test_no_local_representation_diagnostic_gets_review_only_local_action_ledger_entry(self):
+        log_lines = [
+            "activation feedback blocked reason=no-local-representation request_id=req-no-local-secret",
+            "activation feedback blocked reason=no-local-representation session_id=session-no-local-secret",
+        ]
+
+        plan = build_research_plan(
+            issues=[],
+            log_sources=log_lines,
+            threshold=1,
+            now=NOW,
+        )
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        entries = [
+            entry
+            for entry in ledger["entries"]
+            if entry.get("diagnostic_class") == "no-local-representation"
+        ]
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["schema"], "agentflow.evidence_to_activation_next_action_ledger_entry.v1")
+        self.assertEqual(entry["lever"], "activation-feedback")
+        self.assertEqual(entry["local_action_family"], "activation-feedback")
+        self.assertEqual(entry["current_status"], "keep-blocked")
+        self.assertEqual(entry["state"], "keep-blocked")
+        self.assertEqual(entry["issue_worthy_status"], "blocked")
+        self.assertEqual(entry["sample_count"], 2)
+        self.assertEqual(
+            entry["next_action"],
+            "record-review-only-local-representation-and-wait-for-supported-local-action",
+        )
+        self.assertEqual(
+            entry["keep_blocked_reason"],
+            "activation-feedback-no-local-representation-resolved-to-review-only-local-artifact",
+        )
+        self.assertEqual(
+            entry["diagnostic_fingerprint"],
+            "agentflow.repeated-diagnostic.no-local-representation.v1",
+        )
+        self.assertTrue(entry["durable_action_ledger_entry"])
+        self.assertEqual(entry["review_status"], "resolved-to-review-only-no-op")
+        self.assertIn("supported_file_backed_local_action", entry["needed_resolution"])
+        representation = entry["local_action_representation"]
+        self.assertEqual(
+            representation["schema"],
+            "agentflow.activation_feedback_local_action_representation.v1",
+        )
+        self.assertEqual(representation["representation_kind"], "review-only-no-op")
+        self.assertEqual(representation["review_artifact"], "evidence-to-activation-next-action-ledger")
+        self.assertFalse(representation["local_rule_available"])
+        self.assertFalse(representation["file_backed_policy_available"])
+        self.assertFalse(representation["dry_run_evidence_available"])
+        self.assertFalse(representation["canary_evidence_available"])
+        self.assertFalse(representation["managed_enforcement_required"])
+        self.assertFalse(representation["managed_enforced"])
+        self.assertFalse(representation["provider_body_rewrite_required"])
+        self.assertFalse(representation["provider_body_rewrite"])
+        self.assertFalse(representation["policy_files_written"])
+        self.assertTrue(representation["privacy"]["metadata_only"])
+        self.assertTrue(entry["privacy"]["metadata_only"])
+        self.assertTrue(entry["privacy"]["aggregate_only"])
+        self.assertFalse(entry["privacy"]["raw_prompts_included"])
+        self.assertFalse(entry["privacy"]["provider_bodies_included"])
+        self.assertFalse(entry["privacy"]["request_ids_included"])
+        self.assertFalse(entry["privacy"]["session_ids_included"])
+        self.assertFalse(entry["privacy"]["cache_keys_included"])
+
+        created_titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn("Resolve repeated-no-local-representation activation feedback blocker", created_titles)
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["activation_feedback_keep_blocked_suppressed_count"], 1)
+        self.assertEqual(
+            suppression["suppressed"][-1]["keep_blocked_reason"],
+            "activation-feedback-no-local-representation-resolved-to-review-only-local-artifact",
+        )
+
+        repeated_plan = build_research_plan(
+            issues=[],
+            log_sources=log_lines,
+            threshold=1,
+            now=NOW,
+        )
+        repeated_entry = [
+            item
+            for item in repeated_plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]["entries"]
+            if item.get("diagnostic_class") == "no-local-representation"
+        ][0]
+        self.assertEqual(repeated_entry["fingerprint"], entry["fingerprint"])
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("req-no-local-secret", rendered)
+        self.assertNotIn("session-no-local-secret", rendered)
+
     def test_closed_prior_issue_with_advanced_ledger_status_generates_next_stage_issue(self):
         stale_title = "Stage cache replay canary for activation-ready on openai/openai_responses/responses"
         plan = build_research_plan(

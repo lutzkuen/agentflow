@@ -317,6 +317,12 @@ _ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_KEEP_BLOCKED_REASON = (
 _ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_NEXT_ACTION = (
     "keep-missing-dependency-evidence-blocked-until-sanitized-source-report"
 )
+_ACTIVATION_FEEDBACK_NO_LOCAL_REPRESENTATION_KEEP_BLOCKED_REASON = (
+    "activation-feedback-no-local-representation-resolved-to-review-only-local-artifact"
+)
+_ACTIVATION_FEEDBACK_NO_LOCAL_REPRESENTATION_NEXT_ACTION = (
+    "record-review-only-local-representation-and-wait-for-supported-local-action"
+)
 
 _UNSUPPORTED_LOCAL_ACTION_FAMILIES = {
     "server-content-processing",
@@ -986,6 +992,47 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                 },
             }
         )
+    elif diagnostic_class == "no-local-representation":
+        stage.update(
+            {
+                "lever": "activation-feedback",
+                "local_action_family": "activation-feedback",
+                "state": "keep-blocked",
+                "next_action": _ACTIVATION_FEEDBACK_NO_LOCAL_REPRESENTATION_NEXT_ACTION,
+                "review_status": "resolved-to-review-only-no-op",
+                "issue_worthy_status": "blocked",
+                "keep_blocked_reason": _ACTIVATION_FEEDBACK_NO_LOCAL_REPRESENTATION_KEEP_BLOCKED_REASON,
+                "next_state": "keep-blocked",
+                "next_state_reason": _ACTIVATION_FEEDBACK_NO_LOCAL_REPRESENTATION_KEEP_BLOCKED_REASON,
+                "needed_resolution": [
+                    "supported_file_backed_local_action",
+                    "dry_run_or_canary_evidence",
+                    "new_sanitized_evidence",
+                ],
+                "durable_action_ledger_entry": True,
+                "policy_files_written": False,
+                "managed_dependency": "optional",
+                "local_action_representation": {
+                    "schema": "agentflow.activation_feedback_local_action_representation.v1",
+                    "status": "represented",
+                    "representation_kind": "review-only-no-op",
+                    "review_artifact": "evidence-to-activation-next-action-ledger",
+                    "local_action_family": "activation-feedback",
+                    "local_rule_available": False,
+                    "file_backed_policy_available": False,
+                    "dry_run_evidence_available": False,
+                    "canary_evidence_available": False,
+                    "managed_enforcement_required": False,
+                    "managed_enforced": False,
+                    "provider_body_rewrite_required": False,
+                    "provider_body_rewrite": False,
+                    "policy_files_written": False,
+                    "reason": "no-supported-local-rule-dry-run-or-canary-representation",
+                    "next_action": _ACTIVATION_FEEDBACK_NO_LOCAL_REPRESENTATION_NEXT_ACTION,
+                    "privacy": _candidate_privacy(),
+                },
+            }
+        )
     elif diagnostic_class == "stale-evidence":
         stage.update(
             {
@@ -1068,7 +1115,11 @@ def _activation_feedback_blocker_review_suppression(diagnostic: dict[str, Any]) 
     if not stage:
         return None
     diagnostic_class = _normal_diagnostic_token(stage.get("diagnostic_class") or diagnostic.get("diagnostic_class"))
-    if diagnostic_class not in {"activation-feedback-blocker-review", "missing-dependency-evidence"}:
+    if diagnostic_class not in {
+        "activation-feedback-blocker-review",
+        "missing-dependency-evidence",
+        "no-local-representation",
+    }:
         return None
     keep_blocked_reason = str(stage.get("keep_blocked_reason") or "").strip()
     if not keep_blocked_reason:
@@ -3907,6 +3958,8 @@ def build_evidence_to_activation_next_action_ledger(
                 entry[review_key] = sanitize_value(stage.get(review_key))
         if stage.get("dependency_evidence_status"):
             entry["dependency_evidence_status"] = sanitize_value(stage.get("dependency_evidence_status"))
+        if isinstance(stage.get("local_action_representation"), dict):
+            entry["local_action_representation"] = sanitize_value(stage.get("local_action_representation"))
         if stage.get("source"):
             entry["source"] = sanitize_value(stage.get("source"))
         for decision_key in (
