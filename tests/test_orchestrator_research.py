@@ -5610,9 +5610,24 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         self.assertIn("human_review", keep_blocked[0]["needed_resolution"])
         self.assertIn("safer_threshold", keep_blocked[0]["needed_resolution"])
         self.assertIn("rollback_proof", keep_blocked[0]["needed_resolution"])
+        unblock = keep_blocked[0]["unblock_criteria"]
+        self.assertEqual(unblock["schema"], "agentflow.activation_feedback_safety_stop_unblock_criteria.v1")
+        self.assertEqual(unblock["status"], "blocked")
+        self.assertFalse(unblock["safety_stop_count_zero"])
+        self.assertFalse(unblock["applied_coverage_present"])
+        self.assertFalse(unblock["holdout_coverage_present"])
+        self.assertFalse(unblock["safer_threshold_or_executor_guard_present"])
+        self.assertFalse(unblock["rollback_proof_present"])
+        self.assertIn("human_review", unblock["needed_resolution"])
+        self.assertIn("safer_threshold", unblock["needed_resolution"])
+        self.assertIn("rollback_proof", unblock["needed_resolution"])
         suppression = plan["evidence"]["issue_proposal_suppression"]
         self.assertEqual(suppression["keep_blocked_ledger_suppressed_count"], 1)
         self.assertEqual(suppression["suppressed"][-1]["suppression_kind"], "current-keep-blocked-ledger-record")
+        self.assertEqual(
+            suppression["suppressed"][-1]["unblock_criteria"]["suppresses_ready_issue_until"],
+            "safety_stop_count_zero_and_applied_holdout_coverage_present",
+        )
 
     def test_repeated_diagnostic_comments_on_existing_open_issue_not_duplicate_create(self):
         existing_issue = issue(
@@ -5758,6 +5773,12 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
             safety_entries[0]["keep_blocked_reason"],
             "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
         )
+        self.assertEqual(safety_entries[0]["unblock_criteria"]["status"], "blocked")
+        self.assertFalse(safety_entries[0]["unblock_criteria"]["safety_stop_count_zero"])
+        self.assertFalse(safety_entries[0]["unblock_criteria"]["applied_coverage_present"])
+        self.assertFalse(safety_entries[0]["unblock_criteria"]["holdout_coverage_present"])
+        self.assertFalse(safety_entries[0]["unblock_criteria"]["safer_threshold_or_executor_guard_present"])
+        self.assertFalse(safety_entries[0]["unblock_criteria"]["rollback_proof_present"])
 
         # Keep-blocked suppresses the repeated safety-stop ready issue proposal.
         repeated_safety_proposals = [

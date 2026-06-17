@@ -1161,9 +1161,9 @@ def _safety_stop_ledger_stages(safety_stop_burndown: dict[str, Any] | None) -> l
     return stages
 
 
-def _has_current_safety_stop_keep_blocked(safety_stop_burndown: dict[str, Any] | None) -> bool:
+def _current_safety_stop_keep_blocked_group(safety_stop_burndown: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(safety_stop_burndown, dict):
-        return False
+        return None
     for group in safety_stop_burndown.get("groups") or []:
         if not isinstance(group, dict):
             continue
@@ -1171,16 +1171,28 @@ def _has_current_safety_stop_keep_blocked(safety_stop_burndown: dict[str, Any] |
             continue
         reason = str(group.get("keep_blocked_reason") or "").strip()
         needed = {str(item) for item in group.get("needed_resolution") or []}
-        if reason and (needed & {"human_review", "safer_threshold", "rollback_proof"}):
-            return True
-    return False
+        if reason and (
+            needed
+            & {
+                "human_review",
+                "safer_threshold",
+                "safer_threshold_or_executor_guard",
+                "rollback_proof",
+                "applied_coverage",
+                "holdout_coverage",
+                "lifecycle_evidence",
+            }
+        ):
+            return group
+    return None
 
 
 def _without_suppressed_safety_stop_diagnostics(
     diagnostics: list[dict[str, Any]],
     safety_stop_burndown: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if not _has_current_safety_stop_keep_blocked(safety_stop_burndown):
+    keep_blocked_group = _current_safety_stop_keep_blocked_group(safety_stop_burndown)
+    if keep_blocked_group is None:
         return diagnostics, []
     filtered: list[dict[str, Any]] = []
     suppressed: list[dict[str, Any]] = []
@@ -1192,19 +1204,37 @@ def _without_suppressed_safety_stop_diagnostics(
             fingerprint = _diagnostic_fingerprint(diagnostic_class or reason or "safety-stop")
             if fingerprint not in suppressed_fingerprints:
                 suppressed_fingerprints.add(fingerprint)
-                suppressed.append(
-                    {
-                        "diagnostic_class": diagnostic_class or reason,
-                        "reason": reason or diagnostic_class,
-                        "fingerprint": fingerprint,
-                        "suppression_kind": "current-keep-blocked-ledger-record",
-                        "keep_blocked_reason": sanitize_value(
+                suppression = {
+                    "diagnostic_class": diagnostic_class or reason,
+                    "reason": reason or diagnostic_class,
+                    "fingerprint": fingerprint,
+                    "suppression_kind": "current-keep-blocked-ledger-record",
+                    "keep_blocked_reason": sanitize_value(
+                        keep_blocked_group.get("keep_blocked_reason")
+                        or (
                             (safety_stop_burndown.get("summary") or {}).get("top_keep_blocked_reason")
                             if isinstance(safety_stop_burndown.get("summary"), dict)
                             else "safety-stop-keep-blocked"
-                        ),
-                    }
-                )
+                        )
+                    ),
+                    "next_action": sanitize_value(
+                        keep_blocked_group.get("next_action")
+                        or "review-activation-feedback-safety-stop-and-record-keep-blocked-reason"
+                    ),
+                    "needed_resolution": sanitize_value(keep_blocked_group.get("needed_resolution") or []),
+                    "safety_stop_count": _to_int(keep_blocked_group.get("safety_stop_count")),
+                    "applied_count": _to_int(keep_blocked_group.get("applied_count")),
+                    "holdout_count": _to_int(keep_blocked_group.get("holdout_count")),
+                }
+                if isinstance(keep_blocked_group.get("unblock_criteria"), dict):
+                    suppression["unblock_criteria"] = sanitize_value(keep_blocked_group.get("unblock_criteria"))
+                if keep_blocked_group.get("target_local_rule_file"):
+                    suppression["target_local_rule_file"] = sanitize_value(keep_blocked_group.get("target_local_rule_file"))
+                if keep_blocked_group.get("target_local_policy_section"):
+                    suppression["target_local_policy_section"] = sanitize_value(
+                        keep_blocked_group.get("target_local_policy_section")
+                    )
+                suppressed.append(suppression)
             continue
         filtered.append(diagnostic)
     return filtered, suppressed
@@ -4510,7 +4540,7 @@ def _burndown_row_from_safety_stop_group(group: dict[str, Any]) -> dict[str, Any
     next_state = str(group.get("next_state") or "keep-blocked").strip()
     if next_state not in {"keep-blocked", "retry-later", "superseded"}:
         next_state = "keep-blocked"
-    return {
+    row = {
         "lever": "activation-feedback",
         "local_action_family": sanitize_value(group.get("action_family") or "activation-feedback"),
         "state": sanitize_value(next_state),
@@ -4527,6 +4557,9 @@ def _burndown_row_from_safety_stop_group(group: dict[str, Any]) -> dict[str, Any
         "owner": "local-policy",
         "_score": -10.0 + min(count, 10000) / 100.0,
     }
+    if isinstance(group.get("unblock_criteria"), dict):
+        row["unblock_criteria"] = sanitize_value(group.get("unblock_criteria"))
+    return row
 
 
 def _promotion_feedback_family(value: Any) -> str:

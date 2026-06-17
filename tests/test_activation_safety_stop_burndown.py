@@ -296,6 +296,23 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
             "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
         )
         self.assertIn("human_review", report["groups"][0]["needed_resolution"])
+        unblock = report["groups"][0]["unblock_criteria"]
+        self.assertEqual(unblock["schema"], "agentflow.activation_feedback_safety_stop_unblock_criteria.v1")
+        self.assertEqual(unblock["status"], "blocked")
+        self.assertFalse(unblock["safety_stop_count_zero"])
+        self.assertFalse(unblock["applied_coverage_present"])
+        self.assertFalse(unblock["holdout_coverage_present"])
+        self.assertFalse(unblock["safer_threshold_or_executor_guard_present"])
+        self.assertFalse(unblock["rollback_proof_present"])
+        self.assertIn("human_review", unblock["needed_resolution"])
+        self.assertIn("safer_threshold", unblock["needed_resolution"])
+        self.assertIn("rollback_proof", unblock["needed_resolution"])
+        self.assertEqual(
+            unblock["suppresses_ready_issue_until"],
+            "safety_stop_count_zero_and_applied_holdout_coverage_present",
+        )
+        self.assertTrue(unblock["metadata_only"])
+        self.assertTrue(unblock["aggregate_only"])
         rendered = json.dumps(report, sort_keys=True)
         self.assertNotIn("req-secret", rendered)
         self.assertNotIn("session-secret", rendered)

@@ -673,6 +673,43 @@ def _safety_stop_next_state(
     return "keep-blocked", "safety-stop-kept-blocked-until-explicit-resolution"
 
 
+def _activation_feedback_unblock_criteria(
+    *,
+    safety_stop_count: int,
+    applied_count: int,
+    holdout_count: int,
+    needed_resolution: list[str],
+    next_state: str,
+) -> dict[str, Any]:
+    needed = {str(item or "") for item in needed_resolution}
+    safety_stop_clear = safety_stop_count <= 0 and "human_review" not in needed
+    applied_coverage_present = applied_count > 0 and "lifecycle_evidence" not in needed
+    holdout_coverage_present = holdout_count > 0 and "holdout_coverage" not in needed
+    safer_guard_present = not (needed & {"safer_threshold", "safer_threshold_or_executor_guard"})
+    rollback_proof_present = "rollback_proof" not in needed
+    ready = (
+        safety_stop_clear
+        and applied_coverage_present
+        and holdout_coverage_present
+        and safer_guard_present
+        and rollback_proof_present
+        and next_state == "unblock-ready"
+    )
+    return {
+        "schema": "agentflow.activation_feedback_safety_stop_unblock_criteria.v1",
+        "status": "unblock-ready" if ready else "blocked",
+        "safety_stop_count_zero": safety_stop_clear,
+        "applied_coverage_present": applied_coverage_present,
+        "holdout_coverage_present": holdout_coverage_present,
+        "safer_threshold_or_executor_guard_present": safer_guard_present,
+        "rollback_proof_present": rollback_proof_present,
+        "needed_resolution": needed_resolution,
+        "suppresses_ready_issue_until": "safety_stop_count_zero_and_applied_holdout_coverage_present",
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
 def _safety_group_from_lifecycle_row(row: dict[str, Any]) -> dict[str, Any] | None:
     reasons = [str(item) for item in row.get("reason_codes") or [] if str(item or "").strip()]
     cohort = str(row.get("cohort_label") or "").strip()
@@ -729,6 +766,13 @@ def _safety_group_from_lifecycle_row(row: dict[str, Any]) -> dict[str, Any] | No
         "savings_estimate_usd": round(_as_float(row.get("savings_estimate_usd")), 8),
         "reason_breakdown": row.get("blocker_reason_breakdown") or [{"value": primary_reason, "count": max(1, event_count)}],
         "policy_ref": row.get("policy_ref") if str(row.get("policy_ref") or "").startswith("policy:") else "unknown",
+        "unblock_criteria": _activation_feedback_unblock_criteria(
+            safety_stop_count=safety_count,
+            applied_count=applied_count,
+            holdout_count=holdout_count,
+            needed_resolution=needed,
+            next_state=next_state,
+        ),
     }
 
 
@@ -777,6 +821,13 @@ def _safety_group_from_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any] 
         "savings_estimate_usd": 0.0,
         "reason_breakdown": [{"value": reason or "safety-stop", "count": max(1, count)}],
         "policy_ref": "unknown",
+        "unblock_criteria": _activation_feedback_unblock_criteria(
+            safety_stop_count=count,
+            applied_count=0,
+            holdout_count=0,
+            needed_resolution=["human_review", "safer_threshold", "rollback_proof"],
+            next_state=next_state,
+        ),
     }
 
 
