@@ -942,6 +942,33 @@ def _anthropic_routing_unblock_criteria(
     holdout_coverage_present = holdout_count > 0 and not missing_holdout and "holdout_coverage" not in needed
     safer_guard_present = "safer_threshold_or_executor_guard" not in needed
     rollback_proof_present = "rollback_proof" not in needed
+    criterion_results = {
+        "safety_stop_reason_review": {
+            "passed": safety_stop_clear,
+            "status": "passed" if safety_stop_clear else "failed",
+            "reason_codes": ["safety-stop-count-zero"] if safety_stop_clear else ["safety-stop-observed"],
+        },
+        "safer_threshold_or_executor_guard": {
+            "passed": safer_guard_present,
+            "status": "passed" if safer_guard_present else "failed",
+            "reason_codes": ["executor-guard-present"] if safer_guard_present else ["safer-threshold-or-executor-guard-missing"],
+        },
+        "rollback_proof": {
+            "passed": rollback_proof_present,
+            "status": "passed" if rollback_proof_present else "failed",
+            "reason_codes": ["rollback-proof-present"] if rollback_proof_present else ["rollback-proof-missing"],
+        },
+        "applied_coverage": {
+            "passed": applied_coverage_present,
+            "status": "passed" if applied_coverage_present else "failed",
+            "reason_codes": ["applied-coverage-present"] if applied_coverage_present else ["missing-applied-coverage"],
+        },
+        "holdout_coverage": {
+            "passed": holdout_coverage_present,
+            "status": "passed" if holdout_coverage_present else "failed",
+            "reason_codes": ["holdout-coverage-present"] if holdout_coverage_present else ["missing-holdout-coverage"],
+        },
+    }
     ready = (
         safety_stop_clear
         and applied_coverage_present
@@ -964,6 +991,14 @@ def _anthropic_routing_unblock_criteria(
         "stage_allowed": stage_allowed,
         "suppresses_ready_issue_until": "safety_stop_count_zero_and_applied_holdout_coverage_present",
         "needed_resolution": needed_resolution,
+        "required_resolution_fields": [
+            "safety_stop_reason_review",
+            "safer_threshold_or_executor_guard",
+            "rollback_proof",
+            "applied_coverage",
+            "holdout_coverage",
+        ],
+        "criterion_results": criterion_results,
         "metadata_only": True,
         "aggregate_only": True,
     }
@@ -982,6 +1017,7 @@ def _anthropic_routing_review_field(
         "schema": f"agentflow.anthropic_routing_safety_stop_{schema_suffix}.v1",
         "status": status,
         "present": present,
+        "passed": present and status == "present" and not stale,
         "stale": stale,
         "reason_codes": sorted({
             _reason_code(reason) or "unknown"
@@ -1058,8 +1094,14 @@ def _anthropic_routing_guard_review_fields(
             reason_codes=["rollback-proof-missing"] if rollback_missing else ["rollback-proof-present"],
             details={
                 "rollback_action": "keep-routing-policy-disabled",
+                "rollback_action_type": "keep_anthropic_routing_policy_disabled",
+                "target_local_policy_section": "routing.rules",
+                "target_local_rule_file": "routing_rules.yaml",
+                "disabled_policy_state": "anthropic-routing-canary-disabled",
+                "keep_disabled_action": "do-not-stage-or-widen-until-unblock-criteria-pass",
                 "active_policy_changed": False,
                 "wrote_active_policy_files": False,
+                "policy_file_contents_included": False,
             },
         ),
         "applied_coverage": _anthropic_routing_review_field(
@@ -1096,6 +1138,25 @@ def _local_file_backed_routing_representation() -> dict[str, Any]:
         "rule_file": "routing_rules.yaml",
         "metadata_only": True,
         "aggregate_only": True,
+    }
+
+
+def _anthropic_routing_rollback_metadata() -> dict[str, Any]:
+    return {
+        "schema": "agentflow.anthropic_routing_safety_stop_rollback_metadata.v1",
+        "rollback_action_type": "keep_anthropic_routing_policy_disabled",
+        "rollback_action": "keep-routing-policy-disabled",
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "disabled_policy_state": "anthropic-routing-canary-disabled",
+        "keep_disabled_action": "do-not-stage-or-widen-until-unblock-criteria-pass",
+        "active_policy_changed": False,
+        "wrote_active_policy_files": False,
+        "promotion_allowed": False,
+        "stage_allowed": False,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "policy_file_contents_included": False,
     }
 
 
@@ -1170,6 +1231,9 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
     missing_holdout = holdout_count <= 0 or "missing-holdout-coverage" in blockers
     promotion_allowed = next_state == "unblock-ready"
     stage_allowed = next_state == "unblock-ready"
+    rollback_metadata = _anthropic_routing_rollback_metadata()
+    rollback_metadata["promotion_allowed"] = promotion_allowed
+    rollback_metadata["stage_allowed"] = stage_allowed
     guard_review_fields = _anthropic_routing_guard_review_fields(
         safety_stop_count=safety_stop_count,
         applied_count=applied_count,
@@ -1263,6 +1327,7 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "safety_stop_reason_review": guard_review_fields["safety_stop_reason_review"],
         "safer_threshold_or_executor_guard": guard_review_fields["safer_threshold_or_executor_guard"],
         "rollback_proof": guard_review_fields["rollback_proof"],
+        "rollback_metadata": rollback_metadata,
         "applied_coverage": guard_review_fields["applied_coverage"],
         "holdout_coverage": guard_review_fields["holdout_coverage"],
         "duplicate_suppression": duplicate_suppression,

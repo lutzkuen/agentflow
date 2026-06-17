@@ -161,24 +161,58 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertTrue(group["safety_stop_breakdown"][0]["missing_holdout_coverage"])
         self.assertEqual(group["safety_stop_reason_review"]["status"], "missing")
         self.assertFalse(group["safety_stop_reason_review"]["present"])
+        self.assertFalse(group["safety_stop_reason_review"]["passed"])
         self.assertEqual(group["safety_stop_reason_review"]["safety_stop_count"], 390)
         self.assertEqual(group["safer_threshold_or_executor_guard"]["status"], "missing")
         self.assertFalse(group["safer_threshold_or_executor_guard"]["present"])
+        self.assertFalse(group["safer_threshold_or_executor_guard"]["passed"])
         self.assertTrue(group["safer_threshold_or_executor_guard"]["executor_compatible"])
         self.assertEqual(
             group["safer_threshold_or_executor_guard"]["required_local_executor"],
             "anthropic-routing-rules",
         )
         self.assertEqual(group["rollback_proof"]["status"], "missing")
+        self.assertFalse(group["rollback_proof"]["passed"])
+        self.assertEqual(group["rollback_proof"]["rollback_action_type"], "keep_anthropic_routing_policy_disabled")
+        self.assertEqual(group["rollback_proof"]["target_local_policy_section"], "routing.rules")
+        self.assertEqual(group["rollback_proof"]["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(group["rollback_proof"]["disabled_policy_state"], "anthropic-routing-canary-disabled")
+        self.assertEqual(group["rollback_proof"]["keep_disabled_action"], "do-not-stage-or-widen-until-unblock-criteria-pass")
         self.assertFalse(group["rollback_proof"]["active_policy_changed"])
         self.assertFalse(group["rollback_proof"]["wrote_active_policy_files"])
+        rollback = group["rollback_metadata"]
+        self.assertEqual(rollback["schema"], "agentflow.anthropic_routing_safety_stop_rollback_metadata.v1")
+        self.assertEqual(rollback["rollback_action_type"], "keep_anthropic_routing_policy_disabled")
+        self.assertEqual(rollback["target_local_policy_section"], "routing.rules")
+        self.assertEqual(rollback["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(rollback["disabled_policy_state"], "anthropic-routing-canary-disabled")
+        self.assertEqual(rollback["keep_disabled_action"], "do-not-stage-or-widen-until-unblock-criteria-pass")
+        self.assertFalse(rollback["active_policy_changed"])
+        self.assertFalse(rollback["wrote_active_policy_files"])
+        self.assertFalse(rollback["promotion_allowed"])
+        self.assertFalse(rollback["stage_allowed"])
+        self.assertFalse(rollback["policy_file_contents_included"])
+        self.assertTrue(rollback["metadata_only"])
+        self.assertTrue(rollback["aggregate_only"])
         self.assertEqual(group["applied_coverage"]["status"], "missing")
+        self.assertFalse(group["applied_coverage"]["passed"])
         self.assertEqual(group["applied_coverage"]["applied_count"], 0)
         self.assertEqual(group["holdout_coverage"]["status"], "missing")
+        self.assertFalse(group["holdout_coverage"]["passed"])
         self.assertEqual(group["holdout_coverage"]["holdout_count"], 0)
         unblock = group["unblock_criteria"]
         self.assertEqual(unblock["schema"], "agentflow.anthropic_routing_safety_stop_unblock_criteria.v1")
         self.assertEqual(unblock["status"], "blocked")
+        self.assertEqual(
+            unblock["required_resolution_fields"],
+            [
+                "safety_stop_reason_review",
+                "safer_threshold_or_executor_guard",
+                "rollback_proof",
+                "applied_coverage",
+                "holdout_coverage",
+            ],
+        )
         self.assertFalse(unblock["safety_stop_count_zero"])
         self.assertFalse(unblock["applied_coverage_present"])
         self.assertFalse(unblock["holdout_coverage_present"])
@@ -186,6 +220,10 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertFalse(unblock["rollback_proof_present"])
         self.assertFalse(unblock["promotion_allowed"])
         self.assertFalse(unblock["stage_allowed"])
+        for field in unblock["required_resolution_fields"]:
+            self.assertIn(field, unblock["criterion_results"])
+            self.assertFalse(unblock["criterion_results"][field]["passed"])
+            self.assertEqual(unblock["criterion_results"][field]["status"], "failed")
         self.assertIn("safety_stop_reason_review", unblock["needed_resolution"])
         self.assertIn("safer_threshold_or_executor_guard", unblock["needed_resolution"])
         self.assertIn("rollback_proof", unblock["needed_resolution"])
@@ -216,6 +254,48 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         )
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertTrue(report["privacy"]["aggregate_only"])
+
+    def test_anthropic_routing_safety_stop_stays_blocked_even_with_applied_holdout_coverage(self):
+        plan = self._anthropic_routing_safety_stop_plan()
+        lifecycle = plan["evidence"]["stats_summary"]["pass_through_routing_report"]["buckets"][0][
+            "anthropic_canary_lifecycle_evidence"
+        ]
+        lifecycle["cohort_counts"]["canary_applied"] = 8
+        lifecycle["cohort_counts"]["canary_holdout"] = 7
+        lifecycle["coverage"]["applied_rate"] = 0.0064
+        lifecycle["coverage"]["holdout_rate"] = 0.0056
+        lifecycle["blocker_codes"] = ["safety-stop-observed"]
+        lifecycle["blocker_reason_breakdown"] = [{"value": "safety-stop-observed", "count": 390}]
+        for row in lifecycle["safety_stop_breakdown"]:
+            row["missing_applied_coverage"] = False
+            row["missing_holdout_coverage"] = False
+
+        report = build_activation_safety_stop_burndown(research_plan=plan)
+
+        group = report["groups"][0]
+        self.assertEqual(group["next_state"], "keep-blocked")
+        self.assertEqual(group["burndown_status"], "safety-stop-active")
+        self.assertFalse(group["promotion_allowed"])
+        self.assertFalse(group["stage_allowed"])
+        self.assertFalse(group["active_policy_changed"])
+        self.assertFalse(group["wrote_active_policy_files"])
+        self.assertEqual(group["applied_coverage"]["status"], "present")
+        self.assertTrue(group["applied_coverage"]["passed"])
+        self.assertEqual(group["holdout_coverage"]["status"], "present")
+        self.assertTrue(group["holdout_coverage"]["passed"])
+        unblock = group["unblock_criteria"]
+        self.assertFalse(unblock["safety_stop_count_zero"])
+        self.assertTrue(unblock["applied_coverage_present"])
+        self.assertTrue(unblock["holdout_coverage_present"])
+        self.assertFalse(unblock["promotion_allowed"])
+        self.assertFalse(unblock["stage_allowed"])
+        self.assertFalse(unblock["criterion_results"]["safety_stop_reason_review"]["passed"])
+        self.assertTrue(unblock["criterion_results"]["applied_coverage"]["passed"])
+        self.assertTrue(unblock["criterion_results"]["holdout_coverage"]["passed"])
+        rollback = group["rollback_metadata"]
+        self.assertEqual(rollback["keep_disabled_action"], "do-not-stage-or-widen-until-unblock-criteria-pass")
+        self.assertFalse(rollback["active_policy_changed"])
+        self.assertFalse(rollback["wrote_active_policy_files"])
 
     def test_lifecycle_safety_stop_groups_have_specific_next_action(self):
         result = {
