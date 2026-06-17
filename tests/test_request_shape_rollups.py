@@ -20,6 +20,7 @@ from agentflow_proxy.request_shape_rollups import (
     build_request_shape_cache_replay_policy_decision_report,
     build_request_shape_crunch_canary_impact_report,
     build_request_shape_crunch_activation_evidence_report,
+    build_request_shape_crunch_remaining_measurement_report,
     build_request_shape_crunch_policy_decision_ledger,
     build_request_shape_crunch_policy_decision_report,
     build_request_shape_crunch_canary_stage_report,
@@ -4949,6 +4950,209 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(str(duplicate_suppression["fingerprint"]).startswith("activation:"))
         rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("raw-keep-active-policy-secret-should-not-leak", rendered)
+        self.assertNotIn(str(rules_path), rendered)
+
+    def test_remaining_crunch_measurements_skip_keep_active_rule_coverage(self) -> None:
+        decision_id = "request-shape-crunch-policy-decision:keep-active"
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "crunch_rules.yaml"
+            rules_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "request_shape_repeated_context_canaries": {
+                            "enabled": True,
+                            "rules": [
+                                {
+                                    "id": "raw-active-rule-secret-should-not-leak",
+                                    "enabled": True,
+                                    "policy_source": "local-manual",
+                                    "cohort_id": "request-shape-crunch:covered",
+                                    "conditions": {
+                                        "provider_family": "anthropic",
+                                        "source_surface": "anthropic_messages",
+                                        "endpoint": "messages",
+                                        "category": "tool-result",
+                                        "workflow_phase": "thinking",
+                                        "stream": True,
+                                        "has_tools": True,
+                                        "cache_status": "skipped",
+                                        "routing_status": "passthrough",
+                                        "text_bucket": "gte_128k_chars",
+                                        "token_bucket": "lt_500_tokens",
+                                    },
+                                    "rollout": {"canary_enabled": True, "canary_fraction": 0.30, "holdout_fraction": 0.10},
+                                    "safety_gates": {"max_rollout_fraction": 0.30},
+                                    "policy_decision": {
+                                        "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                        "decision_id": decision_id,
+                                        "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                        "decision": "widen",
+                                        "graduation_decision": "widen",
+                                        "applied_count": 107,
+                                        "holdout_count": 40,
+                                        "observed_saved_tokens": 8606129,
+                                        "observed_saved_usd": 25.818387,
+                                        "widened_canary_fraction": 0.30,
+                                        "holdout_fraction": 0.10,
+                                    },
+                                }
+                            ],
+                        }
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            activation = build_request_shape_crunch_activation_evidence_report(
+                crunch_policy_decision={
+                    "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "decision": "widen",
+                    "graduation_decision": "widen",
+                    "decision_id": decision_id,
+                    "summary": {
+                        "decision": "widen",
+                        "graduation_decision": "widen",
+                        "decision_id": decision_id,
+                        "applied_count": 107,
+                        "holdout_count": 40,
+                        "observed_saved_tokens": 8606129,
+                        "observed_saved_usd": 25.818387,
+                        "coverage": {"skipped_count": 280, "fallback_count": 0, "safety_stop_count": 0, "rollback_count": 0},
+                    },
+                },
+                crunch_canary_impact={"schema": "agentflow.request_shape_crunch_canary_impact.v1", "summary": {}},
+                rules_path=rules_path,
+            )
+            follow_up = {
+                "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                "candidates": [
+                    {
+                        "rank": 1,
+                        "provider_family": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "category": "tool-result",
+                        "workflow_phase": "thinking",
+                        "stream": True,
+                        "has_tools": True,
+                        "cache_status": "skipped",
+                        "routing_status": "passthrough",
+                        "text_bucket": "gte_128k_chars",
+                        "token_bucket": "lt_500_tokens",
+                        "row_count": 107,
+                        "sample_count": 107,
+                        "projected_saved_tokens": 8606129,
+                        "projected_savings_usd": 25.818387,
+                        "projected_crunch_tokens_saved": 8606129,
+                        "projected_crunch_savings_usd": 25.818387,
+                        "blocker_codes": ["tool-call-cache-disabled", "unsupported-streaming-shape"],
+                        "readiness_state": "measurement-required",
+                        "next_action": "measure-repeated-context-crunch-canary-impact",
+                        "local_action_family": "crunch",
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    {
+                        "rank": 2,
+                        "provider_family": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "unknown",
+                        "category": "tool-result",
+                        "workflow_phase": "thinking",
+                        "stream": True,
+                        "has_tools": True,
+                        "cache_status": "skipped",
+                        "routing_status": "passthrough",
+                        "text_bucket": "gte_128k_chars",
+                        "token_bucket": "lt_500_tokens",
+                        "row_count": 446,
+                        "sample_count": 446,
+                        "projected_saved_tokens": 1860651,
+                        "projected_savings_usd": 5.581954,
+                        "projected_crunch_tokens_saved": 1860651,
+                        "projected_crunch_savings_usd": 5.581954,
+                        "blocker_codes": ["tool-call-cache-disabled", "unsupported-streaming-shape"],
+                        "readiness_state": "measurement-required",
+                        "next_action": "measure-repeated-context-crunch-canary-impact",
+                        "local_action_family": "crunch",
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                ],
+            }
+            opportunity = {
+                "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                "cohorts": [
+                    {
+                        "provider_family": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "category": "tool-result",
+                        "workflow_phase": "thinking",
+                        "stream": True,
+                        "has_tools": True,
+                        "cache_status": "skipped",
+                        "routing_status": "passthrough",
+                        "text_bucket": "gte_128k_chars",
+                        "token_bucket": "lt_500_tokens",
+                        "evidence_blocker_codes": ["tool-call-cache-disabled"],
+                        "crunch_canary_lifecycle": {"applied_count": 107, "holdout_count": 40},
+                        "duplicate_suppression": {"suppresses_new_stage_action": True, "matching_local_policy": "crunch_rules"},
+                    },
+                    {
+                        "provider_family": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "unknown",
+                        "category": "tool-result",
+                        "workflow_phase": "thinking",
+                        "stream": True,
+                        "has_tools": True,
+                        "cache_status": "skipped",
+                        "routing_status": "passthrough",
+                        "text_bucket": "gte_128k_chars",
+                        "token_bucket": "lt_500_tokens",
+                        "evidence_blocker_codes": ["tool-call-cache-disabled", "unsupported-streaming-shape"],
+                        "crunch_canary_lifecycle": {
+                            "applied_count": 24,
+                            "holdout_count": 16,
+                            "fallback_count": 1,
+                            "retry_count": 2,
+                            "rollback_count": 0,
+                            "safety_stopped_count": 0,
+                        },
+                        "duplicate_suppression": {"suppresses_new_stage_action": False},
+                    },
+                ],
+            }
+
+            payload = build_request_shape_crunch_remaining_measurement_report(
+                follow_up_candidates=follow_up,
+                crunch_opportunity=opportunity,
+                activation_evidence=activation,
+                rules_path=rules_path,
+            )
+
+        self.assertEqual(payload["schema"], "agentflow.request_shape_crunch_remaining_measurement_cohorts.v1")
+        self.assertEqual(payload["status"], "ranked")
+        self.assertEqual(payload["summary"]["excluded_active_rule_covered_count"], 1)
+        self.assertEqual(payload["summary"]["remaining_measurement_required_count"], 1)
+        self.assertEqual(payload["summary"]["active_rule_next_action"], "keep-active")
+        self.assertTrue(payload["summary"]["active_rule_duplicate_suppresses_new_activation_issue"])
+        cohort = payload["cohorts"][0]
+        self.assertEqual(cohort["row_count"], 446)
+        self.assertEqual(cohort["readiness_state"], "measurement-required")
+        self.assertEqual(cohort["blocker_codes"], ["tool-call-cache-disabled", "unsupported-streaming-shape"])
+        self.assertEqual(cohort["projected_saved_tokens"], 1860651)
+        self.assertAlmostEqual(cohort["projected_saved_usd"], 5.581954)
+        self.assertEqual(cohort["active_rule_coverage_status"], "not-covered-by-active-rule")
+        self.assertEqual(cohort["applied_count"], 24)
+        self.assertEqual(cohort["holdout_count"], 16)
+        self.assertEqual(cohort["fallback_count"], 1)
+        self.assertEqual(cohort["retry_count"], 2)
+        self.assertEqual(cohort["rollback_count"], 0)
+        self.assertEqual(cohort["safety_stop_count"], 0)
+        self.assertTrue(cohort["privacy"]["metadata_only"])
+        self.assertTrue(cohort["privacy"]["aggregate_only"])
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw-active-rule-secret-should-not-leak", rendered)
         self.assertNotIn(str(rules_path), rendered)
 
     def test_crunch_activation_evidence_requests_rollback_for_post_widening_regression(self) -> None:

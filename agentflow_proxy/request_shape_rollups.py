@@ -40,6 +40,7 @@ CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycl
 CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
 CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
 CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "agentflow.request_shape_crunch_activation_evidence.v1"
+CRUNCH_REMAINING_MEASUREMENT_SCHEMA = "agentflow.request_shape_crunch_remaining_measurement_cohorts.v1"
 CRUNCH_POLICY_DECISION_APPLY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_apply.v1"
 CRUNCH_POLICY_DECISION_LEDGER_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger.v1"
 CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger_entry.v1"
@@ -2510,6 +2511,240 @@ def build_request_shape_crunch_activation_evidence_report(
         "rules": evidence_rules[:5],
         "activation_follow_up": activation_follow_up,
         "duplicate_suppression": duplicate_suppression,
+        "missing_measurements": missing_measurements,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _crunch_remaining_shape_key(cohort: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        public_label(cohort.get("provider_family"), "unknown"),
+        public_label(cohort.get("source_surface"), "unknown"),
+        public_label(cohort.get("endpoint"), "unknown"),
+        public_label(cohort.get("category"), "unknown"),
+        public_label(cohort.get("workflow_phase"), "unknown"),
+        bool(cohort.get("stream")),
+        bool(cohort.get("has_tools")),
+        public_label(cohort.get("cache_status"), "unknown"),
+        public_label(cohort.get("routing_status"), "unknown"),
+        public_label(cohort.get("text_bucket"), "unknown"),
+        public_label(cohort.get("token_bucket"), "unknown"),
+    )
+
+
+def _crunch_remaining_active_rule_coverage(
+    candidate: dict[str, Any],
+    *,
+    active_rules: list[dict[str, Any]],
+    activation_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    active_summary = activation_evidence.get("summary") if isinstance(activation_evidence.get("summary"), dict) else {}
+    active_next_action = public_label(
+        activation_evidence.get("next_action") or active_summary.get("next_action") or "unknown",
+        "unknown",
+    )
+    active_status = public_label(activation_evidence.get("status") or "unknown", "unknown")
+    for rule in active_rules:
+        if _request_shape_crunch_cohort_matches_rule(candidate, rule):
+            return {
+                "schema": "agentflow.request_shape_crunch_remaining_active_rule_coverage.v1",
+                "status": "covered-by-active-rule",
+                "covered": True,
+                "matching_local_policy": "crunch_rules",
+                "matching_policy_id": public_label(rule.get("policy_id") or rule.get("id"), "unknown"),
+                "matching_cohort_id": public_label(rule.get("cohort_id"), "unknown"),
+                "active_rule_status": active_status,
+                "active_rule_next_action": active_next_action,
+                "target_local_rule_file": "crunch_rules.yaml",
+                "target_local_policy_section": "crunch.rules",
+                "metadata_only": True,
+                "aggregate_only": True,
+                "privacy": _crunch_opportunity_privacy(),
+            }
+    if active_rules:
+        status = "not-covered-by-active-rule"
+    elif active_status == "active-rule-evidence-observed":
+        status = "active-rule-coverage-unmatched"
+    else:
+        status = "no-active-rule-coverage"
+    return {
+        "schema": "agentflow.request_shape_crunch_remaining_active_rule_coverage.v1",
+        "status": status,
+        "covered": False,
+        "matching_local_policy": None,
+        "matching_policy_id": None,
+        "matching_cohort_id": None,
+        "active_rule_status": active_status,
+        "active_rule_next_action": active_next_action,
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def build_request_shape_crunch_remaining_measurement_report(
+    *,
+    follow_up_candidates: dict[str, Any],
+    crunch_opportunity: dict[str, Any],
+    activation_evidence: dict[str, Any],
+    rules_path: str | Path | None = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    candidates = follow_up_candidates.get("candidates") if isinstance(follow_up_candidates.get("candidates"), list) else []
+    opportunity_cohorts = crunch_opportunity.get("cohorts") if isinstance(crunch_opportunity.get("cohorts"), list) else []
+    opportunity_by_shape = {
+        _crunch_remaining_shape_key(cohort): cohort
+        for cohort in opportunity_cohorts
+        if isinstance(cohort, dict)
+    }
+    active_rules = _load_request_shape_crunch_canary_rules(rules_path)
+    rows: list[dict[str, Any]] = []
+    excluded_active_rule_count = 0
+    projected_tokens = 0
+    projected_savings = 0.0
+    applied_count = 0
+    holdout_count = 0
+    fallback_count = 0
+    retry_count = 0
+    rollback_count = 0
+    safety_stop_count = 0
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if public_label(candidate.get("local_action_family"), "unknown") != "crunch":
+            continue
+        if public_label(candidate.get("readiness_state"), "unknown") != "measurement-required":
+            continue
+        if public_label(candidate.get("next_action"), "unknown") != "measure-repeated-context-crunch-canary-impact":
+            continue
+
+        opportunity = opportunity_by_shape.get(_crunch_remaining_shape_key(candidate), {})
+        lifecycle = opportunity.get("crunch_canary_lifecycle") if isinstance(opportunity.get("crunch_canary_lifecycle"), dict) else {}
+        duplicate = opportunity.get("duplicate_suppression") if isinstance(opportunity.get("duplicate_suppression"), dict) else {}
+        coverage = _crunch_remaining_active_rule_coverage(
+            candidate,
+            active_rules=active_rules,
+            activation_evidence=activation_evidence,
+        )
+        if coverage["covered"]:
+            excluded_active_rule_count += 1
+            continue
+
+        row_applied = _as_int(lifecycle.get("applied_count"))
+        row_holdout = _as_int(lifecycle.get("holdout_count"))
+        row_fallback = _as_int(lifecycle.get("fallback_count"))
+        row_retry = _as_int(lifecycle.get("retry_count"))
+        row_rollback = _as_int(lifecycle.get("rollback_count"))
+        row_safety = _as_int(lifecycle.get("safety_stopped_count"))
+        row_projected_tokens = _as_int(candidate.get("projected_saved_tokens") or candidate.get("projected_crunch_tokens_saved"))
+        row_projected_savings = _as_float(candidate.get("projected_savings_usd") or candidate.get("projected_crunch_savings_usd"))
+        projected_tokens += row_projected_tokens
+        projected_savings += row_projected_savings
+        applied_count += row_applied
+        holdout_count += row_holdout
+        fallback_count += row_fallback
+        retry_count += row_retry
+        rollback_count += row_rollback
+        safety_stop_count += row_safety
+        rows.append(
+            {
+                "schema": "agentflow.request_shape_crunch_remaining_measurement_cohort.v1",
+                "rank": _as_int(candidate.get("rank")),
+                "row_count": _as_int(candidate.get("row_count")),
+                "sample_count": _as_int(candidate.get("sample_count") or candidate.get("row_count")),
+                "readiness_state": public_label(candidate.get("readiness_state"), "unknown"),
+                "next_action": public_label(candidate.get("next_action"), "unknown"),
+                "actionability_reason": public_label(candidate.get("actionability_reason"), "unknown"),
+                "blocker_codes": _public_label_list(candidate.get("blocker_codes")),
+                "evidence_blocker_codes": _public_label_list(opportunity.get("evidence_blocker_codes")),
+                "projected_saved_tokens": row_projected_tokens,
+                "projected_saved_usd": round(row_projected_savings, 8),
+                "projected_crunch_tokens_saved": _as_int(candidate.get("projected_crunch_tokens_saved")),
+                "projected_crunch_savings_usd": round(_as_float(candidate.get("projected_crunch_savings_usd")), 8),
+                "applied_count": row_applied,
+                "holdout_count": row_holdout,
+                "fallback_count": row_fallback,
+                "retry_count": row_retry,
+                "rollback_count": row_rollback,
+                "safety_stop_count": row_safety,
+                "active_rule_coverage_status": coverage["status"],
+                "active_rule_coverage": coverage,
+                "duplicate_suppression": {
+                    "schema": public_label(duplicate.get("schema"), "agentflow.request_shape_crunch_stage_duplicate_suppression.v1"),
+                    "suppressed": bool(duplicate.get("suppressed") or duplicate.get("suppresses_new_stage_action")),
+                    "suppresses_new_stage_action": bool(duplicate.get("suppresses_new_stage_action")),
+                    "reason": public_label(duplicate.get("reason"), "unknown"),
+                    "matching_local_policy": public_label(duplicate.get("matching_local_policy"), "unknown"),
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                    "privacy": _crunch_opportunity_privacy(),
+                },
+                "provider_family": public_label(candidate.get("provider_family"), "unknown"),
+                "source_surface": public_label(candidate.get("source_surface"), "unknown"),
+                "endpoint": public_label(candidate.get("endpoint"), "unknown"),
+                "category": public_label(candidate.get("category"), "unknown"),
+                "workflow_phase": public_label(candidate.get("workflow_phase"), "unknown"),
+                "stream": bool(candidate.get("stream")),
+                "has_tools": bool(candidate.get("has_tools")),
+                "text_bucket": public_label(candidate.get("text_bucket"), "unknown"),
+                "token_bucket": public_label(candidate.get("token_bucket"), "unknown"),
+                "cache_status": public_label(candidate.get("cache_status"), "unknown"),
+                "routing_status": public_label(candidate.get("routing_status"), "unknown"),
+                "privacy": _crunch_opportunity_privacy(),
+            }
+        )
+
+    rows.sort(
+        key=lambda item: (
+            _as_float(item.get("projected_saved_usd")),
+            _as_int(item.get("projected_saved_tokens")),
+            _as_int(item.get("row_count")),
+        ),
+        reverse=True,
+    )
+    capped_limit = max(1, min(_as_int(limit, 10), 50))
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
+
+    activation_summary = activation_evidence.get("summary") if isinstance(activation_evidence.get("summary"), dict) else {}
+    duplicate_suppression = activation_evidence.get("duplicate_suppression") if isinstance(activation_evidence.get("duplicate_suppression"), dict) else {}
+    missing_measurements = [] if rows else ["remaining-measurement-required-crunch-cohorts"]
+    return {
+        "schema": CRUNCH_REMAINING_MEASUREMENT_SCHEMA,
+        "status": "ranked" if rows else "no-remaining-measurement-required-cohorts",
+        "ok": True,
+        "read_only": True,
+        "source_reports": {
+            "follow_up_candidates_schema": public_label(follow_up_candidates.get("schema"), "unknown"),
+            "crunch_opportunity_schema": public_label(crunch_opportunity.get("schema"), "unknown"),
+            "activation_evidence_schema": public_label(activation_evidence.get("schema"), "unknown"),
+        },
+        "summary": {
+            "remaining_measurement_required_count": len(rows),
+            "reported_count": min(len(rows), capped_limit),
+            "excluded_active_rule_covered_count": excluded_active_rule_count,
+            "active_rule_count": _as_int(activation_summary.get("active_rule_count")),
+            "active_rule_status": public_label(activation_evidence.get("status"), "unknown"),
+            "active_rule_next_action": public_label(activation_evidence.get("next_action"), "unknown"),
+            "active_rule_duplicate_suppresses_new_activation_issue": bool(duplicate_suppression.get("suppresses_new_activation_issue")),
+            "projected_saved_tokens": projected_tokens,
+            "projected_saved_usd": round(projected_savings, 8),
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "fallback_count": fallback_count,
+            "retry_count": retry_count,
+            "rollback_count": rollback_count,
+            "safety_stop_count": safety_stop_count,
+            "top_active_rule_coverage_status": rows[0]["active_rule_coverage_status"] if rows else None,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "policy_files_written": False,
+        },
+        "cohorts": rows[:capped_limit],
+        "top_cohort": rows[0] if rows else None,
         "missing_measurements": missing_measurements,
         "privacy": _crunch_opportunity_privacy(),
     }
@@ -7396,6 +7631,12 @@ def build_request_shape_rollups_report(
         crunch_canary_impact=crunch_canary_impact,
     )
     follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10)
+    remaining_crunch_measurements = build_request_shape_crunch_remaining_measurement_report(
+        follow_up_candidates=follow_up_candidates,
+        crunch_opportunity=crunch_opportunity_dry_run,
+        activation_evidence=crunch_activation_evidence,
+        limit=10,
+    )
 
     return {
         "schema": SCHEMA,
@@ -7420,6 +7661,7 @@ def build_request_shape_rollups_report(
             "follow_up_candidate_count": follow_up_candidates["summary"]["ranked_candidate_count"],
             "top_next_action": follow_up_candidates["summary"]["top_next_action"],
             "top_local_action_family": follow_up_candidates["summary"]["top_local_action_family"],
+            "remaining_crunch_measurement_count": remaining_crunch_measurements["summary"]["remaining_measurement_required_count"],
         },
         "provider_breakdown": _breakdown(provider_counts),
         "candidate_family_breakdown": _breakdown(candidate_family_counts),
@@ -7431,6 +7673,7 @@ def build_request_shape_rollups_report(
         "crunch_canary_impact": crunch_canary_impact,
         "crunch_policy_decision": crunch_policy_decision,
         "crunch_activation_evidence": crunch_activation_evidence,
+        "remaining_crunch_measurements": remaining_crunch_measurements,
         "rollups": rollups,
         "privacy": {
             "metadata_only": True,
