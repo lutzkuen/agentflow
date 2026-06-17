@@ -3911,6 +3911,87 @@ def _cache_replay_canary_policy_id(cohort_id: str) -> str:
     return f"local-openai-cache-replay-canary:{digest}"
 
 
+def _cache_replay_shape_key(shape: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        public_label(shape.get("provider_family") or "openai", "unknown"),
+        public_label(shape.get("source_surface"), "unknown"),
+        public_label(shape.get("endpoint"), "unknown"),
+        public_label(shape.get("category"), "unknown"),
+        public_label(shape.get("workflow_phase"), "unknown"),
+        public_label(shape.get("text_bucket"), "unknown"),
+        public_label(shape.get("token_bucket"), "unknown"),
+        bool(shape.get("stream")),
+        bool(shape.get("has_tools")),
+    )
+
+
+def _cache_replay_cohort_shape_key(cohort: dict[str, Any]) -> tuple[Any, ...]:
+    return _cache_replay_shape_key(
+        {
+            "provider_family": cohort.get("provider_family"),
+            "source_surface": cohort.get("source_surface"),
+            "endpoint": cohort.get("endpoint"),
+            "category": cohort.get("category"),
+            "workflow_phase": cohort.get("workflow_phase"),
+            "text_bucket": cohort.get("text_bucket"),
+            "token_bucket": cohort.get("token_bucket"),
+            "stream": bool(cohort.get("stream")),
+            "has_tools": bool(cohort.get("has_tools")),
+        }
+    )
+
+
+def _cache_replay_handled_rule_state(rule: dict[str, Any]) -> str:
+    if not bool(rule.get("enabled", True)):
+        return "blocked-local-policy"
+    source_file = str(rule.get("source_policy_file") or "")
+    target = rule.get("target_cache_policy") if isinstance(rule.get("target_cache_policy"), dict) else {}
+    target_file = str(target.get("target_local_rule_file") or source_file)
+    rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
+    if target_file == "cache_rules.yaml" or source_file == "cache_rules.yaml" or rollout.get("canary_enabled") is False:
+        return "active-local-policy"
+    return "staged-canary"
+
+
+def _cache_replay_handled_rule_public(rule: dict[str, Any]) -> dict[str, Any]:
+    graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else {}
+    return {
+        "schema": "agentflow.request_shape_cache_replay_handled_local_policy.v1",
+        "handled": True,
+        "handled_state": _cache_replay_handled_rule_state(rule),
+        "policy_source": public_label(rule.get("policy_source"), "unknown"),
+        "source_policy_file": public_label(rule.get("source_policy_file"), "unknown"),
+        "target_local_rule_file": public_label(rule.get("target_local_rule_file") or rule.get("source_policy_file"), "unknown"),
+        "shape": _cache_replay_public_shape_from_rule(rule),
+        "source_schema": graduation.get("source_schema"),
+        "sample_count": _as_int(graduation.get("sample_count")),
+        "source_rank": _as_int(graduation.get("rank") or graduation.get("cohort_rank")),
+        "projected_hits": _as_int(graduation.get("projected_hits") or graduation.get("projected_hit_count")),
+        "projected_savings_usd": round(
+            _as_float(graduation.get("projected_savings_usd") or graduation.get("projected_saved_cost_usd")),
+            6,
+        ),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "rule_ids_included": False,
+        "cohort_ids_included": False,
+        "policy_paths_included": False,
+    }
+
+
+def _cache_replay_handled_match(
+    cohort: dict[str, Any],
+    handled_rules: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not handled_rules:
+        return None
+    cohort_key = _cache_replay_cohort_shape_key(cohort)
+    for rule in handled_rules:
+        if _cache_replay_shape_key(_cache_replay_public_shape_from_rule(rule)) == cohort_key:
+            return _cache_replay_handled_rule_public(rule)
+    return None
+
+
 def _request_shape_cache_replay_canary_lifecycle_projection(
     cohort: dict[str, Any],
     *,
@@ -4245,6 +4326,7 @@ def build_request_shape_cache_replay_canary_stage_report(
         limit=limit,
         persist=persist_rollups,
         run_id=run_id,
+        mark_handled_cache_replay_cohorts=False,
     )
     dry_run = (
         rollup_report.get("cache_replayability_dry_run")
@@ -4603,6 +4685,7 @@ def _request_shape_cache_replay_policy_rules(policy: dict[str, Any]) -> list[dic
         action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
         rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
         conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+        target_cache_policy = rule.get("target_cache_policy") if isinstance(rule.get("target_cache_policy"), dict) else {}
         if graduation.get("source_schema") != REPLAYABILITY_DRY_RUN_SCHEMA:
             continue
         staged.append({
@@ -4611,6 +4694,8 @@ def _request_shape_cache_replay_policy_rules(policy: dict[str, Any]) -> list[dic
             "candidate_id": str(rule.get("candidate_id") or ""),
             "policy_source": public_label(rule.get("policy_source"), "unknown"),
             "enabled": bool(rule.get("enabled", True)),
+            "target_cache_policy": target_cache_policy,
+            "target_local_rule_file": public_label(target_cache_policy.get("target_local_rule_file"), "unknown"),
             "conditions": conditions,
             "action": action,
             "rollout": rollout,
@@ -4618,6 +4703,45 @@ def _request_shape_cache_replay_policy_rules(policy: dict[str, Any]) -> list[dic
             "staged_at": rule.get("staged_at") or graduation.get("staged_at"),
         })
     return staged
+
+
+def _cache_replay_policy_file_candidates(filename: str) -> list[tuple[str, Path]]:
+    candidates: list[tuple[str, Path]] = []
+    if filename == "cache_rules.yaml":
+        candidates.append((filename, Path(__file__).with_name(filename)))
+    candidates.append((filename, Path.cwd() / "config" / filename))
+    candidates.append((filename, agentflow_config_path(filename)))
+    return candidates
+
+
+def _request_shape_cache_replay_handled_policy_rules() -> list[dict[str, Any]]:
+    handled: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for filename in ("cache_rules.yaml", "cache_canary_policy.yaml"):
+        for public_filename, path in _cache_replay_policy_file_candidates(filename):
+            if not path.exists():
+                continue
+            try:
+                loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                continue
+            if not isinstance(loaded, dict):
+                continue
+            for rule in _request_shape_cache_replay_policy_rules(loaded):
+                rule = dict(rule)
+                rule["source_policy_file"] = public_filename
+                if not rule.get("target_local_rule_file") or rule.get("target_local_rule_file") == "unknown":
+                    rule["target_local_rule_file"] = public_filename
+                key = (
+                    _cache_replay_shape_key(_cache_replay_public_shape_from_rule(rule)),
+                    _cache_replay_handled_rule_state(rule),
+                    rule.get("source_policy_file"),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                handled.append(rule)
+    return handled
 
 
 def _cache_replay_public_shape_from_rule(rule: dict[str, Any]) -> dict[str, Any]:
@@ -6162,6 +6286,7 @@ def build_request_shape_cache_replayability_dry_run(
     rollups: list[dict[str, Any]],
     *,
     limit: int = 25,
+    handled_policy_rules: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     replay_rows = [
         row
@@ -6181,6 +6306,11 @@ def build_request_shape_cache_replayability_dry_run(
     skipped_rows = 0
     projected_hits = 0
     projected_savings = 0.0
+    remaining_projected_hits = 0
+    remaining_projected_savings = 0.0
+    handled_projected_hits = 0
+    handled_projected_savings = 0.0
+    handled_rules = handled_policy_rules or []
 
     for row in replay_rows:
         decision = _shape_replayability_decision(row)
@@ -6203,33 +6333,48 @@ def build_request_shape_cache_replayability_dry_run(
             projected_savings += saved
         else:
             skipped_rows += row_count
-        cohorts.append(
-            {
-                "schema": "agentflow.request_shape_cache_replayability_cohort.v1",
-                "readiness": readiness,
-                "reason": reason,
-                "blockers": decision.get("blockers") or [],
-                "provider_family": row.get("provider_family"),
-                "source_surface": row.get("source_surface"),
-                "endpoint": row.get("endpoint"),
-                "category": row.get("category"),
-                "workflow_phase": row.get("workflow_phase"),
-                "stream": bool(row.get("stream")),
-                "has_tools": bool(row.get("has_tools")),
-                "cache_status": row.get("cache_status"),
-                "routing_status": row.get("routing_status"),
-                "text_bucket": row.get("text_bucket"),
-                "token_bucket": row.get("token_bucket"),
-                "row_count": row_count,
-                "projected_hits": hits,
-                "projected_savings_usd": round(saved, 6),
-                "aggregate_only": True,
-                "privacy": _replayability_privacy(),
-            }
-        )
+        cohort = {
+            "schema": "agentflow.request_shape_cache_replayability_cohort.v1",
+            "readiness": readiness,
+            "reason": reason,
+            "blockers": decision.get("blockers") or [],
+            "provider_family": row.get("provider_family"),
+            "source_surface": row.get("source_surface"),
+            "endpoint": row.get("endpoint"),
+            "category": row.get("category"),
+            "workflow_phase": row.get("workflow_phase"),
+            "stream": bool(row.get("stream")),
+            "has_tools": bool(row.get("has_tools")),
+            "cache_status": row.get("cache_status"),
+            "routing_status": row.get("routing_status"),
+            "text_bucket": row.get("text_bucket"),
+            "token_bucket": row.get("token_bucket"),
+            "row_count": row_count,
+            "projected_hits": hits,
+            "projected_savings_usd": round(saved, 6),
+            "aggregate_only": True,
+            "privacy": _replayability_privacy(),
+        }
+        handled = _cache_replay_handled_match(cohort, handled_rules) if readiness == "replay-ready" else None
+        if handled:
+            cohort["handled_by_local_policy"] = True
+            cohort["handled_local_policy"] = handled
+            cohort["remaining_replay_ready"] = False
+            cohort["next_action"] = "already-handled-by-local-cache-policy"
+            handled_projected_hits += hits
+            handled_projected_savings += saved
+        else:
+            cohort["handled_by_local_policy"] = False
+            cohort["remaining_replay_ready"] = readiness == "replay-ready"
+            if readiness == "replay-ready":
+                cohort["next_action"] = "stage-cache-replay-canary"
+                remaining_projected_hits += hits
+                remaining_projected_savings += saved
+        cohorts.append(cohort)
 
     cohorts.sort(
         key=lambda item: (
+            item.get("readiness") == "replay-ready" and not bool(item.get("handled_by_local_policy")),
             item.get("readiness") == "replay-ready",
             _as_float(item.get("projected_savings_usd")),
             _as_int(item.get("projected_hits")),
@@ -6239,6 +6384,20 @@ def build_request_shape_cache_replayability_dry_run(
     )
     for rank, row in enumerate(cohorts, start=1):
         row["rank"] = rank
+    remaining_replay_ready = [
+        row
+        for row in cohorts
+        if row.get("readiness") == "replay-ready" and not bool(row.get("handled_by_local_policy"))
+    ]
+    handled_replay_ready = [
+        row
+        for row in cohorts
+        if row.get("readiness") == "replay-ready" and bool(row.get("handled_by_local_policy"))
+    ]
+    for rank, row in enumerate(remaining_replay_ready, start=1):
+        row["remaining_rank"] = rank
+    for rank, row in enumerate(handled_replay_ready, start=1):
+        row["handled_rank"] = rank
 
     top_blocker = None
     blocker_breakdown = _breakdown(blocker_counts)
@@ -6261,11 +6420,24 @@ def build_request_shape_cache_replayability_dry_run(
             "rows_considered": sum(_as_int(row.get("row_count") or row.get("count")) for row in replay_rows),
             "replay_ready_cohort_count": readiness_counts.get("replay-ready", 0),
             "replay_ready_rows": replay_ready_rows,
+            "remaining_replay_ready_cohort_count": len(remaining_replay_ready),
+            "remaining_replay_ready_rows": sum(_as_int(row.get("row_count")) for row in remaining_replay_ready),
+            "handled_replay_ready_cohort_count": len(handled_replay_ready),
+            "handled_replay_ready_rows": sum(_as_int(row.get("row_count")) for row in handled_replay_ready),
             "skipped_cohort_count": readiness_counts.get("skipped", 0),
             "skipped_rows": skipped_rows,
             "projected_hits": projected_hits,
             "projected_savings_usd": round(projected_savings, 6),
+            "remaining_projected_hits": remaining_projected_hits,
+            "remaining_projected_savings_usd": round(remaining_projected_savings, 6),
+            "handled_projected_hits": handled_projected_hits,
+            "handled_projected_savings_usd": round(handled_projected_savings, 6),
             "top_blocker_code": top_blocker,
+            "top_remaining_replay_ready_rank": _as_int(remaining_replay_ready[0].get("rank")) if remaining_replay_ready else 0,
+            "top_remaining_replay_ready_projected_hits": _as_int(remaining_replay_ready[0].get("projected_hits")) if remaining_replay_ready else 0,
+            "top_remaining_replay_ready_projected_savings_usd": (
+                remaining_replay_ready[0].get("projected_savings_usd") if remaining_replay_ready else 0.0
+            ),
             "provider_calls_made": 0,
             "cache_entries_written": 0,
             "policy_files_written": False,
@@ -6275,9 +6447,30 @@ def build_request_shape_cache_replayability_dry_run(
         "blocker_breakdown": blocker_breakdown,
         "cache_invalidation_evidence": invalidation_evidence,
         "skipped_openai_blockers": skipped_openai_blockers,
+        "remaining_replay_ready_cohorts": remaining_replay_ready[:capped_limit],
+        "handled_replay_ready_cohorts": handled_replay_ready[:capped_limit],
+        "handled_policy_summary": {
+            "schema": "agentflow.request_shape_cache_replay_handled_policy_summary.v1",
+            "handled_rule_count": len(handled_rules),
+            "matched_handled_cohort_count": len(handled_replay_ready),
+            "policy_paths_included": False,
+            "rule_ids_included": False,
+            "cohort_ids_included": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
         "acceptance": {
             "emits_durable_invalidation_evidence": invalidation_evidence["schema"] == REPLAY_INVALIDATION_EVIDENCE_SCHEMA,
             "emits_skipped_openai_blocker_ranking": skipped_openai_blockers["schema"] == REPLAY_SKIPPED_OPENAI_BLOCKERS_SCHEMA,
+            "ranks_remaining_replay_ready_cohorts": all(
+                _as_int(row.get("remaining_rank")) > 0 for row in remaining_replay_ready[:capped_limit]
+            ),
+            "marks_already_handled_replay_ready_cohorts": all(
+                bool(row.get("handled_by_local_policy")) and isinstance(row.get("handled_local_policy"), dict)
+                for row in handled_replay_ready[:capped_limit]
+            ),
+            "reports_remaining_projected_hits_and_savings": remaining_projected_hits >= 0
+            and remaining_projected_savings >= 0.0,
             "has_ranked_blocker_cohorts": bool(
                 invalidation_evidence.get("acceptance", {}).get("has_ranked_blocker_cohorts")
             ),
@@ -6940,6 +7133,7 @@ def build_request_shape_rollups_report(
     persist: bool = True,
     run_id: str | None = None,
     max_crunch_canary_evidence_age_hours: float = DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS,
+    mark_handled_cache_replay_cohorts: bool = True,
 ) -> dict[str, Any]:
     capped_limit = max(1, min(int(limit or 1000), 10_000))
     generated_at = utc_now()
@@ -7125,7 +7319,16 @@ def build_request_shape_rollups_report(
             generated_at=generated_at,
             rows=persistable,
         )
-    cache_replayability_dry_run = build_request_shape_cache_replayability_dry_run(rollups, limit=25)
+    handled_cache_replay_rules = (
+        _request_shape_cache_replay_handled_policy_rules()
+        if mark_handled_cache_replay_cohorts
+        else []
+    )
+    cache_replayability_dry_run = build_request_shape_cache_replayability_dry_run(
+        rollups,
+        limit=25,
+        handled_policy_rules=handled_cache_replay_rules,
+    )
     cache_replay_blocker_classification = build_request_shape_cache_replay_blocker_classification_report(
         cache_replayability_dry_run,
         limit=25,
