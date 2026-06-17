@@ -194,6 +194,32 @@ def _candidate_allows_tools(bucket: dict[str, Any]) -> bool:
     )
 
 
+def _canary_lifecycle_target(
+    *,
+    openai_canary: dict[str, Any],
+    requested_model: str,
+) -> tuple[str | None, str, str] | None:
+    if not openai_canary:
+        return None
+    canary_requested = str(
+        openai_canary.get("requested_model")
+        or openai_canary.get("original_model")
+        or ""
+    ).strip()
+    canary_target = str(openai_canary.get("target_model") or "").strip()
+    if not canary_target:
+        return None
+    if canary_requested and canary_requested.lower() != requested_model.lower():
+        return None
+    if canary_target.lower() == requested_model.lower():
+        return None
+    return (
+        canary_target,
+        "local-openai-routing-canary",
+        "openai-canary-lifecycle-metadata-outside-simulated-route",
+    )
+
+
 def _projected_savings(row: dict[str, Any], requested_model: str, target_model: str, input_tokens: int, output_tokens: int) -> tuple[float, list[str]]:
     blockers: list[str] = []
     if input_tokens <= 0 and output_tokens <= 0:
@@ -225,7 +251,9 @@ def _canary_cohort(canary: dict[str, Any]) -> str:
         return "canary_holdout"
     if status == "safety_stopped" or safety.get("tripped") or "safety-stop" in reason:
         return "safety_stopped"
-    if status in {"disabled", "ineligible", "noop"} or cohort == "bypassed_or_disabled":
+    if status == "ineligible":
+        return "skipped"
+    if status in {"disabled", "noop"} or cohort == "bypassed_or_disabled":
         return "bypassed_or_disabled"
     if status in {"not_selected", "skipped"} or cohort == "skipped":
         return "skipped"
@@ -850,8 +878,14 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
             text_chars=text_chars,
         )
         if not target_model:
-            _increment(unmatched_reason_counts, reason)
-            continue
+            canary_target = _canary_lifecycle_target(
+                openai_canary=openai_canary,
+                requested_model=requested_model,
+            )
+            if canary_target is None:
+                _increment(unmatched_reason_counts, reason)
+                continue
+            target_model, policy, reason = canary_target
         if target_model.lower() == requested_model.lower():
             _increment(unmatched_reason_counts, "target-same-as-requested")
             continue
