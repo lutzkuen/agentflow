@@ -942,6 +942,86 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("secret-holdout-session-id", rendered)
         self.assertNotIn("secret-applied-request-id", rendered)
 
+    def test_openai_tool_light_promotion_decision_is_carried_from_pass_through_lifecycle(self):
+        observed_at = datetime.now(timezone.utc).isoformat()
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 67,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "category": "tool-light",
+                        "c": 40,
+                        "openai_canary_holdout_count": 15,
+                        "openai_canary_skipped_count": 10,
+                        "openai_canary_latest_observed_at": observed_at,
+                        "request_id": "secret-promotion-holdout-request",
+                    },
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4-mini",
+                        "category": "tool-light",
+                        "c": 12,
+                        "openai_canary_applied_count": 12,
+                        "openai_canary_latest_observed_at": observed_at,
+                        "session_id": "secret-promotion-applied-session",
+                    },
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4-mini",
+                        "routed_model": "gpt-5.4-mini",
+                        "category": "chat",
+                        "c": 15,
+                    },
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        summary = plan["evidence"]["stats_summary"]
+        decision_report = summary["openai_routing_promotion_decision"]
+        self.assertEqual(decision_report["schema"], "agentflow.openai_routing_promotion_decision_report.v1")
+        self.assertEqual(decision_report["decision"], "promote")
+        self.assertTrue(decision_report["promotion_ready"])
+        self.assertEqual(decision_report["summary"]["applied_count"], 12)
+        self.assertEqual(decision_report["summary"]["holdout_count"], 15)
+        self.assertEqual(decision_report["summary"]["safety_stop_count"], 0)
+        self.assertEqual(decision_report["summary"]["error_count"], 0)
+        self.assertEqual(decision_report["summary"]["fallback_count"], 0)
+        self.assertEqual(decision_report["summary"]["retry_count"], 0)
+        self.assertEqual(decision_report["summary"]["next_action"], "draft-openai-routing-rule")
+        self.assertEqual(decision_report["summary"]["target_local_rule_file"], "routing_rules.yaml")
+
+        loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
+        routing_lever = next(row for row in loop["levers"] if row["lever"] == "routing")
+        self.assertEqual(routing_lever["evidence_source"], "agentflow.openai_routing_promotion_decision_report.v1")
+        self.assertEqual(routing_lever["state"], "activation-ready")
+        self.assertEqual(routing_lever["next_action"], "draft-openai-routing-rule")
+        self.assertEqual(routing_lever["applied_count"], 12)
+        self.assertEqual(routing_lever["holdout_count"], 15)
+
+        routing_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "routing")
+        self.assertEqual(routing_candidate["blocker"], "openai-routing-promotion-ready")
+        self.assertEqual(routing_candidate["projected_savings_signal"]["decision"], "promote")
+        self.assertEqual(routing_candidate["projected_savings_signal"]["target_local_rule_file"], "routing_rules.yaml")
+
+        rendered = json.dumps(plan)
+        self.assertNotIn("secret-promotion-holdout-request", rendered)
+        self.assertNotIn("secret-promotion-applied-session", rendered)
+
     def test_pass_through_routing_report_keeps_openai_lifecycle_shape_specific_for_low_volume_holdout(self):
         observed_at = datetime.now(timezone.utc).isoformat()
         plan = build_research_plan(
