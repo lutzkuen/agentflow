@@ -752,6 +752,99 @@ class RequestShapeRollupTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, rendered)
 
+    def test_cache_replayability_marks_short_completion_remaining_cohorts_handled_by_local_policy(self) -> None:
+        for cost in (0.004, 0.006, 0.005):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="short-completion",
+                workflow_phase="short-completion",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=1_200,
+                actual_input_tokens=300,
+                cost=cost,
+                baseline=cost,
+            )
+        for cost in (0.007, 0.009):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="short-completion",
+                workflow_phase="short-completion",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=1_800,
+                actual_input_tokens=700,
+                cost=cost,
+                baseline=cost,
+            )
+
+        report = build_request_shape_rollups_report(
+            self.store,
+            limit=20,
+            persist=False,
+            run_id="remaining-short-completion-cache-replay",
+        )
+        dry_run = report["cache_replayability_dry_run"]
+
+        self.assertEqual(dry_run["summary"]["replay_ready_cohort_count"], 2)
+        self.assertEqual(dry_run["summary"]["remaining_replay_ready_cohort_count"], 0)
+        self.assertEqual(dry_run["summary"]["handled_replay_ready_cohort_count"], 2)
+        self.assertEqual(dry_run["summary"]["remaining_projected_hits"], 0)
+        self.assertEqual(dry_run["summary"]["remaining_projected_savings_usd"], 0.0)
+
+        handled_shapes = {
+            (row["category"], row["workflow_phase"], row["text_bucket"], row["token_bucket"]): row
+            for row in dry_run["handled_replay_ready_cohorts"]
+        }
+        self.assertIn(("short-completion", "short-completion", "lt_2k_chars", "lt_500_tokens"), handled_shapes)
+        self.assertIn(("short-completion", "short-completion", "lt_2k_chars", "500_2k_tokens"), handled_shapes)
+        for handled in handled_shapes.values():
+            self.assertTrue(handled["handled_by_local_policy"])
+            self.assertEqual(handled["next_action"], "already-handled-by-local-cache-policy")
+            self.assertEqual(handled["handled_local_policy"]["handled_state"], "active-local-policy")
+            self.assertEqual(handled["handled_local_policy"]["source_policy_file"], "cache_rules.yaml")
+            self.assertEqual(handled["handled_local_policy"]["target_local_rule_file"], "cache_rules.yaml")
+            self.assertFalse(handled["handled_local_policy"]["rule_ids_included"])
+            self.assertFalse(handled["handled_local_policy"]["cohort_ids_included"])
+
+        stage = build_request_shape_cache_replay_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="remaining-short-completion-cache-replay",
+        )
+        self.assertEqual(stage["status"], "no-stageable-cohort")
+        self.assertEqual(stage["eligible_stageable_cohort_count"], 0)
+        self.assertEqual(stage["staged_canary_count"], 0)
+
+        rendered = json.dumps(dry_run, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_cache_replay_canary_stage_report_targets_openai_responses_replay_ready_cohort(self) -> None:
         for cost in (0.01, 0.03, 0.02):
             self._log_call(
@@ -867,9 +960,11 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertTrue(report["dry_run"])
         self.assertTrue(report["read_only"])
-        self.assertEqual(report["staged_canary_count"], 1)
-        self.assertEqual(report["eligible_stageable_cohort_count"], 1)
-        self.assertTrue(report["acceptance"]["stages_single_top_ranked_cohort"])
+        self.assertEqual(report["staged_canary_count"], 2)
+        self.assertEqual(report["eligible_stageable_cohort_count"], 2)
+        self.assertEqual(len(report["stage_actions"]), 2)
+        self.assertTrue(report["acceptance"]["stages_top_ranked_cohort"])
+        self.assertTrue(report["acceptance"]["stages_all_remaining_exact_safe_replay_ready_cohorts"])
         self.assertTrue(report["acceptance"]["has_replay_ready_openai_responses_cohort"])
         self.assertTrue(report["acceptance"]["stages_remaining_unhandled_replay_ready_cohort"])
         self.assertTrue(report["acceptance"]["excludes_already_handled_local_policy_cohorts"])
@@ -885,8 +980,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["acceptance"]["has_applied_and_holdout_eligibility"])
         self.assertTrue(report["acceptance"]["records_hit_miss_bypass_invalidation_and_stale_risk"])
         self.assertTrue(report["acceptance"]["preserves_tool_and_streaming_guards"])
-        self.assertTrue(report["acceptance"]["stages_only_openai_responses_chat"])
+        self.assertTrue(report["acceptance"]["stages_only_openai_responses_exact_safe_categories"])
         self.assertTrue(report["acceptance"]["tool_streaming_and_invalidation_missing_cohorts_skipped"])
+        self.assertEqual(
+            {item["conditions"]["category"] for item in report["stage_actions"]},
+            {"chat", "short-completion"},
+        )
 
         action = report["top_stage_action"]
         self.assertEqual(action["schema"], "agentflow.request_shape_cache_replay_canary_action.v1")

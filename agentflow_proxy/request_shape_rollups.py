@@ -4588,6 +4588,7 @@ def build_request_shape_cache_replay_canary_stage_report(
         if mark_handled_cache_replay_cohorts and isinstance(dry_run.get("remaining_replay_ready_cohorts"), list)
         else dry_run.get("cohorts")
     )
+    exact_safe_categories = {"chat", "short-completion"}
     cohorts = [
         cohort
         for cohort in source_cohorts or []
@@ -4597,13 +4598,13 @@ def build_request_shape_cache_replay_canary_stage_report(
         and cohort.get("provider_family") == "openai"
         and cohort.get("source_surface") == "openai_responses"
         and cohort.get("endpoint") == "responses"
-        and cohort.get("category") == "chat"
+        and str(cohort.get("category") or "") in exact_safe_categories
         and not bool(cohort.get("has_tools"))
         and not bool(cohort.get("stream"))
         and _as_int(cohort.get("projected_hits")) > 0
         and _as_float(cohort.get("projected_savings_usd")) > 0
     ]
-    top_stageable_cohorts = cohorts[:1]
+    top_stageable_cohorts = cohorts
     actions = [
         _request_shape_cache_replay_canary_action(
             cohort,
@@ -4658,6 +4659,10 @@ def build_request_shape_cache_replay_canary_stage_report(
         },
         "acceptance": {
             "stages_single_top_ranked_cohort": len(actions) == 1 and bool(top_action and _as_int(top_action.get("rank")) == _as_int((top_cohort or {}).get("rank"))),
+            "stages_top_ranked_cohort": bool(
+                top_action and _as_int(top_action.get("rank")) == _as_int((top_cohort or {}).get("rank"))
+            ),
+            "stages_all_remaining_exact_safe_replay_ready_cohorts": len(actions) == len(cohorts),
             "has_replay_ready_openai_responses_cohort": bool(actions),
             "stages_remaining_unhandled_replay_ready_cohort": bool(
                 top_cohort
@@ -4720,11 +4725,11 @@ def build_request_shape_cache_replay_canary_stage_report(
                 not bool(action.get("conditions", {}).get("has_tools")) and not bool(action.get("conditions", {}).get("stream"))
                 for action in actions
             ),
-            "stages_only_openai_responses_chat": all(
+            "stages_only_openai_responses_exact_safe_categories": all(
                 action.get("conditions", {}).get("provider_family") == "openai"
                 and action.get("conditions", {}).get("source_surface") == "openai_responses"
                 and action.get("conditions", {}).get("endpoint") == "responses"
-                and action.get("conditions", {}).get("category") == "chat"
+                and action.get("conditions", {}).get("category") in exact_safe_categories
                 for action in actions
             ),
             "tool_streaming_and_invalidation_missing_cohorts_skipped": bool(
