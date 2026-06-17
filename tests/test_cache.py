@@ -155,6 +155,73 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertIn("canary_applied", cohorts)
         self.assertIn("canary_holdout", cohorts)
 
+    def test_openai_cache_replay_hit_recovery_smoke_demonstrates_second_hit(self):
+        from agentflow_proxy.cache_smoke import build_cache_replay_hit_recovery_smoke
+
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                result = build_cache_replay_hit_recovery_smoke(store)
+            finally:
+                store.conn.close()
+
+        self.assertEqual(result["schema"], "agentflow.cache_replay_hit_recovery_smoke.v1")
+        self.assertEqual(result["status"], "hit-recovered")
+        self.assertEqual(result["target_rule_id"], "local-openai-cache-replay-canary-ae8404ee817f89f4")
+        self.assertEqual(result["target_shape"]["provider_family"], "openai")
+        self.assertEqual(result["target_shape"]["source_surface"], "openai_responses")
+        self.assertEqual(result["target_shape"]["endpoint"], "responses")
+        self.assertEqual(result["target_shape"]["category"], "chat")
+        self.assertEqual(result["target_shape"]["text_bucket"], "2k_8k_chars")
+        self.assertEqual(result["target_shape"]["token_bucket"], "500_2k_tokens")
+        self.assertFalse(result["target_shape"]["has_tools"])
+        self.assertFalse(result["target_shape"]["stream"])
+        self.assertEqual(result["first_lookup"]["status"], "miss")
+        self.assertEqual(result["first_lookup"]["reason"], "first-seen-cache-warmup")
+        self.assertEqual(result["first_lookup"]["canary_status"], "applied")
+        self.assertEqual(result["second_lookup"]["status"], "hit")
+        self.assertEqual(result["second_lookup"]["reason"], "exact-match")
+        self.assertEqual(result["second_lookup"]["hit_type"], "exact")
+        self.assertEqual(result["second_lookup"]["canary_status"], "applied")
+        self.assertEqual(result["second_lookup"]["canary_cohort"], "canary_applied")
+        self.assertEqual(result["summary"]["synthetic_requests"], 2)
+        self.assertEqual(result["summary"]["provider_calls_made"], 0)
+        self.assertTrue(result["summary"]["cache_entries_written"])
+        self.assertEqual(result["summary"]["exact_hit_count"], 1)
+        self.assertTrue(result["summary"]["hit_recovery_demonstrated"])
+        self.assertTrue(result["privacy"]["metadata_only"])
+        self.assertTrue(result["privacy"]["synthetic_only"])
+        self.assertFalse(result["privacy"]["provider_calls_made"])
+        self.assertFalse(result["privacy"]["managed_server_calls_made"])
+        self.assertFalse(result["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(result["privacy"]["raw_responses_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+        self.assertFalse(result["privacy"]["request_fingerprints_included"])
+        self.assertFalse(result["privacy"]["session_ids_included"])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("AgentFlow deterministic OpenAI cache replay", rendered)
+        self.assertNotIn("agentflow-cache-replay-hit-recovery-smoke-", rendered)
+        self.assertNotIn("agentflow-cache-replay-hit-recovery-smoke-session", rendered)
+
+    def test_cache_smoke_diagnostic_includes_isolated_hit_recovery_without_mutating_store(self):
+        from agentflow_proxy.cache_smoke import build_cache_smoke_diagnostic
+
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                before = store.conn.execute("select count(*) as c from cache").fetchone()["c"]
+                result = build_cache_smoke_diagnostic(store, limit=1, scan_limit=1)
+                after = store.conn.execute("select count(*) as c from cache").fetchone()["c"]
+            finally:
+                store.conn.close()
+
+        self.assertEqual(before, 0)
+        self.assertEqual(after, 0)
+        smoke = result["cache_replay_hit_recovery_smoke"]
+        self.assertEqual(smoke["schema"], "agentflow.cache_replay_hit_recovery_smoke.v1")
+        self.assertEqual(smoke["status"], "hit-recovered")
+        self.assertTrue(result["privacy"]["synthetic_hit_recovery_included"])
+
     def test_tool_requests_are_skipped_when_tool_cache_disabled(self):
         can_exact, can_semantic, meta = cache_module.cache_lookup_meta(has_tool_blocks=True)
 

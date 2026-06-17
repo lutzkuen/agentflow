@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
-from agentflow_proxy.cache import cache_key_for
+import agentflow_proxy.cache as cache_module
 from agentflow_proxy.policy_files import utc_now
 from agentflow_proxy.public_metadata import public_label
+from agentflow_proxy.store import SQLiteStore
+
+HIT_RECOVERY_SMOKE_SCHEMA = "agentflow.cache_replay_hit_recovery_smoke.v1"
+_TARGET_OPENAI_CACHE_REPLAY_RULE_ID = "local-openai-cache-replay-canary-ae8404ee817f89f4"
 
 
 def _json_obj(raw: Any) -> dict[str, Any]:
@@ -201,7 +207,7 @@ def _key_stability_sample(store_obj: Any, call_rows: list[dict[str, Any]]) -> di
         if not body:
             continue
         provider = str(row.get("provider") or "anthropic")
-        computed = cache_key_for(body, str(row.get("path") or ""), provider=provider)
+        computed = cache_module.cache_key_for(body, str(row.get("path") or ""), provider=provider)
         if computed in cache_keys:
             return {
                 "status": "matched",
@@ -222,6 +228,272 @@ def _key_stability_sample(store_obj: Any, call_rows: list[dict[str, Any]]) -> di
         "raw_request_bodies_included": False,
         "cache_keys_included": False,
     }
+
+
+def _synthetic_openai_cache_replay_body() -> dict[str, Any]:
+    repeated = "AgentFlow deterministic OpenAI cache replay hit recovery smoke. "
+    synthetic_text = (repeated * 55).strip()
+    return {
+        "model": "gpt-5.4-mini",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": synthetic_text,
+                    }
+                ],
+            }
+        ],
+        "stream": False,
+    }
+
+
+def _synthetic_openai_cache_replay_response() -> dict[str, Any]:
+    return {
+        "id": "resp_agentflow_cache_replay_hit_recovery_smoke",
+        "object": "response",
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Synthetic cache replay response.",
+                    }
+                ],
+            }
+        ],
+        "output_text": "Synthetic cache replay response.",
+    }
+
+
+def _synthetic_openai_cache_replay_features(request_fingerprint: str) -> dict[str, Any]:
+    return {
+        "pattern_hashes": ["sha256:" + "a" * 64],
+        "provider_family": "openai",
+        "source_surface": "openai_responses",
+        "endpoint": "responses",
+        "category": "chat",
+        "workflow_phase": "chat",
+        "text_bucket": "2k_8k_chars",
+        "token_bucket": "500_2k_tokens",
+        "has_tools": False,
+        "stream": False,
+        "replayability_level": "local-exact-response",
+        "request_fingerprint": request_fingerprint,
+        "raw_pattern_strings_included": False,
+    }
+
+
+def _failure_result(reason: str, *, blockers: list[str] | None = None, detail: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "schema": HIT_RECOVERY_SMOKE_SCHEMA,
+        "generated_at": utc_now(),
+        "status": "blocked",
+        "reason": reason,
+        "blocker_codes": blockers or [reason],
+        "target_rule_id": _TARGET_OPENAI_CACHE_REPLAY_RULE_ID,
+        "target_shape": {
+            "provider_family": "openai",
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "category": "chat",
+            "workflow_phase": "chat",
+            "text_bucket": "2k_8k_chars",
+            "token_bucket": "500_2k_tokens",
+            "has_tools": False,
+            "stream": False,
+        },
+        "detail": detail or {},
+        "privacy": _hit_recovery_privacy(),
+    }
+
+
+def _hit_recovery_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "synthetic_only": True,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "raw_responses_included": False,
+        "cache_keys_included": False,
+        "request_fingerprints_included": False,
+        "session_ids_included": False,
+        "database_path_included": False,
+    }
+
+
+def _select_synthetic_openai_canary_applied_lookup(
+    store_obj: Any,
+    *,
+    max_attempts: int = 4096,
+) -> tuple[str | None, bool, bool, dict[str, Any]]:
+    for index in range(max(1, max_attempts)):
+        request_fingerprint = f"agentflow-cache-replay-hit-recovery-smoke-{index}"
+        can_exact, can_semantic, meta = cache_module.cache_lookup_meta(
+            has_tool_blocks=False,
+            pattern_features=_synthetic_openai_cache_replay_features(request_fingerprint),
+            store_obj=store_obj,
+        )
+        rule = meta.get("pattern_rule") if isinstance(meta.get("pattern_rule"), dict) else {}
+        canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else {}
+        if (
+            rule.get("rule_id") == _TARGET_OPENAI_CACHE_REPLAY_RULE_ID
+            and canary.get("status") == "applied"
+            and canary.get("cohort") == "canary_applied"
+        ):
+            return request_fingerprint, can_exact, can_semantic, meta
+    return None, False, False, {}
+
+
+def build_cache_replay_hit_recovery_smoke(
+    store_obj: Any,
+    *,
+    upstream: str = "https://api.openai.com",
+) -> dict[str, Any]:
+    request_fingerprint, can_exact, can_semantic, lookup_meta = _select_synthetic_openai_canary_applied_lookup(store_obj)
+    if not request_fingerprint:
+        return _failure_result(
+            "no-synthetic-canary-applied-fingerprint",
+            blockers=["canary-applied-cohort-unavailable"],
+            detail={"fingerprint_search_attempts": 4096},
+        )
+    if not can_exact:
+        return _failure_result(
+            "synthetic-shape-not-exact-cache-enabled",
+            blockers=["exact-cache-disabled"],
+            detail={"cache_status": lookup_meta.get("status"), "cache_reason": lookup_meta.get("reason")},
+        )
+
+    session_id = "agentflow-cache-replay-hit-recovery-smoke-session"
+    replay_scope, replay_scope_id, replay_pattern_rule = cache_module.cache_replay_scope_for_meta(lookup_meta, session_id)
+    if replay_pattern_rule is None:
+        return _failure_result("cache-replay-pattern-rule-missing", blockers=["pattern-rule-missing"])
+    if replay_scope == "session" and not replay_scope_id:
+        return _failure_result("session-scope-missing", blockers=["session-scope-missing"])
+
+    body = _synthetic_openai_cache_replay_body()
+    path = "/v1/responses"
+    key = cache_module.cache_key_for(
+        body,
+        path,
+        provider="openai",
+        upstream=upstream,
+        replay_scope=replay_scope,
+        replay_scope_id=replay_scope_id,
+    )
+    first_allowed, first_canary = cache_module.cache_replay_canary_decision(
+        cache_meta=lookup_meta,
+        dependency_audit=store_obj.cache_file_dependency_audit(key),
+        session_id=session_id,
+    )
+    if not first_allowed:
+        return _failure_result(
+            str(first_canary.get("reason") or "cache-replay-canary-bypassed"),
+            blockers=[str(first_canary.get("reason") or "cache-replay-canary-bypassed")],
+            detail={"canary_status": first_canary.get("status")},
+        )
+
+    first_cached, first_invalidated_reason = store_obj.get_cache_with_reason(key)
+    if first_invalidated_reason:
+        return _failure_result(
+            str(first_invalidated_reason),
+            blockers=[str(first_invalidated_reason)],
+            detail={"first_lookup_status": "invalidated"},
+        )
+
+    response = _synthetic_openai_cache_replay_response()
+    if first_cached is None:
+        store_obj.set_cache(key, "gpt-5.4-mini", len(json.dumps(body, sort_keys=True)), response, file_deps=[])
+
+    second_allowed, second_canary = cache_module.cache_replay_canary_decision(
+        cache_meta=lookup_meta,
+        dependency_audit=store_obj.cache_file_dependency_audit(key),
+        session_id=session_id,
+    )
+    second_cached = None
+    second_invalidated_reason = None
+    if second_allowed:
+        second_cached, second_invalidated_reason = store_obj.get_cache_with_reason(key)
+    if not second_allowed or second_cached is None:
+        reason = (
+            str(second_canary.get("reason") or "cache-replay-canary-bypassed")
+            if not second_allowed
+            else str(second_invalidated_reason or "synthetic-repeat-cache-miss")
+        )
+        return _failure_result(
+            reason,
+            blockers=[reason],
+            detail={
+                "second_lookup_allowed": bool(second_allowed),
+                "second_canary_status": second_canary.get("status"),
+                "second_lookup_status": "miss",
+            },
+        )
+
+    hit_meta = cache_module.cache_hit_decision_meta(
+        "exact-match",
+        hit_type="exact",
+        exact_enabled=can_exact,
+        semantic_enabled=can_semantic,
+        lookup_meta={**lookup_meta, "cache_replay_canary": second_canary},
+        estimated_saved_cost_usd=0.001,
+    )
+    return {
+        "schema": HIT_RECOVERY_SMOKE_SCHEMA,
+        "generated_at": utc_now(),
+        "status": "hit-recovered",
+        "reason": "synthetic-repeat-exact-cache-hit",
+        "target_rule_id": _TARGET_OPENAI_CACHE_REPLAY_RULE_ID,
+        "target_shape": {
+            "provider_family": "openai",
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "category": "chat",
+            "workflow_phase": "chat",
+            "text_bucket": "2k_8k_chars",
+            "token_bucket": "500_2k_tokens",
+            "has_tools": False,
+            "stream": False,
+        },
+        "first_lookup": {
+            "status": "hit" if first_cached is not None else "miss",
+            "reason": "already-warm" if first_cached is not None else "first-seen-cache-warmup",
+            "canary_status": first_canary.get("status"),
+            "canary_reason": first_canary.get("reason"),
+        },
+        "second_lookup": {
+            "status": "hit",
+            "reason": hit_meta.get("reason"),
+            "hit_type": hit_meta.get("hit_type"),
+            "canary_status": second_canary.get("status"),
+            "canary_reason": second_canary.get("reason"),
+            "canary_cohort": second_canary.get("canary_cohort"),
+        },
+        "summary": {
+            "synthetic_requests": 2,
+            "provider_calls_made": 0,
+            "cache_entries_written": first_cached is None,
+            "exact_hit_count": 1,
+            "observed_hits": 1,
+            "hit_recovery_demonstrated": True,
+        },
+        "privacy": _hit_recovery_privacy(),
+    }
+
+
+def _build_isolated_cache_replay_hit_recovery_smoke() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as tmp:
+        store_obj = SQLiteStore(str(Path(tmp) / "agentflow-cache-hit-recovery-smoke.sqlite3"))
+        try:
+            return build_cache_replay_hit_recovery_smoke(store_obj)
+        finally:
+            store_obj.conn.close()
 
 
 def build_cache_smoke_diagnostic(
@@ -355,8 +627,10 @@ def build_cache_smoke_diagnostic(
             "reconstruction_required_for_exact_confirmation": True,
         },
         "selected_cache_row_reconstruction": _key_stability_sample(store_obj, call_rows),
+        "cache_replay_hit_recovery_smoke": _build_isolated_cache_replay_hit_recovery_smoke(),
         "privacy": {
             "metadata_only": True,
+            "synthetic_hit_recovery_included": True,
             "raw_prompts_included": False,
             "raw_messages_included": False,
             "raw_request_bodies_included": False,
