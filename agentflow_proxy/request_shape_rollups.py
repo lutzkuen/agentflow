@@ -4320,24 +4320,31 @@ def build_request_shape_cache_replay_canary_stage_report(
     persist_rollups: bool = False,
     rollout_fraction: float = DEFAULT_CACHE_REPLAY_CANARY_ROLLOUT_FRACTION,
     holdout_fraction: float = DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION,
+    mark_handled_cache_replay_cohorts: bool = True,
 ) -> dict[str, Any]:
     rollup_report = build_request_shape_rollups_report(
         store_obj,
         limit=limit,
         persist=persist_rollups,
         run_id=run_id,
-        mark_handled_cache_replay_cohorts=False,
+        mark_handled_cache_replay_cohorts=mark_handled_cache_replay_cohorts,
     )
     dry_run = (
         rollup_report.get("cache_replayability_dry_run")
         if isinstance(rollup_report.get("cache_replayability_dry_run"), dict)
         else {}
     )
+    source_cohorts = (
+        dry_run.get("remaining_replay_ready_cohorts")
+        if mark_handled_cache_replay_cohorts and isinstance(dry_run.get("remaining_replay_ready_cohorts"), list)
+        else dry_run.get("cohorts")
+    )
     cohorts = [
         cohort
-        for cohort in dry_run.get("cohorts") or []
+        for cohort in source_cohorts or []
         if isinstance(cohort, dict)
         and cohort.get("readiness") == "replay-ready"
+        and not bool(cohort.get("handled_by_local_policy"))
         and cohort.get("provider_family") == "openai"
         and cohort.get("source_surface") == "openai_responses"
         and cohort.get("endpoint") == "responses"
@@ -4398,10 +4405,21 @@ def build_request_shape_cache_replay_canary_stage_report(
             "cache_replayability_summary": dry_run.get("summary"),
             "readiness_breakdown": dry_run.get("readiness_breakdown"),
             "blocker_breakdown": dry_run.get("blocker_breakdown"),
+            "handled_policy_summary": dry_run.get("handled_policy_summary"),
         },
         "acceptance": {
             "stages_single_top_ranked_cohort": len(actions) == 1 and bool(top_action and _as_int(top_action.get("rank")) == _as_int((top_cohort or {}).get("rank"))),
             "has_replay_ready_openai_responses_cohort": bool(actions),
+            "stages_remaining_unhandled_replay_ready_cohort": bool(
+                top_cohort
+                and top_cohort.get("readiness") == "replay-ready"
+                and bool(top_cohort.get("remaining_replay_ready", True))
+                and not bool(top_cohort.get("handled_by_local_policy"))
+            ),
+            "excludes_already_handled_local_policy_cohorts": bool(
+                not mark_handled_cache_replay_cohorts
+                or all(not bool(action.get("handled_by_local_policy")) for action in actions)
+            ),
             "has_rank": bool(top_action and _as_int(top_action.get("rank")) > 0),
             "has_shape_buckets": bool(
                 top_action

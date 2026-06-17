@@ -5413,6 +5413,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
                     run_id="cli-cache-replay-stage-enrichment",
                     rollout_fraction=0.10,
                     holdout_fraction=0.10,
+                    mark_handled_cache_replay_cohorts=False,
                 )
                 apply_request_shape_cache_replay_canary_action(
                     stage["top_stage_action"],

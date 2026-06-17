@@ -675,6 +675,26 @@ class RequestShapeRollupTests(unittest.TestCase):
                 cost=cost,
                 baseline=cost,
             )
+        for cost in (0.40, 0.45, 0.50, 0.55, 0.60):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=40_000,
+                cost=cost,
+                baseline=cost,
+            )
 
         report = build_request_shape_rollups_report(
             self.store,
@@ -685,10 +705,10 @@ class RequestShapeRollupTests(unittest.TestCase):
         dry_run = report["cache_replayability_dry_run"]
 
         self.assertEqual(dry_run["schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
-        self.assertEqual(dry_run["summary"]["replay_ready_cohort_count"], 2)
+        self.assertEqual(dry_run["summary"]["replay_ready_cohort_count"], 3)
         self.assertEqual(dry_run["summary"]["remaining_replay_ready_cohort_count"], 1)
-        self.assertEqual(dry_run["summary"]["handled_replay_ready_cohort_count"], 1)
-        self.assertEqual(dry_run["summary"]["remaining_projected_hits"], 3)
+        self.assertEqual(dry_run["summary"]["handled_replay_ready_cohort_count"], 2)
+        self.assertEqual(dry_run["summary"]["remaining_projected_hits"], 4)
         self.assertGreater(dry_run["summary"]["remaining_projected_savings_usd"], 0)
         self.assertTrue(dry_run["acceptance"]["ranks_remaining_replay_ready_cohorts"])
         self.assertTrue(dry_run["acceptance"]["marks_already_handled_replay_ready_cohorts"])
@@ -697,20 +717,24 @@ class RequestShapeRollupTests(unittest.TestCase):
         remaining = dry_run["remaining_replay_ready_cohorts"][0]
         self.assertEqual(remaining["rank"], 1)
         self.assertEqual(remaining["remaining_rank"], 1)
-        self.assertEqual(remaining["text_bucket"], "8k_32k_chars")
-        self.assertEqual(remaining["token_bucket"], "2k_8k_tokens")
+        self.assertEqual(remaining["text_bucket"], "32k_128k_chars")
+        self.assertEqual(remaining["token_bucket"], "8k_32k_tokens")
         self.assertFalse(remaining["handled_by_local_policy"])
         self.assertEqual(remaining["next_action"], "stage-cache-replay-canary")
 
-        handled = dry_run["handled_replay_ready_cohorts"][0]
-        self.assertEqual(handled["text_bucket"], "2k_8k_chars")
-        self.assertEqual(handled["token_bucket"], "500_2k_tokens")
-        self.assertTrue(handled["handled_by_local_policy"])
-        self.assertEqual(handled["next_action"], "already-handled-by-local-cache-policy")
-        self.assertEqual(handled["handled_local_policy"]["handled_state"], "active-local-policy")
-        self.assertEqual(handled["handled_local_policy"]["source_policy_file"], "cache_rules.yaml")
-        self.assertFalse(handled["handled_local_policy"]["rule_ids_included"])
-        self.assertFalse(handled["handled_local_policy"]["cohort_ids_included"])
+        handled_shapes = {
+            (row["text_bucket"], row["token_bucket"]): row
+            for row in dry_run["handled_replay_ready_cohorts"]
+        }
+        self.assertIn(("2k_8k_chars", "500_2k_tokens"), handled_shapes)
+        self.assertIn(("8k_32k_chars", "2k_8k_tokens"), handled_shapes)
+        for handled in handled_shapes.values():
+            self.assertTrue(handled["handled_by_local_policy"])
+            self.assertEqual(handled["next_action"], "already-handled-by-local-cache-policy")
+            self.assertEqual(handled["handled_local_policy"]["handled_state"], "active-local-policy")
+            self.assertEqual(handled["handled_local_policy"]["source_policy_file"], "cache_rules.yaml")
+            self.assertFalse(handled["handled_local_policy"]["rule_ids_included"])
+            self.assertFalse(handled["handled_local_policy"]["cohort_ids_included"])
         self.assertFalse(dry_run["handled_policy_summary"]["policy_paths_included"])
 
         rendered = json.dumps(dry_run, sort_keys=True)
@@ -834,6 +858,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             run_id="2026-06-15-cache-replay-stage",
             rollout_fraction=0.05,
             holdout_fraction=0.20,
+            mark_handled_cache_replay_cohorts=False,
         )
 
         self.assertEqual(report["schema"], "agentflow.request_shape_cache_replay_canary_stage.v1")
@@ -845,6 +870,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["eligible_stageable_cohort_count"], 1)
         self.assertTrue(report["acceptance"]["stages_single_top_ranked_cohort"])
         self.assertTrue(report["acceptance"]["has_replay_ready_openai_responses_cohort"])
+        self.assertTrue(report["acceptance"]["stages_remaining_unhandled_replay_ready_cohort"])
+        self.assertTrue(report["acceptance"]["excludes_already_handled_local_policy_cohorts"])
         self.assertTrue(report["acceptance"]["has_rank"])
         self.assertTrue(report["acceptance"]["has_shape_buckets"])
         self.assertTrue(report["acceptance"]["has_target_cache_policy_metadata"])
@@ -1013,6 +1040,66 @@ class RequestShapeRollupTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, rendered)
 
+    def test_packaged_cache_rules_stage_next_openai_replay_cohort(self) -> None:
+        rules_path = Path(__file__).parents[1] / "agentflow_proxy" / "cache_rules.yaml"
+        policy = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+        rules = policy["pattern_rules"]
+        rule = next(
+            item
+            for item in rules
+            if item.get("candidate_id") == "request-shape-cache-replay:responses:chat:21ea87daf8319e93"
+        )
+
+        self.assertEqual(rule["id"], "local-openai-cache-replay-canary-204ae274924d75dd")
+        self.assertEqual(rule["policy_source"], "local-manual")
+        self.assertEqual(rule["target_cache_policy"]["schema"], "agentflow.request_shape_cache_replay_target_policy.v1")
+        self.assertEqual(rule["target_cache_policy"]["policy_section"], "cache.pattern_rules")
+        self.assertEqual(rule["target_cache_policy"]["target_local_policy"], "cache_rules")
+        self.assertEqual(rule["target_cache_policy"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertFalse(rule["target_cache_policy"]["rules_path_included"])
+        self.assertTrue(rule["target_cache_policy"]["metadata_only"])
+        self.assertTrue(rule["target_cache_policy"]["aggregate_only"])
+        self.assertEqual(rule["conditions"]["provider_family"], "openai")
+        self.assertEqual(rule["conditions"]["source_surface"], "openai_responses")
+        self.assertEqual(rule["conditions"]["endpoint"], "responses")
+        self.assertEqual(rule["conditions"]["category"], "chat")
+        self.assertEqual(rule["conditions"]["text_bucket"], "8k_32k_chars")
+        self.assertEqual(rule["conditions"]["token_bucket"], "2k_8k_tokens")
+        self.assertFalse(rule["conditions"]["has_tools"])
+        self.assertFalse(rule["conditions"]["stream"])
+        self.assertFalse(rule["action"]["allow_tool_calls"])
+        self.assertFalse(rule["action"]["streaming"])
+        self.assertEqual(rule["action"]["scope"], "session")
+        self.assertEqual(rule["action"]["ttl_seconds"], 3600)
+        self.assertEqual(rule["rollout"]["canary_fraction"], 0.10)
+        self.assertEqual(rule["rollout"]["holdout_fraction"], 0.10)
+        self.assertEqual(rule["rollout"]["canary_unit"], "request_fingerprint")
+
+        graduation = rule["graduation"]
+        self.assertEqual(graduation["schema"], "agentflow.request_shape_cache_replay_shape_activation.v1")
+        self.assertEqual(graduation["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(graduation["source_reason"], "replay-ready-exact-non-tool-shape")
+        self.assertEqual(graduation["sample_count"], 10)
+        self.assertEqual(graduation["rank"], 1)
+        self.assertEqual(graduation["cohort_rank"], 1)
+        self.assertEqual(graduation["projected_hits"], 9)
+        self.assertEqual(graduation["projected_savings_usd"], 0.031711)
+        self.assertTrue(graduation["aggregate_only"])
+        self.assertEqual(graduation["shape"]["text_bucket"], "8k_32k_chars")
+        self.assertEqual(graduation["shape"]["token_bucket"], "2k_8k_tokens")
+        self.assertEqual(graduation["shape"]["readiness"], "replay-ready")
+        self.assertEqual(graduation["shape"]["reason"], "replay-ready-exact-non-tool-shape")
+        rendered = json.dumps(rule, sort_keys=True)
+        for forbidden in (
+            "raw prompt",
+            "provider body",
+            "cache_key",
+            "request_id",
+            "session_id",
+            "/tmp/",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_cache_replay_canary_stage_selects_only_top_ranked_replay_ready_cohort(self) -> None:
         for cost in (0.01, 0.03, 0.02):
             self._log_call(
@@ -1054,6 +1141,26 @@ class RequestShapeRollupTests(unittest.TestCase):
                 cost=cost,
                 baseline=cost,
             )
+        for cost in (0.40, 0.45, 0.50, 0.55, 0.60):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=40_000,
+                cost=cost,
+                baseline=cost,
+            )
 
         report = build_request_shape_cache_replay_canary_stage_report(
             self.store,
@@ -1064,22 +1171,29 @@ class RequestShapeRollupTests(unittest.TestCase):
         )
 
         self.assertEqual(report["status"], "staged")
-        self.assertEqual(report["eligible_stageable_cohort_count"], 2)
+        self.assertEqual(report["eligible_stageable_cohort_count"], 1)
         self.assertEqual(report["staged_canary_count"], 1)
         self.assertEqual(len(report["stage_actions"]), 1)
         self.assertTrue(report["acceptance"]["stages_single_top_ranked_cohort"])
+        self.assertTrue(report["acceptance"]["stages_remaining_unhandled_replay_ready_cohort"])
+        self.assertTrue(report["acceptance"]["excludes_already_handled_local_policy_cohorts"])
+        self.assertEqual(report["source_report"]["cache_replayability_summary"]["replay_ready_cohort_count"], 3)
+        self.assertEqual(report["source_report"]["cache_replayability_summary"]["remaining_replay_ready_cohort_count"], 1)
+        self.assertEqual(report["source_report"]["cache_replayability_summary"]["handled_replay_ready_cohort_count"], 2)
         action = report["top_stage_action"]
         self.assertEqual(action["rank"], 1)
         self.assertEqual(action["cohort_rank"], 1)
-        self.assertEqual(action["shape"]["text_bucket"], "8k_32k_chars")
-        self.assertEqual(action["shape"]["token_bucket"], "2k_8k_tokens")
-        self.assertEqual(action["conditions"]["text_bucket"], "8k_32k_chars")
+        self.assertEqual(action["shape"]["text_bucket"], "32k_128k_chars")
+        self.assertEqual(action["shape"]["token_bucket"], "8k_32k_tokens")
+        self.assertEqual(action["conditions"]["text_bucket"], "32k_128k_chars")
         self.assertGreater(action["projected_hits"], 0)
         self.assertGreater(action["projected_savings_usd"], 0)
         self.assertEqual(action["target_cache_policy"]["target_local_policy"], "cache_canary_policy")
         self.assertEqual(action["target_cache_policy"]["target_local_rule_file"], "cache_canary_policy.yaml")
         self.assertEqual(report["top_cohort"]["rank"], 1)
-        self.assertEqual(report["top_cohort"]["text_bucket"], "8k_32k_chars")
+        self.assertEqual(report["top_cohort"]["remaining_rank"], 1)
+        self.assertEqual(report["top_cohort"]["text_bucket"], "32k_128k_chars")
+        self.assertFalse(report["top_cohort"]["handled_by_local_policy"])
 
     def test_cache_replay_canary_stage_cli_emits_direct_stage_payload(self) -> None:
         for cost in (0.01, 0.03, 0.02):
@@ -1098,7 +1212,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 has_tools=False,
                 cache_status="miss",
                 cache_reason="exact-miss",
-                text_chars=6_000,
+                text_chars=40_000,
                 cost=cost,
                 baseline=cost,
             )
@@ -1163,6 +1277,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             run_id="2026-06-15-cache-replay-stage-apply",
             rollout_fraction=0.05,
             holdout_fraction=0.20,
+            mark_handled_cache_replay_cohorts=False,
         )
         policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
         result = apply_request_shape_cache_replay_canary_action(
@@ -1248,7 +1363,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 has_tools=False,
                 cache_status="miss",
                 cache_reason="exact-miss",
-                text_chars=6_000,
+                text_chars=40_000,
                 cost=cost,
                 baseline=cost,
             )
@@ -1345,6 +1460,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             run_id="2026-06-15-cache-replay-evidence-stage",
             rollout_fraction=0.05,
             holdout_fraction=0.20,
+            mark_handled_cache_replay_cohorts=False,
         )
         policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
         apply_request_shape_cache_replay_canary_action(report["top_stage_action"], rules_path=policy_path)
@@ -1403,6 +1519,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             run_id="2026-06-15-cache-replay-evidence-observed",
             rollout_fraction=0.50,
             holdout_fraction=0.25,
+            mark_handled_cache_replay_cohorts=False,
         )
         policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
         apply_result = apply_request_shape_cache_replay_canary_action(stage["top_stage_action"], rules_path=policy_path)
@@ -1635,6 +1752,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             run_id="2026-06-16-cache-replay-applied-miss-blockers",
             rollout_fraction=0.75,
             holdout_fraction=0.25,
+            mark_handled_cache_replay_cohorts=False,
         )
         policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
         apply_request_shape_cache_replay_canary_action(stage["top_stage_action"], rules_path=policy_path)
@@ -1788,7 +1906,11 @@ class RequestShapeRollupTests(unittest.TestCase):
                 cost=cost,
                 baseline=cost,
             )
-        stage = build_request_shape_cache_replay_canary_stage_report(self.store, limit=20)
+        stage = build_request_shape_cache_replay_canary_stage_report(
+            self.store,
+            limit=20,
+            mark_handled_cache_replay_cohorts=False,
+        )
         policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
         apply_request_shape_cache_replay_canary_action(stage["top_stage_action"], rules_path=policy_path)
 
@@ -1840,6 +1962,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             run_id="2026-06-15-cache-replay-policy-decision",
             rollout_fraction=0.50,
             holdout_fraction=0.25,
+            mark_handled_cache_replay_cohorts=False,
         )
         policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
         apply_request_shape_cache_replay_canary_action(stage["top_stage_action"], rules_path=policy_path)
