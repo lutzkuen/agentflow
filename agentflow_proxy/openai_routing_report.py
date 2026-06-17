@@ -11,6 +11,8 @@ from agentflow_proxy.store import utc_now
 
 
 SCHEMA = "agentflow.openai_routing_opportunity.v1"
+PROMOTION_DECISION_REPORT_SCHEMA = "agentflow.openai_routing_promotion_decision_report.v1"
+PROMOTION_DECISION_SCHEMA = "agentflow.openai_routing_promotion_decision.v1"
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
 DEFAULT_MAX_RETRY_RATE = 0.20
@@ -1018,5 +1020,362 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
             "secrets_included": False,
             "provider_calls_made": False,
             "basis": "local calls table metadata plus sanitized routing/cache decision summaries only",
+        },
+    }
+
+
+def _matches_promotion_target(
+    candidate: dict[str, Any],
+    *,
+    requested_model: str,
+    target_model: str,
+    source_surface: str,
+    endpoint: str,
+    category: str,
+) -> bool:
+    return (
+        str(candidate.get("requested_model") or "").lower() == requested_model.lower()
+        and str(candidate.get("target_model") or "").lower() == target_model.lower()
+        and str(candidate.get("source_surface") or "").lower() == source_surface.lower()
+        and str(candidate.get("endpoint") or "").lower() == endpoint.lower()
+        and str(candidate.get("category") or "").lower() == category.lower()
+    )
+
+
+def _merge_breakdown(counter: dict[str, int], breakdown: Any) -> None:
+    if not isinstance(breakdown, list):
+        return
+    for item in breakdown:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        if value is None:
+            continue
+        _increment(counter, value, _as_int(item.get("count"), 1))
+
+
+def _openai_promotion_decision_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "provider_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_requests_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "tool_payloads_included": False,
+        "cache_keys_included": False,
+        "file_paths_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "policy_files_written": False,
+    }
+
+
+def _build_openai_promotion_decision(
+    *,
+    report: dict[str, Any],
+    requested_model: str,
+    target_model: str,
+    source_surface: str,
+    endpoint: str,
+    category: str,
+) -> dict[str, Any]:
+    candidates = [
+        candidate
+        for candidate in report.get("candidates", [])
+        if isinstance(candidate, dict)
+        and _matches_promotion_target(
+            candidate,
+            requested_model=requested_model,
+            target_model=target_model,
+            source_surface=source_surface,
+            endpoint=endpoint,
+            category=category,
+        )
+    ]
+
+    matched_count = sum(_as_int(candidate.get("matched_count")) for candidate in candidates)
+    current_routed_count = sum(_as_int(candidate.get("current_routed_count")) for candidate in candidates)
+    candidate_blocked_count = sum(_as_int(candidate.get("blocked_count")) for candidate in candidates)
+    projected_savings_usd = sum(_as_float(candidate.get("projected_savings_usd")) for candidate in candidates)
+    baseline_cost_usd = sum(_as_float(candidate.get("estimated_baseline_cost_usd")) for candidate in candidates)
+    savings_per_1000 = round((projected_savings_usd / matched_count) * 1000.0, 6) if matched_count else 0.0
+
+    cohort_counts = {
+        "canary_applied": 0,
+        "canary_holdout": 0,
+        "safety_stopped": 0,
+        "skipped": 0,
+        "bypassed_or_disabled": 0,
+        "unknown": 0,
+    }
+    error_count = 0
+    fallback_count = 0
+    retry_count = 0
+    stale_evidence_count = 0
+    latest_observed_at: str | None = None
+    oldest_observed_at: str | None = None
+    skipped_reason_counts: dict[str, int] = {}
+    unknown_reason_counts: dict[str, int] = {}
+    safe_bypass_reason_counts: dict[str, int] = {}
+    unsupported_shape_reason_counts: dict[str, int] = {}
+    promotion_blocker_reason_counts: dict[str, int] = {}
+    unclassified_reason_counts: dict[str, int] = {}
+
+    routing_rule_metadata: dict[str, Any] | None = None
+    candidate_ids: list[str] = []
+    for candidate in candidates:
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if candidate_id:
+            candidate_ids.append(candidate_id)
+        readiness = candidate.get("promotion_readiness") if isinstance(candidate.get("promotion_readiness"), dict) else {}
+        if routing_rule_metadata is None and isinstance(readiness.get("routing_rule_metadata"), dict):
+            routing_rule_metadata = readiness["routing_rule_metadata"]
+        lifecycle = candidate.get("openai_canary_lifecycle_evidence") if isinstance(candidate.get("openai_canary_lifecycle_evidence"), dict) else {}
+        counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+        for key in cohort_counts:
+            cohort_counts[key] += _as_int(counts.get(key))
+        error_count += _as_int(lifecycle.get("error_count"))
+        fallback_count += _as_int(lifecycle.get("fallback_count"))
+        retry_count += _as_int(lifecycle.get("retry_count"))
+        latest = lifecycle.get("latest_observed_at")
+        oldest = lifecycle.get("oldest_observed_at")
+        if isinstance(latest, str) and (latest_observed_at is None or latest > latest_observed_at):
+            latest_observed_at = latest
+        if isinstance(oldest, str) and (oldest_observed_at is None or oldest < oldest_observed_at):
+            oldest_observed_at = oldest
+        stale = lifecycle.get("stale_evidence") if isinstance(lifecycle.get("stale_evidence"), dict) else {}
+        if stale.get("stale"):
+            stale_evidence_count += _as_int(lifecycle.get("observed_count"))
+        _merge_breakdown(skipped_reason_counts, lifecycle.get("skipped_reason_breakdown"))
+        _merge_breakdown(unknown_reason_counts, lifecycle.get("unknown_reason_breakdown"))
+        classification = lifecycle.get("skipped_unknown_classification") if isinstance(lifecycle.get("skipped_unknown_classification"), dict) else {}
+        _merge_breakdown(safe_bypass_reason_counts, classification.get("safe_bypass_reason_breakdown"))
+        _merge_breakdown(unsupported_shape_reason_counts, classification.get("unsupported_shape_reason_breakdown"))
+        _merge_breakdown(promotion_blocker_reason_counts, classification.get("promotion_blocker_reason_breakdown"))
+        _merge_breakdown(unclassified_reason_counts, classification.get("unclassified_reason_breakdown"))
+
+    applied = cohort_counts["canary_applied"]
+    holdout = cohort_counts["canary_holdout"]
+    safety = cohort_counts["safety_stopped"]
+    skipped = cohort_counts["skipped"]
+    unknown = cohort_counts["unknown"]
+    observed_count = sum(cohort_counts.values())
+    unsupported_shape_count = sum(unsupported_shape_reason_counts.values())
+    promotion_blocker_count = sum(promotion_blocker_reason_counts.values())
+    unclassified_count = sum(unclassified_reason_counts.values())
+
+    blocker_counts: dict[str, int] = {}
+    if not candidates:
+        blocker_counts["no-matching-openai-routing-candidate"] = 1
+    if matched_count < DEFAULT_MIN_SAMPLES:
+        blocker_counts["insufficient-samples"] = matched_count
+    if observed_count <= 0:
+        blocker_counts["missing-canary-lifecycle-evidence"] = matched_count
+    if applied <= 0:
+        blocker_counts["missing-applied-coverage"] = matched_count
+    if holdout <= 0:
+        blocker_counts["missing-holdout-coverage"] = matched_count
+    if safety:
+        blocker_counts["safety-stop-observed"] = safety
+    if error_count:
+        blocker_counts["error-observed"] = error_count
+    if fallback_count:
+        blocker_counts["fallback-observed"] = fallback_count
+    if retry_count:
+        blocker_counts["retry-observed"] = retry_count
+    if stale_evidence_count:
+        blocker_counts["stale-evidence"] = stale_evidence_count
+    if unknown:
+        blocker_counts["unknown-canary-lifecycle-rows"] = unknown
+    if unclassified_count:
+        blocker_counts["unclassified-canary-lifecycle-rows"] = unclassified_count
+    if unsupported_shape_count:
+        blocker_counts["skipped-canary-unsupported-shape"] = unsupported_shape_count
+    if promotion_blocker_count:
+        blocker_counts["skipped-canary-promotion-blocker"] = promotion_blocker_count
+    if savings_per_1000 <= 0:
+        blocker_counts["non-positive-estimated-savings"] = matched_count
+
+    staged_review_reasons = {
+        "missing-canary-lifecycle-evidence",
+        "missing-applied-coverage",
+        "missing-holdout-coverage",
+        "unknown-canary-lifecycle-rows",
+        "unclassified-canary-lifecycle-rows",
+        "skipped-canary-unsupported-shape",
+    }
+    hard_blockers = [reason for reason in sorted(blocker_counts) if reason not in staged_review_reasons]
+    if applied > 0 and holdout > 0 and not blocker_counts and savings_per_1000 > 0:
+        decision = "promote"
+        next_action = "draft-openai-routing-rule"
+        reason = "promotion-ready"
+    elif hard_blockers:
+        decision = "keep-blocked"
+        next_action = "review-openai-routing-canary-blockers"
+        reason = hard_blockers[0]
+    else:
+        decision = "keep-staged"
+        next_action = (
+            "classify-openai-routing-canary-skipped-unknown"
+            if unknown or unclassified_count or unsupported_shape_count
+            else "collect-openai-routing-canary-evidence"
+        )
+        reason = sorted(blocker_counts)[0] if blocker_counts else "insufficient-promotion-evidence"
+
+    if routing_rule_metadata is None:
+        routing_rule_metadata = {
+            "schema": "agentflow.openai_routing_rule_metadata.v1",
+            "policy_source": "local-manual-review",
+            "target_local_rule_file": "routing_rules.yaml",
+            "target_local_policy_section": "routing.rules",
+            "required_local_executor": "openai-routing-canary",
+            "rule_preview": {
+                "id": f"promote-openai-route:{endpoint}:gpt-5:{category}:to-{target_model.lower().replace('.', '-')}",
+                "conditions": {
+                    "model_pattern": requested_model,
+                    "category": category,
+                    "source_surface": source_surface,
+                    "endpoint": endpoint,
+                    "has_tools": category.startswith("tool-"),
+                },
+                "action": {
+                    "route_to": target_model,
+                    "reason": f"promote OpenAI routing canary {source_surface}/{endpoint}/{category}",
+                },
+            },
+        }
+
+    blocked_count = matched_count if blocker_counts else 0
+    privacy = _openai_promotion_decision_privacy()
+    return {
+        "schema": PROMOTION_DECISION_SCHEMA,
+        "decision": decision,
+        "promotion_ready": decision == "promote",
+        "next_action": next_action,
+        "reason": reason,
+        "reason_codes": sorted(blocker_counts),
+        "blocker_reason_breakdown": _breakdown(blocker_counts),
+        "target": {
+            "provider": "openai",
+            "source_surface": source_surface,
+            "endpoint": endpoint,
+            "category": category,
+            "requested_model": requested_model,
+            "target_model": target_model,
+            "required_local_executor": "openai-routing-canary",
+            "target_local_policy_section": "routing.rules",
+            "target_local_rule_file": "routing_rules.yaml",
+        },
+        "candidate_count": len(candidates),
+        "candidate_ids": sorted(candidate_ids),
+        "matched_count": matched_count,
+        "current_routed_count": current_routed_count,
+        "blocked_count": blocked_count,
+        "candidate_blocked_count": candidate_blocked_count,
+        "projected_savings_usd": round(projected_savings_usd, 6),
+        "estimated_baseline_cost_usd": round(baseline_cost_usd, 6),
+        "savings_per_1000_calls_usd": savings_per_1000,
+        "estimated_savings_per_1000_calls_usd": savings_per_1000,
+        "lifecycle": {
+            "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+            "status": "matched" if observed_count else "no-openai-canary-metadata",
+            "observed_count": observed_count,
+            "cohort_counts": cohort_counts,
+            "applied_count": applied,
+            "holdout_count": holdout,
+            "skipped_count": skipped,
+            "unknown_count": unknown,
+            "safety_stop_count": safety,
+            "error_count": error_count,
+            "fallback_count": fallback_count,
+            "retry_count": retry_count,
+            "latest_observed_at": latest_observed_at,
+            "oldest_observed_at": oldest_observed_at,
+            "skipped_reason_breakdown": _breakdown(skipped_reason_counts),
+            "unknown_reason_breakdown": _breakdown(unknown_reason_counts),
+            "skipped_unknown_classification": {
+                "schema": "agentflow.openai_routing_canary_skipped_unknown_classification.v1",
+                "safe_bypass_count": sum(safe_bypass_reason_counts.values()),
+                "unsupported_shape_count": unsupported_shape_count,
+                "promotion_blocker_count": promotion_blocker_count,
+                "unclassified_count": unclassified_count,
+                "requires_operator_review": bool(unknown or unsupported_shape_count or promotion_blocker_count or unclassified_count),
+                "safe_bypass_reason_breakdown": _breakdown(safe_bypass_reason_counts),
+                "unsupported_shape_reason_breakdown": _breakdown(unsupported_shape_reason_counts),
+                "promotion_blocker_reason_breakdown": _breakdown(promotion_blocker_reason_counts),
+                "unclassified_reason_breakdown": _breakdown(unclassified_reason_counts),
+            },
+        },
+        "quality_gates": {
+            "requires_applied_coverage": True,
+            "requires_holdout_coverage": True,
+            "requires_zero_safety_stops": True,
+            "requires_zero_errors": True,
+            "requires_zero_fallbacks": True,
+            "requires_zero_retries": True,
+            "requires_positive_estimated_savings": True,
+            "requires_file_backed_local_policy": True,
+        },
+        "routing_rule_metadata": routing_rule_metadata,
+        "privacy": privacy,
+    }
+
+
+def build_openai_routing_promotion_decision_report(
+    store_obj: Any,
+    limit: int = 1000,
+    *,
+    requested_model: str = "gpt-5.4",
+    target_model: str = "gpt-5.4-mini",
+    source_surface: str = "openai_responses",
+    endpoint: str = "responses",
+    category: str = "tool-light",
+) -> dict[str, Any]:
+    report = build_openai_routing_report(store_obj, limit=limit)
+    decision = _build_openai_promotion_decision(
+        report=report,
+        requested_model=requested_model,
+        target_model=target_model,
+        source_surface=source_surface,
+        endpoint=endpoint,
+        category=category,
+    )
+    return {
+        "schema": PROMOTION_DECISION_REPORT_SCHEMA,
+        "generated_at": utc_now(),
+        "limit": report.get("limit"),
+        "target": decision["target"],
+        "decision": decision["decision"],
+        "promotion_ready": decision["promotion_ready"],
+        "summary": {
+            "decision_count": 1,
+            "promote_count": 1 if decision["decision"] == "promote" else 0,
+            "keep_staged_count": 1 if decision["decision"] == "keep-staged" else 0,
+            "keep_blocked_count": 1 if decision["decision"] == "keep-blocked" else 0,
+            "matched_count": decision["matched_count"],
+            "candidate_count": decision["candidate_count"],
+            "current_routed_count": decision["current_routed_count"],
+            "applied_count": decision["lifecycle"]["applied_count"],
+            "holdout_count": decision["lifecycle"]["holdout_count"],
+            "safety_stop_count": decision["lifecycle"]["safety_stop_count"],
+            "error_count": decision["lifecycle"]["error_count"],
+            "fallback_count": decision["lifecycle"]["fallback_count"],
+            "retry_count": decision["lifecycle"]["retry_count"],
+            "savings_per_1000_calls_usd": decision["savings_per_1000_calls_usd"],
+            "projected_savings_usd": decision["projected_savings_usd"],
+            "target_local_policy_section": "routing.rules",
+            "target_local_rule_file": "routing_rules.yaml",
+        },
+        "promotion_decision": decision,
+        "decisions": [decision],
+        "source_report_summary": report.get("summary") if isinstance(report.get("summary"), dict) else {},
+        "privacy": _openai_promotion_decision_privacy()
+        | {
+            "basis": "local calls table metadata plus sanitized OpenAI routing canary lifecycle summaries only",
+            "source_report_schema": report.get("schema"),
         },
     }

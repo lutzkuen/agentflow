@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 from agentflow_proxy import cli
-from agentflow_proxy.openai_routing_report import build_openai_routing_report
+from agentflow_proxy.openai_routing_report import build_openai_routing_promotion_decision_report, build_openai_routing_report
 from agentflow_proxy.stats import stats_openai_routing_report
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 
@@ -527,6 +527,106 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertFalse(readiness["privacy"]["session_ids_included"])
         self.assertFalse(readiness["privacy"]["tool_payloads_included"])
         self.assertFalse(readiness["privacy"]["cache_keys_included"])
+
+    def test_targeted_gpt54_tool_light_promotion_decision_aggregates_lifecycle_buckets(self) -> None:
+        def canary(cohort: str) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-v1",
+                "target_candidate_id": "openai-route:responses:gpt-5:tool-light:tools:nonstream:to-gpt-5-4-mini",
+                "status": "applied" if cohort == "canary_applied" else "holdout",
+                "cohort": cohort,
+                "reason": "selected-canary" if cohort == "canary_applied" else "selected-holdout",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if cohort == "canary_applied" else "gpt-5.4",
+                "category": "tool-light",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "canary_fraction": 0.15,
+                "holdout_fraction": 0.10,
+            }
+
+        for _ in range(4):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+            )
+        for _ in range(5):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout"),
+            )
+        for _ in range(3):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=9000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+            )
+        for _ in range(2):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=9000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout"),
+            )
+
+        result = build_openai_routing_promotion_decision_report(self.store, limit=20)
+
+        self.assertEqual(result["schema"], "agentflow.openai_routing_promotion_decision_report.v1")
+        self.assertEqual(result["decision"], "promote")
+        self.assertEqual(result["summary"]["decision_count"], 1)
+        self.assertEqual(len(result["decisions"]), 1)
+        decision = result["promotion_decision"]
+        self.assertEqual(decision["schema"], "agentflow.openai_routing_promotion_decision.v1")
+        self.assertEqual(decision["decision"], "promote")
+        self.assertEqual(decision["target"]["source_surface"], "openai_responses")
+        self.assertEqual(decision["target"]["endpoint"], "responses")
+        self.assertEqual(decision["target"]["category"], "tool-light")
+        self.assertEqual(decision["target"]["requested_model"], "gpt-5.4")
+        self.assertEqual(decision["target"]["target_model"], "gpt-5.4-mini")
+        self.assertEqual(decision["target"]["target_local_policy_section"], "routing.rules")
+        self.assertEqual(decision["target"]["target_local_rule_file"], "routing_rules.yaml")
+        self.assertGreaterEqual(decision["candidate_count"], 2)
+        self.assertEqual(decision["matched_count"], 14)
+        self.assertEqual(decision["lifecycle"]["applied_count"], 7)
+        self.assertEqual(decision["lifecycle"]["holdout_count"], 7)
+        self.assertEqual(decision["lifecycle"]["safety_stop_count"], 0)
+        self.assertEqual(decision["lifecycle"]["error_count"], 0)
+        self.assertEqual(decision["lifecycle"]["fallback_count"], 0)
+        self.assertEqual(decision["lifecycle"]["retry_count"], 0)
+        self.assertGreater(decision["savings_per_1000_calls_usd"], 0)
+        self.assertEqual(decision["reason_codes"], [])
+        self.assertEqual(decision["routing_rule_metadata"]["target_local_policy_section"], "routing.rules")
+        self.assertFalse(decision["privacy"]["provider_calls_made"])
+        self.assertFalse(decision["privacy"]["managed_server_calls_made"])
+        self.assertFalse(decision["privacy"]["policy_files_written"])
+        self.assertNotIn("secret-openai-session", json.dumps(result, sort_keys=True))
+
+        output = io.StringIO()
+        exit_code = cli.openai_routing_report_cli(
+            ["--db", self.db_path, "--limit", "20", "--promotion-decision"],
+            stdout=output,
+        )
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.openai_routing_promotion_decision_report.v1")
+        self.assertEqual(payload["decision"], "promote")
+        self.assertEqual(payload["summary"]["applied_count"], 7)
+        self.assertEqual(payload["summary"]["holdout_count"], 7)
 
     def test_stats_wrapper_and_cli_emit_report(self) -> None:
         for _ in range(5):

@@ -2148,16 +2148,37 @@ def openai_routing_report_cli(argv: Sequence[str] | None = None, *, stdout: Any 
         action="store_true",
         help="Pretty-print JSON instead of emitting one compact line.",
     )
+    parser.add_argument(
+        "--promotion-decision",
+        action="store_true",
+        help="Emit one targeted OpenAI routing promotion decision instead of the broad opportunity report.",
+    )
+    parser.add_argument("--requested-model", default="gpt-5.4", help="Requested model for --promotion-decision, default: gpt-5.4.")
+    parser.add_argument("--target-model", default="gpt-5.4-mini", help="Target model for --promotion-decision, default: gpt-5.4-mini.")
+    parser.add_argument("--source-surface", default="openai_responses", help="Source surface for --promotion-decision, default: openai_responses.")
+    parser.add_argument("--endpoint", default="responses", help="Endpoint for --promotion-decision, default: responses.")
+    parser.add_argument("--category", default="tool-light", help="Category for --promotion-decision, default: tool-light.")
     args = parser.parse_args(argv)
 
     stdout = stdout if stdout is not None else sys.stdout
 
-    from agentflow_proxy.openai_routing_report import build_openai_routing_report
+    from agentflow_proxy.openai_routing_report import build_openai_routing_promotion_decision_report, build_openai_routing_report
     from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
 
     store = open_store_for_db(str(args.db))
     try:
-        result = build_openai_routing_report(store, limit=args.limit)
+        if args.promotion_decision:
+            result = build_openai_routing_promotion_decision_report(
+                store,
+                limit=args.limit,
+                requested_model=args.requested_model,
+                target_model=args.target_model,
+                source_surface=args.source_surface,
+                endpoint=args.endpoint,
+                category=args.category,
+            )
+        else:
+            result = build_openai_routing_report(store, limit=args.limit)
     finally:
         store.conn.close()
     if args.pretty:
