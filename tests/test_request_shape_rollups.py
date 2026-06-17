@@ -636,6 +636,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(tool_replay_evidence["acceptance"]["reports_tools_present_replay_evidence"])
         self.assertTrue(tool_replay_evidence["acceptance"]["reduces_generic_tools_present_blocker"])
         self.assertTrue(tool_replay_evidence["acceptance"]["reports_dependency_evidence_decisions"])
+        self.assertTrue(tool_replay_evidence["acceptance"]["reports_dependency_evidence_burndown"])
         self.assertTrue(tool_replay_evidence["acceptance"]["unsafe_or_missing_dependency_keeps_tool_replay_blocked"])
         self.assertTrue(tool_replay_evidence["acceptance"]["emits_no_cache_apply_actions"])
         self.assertTrue(tool_replay_evidence["acceptance"]["tool_and_streaming_replay_remain_disabled"])
@@ -647,7 +648,16 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(tool_replay_row["evidence_state"], "blocked-missing-dependency-evidence")
         self.assertEqual(tool_replay_row["next_action"], "collect-file-invalidation-evidence")
         self.assertEqual(tool_replay_row["dependency_evidence_decision"]["decision"], "missing-dependency-evidence")
+        self.assertEqual(tool_replay_row["dependency_evidence_decision"]["evidence_class"], "missing-dependency-evidence")
         self.assertFalse(tool_replay_row["tool_cache_replay_enabled"])
+        tool_burndown = tool_replay_evidence["dependency_evidence_burndown"][0]
+        self.assertEqual(tool_burndown["dependency_evidence_class"], "missing-dependency-evidence")
+        self.assertEqual(tool_burndown["row_count"], 1)
+        self.assertEqual(tool_burndown["next_action"], "collect-file-invalidation-evidence")
+        self.assertFalse(tool_burndown["tool_cache_replay_enabled"])
+        self.assertFalse(tool_burndown["streaming_replay_enabled"])
+        self.assertEqual(tool_burndown["cache_entries_written"], 0)
+        self.assertFalse(tool_burndown["policy_files_written"])
         rendered_tool_replay = json.dumps(tool_replay_evidence, sort_keys=True)
         for forbidden in (
             "raw prompt must not leak",
@@ -674,6 +684,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(invalidation_evidence["acceptance"]["tool_cohorts_require_invalidation_evidence"])
         self.assertTrue(invalidation_evidence["acceptance"]["tool_and_streaming_replay_remain_disabled"])
         self.assertTrue(invalidation_evidence["acceptance"]["reports_dependency_evidence_decisions"])
+        self.assertTrue(invalidation_evidence["acceptance"]["reports_dependency_evidence_burndown"])
         self.assertTrue(invalidation_evidence["acceptance"]["stale_or_missing_dependency_evidence_keeps_replay_blocked"])
         self.assertTrue(invalidation_evidence["acceptance"]["no_cache_entries_written"])
         self.assertFalse(invalidation_evidence["acceptance"]["policy_files_written"])
@@ -698,7 +709,15 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(tool_evidence["next_action"], "collect-file-invalidation-evidence")
         self.assertEqual(tool_evidence["dependency_evidence_status"], "missing")
         self.assertEqual(tool_evidence["dependency_evidence_decision"]["decision"], "missing-dependency-evidence")
+        self.assertEqual(tool_evidence["dependency_evidence_decision"]["evidence_class"], "missing-dependency-evidence")
         self.assertEqual(tool_evidence["dependency_evidence_decision"]["reason"], "invalidation-evidence-missing")
+        invalidation_burndown = {
+            row["dependency_evidence_class"]: row
+            for row in invalidation_evidence["dependency_evidence_burndown"]
+        }
+        self.assertIn("missing-dependency-evidence", invalidation_burndown)
+        self.assertEqual(invalidation_burndown["missing-dependency-evidence"]["row_count"], 1)
+        self.assertFalse(invalidation_burndown["missing-dependency-evidence"]["tool_cache_replay_enabled"])
         self.assertIn("keep-tool-cache-blocked", tool_evidence["secondary_next_actions"])
         self.assertTrue(tool_evidence["requires_explicit_invalidation_safety_evidence"])
         self.assertFalse(tool_evidence["safe_invalidation_evidence"])
@@ -862,8 +881,23 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision_breakdown["stale-risk-blocker"], 1)
         self.assertEqual(decision_breakdown["missing-dependency-evidence"], 1)
         self.assertTrue(invalidation["acceptance"]["reports_dependency_evidence_decisions"])
+        self.assertTrue(invalidation["acceptance"]["reports_dependency_evidence_burndown"])
+        self.assertTrue(invalidation["acceptance"]["distinguishes_missing_stable_and_stale_dependency_evidence"])
         self.assertTrue(invalidation["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
         self.assertTrue(invalidation["acceptance"]["stale_or_missing_dependency_evidence_keeps_replay_blocked"])
+        invalidation_burndown = {
+            row["dependency_evidence_class"]: row
+            for row in invalidation["dependency_evidence_burndown"]
+        }
+        self.assertEqual(
+            set(invalidation_burndown),
+            {"stable-dependency-evidence", "stale-dependency-evidence", "missing-dependency-evidence"},
+        )
+        self.assertTrue(all(row["row_count"] == 1 for row in invalidation_burndown.values()))
+        self.assertFalse(any(row["tool_cache_replay_enabled"] for row in invalidation_burndown.values()))
+        self.assertFalse(any(row["streaming_replay_enabled"] for row in invalidation_burndown.values()))
+        self.assertTrue(all(row["cache_entries_written"] == 0 for row in invalidation_burndown.values()))
+        self.assertFalse(any(row["policy_files_written"] for row in invalidation_burndown.values()))
         self.assertEqual(
             invalidation_by_status["stable"]["next_action"],
             "rank-safe-tool-cache-replay-readiness",
@@ -891,7 +925,22 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(tool_replay["summary"]["tools_present_replay_evidence_rows"], 3)
         self.assertTrue(tool_replay["acceptance"]["reports_tools_present_replay_evidence"])
         self.assertTrue(tool_replay["acceptance"]["reduces_generic_tools_present_blocker"])
+        self.assertTrue(tool_replay["acceptance"]["reports_dependency_evidence_burndown"])
+        self.assertTrue(tool_replay["acceptance"]["distinguishes_missing_stable_and_stale_dependency_evidence"])
         self.assertTrue(tool_replay["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
+        tool_burndown = {
+            row["dependency_evidence_class"]: row
+            for row in tool_replay["dependency_evidence_burndown"]
+        }
+        self.assertEqual(
+            set(tool_burndown),
+            {"stable-dependency-evidence", "stale-dependency-evidence", "missing-dependency-evidence"},
+        )
+        self.assertTrue(all(row["row_count"] == 1 for row in tool_burndown.values()))
+        self.assertFalse(any(row["tool_cache_replay_enabled"] for row in tool_burndown.values()))
+        self.assertFalse(any(row["streaming_replay_enabled"] for row in tool_burndown.values()))
+        self.assertTrue(all(row["cache_entries_written"] == 0 for row in tool_burndown.values()))
+        self.assertFalse(any(row["policy_files_written"] for row in tool_burndown.values()))
         self.assertEqual(
             tool_replay_by_status["stable"]["evidence_state"],
             "dependency-gated-review-ready",

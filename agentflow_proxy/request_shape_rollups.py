@@ -6539,10 +6539,17 @@ def _cache_dependency_evidence_decision(
     else:
         decision = "unknown-dependency-evidence"
         reason = "dependency-evidence-unknown"
+    evidence_class = {
+        "stable-dependency-evidence": "stable-dependency-evidence",
+        "stale-risk-blocker": "stale-dependency-evidence",
+        "missing-dependency-evidence": "missing-dependency-evidence",
+        "not-required": "not-required",
+    }.get(decision, "unknown-dependency-evidence")
     return {
         "schema": "agentflow.request_shape_cache_dependency_evidence_decision.v1",
         "status": status,
         "decision": decision,
+        "evidence_class": evidence_class,
         "reason": reason,
         "next_action": next_action,
         "safe_invalidation_evidence": decision == "stable-dependency-evidence",
@@ -6553,6 +6560,82 @@ def _cache_dependency_evidence_decision(
         "metadata_only": True,
         "aggregate_only": True,
     }
+
+
+def _cache_dependency_evidence_state(decision: str) -> str:
+    if decision == "stable-dependency-evidence":
+        return "dependency-gated-review-ready"
+    if decision == "stale-risk-blocker":
+        return "blocked-stale-dependency-evidence"
+    if decision == "missing-dependency-evidence":
+        return "blocked-missing-dependency-evidence"
+    if decision == "not-required":
+        return "exact-non-tool-only"
+    return "blocked-unknown-dependency-evidence"
+
+
+def _dependency_evidence_burndown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    burndown: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        decision_meta = row.get("dependency_evidence_decision")
+        if not isinstance(decision_meta, dict):
+            continue
+        decision = public_label(decision_meta.get("decision"), "unknown-dependency-evidence")
+        evidence_class = public_label(decision_meta.get("evidence_class"), decision)
+        status = public_label(row.get("dependency_evidence_status") or decision_meta.get("status"), "unknown")
+        next_action = public_label(row.get("next_action") or decision_meta.get("next_action"), "keep-cache-replay-blocked")
+        evidence_state = public_label(row.get("evidence_state"), _cache_dependency_evidence_state(decision))
+        count = _as_int(row.get("row_count") or row.get("sample_count"))
+        if count <= 0:
+            continue
+        key = (decision, status, evidence_state, next_action)
+        entry = burndown.setdefault(
+            key,
+            {
+                "schema": "agentflow.request_shape_cache_dependency_evidence_burndown_row.v1",
+                "dependency_evidence_decision": decision,
+                "dependency_evidence_class": evidence_class,
+                "dependency_evidence_status": status,
+                "evidence_state": evidence_state,
+                "next_action": next_action,
+                "row_count": 0,
+                "tool_cache_replay_enabled": False,
+                "streaming_replay_enabled": False,
+                "cache_entries_written": 0,
+                "policy_files_written": False,
+                "metadata_only": True,
+                "aggregate_only": True,
+            },
+        )
+        entry["row_count"] += count
+        entry["tool_cache_replay_enabled"] = bool(
+            entry["tool_cache_replay_enabled"] or row.get("tool_cache_replay_enabled")
+        )
+        entry["streaming_replay_enabled"] = bool(
+            entry["streaming_replay_enabled"] or row.get("streaming_replay_enabled")
+        )
+        entry["cache_entries_written"] += _as_int(row.get("cache_entries_written"))
+        entry["policy_files_written"] = bool(entry["policy_files_written"] or row.get("policy_files_written"))
+
+    priority = {
+        "blocked-missing-dependency-evidence": 5,
+        "blocked-stale-dependency-evidence": 5,
+        "dependency-gated-review-ready": 4,
+        "blocked-unknown-dependency-evidence": 3,
+        "exact-non-tool-only": 1,
+    }
+    return sorted(
+        burndown.values(),
+        key=lambda item: (
+            priority.get(str(item.get("evidence_state")), 0),
+            _as_int(item.get("row_count")),
+            str(item.get("dependency_evidence_decision")),
+            str(item.get("next_action")),
+        ),
+        reverse=True,
+    )
 
 
 def build_request_shape_cache_invalidation_evidence_report(
@@ -6701,6 +6784,12 @@ def build_request_shape_cache_invalidation_evidence_report(
         row["rank"] = rank
 
     next_action_breakdown = _breakdown(next_action_counts)
+    dependency_evidence_burndown = _dependency_evidence_burndown(rows)
+    dependency_evidence_classes = {
+        public_label(row.get("dependency_evidence_decision", {}).get("evidence_class"), "unknown-dependency-evidence")
+        for row in rows
+        if isinstance(row.get("dependency_evidence_decision"), dict)
+    }
     return {
         "schema": REPLAY_INVALIDATION_EVIDENCE_SCHEMA,
         "status": "ranked" if rows else "no-cache-invalidation-evidence",
@@ -6728,6 +6817,7 @@ def build_request_shape_cache_invalidation_evidence_report(
         "readiness_breakdown": _breakdown(readiness_counts),
         "blocker_breakdown": _breakdown(blocker_counts),
         "dependency_evidence_decision_breakdown": _breakdown(dependency_decision_counts),
+        "dependency_evidence_burndown": dependency_evidence_burndown,
         "local_file_backed_policy_compatibility": {
             "schema": "agentflow.request_shape_cache_invalidation_policy_compatibility.v1",
             "compatible": True,
@@ -6760,6 +6850,13 @@ def build_request_shape_cache_invalidation_evidence_report(
                 and bool(row.get("dependency_evidence_decision", {}).get("decision"))
                 for row in rows
             ),
+            "reports_dependency_evidence_burndown": bool(dependency_evidence_burndown)
+            and all(_as_int(item.get("row_count")) > 0 for item in dependency_evidence_burndown),
+            "distinguishes_missing_stable_and_stale_dependency_evidence": {
+                "missing-dependency-evidence",
+                "stable-dependency-evidence",
+                "stale-dependency-evidence",
+            }.issubset(dependency_evidence_classes),
             "stable_dependency_evidence_does_not_activate_replay": all(
                 row.get("next_action") == "rank-safe-tool-cache-replay-readiness"
                 and not bool(row.get("tool_cache_replay_enabled"))
@@ -7204,6 +7301,12 @@ def build_request_shape_tool_cache_replay_evidence_report(
 
     evidence_state_breakdown = _breakdown(evidence_state_counts)
     next_action_breakdown = _breakdown(next_action_counts)
+    dependency_evidence_burndown = _dependency_evidence_burndown(rows)
+    dependency_evidence_classes = {
+        public_label(row.get("dependency_evidence_decision", {}).get("evidence_class"), "unknown-dependency-evidence")
+        for row in rows
+        if isinstance(row.get("dependency_evidence_decision"), dict)
+    }
     return {
         "schema": REPLAY_TOOL_REPLAY_EVIDENCE_SCHEMA,
         "status": "ranked" if rows else "no-tool-cache-replay-evidence",
@@ -7237,6 +7340,7 @@ def build_request_shape_tool_cache_replay_evidence_report(
         },
         "evidence_state_breakdown": evidence_state_breakdown,
         "dependency_evidence_decision_breakdown": _breakdown(dependency_decision_counts),
+        "dependency_evidence_burndown": dependency_evidence_burndown,
         "next_action_breakdown": next_action_breakdown,
         "blocker_breakdown": _breakdown(blocker_counts),
         "cohorts": rows[:capped_limit],
@@ -7251,6 +7355,13 @@ def build_request_shape_tool_cache_replay_evidence_report(
                 and bool(row.get("dependency_evidence_decision", {}).get("decision"))
                 for row in rows[:capped_limit]
             ),
+            "reports_dependency_evidence_burndown": bool(dependency_evidence_burndown)
+            and all(_as_int(item.get("row_count")) > 0 for item in dependency_evidence_burndown),
+            "distinguishes_missing_stable_and_stale_dependency_evidence": {
+                "missing-dependency-evidence",
+                "stable-dependency-evidence",
+                "stale-dependency-evidence",
+            }.issubset(dependency_evidence_classes),
             "stable_dependency_evidence_does_not_activate_replay": all(
                 row.get("next_action") == "rank-safe-tool-cache-replay-readiness"
                 and not bool(row.get("tool_cache_replay_enabled"))
