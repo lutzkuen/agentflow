@@ -30,17 +30,27 @@ MISSING_INVALIDATION_REASONS = {
     "dependency-missing",
     "file-dependency-missing",
     "file-watch-disabled",
+    "invalidation-evidence-missing",
     "safe-invalidation-required",
     "tool-call-cache-disabled",
+    "unsafe-tool-calls-without-invalidation",
 }
 NOOP_REASONS = {
     "already-cache-hit",
     "canary-holdout-only",
+    "streaming-replay-not-supported",
     "no-openai-cache-replay-opportunity-observed",
     "no-openai-calls-observed",
     "no-runnable-canary-traffic",
     "staged-canary-policy-missing",
     "unsupported-streaming-shape",
+}
+SUPPORTED_REPLAY_ENDPOINTS = {"responses", "chat_completions"}
+OUTCOME_PRIORITY = {
+    "replay-ready": 4,
+    "stale-dependency": 3,
+    "missing-invalidation": 2,
+    "noop": 1,
 }
 
 
@@ -110,6 +120,25 @@ def _outcome_for_opportunity(candidate: dict[str, Any]) -> tuple[str, str]:
     reasons = set(_candidate_reasons(candidate))
     safety_eligible = _as_int(candidate.get("safety_eligible_count"))
     projected = _as_float(candidate.get("projected_savings_usd"))
+    has_tools = bool(candidate.get("has_tools"))
+    stream = bool(candidate.get("stream"))
+    endpoint = str(candidate.get("endpoint") or "")
+    dependency_status = str(candidate.get("file_dependency_status") or "")
+    audit = candidate.get("file_dependency_audit") if isinstance(candidate.get("file_dependency_audit"), dict) else {}
+    safe_dependency = bool(audit.get("safe_invalidation_evidence") or dependency_status == "stable")
+    invalidation_reason = str(audit.get("invalidation_reason") or "")
+    if stream or endpoint and endpoint not in SUPPORTED_REPLAY_ENDPOINTS:
+        if stream:
+            return "noop", "unsupported-streaming-shape"
+        return "noop", "unsupported-endpoint"
+    if has_tools:
+        if dependency_status == "invalidated" or invalidation_reason in STALE_DEPENDENCY_REASONS:
+            return "stale-dependency", invalidation_reason or "stale-dependency-evidence"
+        if safe_dependency:
+            return "replay-ready", "safe-invalidation-evidence-present"
+        if dependency_status == "missing" or reasons & MISSING_INVALIDATION_REASONS:
+            return "missing-invalidation", "invalidation-evidence-missing"
+        return "noop", "dependency-evidence-unknown"
     if reasons & STALE_DEPENDENCY_REASONS:
         return "stale-dependency", sorted(reasons & STALE_DEPENDENCY_REASONS)[0]
     if reasons & MISSING_INVALIDATION_REASONS:
@@ -139,17 +168,104 @@ def _outcome_for_impact(candidate: dict[str, Any]) -> tuple[str, str]:
 
 
 def _top_next_action(outcome_counts: Counter[str], reason_counts: Counter[str]) -> str:
+    if outcome_counts.get("replay-ready"):
+        return "stage-local-cache-replay-canary"
     if outcome_counts.get("stale-dependency"):
         return "refresh-cache-replay-dependency-evidence"
     if outcome_counts.get("missing-invalidation"):
         return "collect-safe-invalidation-evidence"
-    if outcome_counts.get("replay-ready"):
-        return "stage-local-cache-replay-canary"
     if outcome_counts.get("noop"):
         if reason_counts.get("unsupported-streaming-shape"):
             return "keep-streaming-cache-replay-noop"
         return "keep-cache-replay-noop"
     return "keep-cache-replay-observing"
+
+
+def _next_action_for_outcome(outcome: str, reason: str) -> str:
+    if outcome == "replay-ready":
+        return "stage-local-cache-replay-canary"
+    if outcome == "stale-dependency":
+        return "refresh-cache-replay-dependency-evidence"
+    if outcome == "missing-invalidation":
+        return "collect-safe-invalidation-evidence"
+    if reason in {"unsupported-streaming-shape", "streaming-replay-not-supported"}:
+        return "keep-streaming-cache-replay-noop"
+    return "keep-cache-replay-noop"
+
+
+def _safe_audit(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    audit = candidate.get("file_dependency_audit")
+    if not isinstance(audit, dict):
+        return None
+    allowed = (
+        "schema",
+        "file_watch_enabled",
+        "snapshot_root_policy",
+        "root_path_included",
+        "snapshot_count",
+        "snapshot_count_bucket",
+        "candidate_path_count_bucket",
+        "raw_candidate_path_count_bucket",
+        "distinct_candidate_path_count_bucket",
+        "max_paths",
+        "cap_exceeded",
+        "cap_trimmed",
+        "dependency_capture_reason",
+        "present_path_count",
+        "missing_path_count",
+        "changed_path_count",
+        "deleted_path_count",
+        "created_path_count",
+        "invalidation_reason",
+        "safe_invalidation_evidence",
+        "file_dependency_evidence_available",
+        "paths_included",
+    )
+    sanitized = {key: audit.get(key) for key in allowed if key in audit}
+    sanitized["paths_included"] = False
+    sanitized["root_path_included"] = False
+    return sanitized
+
+
+def _cohort_row(*, source: str, candidate: dict[str, Any], outcome: str, reason: str, amount: int) -> dict[str, Any]:
+    audit = _safe_audit(candidate)
+    return {
+        "schema": "agentflow.openai_cache_replay_blocker_outcome_cohort.v1",
+        "rank": 0,
+        "source": source,
+        "outcome": outcome,
+        "reason": reason,
+        "next_action": _next_action_for_outcome(outcome, reason),
+        "sample_count": max(0, _as_int(amount)),
+        "source_surface": candidate.get("source_surface"),
+        "endpoint": candidate.get("endpoint"),
+        "category": candidate.get("category"),
+        "workflow_phase": candidate.get("workflow_phase"),
+        "stream": bool(candidate.get("stream")),
+        "has_tools": bool(candidate.get("has_tools")),
+        "cache_status": candidate.get("cache_status"),
+        "cache_reason": candidate.get("cache_reason"),
+        "replayability_level": candidate.get("replayability_level"),
+        "file_dependency_status": candidate.get("file_dependency_status"),
+        "file_dependency_fingerprint_available": bool(candidate.get("file_dependency_fingerprint_available")),
+        "file_dependency_audit": audit,
+        "safe_invalidation_evidence": bool((audit or {}).get("safe_invalidation_evidence")),
+        "projected_hits": _as_int(candidate.get("projected_hits")),
+        "projected_savings_usd": round(_as_float(candidate.get("projected_savings_usd")), 8),
+        "observed_savings_usd": (
+            round(_as_float(candidate.get("observed_savings_usd")), 8)
+            if candidate.get("observed_savings_usd") is not None
+            else None
+        ),
+        "blocker_codes": sorted(_candidate_reasons(candidate)),
+        "tool_cache_replay_enabled": False,
+        "streaming_replay_enabled": False,
+        "emits_cache_apply_action": False,
+        "policy_files_written": False,
+        "aggregate_only": True,
+        "metadata_only": True,
+        "privacy": _privacy_summary(),
+    }
 
 
 def _add_outcome(
@@ -189,11 +305,13 @@ def build_openai_cache_replay_blocker_outcomes_report(
     outcome_counts: Counter[str] = Counter()
     reason_counts: Counter[str] = Counter()
     source_counts: Counter[str] = Counter()
+    cohorts: list[dict[str, Any]] = []
 
     for candidate in opportunity.get("candidates") or []:
         if not isinstance(candidate, dict):
             continue
         outcome, reason = _outcome_for_opportunity(candidate)
+        amount = _as_int(candidate.get("matched_count"))
         _add_outcome(
             outcome_counts=outcome_counts,
             reason_counts=reason_counts,
@@ -201,13 +319,24 @@ def build_openai_cache_replay_blocker_outcomes_report(
             outcome=outcome,
             reason=reason,
             source="opportunity",
-            amount=_as_int(candidate.get("matched_count")),
+            amount=amount,
         )
+        if amount:
+            cohorts.append(
+                _cohort_row(
+                    source="opportunity",
+                    candidate=candidate,
+                    outcome=outcome,
+                    reason=reason,
+                    amount=amount,
+                )
+            )
 
     for candidate in impact.get("candidates") or []:
         if not isinstance(candidate, dict):
             continue
         outcome, reason = _outcome_for_impact(candidate)
+        amount = _as_int(candidate.get("sample_count"))
         _add_outcome(
             outcome_counts=outcome_counts,
             reason_counts=reason_counts,
@@ -215,8 +344,18 @@ def build_openai_cache_replay_blocker_outcomes_report(
             outcome=outcome,
             reason=reason,
             source="impact",
-            amount=_as_int(candidate.get("sample_count")),
+            amount=amount,
         )
+        if amount:
+            cohorts.append(
+                _cohort_row(
+                    source="impact",
+                    candidate=candidate,
+                    outcome=outcome,
+                    reason=reason,
+                    amount=amount,
+                )
+            )
 
     staged_policy = (
         ((readiness.get("lifecycle_diagnostics") or {}).get("staged_canary_policy") or {})
@@ -236,8 +375,36 @@ def build_openai_cache_replay_blocker_outcomes_report(
                 source="staged-policy",
                 amount=1,
             )
+            cohorts.append(
+                _cohort_row(
+                    source="staged-policy",
+                    candidate={
+                        "source_surface": "local-policy",
+                        "endpoint": "cache_rules",
+                        "category": "cache-replay",
+                        "workflow_phase": "policy-readiness",
+                    },
+                    outcome="noop" if reason_text in NOOP_REASONS else "missing-invalidation",
+                    reason=reason_text,
+                    amount=1,
+                )
+            )
 
-    top_next_action = _top_next_action(outcome_counts, reason_counts)
+    cohorts.sort(
+        key=lambda row: (
+            OUTCOME_PRIORITY.get(str(row.get("outcome")), 0),
+            _as_float(row.get("projected_savings_usd")),
+            _as_int(row.get("projected_hits")),
+            _as_int(row.get("sample_count")),
+            str(row.get("source_surface") or ""),
+            str(row.get("endpoint") or ""),
+            str(row.get("category") or ""),
+        ),
+        reverse=True,
+    )
+    for rank, row in enumerate(cohorts, start=1):
+        row["rank"] = rank
+    top_next_action = str(cohorts[0].get("next_action")) if cohorts else _top_next_action(outcome_counts, reason_counts)
     return {
         "schema": SCHEMA,
         "generated_at": utc_now(),
@@ -264,10 +431,36 @@ def build_openai_cache_replay_blocker_outcomes_report(
             ),
             "observed_savings_usd": impact_summary.get("observed_savings_usd"),
             "top_next_action": top_next_action,
+            "ranked_cohort_count": len(cohorts),
         },
+        "cohorts": cohorts,
         "outcome_breakdown": _counter_rows(outcome_counts, key="outcome"),
         "reason_breakdown": _counter_rows(reason_counts),
         "source_outcome_breakdown": _counter_rows(source_counts),
+        "acceptance": {
+            "emits_ranked_replay_ready_stale_and_missing_cohorts": all(
+                outcome in {row.get("outcome") for row in cohorts}
+                for outcome in ("replay-ready", "stale-dependency", "missing-invalidation")
+            ),
+            "safe_rows_stage_local_cache_replay_canary": all(
+                row.get("next_action") == "stage-local-cache-replay-canary"
+                for row in cohorts
+                if row.get("outcome") == "replay-ready" and row.get("safe_invalidation_evidence")
+            ),
+            "stale_rows_refresh_dependency_evidence": all(
+                row.get("next_action") == "refresh-cache-replay-dependency-evidence"
+                for row in cohorts
+                if row.get("outcome") == "stale-dependency"
+            ),
+            "missing_rows_collect_safe_invalidation_evidence": all(
+                row.get("next_action") == "collect-safe-invalidation-evidence"
+                for row in cohorts
+                if row.get("outcome") == "missing-invalidation"
+            ),
+            "no_policy_files_written": True,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
         "source_reports": {
             "opportunity_schema": opportunity.get("schema"),
             "impact_schema": impact.get("schema"),
