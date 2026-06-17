@@ -1101,6 +1101,66 @@ class RequestShapeRollupTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, rendered)
 
+    def test_packaged_cache_rules_stage_remaining_openai_replay_cohort(self) -> None:
+        rules_path = Path(__file__).parents[1] / "agentflow_proxy" / "cache_rules.yaml"
+        policy = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+        rules = policy["pattern_rules"]
+        rule = next(
+            item
+            for item in rules
+            if item.get("candidate_id") == "request-shape-cache-replay:responses:chat:5f65035aa6826d9d"
+        )
+
+        self.assertEqual(rule["id"], "local-openai-cache-replay-canary-3acbfbd015741a58")
+        self.assertEqual(rule["policy_source"], "local-manual")
+        self.assertEqual(rule["target_cache_policy"]["schema"], "agentflow.request_shape_cache_replay_target_policy.v1")
+        self.assertEqual(rule["target_cache_policy"]["policy_section"], "cache.pattern_rules")
+        self.assertEqual(rule["target_cache_policy"]["target_local_policy"], "cache_rules")
+        self.assertEqual(rule["target_cache_policy"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertFalse(rule["target_cache_policy"]["rules_path_included"])
+        self.assertTrue(rule["target_cache_policy"]["metadata_only"])
+        self.assertTrue(rule["target_cache_policy"]["aggregate_only"])
+        self.assertEqual(rule["conditions"]["provider_family"], "openai")
+        self.assertEqual(rule["conditions"]["source_surface"], "openai_responses")
+        self.assertEqual(rule["conditions"]["endpoint"], "responses")
+        self.assertEqual(rule["conditions"]["category"], "chat")
+        self.assertEqual(rule["conditions"]["text_bucket"], "2k_8k_chars")
+        self.assertEqual(rule["conditions"]["token_bucket"], "2k_8k_tokens")
+        self.assertFalse(rule["conditions"]["has_tools"])
+        self.assertFalse(rule["conditions"]["stream"])
+        self.assertFalse(rule["action"]["allow_tool_calls"])
+        self.assertFalse(rule["action"]["streaming"])
+        self.assertEqual(rule["action"]["scope"], "session")
+        self.assertEqual(rule["action"]["ttl_seconds"], 3600)
+        self.assertEqual(rule["rollout"]["canary_fraction"], 0.10)
+        self.assertEqual(rule["rollout"]["holdout_fraction"], 0.10)
+        self.assertEqual(rule["rollout"]["canary_unit"], "request_fingerprint")
+
+        graduation = rule["graduation"]
+        self.assertEqual(graduation["schema"], "agentflow.request_shape_cache_replay_shape_activation.v1")
+        self.assertEqual(graduation["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(graduation["source_reason"], "replay-ready-exact-non-tool-shape")
+        self.assertEqual(graduation["sample_count"], 8)
+        self.assertEqual(graduation["rank"], 1)
+        self.assertEqual(graduation["cohort_rank"], 1)
+        self.assertEqual(graduation["projected_hits"], 7)
+        self.assertEqual(graduation["projected_savings_usd"], 0.01869)
+        self.assertTrue(graduation["aggregate_only"])
+        self.assertEqual(graduation["shape"]["text_bucket"], "2k_8k_chars")
+        self.assertEqual(graduation["shape"]["token_bucket"], "2k_8k_tokens")
+        self.assertEqual(graduation["shape"]["readiness"], "replay-ready")
+        self.assertEqual(graduation["shape"]["reason"], "replay-ready-exact-non-tool-shape")
+        rendered = json.dumps(rule, sort_keys=True)
+        for forbidden in (
+            "raw prompt",
+            "provider body",
+            "cache_key",
+            "request_id",
+            "session_id",
+            "/tmp/",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_cache_replay_canary_stage_selects_only_top_ranked_replay_ready_cohort(self) -> None:
         for cost in (0.01, 0.03, 0.02):
             self._log_call(

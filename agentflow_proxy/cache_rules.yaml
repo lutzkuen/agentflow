@@ -195,6 +195,97 @@ pattern_rules:
       aggregate_only: true
       staged_at: "2026-06-17T05:15:01+00:00"
 
+  # Staged from the next remaining replay-ready OpenAI Responses chat cohort.
+  # This remains exact, non-streaming, non-tool, session-scoped replay only.
+  - id: local-openai-cache-replay-canary-3acbfbd015741a58
+    enabled: true
+    policy_source: local-manual
+    candidate_id: request-shape-cache-replay:responses:chat:5f65035aa6826d9d
+    description: Local OpenAI Responses exact-cache replay canary staged from aggregate request-shape evidence.
+    target_cache_policy:
+      schema: agentflow.request_shape_cache_replay_target_policy.v1
+      policy_section: cache.pattern_rules
+      target_local_policy: cache_rules
+      target_local_rule_file: cache_rules.yaml
+      policy_source: local-manual
+      local_file_backed: true
+      managed_dependency: optional
+      rules_path_included: false
+      metadata_only: true
+      aggregate_only: true
+    conditions:
+      pattern_hashes:
+        - "sha256:*"
+      provider_family: openai
+      source_surface: openai_responses
+      endpoint: responses
+      category: chat
+      workflow_phase: chat
+      text_bucket: 2k_8k_chars
+      token_bucket: 2k_8k_tokens
+      has_tools: false
+      stream: false
+      replayability_levels:
+        - features_only
+        - local-exact-response
+    action:
+      type: exact_cache_pattern
+      allow_tool_calls: false
+      safe_invalidation: false
+      streaming: false
+      scope: session
+      min_call_count: 2
+      ttl_seconds: 3600
+    rollout:
+      schema: agentflow.pattern_policy_rollout.v1
+      recommendation_mode: openai-cache-replay-request-shape-canary
+      canary_enabled: true
+      canary_fraction: 0.10
+      holdout_fraction: 0.10
+      canary_salt: local-openai-cache-replay-canary-3acbfbd015741a58
+      canary_unit: request_fingerprint
+      local_feedback_fields:
+        - cache_hit
+        - status_code
+        - retry_count
+        - latency_ms
+        - cost_est_usd
+        - cost_baseline_usd
+        - cache_replay_canary
+        - invalidation_reason
+    graduation:
+      schema: agentflow.request_shape_cache_replay_shape_activation.v1
+      source_schema: agentflow.request_shape_cache_replayability_dry_run.v1
+      source_reason: replay-ready-exact-non-tool-shape
+      cohort_id: request-shape-cache-replay:responses:chat:5f65035aa6826d9d
+      source_surface: openai_responses
+      endpoint: responses
+      category: chat
+      workflow_phase: chat
+      text_bucket: 2k_8k_chars
+      token_bucket: 2k_8k_tokens
+      sample_count: 8
+      rank: 1
+      cohort_rank: 1
+      shape:
+        provider_family: openai
+        source_surface: openai_responses
+        endpoint: responses
+        category: chat
+        workflow_phase: chat
+        stream: false
+        has_tools: false
+        cache_status: miss
+        routing_status: passthrough
+        text_bucket: 2k_8k_chars
+        token_bucket: 2k_8k_tokens
+        readiness: replay-ready
+        reason: replay-ready-exact-non-tool-shape
+      projected_hits: 7
+      projected_savings_usd: 0.01869
+      aggregate_only: true
+      staged_at: "2026-06-17T05:31:57+00:00"
+
   # Reviewed local streaming replay for deterministic Claude Code short-completion turns
   # routed to Haiku. This remains narrow: streaming only, no tools, no thinking, session
   # scoped, high/static cacheability metadata required, and the fifth matching local
