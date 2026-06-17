@@ -3704,6 +3704,8 @@ def _loop_state_rank(state: str) -> int:
         "canary-staged": 1,
         "measured-savings": 2,
         "measured-active": 2,
+        "full-rollout-active": 2,
+        "active-local-policy": 2,
         "projected-savings": 3,
         "ranked-evidence": 4,
         "missing-evidence": 5,
@@ -3718,7 +3720,18 @@ def _loop_missing_state(state: str) -> bool:
 
 
 def _loop_progress_state(state: str) -> bool:
-    return state in {"activation-ready", "replay-ready", "canary-staged", "measured-savings", "measured-active", "projected-savings", "ranked-evidence", "superseded"}
+    return state in {
+        "activation-ready",
+        "replay-ready",
+        "canary-staged",
+        "measured-savings",
+        "measured-active",
+        "full-rollout-active",
+        "active-local-policy",
+        "projected-savings",
+        "ranked-evidence",
+        "superseded",
+    }
 
 
 def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
@@ -3732,7 +3745,9 @@ def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
         return "safety-stopped"
     if state in {"blocked", "missing-evidence"}:
         return "blocked"
-    if state in {"applied", "active", "measured-active"}:
+    if state in {"full-rollout", "full-rollout-active"}:
+        return "full-rollout"
+    if state in {"applied", "active", "measured-active", "active-local-policy"}:
         return "applied"
     if _to_int(stage.get("applied_count")) > 0 and _to_int(stage.get("holdout_count")) > 0:
         return "holdout"
@@ -4224,7 +4239,7 @@ def _queue_realized_savings(entry: dict[str, Any], projected: float) -> float:
         value = _to_float(entry.get(key))
         if value > 0:
             return value
-    if str(entry.get("current_status") or "") in {"applied", "measured", "holdout"} and projected > 0:
+    if str(entry.get("current_status") or "") in {"applied", "measured", "holdout", "full-rollout"} and projected > 0:
         return projected
     return 0.0
 
@@ -5389,6 +5404,10 @@ def _request_shape_crunch_progress_state(progress: dict[str, Any]) -> str:
             return "blocked"
         return "measured-savings"
     if progress.get("report_key") == "request_shape_crunch_activation_evidence":
+        post_max_decision = str(progress.get("post_max_rollout_decision") or "").strip()
+        post_max_status = str(progress.get("post_max_rollout_status") or "").strip()
+        if post_max_decision == "full-rollout-applied" or post_max_status == "post-max-rollout-full-rollout-applied":
+            return "full-rollout-active"
         if _to_int(progress.get("active_rule_count")) > 0 and (
             _to_int(progress.get("applied_count")) > 0 or _to_int(progress.get("projected_saved_tokens")) > 0
         ):
@@ -8669,7 +8688,7 @@ def _proposal_from_evidence_to_activation_ledger(stats_summary: dict[str, Any]) 
     entries = [entry for entry in ledger.get("entries") or [] if isinstance(entry, dict)]
     if not entries:
         return None
-    advanced_statuses = {"staged", "applied", "holdout", "measured", "closed-issue-seen"}
+    advanced_statuses = {"staged", "applied", "holdout", "measured", "full-rollout", "closed-issue-seen"}
     advanced = [
         entry for entry in entries
         if str(entry.get("issue_status") or "") == "closed-issue-seen"

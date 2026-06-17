@@ -1014,6 +1014,18 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(routing_lever["applied_count"], 12)
         self.assertEqual(routing_lever["holdout_count"], 15)
 
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        routing_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "routing")
+        self.assertEqual(routing_entry["state"], "active-local-policy")
+        self.assertEqual(routing_entry["current_status"], "applied")
+        self.assertEqual(routing_entry["next_action"], "measure-openai-routing-rule-outcomes")
+        self.assertEqual(routing_entry["applied_count"], 12)
+        self.assertEqual(routing_entry["holdout_count"], 15)
+        queue = plan["evidence"]["stats_summary"]["local_activation_next_action_queue"]
+        routing_queue = next(entry for entry in queue["entries"] if entry["lever"] == "routing")
+        self.assertEqual(routing_queue["current_status"], "applied")
+        self.assertEqual(routing_queue["next_action"], "measure-openai-routing-rule-outcomes")
+
         routing_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "routing")
         self.assertEqual(routing_candidate["blocker"], "openai-routing-promotion-active-local-policy")
         self.assertEqual(routing_candidate["projected_savings_signal"]["decision"], "active-local-policy")
@@ -4516,6 +4528,149 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(entry["duplicate_suppression"]["suppresses_new_activation_issue"])
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw-request-secret", rendered)
+
+    def test_full_rollout_crunch_post_apply_outcome_advances_ledger_status(self):
+        decision_id = "request-shape-crunch-policy-decision:full-rollout-applied"
+        closed_title = "Apply full-rollout repeated-context crunch promotion after max-rollout evidence"
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    641,
+                    closed_title,
+                    ["backlog", "status:ready", "crunch", "privacy"],
+                    state="CLOSED",
+                    closed="2026-06-18T00:45:00Z",
+                )
+            ],
+            stats={
+                "calls": 2530,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "crunch_activation_evidence": {
+                        "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                        "status": "active-rule-evidence-observed",
+                        "decision": "widen",
+                        "graduation_decision": "widen",
+                        "decision_id": decision_id,
+                        "summary": {
+                            "decision": "widen",
+                            "graduation_decision": "widen",
+                            "decision_id": decision_id,
+                            "applied_count": 221,
+                            "holdout_count": 0,
+                            "skipped_count": 93,
+                            "matched_count": 314,
+                            "observed_saved_tokens": 12000000,
+                            "observed_saved_usd": 36.0,
+                            "projected_saved_tokens": 12000000,
+                            "projected_saved_usd": 36.0,
+                            "safety_stop_count": 0,
+                            "rollback_count": 0,
+                            "fallback_count": 0,
+                            "error_rate_delta": 0.0,
+                            "retry_rate_delta": 0.0,
+                            "fallback_rate_delta": 0.0,
+                            "active_rule_count": 1,
+                            "widened_rule_count": 0,
+                            "active_rule_ref": "local-repeated-context-crunch-full-rollout-public",
+                            "active_rule_source": "local-manual",
+                            "active_rule_decision_id": decision_id,
+                            "active_rule_source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                            "activation_state": "full-rollout-active",
+                            "activation_mode": "active-local-policy",
+                            "follow_up_status": "full-rollout-outcome-recorded",
+                            "full_rollout_active": True,
+                            "full_rollout_fraction": 1.0,
+                            "canary_fraction": 1.0,
+                            "max_rollout_fraction": 1.0,
+                            "post_widening_status": "post-widening-active-at-full-rollout",
+                            "post_widening_next_action": "keep-active",
+                            "post_widening_reason_codes": [],
+                            "post_max_rollout_status": "post-max-rollout-full-rollout-applied",
+                            "post_max_rollout_decision": "full-rollout-applied",
+                            "post_max_rollout_next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "post_max_rollout_reason_codes": ["full-rollout-policy-active"],
+                            "post_max_rollout_promotion_allowed": False,
+                            "post_max_rollout_full_rollout_allowed": True,
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "target_local_policy_section": "crunch.rules",
+                            "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "no_op_reason": "repeated-context-crunch-full-rollout-active",
+                            "request_id": "raw-full-rollout-request-secret",
+                            "session_id": "raw-full-rollout-session-secret",
+                            "raw_prompt": "raw full rollout prompt must not leak",
+                        },
+                        "rules": [
+                            {
+                                "rank": 1,
+                                "rule_ref": "local-repeated-context-crunch-full-rollout-public",
+                                "policy_source": "local-manual",
+                                "decision": "widen",
+                                "decision_id": decision_id,
+                                "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                            }
+                        ],
+                        "duplicate_suppression": {
+                            "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                            "suppresses_new_activation_issue": True,
+                            "suppresses_generic_crunch_activation_issue": True,
+                            "reason": "repeated-context-crunch-full-rollout-active",
+                            "fingerprint": "activation:full-rollout-public",
+                            "matching_local_policy": "crunch_rules",
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "target_local_policy_section": "crunch.rules",
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                        },
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        signal = stats_summary["crunch_savings_signal"]
+        self.assertEqual(signal["top_report"]["activation_state"], "full-rollout-active")
+        self.assertEqual(signal["top_report"]["post_max_rollout_decision"], "full-rollout-applied")
+        self.assertEqual(
+            signal["top_report"]["post_max_rollout_next_action"],
+            "measure-full-rollout-repeated-context-crunch-outcomes",
+        )
+
+        loop = stats_summary["evidence_to_activation_loop"]
+        crunch_stage = next(item for item in loop["levers"] if item["lever"] == "crunch")
+        self.assertEqual(crunch_stage["state"], "full-rollout-active")
+        self.assertEqual(crunch_stage["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
+        self.assertEqual(crunch_stage["post_max_rollout_decision"], "full-rollout-applied")
+
+        ledger = stats_summary["evidence_to_activation_next_action_ledger"]
+        crunch_entry = next(item for item in ledger["entries"] if item["lever"] == "crunch")
+        self.assertEqual(crunch_entry["state"], "full-rollout-active")
+        self.assertEqual(crunch_entry["current_status"], "full-rollout")
+        self.assertEqual(crunch_entry["issue_status"], "closed-issue-seen")
+        self.assertEqual(crunch_entry["prior_issue"]["number"], 641)
+        self.assertEqual(crunch_entry["post_max_rollout_decision"], "full-rollout-applied")
+        self.assertEqual(crunch_entry["post_max_rollout_status"], "post-max-rollout-full-rollout-applied")
+        self.assertEqual(crunch_entry["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
+        self.assertTrue(crunch_entry["duplicate_suppression"]["suppresses_new_activation_issue"])
+
+        queue = stats_summary["local_activation_next_action_queue"]
+        crunch_queue = next(item for item in queue["entries"] if item["lever"] == "crunch")
+        self.assertEqual(crunch_queue["current_status"], "full-rollout")
+        self.assertEqual(crunch_queue["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
+        self.assertEqual(crunch_queue["realized_savings_usd"], 36.0)
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn(closed_title, titles)
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-full-rollout-request-secret", rendered)
+        self.assertNotIn("raw-full-rollout-session-secret", rendered)
+        self.assertNotIn("raw full rollout prompt must not leak", rendered)
 
     def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
         plan = build_research_plan(
