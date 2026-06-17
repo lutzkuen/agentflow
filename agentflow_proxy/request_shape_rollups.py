@@ -5493,6 +5493,101 @@ def _cache_replay_row_observed_savings(row: dict[str, Any], cache_meta: dict[str
     return max(0.0, baseline - actual)
 
 
+def _cache_replay_warmup_window_analysis(
+    *,
+    warmup_miss_count: int,
+    non_warmup_miss_count: int,
+    applied_miss_count: int,
+    observed_hits: int,
+    projected_hits: int,
+    projected_savings_usd: float,
+    ttl_seconds: int,
+    first_warmup_miss_at: datetime | None,
+    latest_warmup_miss_at: datetime | None,
+    now: datetime,
+    top_applied_miss_blocker: str | None,
+) -> dict[str, Any]:
+    ttl = max(0, int(ttl_seconds or 0))
+    ttl_hours = round(ttl / 3600.0, 6) if ttl else None
+    first_age_hours = (
+        round((now - first_warmup_miss_at).total_seconds() / 3600.0, 3)
+        if first_warmup_miss_at
+        else None
+    )
+    latest_age_hours = (
+        round((now - latest_warmup_miss_at).total_seconds() / 3600.0, 3)
+        if latest_warmup_miss_at
+        else None
+    )
+    warmup_only = bool(warmup_miss_count > 0 and non_warmup_miss_count == 0 and observed_hits <= 0)
+    repeat_window_elapsed = bool(
+        warmup_only
+        and ttl_hours is not None
+        and first_age_hours is not None
+        and first_age_hours >= ttl_hours
+    )
+    later_exact_repeat_expected = bool(warmup_only and projected_hits > 0)
+    later_exact_repeat_absent = bool(later_exact_repeat_expected and observed_hits <= 0 and repeat_window_elapsed)
+    if observed_hits > 0:
+        status = "live-repeat-observed"
+        classification = "hit-recovered"
+        next_action = "review-cache-replay-promotion"
+    elif warmup_only and repeat_window_elapsed:
+        status = "repeat-window-elapsed-no-live-repeat"
+        classification = "first-seen-warmup-no-later-repeat-yet"
+        next_action = "keep-staged-until-live-repeat-or-blocker"
+    elif warmup_only:
+        status = "warmup-window-open"
+        classification = "first-seen-warmup"
+        next_action = "continue-cache-replay-warmup"
+    elif non_warmup_miss_count > 0:
+        status = "ineffective-replay-evidence"
+        classification = "non-warmup-applied-miss"
+        next_action = "keep-cache-replay-blocked"
+    else:
+        status = "no-applied-warmup-misses"
+        classification = "no-warmup-evidence"
+        next_action = "collect-cache-replay-canary-traffic"
+    return {
+        "schema": "agentflow.request_shape_cache_replay_warmup_analysis.v1",
+        "status": status,
+        "classification": classification,
+        "next_action": next_action,
+        "warmup_only_applied_misses": warmup_only,
+        "warmup_miss_count": warmup_miss_count,
+        "applied_miss_count": applied_miss_count,
+        "non_warmup_miss_count": non_warmup_miss_count,
+        "observed_hit_blocker": top_applied_miss_blocker if warmup_only and observed_hits <= 0 else None,
+        "first_warmup_age_hours": first_age_hours,
+        "latest_warmup_age_hours": latest_age_hours,
+        "repeat_window": {
+            "schema": "agentflow.request_shape_cache_replay_repeat_window.v1",
+            "ttl_seconds": ttl,
+            "ttl_hours": ttl_hours,
+            "eligible": bool(warmup_miss_count > 0 and ttl > 0),
+            "elapsed": repeat_window_elapsed,
+            "projected_hits": projected_hits,
+            "observed_hits": observed_hits,
+            "projected_savings_usd": round(projected_savings_usd, 6),
+            "later_exact_repeat_expected": later_exact_repeat_expected,
+            "later_exact_repeat_absent": later_exact_repeat_absent,
+            "reason": status,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "policy_files_written": False,
+        "cache_entries_written": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "file_paths_included": False,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
 def build_request_shape_cache_replay_evidence_report(
     store_obj: Any,
     *,
@@ -5526,6 +5621,10 @@ def build_request_shape_cache_replay_evidence_report(
     observed_rows = 0
     observed_savings = 0.0
     latest_observed: datetime | None = None
+    first_warmup_miss_at: datetime | None = None
+    latest_warmup_miss_at: datetime | None = None
+    warmup_miss_count = 0
+    non_warmup_miss_count = 0
 
     for row in rows:
         cache_meta = _json_obj(row.get("cache_json"))
@@ -5556,8 +5655,18 @@ def build_request_shape_cache_replay_evidence_report(
         elif evidence_class == "miss":
             lifecycle_counts["canary_applied_count"] += 1
             lifecycle_counts["miss_count"] += 1
-            for blocker in _cache_replay_applied_miss_blockers(row, cache_meta):
+            miss_blockers = _cache_replay_applied_miss_blockers(row, cache_meta)
+            for blocker in miss_blockers:
                 _increment(applied_miss_blocker_counts, blocker)
+            observed_at = _parse_utc(row.get("created_at"))
+            if miss_blockers and all(blocker in _CACHE_REPLAY_NON_BLOCKING_APPLIED_MISS_BLOCKERS for blocker in miss_blockers):
+                warmup_miss_count += 1
+                if observed_at and (first_warmup_miss_at is None or observed_at < first_warmup_miss_at):
+                    first_warmup_miss_at = observed_at
+                if observed_at and (latest_warmup_miss_at is None or observed_at > latest_warmup_miss_at):
+                    latest_warmup_miss_at = observed_at
+            else:
+                non_warmup_miss_count += 1
         elif evidence_class == "applied":
             lifecycle_counts["canary_applied_count"] += 1
         elif evidence_class == "holdout":
@@ -5656,8 +5765,27 @@ def build_request_shape_cache_replay_evidence_report(
         for rule in staged_rules
         if isinstance(rule.get("graduation"), dict)
     )
+    staged_canary_summaries = _cache_replay_staged_policy_summary(staged_rules)
     observed_hits = lifecycle_counts["exact_hit_count"]
     applied_miss_blocker_breakdown = _breakdown(applied_miss_blocker_counts)
+    top_applied_miss_blocker = applied_miss_blocker_breakdown[0]["value"] if applied_miss_blocker_breakdown else None
+    top_ttl_seconds = _as_int(
+        staged_canary_summaries[0].get("ttl_seconds") if staged_canary_summaries else None,
+        DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS,
+    )
+    warmup_analysis = _cache_replay_warmup_window_analysis(
+        warmup_miss_count=warmup_miss_count,
+        non_warmup_miss_count=non_warmup_miss_count,
+        applied_miss_count=lifecycle_counts["miss_count"],
+        observed_hits=observed_hits,
+        projected_hits=projected_hits,
+        projected_savings_usd=projected_savings,
+        ttl_seconds=top_ttl_seconds,
+        first_warmup_miss_at=first_warmup_miss_at,
+        latest_warmup_miss_at=latest_warmup_miss_at,
+        now=now,
+        top_applied_miss_blocker=top_applied_miss_blocker,
+    )
     return {
         "schema": REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA,
         "status": status,
@@ -5673,7 +5801,7 @@ def build_request_shape_cache_replay_evidence_report(
             "lookback_limit": capped_limit,
         },
         "staged_canary_count": len(staged_rules),
-        "staged_canaries": _cache_replay_staged_policy_summary(staged_rules),
+        "staged_canaries": staged_canary_summaries,
         "summary": {
             "observed_row_count": observed_rows,
             "applied_count": lifecycle_counts["canary_applied_count"],
@@ -5693,7 +5821,13 @@ def build_request_shape_cache_replay_evidence_report(
             "hit_observation_rate": round(observed_hits / float(lifecycle_counts["canary_applied_count"]), 6)
             if lifecycle_counts["canary_applied_count"] else 0.0,
             "top_blocker": _breakdown(blocker_counts)[0]["value"] if blocker_counts else None,
-            "top_applied_miss_blocker": applied_miss_blocker_breakdown[0]["value"] if applied_miss_blocker_breakdown else None,
+            "top_applied_miss_blocker": top_applied_miss_blocker,
+            "warmup_miss_count": warmup_analysis["warmup_miss_count"],
+            "non_warmup_miss_count": warmup_analysis["non_warmup_miss_count"],
+            "warmup_status": warmup_analysis["status"],
+            "repeat_window_elapsed": warmup_analysis["repeat_window"]["elapsed"],
+            "later_exact_repeat_expected": warmup_analysis["repeat_window"]["later_exact_repeat_expected"],
+            "later_exact_repeat_absent": warmup_analysis["repeat_window"]["later_exact_repeat_absent"],
         },
         "lifecycle_counts": lifecycle_counts,
         "cache_status_breakdown": _breakdown(cache_status_counts),
@@ -5701,6 +5835,7 @@ def build_request_shape_cache_replay_evidence_report(
         "blocker_breakdown": _breakdown(blocker_counts),
         "miss_reason_breakdown": applied_miss_blocker_breakdown,
         "applied_miss_blocker_breakdown": applied_miss_blocker_breakdown,
+        "warmup_analysis": warmup_analysis,
         "stale_evidence": {
             "max_age_hours": float(max_age_hours),
             "latest_observed_at": latest_observed.isoformat() if latest_observed else None,
@@ -5716,6 +5851,9 @@ def build_request_shape_cache_replay_evidence_report(
             "reports_observed_savings_estimate": True,
             "reports_blocker_breakdown": isinstance(_breakdown(blocker_counts), list),
             "reports_applied_miss_blocker_breakdown": isinstance(applied_miss_blocker_breakdown, list),
+            "reports_warmup_analysis": isinstance(warmup_analysis, dict),
+            "reports_repeat_window_metadata": isinstance(warmup_analysis.get("repeat_window"), dict),
+            "distinguishes_first_seen_warmup_from_ineffective_replay": True,
             "reports_stale_evidence_metadata": True,
             "aggregate_only": True,
         },
@@ -5808,6 +5946,8 @@ def _cache_replay_requires_invalidation_evidence(pattern_rule: dict[str, Any], r
 def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> dict[str, Any]:
     summary = evidence.get("summary") if isinstance(evidence, dict) and isinstance(evidence.get("summary"), dict) else {}
     stale = evidence.get("stale_evidence") if isinstance(evidence, dict) and isinstance(evidence.get("stale_evidence"), dict) else {}
+    warmup = evidence.get("warmup_analysis") if isinstance(evidence, dict) and isinstance(evidence.get("warmup_analysis"), dict) else {}
+    repeat_window = warmup.get("repeat_window") if isinstance(warmup.get("repeat_window"), dict) else {}
     applied_miss_blockers = (
         evidence.get("applied_miss_blocker_breakdown")
         if isinstance(evidence, dict) and isinstance(evidence.get("applied_miss_blocker_breakdown"), list)
@@ -5849,6 +5989,19 @@ def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> di
         if applied_miss_blockers and isinstance(applied_miss_blockers[0], dict)
         else summary.get("top_applied_miss_blocker"),
         "top_blocking_applied_miss_blocker": _cache_replay_top_blocking_applied_miss_blocker(applied_miss_blocker_values),
+        "warmup_status": public_label(warmup.get("status"), "unknown"),
+        "warmup_classification": public_label(warmup.get("classification"), "unknown"),
+        "warmup_miss_count": _as_int(warmup.get("warmup_miss_count") or summary.get("warmup_miss_count")),
+        "non_warmup_miss_count": _as_int(warmup.get("non_warmup_miss_count") or summary.get("non_warmup_miss_count")),
+        "first_warmup_age_hours": warmup.get("first_warmup_age_hours"),
+        "latest_warmup_age_hours": warmup.get("latest_warmup_age_hours"),
+        "repeat_window_elapsed": bool(repeat_window.get("elapsed") or summary.get("repeat_window_elapsed")),
+        "later_exact_repeat_expected": bool(
+            repeat_window.get("later_exact_repeat_expected") or summary.get("later_exact_repeat_expected")
+        ),
+        "later_exact_repeat_absent": bool(
+            repeat_window.get("later_exact_repeat_absent") or summary.get("later_exact_repeat_absent")
+        ),
         "stale_evidence": bool(stale.get("stale")),
         "evidence_age_hours": stale.get("age_hours"),
         "metadata_only": True,
@@ -5963,6 +6116,70 @@ def _cache_replay_warmup_only_applied_miss(evidence: dict[str, Any] | None) -> b
         and metrics["observed_hits"] <= 0
         and all(blocker in _CACHE_REPLAY_NON_BLOCKING_APPLIED_MISS_BLOCKERS for blocker in blockers)
     )
+
+
+def _cache_replay_policy_warmup_analysis(evidence: dict[str, Any] | None, metrics: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(evidence, dict) and isinstance(evidence.get("warmup_analysis"), dict):
+        warmup = dict(evidence["warmup_analysis"])
+        repeat_window = warmup.get("repeat_window") if isinstance(warmup.get("repeat_window"), dict) else {}
+        warmup["repeat_window"] = {
+            **repeat_window,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+        warmup.update({
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "policy_files_written": False,
+            "cache_entries_written": False,
+            "cache_keys_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        })
+        return warmup
+    top = metrics.get("top_applied_miss_blocker")
+    warmup_only = bool(_cache_replay_warmup_only_applied_miss(evidence))
+    return {
+        "schema": "agentflow.request_shape_cache_replay_warmup_analysis.v1",
+        "status": "warmup-only-without-window-metadata" if warmup_only else "unavailable",
+        "classification": "first-seen-warmup" if warmup_only else "unknown",
+        "next_action": "continue-cache-replay-warmup" if warmup_only else "collect-cache-replay-canary-traffic",
+        "warmup_only_applied_misses": warmup_only,
+        "warmup_miss_count": metrics.get("miss_count", 0) if warmup_only else 0,
+        "applied_miss_count": metrics.get("miss_count", 0),
+        "non_warmup_miss_count": 0 if warmup_only else metrics.get("miss_count", 0),
+        "observed_hit_blocker": top if warmup_only and metrics.get("observed_hits", 0) <= 0 else None,
+        "first_warmup_age_hours": metrics.get("evidence_age_hours"),
+        "latest_warmup_age_hours": metrics.get("evidence_age_hours"),
+        "repeat_window": {
+            "schema": "agentflow.request_shape_cache_replay_repeat_window.v1",
+            "ttl_seconds": None,
+            "ttl_hours": None,
+            "eligible": False,
+            "elapsed": False,
+            "projected_hits": metrics.get("projected_hits", 0),
+            "observed_hits": metrics.get("observed_hits", 0),
+            "projected_savings_usd": metrics.get("projected_savings_usd", 0.0),
+            "later_exact_repeat_expected": bool(warmup_only and metrics.get("projected_hits", 0) > 0),
+            "later_exact_repeat_absent": False,
+            "reason": "warmup-window-metadata-unavailable",
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "policy_files_written": False,
+        "cache_entries_written": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "file_paths_included": False,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
 
 
 def _cache_replay_policy_reason_codes(evidence: dict[str, Any] | None) -> list[str]:
@@ -6266,6 +6483,7 @@ def build_request_shape_cache_replay_policy_decision_report(
     evidence = evidence_report if isinstance(evidence_report, dict) else {}
     decision = _cache_replay_policy_decision_value(evidence)
     metrics = _cache_replay_policy_decision_metrics(evidence)
+    warmup_analysis = _cache_replay_policy_warmup_analysis(evidence, metrics)
     hit_recovery_metrics = _cache_replay_policy_hit_recovery_metrics(hit_recovery_report, evidence)
     reason = _cache_replay_policy_decision_reason(evidence, decision)
     reason_codes = _cache_replay_policy_reason_codes(evidence)
@@ -6343,6 +6561,7 @@ def build_request_shape_cache_replay_policy_decision_report(
             "aggregate_only": True,
         },
         "metrics": metrics,
+        "warmup_analysis": warmup_analysis,
         "hit_recovery_metrics": hit_recovery_metrics,
         "applied_miss_blocker_breakdown": (
             evidence.get("applied_miss_blocker_breakdown")
@@ -6372,6 +6591,7 @@ def build_request_shape_cache_replay_policy_decision_report(
         "next_action": recommended_next_action,
         "top_decision": entry,
         "decisions": [entry],
+        "warmup_analysis": warmup_analysis,
         "hit_recovery_metrics": hit_recovery_metrics,
         "duplicate_suppression": duplicate_suppression,
         "summary": {
@@ -6411,6 +6631,15 @@ def build_request_shape_cache_replay_policy_decision_report(
             "savings_realization_ratio": metrics["savings_realization_ratio"],
             "top_applied_miss_blocker": metrics["top_applied_miss_blocker"],
             "top_blocking_applied_miss_blocker": metrics["top_blocking_applied_miss_blocker"],
+            "warmup_status": warmup_analysis["status"],
+            "warmup_classification": warmup_analysis["classification"],
+            "warmup_miss_count": warmup_analysis["warmup_miss_count"],
+            "non_warmup_miss_count": warmup_analysis["non_warmup_miss_count"],
+            "first_warmup_age_hours": warmup_analysis["first_warmup_age_hours"],
+            "latest_warmup_age_hours": warmup_analysis["latest_warmup_age_hours"],
+            "repeat_window_elapsed": warmup_analysis["repeat_window"]["elapsed"],
+            "later_exact_repeat_expected": warmup_analysis["repeat_window"]["later_exact_repeat_expected"],
+            "later_exact_repeat_absent": warmup_analysis["repeat_window"]["later_exact_repeat_absent"],
             "promotion_blocker": promotion_blocker,
             "observed_hit_blocker": observed_hit_blocker,
             "stale_evidence": metrics["stale_evidence"],
@@ -6431,6 +6660,7 @@ def build_request_shape_cache_replay_policy_decision_report(
                 else []
             ),
             "hit_recovery_metrics": hit_recovery_metrics,
+            "warmup_analysis": warmup_analysis,
             "stale_evidence": evidence.get("stale_evidence") if isinstance(evidence.get("stale_evidence"), dict) else {},
             "privacy": _cache_replay_evidence_privacy(),
         },
@@ -6448,6 +6678,9 @@ def build_request_shape_cache_replay_policy_decision_report(
                 evidence.get("applied_miss_blocker_breakdown"), list
             ),
             "reports_observed_hit_blocker": bool(observed_hit_blocker) or metrics["observed_hits"] > 0,
+            "reports_warmup_analysis": isinstance(warmup_analysis, dict),
+            "reports_repeat_window_metadata": isinstance(warmup_analysis.get("repeat_window"), dict),
+            "distinguishes_first_seen_warmup_from_ineffective_replay": True,
             "drafts_local_policy_patch_or_blocker": bool(local_policy_patch) or bool(reason_codes),
             "targets_file_backed_cache_policy": entry["target_local_rule_file"] == "cache_rules.yaml",
             "suppresses_generic_replay_ready_issue_recreation": duplicate_suppression[

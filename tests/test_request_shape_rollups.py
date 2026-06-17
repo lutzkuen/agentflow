@@ -2514,9 +2514,23 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(evidence["summary"]["observed_hits"], 0)
         self.assertEqual(applied_miss_blockers, {"first-seen-cache-warmup": 3})
         self.assertEqual(evidence["summary"]["top_applied_miss_blocker"], "first-seen-cache-warmup")
+        self.assertEqual(evidence["warmup_analysis"]["schema"], "agentflow.request_shape_cache_replay_warmup_analysis.v1")
+        self.assertTrue(evidence["warmup_analysis"]["warmup_only_applied_misses"])
+        self.assertEqual(evidence["warmup_analysis"]["warmup_miss_count"], 3)
+        self.assertEqual(evidence["warmup_analysis"]["observed_hit_blocker"], "first-seen-cache-warmup")
+        self.assertEqual(evidence["warmup_analysis"]["repeat_window"]["schema"], "agentflow.request_shape_cache_replay_repeat_window.v1")
+        self.assertTrue(evidence["warmup_analysis"]["repeat_window"]["eligible"])
+        self.assertTrue(evidence["warmup_analysis"]["repeat_window"]["later_exact_repeat_expected"])
+        self.assertFalse(evidence["warmup_analysis"]["provider_calls_made"])
+        self.assertFalse(evidence["warmup_analysis"]["cache_entries_written"])
+        self.assertTrue(evidence["acceptance"]["reports_warmup_analysis"])
+        self.assertTrue(evidence["acceptance"]["reports_repeat_window_metadata"])
         self.assertEqual(decision["decision"], "keep-staged")
         self.assertEqual(decision["promotion_decision"], "keep-staged-warmup")
         self.assertEqual(decision["reason"], "first-seen-cache-warmup")
+        self.assertEqual(decision["warmup_analysis"]["schema"], "agentflow.request_shape_cache_replay_warmup_analysis.v1")
+        self.assertEqual(decision["top_decision"]["warmup_analysis"]["status"], evidence["warmup_analysis"]["status"])
+        self.assertTrue(decision["summary"]["later_exact_repeat_expected"])
         self.assertIn("first-seen-cache-warmup", decision["reason_codes"])
         self.assertIn("applied-miss:first-seen-cache-warmup", decision["reason_codes"])
         self.assertNotIn("applied-miss:cache-warmup-miss", decision["reason_codes"])
@@ -2936,6 +2950,44 @@ class RequestShapeRollupTests(unittest.TestCase):
                 "error_count": 0,
             },
             "applied_miss_blocker_breakdown": [{"value": "first-seen-cache-warmup", "count": 24}],
+            "warmup_analysis": {
+                "schema": "agentflow.request_shape_cache_replay_warmup_analysis.v1",
+                "status": "repeat-window-elapsed-no-live-repeat",
+                "classification": "first-seen-warmup-no-later-repeat-yet",
+                "next_action": "keep-staged-until-live-repeat-or-blocker",
+                "warmup_only_applied_misses": True,
+                "warmup_miss_count": 24,
+                "applied_miss_count": 24,
+                "non_warmup_miss_count": 0,
+                "observed_hit_blocker": "first-seen-cache-warmup",
+                "first_warmup_age_hours": 2.5,
+                "latest_warmup_age_hours": 0.1,
+                "repeat_window": {
+                    "schema": "agentflow.request_shape_cache_replay_repeat_window.v1",
+                    "ttl_seconds": 3600,
+                    "ttl_hours": 1.0,
+                    "eligible": True,
+                    "elapsed": True,
+                    "projected_hits": 35,
+                    "observed_hits": 0,
+                    "projected_savings_usd": 0.075373,
+                    "later_exact_repeat_expected": True,
+                    "later_exact_repeat_absent": True,
+                    "reason": "repeat-window-elapsed-no-live-repeat",
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                },
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "policy_files_written": False,
+                "cache_entries_written": False,
+                "cache_keys_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "file_paths_included": False,
+                "metadata_only": True,
+                "aggregate_only": True,
+            },
             "stale_evidence": {"stale": False, "age_hours": 2.5},
             "blocker_breakdown": [],
         }
@@ -2968,6 +3020,14 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["summary"]["synthetic_hit_recovery_exact_hit_count"], 1)
         self.assertEqual(decision["summary"]["synthetic_hit_recovery_status"], "hit-recovered")
         self.assertTrue(decision["summary"]["target_matches_hit_recovery_shape"])
+        self.assertEqual(decision["summary"]["warmup_status"], "repeat-window-elapsed-no-live-repeat")
+        self.assertEqual(decision["summary"]["warmup_classification"], "first-seen-warmup-no-later-repeat-yet")
+        self.assertEqual(decision["summary"]["warmup_miss_count"], 24)
+        self.assertEqual(decision["summary"]["non_warmup_miss_count"], 0)
+        self.assertEqual(decision["summary"]["first_warmup_age_hours"], 2.5)
+        self.assertTrue(decision["summary"]["repeat_window_elapsed"])
+        self.assertTrue(decision["summary"]["later_exact_repeat_expected"])
+        self.assertTrue(decision["summary"]["later_exact_repeat_absent"])
         self.assertEqual(decision["summary"]["top_applied_miss_blocker"], "first-seen-cache-warmup")
         self.assertEqual(decision["summary"]["promotion_blocker"], "first-seen-cache-warmup")
         self.assertEqual(decision["summary"]["observed_hit_blocker"], "first-seen-cache-warmup")
@@ -2980,6 +3040,18 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(decision["hit_recovery_metrics"]["metadata_only"])
         self.assertTrue(decision["hit_recovery_metrics"]["synthetic_only"])
         self.assertFalse(decision["hit_recovery_metrics"]["target_rule_id_included"])
+        self.assertEqual(decision["warmup_analysis"]["status"], "repeat-window-elapsed-no-live-repeat")
+        self.assertEqual(decision["warmup_analysis"]["repeat_window"]["ttl_seconds"], 3600)
+        self.assertTrue(decision["warmup_analysis"]["repeat_window"]["later_exact_repeat_absent"])
+        self.assertFalse(decision["warmup_analysis"]["provider_calls_made"])
+        self.assertFalse(decision["warmup_analysis"]["managed_server_calls_made"])
+        self.assertFalse(decision["warmup_analysis"]["policy_files_written"])
+        self.assertFalse(decision["warmup_analysis"]["cache_entries_written"])
+        self.assertFalse(decision["warmup_analysis"]["cache_keys_included"])
+        self.assertFalse(decision["warmup_analysis"]["request_ids_included"])
+        self.assertFalse(decision["warmup_analysis"]["session_ids_included"])
+        self.assertTrue(decision["warmup_analysis"]["metadata_only"])
+        self.assertTrue(decision["warmup_analysis"]["aggregate_only"])
         self.assertEqual(
             decision["duplicate_suppression"]["reason"],
             "synthetic-hit-recovery-proven-live-traffic-warmup-only",
@@ -2992,6 +3064,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["top_decision"]["promotion_blocker"], "first-seen-cache-warmup")
         self.assertEqual(decision["top_decision"]["observed_hit_blocker"], "first-seen-cache-warmup")
         self.assertEqual(decision["top_decision"]["recommended_next_action"], "keep-cache-replay-canary-staged")
+        self.assertEqual(decision["top_decision"]["warmup_analysis"]["status"], "repeat-window-elapsed-no-live-repeat")
+        self.assertTrue(decision["top_decision"]["warmup_analysis"]["repeat_window"]["elapsed"])
         self.assertEqual(decision["top_decision"]["coverage"]["applied_count"], 24)
         self.assertEqual(decision["top_decision"]["coverage"]["holdout_count"], 16)
         self.assertEqual(decision["top_decision"]["coverage"]["miss_count"], 24)
@@ -3004,6 +3078,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(decision["acceptance"]["reports_synthetic_hit_recovery_smoke"])
         self.assertTrue(decision["acceptance"]["reports_applied_miss_blocker_breakdown"])
         self.assertTrue(decision["acceptance"]["reports_observed_hit_blocker"])
+        self.assertTrue(decision["acceptance"]["reports_warmup_analysis"])
+        self.assertTrue(decision["acceptance"]["reports_repeat_window_metadata"])
+        self.assertTrue(decision["acceptance"]["distinguishes_first_seen_warmup_from_ineffective_replay"])
         self.assertTrue(decision["acceptance"]["suppresses_generic_replay_ready_issue_recreation"])
         self.assertTrue(decision["privacy"]["metadata_only"])
         self.assertTrue(decision["privacy"]["aggregate_only"])
