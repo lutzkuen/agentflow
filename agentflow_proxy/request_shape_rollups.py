@@ -6476,6 +6476,45 @@ def _cache_invalidation_next_actions(cohort: dict[str, Any]) -> tuple[str, list[
     return "keep-cache-replay-noop", secondary, public_label(reason, "unsupported-cache-replay-shape"), False
 
 
+def _cache_dependency_evidence_decision(
+    *,
+    file_dependency_status: str,
+    next_action: str,
+    requires_invalidation: bool,
+    has_tools: bool,
+) -> dict[str, Any]:
+    status = public_label(file_dependency_status, "missing")
+    if not has_tools and not requires_invalidation:
+        decision = "not-required"
+        reason = "exact-non-tool-cache-replay"
+    elif status == "stable":
+        decision = "stable-dependency-evidence"
+        reason = "safe-invalidation-evidence-present"
+    elif status == "invalidated":
+        decision = "stale-risk-blocker"
+        reason = "stale-dependency-evidence"
+    elif status == "missing":
+        decision = "missing-dependency-evidence"
+        reason = "invalidation-evidence-missing"
+    else:
+        decision = "unknown-dependency-evidence"
+        reason = "dependency-evidence-unknown"
+    return {
+        "schema": "agentflow.request_shape_cache_dependency_evidence_decision.v1",
+        "status": status,
+        "decision": decision,
+        "reason": reason,
+        "next_action": next_action,
+        "safe_invalidation_evidence": decision == "stable-dependency-evidence",
+        "stale_risk_blocker": decision == "stale-risk-blocker",
+        "missing_dependency_evidence": decision == "missing-dependency-evidence",
+        "tool_cache_replay_enabled": False,
+        "streaming_replay_enabled": False,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
 def build_request_shape_cache_invalidation_evidence_report(
     cohorts: list[dict[str, Any]],
     *,
@@ -6490,6 +6529,10 @@ def build_request_shape_cache_invalidation_evidence_report(
     streaming_blocked_rows = 0
     invalidation_missing_rows = 0
     exact_non_tool_rows = 0
+    stable_dependency_evidence_rows = 0
+    stale_dependency_evidence_rows = 0
+    missing_dependency_evidence_rows = 0
+    dependency_decision_counts: dict[str, int] = {}
 
     for cohort in cohorts:
         if not isinstance(cohort, dict):
@@ -6510,6 +6553,13 @@ def build_request_shape_cache_invalidation_evidence_report(
         has_tools = bool(cohort.get("has_tools"))
         stream = bool(cohort.get("stream"))
         exact_non_tool_only = readiness == "replay-ready" and not has_tools and not stream
+        file_dependency_status = public_label(cohort.get("file_dependency_status"), "missing")
+        dependency_evidence_decision = _cache_dependency_evidence_decision(
+            file_dependency_status=file_dependency_status,
+            next_action=next_action,
+            requires_invalidation=requires_invalidation,
+            has_tools=has_tools,
+        )
 
         row_count_total += row_count
         _increment(readiness_counts, readiness, row_count)
@@ -6524,6 +6574,14 @@ def build_request_shape_cache_invalidation_evidence_report(
             invalidation_missing_rows += row_count
         if exact_non_tool_only:
             exact_non_tool_rows += row_count
+        decision = str(dependency_evidence_decision.get("decision") or "unknown-dependency-evidence")
+        _increment(dependency_decision_counts, decision, row_count)
+        if decision == "stable-dependency-evidence":
+            stable_dependency_evidence_rows += row_count
+        elif decision == "stale-risk-blocker":
+            stale_dependency_evidence_rows += row_count
+        elif decision == "missing-dependency-evidence":
+            missing_dependency_evidence_rows += row_count
 
         rows.append(
             {
@@ -6550,12 +6608,14 @@ def build_request_shape_cache_invalidation_evidence_report(
                 "projected_hits": _as_int(cohort.get("projected_hits")),
                 "projected_savings_usd": round(_as_float(cohort.get("projected_savings_usd")), 6),
                 "requires_explicit_invalidation_safety_evidence": requires_invalidation,
-                "file_dependency_status": public_label(cohort.get("file_dependency_status"), "missing"),
+                "dependency_evidence_status": dependency_evidence_decision["status"],
+                "dependency_evidence_decision": dependency_evidence_decision,
+                "file_dependency_status": file_dependency_status,
                 "file_dependency_fingerprint_available": bool(cohort.get("file_dependency_fingerprint_available")),
                 "file_dependency_audit": cohort.get("file_dependency_audit")
                 if isinstance(cohort.get("file_dependency_audit"), dict)
                 else None,
-                "safe_invalidation_evidence": bool(cohort.get("file_dependency_status") == "stable"),
+                "safe_invalidation_evidence": bool(file_dependency_status == "stable"),
                 "tool_cache_replay_enabled": False,
                 "streaming_replay_enabled": False,
                 "cache_entries_written": 0,
@@ -6613,6 +6673,10 @@ def build_request_shape_cache_invalidation_evidence_report(
             "tool_blocked_rows": tool_blocked_rows,
             "streaming_blocked_rows": streaming_blocked_rows,
             "invalidation_missing_rows": invalidation_missing_rows,
+            "stable_dependency_evidence_rows": stable_dependency_evidence_rows,
+            "stale_dependency_evidence_rows": stale_dependency_evidence_rows,
+            "missing_dependency_evidence_rows": missing_dependency_evidence_rows,
+            "dependency_evidence_decision_count": len(dependency_decision_counts),
             "exact_non_tool_rows": exact_non_tool_rows,
             "top_next_action": next_action_breakdown[0]["value"] if next_action_breakdown else None,
             "provider_calls_made": 0,
@@ -6623,6 +6687,7 @@ def build_request_shape_cache_invalidation_evidence_report(
         "next_action_breakdown": next_action_breakdown,
         "readiness_breakdown": _breakdown(readiness_counts),
         "blocker_breakdown": _breakdown(blocker_counts),
+        "dependency_evidence_decision_breakdown": _breakdown(dependency_decision_counts),
         "local_file_backed_policy_compatibility": {
             "schema": "agentflow.request_shape_cache_invalidation_policy_compatibility.v1",
             "compatible": True,
@@ -6649,6 +6714,24 @@ def build_request_shape_cache_invalidation_evidence_report(
                 not bool(row.get("tool_cache_replay_enabled")) and not bool(row.get("streaming_replay_enabled"))
                 for row in rows
                 if bool(row.get("has_tools")) or bool(row.get("stream"))
+            ),
+            "reports_dependency_evidence_decisions": all(
+                isinstance(row.get("dependency_evidence_decision"), dict)
+                and bool(row.get("dependency_evidence_decision", {}).get("decision"))
+                for row in rows
+            ),
+            "stable_dependency_evidence_does_not_activate_replay": all(
+                row.get("next_action") == "rank-safe-tool-cache-replay-readiness"
+                and not bool(row.get("tool_cache_replay_enabled"))
+                for row in rows
+                if row.get("dependency_evidence_decision", {}).get("decision") == "stable-dependency-evidence"
+            ),
+            "stale_or_missing_dependency_evidence_keeps_replay_blocked": all(
+                bool(row.get("requires_explicit_invalidation_safety_evidence"))
+                and not bool(row.get("tool_cache_replay_enabled"))
+                for row in rows
+                if row.get("dependency_evidence_decision", {}).get("decision")
+                in {"stale-risk-blocker", "missing-dependency-evidence"}
             ),
             "no_cache_entries_written": True,
             "policy_files_written": False,

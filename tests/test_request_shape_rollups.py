@@ -619,11 +619,15 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(invalidation_evidence["summary"]["ranked_blocker_cohort_count"], 3)
         self.assertEqual(invalidation_evidence["summary"]["policy_files_written"], False)
         self.assertEqual(invalidation_evidence["summary"]["cache_entries_written"], 0)
+        self.assertEqual(invalidation_evidence["summary"]["missing_dependency_evidence_rows"], 1)
+        self.assertGreaterEqual(invalidation_evidence["summary"]["dependency_evidence_decision_count"], 2)
         self.assertTrue(invalidation_evidence["acceptance"]["has_ranked_blocker_cohorts"])
         self.assertTrue(invalidation_evidence["acceptance"]["has_next_action"])
         self.assertTrue(invalidation_evidence["acceptance"]["has_local_file_backed_policy_compatibility"])
         self.assertTrue(invalidation_evidence["acceptance"]["tool_cohorts_require_invalidation_evidence"])
         self.assertTrue(invalidation_evidence["acceptance"]["tool_and_streaming_replay_remain_disabled"])
+        self.assertTrue(invalidation_evidence["acceptance"]["reports_dependency_evidence_decisions"])
+        self.assertTrue(invalidation_evidence["acceptance"]["stale_or_missing_dependency_evidence_keeps_replay_blocked"])
         self.assertTrue(invalidation_evidence["acceptance"]["no_cache_entries_written"])
         self.assertFalse(invalidation_evidence["acceptance"]["policy_files_written"])
         self.assertTrue(invalidation_evidence["privacy"]["metadata_only"])
@@ -645,6 +649,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("exact-non-tool-only", evidence_actions)
         tool_evidence = next(row for row in invalidation_evidence["cohorts"] if row["has_tools"])
         self.assertEqual(tool_evidence["next_action"], "collect-file-invalidation-evidence")
+        self.assertEqual(tool_evidence["dependency_evidence_status"], "missing")
+        self.assertEqual(tool_evidence["dependency_evidence_decision"]["decision"], "missing-dependency-evidence")
+        self.assertEqual(tool_evidence["dependency_evidence_decision"]["reason"], "invalidation-evidence-missing")
         self.assertIn("keep-tool-cache-blocked", tool_evidence["secondary_next_actions"])
         self.assertTrue(tool_evidence["requires_explicit_invalidation_safety_evidence"])
         self.assertFalse(tool_evidence["safe_invalidation_evidence"])
@@ -796,13 +803,38 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("invalidation-evidence-missing", missing_row["blocker_codes"])
 
         invalidation_by_status = {row["file_dependency_status"]: row for row in invalidation["cohorts"]}
+        self.assertEqual(invalidation["summary"]["stable_dependency_evidence_rows"], 1)
+        self.assertEqual(invalidation["summary"]["stale_dependency_evidence_rows"], 1)
+        self.assertEqual(invalidation["summary"]["missing_dependency_evidence_rows"], 1)
+        decision_breakdown = {
+            row["value"]: row["count"]
+            for row in invalidation["dependency_evidence_decision_breakdown"]
+        }
+        self.assertEqual(decision_breakdown["stable-dependency-evidence"], 1)
+        self.assertEqual(decision_breakdown["stale-risk-blocker"], 1)
+        self.assertEqual(decision_breakdown["missing-dependency-evidence"], 1)
+        self.assertTrue(invalidation["acceptance"]["reports_dependency_evidence_decisions"])
+        self.assertTrue(invalidation["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
+        self.assertTrue(invalidation["acceptance"]["stale_or_missing_dependency_evidence_keeps_replay_blocked"])
         self.assertEqual(
             invalidation_by_status["stable"]["next_action"],
             "rank-safe-tool-cache-replay-readiness",
         )
         self.assertEqual(
+            invalidation_by_status["stable"]["dependency_evidence_decision"]["decision"],
+            "stable-dependency-evidence",
+        )
+        self.assertEqual(
             invalidation_by_status["invalidated"]["next_action"],
             "refresh-file-invalidation-evidence",
+        )
+        self.assertEqual(
+            invalidation_by_status["invalidated"]["dependency_evidence_decision"]["decision"],
+            "stale-risk-blocker",
+        )
+        self.assertEqual(
+            invalidation_by_status["missing"]["dependency_evidence_decision"]["decision"],
+            "missing-dependency-evidence",
         )
 
         rendered = json.dumps([skipped, invalidation], sort_keys=True)
