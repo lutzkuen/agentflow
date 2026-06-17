@@ -3264,6 +3264,98 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-request-secret", rendered)
         self.assertNotIn("raw-session-secret", rendered)
 
+    def test_cache_replay_retirement_policy_decision_is_superseded_in_ledger(self):
+        evidence = {
+            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "status": "observed",
+            "staged_canary_count": 1,
+            "staged_canaries": [
+                {
+                    "shape": {
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "category": "chat",
+                    },
+                    "sample_count": 36,
+                    "projected_hits": 35,
+                    "projected_savings_usd": 0.075373,
+                }
+            ],
+            "summary": {
+                "observed_row_count": 75,
+                "applied_count": 28,
+                "holdout_count": 47,
+                "miss_count": 28,
+                "observed_hits": 0,
+                "projected_hits": 35,
+                "observed_savings_usd": 0.0,
+                "projected_savings_usd": 0.075373,
+            },
+            "applied_miss_blocker_breakdown": [{"value": "first-seen-cache-warmup", "count": 28}],
+        }
+        policy_decision = {
+            "schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+            "decision": "retire-staged-no-repeat",
+            "promotion_decision": "retire-staged-no-repeat",
+            "promotion_readiness": "retire-staged-no-repeat",
+            "reason": "repeat-window-elapsed-no-live-repeat",
+            "reason_codes": [
+                "retire-staged-no-repeat",
+                "repeat-window-elapsed-no-live-repeat",
+                "first-seen-cache-warmup",
+            ],
+            "next_action": "retire-cache-replay-canary-no-repeat",
+            "duplicate_suppression": {
+                "schema": "agentflow.request_shape_cache_replay_policy_decision_duplicate_suppression.v1",
+                "reason": "synthetic-hit-recovery-proven-live-traffic-no-repeat-retired",
+                "suppresses_generic_replay_ready_issue": True,
+                "suppresses_new_cache_replay_stage_issue": True,
+                "metadata_only": True,
+                "aggregate_only": True,
+            },
+            "summary": {
+                "decision": "retire-staged-no-repeat",
+                "promotion_decision": "retire-staged-no-repeat",
+                "promotion_readiness": "retire-staged-no-repeat",
+                "next_action": "retire-cache-replay-canary-no-repeat",
+                "staged_canary_count": 1,
+                "observed_row_count": 75,
+                "applied_count": 28,
+                "holdout_count": 47,
+                "miss_count": 28,
+                "observed_hits": 0,
+                "projected_hits": 35,
+                "observed_savings_usd": 0.0,
+                "projected_savings_usd": 0.075373,
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+            },
+            "top_decision": {
+                "decision_id": "cache-replay-policy-decision:public",
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+            },
+            "source_evidence": evidence,
+        }
+
+        ledger = build_evidence_to_activation_next_action_ledger(
+            {
+                "request_shape_cache_replay_evidence": evidence,
+                "request_shape_cache_replay_policy_decision": policy_decision,
+            }
+        )
+
+        cache_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "cache")
+        self.assertEqual(cache_entry["state"], "retired-no-repeat")
+        self.assertEqual(cache_entry["current_status"], "superseded")
+        self.assertEqual(cache_entry["issue_worthy_status"], "review")
+        self.assertEqual(cache_entry["next_action"], "retire-cache-replay-canary-no-repeat")
+        self.assertEqual(
+            cache_entry["duplicate_suppression"]["reason"],
+            "synthetic-hit-recovery-proven-live-traffic-no-repeat-retired",
+        )
+        self.assertTrue(cache_entry["duplicate_suppression"]["suppresses_new_cache_replay_stage_issue"])
+
     def test_crunch_candidate_ranks_projected_savings_report(self):
         plan = build_research_plan(
             issues=[],

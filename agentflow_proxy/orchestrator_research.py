@@ -3722,6 +3722,8 @@ def _loop_progress_state(state: str) -> bool:
 def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
     state = str(stage.get("state") or "").strip().lower().replace("_", "-")
     blockers = [str(item).lower().replace("_", "-") for item in stage.get("blocker_codes") or []]
+    if state == "retired-no-repeat":
+        return "superseded"
     if state in {"keep-blocked", "retry-later", "superseded"}:
         return state
     if _to_int(stage.get("safety_stopped_count")) > 0 or any("safety" in blocker for blocker in blockers):
@@ -4561,6 +4563,8 @@ def _request_shape_cache_replay_evidence_blockers(evidence: dict[str, Any]) -> l
 def _request_shape_cache_replay_policy_decision_state(decision: str, promotion_readiness: str) -> str:
     if decision == "widen" or promotion_readiness == "promotion-ready":
         return "measured-savings"
+    if decision == "retire-staged-no-repeat" or promotion_readiness == "retire-staged-no-repeat":
+        return "retired-no-repeat"
     if decision in {"rollback", "keep-blocked"} or promotion_readiness == "rollback-required":
         return "keep-blocked"
     if decision == "keep-staged":
@@ -8317,6 +8321,9 @@ def _evidence_ledger_action_title(entry: dict[str, Any]) -> str:
     action = str(entry.get("next_action") or "advance-local-evidence").lower().replace("_", "-")
     promotion_readiness = str(entry.get("promotion_readiness") or "").lower().replace("_", "-")
     reason_codes = {str(item).lower().replace("_", "-") for item in entry.get("reason_codes") or []}
+    if lever == "cache" and "retire-cache-replay-canary" in action:
+        base = "Record cache replay canary retirement in evidence ledger"
+        return f"{base} ({_evidence_ledger_title_token(entry)})"
     if (
         lever == "cache"
         and (
@@ -8361,7 +8368,7 @@ def _ledger_entry_has_progressed_next_action(entry: dict[str, Any]) -> bool:
     previous = str(entry.get("fingerprint_next_action") or entry.get("lifecycle_progressed_from_next_action") or "").lower().replace("_", "-")
     if previous and action and action != previous:
         return True
-    return any(token in action for token in ("review-", "measure-", "keep-active", "keep-cache-replay-canary-staged", "promotion-readiness", "widen", "apply"))
+    return any(token in action for token in ("review-", "measure-", "keep-active", "keep-cache-replay-canary-staged", "promotion-readiness", "widen", "apply", "retire"))
 
 
 def _ledger_entry_successor_rank(entry: dict[str, Any]) -> int:
@@ -8369,6 +8376,8 @@ def _ledger_entry_successor_rank(entry: dict[str, Any]) -> int:
     lever = str(entry.get("lever") or "").lower().replace("_", "-")
     promotion_readiness = str(entry.get("promotion_readiness") or "").lower().replace("_", "-")
     if lever == "cache" and (action == "keep-cache-replay-canary-staged" or promotion_readiness == "keep-staged-warmup"):
+        return 0
+    if lever == "cache" and "retire-cache-replay-canary" in action:
         return 0
     if lever == "cache" and "review-cache-replay-canary-promotion-readiness" in action:
         return 0

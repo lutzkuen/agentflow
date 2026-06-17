@@ -2785,11 +2785,18 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["summary"]["observed_hits"], 1)
         self.assertEqual(decision["summary"]["observed_savings_usd"], 0.03)
         top = decision["top_decision"]
-        self.assertEqual(top["decision_options"], ["widen", "rollback", "keep-staged", "keep-blocked"])
+        self.assertEqual(top["decision_options"], ["widen", "rollback", "retire-staged-no-repeat", "keep-staged", "keep-blocked"])
         self.assertEqual(top["promotion_readiness"], "promotion-ready")
         self.assertEqual(
             top["promotion_readiness_options"],
-            ["promotion-ready", "keep-staged-warmup", "keep-staged", "keep-blocked", "rollback-required"],
+            [
+                "promotion-ready",
+                "retire-staged-no-repeat",
+                "keep-staged-warmup",
+                "keep-staged",
+                "keep-blocked",
+                "rollback-required",
+            ],
         )
         self.assertTrue(top["promotion_ready"])
         self.assertEqual(top["local_policy_patch"]["patch_type"], "widen_openai_exact_cache_replay_canary")
@@ -2940,7 +2947,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(decision["privacy"]["metadata_only"])
         self.assertTrue(decision["privacy"]["aggregate_only"])
 
-    def test_cache_replay_policy_decision_keeps_staged_for_warmup_only_applied_misses(self) -> None:
+    def test_cache_replay_policy_decision_retires_no_repeat_warmup_after_elapsed_window(self) -> None:
         evidence = {
             "schema": "agentflow.request_shape_cache_replay_evidence.v1",
             "status": "observed",
@@ -3025,18 +3032,20 @@ class RequestShapeRollupTests(unittest.TestCase):
             hit_recovery_report=self._cache_replay_hit_recovery_smoke(),
         )
 
-        self.assertEqual(decision["decision"], "keep-staged")
-        self.assertEqual(decision["promotion_decision"], "keep-staged-warmup")
-        self.assertEqual(decision["promotion_readiness"], "keep-staged-warmup")
-        self.assertEqual(decision["impact_recommendation"], "keep-staged-warmup")
-        self.assertEqual(decision["reason"], "first-seen-cache-warmup")
-        self.assertEqual(decision["promotion_blocker"], "first-seen-cache-warmup")
-        self.assertEqual(decision["observed_hit_blocker"], "first-seen-cache-warmup")
-        self.assertEqual(decision["next_action"], "keep-cache-replay-canary-staged")
-        self.assertTrue(decision["summary"]["keep_staged_warmup"])
-        self.assertEqual(decision["summary"]["promotion_readiness"], "keep-staged-warmup")
+        self.assertEqual(decision["decision"], "retire-staged-no-repeat")
+        self.assertEqual(decision["promotion_decision"], "retire-staged-no-repeat")
+        self.assertEqual(decision["promotion_readiness"], "retire-staged-no-repeat")
+        self.assertEqual(decision["impact_recommendation"], "retire-staged-no-repeat")
+        self.assertEqual(decision["reason"], "repeat-window-elapsed-no-live-repeat")
+        self.assertEqual(decision["promotion_blocker"], "repeat-window-elapsed-no-live-repeat")
+        self.assertEqual(decision["observed_hit_blocker"], "repeat-window-elapsed-no-live-repeat")
+        self.assertEqual(decision["next_action"], "retire-cache-replay-canary-no-repeat")
+        self.assertFalse(decision["summary"]["keep_staged_warmup"])
+        self.assertTrue(decision["summary"]["retire_staged_no_repeat"])
+        self.assertTrue(decision["summary"]["retirement_required"])
+        self.assertEqual(decision["summary"]["promotion_readiness"], "retire-staged-no-repeat")
         self.assertFalse(decision["summary"]["promotion_ready"])
-        self.assertTrue(decision["summary"]["keep_staged"])
+        self.assertFalse(decision["summary"]["keep_staged"])
         self.assertFalse(decision["summary"]["keep_blocked"])
         self.assertFalse(decision["summary"]["promotion_allowed"])
         self.assertEqual(decision["summary"]["applied_count"], 24)
@@ -3057,8 +3066,10 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(decision["summary"]["later_exact_repeat_expected"])
         self.assertTrue(decision["summary"]["later_exact_repeat_absent"])
         self.assertEqual(decision["summary"]["top_applied_miss_blocker"], "first-seen-cache-warmup")
-        self.assertEqual(decision["summary"]["promotion_blocker"], "first-seen-cache-warmup")
-        self.assertEqual(decision["summary"]["observed_hit_blocker"], "first-seen-cache-warmup")
+        self.assertEqual(decision["summary"]["promotion_blocker"], "repeat-window-elapsed-no-live-repeat")
+        self.assertEqual(decision["summary"]["observed_hit_blocker"], "repeat-window-elapsed-no-live-repeat")
+        self.assertIn("retire-staged-no-repeat", decision["reason_codes"])
+        self.assertIn("repeat-window-elapsed-no-live-repeat", decision["reason_codes"])
         self.assertIn("first-seen-cache-warmup", decision["reason_codes"])
         self.assertIn("applied-miss:first-seen-cache-warmup", decision["reason_codes"])
         self.assertEqual(decision["hit_recovery_metrics"]["source_schema"], "agentflow.cache_replay_hit_recovery_smoke.v1")
@@ -3082,23 +3093,45 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(decision["warmup_analysis"]["aggregate_only"])
         self.assertEqual(
             decision["duplicate_suppression"]["reason"],
-            "synthetic-hit-recovery-proven-live-traffic-warmup-only",
+            "synthetic-hit-recovery-proven-live-traffic-no-repeat-retired",
         )
         self.assertTrue(decision["duplicate_suppression"]["suppresses_generic_replay_ready_issue"])
-        self.assertEqual(decision["top_decision"]["promotion_decision"], "keep-staged-warmup")
-        self.assertEqual(decision["top_decision"]["promotion_readiness"], "keep-staged-warmup")
-        self.assertEqual(decision["top_decision"]["promotion_decision_options"], ["promote", "keep-staged-warmup", "keep-blocked"])
-        self.assertEqual(decision["top_decision"]["reason"], "first-seen-cache-warmup")
-        self.assertEqual(decision["top_decision"]["promotion_blocker"], "first-seen-cache-warmup")
-        self.assertEqual(decision["top_decision"]["observed_hit_blocker"], "first-seen-cache-warmup")
-        self.assertEqual(decision["top_decision"]["recommended_next_action"], "keep-cache-replay-canary-staged")
+        self.assertTrue(decision["duplicate_suppression"]["suppresses_new_cache_replay_stage_issue"])
+        self.assertEqual(decision["top_decision"]["promotion_decision"], "retire-staged-no-repeat")
+        self.assertEqual(decision["top_decision"]["promotion_readiness"], "retire-staged-no-repeat")
+        self.assertEqual(
+            decision["top_decision"]["promotion_decision_options"],
+            ["promote", "keep-staged-warmup", "retire-staged-no-repeat", "keep-blocked"],
+        )
+        self.assertIn("retire-staged-no-repeat", decision["top_decision"]["decision_options"])
+        self.assertEqual(decision["top_decision"]["reason"], "repeat-window-elapsed-no-live-repeat")
+        self.assertEqual(decision["top_decision"]["promotion_blocker"], "repeat-window-elapsed-no-live-repeat")
+        self.assertEqual(decision["top_decision"]["observed_hit_blocker"], "repeat-window-elapsed-no-live-repeat")
+        self.assertEqual(decision["top_decision"]["recommended_next_action"], "retire-cache-replay-canary-no-repeat")
         self.assertEqual(decision["top_decision"]["warmup_analysis"]["status"], "repeat-window-elapsed-no-live-repeat")
         self.assertTrue(decision["top_decision"]["warmup_analysis"]["repeat_window"]["elapsed"])
         self.assertEqual(decision["top_decision"]["coverage"]["applied_count"], 24)
         self.assertEqual(decision["top_decision"]["coverage"]["holdout_count"], 16)
         self.assertEqual(decision["top_decision"]["coverage"]["miss_count"], 24)
         self.assertEqual(decision["top_decision"]["coverage"]["observed_hits"], 0)
-        self.assertIsNone(decision["top_decision"]["local_policy_patch"])
+        self.assertIsNotNone(decision["top_decision"]["local_policy_patch"])
+        self.assertEqual(
+            decision["top_decision"]["local_policy_patch"]["patch_type"],
+            "retire_openai_exact_cache_replay_canary",
+        )
+        self.assertFalse(decision["top_decision"]["local_policy_patch"]["pattern_rules"][0]["enabled"])
+        self.assertEqual(
+            decision["top_decision"]["local_policy_patch"]["pattern_rules"][0]["disabled_reason"],
+            "repeat-window-elapsed-no-live-repeat",
+        )
+        self.assertEqual(
+            decision["top_decision"]["rollback_metadata"]["rollback_action_type"],
+            "disable_openai_exact_cache_replay_policy",
+        )
+        self.assertEqual(
+            decision["top_decision"]["rollback_metadata"]["disable_patch"]["pattern_rules"][0]["disabled_reason"],
+            "repeat-window-elapsed-no-live-repeat",
+        )
         self.assertTrue(decision["acceptance"]["records_durable_decision"])
         self.assertTrue(decision["acceptance"]["single_durable_decision"])
         self.assertTrue(decision["acceptance"]["emits_explicit_canary_promotion_decision"])
@@ -3115,6 +3148,18 @@ class RequestShapeRollupTests(unittest.TestCase):
         rendered = json.dumps(decision, sort_keys=True)
         self.assertNotIn("local-openai-cache-replay-canary-ae8404ee817f89f4", rendered)
         self.assertNotIn("raw-request-fingerprint-must-not-leak", rendered)
+
+        evidence["warmup_analysis"]["status"] = "repeat-window-active"
+        evidence["warmup_analysis"]["repeat_window"]["elapsed"] = False
+        evidence["warmup_analysis"]["repeat_window"]["later_exact_repeat_absent"] = False
+        keep_staged = build_request_shape_cache_replay_policy_decision_report(
+            evidence,
+            hit_recovery_report=self._cache_replay_hit_recovery_smoke(),
+        )
+        self.assertEqual(keep_staged["decision"], "keep-staged")
+        self.assertEqual(keep_staged["promotion_decision"], "keep-staged-warmup")
+        self.assertEqual(keep_staged["next_action"], "keep-cache-replay-canary-staged")
+        self.assertFalse(keep_staged["summary"]["retire_staged_no_repeat"])
 
     def test_cache_replay_policy_decision_keeps_blocked_for_invalidation_risk(self) -> None:
         evidence = {
