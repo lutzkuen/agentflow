@@ -4706,18 +4706,36 @@ def _cache_replay_applied_miss_blockers(row: dict[str, Any], cache_meta: dict[st
             reason = public_label(item.get("reason"), "unknown")
             if reason != "unknown":
                 reasons.add(reason)
+    cache_replay_blocker_reasons = {
+        public_label(value, "unknown")
+        for value in (cache_meta.get("cache_replay_blocker_reasons") or [])
+        if public_label(value, "unknown") != "unknown"
+    }
     audit = replay_canary.get("dependency_audit")
     if not isinstance(audit, dict):
         audit = cache_meta.get("file_dependency_audit") if isinstance(cache_meta.get("file_dependency_audit"), dict) else {}
 
     blockers: set[str] = set()
+    requires_invalidation_evidence = _cache_replay_requires_invalidation_evidence(pattern_rule, replay_canary, cache_meta)
+    invalidation_reasons = reasons | cache_replay_blocker_reasons
     if any("ttl" in reason or "expired" in reason for reason in reasons):
         blockers.add("ttl-expiry")
     if (
         cache_meta.get("invalidated")
-        or cache_meta.get("cache_replay_blocker_reasons")
-        or any(reason.startswith("dependency-") or "invalidation" in reason for reason in reasons)
-        or (isinstance(audit, dict) and audit.get("safe_invalidation_evidence") is False)
+        or any(
+            "invalidation" in reason
+            or reason in {"dependency-changed", "dependency-deleted", "dependency-created", "dependency-cap-exceeded"}
+            for reason in invalidation_reasons
+        )
+        or (
+            requires_invalidation_evidence
+            and any(reason.startswith("dependency-") or reason == "file-dependency-missing" for reason in invalidation_reasons)
+        )
+        or (
+            requires_invalidation_evidence
+            and isinstance(audit, dict)
+            and audit.get("safe_invalidation_evidence") is False
+        )
     ):
         blockers.add("invalidation-risk")
     mismatch_reasons = {
@@ -5067,6 +5085,18 @@ def _cache_replay_top_blocking_applied_miss_blocker(blockers: list[str]) -> str 
     return sorted(blocking)[0]
 
 
+def _cache_replay_requires_invalidation_evidence(pattern_rule: dict[str, Any], replay_canary: dict[str, Any], cache_meta: dict[str, Any]) -> bool:
+    action = pattern_rule.get("action") if isinstance(pattern_rule.get("action"), dict) else {}
+    conditions = pattern_rule.get("conditions") if isinstance(pattern_rule.get("conditions"), dict) else {}
+    if bool(action.get("allow_tool_calls") or action.get("safe_invalidation")):
+        return True
+    if bool(conditions.get("has_tools")):
+        return True
+    if bool(replay_canary.get("allow_tool_calls") or cache_meta.get("has_tools")):
+        return True
+    return False
+
+
 def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> dict[str, Any]:
     summary = evidence.get("summary") if isinstance(evidence, dict) and isinstance(evidence.get("summary"), dict) else {}
     stale = evidence.get("stale_evidence") if isinstance(evidence, dict) and isinstance(evidence.get("stale_evidence"), dict) else {}
@@ -5247,6 +5277,14 @@ def _cache_replay_policy_recommended_next_action(decision: str) -> str:
     }[decision]
 
 
+def _cache_replay_canary_promotion_decision(evidence: dict[str, Any] | None, decision: str) -> str:
+    if decision == "widen":
+        return "promote"
+    if decision == "keep-staged" and _cache_replay_warmup_only_applied_miss(evidence):
+        return "keep-staged-warmup"
+    return "keep-blocked"
+
+
 def _cache_replay_policy_rollback_metadata(evidence: dict[str, Any] | None, decision: str) -> dict[str, Any]:
     rule_id = _cache_replay_policy_rule_id(evidence or {})
     return {
@@ -5384,6 +5422,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
     reason = _cache_replay_policy_decision_reason(evidence, decision)
     reason_codes = _cache_replay_policy_reason_codes(evidence)
     recommended_next_action = _cache_replay_policy_recommended_next_action(decision)
+    promotion_decision = _cache_replay_canary_promotion_decision(evidence, decision)
     rollback_metadata = _cache_replay_policy_rollback_metadata(evidence, decision)
     local_policy_patch = _cache_replay_policy_patch(evidence, decision)
     promotion_allowed = decision == "widen"
@@ -5392,6 +5431,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "schema": "agentflow.request_shape_cache_replay_policy_decision_entry.v1",
         "decision_id": _cache_replay_policy_decision_id(evidence, decision),
         "decision": decision,
+        "promotion_decision": promotion_decision,
         "reason": reason,
         "reason_codes": reason_codes,
         "recommended_next_action": recommended_next_action,
@@ -5402,6 +5442,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "source_canary_policy_file": "cache_canary_policy.yaml",
         "policy_source": "local-manual" if metrics["staged_canary_count"] else "unknown",
         "decision_options": ["widen", "rollback", "keep-staged", "keep-blocked"],
+        "promotion_decision_options": ["promote", "keep-staged-warmup", "keep-blocked"],
         "promotion_allowed": promotion_allowed,
         "rollback_required": rollback_required,
         "keep_staged": decision == "keep-staged",
@@ -5417,6 +5458,11 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "has_supported_shapes": metrics["unsupported_shape_count"] == 0,
             "has_no_fallbacks": metrics["fallback_count"] == 0,
             "has_no_errors": metrics["error_count"] == 0,
+            "applied_count": metrics["applied_count"],
+            "holdout_count": metrics["holdout_count"],
+            "miss_count": metrics["miss_count"],
+            "observed_hits": metrics["observed_hits"],
+            "exact_hit_count": metrics["exact_hit_count"],
             "metadata_only": True,
             "aggregate_only": True,
         },
@@ -5437,6 +5483,7 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "read_only": True,
         "generated_at": utc_now(),
         "decision": decision,
+        "promotion_decision": promotion_decision,
         "reason": reason,
         "reason_codes": reason_codes,
         "next_action": recommended_next_action,
@@ -5444,9 +5491,11 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "decisions": [entry],
         "summary": {
             "decision": decision,
+            "promotion_decision": promotion_decision,
             "next_action": recommended_next_action,
             "promotion_allowed": promotion_allowed,
             "rollback_required": rollback_required,
+            "keep_staged_warmup": promotion_decision == "keep-staged-warmup",
             "keep_staged": decision == "keep-staged",
             "keep_blocked": decision == "keep-blocked",
             "staged_canary_count": metrics["staged_canary_count"],
@@ -5491,6 +5540,8 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         },
         "acceptance": {
             "records_durable_decision": decision in {"widen", "rollback", "keep-staged", "keep-blocked"},
+            "emits_explicit_canary_promotion_decision": promotion_decision
+            in {"promote", "keep-staged-warmup", "keep-blocked"},
             "reports_hit_recovery": metrics["observed_hits"] >= 0 and metrics["projected_hits"] >= 0,
             "reports_holdout_coverage": metrics["holdout_count"] >= 0,
             "reports_applied_miss_blocker_breakdown": isinstance(

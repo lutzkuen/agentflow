@@ -1570,7 +1570,14 @@ class RequestShapeRollupTests(unittest.TestCase):
             "projection": rule["graduation"],
         }
         for cache_reason, extra in (
-            ("exact-pattern-miss", {"cache_replay_store": {"status": "stored", "reason": "compatible-success-response"}}),
+            (
+                "exact-pattern-miss",
+                {
+                    "cache_replay_store": {"status": "stored", "reason": "compatible-success-response"},
+                    "cache_replay_blocker_reasons": ["file-dependency-missing", "replay-rule-required"],
+                    "file_dependency_audit": {"safe_invalidation_evidence": False},
+                },
+            ),
             ("exact-pattern-miss", {"pattern_rules": {"skip_reasons": [{"reason": "pattern-hash-mismatch"}]}}),
             ("ttl-expired-without-tool-result", {}),
         ):
@@ -2031,9 +2038,9 @@ class RequestShapeRollupTests(unittest.TestCase):
                 }
             ],
             "summary": {
-                "observed_row_count": 28,
+                "observed_row_count": 40,
                 "applied_count": 24,
-                "holdout_count": 4,
+                "holdout_count": 16,
                 "exact_hit_count": 0,
                 "miss_count": 24,
                 "observed_hits": 0,
@@ -2055,22 +2062,32 @@ class RequestShapeRollupTests(unittest.TestCase):
         decision = build_request_shape_cache_replay_policy_decision_report(evidence)
 
         self.assertEqual(decision["decision"], "keep-staged")
+        self.assertEqual(decision["promotion_decision"], "keep-staged-warmup")
         self.assertEqual(decision["reason"], "cache-warmup-miss")
         self.assertEqual(decision["next_action"], "keep-cache-replay-canary-staged")
+        self.assertTrue(decision["summary"]["keep_staged_warmup"])
         self.assertTrue(decision["summary"]["keep_staged"])
         self.assertFalse(decision["summary"]["keep_blocked"])
         self.assertFalse(decision["summary"]["promotion_allowed"])
         self.assertEqual(decision["summary"]["applied_count"], 24)
-        self.assertEqual(decision["summary"]["holdout_count"], 4)
+        self.assertEqual(decision["summary"]["holdout_count"], 16)
         self.assertEqual(decision["summary"]["miss_count"], 24)
+        self.assertEqual(decision["summary"]["observed_hits"], 0)
         self.assertEqual(decision["summary"]["projected_hits"], 35)
         self.assertEqual(decision["summary"]["top_applied_miss_blocker"], "cache-warmup-miss")
         self.assertIn("cache-warmup-miss", decision["reason_codes"])
         self.assertIn("applied-miss:cache-warmup-miss", decision["reason_codes"])
+        self.assertEqual(decision["top_decision"]["promotion_decision"], "keep-staged-warmup")
+        self.assertEqual(decision["top_decision"]["promotion_decision_options"], ["promote", "keep-staged-warmup", "keep-blocked"])
         self.assertEqual(decision["top_decision"]["reason"], "cache-warmup-miss")
         self.assertEqual(decision["top_decision"]["recommended_next_action"], "keep-cache-replay-canary-staged")
+        self.assertEqual(decision["top_decision"]["coverage"]["applied_count"], 24)
+        self.assertEqual(decision["top_decision"]["coverage"]["holdout_count"], 16)
+        self.assertEqual(decision["top_decision"]["coverage"]["miss_count"], 24)
+        self.assertEqual(decision["top_decision"]["coverage"]["observed_hits"], 0)
         self.assertIsNone(decision["top_decision"]["local_policy_patch"])
         self.assertTrue(decision["acceptance"]["records_durable_decision"])
+        self.assertTrue(decision["acceptance"]["emits_explicit_canary_promotion_decision"])
         self.assertTrue(decision["acceptance"]["reports_applied_miss_blocker_breakdown"])
         self.assertTrue(decision["privacy"]["metadata_only"])
         self.assertTrue(decision["privacy"]["aggregate_only"])
