@@ -1282,6 +1282,19 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(burndown_entry["stage_allowed"])
         self.assertFalse(burndown_entry["active_policy_changed"])
         self.assertFalse(burndown_entry["wrote_active_policy_files"])
+        self.assertTrue(burndown_entry["durable_action_ledger_entry"])
+        self.assertFalse(burndown_entry["executor_compatible"])
+        self.assertEqual(burndown_entry["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(burndown_entry["target_local_policy_section"], "routing.rules")
+        representation = burndown_entry["local_file_backed_representation"]
+        self.assertTrue(representation["exists"])
+        self.assertEqual(representation["policy_section"], "routing")
+        self.assertEqual(representation["rule_file"], "routing_rules.yaml")
+        self.assertTrue(str(burndown_entry["fingerprint"]).startswith("activation:"))
+        self.assertNotEqual(
+            burndown_entry["fingerprint"],
+            routing_entry["fingerprint"],
+        )
         self.assertEqual(burndown_entry["unblock_criteria"]["status"], "blocked")
         self.assertFalse(burndown_entry["unblock_criteria"]["safety_stop_count_zero"])
         self.assertFalse(burndown_entry["unblock_criteria"]["applied_coverage_present"])

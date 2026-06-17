@@ -918,6 +918,18 @@ def _anthropic_routing_unblock_criteria(
     }
 
 
+def _local_file_backed_routing_representation() -> dict[str, Any]:
+    return {
+        "exists": True,
+        "policy_section": "routing",
+        "policy_source": "local-file-backed",
+        "reason": "file-backed-local-policy",
+        "rule_file": "routing_rules.yaml",
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
 def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, Any] | None:
     if str(bucket.get("provider") or "").strip().lower() != "anthropic":
         return None
@@ -973,6 +985,7 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         workflow_phase = _safe_label(safety_breakdown[0].get("workflow_phase"), "unknown")
     if workflow_phase == "unknown" and _safe_label(bucket.get("category"), "unknown") == "tool-result":
         workflow_phase = "tool-execution"
+    executor_compatible = any(bool(row.get("executor_compatible")) for row in safety_breakdown)
 
     matched_count = _as_int(lifecycle.get("matched_count") or coverage.get("matched_count") or bucket.get("sample_count"))
     observed_count = _as_int(lifecycle.get("observed_count"))
@@ -1030,6 +1043,10 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "requested_model": _safe_label(bucket.get("requested_model"), "unknown"),
         "target_model": _safe_label(bucket.get("candidate_target_model") or bucket.get("target_model"), "unknown"),
         "required_local_executor": _safe_label(bucket.get("required_local_executor") or (safety_breakdown[0].get("expected_local_executor") if safety_breakdown else None), "unknown"),
+        "executor_compatible": executor_compatible,
+        "local_file_backed_representation": _local_file_backed_routing_representation(),
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
         "event_count": observed_count,
         "sample_count": _as_int(bucket.get("sample_count") or bucket.get("count")),
         "matched_count": matched_count,

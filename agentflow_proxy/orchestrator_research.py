@@ -1068,6 +1068,7 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
         "state": next_state,
         "status": group.get("status") or ("blocked" if next_state == "keep-blocked" else next_state),
         "evidence_source": "agentflow.activation_safety_stop_burndown.v1",
+        "durable_action_ledger_entry": True,
         "next_action": group.get("next_action") or "review-activation-feedback-safety-stop-and-record-keep-blocked-reason",
         "blocker_codes": [reason],
         "sample_count": count,
@@ -1097,10 +1098,30 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
         stage["candidate_target_model"] = target_model
     if group.get("safety_stop_breakdown"):
         stage["safety_stop_breakdown"] = group.get("safety_stop_breakdown")
+    cohort_parts = [
+        str(group.get("source_surface") or "").strip(),
+        str(group.get("endpoint") or "").strip(),
+        str(group.get("category") or "").strip(),
+        str(group.get("workflow_phase") or "").strip(),
+        str(group.get("requested_model") or "").strip(),
+        str(target_model or "").strip(),
+    ]
+    if any(cohort_parts):
+        cohort_bucket = "|".join(part or "unknown" for part in cohort_parts)
+        stage["cohort_bucket"] = cohort_bucket
+        stage["fingerprint_cohort_bucket"] = cohort_bucket
     if isinstance(group.get("duplicate_suppression"), dict):
         stage["duplicate_suppression"] = group.get("duplicate_suppression")
     if isinstance(group.get("unblock_criteria"), dict):
         stage["unblock_criteria"] = group.get("unblock_criteria")
+    if isinstance(group.get("local_file_backed_representation"), dict):
+        stage["local_file_backed_representation"] = group.get("local_file_backed_representation")
+    if group.get("target_local_rule_file"):
+        stage["target_local_rule_file"] = group.get("target_local_rule_file")
+    if group.get("target_local_policy_section"):
+        stage["target_local_policy_section"] = group.get("target_local_policy_section")
+    if group.get("executor_compatible") is not None:
+        stage["executor_compatible"] = bool(group.get("executor_compatible"))
     for gate_key in ("promotion_allowed", "stage_allowed", "active_policy_changed", "wrote_active_policy_files"):
         if group.get(gate_key) is not None:
             stage[gate_key] = bool(group.get(gate_key))
@@ -1120,7 +1141,7 @@ def _safety_stop_ledger_stages(safety_stop_burndown: dict[str, Any] | None) -> l
     if not isinstance(safety_stop_burndown, dict):
         return []
     stages: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for group in safety_stop_burndown.get("groups") or []:
         if not isinstance(group, dict):
             continue
@@ -1131,6 +1152,7 @@ def _safety_stop_ledger_stages(safety_stop_burndown: dict[str, Any] | None) -> l
             str(stage.get("local_action_family") or ""),
             str(stage.get("keep_blocked_reason") or ""),
             str(stage.get("next_state") or ""),
+            str(stage.get("fingerprint_cohort_bucket") or stage.get("cohort_bucket") or ""),
         )
         if key in seen:
             continue
@@ -3430,6 +3452,8 @@ def build_evidence_to_activation_next_action_ledger(
         for source_key in ("source_surface", "endpoint", "category", "workflow_phase", "required_local_executor"):
             if stage.get(source_key):
                 entry[source_key] = sanitize_value(stage.get(source_key))
+        if stage.get("executor_compatible") is not None:
+            entry["executor_compatible"] = bool(stage.get("executor_compatible"))
         if stage.get("requested_model"):
             entry["requested_model"] = sanitize_value(stage.get("requested_model"))
         if stage.get("candidate_target_model"):
@@ -3506,6 +3530,7 @@ def build_evidence_to_activation_next_action_ledger(
             "stage_allowed",
             "active_policy_changed",
             "wrote_active_policy_files",
+            "executor_compatible",
         }
         entries.append({key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in preserved_empty_keys})
 
