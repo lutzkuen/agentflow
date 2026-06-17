@@ -1580,6 +1580,7 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
         "crunch_savings_signal",
         "request_shape_rollup_candidates",
         "managed_recommendation_health",
+        "local_activation_outcome_summary",
         "promotion_blocker_next_action_status",
         "post_promotion_priority_delta_status",
         "promotion_outcome_feedback",
@@ -1760,6 +1761,10 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     )
     if managed_health is not None:
         summary["managed_recommendation_health"] = managed_health
+    if not isinstance(summary.get("local_activation_outcome_summary"), dict):
+        local_activation = _local_activation_keep_active_outcome_summary(summary)
+        if local_activation is not None:
+            summary["local_activation_outcome_summary"] = local_activation
     promotion_blocker = (
         None
         if isinstance(stats.get("promotion_blocker_next_action_status"), dict)
@@ -2882,6 +2887,205 @@ def _request_shape_report(stats: dict[str, Any]) -> dict[str, Any] | None:
         if isinstance(report, dict):
             return report
     return None
+
+
+def _local_activation_outcome_privacy() -> dict[str, Any]:
+    return {
+        "schema": "agentflow.local_activation_outcome_summary_privacy.v1",
+        "feature_only": True,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "provider_bodies_included": False,
+        "raw_request_bodies_included": False,
+        "raw_response_bodies_included": False,
+        "tool_payloads_included": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "tenant_ids_included": False,
+        "individual_candidate_ids_included": False,
+        "absolute_paths_included": False,
+        "policy_file_contents_included": False,
+    }
+
+
+def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    signal = stats_summary.get("crunch_savings_signal")
+    if not isinstance(signal, dict):
+        return None
+    reports: list[dict[str, Any]] = []
+    top_report = signal.get("top_report") if isinstance(signal.get("top_report"), dict) else None
+    if top_report is not None:
+        reports.append(top_report)
+    reports.extend(item for item in signal.get("reports") or [] if isinstance(item, dict))
+
+    report: dict[str, Any] | None = None
+    for item in reports:
+        if item.get("report_key") != "request_shape_crunch_activation_evidence":
+            continue
+        if str(item.get("post_widening_status") or "") != "post-widening-active-at-max-rollout":
+            continue
+        if str(item.get("post_widening_next_action") or item.get("next_action") or "") != "keep-active":
+            continue
+        if _to_int(item.get("active_rule_count")) <= 0:
+            continue
+        report = item
+        break
+    if report is None:
+        return None
+
+    target_rule_file = sanitize_value(report.get("target_local_rule_file") or "crunch_rules.yaml")
+    target_policy_section = sanitize_value(report.get("target_local_policy_section") or "crunch.rules")
+    applied_count = _to_int(report.get("applied_count"))
+    holdout_count = _to_int(report.get("holdout_count"))
+    skipped_count = _to_int(report.get("skipped_count"))
+    safety_stop_count = _to_int(report.get("safety_stop_count"))
+    fallback_count = _to_int(report.get("fallback_count"))
+    rollback_count = _to_int(report.get("rollback_count"))
+    observed_savings = round(_to_float(report.get("projected_saved_usd")), 8)
+    observed_tokens = _to_int(report.get("projected_saved_tokens"))
+    duplicate_suppression = (
+        sanitize_value(report.get("duplicate_suppression"))
+        if isinstance(report.get("duplicate_suppression"), dict)
+        else {
+            "schema": "agentflow.local_activation_keep_active_duplicate_suppression.v1",
+            "suppresses_new_activation_issue": True,
+            "suppresses_generic_crunch_activation_issue": True,
+            "reason": "repeated-context-crunch-active-at-max-rollout",
+            "activation_ref": public_id(
+                json.dumps(
+                    {
+                        "decision_id": report.get("decision_id"),
+                        "active_rule_ref": report.get("active_rule_ref"),
+                        "target_local_rule_file": target_rule_file,
+                        "target_local_policy_section": target_policy_section,
+                    },
+                    sort_keys=True,
+                ),
+                prefix="activation",
+            ),
+            "matching_local_policy": "crunch_rules",
+            "target_local_rule_file": target_rule_file,
+            "target_local_policy_section": target_policy_section,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+    )
+    row_count = applied_count + holdout_count + skipped_count
+    coverage = {
+        "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+        "source_schema": sanitize_value(report.get("schema")),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "observed_count": row_count,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "skipped_count": skipped_count,
+        "safety_stop_count": safety_stop_count,
+        "rollback_count": rollback_count,
+        "fallback_count": fallback_count,
+        "error_rate_delta": round(_to_float(report.get("error_rate_delta")), 6),
+        "retry_rate_delta": round(_to_float(report.get("retry_rate_delta")), 6),
+        "fallback_rate_delta": round(_to_float(report.get("fallback_rate_delta")), 6),
+        "canary_fraction": round(_to_float(report.get("canary_fraction")), 6),
+        "max_rollout_fraction": round(_to_float(report.get("max_rollout_fraction")), 6),
+    }
+    outcome = {
+        "schema": "agentflow.local_activation_outcome_summary_row.v1",
+        "policy_section": "crunch",
+        "local_action_family": "crunch",
+        "local_file_backed_representation": {
+            "policy_section": "crunch",
+            "rule_file": target_rule_file,
+            "exists": True,
+            "policy_source": "local-file-backed",
+            "reason": "file-backed-local-policy",
+            "path_included": False,
+            "policy_file_contents_included": False,
+        },
+        "row_count": row_count,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "skipped_count": skipped_count,
+        "safety_stopped_count": safety_stop_count,
+        "fallback_count": fallback_count,
+        "rollback_count": rollback_count,
+        "observed_savings_usd": observed_savings,
+        "projected_savings_usd": observed_savings,
+        "observed_saved_tokens": observed_tokens,
+        "projected_saved_tokens": observed_tokens,
+        "source_evidence_schema": sanitize_value(report.get("schema")),
+        "source_decision_id": sanitize_value(report.get("decision_id")),
+        "source_decision": sanitize_value(report.get("decision")),
+        "graduation_decision": sanitize_value(report.get("graduation_decision")),
+        "safety_stop_state": sanitize_value(report.get("safety_stop_state")),
+        "target_local_rule_file": target_rule_file,
+        "target_local_policy_section": target_policy_section,
+        "active_rule_count": _to_int(report.get("active_rule_count")),
+        "widened_rule_count": _to_int(report.get("widened_rule_count")),
+        "active_rule_ref": sanitize_value(report.get("active_rule_ref")),
+        "active_rule_source": sanitize_value(report.get("active_rule_source")),
+        "active_rule_decision_id": sanitize_value(report.get("active_rule_decision_id")),
+        "active_rule_source_evidence_schema": sanitize_value(report.get("active_rule_source_evidence_schema")),
+        "post_widening_status": sanitize_value(report.get("post_widening_status")),
+        "post_widening_next_action": "keep-active",
+        "post_widening_reason_codes": sanitize_value(report.get("post_widening_reason_codes")),
+        "outcome": "keep-active",
+        "next_action": "keep-active",
+        "error_rate_delta": round(_to_float(report.get("error_rate_delta")), 6),
+        "retry_rate_delta": round(_to_float(report.get("retry_rate_delta")), 6),
+        "fallback_rate_delta": round(_to_float(report.get("fallback_rate_delta")), 6),
+        "coverage": coverage,
+        "duplicate_suppression": duplicate_suppression,
+        "source_report": {
+            "schema": sanitize_value(report.get("schema")),
+            "status": sanitize_value(report.get("status")),
+            "decision": sanitize_value(report.get("decision")),
+            "post_widening_status": sanitize_value(report.get("post_widening_status")),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+    }
+    privacy = _local_activation_outcome_privacy()
+    return {
+        "schema": "agentflow.local_activation_outcome_summary.v1",
+        "status": "tracked",
+        "read_only": True,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "managed_dependency": "optional",
+        "summary": {
+            "rows_considered": 0,
+            "local_action_family_count": 1,
+            "policy_decision_report_count": 1,
+            "policy_decision_families": ["crunch"],
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "error_count": 0,
+            "retry_count": 0,
+            "fallback_count": fallback_count,
+            "observed_savings_usd": observed_savings,
+            "projected_savings_usd": observed_savings,
+        },
+        "outcome_summaries": [outcome],
+        "local_policy_handoff": {
+            "source": "local-activation-outcome-summary",
+            "supported_local_action_families": ["crunch"],
+            "source_policy_decision_schemas": [sanitize_value(report.get("schema"))],
+            "managed_dependency": "optional",
+            "server_ingestion_required": False,
+        },
+        "privacy": privacy,
+        "egress_guard": {
+            "schema": "agentflow.managed_egress_guard.v1",
+            "status": "passed",
+            "blocked": False,
+            "violation_count": 0,
+            "raw_values_logged": False,
+        },
+    }
 
 
 def _shape_row_classes(row: dict[str, Any]) -> list[str]:
