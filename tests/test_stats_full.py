@@ -9311,9 +9311,15 @@ request_shape_repeated_context_canaries:
         self.assertNotIn("\nrefreshTerminalOutputCompaction();", html)
         self.assertNotIn("\nrefreshRepeatedScaffold();", html)
         self.assertNotIn("\nrefreshOptimizationCoordinator();", html)
-        self.assertIn("cache:[refreshCache]", html)
-        self.assertNotIn("cache:[refreshCache,refreshOpenAICacheReplayReadiness]", html)
+        self.assertIn(
+            "cache:[refreshCache,refreshOpenAICacheReplayReadiness,refreshOpenAIToolCacheInvalidationBurndown]",
+            html,
+        )
         self.assertIn("fetch('/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=250&impact_limit=100')", html)
+        self.assertIn(
+            "fetch('/agentflow/stats/openai-tool-cache-invalidation-burndown?opportunity_limit=250&impact_limit=100&row_limit=25')",
+            html,
+        )
         self.assertIn("fetch('/agentflow/stats/repeated-scaffold-opportunity?limit=250&min_repeated_rows=2')", html)
         self.assertIn("fetch('/agentflow/stats/optimization-coordinator?limit=250')", html)
         self.assertIn("fetch('/agentflow/stats/local-pattern-coverage?limit=250')", html)

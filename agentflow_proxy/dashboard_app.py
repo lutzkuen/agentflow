@@ -330,6 +330,23 @@ def create_dashboard_router(
             ),
         )
 
+    @router.get("/agentflow/stats/openai-tool-cache-invalidation-burndown")
+    async def stats_openai_tool_cache_invalidation_burndown(
+        opportunity_limit: int = 1000,
+        impact_limit: int = 500,
+        row_limit: int = 25,
+    ) -> dict[str, Any]:
+        return await cached_expensive_stats(
+            "openai-tool-cache-invalidation-burndown",
+            (int(opportunity_limit), int(impact_limit), int(row_limit)),
+            lambda: stats_views.stats_openai_tool_cache_invalidation_burndown(
+                _store(store_obj),
+                opportunity_limit=opportunity_limit,
+                impact_limit=impact_limit,
+                row_limit=row_limit,
+            ),
+        )
+
     @router.get("/agentflow/stats/repeated-scaffold-opportunity")
     async def stats_repeated_scaffold_opportunity(
         limit: int = 1000,

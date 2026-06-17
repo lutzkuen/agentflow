@@ -427,6 +427,13 @@ def build_openai_cache_replay_blocker_outcomes_report(
             "stale_dependency_count": outcome_counts.get("stale-dependency", 0),
             "missing_invalidation_count": outcome_counts.get("missing-invalidation", 0),
             "noop_count": outcome_counts.get("noop", 0),
+            "staged_canary_count": 1 if staged_status == "staged-policy-can-run" else 0,
+            "staged_canary_policy_status": staged_status or None,
+            "applied_count": _as_int(impact_summary.get("applied_count")),
+            "holdout_count": _as_int(impact_summary.get("holdout_count")),
+            "exact_hit_count": _as_int(impact_summary.get("actual_hits")),
+            "safety_stop_count": _as_int(impact_summary.get("safety_stop_count")),
+            "invalidated_count": _as_int(impact_summary.get("invalidated_count")),
             "projected_savings_usd": round(
                 max(_as_float(opp_summary.get("projected_savings_usd")), _as_float(impact_summary.get("projected_savings_usd"))),
                 8,

@@ -12241,6 +12241,173 @@ async def stats_openai_cache_replay_readiness(
     )
 
 
+async def stats_openai_tool_cache_invalidation_burndown(
+    store_obj: Any,
+    opportunity_limit: int = 1000,
+    impact_limit: int = 500,
+    row_limit: int = 25,
+) -> dict[str, Any]:
+    from agentflow_proxy.openai_cache_replay_blocker_outcomes import (
+        build_openai_cache_replay_blocker_outcomes_report,
+    )
+
+    capped_opportunity_limit = max(1, min(int(opportunity_limit or 1000), 10_000))
+    capped_impact_limit = max(1, min(int(impact_limit or 500), 10_000))
+    capped_row_limit = max(1, min(int(row_limit or 25), 100))
+    report = build_openai_cache_replay_blocker_outcomes_report(
+        store_obj,
+        opportunity_limit=capped_opportunity_limit,
+        impact_limit=capped_impact_limit,
+    )
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    grouped: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    reason_counts: dict[str, int] = {}
+    for raw_row in report.get("cohorts") or []:
+        if not isinstance(raw_row, dict):
+            continue
+        outcome = str(raw_row.get("outcome") or "unknown")
+        reason = str(raw_row.get("reason") or "unknown")
+        sample_count = _as_int(raw_row.get("sample_count"))
+        key = (
+            "openai",
+            str(raw_row.get("source_surface") or "unknown"),
+            str(raw_row.get("endpoint") or "unknown"),
+            str(raw_row.get("category") or "unknown"),
+            str(raw_row.get("workflow_phase") or "unknown"),
+        )
+        row = grouped.setdefault(
+            key,
+            {
+                "provider": "openai",
+                "source_surface": key[1],
+                "endpoint": key[2],
+                "category": key[3],
+                "workflow_phase": key[4],
+                "sample_count": 0,
+                "missing_dependency_evidence_count": 0,
+                "safe_dependency_evidence_count": 0,
+                "stale_dependency_count": 0,
+                "noop_count": 0,
+                "projected_hits": 0,
+                "projected_savings_usd": 0.0,
+                "top_next_action": raw_row.get("next_action"),
+                "reason_counts": {},
+            },
+        )
+        row["sample_count"] += sample_count
+        row["projected_hits"] += _as_int(raw_row.get("projected_hits"))
+        row["projected_savings_usd"] += _as_float(raw_row.get("projected_savings_usd"))
+        row["top_next_action"] = row.get("top_next_action") or raw_row.get("next_action")
+        if outcome == "missing-invalidation":
+            row["missing_dependency_evidence_count"] += sample_count
+        elif outcome == "replay-ready":
+            row["safe_dependency_evidence_count"] += sample_count
+        elif outcome == "stale-dependency":
+            row["stale_dependency_count"] += sample_count
+        elif outcome == "noop":
+            row["noop_count"] += sample_count
+        row["reason_counts"][reason] = _as_int(row["reason_counts"].get(reason)) + sample_count
+        reason_counts[reason] = _as_int(reason_counts.get(reason)) + sample_count
+
+    blocker_rows: list[dict[str, Any]] = []
+    for row in grouped.values():
+        row["projected_savings_usd"] = round(_as_float(row.get("projected_savings_usd")), 8)
+        row["reason_breakdown"] = _managed_breakdown(row.pop("reason_counts", {}))[:6]
+        row["privacy"] = {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "tool_payloads_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+        }
+        blocker_rows.append(row)
+    blocker_rows.sort(
+        key=lambda item: (
+            _as_int(item.get("missing_dependency_evidence_count")),
+            _as_int(item.get("stale_dependency_count")),
+            _as_int(item.get("safe_dependency_evidence_count")),
+            _as_float(item.get("projected_savings_usd")),
+            _as_int(item.get("sample_count")),
+        ),
+        reverse=True,
+    )
+    blocker_rows = blocker_rows[:capped_row_limit]
+    for rank, row in enumerate(blocker_rows, start=1):
+        row["rank"] = rank
+
+    return {
+        "schema": "agentflow.openai_tool_cache_invalidation_burndown.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "opportunity_limit": capped_opportunity_limit,
+        "impact_limit": capped_impact_limit,
+        "row_limit": capped_row_limit,
+        "status": report.get("status") or "unknown",
+        "top_next_action": report.get("top_next_action"),
+        "summary": {
+            "openai_call_count": _as_int(summary.get("openai_call_count")),
+            "opportunity_candidate_count": _as_int(summary.get("opportunity_candidate_count")),
+            "impact_candidate_count": _as_int(summary.get("impact_candidate_count")),
+            "observed_replay_metadata_rows": _as_int(summary.get("observed_replay_metadata_rows")),
+            "missing_dependency_evidence_count": _as_int(summary.get("missing_invalidation_count")),
+            "safe_dependency_evidence_count": _as_int(summary.get("replay_ready_count")),
+            "stale_dependency_count": _as_int(summary.get("stale_dependency_count")),
+            "staged_canary_count": _as_int(summary.get("staged_canary_count")),
+            "staged_canary_policy_status": summary.get("staged_canary_policy_status"),
+            "applied_count": _as_int(summary.get("applied_count")),
+            "holdout_count": _as_int(summary.get("holdout_count")),
+            "exact_hit_count": _as_int(summary.get("exact_hit_count")),
+            "safety_stop_count": _as_int(summary.get("safety_stop_count")),
+            "invalidated_count": _as_int(summary.get("invalidated_count")),
+            "projected_savings_usd": round(_as_float(summary.get("projected_savings_usd")), 8),
+            "observed_savings_usd": round(_as_float(summary.get("observed_savings_usd")), 8),
+            "ranked_blocker_count": len(blocker_rows),
+            "top_next_action": report.get("top_next_action"),
+        },
+        "blockers": blocker_rows,
+        "reason_breakdown": _managed_breakdown(reason_counts),
+        "outcome_breakdown": report.get("outcome_breakdown") if isinstance(report.get("outcome_breakdown"), list) else [],
+        "source_reports": {
+            "blocker_outcomes_schema": report.get("schema"),
+            "opportunity_limit": capped_opportunity_limit,
+            "impact_limit": capped_impact_limit,
+            "raw_source_reports_included": False,
+        },
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "content_free": True,
+            "dashboard_read_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_provider_bodies_included": False,
+            "provider_bodies_included": False,
+            "raw_responses_included": False,
+            "tool_payloads_included": False,
+            "absolute_paths_included": False,
+            "file_paths_included": False,
+            "filesystem_paths_included": False,
+            "cache_keys_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "raw_session_ids_included": False,
+            "individual_candidate_ids_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "basis": "bounded OpenAI cache replay blocker, invalidation, and canary lifecycle aggregates only",
+        },
+    }
+
+
 async def stats_openai_old_context_summary_report(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
     from agentflow_proxy.openai_old_context_summary_report import build_openai_old_context_summary_report
     from agentflow_proxy.openai_old_context_summary import load_openai_old_context_summary_policy
@@ -20204,6 +20371,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>OpenAI tool-cache invalidation burndown</h2>
+  <table data-table-id="openai-tool-cache-invalidation-burndown" data-filter-label="Filter OpenAI tool-cache invalidation burndown">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Missing evidence</th><th data-sort-type="number">Safe evidence</th><th data-sort-type="number">Stale dependency</th><th data-sort-type="number">Staged canary</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Exact hits</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Next action</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="openai-tool-cache-invalidation-burndown-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>OpenAI tool-cache blocker cohorts</h2>
+  <table data-table-id="openai-tool-cache-invalidation-blockers" data-filter-label="Filter OpenAI tool-cache blocker cohorts">
+    <thead><tr>
+      <th data-sort-type="number">Rank</th><th data-sort-type="text">Provider / surface</th><th data-sort-type="text">Endpoint</th><th data-sort-type="text">Category / phase</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Missing evidence</th><th data-sort-type="number">Safe evidence</th><th data-sort-type="number">Stale dependency</th><th data-sort-type="number">Projected hits</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Next action</th>
+    </tr></thead>
+    <tbody id="openai-tool-cache-invalidation-blockers-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>OpenAI cache replay impact gates</h2>
   <table data-table-id="openai-cache-replay-impact-gates" data-filter-label="Filter OpenAI cache replay impact gates">
     <thead><tr>
@@ -21986,6 +22171,44 @@ async function refreshOpenAICacheReplayReadiness(){
         <td class="flags">${openaiCacheReplayPrivacyBadges(row.privacy||{})}</td>
       </tr>`;
     }).join('')||'<tr><td colspan="14" style="color:#8b949e">No OpenAI cache replay readiness or impact metadata recorded yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
+async function refreshOpenAIToolCacheInvalidationBurndown(){
+  try{
+    const r=await fetch('/agentflow/stats/openai-tool-cache-invalidation-burndown?opportunity_limit=250&impact_limit=100&row_limit=25');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    document.getElementById('openai-tool-cache-invalidation-burndown-tbody').innerHTML=`<tr>
+      <td><span class="badge ${s.safety_stop_count?'err':s.missing_dependency_evidence_count?'routed':'hit'}">${esc(d.status||'unknown')}</span><div class="sub">${esc(s.staged_canary_policy_status||'')}</div></td>
+      <td class="tokens">${(s.missing_dependency_evidence_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.safe_dependency_evidence_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.stale_dependency_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.staged_canary_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.exact_hit_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.safety_stop_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(s.projected_savings_usd||0,6)}</td>
+      <td class="flags"><span class="badge provider">${esc(s.top_next_action||d.top_next_action||'none')}</span></td>
+      <td class="flags">${openaiCacheReplayPrivacyBadges(privacy)}</td>
+    </tr>`;
+    const rows=d.blockers||[];
+    document.getElementById('openai-tool-cache-invalidation-blockers-tbody').innerHTML=rows.map(row=>`<tr>
+      <td class="tokens">${(row.rank||0).toLocaleString()}</td>
+      <td><span class="badge provider">${esc(row.provider||'openai')}</span> <span class="badge miss">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td><span class="badge provider">${esc(row.endpoint||'unknown')}</span></td>
+      <td><span class="badge miss">${esc(row.category||'unknown')}</span> <span class="badge provider">${esc(row.workflow_phase||'unknown')}</span></td>
+      <td class="tokens">${(row.sample_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.missing_dependency_evidence_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.safe_dependency_evidence_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.stale_dependency_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.projected_hits||0).toLocaleString()}</td>
+      <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+      <td class="flags">${openaiCacheReplayReasonBadges(row.reason_breakdown)}</td>
+      <td class="flags"><span class="badge provider">${esc(row.top_next_action||'none')}</span></td>
+    </tr>`).join('')||'<tr><td colspan="12" style="color:#8b949e">No OpenAI tool-cache invalidation blocker metadata recorded yet</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }
@@ -24641,7 +24864,7 @@ const tabRefreshers={
   codex:[refreshCodexReadiness,refreshCodexQuota,refreshCodexCanaryImpact],
   weekly:[refreshWeekly],
   categories:[refreshCategories],
-  cache:[refreshCache],
+  cache:[refreshCache,refreshOpenAICacheReplayReadiness,refreshOpenAIToolCacheInvalidationBurndown],
   terminal:[refreshTerminalOutputCompaction],
   thinking:[refreshThinkingCompactionImpact],
   scaffold:[refreshRepeatedScaffold],

@@ -28,6 +28,7 @@ from agentflow_proxy.stats import (
     stats_openai_cache_replay_impact,
     stats_openai_cache_replay_readiness,
     stats_openai_cache_replay_report,
+    stats_openai_tool_cache_invalidation_burndown,
 )
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 
@@ -1579,12 +1580,34 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 invalidated=True,
             ),
         )
+        self._log_openai_call(
+            endpoint="responses",
+            category="tool-light",
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="tools-disabled",
+            file_dependency_audit={
+                **self._audit(safe=False),
+                "paths": ["/tmp/openai-secret.py"],
+                "root_path": "/tmp",
+            },
+            cost=0.02,
+            cost_baseline=0.02,
+            cache_extra=replay_meta(
+                candidate_id="openai-cache-missing-invalidation",
+                rule_id="openai-cache-missing-invalidation-rule",
+                canary_status="blocked",
+                cohort="blocked",
+                projected=0.02,
+                reason="invalidation-evidence-missing",
+            ),
+        )
 
         report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
         self.assertEqual(report["schema"], "agentflow.openai_cache_replay_readiness.v1")
         self.assertEqual(report["state"], "saving")
         self.assertEqual(report["summary"]["applied_count"], 2)
-        self.assertEqual(report["summary"]["holdout_count"], 1)
+        self.assertEqual(report["summary"]["holdout_count"], 2)
         self.assertEqual(report["summary"]["invalidated_count"], 1)
         self.assertGreater(report["summary"]["observed_savings_usd"], 0)
         self.assertTrue(report["candidates"])
@@ -1597,6 +1620,27 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
 
         stats_result = asyncio.run(stats_openai_cache_replay_readiness(self.store, opportunity_limit=20, impact_limit=20))
         self.assertEqual(stats_result["schema"], "agentflow.openai_cache_replay_readiness.v1")
+        burndown = asyncio.run(
+            stats_openai_tool_cache_invalidation_burndown(
+                self.store,
+                opportunity_limit=20,
+                impact_limit=20,
+                row_limit=10,
+            )
+        )
+        self.assertEqual(burndown["schema"], "agentflow.openai_tool_cache_invalidation_burndown.v1")
+        self.assertGreaterEqual(burndown["summary"]["missing_dependency_evidence_count"], 1)
+        self.assertGreaterEqual(burndown["summary"]["safe_dependency_evidence_count"], 1)
+        self.assertGreaterEqual(burndown["summary"]["stale_dependency_count"], 1)
+        self.assertEqual(burndown["summary"]["applied_count"], 2)
+        self.assertEqual(burndown["summary"]["holdout_count"], 2)
+        self.assertEqual(burndown["summary"]["exact_hit_count"], 2)
+        self.assertFalse(burndown["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(burndown["privacy"]["file_paths_included"])
+        self.assertFalse(burndown["privacy"]["cache_keys_included"])
+        self.assertFalse(burndown["privacy"]["request_ids_included"])
+        self.assertFalse(burndown["privacy"]["session_ids_included"])
+        self.assertTrue(burndown["blockers"])
 
         app = create_dashboard_app(
             store_obj=lambda: self.store,
@@ -1611,13 +1655,26 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         )
         with TestClient(app) as client:
             api_response = client.get("/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=20&impact_limit=20")
+            burndown_response = client.get(
+                "/agentflow/stats/openai-tool-cache-invalidation-burndown?opportunity_limit=20&impact_limit=20&row_limit=10"
+            )
             dashboard = client.get("/agentflow/dashboard")
         self.assertEqual(api_response.status_code, 200)
         self.assertEqual(api_response.json()["state"], "saving")
+        self.assertEqual(burndown_response.status_code, 200)
+        self.assertEqual(
+            burndown_response.json()["schema"],
+            "agentflow.openai_tool_cache_invalidation_burndown.v1",
+        )
+        self.assertGreaterEqual(burndown_response.json()["summary"]["missing_dependency_evidence_count"], 1)
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn("/agentflow/stats/openai-cache-replay-readiness", dashboard.text)
+        self.assertIn("/agentflow/stats/openai-tool-cache-invalidation-burndown", dashboard.text)
         self.assertIn("OpenAI cache replay readiness", dashboard.text)
         self.assertIn("openai-cache-replay-readiness-tbody", dashboard.text)
+        self.assertIn("OpenAI tool-cache invalidation burndown", dashboard.text)
+        self.assertIn("openai-tool-cache-invalidation-burndown-tbody", dashboard.text)
+        self.assertIn("openai-tool-cache-invalidation-blockers-tbody", dashboard.text)
         self.assertIn("OpenAI cache replay impact gates", dashboard.text)
         self.assertIn("openai-cache-replay-impact-gates-tbody", dashboard.text)
 
@@ -1632,6 +1689,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         rendered_outputs = [
             json.dumps(report, sort_keys=True),
             json.dumps(api_response.json(), sort_keys=True),
+            json.dumps(burndown, sort_keys=True),
+            json.dumps(burndown_response.json(), sort_keys=True),
             output.getvalue(),
             dashboard.text,
         ]
