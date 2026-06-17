@@ -76,11 +76,11 @@ def _pass_through_report_with_blocked_lifecycle() -> dict:
         "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
         "status": "matched",
         "matched_count": 1250,
-        "observed_count": 51,
+        "observed_count": 492,
         "cohort_counts": {
             "canary_applied": 0,
             "canary_holdout": 0,
-            "safety_stopped": 51,
+            "safety_stopped": 492,
             "skipped": 0,
             "bypassed_or_disabled": 0,
             "unknown": 0,
@@ -100,25 +100,69 @@ def _pass_through_report_with_blocked_lifecycle() -> dict:
         "blocker_reason_breakdown": [
             {"value": "missing-applied-coverage", "count": 1250},
             {"value": "missing-holdout-coverage", "count": 1250},
-            {"value": "safety-stop-observed", "count": 51},
+            {"value": "safety-stop-observed", "count": 492},
         ],
         "safety_stop_breakdown": [
             {
-                "reason_code": "thinking-routing-guard",
-                "count": 51,
+                "reason_code": "local-canary-safety-stop",
+                "count": 492,
                 "source_surface": "anthropic_messages",
-                "endpoint": "messages",
+                "endpoint": "/v1/messages",
                 "category": "tool-result",
-                "workflow_phase": "thinking",
+                "workflow_phase": "tool-execution",
                 "expected_local_executor": "anthropic-routing-rules",
-                "executor_compatible": False,
+                "executor_compatible": True,
                 "missing_applied_coverage": True,
                 "missing_holdout_coverage": True,
-                "durable_blocked_reason": "anthropic-routing-safety-stop-thinking-routing-guard-keep-blocked",
+                "durable_blocked_reason": "anthropic-routing-safety-stop-local-canary-safety-stop-keep-blocked",
                 "next_action": "keep-anthropic-routing-blocked-until-safety-stop-burndown",
             }
         ],
-        "durable_blocked_reason": "anthropic-routing-safety-stop-thinking-routing-guard-keep-blocked",
+        "durable_blocked_reason": "anthropic-routing-safety-stop-local-canary-safety-stop-keep-blocked",
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+        },
+    }
+    report["buckets"] = [bucket]
+    return report
+
+
+def _pass_through_report_with_guard_ready_lifecycle() -> dict:
+    report = _pass_through_report()
+    bucket = report["buckets"][0]
+    bucket["sample_count"] = 120
+    bucket["anthropic_canary_lifecycle_evidence"] = {
+        "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+        "status": "matched",
+        "matched_count": 120,
+        "observed_count": 54,
+        "cohort_counts": {
+            "canary_applied": 24,
+            "canary_holdout": 30,
+            "safety_stopped": 0,
+            "skipped": 0,
+            "bypassed_or_disabled": 0,
+            "unknown": 0,
+        },
+        "coverage": {
+            "matched_count": 120,
+            "observed_rate": 0.45,
+            "applied_rate": 0.2,
+            "holdout_rate": 0.25,
+        },
+        "error_count": 0,
+        "retry_count": 0,
+        "fallback_count": 0,
+        "latest_observed_at": "2026-06-17T20:30:00+00:00",
+        "stale_evidence": {"stale": False, "age_hours": 0.25, "max_age_hours": 72.0},
+        "blocker_codes": [],
+        "blocker_reason_breakdown": [],
+        "safety_stop_breakdown": [],
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -231,12 +275,18 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertEqual(result["summary"]["blocked_review_count"], 1)
         self.assertEqual(result["summary"]["projected_canary_applied_count"], 0)
         self.assertEqual(result["summary"]["projected_canary_holdout_count"], 0)
-        self.assertEqual(result["summary"]["projected_safety_stopped_count"], 51)
+        self.assertEqual(result["summary"]["projected_safety_stopped_count"], 492)
+        self.assertEqual(result["summary"]["executor_guard_dry_run_count"], 1)
+        self.assertEqual(result["summary"]["executor_guard_keep_blocked_count"], 1)
+        self.assertEqual(result["summary"]["top_executor_guard_status"], "keep-blocked")
+        self.assertEqual(result["summary"]["top_required_local_executor"], "anthropic-routing-rules")
         self.assertTrue(result["summary"]["acceptance_met"])
         self.assertTrue(result["acceptance"]["blocked_review_recorded"])
         self.assertTrue(result["acceptance"]["blocked_review_has_local_rule_file_representation"])
         self.assertTrue(result["acceptance"]["no_automatic_promotion_while_blocked"])
         self.assertTrue(result["acceptance"]["blocked_review_has_keep_blocked_reason"])
+        self.assertTrue(result["acceptance"]["executor_guard_dry_run_reports_all_criteria"])
+        self.assertTrue(result["acceptance"]["executor_guard_blocks_safety_stopped_cohorts"])
         self.assertEqual(result["summary"]["top_next_state"], "keep-blocked")
         self.assertEqual(
             result["summary"]["top_keep_blocked_reason"],
@@ -267,17 +317,17 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
             ],
         )
         self.assertEqual(blocked["matched_count"], 1250)
-        self.assertEqual(blocked["observed_count"], 51)
+        self.assertEqual(blocked["observed_count"], 492)
         self.assertEqual(blocked["cohort_counts"]["canary_applied"], 0)
         self.assertEqual(blocked["cohort_counts"]["canary_holdout"], 0)
-        self.assertEqual(blocked["cohort_counts"]["safety_stopped"], 51)
+        self.assertEqual(blocked["cohort_counts"]["safety_stopped"], 492)
         self.assertEqual(blocked["coverage"]["applied_rate"], 0.0)
         self.assertEqual(blocked["coverage"]["holdout_rate"], 0.0)
         self.assertIn("missing-applied-coverage", blocked["blocker_codes"])
         self.assertIn("missing-holdout-coverage", blocked["blocker_codes"])
         self.assertIn("safety-stop-observed", blocked["blocker_codes"])
-        self.assertEqual(blocked["safety_stop_breakdown"][0]["reason_code"], "thinking-routing-guard")
-        self.assertFalse(blocked["safety_stop_breakdown"][0]["executor_compatible"])
+        self.assertEqual(blocked["safety_stop_breakdown"][0]["reason_code"], "local-canary-safety-stop")
+        self.assertTrue(blocked["safety_stop_breakdown"][0]["executor_compatible"])
         self.assertEqual(blocked["local_file_backed_representation"]["rule_file"], "routing_rules.yaml")
         self.assertEqual(blocked["target_local_rule_file"], "routing_rules.yaml")
         self.assertEqual(blocked["next_action"], "review-anthropic-routing-safety-stop-before-canary")
@@ -286,15 +336,89 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertFalse(blocked["stage_allowed"])
         self.assertFalse(blocked["active_policy_changed"])
         self.assertFalse(blocked["wrote_active_policy_files"])
+        guard = blocked["executor_guard_dry_run"]
+        self.assertEqual(guard["schema"], "agentflow.anthropic_routing_executor_guard_dry_run.v1")
+        self.assertEqual(guard["status"], "keep-blocked")
+        self.assertFalse(guard["stage_allowed"])
+        self.assertFalse(guard["promotion_allowed"])
+        self.assertFalse(guard["active_policy_changed"])
+        self.assertFalse(guard["wrote_active_policy_files"])
+        self.assertEqual(guard["safety_stop_count"], 492)
+        self.assertEqual(guard["required_local_executor"], "anthropic-routing-rules")
+        self.assertTrue(guard["executor_compatible"])
+        for field, reason in {
+            "safety_stop_reason_review": "safety-stop-observed",
+            "safer_threshold_or_executor_guard": "safer-threshold-or-executor-guard-missing",
+            "rollback_proof": "rollback-proof-missing",
+            "applied_coverage": "missing-applied-coverage",
+            "holdout_coverage": "missing-holdout-coverage",
+        }.items():
+            self.assertFalse(guard["criterion_results"][field]["passed"])
+            self.assertEqual(guard["criterion_results"][field]["status"], "failed")
+            self.assertEqual(guard["criterion_results"][field]["reason_codes"], [reason])
+            self.assertIn(field, guard["needed_resolution"])
+            self.assertIn(reason, guard["reason_codes"])
 
         omitted = result["omitted"][0]
         self.assertEqual(omitted["status"], "blocked-review")
-        self.assertEqual(omitted["projected_lifecycle_evidence"]["cohort_counts"]["safety_stopped"], 51)
+        self.assertEqual(omitted["projected_lifecycle_evidence"]["cohort_counts"]["safety_stopped"], 492)
         self.assertEqual(
             omitted["projected_lifecycle_evidence"]["safety_stop_breakdown"][0]["durable_blocked_reason"],
-            "anthropic-routing-safety-stop-thinking-routing-guard-keep-blocked",
+            "anthropic-routing-safety-stop-local-canary-safety-stop-keep-blocked",
         )
         self.assertEqual(omitted["blocked_review"]["target_local_rule_file"], "routing_rules.yaml")
+        _assert_privacy_clean(self, result)
+
+    def test_executor_guard_ready_dry_run_does_not_enable_traffic(self) -> None:
+        result = build_anthropic_routing_canary_stage_report(
+            _pass_through_report_with_guard_ready_lifecycle(),
+            canary_fraction=0.05,
+            holdout_fraction=0.10,
+            min_samples=5,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["candidate_count"], 1)
+        self.assertEqual(result["summary"]["eligible_candidate_count"], 1)
+        self.assertEqual(result["summary"]["staged_count"], 1)
+        self.assertEqual(result["summary"]["executor_guard_dry_run_count"], 1)
+        self.assertEqual(result["summary"]["executor_guard_ready_count"], 1)
+        self.assertEqual(result["summary"]["top_executor_guard_status"], "guard-ready")
+        self.assertTrue(result["acceptance"]["executor_guard_ready_without_activation"])
+
+        guard = result["executor_guard_dry_runs"][0]
+        self.assertEqual(guard["schema"], "agentflow.anthropic_routing_executor_guard_dry_run.v1")
+        self.assertEqual(guard["status"], "guard-ready")
+        self.assertTrue(guard["guard_ready"])
+        self.assertTrue(guard["stage_allowed"])
+        self.assertFalse(guard["promotion_allowed"])
+        self.assertEqual(guard["safety_stop_count"], 0)
+        self.assertEqual(guard["applied_count"], 24)
+        self.assertEqual(guard["holdout_count"], 30)
+        self.assertEqual(guard["needed_resolution"], [])
+        self.assertEqual(guard["reason_codes"], [])
+        self.assertEqual(guard["next_action"], "operator-review-anthropic-routing-guard-ready")
+        for field in (
+            "safety_stop_reason_review",
+            "safer_threshold_or_executor_guard",
+            "rollback_proof",
+            "applied_coverage",
+            "holdout_coverage",
+        ):
+            self.assertTrue(guard["criterion_results"][field]["passed"])
+            self.assertEqual(guard["criterion_results"][field]["status"], "passed")
+        self.assertFalse(guard["active_policy_changed"])
+        self.assertFalse(guard["wrote_active_policy_files"])
+        self.assertFalse(guard["provider_calls_made"])
+        self.assertFalse(guard["managed_server_calls_made"])
+
+        draft = result["staged_drafts"][0]
+        self.assertFalse(draft["active_policy_changed"])
+        self.assertFalse(draft["wrote_active_policy_files"])
+        canary = draft["policies"]["routing"]["phase_canary"]
+        self.assertFalse(canary["enabled"])
+        self.assertTrue(canary["review_only"])
+        self.assertEqual(canary["promotion"]["executor_guard_dry_run"]["status"], "guard-ready")
         _assert_privacy_clean(self, result)
 
     def test_cli_extracts_nested_research_plan_report(self) -> None:

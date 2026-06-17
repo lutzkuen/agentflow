@@ -14,7 +14,9 @@ STAGED_SCHEMA = "agentflow.anthropic_routing_canary_staged_draft.v1"
 PROJECTED_LIFECYCLE_SCHEMA = "agentflow.anthropic_routing_canary_projected_lifecycle_coverage.v1"
 BLOCKED_REVIEW_SCHEMA = "agentflow.anthropic_routing_canary_blocked_review.v1"
 ACCEPTANCE_SCHEMA = "agentflow.anthropic_routing_canary_stage_acceptance.v1"
+EXECUTOR_GUARD_DRY_RUN_SCHEMA = "agentflow.anthropic_routing_executor_guard_dry_run.v1"
 PASS_THROUGH_SCHEMA = "agentflow.pass_through_routing_activation_candidates.v1"
+SUPPORTED_EXECUTORS = {"anthropic-routing-rules", "claude-phase-routing-canary", "phase-canary"}
 
 PRIVACY = {
     "local_only": True,
@@ -188,7 +190,7 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
         blockers.append(actionability)
     if provider != "anthropic":
         blockers.append("unsupported-provider")
-    if required_executor not in {"", "anthropic-routing-rules", "claude-phase-routing-canary", "phase-canary"}:
+    if required_executor not in {"", *SUPPORTED_EXECUTORS}:
         blockers.append("unsupported-local-executor")
     if category != "tool-result":
         blockers.append("category-not-enabled")
@@ -294,6 +296,131 @@ def _local_file_backed_representation() -> dict[str, Any]:
         "policy_source": "local-file-backed",
         "reason": "file-backed-local-policy",
         "rule_file": "routing_rules.yaml",
+    }
+
+
+def _first_safety_breakdown_value(lifecycle: dict[str, Any], *keys: str) -> Any:
+    breakdown = lifecycle.get("safety_stop_breakdown")
+    if not isinstance(breakdown, list):
+        return None
+    for row in breakdown:
+        if not isinstance(row, dict):
+            continue
+        for key in keys:
+            value = row.get(key)
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _criterion_result(passed: bool, passed_code: str, failed_code: str) -> dict[str, Any]:
+    return {
+        "passed": bool(passed),
+        "status": "passed" if passed else "failed",
+        "reason_codes": [passed_code if passed else failed_code],
+    }
+
+
+def _executor_guard_dry_run(candidate: dict[str, Any], lifecycle: dict[str, Any]) -> dict[str, Any]:
+    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    coverage = lifecycle.get("coverage") if isinstance(lifecycle.get("coverage"), dict) else {}
+    stale = lifecycle.get("stale_evidence") if isinstance(lifecycle.get("stale_evidence"), dict) else {}
+    blockers = set(_string_list(lifecycle.get("blocker_codes")))
+    safety_stop_count = _as_int(counts.get("safety_stopped"))
+    applied_count = _as_int(counts.get("canary_applied"))
+    holdout_count = _as_int(counts.get("canary_holdout"))
+    required_executor = _metadata_value(
+        candidate.get("expected_local_executor"),
+        candidate.get("required_local_executor"),
+        _first_safety_breakdown_value(lifecycle, "expected_local_executor", "required_local_executor"),
+        "anthropic-routing-rules",
+    )
+    executor_compatible = required_executor in SUPPORTED_EXECUTORS
+    breakdown = lifecycle.get("safety_stop_breakdown") if isinstance(lifecycle.get("safety_stop_breakdown"), list) else []
+    if breakdown:
+        executor_compatible = executor_compatible or any(bool(row.get("executor_compatible")) for row in breakdown if isinstance(row, dict))
+
+    missing_applied = applied_count <= 0 or "missing-applied-coverage" in blockers
+    missing_holdout = holdout_count <= 0 or "missing-holdout-coverage" in blockers
+    stale_evidence = bool(stale.get("stale"))
+    safety_stop_clear = safety_stop_count <= 0 and "safety-stop-observed" not in blockers
+    applied_present = applied_count > 0 and not missing_applied and not stale_evidence
+    holdout_present = holdout_count > 0 and not missing_holdout and not stale_evidence
+    safer_guard_present = safety_stop_clear and executor_compatible and not stale_evidence
+    rollback_proof_present = safety_stop_clear and not stale_evidence
+
+    criteria = {
+        "safety_stop_reason_review": _criterion_result(
+            safety_stop_clear,
+            "safety-stop-count-zero",
+            "safety-stop-observed",
+        ),
+        "safer_threshold_or_executor_guard": _criterion_result(
+            safer_guard_present,
+            "executor-guard-present",
+            "safer-threshold-or-executor-guard-missing",
+        ),
+        "rollback_proof": _criterion_result(
+            rollback_proof_present,
+            "rollback-proof-present",
+            "rollback-proof-missing",
+        ),
+        "applied_coverage": _criterion_result(
+            applied_present,
+            "applied-coverage-present",
+            "missing-applied-coverage",
+        ),
+        "holdout_coverage": _criterion_result(
+            holdout_present,
+            "holdout-coverage-present",
+            "missing-holdout-coverage",
+        ),
+    }
+    failed = [field for field, result in criteria.items() if not result["passed"]]
+    reason_codes = sorted({code for field in failed for code in criteria[field]["reason_codes"]})
+    guard_ready = not failed
+    return {
+        "schema": EXECUTOR_GUARD_DRY_RUN_SCHEMA,
+        "status": "guard-ready" if guard_ready else "keep-blocked",
+        "decision": "guard-ready" if guard_ready else "keep-blocked",
+        "target_candidate_id": _candidate_id(candidate),
+        "provider": "anthropic",
+        "source_surface": candidate.get("source_surface"),
+        "endpoint": candidate.get("endpoint"),
+        "category": candidate.get("category"),
+        "workflow_phase": candidate.get("workflow_phase") or ("tool-execution" if candidate.get("category") == "tool-result" else "unknown"),
+        "requested_model": candidate.get("requested_model"),
+        "target_model": candidate.get("target_model"),
+        "required_local_executor": required_executor,
+        "executor_compatible": executor_compatible,
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "matched_count": _as_int(lifecycle.get("matched_count")),
+        "observed_count": _as_int(lifecycle.get("observed_count")),
+        "safety_stop_count": safety_stop_count,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "coverage": {
+            "matched_count": _as_int(coverage.get("matched_count") or lifecycle.get("matched_count")),
+            "applied_rate": _as_float(coverage.get("applied_rate")),
+            "holdout_rate": _as_float(coverage.get("holdout_rate")),
+            "observed_rate": _as_float(coverage.get("observed_rate")),
+        },
+        "criterion_results": criteria,
+        "needed_resolution": failed,
+        "reason_codes": reason_codes,
+        "next_action": "operator-review-anthropic-routing-guard-ready" if guard_ready else "keep-anthropic-routing-blocked-until-safety-stop-burndown",
+        "stage_allowed": guard_ready,
+        "promotion_allowed": False,
+        "guard_ready": guard_ready,
+        "dry_run_only": True,
+        "active_policy_changed": False,
+        "wrote_active_policy_files": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "local_file_backed_representation": _local_file_backed_representation(),
+        "rollback_action": "keep-routing-policy-disabled" if not guard_ready else "keep-disabled-until-operator-stages-reviewed-canary",
+        "privacy": PRIVACY,
     }
 
 
@@ -506,7 +633,12 @@ def _projected_lifecycle(
     }
 
 
-def _blocked_review(candidate: dict[str, Any], reason: str, lifecycle: dict[str, Any]) -> dict[str, Any]:
+def _blocked_review(
+    candidate: dict[str, Any],
+    reason: str,
+    lifecycle: dict[str, Any],
+    executor_guard_dry_run: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     blockers = _string_list(lifecycle.get("blocker_codes"))
     next_action = _next_action_for_blockers(candidate, blockers)
     needed_resolution = _blocked_needed_resolution(candidate, blockers, lifecycle)
@@ -543,6 +675,7 @@ def _blocked_review(candidate: dict[str, Any], reason: str, lifecycle: dict[str,
         "wrote_active_policy_files": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
+        "executor_guard_dry_run": executor_guard_dry_run,
         "lifecycle_evidence": lifecycle,
         "privacy": PRIVACY,
     }
@@ -602,6 +735,7 @@ def _acceptance_report(
     projected_applied: int,
     projected_holdout: int,
     blocked_reviews: list[dict[str, Any]] | None = None,
+    executor_guard_dry_runs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     reported_tool_result_canary = False
     lifecycle_counts_present = False
@@ -610,6 +744,9 @@ def _acceptance_report(
     blocked_review_has_rule_file = False
     blocked_review_prevents_promotion = False
     blocked_review_has_keep_blocked_reason = False
+    executor_guard_blocks_safety_stops = False
+    executor_guard_reports_all_criteria = False
+    executor_guard_ready_without_activation = False
 
     for draft in staged:
         routing = draft.get("policies", {}).get("routing", {}) if isinstance(draft.get("policies"), dict) else {}
@@ -690,6 +827,34 @@ def _acceptance_report(
             and "rollback_proof" in needed
         )
 
+    required_criteria = {
+        "safety_stop_reason_review",
+        "safer_threshold_or_executor_guard",
+        "rollback_proof",
+        "applied_coverage",
+        "holdout_coverage",
+    }
+    for dry_run in executor_guard_dry_runs or []:
+        criteria = dry_run.get("criterion_results") if isinstance(dry_run.get("criterion_results"), dict) else {}
+        criteria_keys = set(criteria)
+        executor_guard_reports_all_criteria = executor_guard_reports_all_criteria or required_criteria <= criteria_keys
+        if dry_run.get("status") == "keep-blocked" and _as_int(dry_run.get("safety_stop_count")) > 0:
+            executor_guard_blocks_safety_stops = executor_guard_blocks_safety_stops or (
+                dry_run.get("stage_allowed") is False
+                and dry_run.get("promotion_allowed") is False
+                and dry_run.get("active_policy_changed") is False
+                and dry_run.get("wrote_active_policy_files") is False
+                and required_criteria <= criteria_keys
+            )
+        if dry_run.get("status") == "guard-ready":
+            executor_guard_ready_without_activation = executor_guard_ready_without_activation or (
+                dry_run.get("guard_ready") is True
+                and dry_run.get("active_policy_changed") is False
+                and dry_run.get("wrote_active_policy_files") is False
+                and dry_run.get("provider_calls_made") is False
+                and dry_run.get("managed_server_calls_made") is False
+            )
+
     holdout_coverage = projected_holdout > 0
     privacy_clean = (
         bool(PRIVACY["metadata_only"])
@@ -734,6 +899,9 @@ def _acceptance_report(
         "blocked_review_has_local_rule_file_representation": blocked_review_has_rule_file,
         "no_automatic_promotion_while_blocked": blocked_review_prevents_promotion,
         "blocked_review_has_keep_blocked_reason": blocked_review_has_keep_blocked_reason,
+        "executor_guard_dry_run_reports_all_criteria": executor_guard_reports_all_criteria,
+        "executor_guard_blocks_safety_stopped_cohorts": executor_guard_blocks_safety_stops,
+        "executor_guard_ready_without_activation": executor_guard_ready_without_activation,
         "metadata_only_privacy_proof": privacy_clean,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
@@ -747,6 +915,7 @@ def _candidate_payload(
     *,
     canary_fraction: float,
     holdout_fraction: float,
+    executor_guard_dry_run: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     candidate_id = _candidate_id(candidate)
     bounded_canary_fraction = _bounded_fraction(canary_fraction, 0.05)
@@ -855,6 +1024,7 @@ def _candidate_payload(
                 ],
                 "preserve_previous_rule_required": True,
             },
+            "executor_guard_dry_run": executor_guard_dry_run,
             "privacy": PRIVACY,
         },
     }
@@ -901,18 +1071,25 @@ def build_anthropic_routing_canary_stage_report(
     staged: list[dict[str, Any]] = []
     omitted: list[dict[str, Any]] = []
     blocked_reviews: list[dict[str, Any]] = []
+    executor_guard_dry_runs: list[dict[str, Any]] = []
+    executor_guard_by_candidate_id: dict[str, dict[str, Any]] = {}
     eligible: list[dict[str, Any]] = []
     for candidate in candidates:
+        existing_lifecycle = _existing_lifecycle(candidate)
+        normalized_lifecycle = _normalize_lifecycle_evidence(candidate, existing_lifecycle) if existing_lifecycle else None
+        executor_guard_dry_run = _executor_guard_dry_run(candidate, normalized_lifecycle) if normalized_lifecycle else None
+        if executor_guard_dry_run:
+            executor_guard_dry_runs.append(executor_guard_dry_run)
+            executor_guard_by_candidate_id[_candidate_id(candidate)] = executor_guard_dry_run
         reason = _candidate_omission_reason(candidate, min_samples=min_samples)
         if reason:
             safety_blockers = _safety_blockers(candidate)
             lifecycle = None
             blocked_review = None
-            existing_lifecycle = _existing_lifecycle(candidate)
-            if existing_lifecycle:
-                lifecycle = _normalize_lifecycle_evidence(candidate, existing_lifecycle)
+            if normalized_lifecycle:
+                lifecycle = normalized_lifecycle
                 if _string_list(lifecycle.get("blocker_codes")):
-                    blocked_review = _blocked_review(candidate, reason, lifecycle)
+                    blocked_review = _blocked_review(candidate, reason, lifecycle, executor_guard_dry_run)
                     blocked_reviews.append(blocked_review)
             if safety_blockers and lifecycle is None:
                 lifecycle = _projected_lifecycle(
@@ -933,6 +1110,7 @@ def build_anthropic_routing_canary_stage_report(
             candidate,
             canary_fraction=canary_fraction,
             holdout_fraction=holdout_fraction,
+            executor_guard_dry_run=executor_guard_by_candidate_id.get(_candidate_id(candidate)),
         )
         canary = routing_policy["phase_canary"]
         suffix = "" if index == 0 else f"-{index + 1}"
@@ -969,8 +1147,10 @@ def build_anthropic_routing_canary_stage_report(
         projected_applied=projected_applied,
         projected_holdout=projected_holdout,
         blocked_reviews=blocked_reviews,
+        executor_guard_dry_runs=executor_guard_dry_runs,
     )
     top_blocked = blocked_reviews[0] if blocked_reviews else {}
+    top_guard = executor_guard_dry_runs[0] if executor_guard_dry_runs else {}
 
     return {
         "schema": SCHEMA,
@@ -989,6 +1169,12 @@ def build_anthropic_routing_canary_stage_report(
             "top_next_state": top_blocked.get("next_state"),
             "top_keep_blocked_reason": top_blocked.get("keep_blocked_reason"),
             "top_needed_resolution": top_blocked.get("needed_resolution") or [],
+            "executor_guard_dry_run_count": len(executor_guard_dry_runs),
+            "executor_guard_ready_count": sum(1 for item in executor_guard_dry_runs if item.get("status") == "guard-ready"),
+            "executor_guard_keep_blocked_count": sum(1 for item in executor_guard_dry_runs if item.get("status") == "keep-blocked"),
+            "top_executor_guard_status": top_guard.get("status"),
+            "top_executor_guard_reason_codes": top_guard.get("reason_codes") or [],
+            "top_required_local_executor": top_guard.get("required_local_executor"),
             "estimated_savings_per_1000_calls_usd": round(
                 max((_as_float(draft["policies"]["routing"]["phase_canary"]["promotion"].get("estimated_savings_per_1000_calls_usd")) for draft in staged), default=0.0),
                 6,
@@ -997,6 +1183,7 @@ def build_anthropic_routing_canary_stage_report(
         "staged_drafts": staged,
         "omitted": omitted,
         "blocked_reviews": blocked_reviews,
+        "executor_guard_dry_runs": executor_guard_dry_runs,
         "wrote_active_policy_files": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
