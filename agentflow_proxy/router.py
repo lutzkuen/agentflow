@@ -1526,6 +1526,7 @@ def _rule_matches(
     *,
     requested_l: str,
     text_chars: int,
+    input_tokens_est: int,
     tools: bool,
     max_tokens: Any,
     category: str,
@@ -1533,8 +1534,19 @@ def _rule_matches(
     stream: bool,
     session_id: str | None,
     requested_model: str,
+    provider: str = "anthropic",
+    source_surface: str = "anthropic_messages",
+    endpoint: str = "messages",
 ) -> tuple[bool, dict[str, Any] | None]:
+    if rule.get("enabled") is False:
+        return False, None
     cond = rule.get("conditions") or {}
+    if "provider" in cond and str(cond["provider"]).lower() != provider.lower():
+        return False, None
+    if "source_surface" in cond and str(cond["source_surface"]).lower() != source_surface.lower():
+        return False, None
+    if "endpoint" in cond and str(cond["endpoint"]).lower() != endpoint.lower():
+        return False, None
     if "model_pattern" in cond and str(cond["model_pattern"]).lower() not in requested_l:
         return False, None
     if "text_chars_lt" in cond and not (text_chars < int(cond["text_chars_lt"])):
@@ -1544,6 +1556,14 @@ def _rule_matches(
     if "text_chars_lte" in cond and not (text_chars <= int(cond["text_chars_lte"])):
         return False, None
     if "text_chars_gte" in cond and not (text_chars >= int(cond["text_chars_gte"])):
+        return False, None
+    if "max_text_chars" in cond and not (text_chars <= int(cond["max_text_chars"])):
+        return False, None
+    if "min_text_chars" in cond and not (text_chars >= int(cond["min_text_chars"])):
+        return False, None
+    if "max_input_tokens_est" in cond and not (input_tokens_est <= int(cond["max_input_tokens_est"])):
+        return False, None
+    if "min_input_tokens_est" in cond and not (input_tokens_est >= int(cond["min_input_tokens_est"])):
         return False, None
     if "has_tools" in cond and bool(cond["has_tools"]) != tools:
         return False, None
@@ -1624,6 +1644,68 @@ def _route_from_rule(
     return routed, meta
 
 
+def _route_openai_from_rule(
+    rule: dict[str, Any],
+    *,
+    requested: str,
+    text_chars: int,
+    input_tokens_est: int,
+    tools: bool,
+    stream: bool,
+    category: str,
+    source_surface: str,
+    endpoint: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+    target, target_error = _safe_openai_target_model(action.get("route_to"))
+    if target_error or target is None:
+        return None, None
+    reason = str(action.get("reason") or "matched OpenAI routing rule")
+    metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
+    meta: dict[str, Any] = {
+        "enabled": True,
+        "requested_model": requested,
+        "routed_model": target,
+        "reason": reason,
+        "text_chars": text_chars,
+        "input_tokens_est": input_tokens_est,
+        "has_tools": tools,
+        "stream": stream,
+        "category": category,
+        "workflow_phase": category,
+        "workflow_phase_reason": "openai-request-category",
+        "workflow_phase_confidence": "medium",
+        "policy_source": str(rule.get("policy_source") or ROUTING_RULES_SOURCE),
+        "provider": "openai",
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+    }
+    if metadata.get("promoted_from_canary"):
+        meta["openai_routing_rule"] = {
+            "status": "applied",
+            "source": metadata.get("source") or "openai_routing_promotion_decision",
+            "promoted_from_canary": True,
+            "rule_id": rule.get("id") or metadata.get("rule_id"),
+            "target_candidate_id": metadata.get("target_candidate_id"),
+            "promotion_source_policy_id": metadata.get("promotion_source_policy_id"),
+            "target_local_policy_section": metadata.get("target_local_policy_section") or "routing.rules",
+            "target_local_rule_file": metadata.get("target_local_rule_file") or "routing_rules.yaml",
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "raw_messages_included": False,
+                "provider_bodies_included": False,
+                "tool_payloads_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+                "file_paths_included": False,
+            },
+        }
+    return target, meta
+
+
 def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple[str, dict[str, Any]]:
     requested = str(body.get("model") or SONNET_DEFAULT)
     text_chars = len(extract_text(body))
@@ -1658,6 +1740,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             rule,
             requested_l=requested_l,
             text_chars=text_chars,
+            input_tokens_est=_input_tokens_est(text_chars),
             tools=tools,
             max_tokens=max_tokens,
             category=category,
@@ -1742,6 +1825,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             rule,
             requested_l=requested_l,
             text_chars=text_chars,
+            input_tokens_est=_input_tokens_est(text_chars),
             tools=tools,
             max_tokens=max_tokens,
             category=category,
@@ -1791,6 +1875,8 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     stream = bool(body.get("stream"))
     category = categorize_request(body)
     input_tokens_est = _input_tokens_est(text_chars)
+    source_surface = str(body.get("source_surface") or body.get("_agentflow_source_surface") or "openai_responses")
+    endpoint = str(body.get("endpoint") or body.get("_agentflow_endpoint") or "responses")
     openai_canary_enabled = bool(ROUTING_OPENAI_CANARY.get("enabled"))
     meta = {
         "enabled": bool(OPENAI_ROUTING_ENABLED or openai_canary_enabled),
@@ -1804,11 +1890,51 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "category": category,
         "policy_source": "local-default",
         "provider": "openai",
+        "source_surface": source_surface,
+        "endpoint": endpoint,
     }
     if not ROUTING_ENABLED:
         meta["enabled"] = False
         meta["reason"] = "routing disabled"
         return requested, meta
+
+    requested_l = requested.lower()
+    for rule in ROUTING_RULES:
+        matched, _ = _rule_matches(
+            rule,
+            requested_l=requested_l,
+            text_chars=text_chars,
+            input_tokens_est=input_tokens_est,
+            tools=tools,
+            max_tokens=body.get("max_tokens"),
+            category=category,
+            phase_meta={
+                "workflow_phase": category,
+                "workflow_phase_reason": "openai-request-category",
+                "workflow_phase_confidence": "medium",
+            },
+            stream=stream,
+            session_id=None,
+            requested_model=requested,
+            provider="openai",
+            source_surface=source_surface,
+            endpoint=endpoint,
+        )
+        if not matched:
+            continue
+        routed, rule_meta = _route_openai_from_rule(
+            rule,
+            requested=requested,
+            text_chars=text_chars,
+            input_tokens_est=input_tokens_est,
+            tools=tools,
+            stream=stream,
+            category=category,
+            source_surface=source_surface,
+            endpoint=endpoint,
+        )
+        if routed and rule_meta:
+            return routed, rule_meta
 
     if openai_canary_enabled:
         canary_routed, canary_meta = openai_canary_decision(
@@ -1842,7 +1968,6 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if not OPENAI_ROUTING_ENABLED:
         return requested, meta
 
-    requested_l = requested.lower()
     if tools:
         meta["reason"] = "keep requested OpenAI model for tool request"
         meta["enabled"] = True

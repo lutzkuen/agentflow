@@ -995,28 +995,28 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         summary = plan["evidence"]["stats_summary"]
         decision_report = summary["openai_routing_promotion_decision"]
         self.assertEqual(decision_report["schema"], "agentflow.openai_routing_promotion_decision_report.v1")
-        self.assertEqual(decision_report["decision"], "promote")
-        self.assertTrue(decision_report["promotion_ready"])
+        self.assertEqual(decision_report["decision"], "active-local-policy")
+        self.assertFalse(decision_report["promotion_ready"])
         self.assertEqual(decision_report["summary"]["applied_count"], 12)
         self.assertEqual(decision_report["summary"]["holdout_count"], 15)
         self.assertEqual(decision_report["summary"]["safety_stop_count"], 0)
         self.assertEqual(decision_report["summary"]["error_count"], 0)
         self.assertEqual(decision_report["summary"]["fallback_count"], 0)
         self.assertEqual(decision_report["summary"]["retry_count"], 0)
-        self.assertEqual(decision_report["summary"]["next_action"], "draft-openai-routing-rule")
+        self.assertEqual(decision_report["summary"]["next_action"], "measure-openai-routing-rule-outcomes")
         self.assertEqual(decision_report["summary"]["target_local_rule_file"], "routing_rules.yaml")
 
         loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
         routing_lever = next(row for row in loop["levers"] if row["lever"] == "routing")
         self.assertEqual(routing_lever["evidence_source"], "agentflow.openai_routing_promotion_decision_report.v1")
-        self.assertEqual(routing_lever["state"], "activation-ready")
-        self.assertEqual(routing_lever["next_action"], "draft-openai-routing-rule")
+        self.assertEqual(routing_lever["state"], "active-local-policy")
+        self.assertEqual(routing_lever["next_action"], "measure-openai-routing-rule-outcomes")
         self.assertEqual(routing_lever["applied_count"], 12)
         self.assertEqual(routing_lever["holdout_count"], 15)
 
         routing_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "routing")
-        self.assertEqual(routing_candidate["blocker"], "openai-routing-promotion-ready")
-        self.assertEqual(routing_candidate["projected_savings_signal"]["decision"], "promote")
+        self.assertEqual(routing_candidate["blocker"], "openai-routing-promotion-active-local-policy")
+        self.assertEqual(routing_candidate["projected_savings_signal"]["decision"], "active-local-policy")
         self.assertEqual(routing_candidate["projected_savings_signal"]["target_local_rule_file"], "routing_rules.yaml")
 
         rendered = json.dumps(plan)

@@ -10,9 +10,16 @@
 #   text_chars_gt   — total request text characters greater than this value
 #   text_chars_lte  — total request text characters less than or equal to this value
 #   text_chars_gte  — total request text characters greater than or equal to this value
+#   max_text_chars  — alias for text_chars_lte
+#   min_text_chars  — alias for text_chars_gte
+#   max_input_tokens_est — estimated input tokens less than or equal to this value
+#   min_input_tokens_est — estimated input tokens greater than or equal to this value
 #   has_tools       — true/false: whether the request includes tool definitions or tool blocks
 #   max_tokens_lte  — max_tokens field is <= this value
 #   env_flag        — environment variable that must be truthy for the rule to match
+#   provider        — exact match: anthropic | openai
+#   source_surface  — exact match against sanitized local source surface metadata
+#   endpoint        — exact match against sanitized local endpoint metadata
 #   category        — exact match: tool-result | tool-heavy | tool-light | long-context | short-completion | code-gen | chat
 #   category_not_in — category name or list of category names to exclude
 #   workflow_phase  — exact match against routing metadata: planning | tool-execution | verification | summary | thinking | chat | unknown
@@ -128,6 +135,68 @@ openai_canary:
     limit: 1000
 
 rules:
+
+- id: promoted-openai-gpt54-tool-light-mini
+  enabled: true
+  policy_source: local-promoted
+  conditions:
+    provider: openai
+    source_surface: openai_responses
+    endpoint: responses
+    model_pattern: "gpt-5.4"
+    category: "tool-light"
+    has_tools: true
+    stream: false
+    max_text_chars: 16000
+    max_input_tokens_est: 4000
+  action:
+    route_to: "gpt-5.4-mini"
+    reason: "promoted OpenAI gpt-5.4 tool-light routing rule"
+  metadata:
+    schema: agentflow.openai_routing_promotion_rule_metadata.v1
+    source: openai_routing_promotion_decision
+    promoted_from_canary: true
+    promotion_source_policy_id: local-openai-routing-canary-v1
+    source_evidence_schema: agentflow.openai_routing_promotion_decision_report.v1
+    target_local_policy_section: routing.rules
+    target_local_rule_file: routing_rules.yaml
+    promotion_decision:
+      decision: promote
+      reason: promotion-ready
+      next_action: draft-openai-routing-rule
+      matched_count: 404
+      applied_count: 23
+      holdout_count: 19
+      safety_stop_count: 0
+      error_count: 0
+      retry_count: 0
+      fallback_count: 0
+      savings_per_1000_calls_usd: 4.375
+      projected_savings_usd: 1.7675
+    rollback_metadata:
+      rollback_action_type: disable_openai_routing_rule
+      disabled_patch:
+        id: promoted-openai-gpt54-tool-light-mini
+        enabled: false
+        disabled_reason: operator-requested
+      rollback_reason_codes:
+        - operator-requested
+        - safety-stop-observed
+        - error-observed
+        - fallback-observed
+        - retry-observed
+        - stale-evidence
+    privacy:
+      metadata_only: true
+      aggregate_only: true
+      content_free: true
+      identifiers_included: false
+      provider_payloads_included: false
+      local_paths_included: false
+      cache_identifiers_included: false
+      individual_candidates_included: false
+      provider_calls_made: false
+      managed_server_calls_made: false
 
 - conditions:
     model_pattern: "opus"

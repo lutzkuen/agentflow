@@ -589,17 +589,20 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         result = build_openai_routing_promotion_decision_report(self.store, limit=20)
 
         self.assertEqual(result["schema"], "agentflow.openai_routing_promotion_decision_report.v1")
-        self.assertEqual(result["decision"], "promote")
+        self.assertEqual(result["decision"], "active-local-policy")
+        self.assertFalse(result["promotion_ready"])
         self.assertEqual(result["summary"]["decision_count"], 1)
         self.assertEqual(len(result["decisions"]), 1)
         decision = result["promotion_decision"]
         self.assertEqual(decision["schema"], "agentflow.openai_routing_promotion_decision.v1")
-        self.assertEqual(decision["decision"], "promote")
-        self.assertEqual(decision["promotion_verdict"], "promotion-ready")
+        self.assertEqual(decision["decision"], "active-local-policy")
+        self.assertEqual(decision["promotion_verdict"], "active-local-policy")
         self.assertEqual(
             decision["promotion_verdict_options"],
-            ["promotion-ready", "keep-staged", "keep-blocked", "rollback-required"],
+            ["promotion-ready", "active-local-policy", "keep-staged", "keep-blocked", "rollback-required"],
         )
+        self.assertEqual(decision["next_action"], "measure-openai-routing-rule-outcomes")
+        self.assertEqual(decision["reason"], "matching-openai-routing-rule-active-in-local-policy")
         self.assertEqual(decision["target"]["source_surface"], "openai_responses")
         self.assertEqual(decision["target"]["endpoint"], "responses")
         self.assertEqual(decision["target"]["category"], "tool-light")
@@ -618,16 +621,13 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertGreater(decision["savings_per_1000_calls_usd"], 0)
         self.assertEqual(decision["reason_codes"], [])
         self.assertEqual(decision["routing_rule_metadata"]["target_local_policy_section"], "routing.rules")
-        patch = decision["local_policy_patch"]
-        self.assertEqual(patch["schema"], "agentflow.openai_routing_local_policy_patch.v1")
-        self.assertEqual(patch["patch_type"], "promote_openai_routing_canary")
-        self.assertEqual(patch["status"], "drafted")
-        self.assertTrue(patch["operator_apply_required"])
-        self.assertFalse(patch["policy_files_written"])
-        self.assertEqual(patch["target_local_policy_section"], "routing.rules")
-        self.assertEqual(patch["target_local_rule_file"], "routing_rules.yaml")
-        self.assertEqual(patch["rules"][0]["conditions"]["category"], "tool-light")
-        self.assertEqual(patch["rules"][0]["action"]["route_to"], "gpt-5.4-mini")
+        self.assertIsNone(decision["local_policy_patch"])
+        active = decision["active_local_policy_rule"]
+        self.assertEqual(active["status"], "active-local-policy")
+        self.assertEqual(active["reason"], "matching-openai-routing-rule-active-in-local-policy")
+        self.assertEqual(active["policy_source"], "local-promoted")
+        self.assertEqual(active["target_local_policy_section"], "routing.rules")
+        self.assertEqual(active["target_local_rule_file"], "routing_rules.yaml")
         rollback = decision["rollback_metadata"]
         self.assertEqual(rollback["schema"], "agentflow.openai_routing_promotion_rollback_metadata.v1")
         self.assertEqual(rollback["rollback_action_type"], "disable_openai_routing_rule")
@@ -651,10 +651,11 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["schema"], "agentflow.openai_routing_promotion_decision_report.v1")
-        self.assertEqual(payload["decision"], "promote")
-        self.assertEqual(payload["promotion_verdict"], "promotion-ready")
+        self.assertEqual(payload["decision"], "active-local-policy")
+        self.assertEqual(payload["promotion_verdict"], "active-local-policy")
         self.assertEqual(payload["summary"]["applied_count"], 7)
         self.assertEqual(payload["summary"]["holdout_count"], 7)
+        self.assertEqual(payload["summary"]["next_action"], "measure-openai-routing-rule-outcomes")
 
     def test_targeted_promotion_decision_keeps_skipped_unknown_coverage_out_of_promotion(self) -> None:
         def canary(canary_cohort: str, **extra: object) -> dict[str, object]:

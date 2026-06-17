@@ -14,7 +14,7 @@ from agentflow_proxy.store import utc_now
 SCHEMA = "agentflow.openai_routing_opportunity.v1"
 PROMOTION_DECISION_REPORT_SCHEMA = "agentflow.openai_routing_promotion_decision_report.v1"
 PROMOTION_DECISION_SCHEMA = "agentflow.openai_routing_promotion_decision.v1"
-PROMOTION_VERDICT_OPTIONS = ["promotion-ready", "keep-staged", "keep-blocked", "rollback-required"]
+PROMOTION_VERDICT_OPTIONS = ["promotion-ready", "active-local-policy", "keep-staged", "keep-blocked", "rollback-required"]
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
 DEFAULT_MAX_RETRY_RATE = 0.20
@@ -1161,6 +1161,8 @@ def _promotion_verdict(
     applied_count: int,
     current_routed_count: int,
 ) -> str:
+    if decision == "active-local-policy":
+        return "active-local-policy"
     if decision == "promote":
         return "promotion-ready"
     rollback_reasons = {
@@ -1264,6 +1266,98 @@ def _openai_promotion_local_policy_patch(
         "rules": [rule],
         "privacy": _openai_promotion_decision_privacy(),
     }
+
+
+def _active_openai_local_policy_rule(target: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        from agentflow_proxy import router as router_module
+    except Exception:
+        return None
+
+    requested_model = str(target.get("requested_model") or "").lower()
+    target_model = str(target.get("target_model") or "").lower()
+    source_surface = str(target.get("source_surface") or "").lower()
+    endpoint = str(target.get("endpoint") or "").lower()
+    category = str(target.get("category") or "").lower()
+
+    for rule in getattr(router_module, "ROUTING_RULES", []):
+        if not isinstance(rule, dict) or rule.get("enabled") is False:
+            continue
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        if str(action.get("route_to") or "").lower() != target_model:
+            continue
+        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+        provider_cond = str(conditions.get("provider") or "openai").lower()
+        if provider_cond != "openai":
+            continue
+        model_pattern = str(conditions.get("model_pattern") or "").lower()
+        if model_pattern and model_pattern not in requested_model:
+            continue
+        source_cond = str(conditions.get("source_surface") or source_surface).lower()
+        if source_cond != source_surface:
+            continue
+        endpoint_cond = str(conditions.get("endpoint") or endpoint).lower()
+        if endpoint_cond != endpoint:
+            continue
+        category_cond = str(conditions.get("category") or category).lower()
+        if category_cond != category:
+            continue
+        if "has_tools" in conditions and bool(conditions.get("has_tools")) != category.startswith("tool-"):
+            continue
+        if "stream" in conditions and bool(conditions.get("stream")):
+            continue
+        metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
+        rule_id = str(rule.get("id") or "promoted-openai-routing-rule")
+        return {
+            "schema": "agentflow.openai_routing_active_local_policy_rule.v1",
+            "status": "active-local-policy",
+            "reason": "matching-openai-routing-rule-active-in-local-policy",
+            "policy_source": str(rule.get("policy_source") or metadata.get("policy_source") or "local-promoted"),
+            "promoted_from_canary": bool(metadata.get("promoted_from_canary")),
+            "source": metadata.get("source") or "routing_rules.yaml",
+            "target_local_policy_section": "routing.rules",
+            "target_local_rule_file": "routing_rules.yaml",
+            "rule_id_included": True,
+            "target_rule_id": rule_id,
+            "conditions": {
+                "provider": "openai",
+                "source_surface": source_surface,
+                "endpoint": endpoint,
+                "requested_model": requested_model,
+                "target_model": target_model,
+                "category": category,
+            },
+            "rollback_metadata": {
+                "schema": "agentflow.openai_routing_promotion_rollback_metadata.v1",
+                "required_for_promotion": True,
+                "rollback_action_type": "disable_openai_routing_rule",
+                "target_local_policy_section": "routing.rules",
+                "target_local_rule_file": "routing_rules.yaml",
+                "target_rule_id": rule_id,
+                "rule_id_included": True,
+                "disable_patch": {
+                    "rules": [
+                        {
+                            "id": rule_id,
+                            "enabled": False,
+                            "disabled_reason": "operator-requested",
+                        }
+                    ]
+                },
+                "rollback_reason_codes": [
+                    "operator-requested",
+                    "safety-stop-observed",
+                    "error-observed",
+                    "fallback-observed",
+                    "retry-observed",
+                    "stale-evidence",
+                ],
+                "preserve_previous_rule_required": True,
+                "privacy": _openai_promotion_decision_privacy(),
+            },
+            "privacy": _openai_promotion_decision_privacy(),
+        }
+    return None
 
 
 def _openai_promotion_duplicate_suppression(
@@ -1517,6 +1611,14 @@ def _build_openai_promotion_decision(
             "unclassified_reason_breakdown": _breakdown(unclassified_reason_counts),
         },
     }
+    active_local_policy_rule = _active_openai_local_policy_rule(target)
+    if decision == "promote" and active_local_policy_rule is not None:
+        decision = "active-local-policy"
+        next_action = "measure-openai-routing-rule-outcomes"
+        reason = "matching-openai-routing-rule-active-in-local-policy"
+        blocker_counts = {}
+        reason_codes = []
+
     promotion_verdict = _promotion_verdict(
         decision=decision,
         blocker_counts=blocker_counts,
@@ -1575,6 +1677,7 @@ def _build_openai_promotion_decision(
         },
         "routing_rule_metadata": routing_rule_metadata,
         "local_policy_patch": local_policy_patch,
+        "active_local_policy_rule": active_local_policy_rule,
         "rollback_metadata": rollback_metadata,
         "duplicate_suppression": duplicate_suppression,
         "privacy": privacy,
@@ -1613,6 +1716,7 @@ def build_openai_routing_promotion_decision_report(
             "decision_count": 1,
             "promotion_verdict": decision["promotion_verdict"],
             "promote_count": 1 if decision["decision"] == "promote" else 0,
+            "active_local_policy_count": 1 if decision["decision"] == "active-local-policy" else 0,
             "keep_staged_count": 1 if decision["decision"] == "keep-staged" else 0,
             "keep_blocked_count": 1 if decision["decision"] == "keep-blocked" else 0,
             "narrow_count": 1 if decision["decision"] == "narrow" else 0,

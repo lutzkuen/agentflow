@@ -4487,7 +4487,13 @@ def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     if promotion_decision is not None:
         decision = str(promotion_decision.get("decision") or "unknown")
         lifecycle = promotion_decision.get("lifecycle") if isinstance(promotion_decision.get("lifecycle"), dict) else {}
-        state = "activation-ready" if decision == "promote" else decision if decision in {"keep-staged", "keep-blocked"} else "blocked"
+        state = (
+            "activation-ready"
+            if decision == "promote"
+            else decision
+            if decision in {"active-local-policy", "keep-staged", "keep-blocked"}
+            else "blocked"
+        )
         return {
             "lever": "routing",
             "state": state,
@@ -6873,7 +6879,30 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
             "missing-holdout-coverage",
         }
     ]
-    if applied > 0 and holdout > 0 and not blocker_counts and savings_per_1000 > 0:
+    target = {
+        "provider": "openai",
+        "source_surface": "openai_responses",
+        "endpoint": "responses",
+        "category": "tool-light",
+        "requested_model": "gpt-5.4",
+        "target_model": "gpt-5.4-mini",
+        "required_local_executor": "openai-routing-canary",
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+    }
+    active_local_policy_rule = None
+    try:
+        from agentflow_proxy.openai_routing_report import _active_openai_local_policy_rule
+
+        active_local_policy_rule = _active_openai_local_policy_rule(target)
+    except Exception:
+        active_local_policy_rule = None
+
+    if applied > 0 and holdout > 0 and not blocker_counts and savings_per_1000 > 0 and active_local_policy_rule is not None:
+        decision = "active-local-policy"
+        next_action = "measure-openai-routing-rule-outcomes"
+        reason = "matching-openai-routing-rule-active-in-local-policy"
+    elif applied > 0 and holdout > 0 and not blocker_counts and savings_per_1000 > 0:
         decision = "promote"
         next_action = "draft-openai-routing-rule"
         reason = "promotion-ready"
@@ -6910,17 +6939,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
         "reason": reason,
         "reason_codes": sorted(blocker_counts),
         "blocker_reason_breakdown": breakdown,
-        "target": {
-            "provider": "openai",
-            "source_surface": "openai_responses",
-            "endpoint": "responses",
-            "category": "tool-light",
-            "requested_model": "gpt-5.4",
-            "target_model": "gpt-5.4-mini",
-            "required_local_executor": "openai-routing-canary",
-            "target_local_policy_section": "routing.rules",
-            "target_local_rule_file": "routing_rules.yaml",
-        },
+        "target": target,
         "candidate_count": len(target_buckets),
         "candidate_ids": sorted(candidate_ids),
         "matched_count": matched_count,
@@ -6944,6 +6963,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
             "skipped_reason_breakdown": skipped_breakdown,
             "unknown_reason_breakdown": unknown_breakdown,
         },
+        "active_local_policy_rule": active_local_policy_rule,
         "privacy": privacy,
     }
     return {
@@ -6955,6 +6975,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
         "summary": {
             "decision_count": 1,
             "promote_count": 1 if decision == "promote" else 0,
+            "active_local_policy_count": 1 if decision == "active-local-policy" else 0,
             "keep_staged_count": 1 if decision == "keep-staged" else 0,
             "keep_blocked_count": 1 if decision == "keep-blocked" else 0,
             "matched_count": matched_count,
@@ -7062,14 +7083,23 @@ def _routing_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         lifecycle = promotion_decision.get("lifecycle") if isinstance(promotion_decision.get("lifecycle"), dict) else {}
         decision = str(promotion_decision.get("decision") or "unknown")
         ready = bool(promotion_decision.get("promotion_ready"))
+        active = decision == "active-local-policy"
         reason = str(promotion_decision.get("reason") or decision)
         return _candidate(
             lever="routing",
             provider_surface_bucket="openai/openai_responses/responses/tool-light/gpt-5.4->gpt-5.4-mini",
-            blocker="openai-routing-promotion-ready" if ready else f"openai-routing-promotion-{reason}",
+            blocker=(
+                "openai-routing-promotion-ready"
+                if ready
+                else "openai-routing-promotion-active-local-policy"
+                if active
+                else f"openai-routing-promotion-{reason}"
+            ),
             estimated_savings_path=(
                 "Convert the measured OpenAI routing promotion decision into a reviewed local file-backed routing rule."
                 if ready
+                else "Measure post-apply outcomes for the active local OpenAI routing rule."
+                if active
                 else "Resolve the OpenAI routing promotion blocker before local routing rule drafting."
             ),
             projected_savings_signal={
@@ -7087,9 +7117,9 @@ def _routing_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
                 "target_local_policy_section": "routing.rules",
                 "target_local_rule_file": "routing_rules.yaml",
             },
-            confidence="high" if ready else "medium",
+            confidence="high" if ready or active else "medium",
             sequencing="Use the OpenAI promotion decision before generic pass-through routing candidates so applied and holdout coverage remain durable.",
-            safety_status="review-required" if ready else "blocked",
+            safety_status="active-local-policy" if active else "review-required" if ready else "blocked",
             score=10_000.0 + _to_float(promotion_decision.get("savings_per_1000_calls_usd")),
         )
 

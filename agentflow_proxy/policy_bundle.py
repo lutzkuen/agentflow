@@ -544,12 +544,22 @@ _ROUTING_CONDITION_KEYS = {
     "text_chars_gt",
     "text_chars_lte",
     "text_chars_gte",
+    "max_text_chars",
+    "min_text_chars",
+    "max_input_tokens_est",
+    "min_input_tokens_est",
     "has_tools",
     "max_tokens_lte",
     "env_flag",
+    "provider",
+    "source_surface",
+    "endpoint",
+    "stream",
     "category",
     "category_not_in",
     "workflow_phase",
+    "workflow_phase_confidence_gte",
+    "session_memory",
 }
 
 _ROUTING_CATEGORY_VALUES = {
