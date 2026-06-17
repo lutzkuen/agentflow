@@ -46,6 +46,7 @@ CRUNCH_REMAINING_MEASUREMENT_SCHEMA = "agentflow.request_shape_crunch_remaining_
 CRUNCH_POLICY_DECISION_APPLY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_apply.v1"
 CRUNCH_POLICY_DECISION_LEDGER_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger.v1"
 CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger_entry.v1"
+CRUNCH_POST_MAX_ROLLOUT_DECISION_SCHEMA = "agentflow.request_shape_crunch_post_max_rollout_decision.v1"
 FOLLOW_UP_CANDIDATES_SCHEMA = "agentflow.request_shape_follow_up_candidates.v1"
 FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "agentflow.request_shape_blocker_cohort.v1"
 REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
@@ -2549,6 +2550,7 @@ def _active_request_shape_crunch_rules(rules_path: str | Path | None = None) -> 
             continue
         rollout = item.get("rollout") if isinstance(item.get("rollout"), dict) else {}
         safety_gates = item.get("safety_gates") if isinstance(item.get("safety_gates"), dict) else {}
+        rollback_metadata = item.get("rollback_metadata") if isinstance(item.get("rollback_metadata"), dict) else {}
         decision_value = public_label(decision.get("decision") or "unknown", "unknown")
         rules.append(
             {
@@ -2582,6 +2584,8 @@ def _active_request_shape_crunch_rules(rules_path: str | Path | None = None) -> 
                     _as_float(safety_gates.get("max_rollout_fraction"), DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION),
                     6,
                 ),
+                "rollback_metadata_present": bool(rollback_metadata),
+                "rollback_action_type": public_label(rollback_metadata.get("rollback_action_type") or "unknown", "unknown"),
                 "metadata_only": True,
                 "aggregate_only": True,
             }
@@ -2633,6 +2637,145 @@ def _crunch_activation_post_widening_decision(
     if max_rollout_fraction > 0 and canary_fraction > 0 and canary_fraction < max_rollout_fraction:
         return "post-widening-widen-ready", "widen-further", []
     return "post-widening-active-observed", "monitor-post-widening-crunch-activation", []
+
+
+def _crunch_post_max_rollout_local_policy_patch(
+    *,
+    patch_type: str,
+    decision_id: str,
+    active_rule_ref: str | None,
+    canary_fraction: float,
+    max_rollout_fraction: float,
+) -> dict[str, Any]:
+    patch: dict[str, Any] = {
+        "schema": "agentflow.request_shape_crunch_post_max_rollout_policy_patch.v1",
+        "patch_type": patch_type,
+        "target_local_policy": "crunch_rules",
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "decision_id": public_label(decision_id, "unknown"),
+        "active_rule_ref": public_label(active_rule_ref, "unknown") if active_rule_ref else None,
+        "dry_run": True,
+        "operator_review_required": True,
+        "policy_files_written": False,
+        "policy_file_contents_included": False,
+        "current_rollout": {
+            "schema": "agentflow.request_shape_crunch_rollout_snapshot.v1",
+            "canary_fraction": round(canary_fraction, 6),
+            "max_rollout_fraction": round(max_rollout_fraction, 6),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _crunch_opportunity_privacy(),
+    }
+    if patch_type == "promote_repeated_context_crunch_rule_full_rollout":
+        patch["rollout_update"] = {
+            "schema": "agentflow.request_shape_crunch_full_rollout_update.v1",
+            "canary_enabled": False,
+            "full_rollout_fraction": 1.0,
+            "canary_fraction": 1.0,
+            "holdout_fraction": 0.0,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+    elif patch_type == "rollback_repeated_context_crunch_rule":
+        patch["rollout_update"] = {
+            "schema": "agentflow.request_shape_crunch_rollback_update.v1",
+            "enabled": False,
+            "canary_enabled": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+    return {key: value for key, value in patch.items() if value not in (None, "", [], {})}
+
+
+def _crunch_activation_post_max_rollout_decision(
+    *,
+    post_widening_status: str,
+    post_widening_next_action: str,
+    post_widening_reasons: list[str],
+    decision_id: str,
+    active_rule_ref: str | None,
+    canary_fraction: float,
+    max_rollout_fraction: float,
+    rollback_metadata_present: bool,
+) -> dict[str, Any]:
+    reason_codes = [public_label(reason, "unknown") for reason in post_widening_reasons if public_label(reason, "unknown") != "unknown"]
+    decision = "not-applicable"
+    status = "post-max-rollout-not-applicable"
+    next_action = post_widening_next_action
+    cap_reason: str | None = None
+    local_policy_patch: dict[str, Any] | None = None
+
+    if post_widening_next_action == "rollback":
+        decision = "rollback"
+        status = "post-max-rollout-rollback-required"
+        next_action = "rollback"
+        local_policy_patch = _crunch_post_max_rollout_local_policy_patch(
+            patch_type="rollback_repeated_context_crunch_rule",
+            decision_id=decision_id,
+            active_rule_ref=active_rule_ref,
+            canary_fraction=canary_fraction,
+            max_rollout_fraction=max_rollout_fraction,
+        )
+    elif post_widening_status == "post-widening-active-at-max-rollout":
+        if rollback_metadata_present:
+            decision = "promote-full"
+            status = "post-max-rollout-full-rollout-ready"
+            next_action = "promote-full-repeated-context-crunch-rule"
+            reason_codes = reason_codes or ["max-rollout-cap-only"]
+            local_policy_patch = _crunch_post_max_rollout_local_policy_patch(
+                patch_type="promote_repeated_context_crunch_rule_full_rollout",
+                decision_id=decision_id,
+                active_rule_ref=active_rule_ref,
+                canary_fraction=canary_fraction,
+                max_rollout_fraction=max_rollout_fraction,
+            )
+        else:
+            decision = "keep-capped"
+            status = "post-max-rollout-keep-capped"
+            next_action = "keep-capped-add-rollback-proof"
+            cap_reason = "rollback-metadata-missing"
+            reason_codes = reason_codes or [cap_reason]
+    elif post_widening_status == "post-widening-measurement-incomplete" and max_rollout_fraction > 0 and canary_fraction >= max_rollout_fraction:
+        decision = "keep-capped"
+        status = "post-max-rollout-keep-capped"
+        next_action = "keep-capped-collect-missing-measurements"
+        cap_reason = reason_codes[0] if reason_codes else "post-widening-measurement-incomplete"
+        reason_codes = reason_codes or [cap_reason]
+
+    rollback_metadata = {
+        "schema": "agentflow.request_shape_crunch_post_max_rollout_rollback_metadata.v1",
+        "present": bool(rollback_metadata_present),
+        "required_for_promotion": True,
+        "rollback_action_type": "disable_repeated_context_crunch_canary",
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "active_rule_ref": public_label(active_rule_ref, "unknown") if active_rule_ref else None,
+        "policy_file_contents_included": False,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+    result = {
+        "schema": CRUNCH_POST_MAX_ROLLOUT_DECISION_SCHEMA,
+        "status": status,
+        "decision": decision,
+        "decision_options": ["promote-full", "keep-capped", "rollback"],
+        "next_action": next_action,
+        "promotion_allowed": decision == "promote-full",
+        "full_rollout_allowed": decision == "promote-full",
+        "cap_reason": cap_reason,
+        "reason_codes": reason_codes,
+        "decision_id": public_label(decision_id, "unknown"),
+        "active_rule_ref": public_label(active_rule_ref, "unknown") if active_rule_ref else None,
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "canary_fraction": round(canary_fraction, 6),
+        "max_rollout_fraction": round(max_rollout_fraction, 6),
+        "rollback_metadata": {key: value for key, value in rollback_metadata.items() if value not in (None, "", [], {})},
+        "local_policy_patch": local_policy_patch,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+    return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
 
 def build_request_shape_crunch_activation_evidence_report(
@@ -2715,11 +2858,23 @@ def build_request_shape_crunch_activation_evidence_report(
         next_action = "measure-request-shape-crunch-canary-impact"
         missing_measurements = ["applied-and-holdout-crunch-decision-coverage"]
     active_rule_ref = str(top_rule.get("rule_ref") or top_rule.get("rule_id") or "") or None
+    post_max_rollout_decision = _crunch_activation_post_max_rollout_decision(
+        post_widening_status=post_widening_status,
+        post_widening_next_action=post_widening_next_action,
+        post_widening_reasons=post_widening_reasons,
+        decision_id=decision_id,
+        active_rule_ref=active_rule_ref,
+        canary_fraction=canary_fraction,
+        max_rollout_fraction=max_rollout_fraction,
+        rollback_metadata_present=bool(top_rule.get("rollback_metadata_present")),
+    )
+    post_max_rollout_next_action = str(post_max_rollout_decision.get("next_action") or post_widening_next_action)
     keep_active_outcome = (
         status == "active-rule-evidence-observed"
         and post_widening_status == "post-widening-active-at-max-rollout"
-        and post_widening_next_action == "keep-active"
     )
+    if keep_active_outcome:
+        next_action = post_max_rollout_next_action
     duplicate_suppression = {
         "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
         "suppresses_new_activation_issue": keep_active_outcome,
@@ -2755,6 +2910,7 @@ def build_request_shape_crunch_activation_evidence_report(
         "activation_state": "measured-active" if keep_active_outcome else ("missing-measurement" if missing_measurements else "measured-savings"),
         "activation_mode": "active-local-policy",
         "next_action": next_action,
+        "post_max_rollout_decision": post_max_rollout_decision,
         "target_local_policy": "crunch_rules",
         "policy_section": "crunch",
         "local_file_backed": True,
@@ -2816,6 +2972,12 @@ def build_request_shape_crunch_activation_evidence_report(
             "post_widening_status": post_widening_status,
             "post_widening_next_action": post_widening_next_action,
             "post_widening_reason_codes": post_widening_reasons,
+            "post_max_rollout_status": post_max_rollout_decision.get("status"),
+            "post_max_rollout_decision": post_max_rollout_decision.get("decision"),
+            "post_max_rollout_next_action": post_max_rollout_decision.get("next_action"),
+            "post_max_rollout_reason_codes": post_max_rollout_decision.get("reason_codes", []),
+            "post_max_rollout_promotion_allowed": bool(post_max_rollout_decision.get("promotion_allowed")),
+            "post_max_rollout_cap_reason": post_max_rollout_decision.get("cap_reason"),
             "target_local_rule_file": "crunch_rules.yaml",
             "target_local_policy_section": "crunch.rules",
             "policy_files_written": False,
@@ -2824,6 +2986,7 @@ def build_request_shape_crunch_activation_evidence_report(
             "next_action": next_action,
         },
         "rules": evidence_rules[:5],
+        "post_max_rollout_decision": post_max_rollout_decision,
         "activation_follow_up": activation_follow_up,
         "duplicate_suppression": duplicate_suppression,
         "missing_measurements": missing_measurements,

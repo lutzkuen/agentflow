@@ -269,7 +269,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
             "decision": "widen",
             "graduation_decision": "widen",
             "decision_id": "request-shape-crunch-policy-decision:fixture",
-            "next_action": "keep-active",
+            "next_action": "promote-full-repeated-context-crunch-rule",
             "summary": {
                 "active_rule_count": 1,
                 "matching_active_rule_count": 1,
@@ -296,6 +296,11 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
                 "post_widening_status": "post-widening-active-at-max-rollout",
                 "post_widening_next_action": "keep-active",
                 "post_widening_reason_codes": [],
+                "post_max_rollout_status": "post-max-rollout-full-rollout-ready",
+                "post_max_rollout_decision": "promote-full",
+                "post_max_rollout_next_action": "promote-full-repeated-context-crunch-rule",
+                "post_max_rollout_reason_codes": ["max-rollout-cap-only"],
+                "post_max_rollout_promotion_allowed": True,
                 "target_local_rule_file": "crunch_rules.yaml",
                 "target_local_policy_section": "crunch.rules",
             },
@@ -336,8 +341,8 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         crunch = by_family["crunch"]
         self.assertEqual(crunch["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
         self.assertEqual(crunch["source_decision"], "widen")
-        self.assertEqual(crunch["outcome"], "keep-active")
-        self.assertEqual(crunch["next_action"], "keep-active")
+        self.assertEqual(crunch["outcome"], "promote-full")
+        self.assertEqual(crunch["next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertEqual(crunch["applied_count"], 107)
         self.assertEqual(crunch["holdout_count"], 40)
         self.assertEqual(crunch["skipped_count"], 280)
@@ -347,6 +352,11 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertEqual(crunch["target_local_policy_section"], "crunch.rules")
         self.assertEqual(crunch["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(crunch["post_widening_next_action"], "keep-active")
+        self.assertEqual(crunch["post_max_rollout_status"], "post-max-rollout-full-rollout-ready")
+        self.assertEqual(crunch["post_max_rollout_decision"], "promote-full")
+        self.assertEqual(crunch["post_max_rollout_next_action"], "promote-full-repeated-context-crunch-rule")
+        self.assertEqual(crunch["post_max_rollout_reason_codes"], ["max-rollout-cap-only"])
+        self.assertTrue(crunch["post_max_rollout_promotion_allowed"])
         self.assertEqual(crunch["coverage"]["applied_count"], 107)
         self.assertEqual(crunch["coverage"]["holdout_count"], 40)
         self.assertEqual(crunch["coverage"]["safety_stop_count"], 0)

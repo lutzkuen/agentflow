@@ -4030,7 +4030,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "decision": "widen",
                         "graduation_decision": "widen",
                         "decision_id": decision_id,
-                        "next_action": "keep-active",
+                        "next_action": "promote-full-repeated-context-crunch-rule",
                         "summary": {
                             "active_rule_count": 1,
                             "matching_active_rule_count": 1,
@@ -4058,9 +4058,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "post_widening_status": "post-widening-active-at-max-rollout",
                             "post_widening_next_action": "keep-active",
                             "post_widening_reason_codes": [],
+                            "post_max_rollout_status": "post-max-rollout-full-rollout-ready",
+                            "post_max_rollout_decision": "promote-full",
+                            "post_max_rollout_next_action": "promote-full-repeated-context-crunch-rule",
+                            "post_max_rollout_reason_codes": ["max-rollout-cap-only"],
+                            "post_max_rollout_promotion_allowed": True,
                             "target_local_rule_file": "crunch_rules.yaml",
                             "target_local_policy_section": "crunch.rules",
-                            "next_action": "keep-active",
+                            "next_action": "promote-full-repeated-context-crunch-rule",
                         },
                         "rules": [
                             {
@@ -4152,6 +4157,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(signal["top_report"]["widened_rule_count"], 1)
         self.assertEqual(signal["top_report"]["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(signal["top_report"]["post_widening_next_action"], "keep-active")
+        self.assertEqual(signal["top_report"]["post_max_rollout_status"], "post-max-rollout-full-rollout-ready")
+        self.assertEqual(signal["top_report"]["post_max_rollout_decision"], "promote-full")
+        self.assertEqual(signal["top_report"]["post_max_rollout_next_action"], "promote-full-repeated-context-crunch-rule")
+        self.assertTrue(signal["top_report"]["post_max_rollout_promotion_allowed"])
         self.assertEqual(signal["top_report"]["missing_measurements"], [])
         self.assertTrue(signal["top_report"]["duplicate_suppression"]["suppresses_new_activation_issue"])
         local_outcome_summary = stats_summary["local_activation_outcome_summary"]
@@ -4169,10 +4178,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(keep_active_outcome["active_rule_source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
         self.assertEqual(keep_active_outcome["target_local_rule_file"], "crunch_rules.yaml")
         self.assertEqual(keep_active_outcome["target_local_policy_section"], "crunch.rules")
-        self.assertEqual(keep_active_outcome["outcome"], "keep-active")
-        self.assertEqual(keep_active_outcome["next_action"], "keep-active")
+        self.assertEqual(keep_active_outcome["outcome"], "promote-full")
+        self.assertEqual(keep_active_outcome["next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertEqual(keep_active_outcome["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(keep_active_outcome["post_widening_next_action"], "keep-active")
+        self.assertEqual(keep_active_outcome["post_max_rollout_status"], "post-max-rollout-full-rollout-ready")
+        self.assertEqual(keep_active_outcome["post_max_rollout_decision"], "promote-full")
+        self.assertEqual(keep_active_outcome["post_max_rollout_next_action"], "promote-full-repeated-context-crunch-rule")
+        self.assertTrue(keep_active_outcome["post_max_rollout_promotion_allowed"])
         self.assertEqual(keep_active_outcome["applied_count"], 107)
         self.assertEqual(keep_active_outcome["holdout_count"], 40)
         self.assertEqual(keep_active_outcome["coverage"]["applied_count"], 107)
@@ -4195,7 +4208,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         loop = stats_summary["evidence_to_activation_loop"]
         crunch_stage = next(item for item in loop["levers"] if item["lever"] == "crunch")
         self.assertEqual(crunch_stage["state"], "measured-active")
-        self.assertEqual(crunch_stage["next_action"], "keep-active")
+        self.assertEqual(crunch_stage["next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertEqual(crunch_stage["activation_follow_up_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
         self.assertEqual(crunch_stage["applied_count"], 107)
         self.assertEqual(crunch_stage["holdout_count"], 40)
@@ -4204,6 +4217,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(crunch_stage["error_rate_delta"], 0.0)
         self.assertEqual(crunch_stage["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(crunch_stage["post_widening_next_action"], "keep-active")
+        self.assertEqual(crunch_stage["post_max_rollout_status"], "post-max-rollout-full-rollout-ready")
+        self.assertEqual(crunch_stage["post_max_rollout_decision"], "promote-full")
+        self.assertEqual(crunch_stage["post_max_rollout_next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertTrue(crunch_stage["duplicate_suppression"]["suppresses_generic_crunch_activation_issue"])
         request_shape_stage = next(item for item in loop["levers"] if item["lever"] == "request-shape-rollups")
         self.assertEqual(request_shape_stage["state"], "measured-active")
@@ -4213,14 +4229,20 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(request_shape_stage["holdout_count"], 40)
         self.assertEqual(request_shape_stage["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(request_shape_stage["post_widening_next_action"], "keep-active")
+        self.assertEqual(request_shape_stage["post_max_rollout_status"], "post-max-rollout-full-rollout-ready")
+        self.assertEqual(request_shape_stage["post_max_rollout_decision"], "promote-full")
+        self.assertEqual(request_shape_stage["post_max_rollout_next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertTrue(request_shape_stage["duplicate_suppression"]["suppresses_new_activation_issue"])
         ledger = stats_summary["evidence_to_activation_next_action_ledger"]
         crunch_entry = next(item for item in ledger["entries"] if item["lever"] == "crunch")
         self.assertEqual(crunch_entry["state"], "measured-active")
         self.assertEqual(crunch_entry["current_status"], "applied")
-        self.assertEqual(crunch_entry["next_action"], "keep-active")
+        self.assertEqual(crunch_entry["next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertEqual(crunch_entry["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(crunch_entry["post_widening_next_action"], "keep-active")
+        self.assertEqual(crunch_entry["post_max_rollout_status"], "post-max-rollout-full-rollout-ready")
+        self.assertEqual(crunch_entry["post_max_rollout_decision"], "promote-full")
+        self.assertEqual(crunch_entry["post_max_rollout_next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertEqual(crunch_entry["applied_count"], 107)
         self.assertEqual(crunch_entry["holdout_count"], 40)
         self.assertEqual(crunch_entry["safety_stop_count"], 0)
@@ -4242,6 +4264,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(entry["holdout_count"], 40)
         self.assertEqual(entry["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(entry["post_widening_next_action"], "keep-active")
+        self.assertEqual(entry["post_max_rollout_status"], "post-max-rollout-full-rollout-ready")
+        self.assertEqual(entry["post_max_rollout_decision"], "promote-full")
+        self.assertEqual(entry["post_max_rollout_next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertEqual(entry["active_rule_source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
         self.assertTrue(entry["duplicate_suppression"]["suppresses_new_activation_issue"])
         rendered = json.dumps(plan, sort_keys=True)

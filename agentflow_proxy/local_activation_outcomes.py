@@ -504,8 +504,28 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
         for item in (summary.get("post_widening_reason_codes") or [])
         if public_label(item, "unknown") != "unknown"
     ]
-    row["outcome"] = "keep-active" if keep_active else post_next_action
-    row["next_action"] = post_next_action
+    post_max_status = public_label(summary.get("post_max_rollout_status"), "")
+    post_max_decision = public_label(summary.get("post_max_rollout_decision"), "")
+    post_max_next_action = public_label(summary.get("post_max_rollout_next_action"), "")
+    post_max_reason_codes = [
+        public_label(item, "unknown")
+        for item in (summary.get("post_max_rollout_reason_codes") or [])
+        if public_label(item, "unknown") != "unknown"
+    ]
+    if post_max_status:
+        row["post_max_rollout_status"] = post_max_status
+    if post_max_decision:
+        row["post_max_rollout_decision"] = post_max_decision
+    if post_max_next_action:
+        row["post_max_rollout_next_action"] = post_max_next_action
+    if post_max_reason_codes:
+        row["post_max_rollout_reason_codes"] = post_max_reason_codes
+    row["post_max_rollout_promotion_allowed"] = bool(summary.get("post_max_rollout_promotion_allowed"))
+    cap_reason = public_label(summary.get("post_max_rollout_cap_reason"), "")
+    if cap_reason:
+        row["post_max_rollout_cap_reason"] = cap_reason
+    row["outcome"] = post_max_decision if post_max_decision in {"promote-full", "keep-capped", "rollback"} else ("keep-active" if keep_active else post_next_action)
+    row["next_action"] = post_max_next_action or post_next_action
     row["error_rate_delta"] = round(_as_float(summary.get("error_rate_delta")), 6)
     row["retry_rate_delta"] = round(_as_float(summary.get("retry_rate_delta")), 6)
     row["fallback_rate_delta"] = round(_as_float(summary.get("fallback_rate_delta")), 6)
@@ -542,10 +562,12 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
         "status": public_label(report.get("status"), "unknown"),
         "decision": row["source_decision"],
         "post_widening_status": post_status,
+        "post_max_rollout_status": post_max_status or None,
+        "post_max_rollout_decision": post_max_decision or None,
         "metadata_only": True,
         "aggregate_only": True,
     }
-    for code in _reason_codes(row["post_widening_reason_codes"], summary):
+    for code in _reason_codes(row["post_widening_reason_codes"], post_max_reason_codes, summary):
         blockers[code] += 1
     return True
 

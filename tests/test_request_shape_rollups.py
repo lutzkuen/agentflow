@@ -6035,6 +6035,10 @@ class RequestShapeRollupTests(unittest.TestCase):
                                     },
                                     "rollout": {"canary_fraction": 0.30, "holdout_fraction": 0.10},
                                     "safety_gates": {"max_rollout_fraction": 0.30},
+                                    "rollback_metadata": {
+                                        "rollback_action_type": "disable_repeated_context_crunch_canary",
+                                        "required_for_promotion": True,
+                                    },
                                 }
                             ],
                         }
@@ -6071,12 +6075,31 @@ class RequestShapeRollupTests(unittest.TestCase):
             )
 
         self.assertEqual(payload["status"], "active-rule-evidence-observed")
-        self.assertEqual(payload["next_action"], "keep-active")
+        self.assertEqual(payload["next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertEqual(payload["summary"]["post_widening_status"], "post-widening-active-at-max-rollout")
         self.assertEqual(payload["summary"]["post_widening_next_action"], "keep-active")
+        self.assertEqual(payload["summary"]["post_max_rollout_status"], "post-max-rollout-full-rollout-ready")
+        self.assertEqual(payload["summary"]["post_max_rollout_decision"], "promote-full")
+        self.assertEqual(payload["summary"]["post_max_rollout_next_action"], "promote-full-repeated-context-crunch-rule")
+        self.assertTrue(payload["summary"]["post_max_rollout_promotion_allowed"])
+        post_max = payload["post_max_rollout_decision"]
+        self.assertEqual(post_max["schema"], "agentflow.request_shape_crunch_post_max_rollout_decision.v1")
+        self.assertEqual(post_max["decision"], "promote-full")
+        self.assertEqual(post_max["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(post_max["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(post_max["local_policy_patch"]["patch_type"], "promote_repeated_context_crunch_rule_full_rollout")
+        self.assertEqual(post_max["local_policy_patch"]["rollout_update"]["full_rollout_fraction"], 1.0)
+        self.assertFalse(post_max["local_policy_patch"]["policy_file_contents_included"])
+        self.assertTrue(post_max["rollback_metadata"]["present"])
+        self.assertFalse(post_max["privacy"]["raw_prompts_included"])
+        self.assertFalse(post_max["privacy"]["provider_bodies_included"])
+        self.assertFalse(post_max["privacy"]["request_ids_included"])
+        self.assertFalse(post_max["privacy"]["session_ids_included"])
+        self.assertFalse(post_max["privacy"]["cache_keys_included"])
         follow_up = payload["activation_follow_up"]
         self.assertEqual(follow_up["activation_state"], "measured-active")
-        self.assertEqual(follow_up["next_action"], "keep-active")
+        self.assertEqual(follow_up["next_action"], "promote-full-repeated-context-crunch-rule")
+        self.assertEqual(follow_up["post_max_rollout_decision"]["decision"], "promote-full")
         duplicate_suppression = payload["duplicate_suppression"]
         self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
         self.assertTrue(duplicate_suppression["suppresses_generic_crunch_activation_issue"])
@@ -6129,6 +6152,10 @@ class RequestShapeRollupTests(unittest.TestCase):
                                         "observed_saved_usd": 25.818387,
                                         "widened_canary_fraction": 0.30,
                                         "holdout_fraction": 0.10,
+                                    },
+                                    "rollback_metadata": {
+                                        "rollback_action_type": "disable_repeated_context_crunch_canary",
+                                        "required_for_promotion": True,
                                     },
                                 }
                             ],
@@ -6269,7 +6296,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ranked")
         self.assertEqual(payload["summary"]["excluded_active_rule_covered_count"], 1)
         self.assertEqual(payload["summary"]["remaining_measurement_required_count"], 1)
-        self.assertEqual(payload["summary"]["active_rule_next_action"], "keep-active")
+        self.assertEqual(payload["summary"]["active_rule_next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertTrue(payload["summary"]["active_rule_duplicate_suppresses_new_activation_issue"])
         cohort = payload["cohorts"][0]
         self.assertEqual(cohort["row_count"], 446)

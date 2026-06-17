@@ -2159,6 +2159,14 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         "post_widening_reason_codes": sanitize_value(
             [str(item) for item in summary.get("post_widening_reason_codes") or [] if str(item or "").strip()]
         ),
+        "post_max_rollout_status": sanitize_value(summary.get("post_max_rollout_status")),
+        "post_max_rollout_decision": sanitize_value(summary.get("post_max_rollout_decision")),
+        "post_max_rollout_next_action": sanitize_value(summary.get("post_max_rollout_next_action")),
+        "post_max_rollout_reason_codes": sanitize_value(
+            [str(item) for item in summary.get("post_max_rollout_reason_codes") or [] if str(item or "").strip()]
+        ),
+        "post_max_rollout_promotion_allowed": bool(summary.get("post_max_rollout_promotion_allowed")),
+        "post_max_rollout_cap_reason": sanitize_value(summary.get("post_max_rollout_cap_reason")),
         "canary_fraction": round(_to_float(summary.get("canary_fraction")), 6),
         "max_rollout_fraction": round(_to_float(summary.get("max_rollout_fraction")), 6),
         "activation_state": activation_state,
@@ -3092,7 +3100,7 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
             continue
         if str(item.get("post_widening_status") or "") != "post-widening-active-at-max-rollout":
             continue
-        if str(item.get("post_widening_next_action") or item.get("next_action") or "") != "keep-active":
+        if str(item.get("post_widening_next_action") or "") != "keep-active" and str(item.get("next_action") or "") != "keep-active":
             continue
         if _to_int(item.get("active_rule_count")) <= 0:
             continue
@@ -3157,6 +3165,13 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
         "canary_fraction": round(_to_float(report.get("canary_fraction")), 6),
         "max_rollout_fraction": round(_to_float(report.get("max_rollout_fraction")), 6),
     }
+    post_max_status = sanitize_value(report.get("post_max_rollout_status"))
+    post_max_decision = sanitize_value(report.get("post_max_rollout_decision"))
+    post_max_next_action = sanitize_value(report.get("post_max_rollout_next_action"))
+    post_max_reason_codes = sanitize_value(report.get("post_max_rollout_reason_codes"))
+    post_max_promotion_allowed = bool(report.get("post_max_rollout_promotion_allowed"))
+    outcome_value = post_max_decision if post_max_decision in {"promote-full", "keep-capped", "rollback"} else "keep-active"
+    next_action_value = post_max_next_action or "keep-active"
     outcome = {
         "schema": "agentflow.local_activation_outcome_summary_row.v1",
         "policy_section": "crunch",
@@ -3197,8 +3212,14 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
         "post_widening_status": sanitize_value(report.get("post_widening_status")),
         "post_widening_next_action": "keep-active",
         "post_widening_reason_codes": sanitize_value(report.get("post_widening_reason_codes")),
-        "outcome": "keep-active",
-        "next_action": "keep-active",
+        "post_max_rollout_status": post_max_status,
+        "post_max_rollout_decision": post_max_decision,
+        "post_max_rollout_next_action": post_max_next_action,
+        "post_max_rollout_reason_codes": post_max_reason_codes,
+        "post_max_rollout_promotion_allowed": post_max_promotion_allowed,
+        "post_max_rollout_cap_reason": sanitize_value(report.get("post_max_rollout_cap_reason")),
+        "outcome": outcome_value,
+        "next_action": next_action_value,
         "error_rate_delta": round(_to_float(report.get("error_rate_delta")), 6),
         "retry_rate_delta": round(_to_float(report.get("retry_rate_delta")), 6),
         "fallback_rate_delta": round(_to_float(report.get("fallback_rate_delta")), 6),
@@ -3209,6 +3230,8 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
             "status": sanitize_value(report.get("status")),
             "decision": sanitize_value(report.get("decision")),
             "post_widening_status": sanitize_value(report.get("post_widening_status")),
+            "post_max_rollout_status": post_max_status,
+            "post_max_rollout_decision": post_max_decision,
             "metadata_only": True,
             "aggregate_only": True,
         },
@@ -3874,6 +3897,12 @@ def build_evidence_to_activation_next_action_ledger(
             "post_widening_status": sanitize_value(stage.get("post_widening_status")),
             "post_widening_next_action": sanitize_value(stage.get("post_widening_next_action")),
             "post_widening_reason_codes": sanitize_value(stage.get("post_widening_reason_codes")),
+            "post_max_rollout_status": sanitize_value(stage.get("post_max_rollout_status")),
+            "post_max_rollout_decision": sanitize_value(stage.get("post_max_rollout_decision")),
+            "post_max_rollout_next_action": sanitize_value(stage.get("post_max_rollout_next_action")),
+            "post_max_rollout_reason_codes": sanitize_value(stage.get("post_max_rollout_reason_codes")),
+            "post_max_rollout_promotion_allowed": bool(stage.get("post_max_rollout_promotion_allowed")),
+            "post_max_rollout_cap_reason": sanitize_value(stage.get("post_max_rollout_cap_reason")),
             "projected_hits": _to_int(stage.get("projected_hits")),
             "actual_hits": _to_int(stage.get("actual_hits")),
             "actual_saved_cost_usd": round(_to_float(stage.get("actual_saved_cost_usd")), 8),
@@ -4946,7 +4975,8 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
             if progress_state:
                 state = progress_state
             next_action = str(
-                top_report.get("post_widening_next_action")
+                top_report.get("post_max_rollout_next_action")
+                or top_report.get("post_widening_next_action")
                 or top_report.get("next_action")
                 or "monitor-post-widening-crunch-activation"
             )
@@ -5009,6 +5039,12 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
                 "post_widening_status": sanitize_value(top_report.get("post_widening_status")),
                 "post_widening_next_action": sanitize_value(top_report.get("post_widening_next_action")),
                 "post_widening_reason_codes": sanitize_value(top_report.get("post_widening_reason_codes")),
+                "post_max_rollout_status": sanitize_value(top_report.get("post_max_rollout_status")),
+                "post_max_rollout_decision": sanitize_value(top_report.get("post_max_rollout_decision")),
+                "post_max_rollout_next_action": sanitize_value(top_report.get("post_max_rollout_next_action")),
+                "post_max_rollout_reason_codes": sanitize_value(top_report.get("post_max_rollout_reason_codes")),
+                "post_max_rollout_promotion_allowed": bool(top_report.get("post_max_rollout_promotion_allowed")),
+                "post_max_rollout_cap_reason": sanitize_value(top_report.get("post_max_rollout_cap_reason")),
                 "canary_fraction": round(_to_float(top_report.get("canary_fraction")), 6),
                 "max_rollout_fraction": round(_to_float(top_report.get("max_rollout_fraction")), 6),
                 "active_rule_count": _to_int(top_report.get("active_rule_count")),
@@ -5183,6 +5219,12 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
         stage["post_widening_status"] = sanitize_value(progress.get("post_widening_status"))
         stage["post_widening_next_action"] = sanitize_value(progress.get("post_widening_next_action"))
         stage["post_widening_reason_codes"] = sanitize_value(progress.get("post_widening_reason_codes"))
+        stage["post_max_rollout_status"] = sanitize_value(progress.get("post_max_rollout_status"))
+        stage["post_max_rollout_decision"] = sanitize_value(progress.get("post_max_rollout_decision"))
+        stage["post_max_rollout_next_action"] = sanitize_value(progress.get("post_max_rollout_next_action"))
+        stage["post_max_rollout_reason_codes"] = sanitize_value(progress.get("post_max_rollout_reason_codes"))
+        stage["post_max_rollout_promotion_allowed"] = bool(progress.get("post_max_rollout_promotion_allowed"))
+        stage["post_max_rollout_cap_reason"] = sanitize_value(progress.get("post_max_rollout_cap_reason"))
         stage["canary_fraction"] = round(_to_float(progress.get("canary_fraction")), 6)
         stage["max_rollout_fraction"] = round(_to_float(progress.get("max_rollout_fraction")), 6)
         if progress.get("report_key") in {"active_crunch_rule_coverage", "request_shape_crunch_activation_evidence"}:
