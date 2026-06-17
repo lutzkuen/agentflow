@@ -628,6 +628,159 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["applied_count"], 7)
         self.assertEqual(payload["summary"]["holdout_count"], 7)
 
+    def test_targeted_promotion_decision_keeps_skipped_unknown_coverage_out_of_promotion(self) -> None:
+        def canary(canary_cohort: str, **extra: object) -> dict[str, object]:
+            status = "applied" if canary_cohort == "canary_applied" else "holdout"
+            if canary_cohort == "skipped":
+                status = "not_selected"
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-v1",
+                "target_candidate_id": "openai-route:responses:gpt-5:tool-light:tools:nonstream:to-gpt-5-4-mini",
+                "status": status,
+                "cohort": canary_cohort,
+                "reason": "outside-canary-fraction" if canary_cohort == "skipped" else "selected-canary",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if canary_cohort == "canary_applied" else "gpt-5.4",
+                "category": "tool-light",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "canary_fraction": 0.15,
+                "holdout_fraction": 0.10,
+                **extra,
+            }
+
+        for _ in range(6):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+            )
+        for _ in range(7):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout", reason="selected-holdout"),
+            )
+        for _ in range(3):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("skipped"),
+            )
+        self._log_openai_call(
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4",
+            category="tool-light",
+            text_chars=4000,
+            has_tools=True,
+            openai_canary=canary("unknown", status="mystery", cohort="mystery", reason="missing-status"),
+        )
+
+        result = build_openai_routing_promotion_decision_report(self.store, limit=30)
+
+        self.assertEqual(result["decision"], "keep-staged")
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(result["summary"]["promote_count"], 0)
+        self.assertEqual(result["summary"]["keep_staged_count"], 1)
+        self.assertEqual(result["summary"]["applied_count"], 6)
+        self.assertEqual(result["summary"]["holdout_count"], 7)
+        self.assertEqual(result["summary"]["skipped_count"], 3)
+        self.assertEqual(result["summary"]["unknown_count"], 1)
+        self.assertEqual(result["summary"]["next_action"], "classify-openai-routing-canary-skipped-unknown")
+        self.assertIn("unknown-canary-lifecycle-rows", result["summary"]["reason_codes"])
+        self.assertEqual(result["summary"]["skipped_reason_breakdown"], [{"value": "outside-canary-fraction", "count": 3}])
+        self.assertEqual(result["summary"]["unknown_reason_breakdown"], [{"value": "missing-status", "count": 1}])
+        decision = result["promotion_decision"]
+        self.assertEqual(decision["lifecycle"]["skipped_count"], 3)
+        self.assertEqual(decision["lifecycle"]["unknown_count"], 1)
+        self.assertTrue(decision["quality_gates"]["requires_classified_skipped_unknown_rows"])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("secret-openai-session", rendered)
+        self.assertFalse(decision["privacy"]["raw_prompts_included"])
+        self.assertFalse(decision["privacy"]["tool_payloads_included"])
+
+    def test_targeted_promotion_decision_narrows_unsupported_skipped_coverage(self) -> None:
+        def canary(cohort: str, **extra: object) -> dict[str, object]:
+            status = "applied" if cohort == "canary_applied" else "holdout"
+            if cohort == "skipped":
+                status = "skipped"
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-v1",
+                "target_candidate_id": "openai-route:responses:gpt-5:tool-light:tools:nonstream:to-gpt-5-4-mini",
+                "status": status,
+                "cohort": cohort,
+                "reason": "request-too-large" if cohort == "skipped" else "selected-canary",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if cohort == "canary_applied" else "gpt-5.4",
+                "category": "tool-light",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "canary_fraction": 0.15,
+                "holdout_fraction": 0.10,
+                **extra,
+            }
+
+        for _ in range(6):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+            )
+        for _ in range(7):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout", reason="selected-holdout"),
+            )
+        for _ in range(2):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("skipped"),
+            )
+
+        result = build_openai_routing_promotion_decision_report(self.store, limit=30)
+
+        self.assertEqual(result["decision"], "narrow")
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(result["summary"]["narrow_count"], 1)
+        self.assertEqual(result["summary"]["promote_count"], 0)
+        self.assertEqual(result["summary"]["skipped_count"], 2)
+        self.assertEqual(result["summary"]["unknown_count"], 0)
+        self.assertEqual(result["summary"]["next_action"], "narrow-openai-routing-canary-shape")
+        self.assertEqual(result["summary"]["reason"], "skipped-canary-unsupported-shape")
+        self.assertEqual(
+            result["summary"]["blocker_reason_breakdown"],
+            [{"value": "skipped-canary-unsupported-shape", "count": 2}],
+        )
+        decision = result["promotion_decision"]
+        self.assertEqual(decision["decision"], "narrow")
+        self.assertEqual(decision["lifecycle"]["skipped_unknown_classification"]["unsupported_shape_count"], 2)
+        self.assertEqual(decision["reason_codes"], ["skipped-canary-unsupported-shape"])
+        self.assertEqual(decision["target"]["target_local_rule_file"], "routing_rules.yaml")
+
     def test_stats_wrapper_and_cli_emit_report(self) -> None:
         for _ in range(5):
             self._log_openai_call(category="chat", text_chars=1200)

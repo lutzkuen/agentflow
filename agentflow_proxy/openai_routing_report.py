@@ -1217,6 +1217,10 @@ def _build_openai_promotion_decision(
         decision = "keep-blocked"
         next_action = "review-openai-routing-canary-blockers"
         reason = hard_blockers[0]
+    elif unsupported_shape_count and not unknown and not unclassified_count:
+        decision = "narrow"
+        next_action = "narrow-openai-routing-canary-shape"
+        reason = "skipped-canary-unsupported-shape"
     else:
         decision = "keep-staged"
         next_action = (
@@ -1311,8 +1315,10 @@ def _build_openai_promotion_decision(
             },
         },
         "quality_gates": {
+            "requires_fresh_evidence": True,
             "requires_applied_coverage": True,
             "requires_holdout_coverage": True,
+            "requires_classified_skipped_unknown_rows": True,
             "requires_zero_safety_stops": True,
             "requires_zero_errors": True,
             "requires_zero_fallbacks": True,
@@ -1356,15 +1362,26 @@ def build_openai_routing_promotion_decision_report(
             "promote_count": 1 if decision["decision"] == "promote" else 0,
             "keep_staged_count": 1 if decision["decision"] == "keep-staged" else 0,
             "keep_blocked_count": 1 if decision["decision"] == "keep-blocked" else 0,
+            "narrow_count": 1 if decision["decision"] == "narrow" else 0,
             "matched_count": decision["matched_count"],
+            "blocked_count": decision["blocked_count"],
             "candidate_count": decision["candidate_count"],
             "current_routed_count": decision["current_routed_count"],
             "applied_count": decision["lifecycle"]["applied_count"],
             "holdout_count": decision["lifecycle"]["holdout_count"],
+            "skipped_count": decision["lifecycle"]["skipped_count"],
+            "bypassed_or_disabled_count": decision["lifecycle"]["cohort_counts"].get("bypassed_or_disabled", 0),
+            "unknown_count": decision["lifecycle"]["unknown_count"],
             "safety_stop_count": decision["lifecycle"]["safety_stop_count"],
             "error_count": decision["lifecycle"]["error_count"],
             "fallback_count": decision["lifecycle"]["fallback_count"],
             "retry_count": decision["lifecycle"]["retry_count"],
+            "next_action": decision["next_action"],
+            "reason": decision["reason"],
+            "reason_codes": decision["reason_codes"],
+            "blocker_reason_breakdown": decision["blocker_reason_breakdown"],
+            "skipped_reason_breakdown": decision["lifecycle"]["skipped_reason_breakdown"],
+            "unknown_reason_breakdown": decision["lifecycle"]["unknown_reason_breakdown"],
             "savings_per_1000_calls_usd": decision["savings_per_1000_calls_usd"],
             "projected_savings_usd": decision["projected_savings_usd"],
             "target_local_policy_section": "routing.rules",
