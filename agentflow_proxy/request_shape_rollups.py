@@ -5255,17 +5255,29 @@ def _cache_replay_applied_miss_blockers(row: dict[str, Any], cache_meta: dict[st
         blockers.add("cohort-mismatch")
     if any("normalization" in reason for reason in reasons):
         blockers.add("normalization-mismatch")
+    if any("ttl-window" in reason or "ttl-not-elapsed" in reason for reason in reasons):
+        blockers.add("ttl-window-not-elapsed")
+    if any("bypass" in reason for reason in reasons):
+        blockers.add("canary-bypass")
     if not pattern_rule:
         blockers.add("cohort-mismatch")
     store_status = public_label(store_meta.get("status"), "unknown")
     if store_status == "stored":
-        blockers.add("cache-warmup-miss")
+        store_reason = public_label(store_meta.get("reason"), "unknown")
+        if store_reason in {"compatible-success-response", "chat-compatible", "responses-compatible"}:
+            blockers.add("first-seen-cache-warmup")
+        elif any("write-read" in reason or "hit-recovery" in reason for reason in reasons | {store_reason}):
+            blockers.add("replay-write-read-disconnect")
+        else:
+            blockers.add("first-seen-cache-warmup")
     elif store_status == "skipped":
         blockers.add("cache-write-absence")
     elif _as_int(row.get("status_code"), 200) >= 400:
         blockers.add("upstream-error-before-cache-write")
     elif cache_meta.get("status") == "miss":
         blockers.add("cache-write-absence")
+    if "cache-warmup-miss" in reasons and not blockers:
+        blockers.add("first-seen-cache-warmup")
     if not blockers:
         blockers.add("uncategorized-applied-cache-miss")
     return sorted(blockers)
@@ -5553,14 +5565,20 @@ def _cache_replay_policy_decision_top_canary(evidence: dict[str, Any]) -> dict[s
     return {}
 
 
-_CACHE_REPLAY_NON_BLOCKING_APPLIED_MISS_BLOCKERS = {"cache-warmup-miss"}
+_CACHE_REPLAY_NON_BLOCKING_APPLIED_MISS_BLOCKERS = {
+    "cache-warmup-miss",
+    "first-seen-cache-warmup",
+}
 _CACHE_REPLAY_APPLIED_MISS_BLOCKER_PRIORITY = (
     "invalidation-risk",
     "fingerprint-drift",
     "cache-write-absence",
     "cohort-mismatch",
     "normalization-mismatch",
+    "ttl-window-not-elapsed",
     "ttl-expiry",
+    "canary-bypass",
+    "replay-write-read-disconnect",
     "upstream-error-before-cache-write",
     "uncategorized-applied-cache-miss",
 )
@@ -5665,7 +5683,7 @@ def _cache_replay_warmup_only_applied_miss(evidence: dict[str, Any] | None) -> b
         and metrics["holdout_count"] > 0
         and metrics["miss_count"] > 0
         and metrics["observed_hits"] <= 0
-        and all(blocker == "cache-warmup-miss" for blocker in blockers)
+        and all(blocker in _CACHE_REPLAY_NON_BLOCKING_APPLIED_MISS_BLOCKERS for blocker in blockers)
     )
 
 
@@ -5687,7 +5705,8 @@ def _cache_replay_policy_reason_codes(evidence: dict[str, Any] | None) -> list[s
     if metrics["applied_count"] > 0 and metrics["holdout_count"] > 0 and metrics["miss_count"] > 0 and metrics["observed_hits"] <= 0:
         codes.append("applied-cache-replay-miss-observed")
         if _cache_replay_warmup_only_applied_miss(evidence):
-            codes.append("cache-warmup-miss")
+            top_warmup_blocker = metrics.get("top_applied_miss_blocker") or "cache-warmup-miss"
+            codes.append(public_label(top_warmup_blocker, "cache-warmup-miss"))
     if metrics["stale_evidence"]:
         codes.append("stale-cache-replay-evidence")
     if metrics["invalidation_skipped_count"] > 0:
@@ -5750,8 +5769,8 @@ def _cache_replay_policy_decision_reason(evidence: dict[str, Any] | None, decisi
         return "stale-cache-replay-evidence"
     metrics = _cache_replay_policy_decision_metrics(evidence)
     codes = _cache_replay_policy_reason_codes(evidence)
-    if decision == "keep-staged" and "cache-warmup-miss" in codes:
-        return "cache-warmup-miss"
+    if decision == "keep-staged" and _cache_replay_warmup_only_applied_miss(evidence):
+        return str(metrics.get("top_applied_miss_blocker") or "cache-warmup-miss")
     if decision == "keep-blocked" and metrics.get("top_blocking_applied_miss_blocker"):
         return str(metrics["top_blocking_applied_miss_blocker"])
     if decision == "keep-blocked" and "applied-cache-replay-miss-observed" in codes:
