@@ -463,6 +463,1150 @@ request_shape_repeated_context_canaries:
         lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
+    - id: local-repeated-context-crunch-canary-54e7cc8762d8
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:anthropic:messages:tool-result:eff32bb1c0af6b98
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+      - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+      - thinking-routing-guard
+      - tool-call-cache-disabled
+      - unsupported-streaming-shape
+      conditions:
+        provider_family: anthropic
+        source_surface: anthropic_messages
+        endpoint: messages
+        category: tool-result
+        workflow_phase: thinking
+        stream: true
+        has_tools: true
+        text_bucket: 32k_128k_chars
+        token_bucket: lt_500_tokens
+        cache_status: skipped
+        routing_status: passthrough
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.1
+        holdout_fraction: 0.1
+        canary_salt: local-repeated-context-crunch-canary-54e7cc8762d8
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 299820
+      projected_saved_tokens: 74955
+      projected_saved_usd: 0.224868
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.1
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 6
+        projected_canary_holdout_count: 6
+        projected_skipped_count: 44
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+        - thinking-routing-guard
+        - tool-call-cache-disabled
+        - unsupported-streaming-shape
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
+      rollback_metadata:
+        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        present: true
+        required_for_promotion: true
+        rollback_action_type: disable_repeated_context_crunch_canary
+        rollback_threshold: 0.2
+        rollback_error_rate: 0.2
+        rollback_retry_rate_delta: 0.1
+        rollback_fallback_rate_delta: 0.05
+        rollback_reason_codes:
+        - safety-stop-observed
+        - error-rate-regression
+        - retry-rate-regression
+        - fallback-observed
+        - rollback-observed
+        - operator-requested
+        target_policy_id: local-repeated-context-crunch-canary-54e7cc8762d8
+        target_cohort_id: request-shape-crunch:anthropic:messages:tool-result:eff32bb1c0af6b98
+        target_local_rule_file: crunch_rules.yaml
+        metadata_only: true
+        aggregate_only: true
+      privacy:
+        metadata_only: true
+        aggregate_only: true
+        raw_prompts_included: false
+        raw_messages_included: false
+        raw_request_bodies_included: false
+        provider_bodies_included: false
+        raw_responses_included: false
+        tool_payloads_included: false
+        file_paths_included: false
+        request_ids_included: false
+        session_ids_included: false
+        raw_session_ids_included: false
+        tenant_ids_included: false
+        cache_keys_included: false
+        request_fingerprints_included: false
+        individual_candidate_ids_included: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        policy_files_written: false
+      staged_at: '2026-06-17T03:47:52.567471+00:00'
+    - id: local-repeated-context-crunch-canary-1850d4f4c07b
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:anthropic:unknown:tool-heavy:6088ebf4cf9f60b0
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+      - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+      - tool-call-cache-disabled
+      - unsupported-streaming-shape
+      conditions:
+        provider_family: anthropic
+        source_surface: anthropic_messages
+        endpoint: unknown
+        category: tool-heavy
+        workflow_phase: summary
+        stream: true
+        has_tools: true
+        text_bucket: gte_128k_chars
+        token_bucket: gte_32k_tokens
+        cache_status: skipped
+        routing_status: passthrough
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.1
+        holdout_fraction: 0.1
+        canary_salt: local-repeated-context-crunch-canary-1850d4f4c07b
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 102192
+      projected_saved_tokens: 25548
+      projected_saved_usd: 0.076647
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.1
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 1
+        projected_canary_holdout_count: 1
+        projected_skipped_count: 4
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+        - tool-call-cache-disabled
+        - unsupported-streaming-shape
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
+      rollback_metadata:
+        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        present: true
+        required_for_promotion: true
+        rollback_action_type: disable_repeated_context_crunch_canary
+        rollback_threshold: 0.2
+        rollback_error_rate: 0.2
+        rollback_retry_rate_delta: 0.1
+        rollback_fallback_rate_delta: 0.05
+        rollback_reason_codes:
+        - safety-stop-observed
+        - error-rate-regression
+        - retry-rate-regression
+        - fallback-observed
+        - rollback-observed
+        - operator-requested
+        target_policy_id: local-repeated-context-crunch-canary-1850d4f4c07b
+        target_cohort_id: request-shape-crunch:anthropic:unknown:tool-heavy:6088ebf4cf9f60b0
+        target_local_rule_file: crunch_rules.yaml
+        metadata_only: true
+        aggregate_only: true
+      privacy:
+        metadata_only: true
+        aggregate_only: true
+        raw_prompts_included: false
+        raw_messages_included: false
+        raw_request_bodies_included: false
+        provider_bodies_included: false
+        raw_responses_included: false
+        tool_payloads_included: false
+        file_paths_included: false
+        request_ids_included: false
+        session_ids_included: false
+        raw_session_ids_included: false
+        tenant_ids_included: false
+        cache_keys_included: false
+        request_fingerprints_included: false
+        individual_candidate_ids_included: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        policy_files_written: false
+      staged_at: '2026-06-17T03:47:52.620729+00:00'
+    - id: local-repeated-context-crunch-canary-672924667d15
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:anthropic:unknown:tool-heavy:3447fcd2761fae84
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+      - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+      - thinking-routing-guard
+      - tool-call-cache-disabled
+      - unsupported-streaming-shape
+      conditions:
+        provider_family: anthropic
+        source_surface: anthropic_messages
+        endpoint: unknown
+        category: tool-heavy
+        workflow_phase: thinking
+        stream: true
+        has_tools: true
+        text_bucket: gte_128k_chars
+        token_bucket: lt_500_tokens
+        cache_status: skipped
+        routing_status: passthrough
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.1
+        holdout_fraction: 0.1
+        canary_salt: local-repeated-context-crunch-canary-672924667d15
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 73712
+      projected_saved_tokens: 18428
+      projected_saved_usd: 0.055285
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.1
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 1
+        projected_canary_holdout_count: 1
+        projected_skipped_count: 4
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+        - thinking-routing-guard
+        - tool-call-cache-disabled
+        - unsupported-streaming-shape
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
+      rollback_metadata:
+        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        present: true
+        required_for_promotion: true
+        rollback_action_type: disable_repeated_context_crunch_canary
+        rollback_threshold: 0.2
+        rollback_error_rate: 0.2
+        rollback_retry_rate_delta: 0.1
+        rollback_fallback_rate_delta: 0.05
+        rollback_reason_codes:
+        - safety-stop-observed
+        - error-rate-regression
+        - retry-rate-regression
+        - fallback-observed
+        - rollback-observed
+        - operator-requested
+        target_policy_id: local-repeated-context-crunch-canary-672924667d15
+        target_cohort_id: request-shape-crunch:anthropic:unknown:tool-heavy:3447fcd2761fae84
+        target_local_rule_file: crunch_rules.yaml
+        metadata_only: true
+        aggregate_only: true
+      privacy:
+        metadata_only: true
+        aggregate_only: true
+        raw_prompts_included: false
+        raw_messages_included: false
+        raw_request_bodies_included: false
+        provider_bodies_included: false
+        raw_responses_included: false
+        tool_payloads_included: false
+        file_paths_included: false
+        request_ids_included: false
+        session_ids_included: false
+        raw_session_ids_included: false
+        tenant_ids_included: false
+        cache_keys_included: false
+        request_fingerprints_included: false
+        individual_candidate_ids_included: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        policy_files_written: false
+      staged_at: '2026-06-17T03:47:52.688681+00:00'
+    - id: local-repeated-context-crunch-canary-f274203cb090
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:anthropic:messages:tool-heavy:f636b9a34c9fbb3f
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+      - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+      - tool-call-cache-disabled
+      - unsupported-streaming-shape
+      conditions:
+        provider_family: anthropic
+        source_surface: anthropic_messages
+        endpoint: messages
+        category: tool-heavy
+        workflow_phase: summary
+        stream: true
+        has_tools: true
+        text_bucket: gte_128k_chars
+        token_bucket: gte_32k_tokens
+        cache_status: skipped
+        routing_status: passthrough
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.1
+        holdout_fraction: 0.1
+        canary_salt: local-repeated-context-crunch-canary-f274203cb090
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 27280
+      projected_saved_tokens: 6820
+      projected_saved_usd: 0.020463
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.1
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 1
+        projected_canary_holdout_count: 1
+        projected_skipped_count: 1
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+        - tool-call-cache-disabled
+        - unsupported-streaming-shape
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
+      rollback_metadata:
+        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        present: true
+        required_for_promotion: true
+        rollback_action_type: disable_repeated_context_crunch_canary
+        rollback_threshold: 0.2
+        rollback_error_rate: 0.2
+        rollback_retry_rate_delta: 0.1
+        rollback_fallback_rate_delta: 0.05
+        rollback_reason_codes:
+        - safety-stop-observed
+        - error-rate-regression
+        - retry-rate-regression
+        - fallback-observed
+        - rollback-observed
+        - operator-requested
+        target_policy_id: local-repeated-context-crunch-canary-f274203cb090
+        target_cohort_id: request-shape-crunch:anthropic:messages:tool-heavy:f636b9a34c9fbb3f
+        target_local_rule_file: crunch_rules.yaml
+        metadata_only: true
+        aggregate_only: true
+      privacy:
+        metadata_only: true
+        aggregate_only: true
+        raw_prompts_included: false
+        raw_messages_included: false
+        raw_request_bodies_included: false
+        provider_bodies_included: false
+        raw_responses_included: false
+        tool_payloads_included: false
+        file_paths_included: false
+        request_ids_included: false
+        session_ids_included: false
+        raw_session_ids_included: false
+        tenant_ids_included: false
+        cache_keys_included: false
+        request_fingerprints_included: false
+        individual_candidate_ids_included: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        policy_files_written: false
+      staged_at: '2026-06-17T03:47:52.771147+00:00'
+    - id: local-repeated-context-crunch-canary-7d4616f9e1de
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:anthropic:messages:tool-heavy:197a7341f3c94418
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+      - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+      - thinking-routing-guard
+      - tool-call-cache-disabled
+      - unsupported-streaming-shape
+      conditions:
+        provider_family: anthropic
+        source_surface: anthropic_messages
+        endpoint: messages
+        category: tool-heavy
+        workflow_phase: thinking
+        stream: true
+        has_tools: true
+        text_bucket: gte_128k_chars
+        token_bucket: lt_500_tokens
+        cache_status: skipped
+        routing_status: passthrough
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.1
+        holdout_fraction: 0.1
+        canary_salt: local-repeated-context-crunch-canary-7d4616f9e1de
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 26136
+      projected_saved_tokens: 6534
+      projected_saved_usd: 0.019604
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.1
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 1
+        projected_canary_holdout_count: 1
+        projected_skipped_count: 1
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+        - thinking-routing-guard
+        - tool-call-cache-disabled
+        - unsupported-streaming-shape
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
+      rollback_metadata:
+        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        present: true
+        required_for_promotion: true
+        rollback_action_type: disable_repeated_context_crunch_canary
+        rollback_threshold: 0.2
+        rollback_error_rate: 0.2
+        rollback_retry_rate_delta: 0.1
+        rollback_fallback_rate_delta: 0.05
+        rollback_reason_codes:
+        - safety-stop-observed
+        - error-rate-regression
+        - retry-rate-regression
+        - fallback-observed
+        - rollback-observed
+        - operator-requested
+        target_policy_id: local-repeated-context-crunch-canary-7d4616f9e1de
+        target_cohort_id: request-shape-crunch:anthropic:messages:tool-heavy:197a7341f3c94418
+        target_local_rule_file: crunch_rules.yaml
+        metadata_only: true
+        aggregate_only: true
+      privacy:
+        metadata_only: true
+        aggregate_only: true
+        raw_prompts_included: false
+        raw_messages_included: false
+        raw_request_bodies_included: false
+        provider_bodies_included: false
+        raw_responses_included: false
+        tool_payloads_included: false
+        file_paths_included: false
+        request_ids_included: false
+        session_ids_included: false
+        raw_session_ids_included: false
+        tenant_ids_included: false
+        cache_keys_included: false
+        request_fingerprints_included: false
+        individual_candidate_ids_included: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        policy_files_written: false
+      staged_at: '2026-06-17T03:47:52.867580+00:00'
+    - id: local-repeated-context-crunch-canary-71017018a134
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:openai:responses:tool-light:ef8677934acee536
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+      - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+      - tool-call-cache-disabled
+      conditions:
+        provider_family: openai
+        source_surface: openai_responses
+        endpoint: responses
+        category: tool-light
+        workflow_phase: tool-light
+        stream: false
+        has_tools: true
+        text_bucket: 8k_32k_chars
+        token_bucket: 2k_8k_tokens
+        cache_status: skipped
+        routing_status: passthrough
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.1
+        holdout_fraction: 0.1
+        canary_salt: local-repeated-context-crunch-canary-71017018a134
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 33528
+      projected_saved_tokens: 8382
+      projected_saved_usd: 0.020955
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.1
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 3
+        projected_canary_holdout_count: 3
+        projected_skipped_count: 24
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+        - tool-call-cache-disabled
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
+      rollback_metadata:
+        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        present: true
+        required_for_promotion: true
+        rollback_action_type: disable_repeated_context_crunch_canary
+        rollback_threshold: 0.2
+        rollback_error_rate: 0.2
+        rollback_retry_rate_delta: 0.1
+        rollback_fallback_rate_delta: 0.05
+        rollback_reason_codes:
+        - safety-stop-observed
+        - error-rate-regression
+        - retry-rate-regression
+        - fallback-observed
+        - rollback-observed
+        - operator-requested
+        target_policy_id: local-repeated-context-crunch-canary-71017018a134
+        target_cohort_id: request-shape-crunch:openai:responses:tool-light:ef8677934acee536
+        target_local_rule_file: crunch_rules.yaml
+        metadata_only: true
+        aggregate_only: true
+      privacy:
+        metadata_only: true
+        aggregate_only: true
+        raw_prompts_included: false
+        raw_messages_included: false
+        raw_request_bodies_included: false
+        provider_bodies_included: false
+        raw_responses_included: false
+        tool_payloads_included: false
+        file_paths_included: false
+        request_ids_included: false
+        session_ids_included: false
+        raw_session_ids_included: false
+        tenant_ids_included: false
+        cache_keys_included: false
+        request_fingerprints_included: false
+        individual_candidate_ids_included: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        policy_files_written: false
+      staged_at: '2026-06-17T03:47:52.979055+00:00'
+    - id: local-repeated-context-crunch-canary-ead1956eeda6
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:anthropic:unknown:tool-heavy:49e798099f42d92e
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+      - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+      - thinking-routing-guard
+      - tool-call-cache-disabled
+      - unsupported-streaming-shape
+      conditions:
+        provider_family: anthropic
+        source_surface: anthropic_messages
+        endpoint: unknown
+        category: tool-heavy
+        workflow_phase: thinking
+        stream: true
+        has_tools: true
+        text_bucket: 32k_128k_chars
+        token_bucket: lt_500_tokens
+        cache_status: skipped
+        routing_status: passthrough
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.1
+        holdout_fraction: 0.1
+        canary_salt: local-repeated-context-crunch-canary-ead1956eeda6
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 24052
+      projected_saved_tokens: 6013
+      projected_saved_usd: 0.006014
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.1
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 2
+        projected_canary_holdout_count: 2
+        projected_skipped_count: 7
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+        - thinking-routing-guard
+        - tool-call-cache-disabled
+        - unsupported-streaming-shape
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
+      rollback_metadata:
+        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        present: true
+        required_for_promotion: true
+        rollback_action_type: disable_repeated_context_crunch_canary
+        rollback_threshold: 0.2
+        rollback_error_rate: 0.2
+        rollback_retry_rate_delta: 0.1
+        rollback_fallback_rate_delta: 0.05
+        rollback_reason_codes:
+        - safety-stop-observed
+        - error-rate-regression
+        - retry-rate-regression
+        - fallback-observed
+        - rollback-observed
+        - operator-requested
+        target_policy_id: local-repeated-context-crunch-canary-ead1956eeda6
+        target_cohort_id: request-shape-crunch:anthropic:unknown:tool-heavy:49e798099f42d92e
+        target_local_rule_file: crunch_rules.yaml
+        metadata_only: true
+        aggregate_only: true
+      privacy:
+        metadata_only: true
+        aggregate_only: true
+        raw_prompts_included: false
+        raw_messages_included: false
+        raw_request_bodies_included: false
+        provider_bodies_included: false
+        raw_responses_included: false
+        tool_payloads_included: false
+        file_paths_included: false
+        request_ids_included: false
+        session_ids_included: false
+        raw_session_ids_included: false
+        tenant_ids_included: false
+        cache_keys_included: false
+        request_fingerprints_included: false
+        individual_candidate_ids_included: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        policy_files_written: false
+      staged_at: '2026-06-17T03:47:53.112019+00:00'
+    - id: local-repeated-context-crunch-canary-3770efabf232
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:anthropic:messages:tool-heavy:9996c8d2414b9584
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+      - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+      - thinking-routing-guard
+      - tool-call-cache-disabled
+      - unsupported-streaming-shape
+      conditions:
+        provider_family: anthropic
+        source_surface: anthropic_messages
+        endpoint: messages
+        category: tool-heavy
+        workflow_phase: thinking
+        stream: true
+        has_tools: true
+        text_bucket: 32k_128k_chars
+        token_bucket: lt_500_tokens
+        cache_status: skipped
+        routing_status: passthrough
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.1
+        holdout_fraction: 0.1
+        canary_salt: local-repeated-context-crunch-canary-3770efabf232
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 16120
+      projected_saved_tokens: 4030
+      projected_saved_usd: 0.004031
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.1
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 1
+        projected_canary_holdout_count: 1
+        projected_skipped_count: 5
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+        - thinking-routing-guard
+        - tool-call-cache-disabled
+        - unsupported-streaming-shape
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
+      rollback_metadata:
+        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        present: true
+        required_for_promotion: true
+        rollback_action_type: disable_repeated_context_crunch_canary
+        rollback_threshold: 0.2
+        rollback_error_rate: 0.2
+        rollback_retry_rate_delta: 0.1
+        rollback_fallback_rate_delta: 0.05
+        rollback_reason_codes:
+        - safety-stop-observed
+        - error-rate-regression
+        - retry-rate-regression
+        - fallback-observed
+        - rollback-observed
+        - operator-requested
+        target_policy_id: local-repeated-context-crunch-canary-3770efabf232
+        target_cohort_id: request-shape-crunch:anthropic:messages:tool-heavy:9996c8d2414b9584
+        target_local_rule_file: crunch_rules.yaml
+        metadata_only: true
+        aggregate_only: true
+      privacy:
+        metadata_only: true
+        aggregate_only: true
+        raw_prompts_included: false
+        raw_messages_included: false
+        raw_request_bodies_included: false
+        provider_bodies_included: false
+        raw_responses_included: false
+        tool_payloads_included: false
+        file_paths_included: false
+        request_ids_included: false
+        session_ids_included: false
+        raw_session_ids_included: false
+        tenant_ids_included: false
+        cache_keys_included: false
+        request_fingerprints_included: false
+        individual_candidate_ids_included: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        policy_files_written: false
+      staged_at: '2026-06-17T03:47:53.251885+00:00'
+    - id: local-repeated-context-crunch-canary-e479b1987b4d
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:openai:responses:chat:2525fe103170ca18
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+      - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+      - exact-cache-miss
+      conditions:
+        provider_family: openai
+        source_surface: openai_responses
+        endpoint: responses
+        category: chat
+        workflow_phase: chat
+        stream: false
+        has_tools: false
+        text_bucket: 8k_32k_chars
+        token_bucket: 2k_8k_tokens
+        cache_status: miss
+        routing_status: passthrough
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.1
+        holdout_fraction: 0.1
+        canary_salt: local-repeated-context-crunch-canary-e479b1987b4d
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 4696
+      projected_saved_tokens: 1174
+      projected_saved_usd: 0.000881
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.1
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 1
+        projected_canary_holdout_count: 1
+        projected_skipped_count: 8
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+        - exact-cache-miss
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
+      rollback_metadata:
+        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        present: true
+        required_for_promotion: true
+        rollback_action_type: disable_repeated_context_crunch_canary
+        rollback_threshold: 0.2
+        rollback_error_rate: 0.2
+        rollback_retry_rate_delta: 0.1
+        rollback_fallback_rate_delta: 0.05
+        rollback_reason_codes:
+        - safety-stop-observed
+        - error-rate-regression
+        - retry-rate-regression
+        - fallback-observed
+        - rollback-observed
+        - operator-requested
+        target_policy_id: local-repeated-context-crunch-canary-e479b1987b4d
+        target_cohort_id: request-shape-crunch:openai:responses:chat:2525fe103170ca18
+        target_local_rule_file: crunch_rules.yaml
+        metadata_only: true
+        aggregate_only: true
+      privacy:
+        metadata_only: true
+        aggregate_only: true
+        raw_prompts_included: false
+        raw_messages_included: false
+        raw_request_bodies_included: false
+        provider_bodies_included: false
+        raw_responses_included: false
+        tool_payloads_included: false
+        file_paths_included: false
+        request_ids_included: false
+        session_ids_included: false
+        raw_session_ids_included: false
+        tenant_ids_included: false
+        cache_keys_included: false
+        request_fingerprints_included: false
+        individual_candidate_ids_included: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        policy_files_written: false
+      staged_at: '2026-06-17T03:47:53.407393+00:00'
+    - id: local-repeated-context-crunch-canary-310bd2a27a3c
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:openai:responses:tool-light:e9a73fac07aaee1c
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+      - agentflow.request_shape_crunch_opportunity_dry_run.v1
+      - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+      - cache-skipped
+      conditions:
+        provider_family: openai
+        source_surface: openai_responses
+        endpoint: responses
+        category: tool-light
+        workflow_phase: tool-light
+        stream: false
+        has_tools: true
+        text_bucket: 8k_32k_chars
+        token_bucket: 2k_8k_tokens
+        cache_status: skipped
+        routing_status: routed
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.1
+        holdout_fraction: 0.1
+        canary_salt: local-repeated-context-crunch-canary-310bd2a27a3c
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 3516
+      projected_saved_tokens: 879
+      projected_saved_usd: 0.00066
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.1
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 1
+        projected_canary_holdout_count: 1
+        projected_skipped_count: 2
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+        - cache-skipped
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
+      rollback_metadata:
+        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        present: true
+        required_for_promotion: true
+        rollback_action_type: disable_repeated_context_crunch_canary
+        rollback_threshold: 0.2
+        rollback_error_rate: 0.2
+        rollback_retry_rate_delta: 0.1
+        rollback_fallback_rate_delta: 0.05
+        rollback_reason_codes:
+        - safety-stop-observed
+        - error-rate-regression
+        - retry-rate-regression
+        - fallback-observed
+        - rollback-observed
+        - operator-requested
+        target_policy_id: local-repeated-context-crunch-canary-310bd2a27a3c
+        target_cohort_id: request-shape-crunch:openai:responses:tool-light:e9a73fac07aaee1c
+        target_local_rule_file: crunch_rules.yaml
+        metadata_only: true
+        aggregate_only: true
+      privacy:
+        metadata_only: true
+        aggregate_only: true
+        raw_prompts_included: false
+        raw_messages_included: false
+        raw_request_bodies_included: false
+        provider_bodies_included: false
+        raw_responses_included: false
+        tool_payloads_included: false
+        file_paths_included: false
+        request_ids_included: false
+        session_ids_included: false
+        raw_session_ids_included: false
+        tenant_ids_included: false
+        cache_keys_included: false
+        request_fingerprints_included: false
+        individual_candidate_ids_included: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        policy_files_written: false
+      staged_at: '2026-06-17T03:47:53.576905+00:00'
 repeated_provider_scaffolding:
   # Provider-message profile for reviewed repeated scaffolding candidates.
   # Disabled by default. When a local/manual or managed-recommended rule with

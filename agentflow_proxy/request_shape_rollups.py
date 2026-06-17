@@ -4016,6 +4016,20 @@ def build_request_shape_crunch_canary_stage_report(
         next_action = "apply-local-crunch-canary-after-review"
         reason = "staged-repeated-context-crunch-canary"
         ok = True
+    elif (
+        _as_int(duplicate_suppression.get("suppressed_existing_cohort_count")) > 0
+        and _as_int(duplicate_suppression.get("stageable_unsuppressed_cohort_count")) == 0
+        and any(
+            isinstance(cohort.get("duplicate_suppression"), dict)
+            and cohort["duplicate_suppression"].get("reason")
+            == "matching-repeated-context-crunch-canary-already-staged-in-local-policy"
+            for cohort in already_staged_cohorts
+        )
+    ):
+        status = "already-staged"
+        next_action = "measure-repeated-context-crunch-canary-impact"
+        reason = duplicate_suppression.get("reason") or "matching-repeated-context-crunch-canary-already-staged-in-local-policy"
+        ok = True
     elif has_cohort_filter and len(cohorts) == 1 and len(already_staged_cohorts) == 1:
         status = "already-staged"
         next_action = "measure-repeated-context-crunch-canary-impact"

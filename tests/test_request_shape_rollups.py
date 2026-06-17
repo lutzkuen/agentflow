@@ -3274,7 +3274,9 @@ class RequestShapeRollupTests(unittest.TestCase):
             rules_path=rules_path,
         )
 
-        self.assertEqual(second_report["status"], "no-stageable-cohort")
+        self.assertEqual(second_report["status"], "already-staged")
+        self.assertTrue(second_report["ok"])
+        self.assertEqual(second_report["next_action"], "measure-repeated-context-crunch-canary-impact")
         self.assertEqual(second_report["staged_canary_count"], 0)
         self.assertEqual(second_report["stage_actions"], [])
         self.assertEqual(second_report["duplicate_suppression"]["suppressed_existing_cohort_count"], 3)
@@ -3333,6 +3335,157 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["duplicate_suppression"]["newly_staged_cohort_count"], 2)
         self.assertEqual(report["duplicate_suppression"]["stage_action_limit"], 2)
         self.assertTrue(report["acceptance"]["stages_all_unsuppressed_cohorts_within_bound"])
+
+    def test_crunch_canary_stage_applies_ten_unsuppressed_with_existing_suppression(self) -> None:
+        shapes = [
+            ("anthropic", "anthropic_messages", "messages", "tool-result", "thinking", True, True, 132_000, 100, "skipped", "passthrough"),
+            ("anthropic", "anthropic_messages", "messages", "tool-result", "thinking", True, True, 80_000, 100, "skipped", "passthrough"),
+            ("anthropic", "anthropic_messages", "messages", "tool-heavy", "thinking", True, True, 132_000, 100, "skipped", "passthrough"),
+            ("anthropic", "anthropic_messages", "messages", "tool-heavy", "summary", True, True, 132_000, 9_000, "skipped", "passthrough"),
+            ("anthropic", "anthropic_messages", "unknown", "tool-heavy", "thinking", True, True, 132_000, 100, "skipped", "passthrough"),
+            ("anthropic", "anthropic_messages", "unknown", "tool-heavy", "summary", True, True, 132_000, 9_000, "skipped", "passthrough"),
+            ("anthropic", "anthropic_messages", "unknown", "tool-heavy", "thinking", True, True, 80_000, 100, "skipped", "passthrough"),
+            ("anthropic", "anthropic_messages", "messages", "tool-heavy", "thinking", True, True, 80_000, 100, "skipped", "passthrough"),
+            ("openai", "openai_responses", "responses", "tool-light", "tool-light", False, True, 20_000, 3_000, "skipped", "passthrough"),
+            ("openai", "openai_responses", "responses", "chat", "chat", False, False, 20_000, 3_000, "miss", "passthrough"),
+            ("openai", "openai_responses", "responses", "tool-light", "tool-light", False, True, 20_000, 3_000, "skipped", "routed"),
+        ]
+        for provider, surface, endpoint, category, phase, stream, has_tools, text_chars, input_tokens, cache_status, routing_status in shapes:
+            for _ in range(2):
+                self._log_call(
+                    provider=provider,
+                    path="/v1/responses" if provider == "openai" else "/v1/messages",
+                    source_surface=surface,
+                    endpoint=endpoint,
+                    requested_model="gpt-5.4" if provider == "openai" else "claude-sonnet-4-6",
+                    routed_model="gpt-5.4-mini" if routing_status == "routed" else ("gpt-5.4" if provider == "openai" else "claude-sonnet-4-6"),
+                    requested_model_family="gpt-5" if provider == "openai" else "claude-sonnet",
+                    routed_model_family="gpt-5" if provider == "openai" else "claude-sonnet",
+                    category=category,
+                    workflow_phase=phase,
+                    stream=1 if stream else 0,
+                    has_tools=has_tools,
+                    cache_status=cache_status,
+                    cache_reason="exact-miss" if cache_status == "miss" else "streaming tools-disabled",
+                    routing_reason="routed" if routing_status == "routed" else "keep requested model",
+                    routing_extra={"routing_status": routing_status},
+                    text_chars=text_chars,
+                    actual_input_tokens=input_tokens,
+                    cost=0.10,
+                    baseline=0.10,
+                )
+
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+        initial = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=100,
+            run_id="stage-eleven-before-suppression",
+            rules_path=rules_path,
+            max_new_canaries=11,
+        )
+        self.assertEqual(initial["staged_canary_count"], 11)
+
+        existing = initial["stage_actions"][0]
+        rules_path.parent.mkdir()
+        rules_path.write_text(
+            yaml.safe_dump(
+                {
+                    "request_shape_repeated_context_canaries": {
+                        "enabled": True,
+                        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+                        "rules": [
+                            {
+                                "id": existing["policy_id"],
+                                "enabled": True,
+                                "policy_source": "local-manual",
+                                "cohort_id": existing["cohort_id"],
+                                "source_evidence_schema": existing["source_evidence_schema"],
+                                "source_evidence_schemas": existing["source_evidence_schemas"],
+                                "local_only_reason": existing["local_only_reason"],
+                                "evidence_blocker_codes": existing["evidence_blocker_codes"],
+                                "conditions": existing["conditions"],
+                                "rollout": {
+                                    "canary_enabled": True,
+                                    "canary_fraction": 0.10,
+                                    "holdout_fraction": 0.10,
+                                },
+                                "projected_saved_chars": existing["projected_saved_chars"],
+                                "projected_saved_tokens": existing["projected_saved_tokens"],
+                                "projected_saved_usd": existing["projected_saved_usd"],
+                            }
+                        ],
+                    }
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=100,
+            run_id="stage-ten-after-suppression",
+            rules_path=rules_path,
+            max_new_canaries=10,
+        )
+
+        self.assertEqual(report["status"], "staged")
+        self.assertEqual(report["staged_canary_count"], 10)
+        self.assertEqual(len(report["stage_actions"]), 10)
+        self.assertEqual(report["duplicate_suppression"]["suppressed_existing_cohort_count"], 1)
+        self.assertEqual(report["duplicate_suppression"]["stageable_unsuppressed_cohort_count"], 10)
+        self.assertEqual(report["duplicate_suppression"]["newly_staged_cohort_count"], 10)
+        self.assertEqual(report["duplicate_suppression"]["stage_action_limit"], 10)
+        self.assertTrue(report["acceptance"]["stages_all_unsuppressed_cohorts_within_bound"])
+        self.assertTrue(report["acceptance"]["does_not_restage_suppressed_or_existing_widened_cohorts"])
+        self.assertNotIn(existing["cohort_id"], {action["cohort_id"] for action in report["stage_actions"]})
+        self.assertGreater(report["source_report"]["crunch_opportunity_summary"]["projected_saved_tokens"], 0)
+        self.assertGreater(report["source_report"]["crunch_opportunity_summary"]["projected_saved_usd"], 0)
+
+        apply_result = apply_request_shape_crunch_canary_actions(report["stage_actions"], rules_path=rules_path)
+        self.assertTrue(apply_result["ok"])
+        self.assertEqual(apply_result["schema"], "agentflow.request_shape_crunch_canary_apply_batch.v1")
+        self.assertEqual(apply_result["applied_count"], 10)
+        self.assertEqual(apply_result["failed_count"], 0)
+        self.assertTrue(apply_result["wrote_policy_files"])
+        self.assertFalse(apply_result["rules_path_included"])
+        rules = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+        staged_rules = rules["request_shape_repeated_context_canaries"]["rules"]
+        self.assertEqual(len(staged_rules), 11)
+        self.assertEqual({rule["id"] for rule in staged_rules}, {existing["policy_id"], *apply_result["policy_ids"]})
+        for rule in staged_rules:
+            self.assertEqual(rule["policy_source"], "local-manual")
+            self.assertEqual(rule["source_evidence_schema"], "agentflow.request_shape_rollup_row.v1")
+            self.assertGreater(rule["projected_saved_tokens"], 0)
+            self.assertGreater(rule["projected_saved_usd"], 0)
+            self.assertEqual(rule["rollout"]["holdout_fraction"], 0.1)
+
+        review = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=100,
+            run_id="stage-ten-after-apply-review",
+            rules_path=rules_path,
+            max_new_canaries=10,
+        )
+        self.assertEqual(review["status"], "already-staged")
+        self.assertTrue(review["ok"])
+        self.assertEqual(review["next_action"], "measure-repeated-context-crunch-canary-impact")
+        self.assertEqual(review["staged_canary_count"], 0)
+        self.assertEqual(review["duplicate_suppression"]["suppressed_existing_cohort_count"], 11)
+        self.assertEqual(review["duplicate_suppression"]["stageable_unsuppressed_cohort_count"], 0)
+        self.assertTrue(review["duplicate_suppression"]["suppresses_new_stage_action"])
+
+        rendered = json.dumps({"report": report, "apply": apply_result, "rules": staged_rules}, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            str(rules_path),
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def test_crunch_canary_stage_prefers_unsuppressed_stage_action_over_existing_measurement(self) -> None:
         for _ in range(3):
