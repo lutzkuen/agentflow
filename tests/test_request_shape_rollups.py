@@ -1946,16 +1946,22 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(decision["schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
         self.assertEqual(decision["decision"], "widen")
+        self.assertEqual(decision["promotion_readiness"], "promotion-ready")
+        self.assertEqual(decision["impact_recommendation"], "promotion-ready")
+        self.assertEqual(decision["promotion_recommendation"], "promotion-ready")
         self.assertEqual(code, 0)
         self.assertEqual(cli_decision["schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
         self.assertEqual(cli_decision["decision"], "widen")
+        self.assertEqual(cli_decision["summary"]["promotion_readiness"], "promotion-ready")
         self.assertEqual(cli_decision["summary"]["target_local_rule_file"], "cache_rules.yaml")
         self.assertTrue(cli_decision["privacy"]["metadata_only"])
         self.assertTrue(cli_decision["privacy"]["aggregate_only"])
         self.assertNotIn(str(policy_path), stdout.getvalue())
         self.assertTrue(decision["summary"]["promotion_allowed"])
+        self.assertTrue(decision["summary"]["promotion_ready"])
         self.assertFalse(decision["summary"]["keep_staged"])
         self.assertFalse(decision["summary"]["keep_blocked"])
+        self.assertIn("promotion-ready", decision["reason_codes"])
         self.assertFalse(decision["summary"]["policy_files_written"])
         self.assertFalse(decision["summary"]["cache_entries_written"])
         self.assertEqual(decision["summary"]["applied_count"], 1)
@@ -1964,6 +1970,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["summary"]["observed_savings_usd"], 0.03)
         top = decision["top_decision"]
         self.assertEqual(top["decision_options"], ["widen", "rollback", "keep-staged", "keep-blocked"])
+        self.assertEqual(top["promotion_readiness"], "promotion-ready")
+        self.assertEqual(
+            top["promotion_readiness_options"],
+            ["promotion-ready", "keep-staged-warmup", "keep-staged", "keep-blocked", "rollback-required"],
+        )
+        self.assertTrue(top["promotion_ready"])
         self.assertEqual(top["local_policy_patch"]["patch_type"], "widen_openai_exact_cache_replay_canary")
         self.assertEqual(top["local_policy_patch"]["target_local_rule_file"], "cache_rules.yaml")
         promoted_rule = top["local_policy_patch"]["pattern_rules"][0]
@@ -1981,6 +1993,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(top["coverage"]["has_observed_hits"])
         self.assertTrue(decision["acceptance"]["targets_file_backed_cache_policy"])
         self.assertTrue(decision["acceptance"]["keeps_tool_and_streaming_replay_blocked"])
+        self.assertTrue(decision["acceptance"]["emits_explicit_promotion_readiness"])
         rendered = json.dumps(decision, sort_keys=True)
         for forbidden in (
             "raw prompt must not leak",
@@ -2157,9 +2170,13 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(decision["decision"], "keep-staged")
         self.assertEqual(decision["promotion_decision"], "keep-staged-warmup")
+        self.assertEqual(decision["promotion_readiness"], "keep-staged-warmup")
+        self.assertEqual(decision["impact_recommendation"], "keep-staged-warmup")
         self.assertEqual(decision["reason"], "cache-warmup-miss")
         self.assertEqual(decision["next_action"], "keep-cache-replay-canary-staged")
         self.assertTrue(decision["summary"]["keep_staged_warmup"])
+        self.assertEqual(decision["summary"]["promotion_readiness"], "keep-staged-warmup")
+        self.assertFalse(decision["summary"]["promotion_ready"])
         self.assertTrue(decision["summary"]["keep_staged"])
         self.assertFalse(decision["summary"]["keep_blocked"])
         self.assertFalse(decision["summary"]["promotion_allowed"])
@@ -2172,6 +2189,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("cache-warmup-miss", decision["reason_codes"])
         self.assertIn("applied-miss:cache-warmup-miss", decision["reason_codes"])
         self.assertEqual(decision["top_decision"]["promotion_decision"], "keep-staged-warmup")
+        self.assertEqual(decision["top_decision"]["promotion_readiness"], "keep-staged-warmup")
         self.assertEqual(decision["top_decision"]["promotion_decision_options"], ["promote", "keep-staged-warmup", "keep-blocked"])
         self.assertEqual(decision["top_decision"]["reason"], "cache-warmup-miss")
         self.assertEqual(decision["top_decision"]["recommended_next_action"], "keep-cache-replay-canary-staged")
@@ -2182,6 +2200,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIsNone(decision["top_decision"]["local_policy_patch"])
         self.assertTrue(decision["acceptance"]["records_durable_decision"])
         self.assertTrue(decision["acceptance"]["emits_explicit_canary_promotion_decision"])
+        self.assertTrue(decision["acceptance"]["emits_explicit_promotion_readiness"])
         self.assertTrue(decision["acceptance"]["reports_applied_miss_blocker_breakdown"])
         self.assertTrue(decision["privacy"]["metadata_only"])
         self.assertTrue(decision["privacy"]["aggregate_only"])

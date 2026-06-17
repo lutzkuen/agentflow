@@ -5504,6 +5504,16 @@ def _cache_replay_canary_promotion_decision(evidence: dict[str, Any] | None, dec
     return "keep-blocked"
 
 
+def _cache_replay_policy_promotion_readiness(evidence: dict[str, Any] | None, decision: str) -> str:
+    if decision == "widen":
+        return "promotion-ready"
+    if decision == "rollback":
+        return "rollback-required"
+    if decision == "keep-staged" and _cache_replay_warmup_only_applied_miss(evidence):
+        return "keep-staged-warmup"
+    return decision
+
+
 def _cache_replay_policy_rollback_metadata(evidence: dict[str, Any] | None, decision: str) -> dict[str, Any]:
     rule_id = _cache_replay_policy_rule_id(evidence or {})
     return {
@@ -5642,15 +5652,21 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
     reason_codes = _cache_replay_policy_reason_codes(evidence)
     recommended_next_action = _cache_replay_policy_recommended_next_action(decision)
     promotion_decision = _cache_replay_canary_promotion_decision(evidence, decision)
+    promotion_readiness = _cache_replay_policy_promotion_readiness(evidence, decision)
     rollback_metadata = _cache_replay_policy_rollback_metadata(evidence, decision)
     local_policy_patch = _cache_replay_policy_patch(evidence, decision)
     promotion_allowed = decision == "widen"
     rollback_required = decision == "rollback"
+    if promotion_readiness == "promotion-ready":
+        reason_codes = list(dict.fromkeys(["promotion-ready", *reason_codes]))
     entry = {
         "schema": "agentflow.request_shape_cache_replay_policy_decision_entry.v1",
         "decision_id": _cache_replay_policy_decision_id(evidence, decision),
         "decision": decision,
         "promotion_decision": promotion_decision,
+        "promotion_readiness": promotion_readiness,
+        "impact_recommendation": promotion_readiness,
+        "promotion_recommendation": promotion_readiness,
         "reason": reason,
         "reason_codes": reason_codes,
         "recommended_next_action": recommended_next_action,
@@ -5662,7 +5678,15 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "policy_source": "local-manual" if metrics["staged_canary_count"] else "unknown",
         "decision_options": ["widen", "rollback", "keep-staged", "keep-blocked"],
         "promotion_decision_options": ["promote", "keep-staged-warmup", "keep-blocked"],
+        "promotion_readiness_options": [
+            "promotion-ready",
+            "keep-staged-warmup",
+            "keep-staged",
+            "keep-blocked",
+            "rollback-required",
+        ],
         "promotion_allowed": promotion_allowed,
+        "promotion_ready": promotion_readiness == "promotion-ready",
         "rollback_required": rollback_required,
         "keep_staged": decision == "keep-staged",
         "keep_blocked": decision == "keep-blocked",
@@ -5703,6 +5727,9 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "generated_at": utc_now(),
         "decision": decision,
         "promotion_decision": promotion_decision,
+        "promotion_readiness": promotion_readiness,
+        "impact_recommendation": promotion_readiness,
+        "promotion_recommendation": promotion_readiness,
         "reason": reason,
         "reason_codes": reason_codes,
         "next_action": recommended_next_action,
@@ -5711,8 +5738,12 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
         "summary": {
             "decision": decision,
             "promotion_decision": promotion_decision,
+            "promotion_readiness": promotion_readiness,
+            "impact_recommendation": promotion_readiness,
+            "promotion_recommendation": promotion_readiness,
             "next_action": recommended_next_action,
             "promotion_allowed": promotion_allowed,
+            "promotion_ready": promotion_readiness == "promotion-ready",
             "rollback_required": rollback_required,
             "keep_staged_warmup": promotion_decision == "keep-staged-warmup",
             "keep_staged": decision == "keep-staged",
@@ -5761,6 +5792,8 @@ def build_request_shape_cache_replay_policy_decision_report(evidence_report: dic
             "records_durable_decision": decision in {"widen", "rollback", "keep-staged", "keep-blocked"},
             "emits_explicit_canary_promotion_decision": promotion_decision
             in {"promote", "keep-staged-warmup", "keep-blocked"},
+            "emits_explicit_promotion_readiness": promotion_readiness
+            in {"promotion-ready", "keep-staged-warmup", "keep-staged", "keep-blocked", "rollback-required"},
             "reports_hit_recovery": metrics["observed_hits"] >= 0 and metrics["projected_hits"] >= 0,
             "reports_holdout_coverage": metrics["holdout_count"] >= 0,
             "reports_applied_miss_blocker_breakdown": isinstance(
