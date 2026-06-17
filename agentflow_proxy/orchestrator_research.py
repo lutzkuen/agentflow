@@ -6090,7 +6090,7 @@ def _crunch_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         confidence = "low"
         score = float(calls) * 0.1
         bucket = "missing-measurement"
-    return _candidate(
+    candidate = _candidate(
         lever="crunch",
         provider_surface_bucket=bucket,
         blocker=blocker,
@@ -6100,6 +6100,22 @@ def _crunch_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         sequencing="Sequence behind routing/cache blockers unless crunch savings is already the strongest positive dollar signal.",
         score=score,
     )
+    duplicate_suppression = (
+        top_report.get("duplicate_suppression")
+        if isinstance(top_report.get("duplicate_suppression"), dict)
+        else {}
+    )
+    if (
+        blocker == "crunch-observed-savings-ranked"
+        and top_report.get("report_key") == "request_shape_crunch_activation_evidence"
+        and bool(duplicate_suppression.get("suppresses_generic_crunch_activation_issue"))
+    ):
+        candidate["issue_generation_status"] = "suppressed-active-crunch-keep-active"
+        candidate["issue_generation_suppression_reason"] = sanitize_value(
+            duplicate_suppression.get("reason") or "repeated-context-crunch-active-at-max-rollout"
+        )
+        candidate["duplicate_suppression"] = sanitize_value(duplicate_suppression)
+    return candidate
 
 
 def _diagnostic_candidate(diagnostics: list[dict[str, Any]]) -> dict[str, Any] | None:

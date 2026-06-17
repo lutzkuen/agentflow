@@ -2306,7 +2306,20 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "status": "observed-savings-ranked",
                 "calls": 3685,
                 "observed": {"crunch_savings_usd": 25.818387, "crunch_tokens_saved": 8606129},
-                "top_report": {"report_key": "request_shape_crunch_activation_evidence", "next_action": "keep-active"},
+                "top_report": {
+                    "report_key": "request_shape_crunch_activation_evidence",
+                    "next_action": "keep-active",
+                    "duplicate_suppression": {
+                        "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                        "suppresses_new_activation_issue": True,
+                        "suppresses_generic_crunch_activation_issue": True,
+                        "reason": "repeated-context-crunch-active-at-max-rollout",
+                        "matching_local_policy": "crunch_rules",
+                        "target_local_rule_file": "crunch_rules.yaml",
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    },
+                },
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
         }
@@ -2334,8 +2347,19 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             "Stage cache replay canary for replay-ready on openai/openai_responses/responses",
             "Turn replay-ready cache candidate into local replay evidence",
             "Stage request-shape repeated-context crunch canary",
+            "Rank crunch savings follow-up for crunch-observed-savings-ranked",
         ):
             self.assertNotIn(stale_title, titles)
+
+        crunch_candidate = next(
+            item for item in plan["evidence"]["optimization_candidates"]
+            if item.get("lever") == "crunch"
+        )
+        self.assertEqual(crunch_candidate["issue_generation_status"], "suppressed-active-crunch-keep-active")
+        self.assertEqual(
+            crunch_candidate["issue_generation_suppression_reason"],
+            "repeated-context-crunch-active-at-max-rollout",
+        )
 
         ledger_issue = next(
             item for item in plan["backlog_changes"]["create_issues"]
@@ -3757,6 +3781,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(crunch_entry["safety_stop_count"], 0)
         self.assertEqual(crunch_entry["projected_saved_usd"], 25.818387)
         self.assertTrue(crunch_entry["duplicate_suppression"]["suppresses_generic_crunch_activation_issue"])
+        crunch_candidate = next(
+            item for item in plan["evidence"]["optimization_candidates"]
+            if item.get("lever") == "crunch"
+        )
+        self.assertEqual(crunch_candidate["issue_generation_status"], "suppressed-active-crunch-keep-active")
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn("Rank crunch savings follow-up for crunch-observed-savings-ranked", titles)
         entry = next(item for item in ledger["entries"] if item["lever"] == "request-shape-rollups")
         self.assertEqual(entry["state"], "measured-active")
         self.assertEqual(entry["current_status"], "applied")
