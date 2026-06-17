@@ -521,10 +521,14 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
     if post_max_reason_codes:
         row["post_max_rollout_reason_codes"] = post_max_reason_codes
     row["post_max_rollout_promotion_allowed"] = bool(summary.get("post_max_rollout_promotion_allowed"))
+    full_rollout_active = bool(summary.get("full_rollout_active")) or post_max_decision == "full-rollout-applied"
+    row["post_max_rollout_full_rollout_allowed"] = bool(summary.get("post_max_rollout_full_rollout_allowed") or full_rollout_active)
+    row["full_rollout_active"] = full_rollout_active
+    row["full_rollout_fraction"] = round(_as_float(summary.get("full_rollout_fraction")), 6)
     cap_reason = public_label(summary.get("post_max_rollout_cap_reason"), "")
     if cap_reason:
         row["post_max_rollout_cap_reason"] = cap_reason
-    row["outcome"] = post_max_decision if post_max_decision in {"promote-full", "keep-capped", "rollback"} else ("keep-active" if keep_active else post_next_action)
+    row["outcome"] = post_max_decision if post_max_decision in {"promote-full", "full-rollout-applied", "keep-capped", "rollback"} else ("keep-active" if keep_active else post_next_action)
     row["next_action"] = post_max_next_action or post_next_action
     row["error_rate_delta"] = round(_as_float(summary.get("error_rate_delta")), 6)
     row["retry_rate_delta"] = round(_as_float(summary.get("retry_rate_delta")), 6)
@@ -545,6 +549,8 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
         "retry_rate_delta": row["retry_rate_delta"],
         "fallback_rate_delta": row["fallback_rate_delta"],
         "canary_fraction": round(_as_float(summary.get("canary_fraction")), 6),
+        "full_rollout_active": full_rollout_active,
+        "full_rollout_fraction": row["full_rollout_fraction"],
         "max_rollout_fraction": round(_as_float(summary.get("max_rollout_fraction")), 6),
     }
     duplicate_suppression = report.get("duplicate_suppression")

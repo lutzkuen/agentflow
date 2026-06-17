@@ -1387,8 +1387,17 @@ def _parse_request_shape_repeated_context_canary_rules_yaml(
         except (TypeError, ValueError):
             canary_fraction = 0.0
         try:
+            full_rollout_fraction = max(0.0, min(1.0, float(rollout.get("full_rollout_fraction", 0.0))))
+        except (TypeError, ValueError):
+            full_rollout_fraction = 0.0
+        full_rollout_enabled = _as_bool(rollout.get("full_rollout_enabled"), False) or full_rollout_fraction > 0.0
+        try:
             holdout_fraction = max(0.0, min(1.0, float(rollout.get("holdout_fraction", 0.0))))
         except (TypeError, ValueError):
+            holdout_fraction = 0.0
+        if full_rollout_enabled:
+            full_rollout_fraction = full_rollout_fraction or 1.0
+            canary_fraction = max(canary_fraction, full_rollout_fraction)
             holdout_fraction = 0.0
         if canary_fraction + holdout_fraction > 1.0:
             holdout_fraction = max(0.0, 1.0 - canary_fraction)
@@ -1406,6 +1415,8 @@ def _parse_request_shape_repeated_context_canary_rules_yaml(
             "rollout": {
                 "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
                 "canary_enabled": _as_bool(rollout.get("canary_enabled"), True),
+                "full_rollout_enabled": full_rollout_enabled,
+                "full_rollout_fraction": full_rollout_fraction,
                 "canary_fraction": canary_fraction,
                 "holdout_fraction": holdout_fraction,
                 "canary_salt": str(rollout.get("canary_salt") or policy_id),
@@ -1951,14 +1962,17 @@ def _evaluate_request_shape_repeated_context_canaries(
         if not isinstance(rule, dict) or not _as_bool(rule.get("enabled"), True):
             continue
         rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
-        if not _as_bool(rollout.get("canary_enabled"), True):
+        full_rollout_enabled = _as_bool(rollout.get("full_rollout_enabled"), False)
+        if not _as_bool(rollout.get("canary_enabled"), True) and not full_rollout_enabled:
             continue
+        rollout_fraction = rollout.get("full_rollout_fraction") if full_rollout_enabled else rollout.get("canary_fraction", 0.0)
+        holdout_fraction = 0.0 if full_rollout_enabled else rollout.get("holdout_fraction", 0.0)
         action = {
             "policy_id": rule.get("policy_id") or rule.get("id"),
             "cohort_id": rule.get("cohort_id"),
             "conditions": rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {},
-            "rollout_fraction": rollout.get("canary_fraction", 0.0),
-            "holdout_fraction": rollout.get("holdout_fraction", 0.0),
+            "rollout_fraction": rollout_fraction,
+            "holdout_fraction": holdout_fraction,
         }
         lifecycle = request_shape_crunch_canary_lifecycle(action, features)
         status = str(lifecycle.get("status") or "unknown")
@@ -1970,6 +1984,7 @@ def _evaluate_request_shape_repeated_context_canaries(
             "cohort": public_label(lifecycle.get("cohort"), "unknown"),
             "reason": public_label(lifecycle.get("reason"), "unknown"),
             "policy_source": public_label(rule.get("policy_source"), "unknown"),
+            "rollout_mode": "full-rollout" if full_rollout_enabled else "canary",
             "rollout_fraction": lifecycle.get("rollout_fraction"),
             "holdout_fraction": lifecycle.get("holdout_fraction"),
             "staged_at": rule.get("staged_at"),
@@ -2003,6 +2018,7 @@ def _evaluate_request_shape_repeated_context_canaries(
                 "projected_saved_tokens": _safe_int(rule.get("projected_saved_tokens")),
                 "projected_saved_usd": float(rule.get("projected_saved_usd") or 0.0),
                 "rollback_metadata_present": bool(rule.get("rollback_metadata")),
+                "rollout_mode": "full-rollout" if full_rollout_enabled else "canary",
                 "metadata_only": True,
                 "aggregate_only": True,
                 "raw_prompts_included": False,

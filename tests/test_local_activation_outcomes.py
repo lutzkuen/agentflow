@@ -514,6 +514,77 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertEqual(cache["next_action"], "review-cache-replay-canary-promotion-readiness")
         self.assertEqual(cache["outcome"], "cache-replay-lifecycle-outcome-recorded")
 
+    def test_summary_exports_full_rollout_crunch_activation_outcome(self):
+        crunch_evidence = {
+            "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+            "status": "active-rule-evidence-observed",
+            "decision": "widen",
+            "graduation_decision": "widen",
+            "decision_id": "request-shape-crunch-policy-decision:test",
+            "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+            "summary": {
+                "applied_count": 107,
+                "holdout_count": 40,
+                "skipped_count": 280,
+                "safety_stop_count": 0,
+                "rollback_count": 0,
+                "fallback_count": 0,
+                "observed_saved_tokens": 8_606_129,
+                "observed_saved_usd": 25.818387,
+                "target_local_rule_file": "crunch_rules.yaml",
+                "target_local_policy_section": "crunch.rules",
+                "active_rule_count": 1,
+                "widened_rule_count": 0,
+                "full_rollout_rule_count": 1,
+                "full_rollout_active": True,
+                "full_rollout_fraction": 1.0,
+                "canary_fraction": 1.0,
+                "holdout_fraction": 0.0,
+                "max_rollout_fraction": 1.0,
+                "post_widening_status": "post-widening-active-at-max-rollout",
+                "post_widening_next_action": "keep-active",
+                "post_max_rollout_status": "post-max-rollout-full-rollout-applied",
+                "post_max_rollout_decision": "full-rollout-applied",
+                "post_max_rollout_next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                "post_max_rollout_promotion_allowed": False,
+                "post_max_rollout_full_rollout_allowed": True,
+            },
+            "rules": [
+                {
+                    "rule_ref": "local-repeated-context-crunch-canary-test",
+                    "policy_source": "local-manual",
+                    "decision_id": "request-shape-crunch-policy-decision:test",
+                    "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                }
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                report = build_local_activation_outcome_summary(
+                    store,
+                    limit=20,
+                    config_dir=tmp,
+                    activation_reports=[crunch_evidence],
+                )
+            finally:
+                store.conn.close()
+
+        crunch = {row["local_action_family"]: row for row in report["outcome_summaries"]}["crunch"]
+        self.assertEqual(crunch["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(crunch["outcome"], "full-rollout-applied")
+        self.assertEqual(crunch["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
+        self.assertTrue(crunch["full_rollout_active"])
+        self.assertEqual(crunch["full_rollout_fraction"], 1.0)
+        self.assertEqual(crunch["coverage"]["full_rollout_fraction"], 1.0)
+        self.assertFalse(crunch["post_max_rollout_promotion_allowed"])
+        self.assertTrue(crunch["post_max_rollout_full_rollout_allowed"])
+        self.assertEqual(crunch["observed_saved_tokens"], 8_606_129)
+        self.assertAlmostEqual(crunch["observed_savings_usd"], 25.818387)
+
     def test_cli_emits_local_activation_outcome_summary(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")

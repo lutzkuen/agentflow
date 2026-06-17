@@ -5409,6 +5409,11 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
         default=0.50,
         help="Maximum widened canary rollout fraction when --apply is used, default: 0.50.",
     )
+    parser.add_argument(
+        "--promote-full-rollout",
+        action="store_true",
+        help="When --apply is used, convert an already max-rollout repeated-context crunch rule to explicit full rollout.",
+    )
     args = parser.parse_args(argv)
 
     stdout = stdout if stdout is not None else sys.stdout
@@ -5454,6 +5459,7 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
             decision_id=args.decision_id,
             widen_fraction=args.widen_fraction,
             max_canary_fraction=args.max_canary_fraction,
+            promote_full_rollout=args.promote_full_rollout,
         )
         result["apply_result"] = apply_result
         result["read_only"] = False
@@ -5462,8 +5468,12 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
         result["summary"]["policy_files_written"] = bool(apply_result.get("wrote_policy_files"))
         if apply_result.get("ok"):
             result["status"] = "decided-and-applied"
-            result["reason"] = "applied-measured-repeated-context-crunch-widening"
-            result["next_action"] = "monitor-widened-repeated-context-crunch-canary"
+            if apply_result.get("full_rollout_ready"):
+                result["reason"] = "applied-full-rollout-repeated-context-crunch-promotion"
+                result["next_action"] = "measure-full-rollout-repeated-context-crunch-outcomes"
+            else:
+                result["reason"] = "applied-measured-repeated-context-crunch-widening"
+                result["next_action"] = "monitor-widened-repeated-context-crunch-canary"
     result["source_rollups"] = {
         "schema": rollups.get("schema"),
         "summary": {

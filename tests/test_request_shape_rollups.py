@@ -5854,6 +5854,46 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(fresh_apply_again["wrote_policy_files"])
         self.assertEqual(fresh_apply_again["canary_fraction"], 0.3)
 
+        full_rollout = apply_request_shape_crunch_policy_decision(
+            fresh_decision,
+            rules_path=rules_path,
+            decision_id=decision_id,
+            promote_full_rollout=True,
+        )
+        self.assertTrue(full_rollout["ok"])
+        self.assertEqual(full_rollout["status"], "full-rollout-applied")
+        self.assertTrue(full_rollout["wrote_policy_files"])
+        self.assertTrue(full_rollout["full_rollout_ready"])
+        self.assertTrue(full_rollout["full_rollout_applied"])
+        self.assertFalse(full_rollout["canary_enabled"])
+        self.assertEqual(full_rollout["previous_canary_fraction"], 0.3)
+        self.assertEqual(full_rollout["canary_fraction"], 1.0)
+        self.assertEqual(full_rollout["full_rollout_fraction"], 1.0)
+        self.assertEqual(full_rollout["holdout_fraction"], 0.0)
+        full_rules = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+        full_rule = full_rules["request_shape_repeated_context_canaries"]["rules"][0]
+        self.assertFalse(full_rule["rollout"]["canary_enabled"])
+        self.assertTrue(full_rule["rollout"]["full_rollout_enabled"])
+        self.assertEqual(full_rule["rollout"]["full_rollout_fraction"], 1.0)
+        self.assertEqual(full_rule["rollout"]["holdout_fraction"], 0.0)
+        self.assertEqual(full_rule["policy_decision"]["decision"], "promote-full")
+        self.assertEqual(full_rule["policy_decision"]["graduation_decision"], "promote-full")
+        self.assertEqual(full_rule["policy_decision"]["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(full_rule["policy_decision"]["source_policy_decision_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertIn("full_rollout_fingerprint", full_rule["policy_decision"])
+        self.assertEqual(full_rule["rollback_metadata"]["selected_decision"], "promote-full")
+
+        full_rollout_again = apply_request_shape_crunch_policy_decision(
+            fresh_decision,
+            rules_path=rules_path,
+            decision_id=decision_id,
+            promote_full_rollout=True,
+        )
+        self.assertTrue(full_rollout_again["ok"])
+        self.assertEqual(full_rollout_again["status"], "already-full-rollout")
+        self.assertTrue(full_rollout_again["already_applied"])
+        self.assertFalse(full_rollout_again["wrote_policy_files"])
+
     def test_crunch_policy_decision_rolls_back_on_safety_stop(self) -> None:
         lifecycle = {
             "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
@@ -6181,6 +6221,115 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(str(duplicate_suppression["fingerprint"]).startswith("activation:"))
         rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("raw-keep-active-policy-secret-should-not-leak", rendered)
+        self.assertNotIn(str(rules_path), rendered)
+
+    def test_crunch_activation_evidence_reports_full_rollout_applied_rule(self) -> None:
+        decision_id = "request-shape-crunch-policy-decision:full-rollout"
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "crunch_rules.yaml"
+            rules_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "request_shape_repeated_context_canaries": {
+                            "enabled": True,
+                            "rules": [
+                                {
+                                    "id": "raw-full-rollout-policy-secret-should-not-leak",
+                                    "enabled": True,
+                                    "policy_source": "local-manual",
+                                    "policy_decision": {
+                                        "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                        "decision_id": decision_id,
+                                        "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                                        "source_policy_decision_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                        "decision": "promote-full",
+                                        "graduation_decision": "promote-full",
+                                        "applied_count": 107,
+                                        "holdout_count": 40,
+                                        "observed_saved_tokens": 8606129,
+                                        "observed_saved_usd": 25.818387,
+                                        "error_rate_delta": 0.0,
+                                        "retry_rate_delta": 0.0,
+                                        "fallback_rate_delta": 0.0,
+                                        "safety_stop_state": "none",
+                                        "previous_canary_fraction": 0.30,
+                                        "widened_canary_fraction": 1.0,
+                                        "full_rollout_fraction": 1.0,
+                                        "holdout_fraction": 0.0,
+                                    },
+                                    "rollout": {
+                                        "canary_enabled": False,
+                                        "full_rollout_enabled": True,
+                                        "full_rollout_fraction": 1.0,
+                                        "canary_fraction": 1.0,
+                                        "holdout_fraction": 0.0,
+                                    },
+                                    "safety_gates": {
+                                        "max_rollout_fraction": 1.0,
+                                        "previous_max_rollout_fraction": 0.30,
+                                    },
+                                    "rollback_metadata": {
+                                        "rollback_action_type": "disable_repeated_context_crunch_canary",
+                                        "required_for_promotion": True,
+                                    },
+                                }
+                            ],
+                        }
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+
+            payload = build_request_shape_crunch_activation_evidence_report(
+                crunch_policy_decision={
+                    "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "decision": "widen",
+                    "graduation_decision": "widen",
+                    "decision_id": decision_id,
+                    "summary": {
+                        "decision": "widen",
+                        "graduation_decision": "widen",
+                        "decision_id": decision_id,
+                        "applied_count": 107,
+                        "holdout_count": 40,
+                        "observed_saved_tokens": 8606129,
+                        "observed_saved_usd": 25.818387,
+                        "coverage": {
+                            "skipped_count": 280,
+                            "fallback_count": 0,
+                            "safety_stop_count": 0,
+                            "rollback_count": 0,
+                        },
+                    },
+                },
+                crunch_canary_impact={"schema": "agentflow.request_shape_crunch_canary_impact.v1", "summary": {}},
+                rules_path=rules_path,
+            )
+
+        self.assertEqual(payload["status"], "active-rule-evidence-observed")
+        self.assertEqual(payload["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
+        self.assertEqual(payload["summary"]["full_rollout_rule_count"], 1)
+        self.assertEqual(payload["summary"]["matching_full_rollout_rule_count"], 1)
+        self.assertTrue(payload["summary"]["full_rollout_active"])
+        self.assertEqual(payload["summary"]["full_rollout_fraction"], 1.0)
+        self.assertEqual(payload["summary"]["post_max_rollout_status"], "post-max-rollout-full-rollout-applied")
+        self.assertEqual(payload["summary"]["post_max_rollout_decision"], "full-rollout-applied")
+        self.assertEqual(payload["summary"]["post_max_rollout_next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
+        self.assertFalse(payload["summary"]["post_max_rollout_promotion_allowed"])
+        post_max = payload["post_max_rollout_decision"]
+        self.assertEqual(post_max["decision"], "full-rollout-applied")
+        self.assertTrue(post_max["full_rollout_active"])
+        self.assertNotIn("local_policy_patch", post_max)
+        follow_up = payload["activation_follow_up"]
+        self.assertEqual(follow_up["status"], "full-rollout-outcome-recorded")
+        self.assertEqual(follow_up["activation_state"], "full-rollout-active")
+        self.assertEqual(follow_up["no_op_reason"], "repeated-context-crunch-full-rollout-active")
+        duplicate_suppression = payload["duplicate_suppression"]
+        self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
+        self.assertEqual(duplicate_suppression["reason"], "repeated-context-crunch-full-rollout-active")
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw-full-rollout-policy-secret-should-not-leak", rendered)
         self.assertNotIn(str(rules_path), rendered)
 
     def test_remaining_crunch_measurements_skip_keep_active_rule_coverage(self) -> None:

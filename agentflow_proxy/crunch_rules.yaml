@@ -358,9 +358,11 @@ request_shape_repeated_context_canaries:
         routing_status: passthrough
       rollout:
         schema: agentflow.request_shape_crunch_canary_rollout.v1
-        canary_enabled: true
-        canary_fraction: 0.30
-        holdout_fraction: 0.10
+        canary_enabled: false
+        full_rollout_enabled: true
+        full_rollout_fraction: 1.0
+        canary_fraction: 1.0
+        holdout_fraction: 0.0
         canary_salt: local-repeated-context-crunch-canary-a8814a13d90e
         canary_unit: request_shape_cohort
       projected_saved_chars: 3865760
@@ -382,34 +384,38 @@ request_shape_repeated_context_canaries:
         cache_keys_included: false
         file_paths_included: false
         tool_payloads_included: false
-        holdout_required: true
-        max_rollout_fraction: 0.30
+        holdout_required: false
+        max_rollout_fraction: 1.0
+        previous_max_rollout_fraction: 0.3
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       policy_decision:
         schema: agentflow.request_shape_crunch_policy_decision_rule_metadata.v1
         decision_id: request-shape-crunch-policy-decision:9db327d1abdec766
-        application_fingerprint: request-shape-crunch-policy-apply:1dbdbd84d69d16f6
-        source_evidence_schema: agentflow.request_shape_crunch_policy_decision.v1
-        decision: widen
-        graduation_decision: widen
-        applied_count: 26
-        holdout_count: 17
-        observed_saved_tokens: 1647683
-        observed_saved_usd: 4.943049
+        application_fingerprint: request-shape-crunch-policy-apply:75827313ac09173d
+        full_rollout_fingerprint: request-shape-crunch-full-rollout:14f7e956d029d0a3
+        source_evidence_schema: agentflow.request_shape_crunch_activation_evidence.v1
+        source_policy_decision_schema: agentflow.request_shape_crunch_policy_decision.v1
+        decision: promote-full
+        graduation_decision: promote-full
+        applied_count: 107
+        holdout_count: 40
+        observed_saved_tokens: 8606129
+        observed_saved_usd: 25.818387
         error_rate_delta: 0.0
         retry_rate_delta: 0.0
         fallback_rate_delta: 0.0
         safety_stop_state: none
-        previous_canary_fraction: 0.20
-        widened_canary_fraction: 0.30
-        holdout_fraction: 0.10
+        previous_canary_fraction: 0.30
+        widened_canary_fraction: 1.0
+        full_rollout_fraction: 1.0
+        holdout_fraction: 0.0
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
         schema: agentflow.request_shape_crunch_policy_decision_rollback_metadata.v1
         present: true
         required_for_promotion: true
-        selected_decision: widen
+        selected_decision: promote-full
         rollback_action_type: disable_repeated_context_crunch_canary
         rollback_reason_codes:
           - safety-stop-observed

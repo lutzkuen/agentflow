@@ -647,12 +647,22 @@ def _load_request_shape_crunch_canary_rules(rules_path: str | Path | None = None
                 rollout.get("canary_fraction", rollout.get("fraction", 0.0)),
                 0.0,
             )
+            full_rollout_fraction = _bounded_fraction(rollout.get("full_rollout_fraction"), 0.0)
+            full_rollout_active = (
+                bool(rollout.get("full_rollout_enabled"))
+                or full_rollout_fraction > 0.0
+                or decision_value == "promote-full"
+            )
+            if full_rollout_active:
+                full_rollout_fraction = full_rollout_fraction or 1.0
+                canary_fraction = max(canary_fraction, full_rollout_fraction)
             max_rollout_fraction = _bounded_fraction(
                 safety_gates.get("max_rollout_fraction", DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION),
                 0.0,
             )
             active_at_max_rollout = (
                 decision_value == "widen"
+                and not full_rollout_active
                 and canary_fraction > 0
                 and max_rollout_fraction > 0
                 and canary_fraction >= max_rollout_fraction
@@ -670,12 +680,18 @@ def _load_request_shape_crunch_canary_rules(rules_path: str | Path | None = None
                         "decision_id": public_label(policy_decision.get("decision_id"), "unknown"),
                         "source_evidence_schema": public_label(policy_decision.get("source_evidence_schema"), "unknown"),
                     },
+                    "full_rollout_active": full_rollout_active,
                     "active_at_max_rollout": active_at_max_rollout,
+                    "full_rollout_fraction": round(full_rollout_fraction, 6),
                     "max_rollout_fraction": round(max_rollout_fraction, 6),
                     "rollout": {
                         "canary_enabled": bool(rollout.get("canary_enabled", True)),
+                        "full_rollout_enabled": full_rollout_active,
+                        "full_rollout_fraction": full_rollout_fraction,
                         "canary_fraction": canary_fraction,
-                        "holdout_fraction": _bounded_fraction(rollout.get("holdout_fraction", 0.0), 0.0),
+                        "holdout_fraction": 0.0
+                        if full_rollout_active
+                        else _bounded_fraction(rollout.get("holdout_fraction", 0.0), 0.0),
                     },
                 }
             )
@@ -715,26 +731,34 @@ def _request_shape_crunch_cohort_duplicate_suppression(
     lifecycle_suppressed = readiness in {"canary-staged", "canary-applied", "canary-holdout", "canary-safety-stopped"}
     for rule in rules:
         rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
-        if not bool(rollout.get("canary_enabled", True)):
+        full_rollout_active = bool(rule.get("full_rollout_active") or rollout.get("full_rollout_enabled"))
+        if not bool(rollout.get("canary_enabled", True)) and not full_rollout_active:
             continue
         if _request_shape_crunch_cohort_matches_rule(cohort, rule):
             active_at_max_rollout = bool(rule.get("active_at_max_rollout"))
+            full_rollout_active = bool(rule.get("full_rollout_active") or rollout.get("full_rollout_enabled"))
             reason = (
-                "repeated-context-crunch-active-at-max-rollout"
+                "repeated-context-crunch-full-rollout-active"
+                if full_rollout_active
+                else "repeated-context-crunch-active-at-max-rollout"
                 if active_at_max_rollout
                 else "matching-repeated-context-crunch-canary-already-staged-in-local-policy"
             )
+            if full_rollout_active:
+                reason = "repeated-context-crunch-full-rollout-active"
             policy_decision = rule.get("policy_decision") if isinstance(rule.get("policy_decision"), dict) else {}
             return {
                 "schema": "agentflow.request_shape_crunch_stage_duplicate_suppression.v1",
                 "suppressed": True,
                 "suppresses_new_stage_action": True,
                 "reason": reason,
+                "full_rollout_active": full_rollout_active,
                 "active_at_max_rollout": active_at_max_rollout,
                 "matching_local_policy": "crunch_rules",
                 "matching_policy_id": public_label(rule.get("policy_id") or rule.get("id"), "unknown"),
                 "matching_cohort_id": public_label(rule.get("cohort_id"), "unknown"),
                 "matching_rollout_fraction": round(_as_float(rollout.get("canary_fraction")), 6),
+                "matching_full_rollout_fraction": round(_as_float(rollout.get("full_rollout_fraction")), 6),
                 "matching_holdout_fraction": round(_as_float(rollout.get("holdout_fraction")), 6),
                 "matching_max_rollout_fraction": round(_as_float(rule.get("max_rollout_fraction")), 6),
                 "matching_policy_decision": {
@@ -2564,6 +2588,16 @@ def _active_request_shape_crunch_rules(rules_path: str | Path | None = None) -> 
         safety_gates = item.get("safety_gates") if isinstance(item.get("safety_gates"), dict) else {}
         rollback_metadata = item.get("rollback_metadata") if isinstance(item.get("rollback_metadata"), dict) else {}
         decision_value = public_label(decision.get("decision") or "unknown", "unknown")
+        full_rollout_fraction = _as_float(rollout.get("full_rollout_fraction"))
+        full_rollout_active = (
+            bool(rollout.get("full_rollout_enabled"))
+            or full_rollout_fraction > 0.0
+            or decision_value == "promote-full"
+        )
+        canary_fraction = _as_float(decision.get("widened_canary_fraction") or rollout.get("canary_fraction"))
+        if full_rollout_active:
+            full_rollout_fraction = full_rollout_fraction or 1.0
+            canary_fraction = max(canary_fraction, full_rollout_fraction)
         rules.append(
             {
                 "rank": len(rules) + 1,
@@ -2584,12 +2618,14 @@ def _active_request_shape_crunch_rules(rules_path: str | Path | None = None) -> 
                 "fallback_rate_delta": round(_as_float(decision.get("fallback_rate_delta")), 6),
                 "safety_stop_state": public_label(decision.get("safety_stop_state") or "none", "none"),
                 "previous_canary_fraction": round(_as_float(decision.get("previous_canary_fraction")), 6),
-                "canary_fraction": round(
-                    _as_float(decision.get("widened_canary_fraction") or rollout.get("canary_fraction")),
-                    6,
-                ),
+                "canary_fraction": round(canary_fraction, 6),
+                "canary_enabled": bool(rollout.get("canary_enabled", True)),
+                "full_rollout_active": full_rollout_active,
+                "full_rollout_fraction": round(full_rollout_fraction, 6),
                 "holdout_fraction": round(
-                    _as_float(decision.get("holdout_fraction") or rollout.get("holdout_fraction")),
+                    0.0
+                    if full_rollout_active
+                    else _as_float(decision.get("holdout_fraction") or rollout.get("holdout_fraction")),
                     6,
                 ),
                 "max_rollout_fraction": round(
@@ -2711,6 +2747,7 @@ def _crunch_activation_post_max_rollout_decision(
     canary_fraction: float,
     max_rollout_fraction: float,
     rollback_metadata_present: bool,
+    full_rollout_active: bool = False,
 ) -> dict[str, Any]:
     reason_codes = [public_label(reason, "unknown") for reason in post_widening_reasons if public_label(reason, "unknown") != "unknown"]
     decision = "not-applicable"
@@ -2719,7 +2756,12 @@ def _crunch_activation_post_max_rollout_decision(
     cap_reason: str | None = None
     local_policy_patch: dict[str, Any] | None = None
 
-    if post_widening_next_action == "rollback":
+    if full_rollout_active:
+        decision = "full-rollout-applied"
+        status = "post-max-rollout-full-rollout-applied"
+        next_action = "measure-full-rollout-repeated-context-crunch-outcomes"
+        reason_codes = reason_codes or ["full-rollout-policy-active"]
+    elif post_widening_next_action == "rollback":
         decision = "rollback"
         status = "post-max-rollout-rollback-required"
         next_action = "rollback"
@@ -2771,10 +2813,11 @@ def _crunch_activation_post_max_rollout_decision(
         "schema": CRUNCH_POST_MAX_ROLLOUT_DECISION_SCHEMA,
         "status": status,
         "decision": decision,
-        "decision_options": ["promote-full", "keep-capped", "rollback"],
+        "decision_options": ["promote-full", "full-rollout-applied", "keep-capped", "rollback"],
         "next_action": next_action,
         "promotion_allowed": decision == "promote-full",
-        "full_rollout_allowed": decision == "promote-full",
+        "full_rollout_allowed": decision in {"promote-full", "full-rollout-applied"},
+        "full_rollout_active": bool(full_rollout_active),
         "cap_reason": cap_reason,
         "reason_codes": reason_codes,
         "decision_id": public_label(decision_id, "unknown"),
@@ -2838,8 +2881,11 @@ def build_request_shape_crunch_activation_evidence_report(
     )
     canary_fraction = _as_float(top_rule.get("canary_fraction"))
     max_rollout_fraction = _as_float(top_rule.get("max_rollout_fraction"), DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION)
+    full_rollout_active = bool(top_rule.get("full_rollout_active"))
     widened_rule_count = sum(1 for rule in active_rules if rule.get("decision") == "widen")
+    full_rollout_rule_count = sum(1 for rule in active_rules if rule.get("full_rollout_active"))
     matching_widened_rule_count = sum(1 for rule in matching_rules if rule.get("decision") == "widen")
+    matching_full_rollout_rule_count = sum(1 for rule in matching_rules if rule.get("full_rollout_active"))
     decision = public_label(crunch_policy_decision.get("decision") or decision_summary.get("decision") or "unknown", "unknown")
     has_active_decision_rule = bool(matching_rules)
     has_measured_decision = applied_count > 0 and holdout_count > 0
@@ -2879,19 +2925,28 @@ def build_request_shape_crunch_activation_evidence_report(
         canary_fraction=canary_fraction,
         max_rollout_fraction=max_rollout_fraction,
         rollback_metadata_present=bool(top_rule.get("rollback_metadata_present")),
+        full_rollout_active=full_rollout_active,
     )
     post_max_rollout_next_action = str(post_max_rollout_decision.get("next_action") or post_widening_next_action)
     keep_active_outcome = (
         status == "active-rule-evidence-observed"
         and post_widening_status == "post-widening-active-at-max-rollout"
     )
-    if keep_active_outcome:
+    full_rollout_outcome = status == "active-rule-evidence-observed" and full_rollout_active
+    if keep_active_outcome or full_rollout_outcome:
         next_action = post_max_rollout_next_action
+    duplicate_reason = (
+        "repeated-context-crunch-full-rollout-active"
+        if full_rollout_outcome
+        else "repeated-context-crunch-active-at-max-rollout"
+        if keep_active_outcome
+        else None
+    )
     duplicate_suppression = {
         "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
-        "suppresses_new_activation_issue": keep_active_outcome,
-        "suppresses_generic_crunch_activation_issue": keep_active_outcome,
-        "reason": "repeated-context-crunch-active-at-max-rollout" if keep_active_outcome else None,
+        "suppresses_new_activation_issue": keep_active_outcome or full_rollout_outcome,
+        "suppresses_generic_crunch_activation_issue": keep_active_outcome or full_rollout_outcome,
+        "reason": duplicate_reason,
         "fingerprint": public_id(
             "|".join(
                 part
@@ -2915,11 +2970,19 @@ def build_request_shape_crunch_activation_evidence_report(
     }
     activation_follow_up = {
         "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
-        "status": "keep-active-outcome-recorded" if keep_active_outcome else status,
-        "savings_status": "active-rule-evidence-observed" if keep_active_outcome else status,
+        "status": "full-rollout-outcome-recorded"
+        if full_rollout_outcome
+        else "keep-active-outcome-recorded"
+        if keep_active_outcome
+        else status,
+        "savings_status": "active-rule-evidence-observed" if keep_active_outcome or full_rollout_outcome else status,
         "report_key": "request_shape_crunch_activation_evidence",
         "evidence_schema": CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
-        "activation_state": "measured-active" if keep_active_outcome else ("missing-measurement" if missing_measurements else "measured-savings"),
+        "activation_state": "full-rollout-active"
+        if full_rollout_outcome
+        else "measured-active"
+        if keep_active_outcome
+        else ("missing-measurement" if missing_measurements else "measured-savings"),
         "activation_mode": "active-local-policy",
         "next_action": next_action,
         "post_max_rollout_decision": post_max_rollout_decision,
@@ -2932,7 +2995,7 @@ def build_request_shape_crunch_activation_evidence_report(
         "canary_holdout_rows": holdout_count,
         "canary_already_staged": has_active_decision_rule,
         "canary_already_applied": applied_count > 0,
-        "no_op_reason": "repeated-context-crunch-active-at-max-rollout" if keep_active_outcome else None,
+        "no_op_reason": duplicate_reason,
         "duplicate_suppression": duplicate_suppression,
         "missing_measurements": missing_measurements,
         "privacy": _crunch_opportunity_privacy(),
@@ -2960,6 +3023,8 @@ def build_request_shape_crunch_activation_evidence_report(
             "matching_active_rule_count": len(matching_rules),
             "widened_rule_count": widened_rule_count,
             "matching_widened_rule_count": matching_widened_rule_count,
+            "full_rollout_rule_count": full_rollout_rule_count,
+            "matching_full_rollout_rule_count": matching_full_rollout_rule_count,
             "decision": decision,
             "graduation_decision": public_label(decision_summary.get("graduation_decision") or decision, "unknown"),
             "decision_id": decision_id,
@@ -2979,6 +3044,8 @@ def build_request_shape_crunch_activation_evidence_report(
             "policy_source": public_label(top_rule.get("policy_source") or decision_summary.get("policy_source") or "local-manual", "local-manual"),
             "previous_canary_fraction": round(_as_float(top_rule.get("previous_canary_fraction")), 6),
             "canary_fraction": round(canary_fraction, 6),
+            "full_rollout_active": full_rollout_active,
+            "full_rollout_fraction": round(_as_float(top_rule.get("full_rollout_fraction")), 6),
             "holdout_fraction": round(_as_float(top_rule.get("holdout_fraction")), 6),
             "max_rollout_fraction": round(max_rollout_fraction, 6),
             "post_widening_status": post_widening_status,
@@ -3809,6 +3876,21 @@ def _crunch_policy_decision_application_fingerprint(decision: dict[str, Any]) ->
     return f"request-shape-crunch-policy-apply:{digest}"
 
 
+def _crunch_policy_decision_full_rollout_fingerprint(decision: dict[str, Any]) -> str:
+    digest = hashlib.sha256(
+        stable_json(
+            {
+                "schema": "agentflow.request_shape_crunch_full_rollout_application_fingerprint.v1",
+                "decision_id": decision.get("decision_id"),
+                "application_fingerprint": _crunch_policy_decision_application_fingerprint(decision),
+                "policy_id": decision.get("policy_id"),
+                "cohort_id": decision.get("cohort_id"),
+            }
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"request-shape-crunch-full-rollout:{digest}"
+
+
 def _crunch_policy_decision_legacy_metadata_matches(existing: dict[str, Any], decision: dict[str, Any]) -> bool:
     metrics = decision.get("metrics") if isinstance(decision.get("metrics"), dict) else {}
     checks = {
@@ -3846,6 +3928,7 @@ def apply_request_shape_crunch_policy_decision(
     decision_id: str | None = None,
     widen_fraction: float = DEFAULT_CRUNCH_CANARY_WIDEN_FRACTION,
     max_canary_fraction: float = DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION,
+    promote_full_rollout: bool = False,
 ) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
     if decision_report.get("schema") != CRUNCH_POLICY_DECISION_SCHEMA:
@@ -3907,9 +3990,23 @@ def apply_request_shape_crunch_policy_decision(
     rollout = target_rule.get("rollout") if isinstance(target_rule.get("rollout"), dict) else {}
     previous_canary = _bounded_fraction(rollout.get("canary_fraction", rollout.get("fraction")), DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION)
     holdout = _bounded_fraction(rollout.get("holdout_fraction"), DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION)
+    safety_gates = target_rule.get("safety_gates") if isinstance(target_rule.get("safety_gates"), dict) else {}
+    rule_max_rollout = _bounded_fraction(
+        safety_gates.get("max_rollout_fraction", max_canary_fraction),
+        _bounded_fraction(max_canary_fraction, DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION),
+    )
     existing_policy_decision = target_rule.get("policy_decision") if isinstance(target_rule.get("policy_decision"), dict) else {}
     application_fingerprint = _crunch_policy_decision_application_fingerprint(decision)
+    full_rollout_fingerprint = _crunch_policy_decision_full_rollout_fingerprint(decision)
     existing_application_fingerprint = str(existing_policy_decision.get("application_fingerprint") or "")
+    existing_full_rollout_fingerprint = str(existing_policy_decision.get("full_rollout_fingerprint") or "")
+    existing_full_rollout = (
+        existing_policy_decision.get("decision") == "promote-full"
+        and (
+            existing_full_rollout_fingerprint == full_rollout_fingerprint
+            or existing_application_fingerprint == application_fingerprint
+        )
+    )
     already_applied = (
         existing_policy_decision.get("decision_id") == decision_identifier
         and (
@@ -3920,31 +4017,59 @@ def apply_request_shape_crunch_policy_decision(
             )
         )
     )
-    widened_canary = previous_canary if already_applied else _widened_fraction(
-        previous_canary,
-        widen_fraction=widen_fraction,
-        max_canary_fraction=max_canary_fraction,
-        holdout_fraction=holdout,
+    full_rollout_ready = (
+        promote_full_rollout
+        and previous_canary > 0.0
+        and rule_max_rollout > 0.0
+        and previous_canary >= rule_max_rollout
+    )
+    widened_canary = (
+        1.0
+        if full_rollout_ready
+        else previous_canary
+        if already_applied
+        else _widened_fraction(
+            previous_canary,
+            widen_fraction=widen_fraction,
+            max_canary_fraction=max_canary_fraction,
+            holdout_fraction=holdout,
+        )
     )
     updated_rule = dict(target_rule)
     updated_rollout = dict(rollout)
-    updated_rollout.update({
-        "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
-        "canary_enabled": True,
-        "canary_fraction": widened_canary,
-        "holdout_fraction": holdout,
-        "canary_salt": str(updated_rollout.get("canary_salt") or policy_id),
-        "canary_unit": str(updated_rollout.get("canary_unit") or "request_shape_cohort"),
-    })
-    safety_gates = updated_rule.get("safety_gates") if isinstance(updated_rule.get("safety_gates"), dict) else {}
+    if full_rollout_ready:
+        updated_rollout.update({
+            "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+            "canary_enabled": False,
+            "full_rollout_enabled": True,
+            "full_rollout_fraction": 1.0,
+            "canary_fraction": 1.0,
+            "holdout_fraction": 0.0,
+            "canary_salt": str(updated_rollout.get("canary_salt") or policy_id),
+            "canary_unit": str(updated_rollout.get("canary_unit") or "request_shape_cohort"),
+        })
+    else:
+        updated_rollout.update({
+            "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+            "canary_enabled": True,
+            "full_rollout_enabled": False,
+            "full_rollout_fraction": 0.0,
+            "canary_fraction": widened_canary,
+            "holdout_fraction": holdout,
+            "canary_salt": str(updated_rollout.get("canary_salt") or policy_id),
+            "canary_unit": str(updated_rollout.get("canary_unit") or "request_shape_cohort"),
+        })
     updated_safety_gates = dict(safety_gates)
     updated_safety_gates.update({
         "metadata_only": True,
         "aggregate_only": True,
         "local_file_backed": True,
         "local_only": True,
-        "holdout_required": holdout > 0,
-        "max_rollout_fraction": max(widened_canary, _as_float(updated_safety_gates.get("max_rollout_fraction"))),
+        "holdout_required": False if full_rollout_ready else holdout > 0,
+        "max_rollout_fraction": 1.0
+        if full_rollout_ready
+        else max(widened_canary, _as_float(updated_safety_gates.get("max_rollout_fraction"))),
+        "previous_max_rollout_fraction": rule_max_rollout if full_rollout_ready else _as_float(updated_safety_gates.get("previous_max_rollout_fraction")),
         "raw_prompts_included": False,
         "provider_bodies_included": False,
         "request_ids_included": False,
@@ -3964,9 +4089,13 @@ def apply_request_shape_crunch_policy_decision(
             "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
             "decision_id": decision_identifier,
             "application_fingerprint": application_fingerprint,
-            "source_evidence_schema": CRUNCH_POLICY_DECISION_SCHEMA,
-            "decision": "widen",
-            "graduation_decision": public_label(decision.get("graduation_decision") or "widen", "widen"),
+            "full_rollout_fingerprint": full_rollout_fingerprint if full_rollout_ready else None,
+            "source_evidence_schema": CRUNCH_ACTIVATION_EVIDENCE_SCHEMA if full_rollout_ready else CRUNCH_POLICY_DECISION_SCHEMA,
+            "source_policy_decision_schema": CRUNCH_POLICY_DECISION_SCHEMA if full_rollout_ready else None,
+            "decision": "promote-full" if full_rollout_ready else "widen",
+            "graduation_decision": "promote-full"
+            if full_rollout_ready
+            else public_label(decision.get("graduation_decision") or "widen", "widen"),
             "applied_count": _as_int(metrics.get("applied_count")),
             "holdout_count": _as_int(metrics.get("holdout_count")),
             "observed_saved_tokens": _as_int(metrics.get("observed_saved_tokens")),
@@ -3977,12 +4106,14 @@ def apply_request_shape_crunch_policy_decision(
             "safety_stop_state": public_label(decision.get("safety_stop_state") or "none", "none"),
             "previous_canary_fraction": previous_canary,
             "widened_canary_fraction": widened_canary,
-            "holdout_fraction": holdout,
+            "full_rollout_fraction": 1.0 if full_rollout_ready else 0.0,
+            "holdout_fraction": 0.0 if full_rollout_ready else holdout,
             "metadata_only": True,
             "aggregate_only": True,
         },
         "rollback_metadata": {
             **rollback_metadata,
+            "selected_decision": "promote-full" if full_rollout_ready else "widen",
             "policy_files_written": not dry_run,
             "target_policy_id": policy_id,
             "target_cohort_id": cohort_id,
@@ -4002,19 +4133,40 @@ def apply_request_shape_crunch_policy_decision(
     })
     updated = dict(existing)
     updated["request_shape_repeated_context_canaries"] = updated_section
-    if not dry_run and not already_applied:
+    updated_rule["policy_decision"] = {
+        key: value
+        for key, value in updated_rule["policy_decision"].items()
+        if value not in (None, "", [], {})
+    }
+    should_write = not dry_run and not (existing_full_rollout if full_rollout_ready else already_applied)
+    if should_write:
         import yaml
 
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(yaml.safe_dump(updated, sort_keys=False), encoding="utf-8")
+    status = (
+        "already-full-rollout"
+        if full_rollout_ready and existing_full_rollout
+        else "full-rollout-applied"
+        if full_rollout_ready and not dry_run
+        else "full-rollout-drafted"
+        if full_rollout_ready
+        else "already-applied"
+        if already_applied
+        else "applied"
+        if not dry_run
+        else "drafted"
+    )
 
     return {
         "schema": CRUNCH_POLICY_DECISION_APPLY_SCHEMA,
         "ok": True,
-        "status": "already-applied" if already_applied else "applied" if not dry_run else "drafted",
+        "status": status,
         "dry_run": bool(dry_run),
-        "wrote_policy_files": not dry_run and not already_applied,
-        "already_applied": already_applied,
+        "wrote_policy_files": should_write,
+        "already_applied": existing_full_rollout if full_rollout_ready else already_applied,
+        "full_rollout_ready": full_rollout_ready,
+        "full_rollout_applied": full_rollout_ready and not dry_run,
         "target_local_policy": "crunch_rules",
         "target_local_rule_file": "crunch_rules.yaml",
         "target_local_policy_section": "crunch.rules",
@@ -4022,9 +4174,13 @@ def apply_request_shape_crunch_policy_decision(
         "cohort_id": cohort_id,
         "decision_id": decision_identifier,
         "application_fingerprint": application_fingerprint,
+        "full_rollout_fingerprint": full_rollout_fingerprint if full_rollout_ready else None,
         "previous_canary_fraction": previous_canary,
         "canary_fraction": widened_canary,
-        "holdout_fraction": holdout,
+        "full_rollout_fraction": 1.0 if full_rollout_ready else 0.0,
+        "holdout_fraction": 0.0 if full_rollout_ready else holdout,
+        "previous_max_rollout_fraction": rule_max_rollout,
+        "canary_enabled": not full_rollout_ready,
         "widen_fraction": round(_bounded_fraction(widen_fraction, DEFAULT_CRUNCH_CANARY_WIDEN_FRACTION), 6),
         "max_canary_fraction": round(_bounded_fraction(max_canary_fraction, DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION), 6),
         "rollback_metadata": updated_rule["rollback_metadata"],
@@ -4036,7 +4192,8 @@ def apply_request_shape_crunch_policy_decision(
             "application_fingerprint": application_fingerprint,
             "previous_canary_fraction": previous_canary,
             "canary_fraction": widened_canary,
-            "holdout_fraction": holdout,
+            "full_rollout_fraction": 1.0 if full_rollout_ready else 0.0,
+            "holdout_fraction": 0.0 if full_rollout_ready else holdout,
             "metadata_only": True,
             "aggregate_only": True,
         },
