@@ -4944,6 +4944,107 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(measurements["privacy"]["aggregate_only"])
         self.assertFalse(json.loads(json.dumps(report))["privacy"]["raw_prompts_included"])
 
+    def test_crunch_canary_impact_measures_newly_staged_after_max_rollout_suppression(self) -> None:
+        active_cohort_id = "request-shape-crunch:anthropic:messages:tool-result:active-max"
+        staged_cohort_id = "request-shape-crunch:anthropic:messages:tool-result:newly-staged"
+        opportunity_report = {
+            "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "cohorts": [
+                {
+                    "rank": 1,
+                    "cohort_id": active_cohort_id,
+                    "policy_id": "local-repeated-context-crunch-canary-active-max",
+                    "readiness": "canary-staged",
+                    "row_count": 147,
+                    "projected_saved_tokens": 8606129,
+                    "projected_saved_usd": 25.818387,
+                    "crunch_canary_lifecycle": {"applied_count": 107, "holdout_count": 40, "skipped_count": 280},
+                    "duplicate_suppression": {
+                        "suppressed": True,
+                        "suppresses_new_stage_action": True,
+                        "active_at_max_rollout": True,
+                        "reason": "repeated-context-crunch-active-at-max-rollout",
+                        "matching_local_policy": "crunch_rules",
+                        "matching_policy_id": "local-repeated-context-crunch-canary-active-max",
+                        "matching_max_rollout_fraction": 0.3,
+                    },
+                },
+                {
+                    "rank": 2,
+                    "cohort_id": staged_cohort_id,
+                    "policy_id": "local-repeated-context-crunch-canary-newly-staged",
+                    "readiness": "canary-staged",
+                    "row_count": 44,
+                    "projected_saved_tokens": 238878,
+                    "projected_saved_usd": 0.716636,
+                    "crunch_canary_lifecycle": {
+                        "applied_count": 7,
+                        "holdout_count": 5,
+                        "skipped_count": 32,
+                        "fallback_count": 0,
+                        "retry_count": 1,
+                        "rollback_count": 0,
+                        "safety_stopped_count": 0,
+                    },
+                    "duplicate_suppression": {
+                        "suppressed": True,
+                        "suppresses_new_stage_action": True,
+                        "active_at_max_rollout": False,
+                        "reason": "matching-repeated-context-crunch-canary-already-staged-in-local-policy",
+                        "matching_local_policy": "crunch_rules",
+                        "matching_policy_id": "local-repeated-context-crunch-canary-newly-staged",
+                    },
+                },
+            ],
+            "recommended_actions": [
+                {
+                    "action_type": "stage-local-repeated-context-crunch-canary",
+                    "policy_id": "local-repeated-context-crunch-canary-active-max",
+                    "cohort_id": active_cohort_id,
+                    "conditions": {"category": "tool-result"},
+                    "rollout_fraction": 0.1,
+                    "holdout_fraction": 0.1,
+                    "projected_saved_tokens": 8606129,
+                    "projected_saved_usd": 25.818387,
+                },
+                {
+                    "action_type": "stage-local-repeated-context-crunch-canary",
+                    "policy_id": "local-repeated-context-crunch-canary-newly-staged",
+                    "cohort_id": staged_cohort_id,
+                    "conditions": {"category": "tool-result"},
+                    "rollout_fraction": 0.1,
+                    "holdout_fraction": 0.1,
+                    "projected_saved_tokens": 238878,
+                    "projected_saved_usd": 0.716636,
+                },
+            ],
+        }
+
+        report = build_request_shape_crunch_canary_impact_report([], opportunity_report=opportunity_report)
+
+        self.assertEqual(report["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(report["newly_staged_measurement"]["schema"], "agentflow.request_shape_crunch_newly_staged_measurement.v1")
+        self.assertEqual(report["newly_staged_measurement"]["status"], "measured")
+        self.assertEqual(report["newly_staged_measurement"]["cohort_count"], 1)
+        self.assertEqual(report["newly_staged_measurement"]["applied_count"], 7)
+        self.assertEqual(report["newly_staged_measurement"]["holdout_count"], 5)
+        self.assertEqual(report["newly_staged_measurement"]["skipped_count"], 32)
+        self.assertEqual(report["newly_staged_measurement"]["retry_count"], 1)
+        self.assertEqual(report["newly_staged_measurement"]["fallback_count"], 0)
+        self.assertEqual(report["newly_staged_measurement"]["rollback_count"], 0)
+        self.assertEqual(report["newly_staged_measurement"]["safety_stop_count"], 0)
+        self.assertEqual(report["newly_staged_measurement"]["active_max_rollout_suppressed_count"], 1)
+        self.assertEqual(report["summary"]["newly_staged_measurement_cohort_count"], 1)
+        self.assertEqual(report["summary"]["newly_staged_applied_count"], 7)
+        self.assertEqual(report["summary"]["newly_staged_holdout_count"], 5)
+        self.assertEqual(report["activation_ready_measurements"]["bounded_stage_recommendation_count"], 0)
+        self.assertEqual(report["activation_ready_measurements"]["cohorts"][0]["duplicate_suppression"]["active_at_max_rollout"], True)
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertIn("repeated-context-crunch-active-at-max-rollout", rendered)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertFalse(report["privacy"]["provider_bodies_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+
     def test_crunch_canary_impact_names_high_cost_thinking_measurement_row(self) -> None:
         cohort_id = "request-shape-crunch:anthropic:unknown:tool-result:high-cost-thinking"
         opportunity_report = {
