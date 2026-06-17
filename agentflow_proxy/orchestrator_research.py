@@ -6861,6 +6861,13 @@ def _proposal_priority(labels: list[str]) -> str:
     return "priority:unknown"
 
 
+def _proposal_priority_score(priority: str) -> int:
+    match = re.fullmatch(r"priority:p(\d+)", priority)
+    if match is None:
+        return 99
+    return _to_int(match.group(1), 99)
+
+
 def _proposal_lever(proposal: dict[str, Any], candidate_by_title: dict[str, dict[str, Any]]) -> str:
     title = str(proposal.get("title") or "")
     candidate = candidate_by_title.get(title)
@@ -6880,6 +6887,29 @@ def _proposal_lever(proposal: dict[str, Any], candidate_by_title: dict[str, dict
     if "milestone" in title_l or "backlog" in title_l:
         return "milestone-planning"
     return "optimization"
+
+
+def _proposal_summary_source(title: str, candidate: dict[str, Any] | None) -> str:
+    if candidate is not None:
+        return "ranked-optimization-candidate"
+    title_l = title.lower()
+    if "evidence-to-activation ledger" in title_l:
+        return "evidence-to-activation-ledger"
+    if "replay-ready cache cohort" in title_l or "cache replay" in title_l:
+        return "cache-replay-lifecycle"
+    if "promotion" in title_l or "policy" in title_l:
+        return "local-promotion-lifecycle"
+    return "low-backlog-research"
+
+
+def _proposal_source_score(source: str) -> int:
+    return {
+        "evidence-to-activation-ledger": 0,
+        "cache-replay-lifecycle": 1,
+        "local-promotion-lifecycle": 1,
+        "ranked-optimization-candidate": 2,
+        "low-backlog-research": 3,
+    }.get(source, 4)
 
 
 def _next_action_from_summary(stats_summary: dict[str, Any], top_candidate: dict[str, Any] | None) -> str | None:
@@ -6914,15 +6944,19 @@ def _next_backlog_milestone(
         labels = [str(label) for label in proposal.get("labels") or []]
         title = str(proposal.get("title") or "")
         candidate = candidate_by_title.get(title)
+        lever = _proposal_lever(proposal, candidate_by_title)
+        priority = _proposal_priority(labels)
+        source = _proposal_summary_source(title, candidate)
         issue_rows.append(
             {
                 "rank": rank,
                 "title": sanitize_value(title),
                 "repo": sanitize_value(proposal.get("repo") or "lutzkuen/agentflow"),
-                "lever": _proposal_lever(proposal, candidate_by_title),
-                "priority": _proposal_priority(labels),
+                "lever": lever,
+                "priority": priority,
                 "labels": labels,
-                "source": "ranked-optimization-candidate" if candidate is not None else "low-backlog-research",
+                "source": source,
+                "candidate_rank": _to_int(candidate.get("rank")) if candidate is not None else None,
                 "expected_savings_path": sanitize_value(
                     (candidate or {}).get("estimated_savings_path")
                     or "Turn metadata-only local evidence into an implementation-ready follow-up."
@@ -6930,6 +6964,19 @@ def _next_backlog_milestone(
             }
         )
     top_issue = issue_rows[0] if issue_rows else None
+    ranked_issue_rows = sorted(
+        issue_rows,
+        key=lambda row: (
+            1 if row["lever"] == "milestone-planning" else 0,
+            _proposal_source_score(str(row["source"])),
+            _proposal_priority_score(str(row["priority"])),
+            _to_int(row.get("candidate_rank"), 10_000),
+            _to_int(row["rank"], 10_000),
+        ),
+    )
+    for implementation_rank, row in enumerate(ranked_issue_rows, start=1):
+        row["implementation_rank"] = implementation_rank
+    recommended_issue = ranked_issue_rows[0] if ranked_issue_rows else None
     top_lever = sanitize_value(top_candidate.get("lever")) if top_candidate is not None else None
     top_blocker = sanitize_value(top_candidate.get("blocker")) if top_candidate is not None else None
     return {
@@ -6948,8 +6995,18 @@ def _next_backlog_milestone(
                 "lever": top_issue["lever"],
                 "priority": top_issue["priority"],
             } if top_issue is not None else None,
+            "recommended_next_issue": {
+                "rank": recommended_issue["rank"],
+                "implementation_rank": recommended_issue["implementation_rank"],
+                "title": recommended_issue["title"],
+                "repo": recommended_issue["repo"],
+                "lever": recommended_issue["lever"],
+                "priority": recommended_issue["priority"],
+                "source": recommended_issue["source"],
+            } if recommended_issue is not None else None,
         },
         "issues": issue_rows,
+        "implementation_order": ranked_issue_rows,
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,

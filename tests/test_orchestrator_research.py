@@ -126,6 +126,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(milestone["summary"]["proposal_count"], len(created))
         self.assertGreaterEqual(milestone["summary"]["ranked_candidate_count"], 1)
         self.assertEqual(milestone["issues"][0]["title"], created[0]["title"])
+        self.assertIn("recommended_next_issue", milestone["summary"])
+        self.assertNotEqual(milestone["summary"]["recommended_next_issue"]["lever"], "milestone-planning")
+        self.assertEqual(milestone["summary"]["recommended_next_issue"]["implementation_rank"], 1)
+        self.assertEqual(
+            [item["implementation_rank"] for item in milestone["implementation_order"]],
+            list(range(1, len(created) + 1)),
+        )
         self.assertIn("priority", milestone["issues"][0])
         self.assertTrue(milestone["privacy"]["metadata_only"])
         self.assertTrue(milestone["privacy"]["aggregate_only"])
@@ -268,7 +275,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
         self.assertEqual(milestone["summary"]["top_issue"]["rank"], 1)
         self.assertEqual(milestone["summary"]["top_issue"]["title"], created[0]["title"])
+        self.assertEqual(milestone["summary"]["recommended_next_issue"]["implementation_rank"], 1)
+        self.assertNotEqual(milestone["summary"]["recommended_next_issue"]["lever"], "milestone-planning")
         self.assertEqual([item["rank"] for item in milestone["issues"]], list(range(1, len(created) + 1)))
+        self.assertEqual(
+            [item["implementation_rank"] for item in milestone["implementation_order"]],
+            list(range(1, len(created) + 1)),
+        )
 
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("req-issue-533-secret", rendered)
@@ -2331,6 +2344,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(ledger_issue["closed_lifecycle_predecessor"]["number"], 537)
         self.assertIn("Continues closed predecessor: #595", ledger_issue["body"])
         self.assertIn("Top next action: review-cache-replay-canary-promotion-readiness", ledger_issue["body"])
+
+        milestone = plan["evidence"]["next_backlog_milestone"]
+        self.assertEqual(milestone["summary"]["recommended_next_issue"]["title"], ledger_issue["title"])
+        self.assertEqual(milestone["summary"]["recommended_next_issue"]["implementation_rank"], 1)
+        self.assertEqual(milestone["implementation_order"][0]["title"], ledger_issue["title"])
 
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
         self.assertGreaterEqual(ledger["summary"]["closed_issue_seen_count"], 1)
@@ -5412,16 +5430,20 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "labels": [{"name": "status:blocked"}],
                     "updatedAt": "2026-05-01T00:00:00Z",
                     "request_json": {"messages": [{"content": "private prompt text"}]},
+                    "response_body": {"content": "private response text"},
+                    "cache_key": "cache-issue-secret",
                     "session_id": "session-raw-secret",
                 }
             ],
             stats={
                 "calls": 1,
                 "request_json": {"messages": [{"content": "private stats prompt"}]},
+                "raw_response": "private stats response",
+                "cache_key": "cache-stats-secret",
                 "routing": [{"requested_model": "gpt-5", "path": "/home/lutz/private/project/file.py"}],
             },
             log_sources=[
-                "skip_reason=privacy-blocked request_id=req-raw-secret /home/lutz/private/project/file.py sk-testsecret123456"
+                "skip_reason=privacy-blocked request_id=req-raw-secret cache_key=cache-log-secret /home/lutz/private/project/file.py sk-testsecret123456"
             ],
             threshold=2,
             now=NOW,
@@ -5430,9 +5452,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         rendered = json.dumps(plan)
         self.assertNotIn("private prompt text", rendered)
         self.assertNotIn("private stats prompt", rendered)
+        self.assertNotIn("private response text", rendered)
+        self.assertNotIn("private stats response", rendered)
         self.assertNotIn("/home/lutz/private/project/file.py", rendered)
         self.assertNotIn("req-raw-secret", rendered)
         self.assertNotIn("session-raw-secret", rendered)
+        self.assertNotIn("cache-issue-secret", rendered)
+        self.assertNotIn("cache-stats-secret", rendered)
+        self.assertNotIn("cache-log-secret", rendered)
         self.assertNotIn("sk-testsecret123456", rendered)
         self.assertIn("[REDACTED", rendered)
         for proposal in plan["backlog_changes"]["create_issues"]:
@@ -5440,10 +5467,17 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             self.assertIn("## Labels", body)
             self.assertNotIn("private prompt text", body)
             self.assertNotIn("private stats prompt", body)
+            self.assertNotIn("private response text", body)
+            self.assertNotIn("private stats response", body)
             self.assertNotIn("/home/lutz/private/project/file.py", body)
             self.assertNotIn("req-raw-secret", body)
             self.assertNotIn("session-raw-secret", body)
+            self.assertNotIn("cache-issue-secret", body)
+            self.assertNotIn("cache-stats-secret", body)
+            self.assertNotIn("cache-log-secret", body)
         self.assertFalse(plan["privacy"]["raw_prompts_included"])
+        self.assertFalse(plan["privacy"]["provider_bodies_included"])
+        self.assertFalse(plan["privacy"].get("cache_keys_included", False))
         self.assertFalse(plan["privacy"]["absolute_paths_included"])
 
 
