@@ -637,9 +637,22 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(tool_replay_evidence["acceptance"]["reduces_generic_tools_present_blocker"])
         self.assertTrue(tool_replay_evidence["acceptance"]["reports_dependency_evidence_decisions"])
         self.assertTrue(tool_replay_evidence["acceptance"]["reports_dependency_evidence_burndown"])
+        self.assertTrue(tool_replay_evidence["acceptance"]["distinguishes_missing_stable_and_stale_dependency_evidence"])
         self.assertTrue(tool_replay_evidence["acceptance"]["unsafe_or_missing_dependency_keeps_tool_replay_blocked"])
         self.assertTrue(tool_replay_evidence["acceptance"]["emits_no_cache_apply_actions"])
         self.assertTrue(tool_replay_evidence["acceptance"]["tool_and_streaming_replay_remain_disabled"])
+        tool_classification = tool_replay_evidence["dependency_evidence_classification"]
+        self.assertEqual(
+            set(tool_classification["supported_evidence_classes"]),
+            {
+                "missing-dependency-evidence",
+                "stable-dependency-evidence",
+                "stale-dependency-evidence",
+            },
+        )
+        self.assertEqual(tool_classification["observed_evidence_classes"], ["missing-dependency-evidence"])
+        self.assertFalse(tool_classification["tool_cache_replay_enabled"])
+        self.assertFalse(tool_classification["streaming_replay_enabled"])
         self.assertTrue(tool_replay_evidence["privacy"]["metadata_only"])
         self.assertTrue(tool_replay_evidence["privacy"]["aggregate_only"])
         tool_replay_row = tool_replay_evidence["cohorts"][0]
@@ -685,9 +698,24 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(invalidation_evidence["acceptance"]["tool_and_streaming_replay_remain_disabled"])
         self.assertTrue(invalidation_evidence["acceptance"]["reports_dependency_evidence_decisions"])
         self.assertTrue(invalidation_evidence["acceptance"]["reports_dependency_evidence_burndown"])
+        self.assertTrue(
+            invalidation_evidence["acceptance"]["distinguishes_missing_stable_and_stale_dependency_evidence"]
+        )
         self.assertTrue(invalidation_evidence["acceptance"]["stale_or_missing_dependency_evidence_keeps_replay_blocked"])
         self.assertTrue(invalidation_evidence["acceptance"]["no_cache_entries_written"])
         self.assertFalse(invalidation_evidence["acceptance"]["policy_files_written"])
+        invalidation_classification = invalidation_evidence["dependency_evidence_classification"]
+        self.assertEqual(
+            set(invalidation_classification["supported_evidence_classes"]),
+            {
+                "missing-dependency-evidence",
+                "stable-dependency-evidence",
+                "stale-dependency-evidence",
+            },
+        )
+        self.assertIn("missing-dependency-evidence", invalidation_classification["observed_evidence_classes"])
+        self.assertFalse(invalidation_classification["tool_cache_replay_enabled"])
+        self.assertFalse(invalidation_classification["streaming_replay_enabled"])
         self.assertTrue(invalidation_evidence["privacy"]["metadata_only"])
         self.assertTrue(invalidation_evidence["privacy"]["aggregate_only"])
         self.assertFalse(invalidation_evidence["privacy"]["tool_payloads_included"])
