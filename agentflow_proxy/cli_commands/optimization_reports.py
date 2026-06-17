@@ -5146,6 +5146,17 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
         help="Maximum number of unsuppressed cohorts to stage in this run, default: 10. "
         "Remaining stageable cohorts are picked up on the next run once earlier ones are applied.",
     )
+    parser.add_argument("--cohort-provider-family", help="Only report cohorts matching this provider family.")
+    parser.add_argument("--cohort-source-surface", help="Only report cohorts matching this source surface.")
+    parser.add_argument("--cohort-endpoint", help="Only report cohorts matching this endpoint.")
+    parser.add_argument("--cohort-category", help="Only report cohorts matching this request category.")
+    parser.add_argument("--cohort-workflow-phase", help="Only report cohorts matching this workflow phase.")
+    parser.add_argument("--cohort-text-bucket", help="Only report cohorts matching this text bucket.")
+    parser.add_argument("--cohort-token-bucket", help="Only report cohorts matching this token bucket.")
+    parser.add_argument("--cohort-cache-status", help="Only report cohorts matching this cache status.")
+    parser.add_argument("--cohort-routing-status", help="Only report cohorts matching this routing status.")
+    parser.add_argument("--cohort-stream", choices=("true", "false"), help="Only report streaming or non-streaming cohorts.")
+    parser.add_argument("--cohort-has-tools", choices=("true", "false"), help="Only report tool or non-tool cohorts.")
     parser.add_argument(
         "--apply",
         action="store_true",
@@ -5163,6 +5174,20 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
     args = parser.parse_args(argv)
 
     stdout = stdout if stdout is not None else sys.stdout
+    cohort_filter = {
+        "provider_family": args.cohort_provider_family,
+        "source_surface": args.cohort_source_surface,
+        "endpoint": args.cohort_endpoint,
+        "category": args.cohort_category,
+        "workflow_phase": args.cohort_workflow_phase,
+        "text_bucket": args.cohort_text_bucket,
+        "token_bucket": args.cohort_token_bucket,
+        "cache_status": args.cohort_cache_status,
+        "routing_status": args.cohort_routing_status,
+        "stream": None if args.cohort_stream is None else args.cohort_stream == "true",
+        "has_tools": None if args.cohort_has_tools is None else args.cohort_has_tools == "true",
+    }
+    cohort_filter = {key: value for key, value in cohort_filter.items() if value is not None}
 
     from agentflow_proxy.paths import agentflow_config_path
     from agentflow_proxy.request_shape_rollups import (
@@ -5182,6 +5207,7 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
             holdout_fraction=args.holdout_fraction,
             rules_path=args.rules_path,
             max_new_canaries=args.max_new_canaries,
+            cohort_filter=cohort_filter or None,
         )
     finally:
         store.conn.close()
@@ -5189,14 +5215,27 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
         rules_path = Path(args.rules_path or os.getenv("AGENTFLOW_CRUNCH_RULES") or agentflow_config_path("crunch_rules.yaml"))
         actions = [action for action in result.get("stage_actions") or [] if isinstance(action, dict)]
         if not actions:
-            apply_result = {
-                "schema": "agentflow.request_shape_crunch_canary_apply.v1",
-                "ok": False,
-                "dry_run": False,
-                "wrote_policy_files": False,
-                "rules_path_included": False,
-                "errors": [{"path": "$.top_stage_action", "message": "no stageable request-shape crunch canary action"}],
-            }
+            if result.get("status") == "already-staged":
+                apply_result = {
+                    "schema": "agentflow.request_shape_crunch_canary_apply.v1",
+                    "ok": True,
+                    "dry_run": False,
+                    "wrote_policy_files": False,
+                    "target_local_policy": "crunch_rules",
+                    "applied_count": 0,
+                    "reason": "request-shape-crunch-canary-already-staged-in-local-policy",
+                    "rules_path_included": False,
+                    "privacy": result.get("privacy"),
+                }
+            else:
+                apply_result = {
+                    "schema": "agentflow.request_shape_crunch_canary_apply.v1",
+                    "ok": False,
+                    "dry_run": False,
+                    "wrote_policy_files": False,
+                    "rules_path_included": False,
+                    "errors": [{"path": "$.top_stage_action", "message": "no stageable request-shape crunch canary action"}],
+                }
         elif len(actions) == 1:
             apply_result = apply_request_shape_crunch_canary_action(actions[0], rules_path=rules_path)
         else:

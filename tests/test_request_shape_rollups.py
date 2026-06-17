@@ -68,6 +68,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         routing_extra: dict[str, object] | None = None,
         cache_extra: dict[str, object] | None = None,
         crunch_extra: dict[str, object] | None = None,
+        actual_input_tokens: int | None = None,
     ) -> str:
         call_id = str(uuid.uuid4())
         routing_json: dict[str, object] = {
@@ -91,7 +92,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         }
         if cache_extra:
             cache_json.update(cache_extra)
-        input_tokens = max(1, text_chars // 4)
+        input_tokens = actual_input_tokens if actual_input_tokens is not None else max(1, text_chars // 4)
         crunch_json: dict[str, object] = {"changed": False, "tokens_saved_est": 0}
         if crunch_extra:
             crunch_json.update(crunch_extra)
@@ -2702,6 +2703,184 @@ class RequestShapeRollupTests(unittest.TestCase):
             str(rules_path),
         ):
             self.assertNotIn(forbidden, rendered)
+
+    def test_crunch_canary_stage_filter_reports_already_staged_anthropic_messages_cohort(self) -> None:
+        for _ in range(3):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=132_000,
+                actual_input_tokens=100,
+                cost=0.10,
+                baseline=0.10,
+            )
+        for _ in range(2):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=80_000,
+                actual_input_tokens=100,
+                cost=0.08,
+                baseline=0.08,
+            )
+
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+        first_report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="targeted-stage-before-rule",
+            rollout_fraction=0.10,
+            holdout_fraction=0.10,
+            rules_path=rules_path,
+        )
+        target_action = next(
+            action
+            for action in first_report["stage_actions"]
+            if action["conditions"]["endpoint"] == "messages"
+            and action["conditions"]["category"] == "tool-result"
+            and action["conditions"]["workflow_phase"] == "thinking"
+            and action["conditions"]["text_bucket"] == "gte_128k_chars"
+            and action["conditions"]["token_bucket"] == "lt_500_tokens"
+        )
+        apply_result = apply_request_shape_crunch_canary_action(target_action, rules_path=rules_path)
+        self.assertTrue(apply_result["ok"])
+
+        cohort_filter = {
+            "provider_family": "anthropic",
+            "source_surface": "anthropic_messages",
+            "endpoint": "messages",
+            "category": "tool-result",
+            "workflow_phase": "thinking",
+            "text_bucket": "gte_128k_chars",
+            "token_bucket": "lt_500_tokens",
+            "cache_status": "skipped",
+            "routing_status": "passthrough",
+            "stream": True,
+            "has_tools": True,
+        }
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="targeted-stage-after-rule",
+            rollout_fraction=0.10,
+            holdout_fraction=0.10,
+            rules_path=rules_path,
+            cohort_filter=cohort_filter,
+        )
+
+        self.assertEqual(report["status"], "already-staged")
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["staged_canary_count"], 0)
+        self.assertEqual(report["already_staged_canary_count"], 1)
+        self.assertEqual(report["reported_canary_count"], 1)
+        self.assertEqual(report["stage_actions"], [])
+        self.assertEqual(report["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(report["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(report["top_reported_canary"]["cohort_id"], target_action["cohort_id"])
+        self.assertEqual(report["top_reported_canary"]["row_count"], 3)
+        self.assertEqual(report["top_reported_canary"]["token_bucket"], "lt_500_tokens")
+        self.assertEqual(
+            report["top_reported_canary"]["duplicate_suppression"]["reason"],
+            "matching-repeated-context-crunch-canary-already-staged-in-local-policy",
+        )
+        self.assertEqual(report["duplicate_suppression"]["suppressed_existing_cohort_count"], 1)
+        self.assertEqual(report["duplicate_suppression"]["stageable_unsuppressed_cohort_count"], 0)
+        self.assertEqual(report["duplicate_suppression"]["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(report["duplicate_suppression"]["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertTrue(report["acceptance"]["reports_one_new_or_existing_repeated_context_crunch_canary"])
+        self.assertTrue(report["acceptance"]["has_holdout_metadata"])
+        self.assertTrue(report["acceptance"]["has_file_backed_target"])
+        self.assertTrue(report["acceptance"]["has_projected_lifecycle_split"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+        self.assertNotIn(str(rules_path), json.dumps(report, sort_keys=True))
+
+    def test_crunch_canary_stage_cli_filter_reports_already_staged_target(self) -> None:
+        for _ in range(3):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=132_000,
+                actual_input_tokens=100,
+                cost=0.10,
+                baseline=0.10,
+            )
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+        first_report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="targeted-cli-before-rule",
+            rollout_fraction=0.10,
+            holdout_fraction=0.10,
+            rules_path=rules_path,
+        )
+        apply_result = apply_request_shape_crunch_canary_action(first_report["top_stage_action"], rules_path=rules_path)
+        self.assertTrue(apply_result["ok"])
+
+        stdout = io.StringIO()
+        code = cli.request_shape_crunch_canary_stage_cli(
+            [
+                "--db",
+                self.db_path,
+                "--limit",
+                "20",
+                "--run-id",
+                "targeted-cli-after-rule",
+                "--rules-path",
+                str(rules_path),
+                "--cohort-provider-family",
+                "anthropic",
+                "--cohort-source-surface",
+                "anthropic_messages",
+                "--cohort-endpoint",
+                "messages",
+                "--cohort-category",
+                "tool-result",
+                "--cohort-workflow-phase",
+                "thinking",
+                "--cohort-text-bucket",
+                "gte_128k_chars",
+                "--cohort-token-bucket",
+                "lt_500_tokens",
+                "--cohort-cache-status",
+                "skipped",
+                "--cohort-routing-status",
+                "passthrough",
+                "--cohort-stream",
+                "true",
+                "--cohort-has-tools",
+                "true",
+            ],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "already-staged")
+        self.assertEqual(payload["staged_canary_count"], 0)
+        self.assertEqual(payload["already_staged_canary_count"], 1)
+        self.assertEqual(payload["reported_canary_count"], 1)
+        self.assertEqual(payload["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(payload["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(payload["top_reported_canary"]["endpoint"], "messages")
+        self.assertEqual(payload["top_reported_canary"]["text_bucket"], "gte_128k_chars")
+        self.assertEqual(payload["top_reported_canary"]["token_bucket"], "lt_500_tokens")
+        self.assertTrue(payload["acceptance"]["reports_one_new_or_existing_repeated_context_crunch_canary"])
+        self.assertTrue(payload["acceptance"]["has_holdout_metadata"])
+        self.assertTrue(payload["acceptance"]["has_file_backed_target"])
+        self.assertNotIn(str(rules_path), stdout.getvalue())
 
     def test_crunch_canary_stage_skips_existing_local_rule_and_stages_next_cohort(self) -> None:
         for _ in range(3):

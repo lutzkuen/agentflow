@@ -521,6 +521,10 @@ def _request_shape_crunch_cohort_matches_rule(cohort: dict[str, Any], rule: dict
     if rule_cohort_id != "unknown" and cohort_id != "unknown" and rule_cohort_id == cohort_id:
         return True
     conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    return _request_shape_crunch_cohort_matches_conditions(cohort, conditions)
+
+
+def _request_shape_crunch_cohort_matches_conditions(cohort: dict[str, Any], conditions: dict[str, Any]) -> bool:
     if not conditions:
         return False
     for key, expected in conditions.items():
@@ -3430,6 +3434,7 @@ def build_request_shape_crunch_opportunity_dry_run(
     holdout_fraction: float = DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION,
     existing_canary_rules: list[dict[str, Any]] | None = None,
     max_canary_actions: int = DEFAULT_CRUNCH_CANARY_MAX_NEW_STAGE_ACTIONS,
+    cohort_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     crunch_rows = [
         row
@@ -3455,8 +3460,12 @@ def build_request_shape_crunch_opportunity_dry_run(
     canary_holdout_rows = 0
     canary_safety_stopped_rows = 0
     existing_rules = existing_canary_rules if isinstance(existing_canary_rules, list) else []
+    filter_conditions = _request_shape_crunch_canary_rule_conditions(cohort_filter)
+    matched_count = 0
 
     for row in crunch_rows:
+        if filter_conditions and not _request_shape_crunch_cohort_matches_conditions(row, filter_conditions):
+            continue
         decision = _shape_crunch_decision(row)
         row_count = _as_int(row.get("row_count") or row.get("count"))
         classes = sorted({public_label(item, "unknown") for item in row.get("candidate_work_classes") or []})
@@ -3491,6 +3500,7 @@ def build_request_shape_crunch_opportunity_dry_run(
         canary_applied_rows += applied_count
         canary_holdout_rows += holdout_count
         canary_safety_stopped_rows += safety_stopped_count
+        matched_count += row_count
 
         cohort = {
                 "schema": "agentflow.request_shape_crunch_opportunity_cohort.v1",
@@ -3571,7 +3581,6 @@ def build_request_shape_crunch_opportunity_dry_run(
     )
     blocker_breakdown = _breakdown(blocker_counts)
     top_blocker = blocker_breakdown[0]["value"] if blocker_breakdown else None
-    matched_count = sum(_as_int(row.get("row_count") or row.get("count")) for row in crunch_rows)
     status = "ranked" if projected_tokens > 0 or observed_tokens > 0 or projected_savings > 0 or observed_savings > 0 else "no-positive-crunch-opportunity"
     if canary_safety_stopped_rows:
         status = "canary-safety-stopped"
@@ -3581,7 +3590,7 @@ def build_request_shape_crunch_opportunity_dry_run(
         status = "no-repeated-context-crunch-cohorts"
     missing = []
     if not cohorts:
-        missing.append("repeated-context-crunch-cohorts")
+        missing.append("matching-repeated-context-crunch-cohorts" if filter_conditions else "repeated-context-crunch-cohorts")
     if projected_tokens <= 0 and observed_tokens <= 0 and projected_savings <= 0 and observed_savings <= 0:
         missing.append("positive-observed-or-projected-savings")
     activation_follow_up = _request_shape_crunch_follow_up(
@@ -3677,6 +3686,7 @@ def build_request_shape_crunch_canary_stage_report(
     holdout_fraction: float = DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION,
     rules_path: str | Path | None = None,
     max_new_canaries: int = DEFAULT_CRUNCH_CANARY_MAX_NEW_STAGE_ACTIONS,
+    cohort_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rollup_report = build_request_shape_rollups_report(
         store_obj,
@@ -3685,6 +3695,7 @@ def build_request_shape_crunch_canary_stage_report(
         run_id=run_id,
     )
     existing_canary_rules = _load_request_shape_crunch_canary_rules(rules_path)
+    has_cohort_filter = bool(_request_shape_crunch_canary_rule_conditions(cohort_filter))
     dry_run = build_request_shape_crunch_opportunity_dry_run(
         [row for row in rollup_report.get("rollups") or [] if isinstance(row, dict)],
         limit=25,
@@ -3692,6 +3703,7 @@ def build_request_shape_crunch_canary_stage_report(
         holdout_fraction=holdout_fraction,
         existing_canary_rules=existing_canary_rules,
         max_canary_actions=max_new_canaries,
+        cohort_filter=cohort_filter,
     )
     actions = [
         action
@@ -3710,6 +3722,13 @@ def build_request_shape_crunch_canary_stage_report(
         ),
         None,
     )
+    already_staged_cohorts = [
+        cohort
+        for cohort in cohorts
+        if isinstance(cohort.get("duplicate_suppression"), dict)
+        and bool(cohort["duplicate_suppression"].get("suppresses_new_stage_action"))
+    ]
+    top_reported_canary = top_action or (already_staged_cohorts[0] if already_staged_cohorts else top_cohort)
     lifecycle_projections = [
         _request_shape_crunch_canary_lifecycle_projection(
             cohort,
@@ -3751,6 +3770,8 @@ def build_request_shape_crunch_canary_stage_report(
         "suppresses_new_stage_action": not actions and _as_int((dry_run.get("summary") or {}).get("duplicate_suppressed_cohort_count")) > 0,
         "reason": ((dry_run.get("activation_follow_up") or {}).get("duplicate_suppression") or {}).get("reason"),
         "matching_local_policy": "crunch_rules" if existing_canary_rules else None,
+        "target_local_policy_section": "crunch.rules",
+        "target_local_rule_file": "crunch_rules.yaml",
         "metadata_only": True,
         "aggregate_only": True,
         "privacy": _crunch_opportunity_privacy(),
@@ -3759,14 +3780,27 @@ def build_request_shape_crunch_canary_stage_report(
         status = "staged"
         next_action = "apply-local-crunch-canary-after-review"
         reason = "staged-repeated-context-crunch-canary"
+        ok = True
+    elif has_cohort_filter and len(cohorts) == 1 and len(already_staged_cohorts) == 1:
+        status = "already-staged"
+        next_action = "measure-repeated-context-crunch-canary-impact"
+        duplicate = already_staged_cohorts[0].get("duplicate_suppression")
+        reason = (
+            duplicate.get("reason")
+            if isinstance(duplicate, dict) and duplicate.get("reason")
+            else "matching-repeated-context-crunch-canary-already-staged-in-local-policy"
+        )
+        ok = True
     else:
         status = "no-stageable-cohort"
         next_action = (dry_run.get("activation_follow_up") or {}).get("next_action") or "rank-repeated-context-crunch-dry-run"
         reason = (dry_run.get("activation_follow_up") or {}).get("top_blocker") or dry_run.get("status") or "no-stageable-cohort"
+        ok = False
+    reported_canary_count = len(actions) + (len(already_staged_cohorts) if not actions else 0)
     return {
         "schema": CRUNCH_CANARY_STAGE_SCHEMA,
         "status": status,
-        "ok": bool(actions),
+        "ok": ok,
         "dry_run": True,
         "read_only": True,
         "generated_at": utc_now(),
@@ -3774,11 +3808,16 @@ def build_request_shape_crunch_canary_stage_report(
         "reason": reason,
         "next_action": next_action,
         "staged_canary_count": len(actions),
+        "already_staged_canary_count": len(already_staged_cohorts),
+        "reported_canary_count": reported_canary_count,
         "stage_actions": actions,
         "top_stage_action": top_action,
+        "top_reported_canary": top_reported_canary,
         "top_cohort": top_cohort,
         "top_stage_cohort": top_stage_cohort,
         "duplicate_suppression": duplicate_suppression,
+        "target_local_policy_section": "crunch.rules",
+        "target_local_rule_file": "crunch_rules.yaml",
         "stage_lifecycle_projection": stage_lifecycle_projection,
         "cohort_lifecycle_projections": lifecycle_projections[:25],
         "source_report": {
@@ -3795,9 +3834,16 @@ def build_request_shape_crunch_canary_stage_report(
         },
         "acceptance": {
             "stages_one_repeated_context_crunch_canary": len(actions) == 1,
-            "has_projected_tokens": bool(top_action and _as_int(top_action.get("projected_saved_tokens")) > 0),
-            "has_projected_savings": bool(top_action and _as_float(top_action.get("projected_saved_usd")) > 0),
-            "has_holdout_metadata": bool(top_action and _as_float(top_action.get("holdout_fraction")) > 0),
+            "reports_one_new_or_existing_repeated_context_crunch_canary": reported_canary_count == 1,
+            "has_projected_tokens": bool(top_reported_canary and _as_int(top_reported_canary.get("projected_saved_tokens")) > 0),
+            "has_projected_savings": bool(top_reported_canary and _as_float(top_reported_canary.get("projected_saved_usd")) > 0),
+            "has_holdout_metadata": bool(
+                (top_action and _as_float(top_action.get("holdout_fraction")) > 0)
+                or (
+                    isinstance((top_reported_canary or {}).get("duplicate_suppression"), dict)
+                    and _as_float(top_reported_canary["duplicate_suppression"].get("matching_holdout_fraction")) > 0
+                )
+            ),
             "has_projected_lifecycle_split": bool(
                 stage_lifecycle_projection["projected_canary_applied_count"] > 0
                 and stage_lifecycle_projection["projected_canary_holdout_count"] > 0
@@ -3815,6 +3861,7 @@ def build_request_shape_crunch_canary_stage_report(
             "has_rollback_threshold": bool(top_action and _as_float(top_action.get("rollback_threshold")) > 0),
             "has_duplicate_suppression": isinstance(duplicate_suppression, dict)
             and duplicate_suppression.get("schema") == "agentflow.request_shape_crunch_stage_duplicate_suppression_summary.v1",
+            "has_file_backed_target": True,
             "unsafe_or_stale_cohorts_remain_skipped": all(
                 item.get("readiness") == "measurement-ready"
                 or _as_int(item.get("projected_skipped_count")) > 0
