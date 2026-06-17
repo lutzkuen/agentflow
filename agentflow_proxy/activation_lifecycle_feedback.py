@@ -969,6 +969,124 @@ def _anthropic_routing_unblock_criteria(
     }
 
 
+def _anthropic_routing_review_field(
+    *,
+    schema_suffix: str,
+    status: str,
+    present: bool,
+    stale: bool,
+    reason_codes: list[str],
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    field = {
+        "schema": f"agentflow.anthropic_routing_safety_stop_{schema_suffix}.v1",
+        "status": status,
+        "present": present,
+        "stale": stale,
+        "reason_codes": sorted({
+            _reason_code(reason) or "unknown"
+            for reason in reason_codes
+            if str(reason or "").strip()
+        }),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    if isinstance(details, dict):
+        field.update(details)
+    return field
+
+
+def _coverage_review_status(*, missing: bool, stale: bool) -> str:
+    if missing:
+        return "missing"
+    if stale:
+        return "stale"
+    return "present"
+
+
+def _anthropic_routing_guard_review_fields(
+    *,
+    safety_stop_count: int,
+    applied_count: int,
+    holdout_count: int,
+    missing_applied: bool,
+    missing_holdout: bool,
+    stale: bool,
+    blockers: list[str],
+    needed_resolution: list[str],
+    executor_compatible: bool,
+    required_local_executor: str,
+    safety_breakdown_count: int,
+    coverage: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    needed = {str(item or "") for item in needed_resolution}
+    blocker_set = set(blockers)
+    safety_review_missing = safety_stop_count > 0 or "safety-stop-observed" in blocker_set
+    safer_guard_missing = "safer_threshold_or_executor_guard" in needed
+    rollback_missing = "rollback_proof" in needed
+    applied_status = _coverage_review_status(missing=missing_applied, stale=stale)
+    holdout_status = _coverage_review_status(missing=missing_holdout, stale=stale)
+    return {
+        "safety_stop_reason_review": _anthropic_routing_review_field(
+            schema_suffix="reason_review",
+            status="missing" if safety_review_missing else ("stale" if stale else "present"),
+            present=not safety_review_missing and not stale,
+            stale=stale and not safety_review_missing,
+            reason_codes=["safety-stop-observed"] if safety_review_missing else ["safety-stop-count-zero"],
+            details={
+                "safety_stop_count": safety_stop_count,
+                "review_required": safety_review_missing,
+            },
+        ),
+        "safer_threshold_or_executor_guard": _anthropic_routing_review_field(
+            schema_suffix="executor_guard_review",
+            status="missing" if safer_guard_missing else ("stale" if stale else "present"),
+            present=not safer_guard_missing and not stale,
+            stale=stale and not safer_guard_missing,
+            reason_codes=["safer-threshold-or-executor-guard-missing"] if safer_guard_missing else ["executor-guard-present"],
+            details={
+                "executor_compatible": executor_compatible,
+                "required_local_executor": required_local_executor,
+                "safety_stop_breakdown_count": safety_breakdown_count,
+            },
+        ),
+        "rollback_proof": _anthropic_routing_review_field(
+            schema_suffix="rollback_proof_review",
+            status="missing" if rollback_missing else ("stale" if stale else "present"),
+            present=not rollback_missing and not stale,
+            stale=stale and not rollback_missing,
+            reason_codes=["rollback-proof-missing"] if rollback_missing else ["rollback-proof-present"],
+            details={
+                "rollback_action": "keep-routing-policy-disabled",
+                "active_policy_changed": False,
+                "wrote_active_policy_files": False,
+            },
+        ),
+        "applied_coverage": _anthropic_routing_review_field(
+            schema_suffix="applied_coverage_review",
+            status=applied_status,
+            present=applied_status == "present",
+            stale=applied_status == "stale",
+            reason_codes=["missing-applied-coverage"] if missing_applied else ["applied-coverage-present"],
+            details={
+                "applied_count": applied_count,
+                "applied_rate": _as_float(coverage.get("applied_rate")),
+            },
+        ),
+        "holdout_coverage": _anthropic_routing_review_field(
+            schema_suffix="holdout_coverage_review",
+            status=holdout_status,
+            present=holdout_status == "present",
+            stale=holdout_status == "stale",
+            reason_codes=["missing-holdout-coverage"] if missing_holdout else ["holdout-coverage-present"],
+            details={
+                "holdout_count": holdout_count,
+                "holdout_rate": _as_float(coverage.get("holdout_rate")),
+            },
+        ),
+    }
+
+
 def _local_file_backed_routing_representation() -> dict[str, Any]:
     return {
         "exists": True,
@@ -1037,6 +1155,10 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
     if workflow_phase == "unknown" and _safe_label(bucket.get("category"), "unknown") == "tool-result":
         workflow_phase = "tool-execution"
     executor_compatible = any(bool(row.get("executor_compatible")) for row in safety_breakdown)
+    required_local_executor = _safe_label(
+        bucket.get("required_local_executor") or (safety_breakdown[0].get("expected_local_executor") if safety_breakdown else None),
+        "unknown",
+    )
 
     matched_count = _as_int(lifecycle.get("matched_count") or coverage.get("matched_count") or bucket.get("sample_count"))
     observed_count = _as_int(lifecycle.get("observed_count"))
@@ -1048,6 +1170,20 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
     missing_holdout = holdout_count <= 0 or "missing-holdout-coverage" in blockers
     promotion_allowed = next_state == "unblock-ready"
     stage_allowed = next_state == "unblock-ready"
+    guard_review_fields = _anthropic_routing_guard_review_fields(
+        safety_stop_count=safety_stop_count,
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        missing_applied=missing_applied,
+        missing_holdout=missing_holdout,
+        stale=stale,
+        blockers=blockers,
+        needed_resolution=needed,
+        executor_compatible=executor_compatible,
+        required_local_executor=required_local_executor,
+        safety_breakdown_count=len(safety_breakdown),
+        coverage=coverage,
+    )
     suppression_material = {
         "schema": PASS_THROUGH_ROUTING_SCHEMA,
         "provider": "anthropic",
@@ -1093,7 +1229,7 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "workflow_phase": workflow_phase,
         "requested_model": _safe_label(bucket.get("requested_model"), "unknown"),
         "target_model": _safe_label(bucket.get("candidate_target_model") or bucket.get("target_model"), "unknown"),
-        "required_local_executor": _safe_label(bucket.get("required_local_executor") or (safety_breakdown[0].get("expected_local_executor") if safety_breakdown else None), "unknown"),
+        "required_local_executor": required_local_executor,
         "executor_compatible": executor_compatible,
         "local_file_backed_representation": _local_file_backed_routing_representation(),
         "target_local_policy_section": "routing.rules",
@@ -1124,6 +1260,11 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "safety_stop_breakdown": safety_breakdown,
         "missing_applied_coverage": missing_applied,
         "missing_holdout_coverage": missing_holdout,
+        "safety_stop_reason_review": guard_review_fields["safety_stop_reason_review"],
+        "safer_threshold_or_executor_guard": guard_review_fields["safer_threshold_or_executor_guard"],
+        "rollback_proof": guard_review_fields["rollback_proof"],
+        "applied_coverage": guard_review_fields["applied_coverage"],
+        "holdout_coverage": guard_review_fields["holdout_coverage"],
         "duplicate_suppression": duplicate_suppression,
         "burndown_status": "safety-stop-active" if next_state == "keep-blocked" else next_state,
         "promotion_allowed": promotion_allowed,

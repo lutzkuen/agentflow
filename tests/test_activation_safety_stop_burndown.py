@@ -159,6 +159,23 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertEqual(group["safety_stop_breakdown"][0]["count"], 390)
         self.assertTrue(group["safety_stop_breakdown"][0]["missing_applied_coverage"])
         self.assertTrue(group["safety_stop_breakdown"][0]["missing_holdout_coverage"])
+        self.assertEqual(group["safety_stop_reason_review"]["status"], "missing")
+        self.assertFalse(group["safety_stop_reason_review"]["present"])
+        self.assertEqual(group["safety_stop_reason_review"]["safety_stop_count"], 390)
+        self.assertEqual(group["safer_threshold_or_executor_guard"]["status"], "missing")
+        self.assertFalse(group["safer_threshold_or_executor_guard"]["present"])
+        self.assertTrue(group["safer_threshold_or_executor_guard"]["executor_compatible"])
+        self.assertEqual(
+            group["safer_threshold_or_executor_guard"]["required_local_executor"],
+            "anthropic-routing-rules",
+        )
+        self.assertEqual(group["rollback_proof"]["status"], "missing")
+        self.assertFalse(group["rollback_proof"]["active_policy_changed"])
+        self.assertFalse(group["rollback_proof"]["wrote_active_policy_files"])
+        self.assertEqual(group["applied_coverage"]["status"], "missing")
+        self.assertEqual(group["applied_coverage"]["applied_count"], 0)
+        self.assertEqual(group["holdout_coverage"]["status"], "missing")
+        self.assertEqual(group["holdout_coverage"]["holdout_count"], 0)
         unblock = group["unblock_criteria"]
         self.assertEqual(unblock["schema"], "agentflow.anthropic_routing_safety_stop_unblock_criteria.v1")
         self.assertEqual(unblock["status"], "blocked")

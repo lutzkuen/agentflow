@@ -1114,6 +1114,15 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
         stage["duplicate_suppression"] = group.get("duplicate_suppression")
     if isinstance(group.get("unblock_criteria"), dict):
         stage["unblock_criteria"] = group.get("unblock_criteria")
+    for review_key in (
+        "safety_stop_reason_review",
+        "safer_threshold_or_executor_guard",
+        "rollback_proof",
+        "applied_coverage",
+        "holdout_coverage",
+    ):
+        if isinstance(group.get(review_key), dict):
+            stage[review_key] = group.get(review_key)
     if isinstance(group.get("local_file_backed_representation"), dict):
         stage["local_file_backed_representation"] = group.get("local_file_backed_representation")
     if group.get("target_local_rule_file"):
@@ -3790,6 +3799,15 @@ def build_evidence_to_activation_next_action_ledger(
             entry["top_miss_reason"] = sanitize_value(stage.get("top_miss_reason"))
         if isinstance(stage.get("unblock_criteria"), dict):
             entry["unblock_criteria"] = sanitize_value(stage.get("unblock_criteria"))
+        for review_key in (
+            "safety_stop_reason_review",
+            "safer_threshold_or_executor_guard",
+            "rollback_proof",
+            "applied_coverage",
+            "holdout_coverage",
+        ):
+            if isinstance(stage.get(review_key), dict):
+                entry[review_key] = sanitize_value(stage.get(review_key))
         if stage.get("source"):
             entry["source"] = sanitize_value(stage.get("source"))
         for decision_key in (
