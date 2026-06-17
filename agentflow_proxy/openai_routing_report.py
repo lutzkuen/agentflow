@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +14,7 @@ from agentflow_proxy.store import utc_now
 SCHEMA = "agentflow.openai_routing_opportunity.v1"
 PROMOTION_DECISION_REPORT_SCHEMA = "agentflow.openai_routing_promotion_decision_report.v1"
 PROMOTION_DECISION_SCHEMA = "agentflow.openai_routing_promotion_decision.v1"
+PROMOTION_VERDICT_OPTIONS = ["promotion-ready", "keep-staged", "keep-blocked", "rollback-required"]
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
 DEFAULT_MAX_RETRY_RATE = 0.20
@@ -1108,6 +1110,154 @@ def _openai_promotion_decision_privacy() -> dict[str, Any]:
     }
 
 
+def _stable_fingerprint(*parts: Any) -> str:
+    normalized = "|".join(str(part or "") for part in parts)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _promotion_verdict(
+    *,
+    decision: str,
+    blocker_counts: dict[str, int],
+    applied_count: int,
+    current_routed_count: int,
+) -> str:
+    if decision == "promote":
+        return "promotion-ready"
+    rollback_reasons = {
+        "safety-stop-observed",
+        "error-observed",
+        "fallback-observed",
+        "retry-observed",
+    }
+    if rollback_reasons.intersection(blocker_counts) and (applied_count > 0 or current_routed_count > 0):
+        return "rollback-required"
+    if decision == "keep-blocked":
+        return "keep-blocked"
+    return "keep-staged"
+
+
+def _openai_promotion_rollback_metadata(
+    *,
+    routing_rule_metadata: dict[str, Any],
+    reason_codes: list[str],
+    promotion_verdict: str,
+) -> dict[str, Any]:
+    rule_preview = routing_rule_metadata.get("rule_preview") if isinstance(routing_rule_metadata.get("rule_preview"), dict) else {}
+    rule_id = str(rule_preview.get("id") or "promote-openai-routing-canary")
+    disabled_reason = reason_codes[0] if reason_codes else "operator-requested"
+    return {
+        "schema": "agentflow.openai_routing_promotion_rollback_metadata.v1",
+        "required_for_promotion": True,
+        "promotion_verdict": promotion_verdict,
+        "rollback_action_type": "disable_openai_routing_rule",
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "target_rule_id": "[REDACTED_ID]",
+        "rule_id_included": False,
+        "policy_files_written": False,
+        "disable_patch": {
+            "rules": [
+                {
+                    "id": rule_id,
+                    "enabled": False,
+                    "disabled_reason": disabled_reason,
+                }
+            ]
+        },
+        "rollback_reason_codes": [
+            "operator-requested",
+            "safety-stop-observed",
+            "error-observed",
+            "fallback-observed",
+            "retry-observed",
+            "stale-evidence",
+        ],
+        "preserve_previous_rule_required": True,
+        "privacy": _openai_promotion_decision_privacy(),
+    }
+
+
+def _openai_promotion_local_policy_patch(
+    *,
+    decision: str,
+    routing_rule_metadata: dict[str, Any],
+    lifecycle: dict[str, Any],
+    savings_per_1000: float,
+) -> dict[str, Any] | None:
+    if decision != "promote":
+        return None
+    rule_preview = routing_rule_metadata.get("rule_preview") if isinstance(routing_rule_metadata.get("rule_preview"), dict) else {}
+    rule = {
+        "id": rule_preview.get("id") or "promote-openai-routing-canary",
+        "enabled": True,
+        "policy_source": "local-promoted-review",
+        "conditions": rule_preview.get("conditions") if isinstance(rule_preview.get("conditions"), dict) else {},
+        "action": rule_preview.get("action") if isinstance(rule_preview.get("action"), dict) else {},
+        "metadata": {
+            "schema": "agentflow.openai_routing_promotion_rule_metadata.v1",
+            "source": "openai_routing_promotion_decision",
+            "operator_apply_required": True,
+            "policy_files_written": False,
+            "target_local_policy_section": "routing.rules",
+            "target_local_rule_file": "routing_rules.yaml",
+            "promotion_evidence": {
+                "schema": "agentflow.openai_routing_promotion_patch_evidence.v1",
+                "applied_count": _as_int(lifecycle.get("applied_count")),
+                "holdout_count": _as_int(lifecycle.get("holdout_count")),
+                "safety_stop_count": _as_int(lifecycle.get("safety_stop_count")),
+                "error_count": _as_int(lifecycle.get("error_count")),
+                "fallback_count": _as_int(lifecycle.get("fallback_count")),
+                "retry_count": _as_int(lifecycle.get("retry_count")),
+                "savings_per_1000_calls_usd": savings_per_1000,
+            },
+            "privacy": _openai_promotion_decision_privacy(),
+        },
+    }
+    return {
+        "schema": "agentflow.openai_routing_local_policy_patch.v1",
+        "patch_type": "promote_openai_routing_canary",
+        "status": "drafted",
+        "operator_apply_required": True,
+        "policy_files_written": False,
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "rules": [rule],
+        "privacy": _openai_promotion_decision_privacy(),
+    }
+
+
+def _openai_promotion_duplicate_suppression(
+    *,
+    target: dict[str, Any],
+    promotion_verdict: str,
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    fingerprint = _stable_fingerprint(
+        "openai-routing-promotion",
+        target.get("source_surface"),
+        target.get("endpoint"),
+        target.get("category"),
+        target.get("requested_model"),
+        target.get("target_model"),
+        promotion_verdict,
+        ",".join(sorted(reason_codes)),
+    )
+    return {
+        "schema": "agentflow.openai_routing_promotion_duplicate_suppression.v1",
+        "fingerprint": f"routing-promotion:{fingerprint}",
+        "reason": reason_codes[0] if reason_codes else promotion_verdict,
+        "promotion_verdict": promotion_verdict,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "suppresses_generic_routing_activation_issue": True,
+        "suppresses_new_openai_routing_promotion_issue": True,
+        "suppresses_repeated_canary_decision_issue": True,
+    }
+
+
 def _build_openai_promotion_decision(
     *,
     report: dict[str, Any],
@@ -1289,25 +1439,81 @@ def _build_openai_promotion_decision(
 
     blocked_count = matched_count if blocker_counts else 0
     privacy = _openai_promotion_decision_privacy()
+    reason_codes = sorted(blocker_counts)
+    target = {
+        "provider": "openai",
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+        "category": category,
+        "requested_model": requested_model,
+        "target_model": target_model,
+        "required_local_executor": "openai-routing-canary",
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+    }
+    lifecycle = {
+        "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+        "status": "matched" if observed_count else "no-openai-canary-metadata",
+        "observed_count": observed_count,
+        "cohort_counts": cohort_counts,
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "skipped_count": skipped,
+        "unknown_count": unknown,
+        "safety_stop_count": safety,
+        "error_count": error_count,
+        "fallback_count": fallback_count,
+        "retry_count": retry_count,
+        "latest_observed_at": latest_observed_at,
+        "oldest_observed_at": oldest_observed_at,
+        "skipped_reason_breakdown": _breakdown(skipped_reason_counts),
+        "unknown_reason_breakdown": _breakdown(unknown_reason_counts),
+        "skipped_unknown_classification": {
+            "schema": "agentflow.openai_routing_canary_skipped_unknown_classification.v1",
+            "safe_bypass_count": sum(safe_bypass_reason_counts.values()),
+            "unsupported_shape_count": unsupported_shape_count,
+            "promotion_blocker_count": promotion_blocker_count,
+            "unclassified_count": unclassified_count,
+            "requires_operator_review": bool(unknown or unsupported_shape_count or promotion_blocker_count or unclassified_count),
+            "safe_bypass_reason_breakdown": _breakdown(safe_bypass_reason_counts),
+            "unsupported_shape_reason_breakdown": _breakdown(unsupported_shape_reason_counts),
+            "promotion_blocker_reason_breakdown": _breakdown(promotion_blocker_reason_counts),
+            "unclassified_reason_breakdown": _breakdown(unclassified_reason_counts),
+        },
+    }
+    promotion_verdict = _promotion_verdict(
+        decision=decision,
+        blocker_counts=blocker_counts,
+        applied_count=applied,
+        current_routed_count=current_routed_count,
+    )
+    local_policy_patch = _openai_promotion_local_policy_patch(
+        decision=decision,
+        routing_rule_metadata=routing_rule_metadata,
+        lifecycle=lifecycle,
+        savings_per_1000=savings_per_1000,
+    )
+    rollback_metadata = _openai_promotion_rollback_metadata(
+        routing_rule_metadata=routing_rule_metadata,
+        reason_codes=reason_codes,
+        promotion_verdict=promotion_verdict,
+    )
+    duplicate_suppression = _openai_promotion_duplicate_suppression(
+        target=target,
+        promotion_verdict=promotion_verdict,
+        reason_codes=reason_codes,
+    )
     return {
         "schema": PROMOTION_DECISION_SCHEMA,
         "decision": decision,
+        "promotion_verdict": promotion_verdict,
+        "promotion_verdict_options": PROMOTION_VERDICT_OPTIONS,
         "promotion_ready": decision == "promote",
         "next_action": next_action,
         "reason": reason,
-        "reason_codes": sorted(blocker_counts),
+        "reason_codes": reason_codes,
         "blocker_reason_breakdown": _breakdown(blocker_counts),
-        "target": {
-            "provider": "openai",
-            "source_surface": source_surface,
-            "endpoint": endpoint,
-            "category": category,
-            "requested_model": requested_model,
-            "target_model": target_model,
-            "required_local_executor": "openai-routing-canary",
-            "target_local_policy_section": "routing.rules",
-            "target_local_rule_file": "routing_rules.yaml",
-        },
+        "target": target,
         "candidate_count": len(candidates),
         "candidate_ids": sorted(candidate_ids),
         "matched_count": matched_count,
@@ -1318,36 +1524,7 @@ def _build_openai_promotion_decision(
         "estimated_baseline_cost_usd": round(baseline_cost_usd, 6),
         "savings_per_1000_calls_usd": savings_per_1000,
         "estimated_savings_per_1000_calls_usd": savings_per_1000,
-        "lifecycle": {
-            "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
-            "status": "matched" if observed_count else "no-openai-canary-metadata",
-            "observed_count": observed_count,
-            "cohort_counts": cohort_counts,
-            "applied_count": applied,
-            "holdout_count": holdout,
-            "skipped_count": skipped,
-            "unknown_count": unknown,
-            "safety_stop_count": safety,
-            "error_count": error_count,
-            "fallback_count": fallback_count,
-            "retry_count": retry_count,
-            "latest_observed_at": latest_observed_at,
-            "oldest_observed_at": oldest_observed_at,
-            "skipped_reason_breakdown": _breakdown(skipped_reason_counts),
-            "unknown_reason_breakdown": _breakdown(unknown_reason_counts),
-            "skipped_unknown_classification": {
-                "schema": "agentflow.openai_routing_canary_skipped_unknown_classification.v1",
-                "safe_bypass_count": sum(safe_bypass_reason_counts.values()),
-                "unsupported_shape_count": unsupported_shape_count,
-                "promotion_blocker_count": promotion_blocker_count,
-                "unclassified_count": unclassified_count,
-                "requires_operator_review": bool(unknown or unsupported_shape_count or promotion_blocker_count or unclassified_count),
-                "safe_bypass_reason_breakdown": _breakdown(safe_bypass_reason_counts),
-                "unsupported_shape_reason_breakdown": _breakdown(unsupported_shape_reason_counts),
-                "promotion_blocker_reason_breakdown": _breakdown(promotion_blocker_reason_counts),
-                "unclassified_reason_breakdown": _breakdown(unclassified_reason_counts),
-            },
-        },
+        "lifecycle": lifecycle,
         "quality_gates": {
             "requires_fresh_evidence": True,
             "requires_applied_coverage": True,
@@ -1361,6 +1538,9 @@ def _build_openai_promotion_decision(
             "requires_file_backed_local_policy": True,
         },
         "routing_rule_metadata": routing_rule_metadata,
+        "local_policy_patch": local_policy_patch,
+        "rollback_metadata": rollback_metadata,
+        "duplicate_suppression": duplicate_suppression,
         "privacy": privacy,
     }
 
@@ -1390,9 +1570,12 @@ def build_openai_routing_promotion_decision_report(
         "limit": report.get("limit"),
         "target": decision["target"],
         "decision": decision["decision"],
+        "promotion_verdict": decision["promotion_verdict"],
+        "promotion_verdict_options": PROMOTION_VERDICT_OPTIONS,
         "promotion_ready": decision["promotion_ready"],
         "summary": {
             "decision_count": 1,
+            "promotion_verdict": decision["promotion_verdict"],
             "promote_count": 1 if decision["decision"] == "promote" else 0,
             "keep_staged_count": 1 if decision["decision"] == "keep-staged" else 0,
             "keep_blocked_count": 1 if decision["decision"] == "keep-blocked" else 0,
