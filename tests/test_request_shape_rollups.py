@@ -3889,6 +3889,128 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertNotIn(str(rules_path), json.dumps(report, sort_keys=True))
 
+    def test_crunch_canary_stage_suppresses_active_max_rollout_and_stages_unsuppressed(self) -> None:
+        for _ in range(3):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=132_000,
+                cost=0.20,
+                baseline=0.20,
+            )
+        for _ in range(3):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=80_000,
+                cost=0.08,
+                baseline=0.08,
+            )
+
+        first_report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="active-max-stage-first",
+            rollout_fraction=0.10,
+            holdout_fraction=0.10,
+            rules_path=Path(self.tmpdir.name) / "missing-crunch-rules.yaml",
+        )
+        active_action = first_report["top_stage_action"]
+        self.assertEqual(active_action["conditions"]["text_bucket"], "gte_128k_chars")
+
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+        rules_path.parent.mkdir()
+        rules_path.write_text(
+            yaml.safe_dump(
+                {
+                    "request_shape_repeated_context_canaries": {
+                        "enabled": True,
+                        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+                        "rules": [
+                            {
+                                "id": active_action["policy_id"],
+                                "enabled": True,
+                                "policy_source": "local-manual",
+                                "cohort_id": active_action["cohort_id"],
+                                "source_evidence_schema": active_action["source_evidence_schema"],
+                                "conditions": active_action["conditions"],
+                                "rollout": {
+                                    "canary_enabled": True,
+                                    "canary_fraction": 0.30,
+                                    "holdout_fraction": 0.10,
+                                },
+                                "safety_gates": {"max_rollout_fraction": 0.30},
+                                "policy_decision": {
+                                    "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                    "decision_id": "request-shape-crunch-policy-decision:test-max-rollout",
+                                    "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                    "decision": "widen",
+                                    "graduation_decision": "widen",
+                                    "applied_count": 107,
+                                    "holdout_count": 40,
+                                    "observed_saved_tokens": 8606129,
+                                    "observed_saved_usd": 25.818387,
+                                    "error_rate_delta": 0.0,
+                                    "retry_rate_delta": 0.0,
+                                    "fallback_rate_delta": 0.0,
+                                    "safety_stop_state": "none",
+                                    "previous_canary_fraction": 0.20,
+                                    "widened_canary_fraction": 0.30,
+                                    "holdout_fraction": 0.10,
+                                    "metadata_only": True,
+                                    "aggregate_only": True,
+                                },
+                                "projected_saved_chars": active_action["projected_saved_chars"],
+                                "projected_saved_tokens": active_action["projected_saved_tokens"],
+                                "projected_saved_usd": active_action["projected_saved_usd"],
+                            }
+                        ],
+                    }
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="active-max-stage-second",
+            rollout_fraction=0.10,
+            holdout_fraction=0.10,
+            rules_path=rules_path,
+        )
+
+        self.assertEqual(report["status"], "staged")
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["staged_canary_count"], 1)
+        self.assertEqual(report["top_stage_action"]["conditions"]["text_bucket"], "32k_128k_chars")
+        self.assertNotEqual(report["top_stage_action"]["cohort_id"], active_action["cohort_id"])
+        self.assertEqual(report["top_cohort"]["duplicate_suppression"]["reason"], "repeated-context-crunch-active-at-max-rollout")
+        self.assertTrue(report["top_cohort"]["duplicate_suppression"]["active_at_max_rollout"])
+        self.assertEqual(report["top_cohort"]["duplicate_suppression"]["matching_max_rollout_fraction"], 0.30)
+        self.assertEqual(
+            report["top_cohort"]["duplicate_suppression"]["matching_policy_decision"]["source_evidence_schema"],
+            "agentflow.request_shape_crunch_policy_decision.v1",
+        )
+        self.assertEqual(report["duplicate_suppression"]["suppressed_existing_cohort_count"], 1)
+        self.assertEqual(report["duplicate_suppression"]["active_max_rollout_suppressed_cohort_count"], 1)
+        self.assertEqual(report["duplicate_suppression"]["stageable_unsuppressed_cohort_count"], 1)
+        self.assertEqual(report["duplicate_suppression"]["newly_staged_cohort_count"], 1)
+        self.assertFalse(report["duplicate_suppression"]["suppresses_new_stage_action"])
+        self.assertTrue(report["acceptance"]["does_not_restage_suppressed_or_existing_widened_cohorts"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn(str(rules_path), rendered)
+
     def test_crunch_canary_stage_stages_all_remaining_unsuppressed_cohorts_in_one_run(self) -> None:
         for text_chars, workflow_phase in (
             (20_000, "thinking"),

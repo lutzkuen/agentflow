@@ -627,6 +627,23 @@ def _load_request_shape_crunch_canary_rules(rules_path: str | Path | None = None
             if not isinstance(item, dict) or not bool(item.get("enabled", True)):
                 continue
             rollout = item.get("rollout") if isinstance(item.get("rollout"), dict) else {}
+            safety_gates = item.get("safety_gates") if isinstance(item.get("safety_gates"), dict) else {}
+            policy_decision = item.get("policy_decision") if isinstance(item.get("policy_decision"), dict) else {}
+            decision_value = public_label(policy_decision.get("decision") or policy_decision.get("graduation_decision"), "unknown")
+            canary_fraction = _bounded_fraction(
+                rollout.get("canary_fraction", rollout.get("fraction", 0.0)),
+                0.0,
+            )
+            max_rollout_fraction = _bounded_fraction(
+                safety_gates.get("max_rollout_fraction", DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION),
+                0.0,
+            )
+            active_at_max_rollout = (
+                decision_value == "widen"
+                and canary_fraction > 0
+                and max_rollout_fraction > 0
+                and canary_fraction >= max_rollout_fraction
+            )
             rules.append(
                 {
                     "id": public_label(item.get("id") or item.get("policy_id") or f"local-repeated-context-crunch-canary-{index + 1}", "unknown"),
@@ -634,12 +651,17 @@ def _load_request_shape_crunch_canary_rules(rules_path: str | Path | None = None
                     "cohort_id": public_label(item.get("cohort_id"), "unknown"),
                     "policy_source": public_label(item.get("policy_source"), "unknown"),
                     "conditions": _request_shape_crunch_canary_rule_conditions(item.get("conditions")),
+                    "policy_decision": {
+                        "decision": decision_value,
+                        "graduation_decision": public_label(policy_decision.get("graduation_decision") or decision_value, "unknown"),
+                        "decision_id": public_label(policy_decision.get("decision_id"), "unknown"),
+                        "source_evidence_schema": public_label(policy_decision.get("source_evidence_schema"), "unknown"),
+                    },
+                    "active_at_max_rollout": active_at_max_rollout,
+                    "max_rollout_fraction": round(max_rollout_fraction, 6),
                     "rollout": {
                         "canary_enabled": bool(rollout.get("canary_enabled", True)),
-                        "canary_fraction": _bounded_fraction(
-                            rollout.get("canary_fraction", rollout.get("fraction", 0.0)),
-                            0.0,
-                        ),
+                        "canary_fraction": canary_fraction,
                         "holdout_fraction": _bounded_fraction(rollout.get("holdout_fraction", 0.0), 0.0),
                     },
                 }
@@ -683,16 +705,35 @@ def _request_shape_crunch_cohort_duplicate_suppression(
         if not bool(rollout.get("canary_enabled", True)):
             continue
         if _request_shape_crunch_cohort_matches_rule(cohort, rule):
+            active_at_max_rollout = bool(rule.get("active_at_max_rollout"))
+            reason = (
+                "repeated-context-crunch-active-at-max-rollout"
+                if active_at_max_rollout
+                else "matching-repeated-context-crunch-canary-already-staged-in-local-policy"
+            )
+            policy_decision = rule.get("policy_decision") if isinstance(rule.get("policy_decision"), dict) else {}
             return {
                 "schema": "agentflow.request_shape_crunch_stage_duplicate_suppression.v1",
                 "suppressed": True,
                 "suppresses_new_stage_action": True,
-                "reason": "matching-repeated-context-crunch-canary-already-staged-in-local-policy",
+                "reason": reason,
+                "active_at_max_rollout": active_at_max_rollout,
                 "matching_local_policy": "crunch_rules",
                 "matching_policy_id": public_label(rule.get("policy_id") or rule.get("id"), "unknown"),
                 "matching_cohort_id": public_label(rule.get("cohort_id"), "unknown"),
                 "matching_rollout_fraction": round(_as_float(rollout.get("canary_fraction")), 6),
                 "matching_holdout_fraction": round(_as_float(rollout.get("holdout_fraction")), 6),
+                "matching_max_rollout_fraction": round(_as_float(rule.get("max_rollout_fraction")), 6),
+                "matching_policy_decision": {
+                    "decision": public_label(policy_decision.get("decision"), "unknown"),
+                    "graduation_decision": public_label(policy_decision.get("graduation_decision"), "unknown"),
+                    "decision_id": public_label(policy_decision.get("decision_id"), "unknown"),
+                    "source_evidence_schema": public_label(policy_decision.get("source_evidence_schema"), "unknown"),
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                }
+                if policy_decision
+                else None,
                 "metadata_only": True,
                 "aggregate_only": True,
                 "privacy": _crunch_opportunity_privacy(),
@@ -3959,6 +4000,13 @@ def build_request_shape_crunch_opportunity_dry_run(
         if isinstance(cohort.get("duplicate_suppression"), dict)
         and bool(cohort["duplicate_suppression"].get("suppresses_new_stage_action"))
     )
+    active_max_rollout_suppressed_count = sum(
+        1
+        for cohort in cohorts
+        if isinstance(cohort.get("duplicate_suppression"), dict)
+        and bool(cohort["duplicate_suppression"].get("suppresses_new_stage_action"))
+        and bool(cohort["duplicate_suppression"].get("active_at_max_rollout"))
+    )
     blocker_breakdown = _breakdown(blocker_counts)
     top_blocker = blocker_breakdown[0]["value"] if blocker_breakdown else None
     status = "ranked" if projected_tokens > 0 or observed_tokens > 0 or projected_savings > 0 or observed_savings > 0 else "no-positive-crunch-opportunity"
@@ -3993,6 +4041,7 @@ def build_request_shape_crunch_opportunity_dry_run(
     activation_follow_up["duplicate_suppression"].update(
         {
             "suppressed_existing_cohort_count": duplicate_suppressed_count,
+            "active_max_rollout_suppressed_cohort_count": active_max_rollout_suppressed_count,
             "stageable_unsuppressed_cohort_count": len(stageable_cohorts),
             "newly_staged_cohort_count": len(recommended_actions),
             "suppresses_new_stage_action": bool(
@@ -4029,6 +4078,7 @@ def build_request_shape_crunch_opportunity_dry_run(
             "newly_staged_cohort_count": len(recommended_actions),
             "stage_action_limit": stage_action_limit,
             "duplicate_suppressed_cohort_count": duplicate_suppressed_count,
+            "active_max_rollout_suppressed_cohort_count": active_max_rollout_suppressed_count,
             "stageable_unsuppressed_cohort_count": len(stageable_cohorts),
             "skipped_cohort_count": readiness_counts.get("skipped", 0),
             "current_conservative_tokens_saved": observed_tokens,
@@ -4144,6 +4194,10 @@ def build_request_shape_crunch_canary_stage_report(
         "schema": "agentflow.request_shape_crunch_stage_duplicate_suppression_summary.v1",
         "existing_local_rule_count": len(existing_canary_rules),
         "suppressed_existing_cohort_count": (dry_run.get("summary") or {}).get("duplicate_suppressed_cohort_count", 0),
+        "active_max_rollout_suppressed_cohort_count": (dry_run.get("summary") or {}).get(
+            "active_max_rollout_suppressed_cohort_count",
+            0,
+        ),
         "stageable_unsuppressed_cohort_count": (dry_run.get("summary") or {}).get("stageable_unsuppressed_cohort_count", 0),
         "newly_staged_cohort_count": len(actions),
         "stage_action_limit": (dry_run.get("summary") or {}).get("stage_action_limit", max_new_canaries),
