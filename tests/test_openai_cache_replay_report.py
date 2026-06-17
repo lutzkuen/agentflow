@@ -2040,6 +2040,154 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertFalse(plan["request_shape_evidence"]["cache_replayability_dry_run"]["privacy"]["individual_candidate_ids_included"])
         self.assertFalse(plan["activation_dry_run"]["privacy"]["pattern_hashes_included"])
 
+    def test_openai_cache_replay_apply_stages_single_safe_tool_light_canary(self) -> None:
+        for index, cost in enumerate((0.01, 0.03, 0.04)):
+            self._log_openai_call(
+                category="tool-light",
+                has_tools=True,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                request_fingerprint="raw-safe-tool-cache-fingerprint",
+                file_dependency_audit=self._audit(safe=True),
+                cost=cost,
+                created_at=f"2026-06-11T08:0{index}:00+00:00",
+            )
+        self._log_openai_call(
+            category="tool-light",
+            has_tools=True,
+            cache_status="miss",
+            cache_reason="exact-miss",
+            request_fingerprint="raw-stale-tool-cache-fingerprint",
+            file_dependency_audit=self._audit(reason="dependency-changed", safe=False),
+            cost=0.05,
+            created_at="2026-06-11T08:10:00+00:00",
+        )
+        self._log_openai_call(
+            category="tool-light",
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="tool-cache-disabled",
+            request_fingerprint="raw-missing-tool-cache-fingerprint",
+            file_dependency_audit=self._audit(reason="file-dependency-missing", safe=False),
+            cost=0.02,
+            created_at="2026-06-11T08:11:00+00:00",
+        )
+
+        plan = build_openai_cache_replay_apply_plan(
+            self.store,
+            opportunity_limit=20,
+            impact_limit=20,
+            holdout_fraction=0.25,
+            max_candidates=10,
+        )
+
+        self.assertTrue(plan["ok"])
+        accepted = [
+            row
+            for row in plan["accepted_candidates"]
+            if row.get("source_schema") == "agentflow.openai_cache_replay_blocker_outcomes.v1"
+        ]
+        self.assertEqual(len(accepted), 1)
+        self.assertTrue(accepted[0]["allow_tool_calls"])
+        self.assertTrue(accepted[0]["safe_invalidation"])
+        self.assertTrue(accepted[0]["safe_invalidation_evidence"])
+        self.assertEqual(accepted[0]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(accepted[0]["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(accepted[0]["canary_fraction"], 0.75)
+        self.assertEqual(accepted[0]["holdout_fraction"], 0.25)
+        self.assertEqual(
+            accepted[0]["rollback_metadata"]["rollback_action_type"],
+            "disable_openai_tool_cache_replay_canary",
+        )
+
+        skipped_reasons = {
+            reason
+            for row in plan["skipped_candidates"]
+            if row.get("source_schema") == "agentflow.openai_cache_replay_blocker_outcomes.v1"
+            for reason in row.get("reason_codes") or []
+        }
+        self.assertIn("stale-dependency", skipped_reasons)
+        self.assertIn("missing-invalidation", skipped_reasons)
+        self.assertTrue(all(
+            not row.get("emits_cache_apply_action")
+            for row in plan["skipped_candidates"]
+            if row.get("source_schema") == "agentflow.openai_cache_replay_blocker_outcomes.v1"
+        ))
+
+        policy = plan["policy"]
+        tool_rules = [
+            rule
+            for rule in policy["pattern_rules"]
+            if (rule.get("graduation") or {}).get("source_schema") == "agentflow.openai_cache_replay_blocker_outcomes.v1"
+        ]
+        self.assertEqual(len(tool_rules), 1)
+        rule = tool_rules[0]
+        self.assertEqual(rule["target_cache_policy"]["policy_section"], "cache.pattern_rules")
+        self.assertEqual(rule["target_cache_policy"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(rule["conditions"]["pattern_hashes"], ["sha256:*"])
+        self.assertEqual(rule["conditions"]["source_surface"], "openai_responses")
+        self.assertEqual(rule["conditions"]["endpoint"], "responses")
+        self.assertEqual(rule["conditions"]["category"], "tool-light")
+        self.assertTrue(rule["conditions"]["has_tools"])
+        self.assertFalse(rule["conditions"]["stream"])
+        self.assertTrue(rule["action"]["allow_tool_calls"])
+        self.assertTrue(rule["action"]["safe_invalidation"])
+        self.assertTrue(rule["action"]["invalidation"]["safe_invalidation_evidence"])
+        self.assertFalse(rule["action"]["invalidation"]["file_dependency_audit"]["paths_included"])
+        self.assertEqual(rule["rollout"]["canary_fraction"], 0.75)
+        self.assertEqual(rule["rollout"]["holdout_fraction"], 0.25)
+        self.assertEqual(rule["rollback_metadata"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(rule["promotion"]["rollback_metadata"]["disable_patch"]["pattern_rules"][0]["id"], rule["id"])
+
+        self.assertEqual(plan["blocker_outcome_evidence"]["schema"], "agentflow.openai_cache_replay_blocker_outcomes.v1")
+        rendered = json.dumps(plan, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "raw response must not leak",
+            "raw-cache-key-secret",
+            "raw-safe-tool-cache-fingerprint",
+            "raw-stale-tool-cache-fingerprint",
+            "raw-missing-tool-cache-fingerprint",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertFalse(plan["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(plan["privacy"]["request_fingerprints_included"])
+        self.assertFalse(plan["privacy"]["session_ids_included"])
+        self.assertFalse(plan["privacy"]["cache_keys_included"])
+
+        output = io.StringIO()
+        exit_code = cli.openai_cache_replay_apply_cli(
+            [
+                "--db",
+                self.db_path,
+                "--config-dir",
+                str(Path(self.tmpdir.name) / "config"),
+                "--opportunity-limit",
+                "20",
+                "--impact-limit",
+                "20",
+                "--holdout-fraction",
+                "0.25",
+                "--dry-run",
+            ],
+            stdout=output,
+        )
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.openai_cache_replay_apply.v1")
+        self.assertTrue(payload["dry_run"])
+        self.assertFalse(payload["wrote_policy_files"])
+        cli_accepted = [
+            row
+            for row in payload["accepted_candidates"]
+            if row.get("source_schema") == "agentflow.openai_cache_replay_blocker_outcomes.v1"
+        ]
+        self.assertEqual(len(cli_accepted), 1)
+        self.assertTrue(cli_accepted[0]["allow_tool_calls"])
+        self.assertTrue(cli_accepted[0]["safe_invalidation"])
+        self.assertEqual(cli_accepted[0]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertNotIn("raw-safe-tool-cache-fingerprint", output.getvalue())
+
     def test_openai_dry_run_projects_session_scoped_replay_and_dependency_blockers(self) -> None:
         pattern_hash = "sha256:" + "b" * 64
         policy = {

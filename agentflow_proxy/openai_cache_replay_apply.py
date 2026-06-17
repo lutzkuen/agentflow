@@ -9,6 +9,9 @@ from typing import Any
 import yaml
 
 from agentflow_proxy.cache import _parse_pattern_hashes
+from agentflow_proxy.openai_cache_replay_blocker_outcomes import (
+    build_openai_cache_replay_blocker_outcomes_report,
+)
 from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
 from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 from agentflow_proxy.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
@@ -370,6 +373,213 @@ def _rule_from_request_shape_cohort(
     }, []
 
 
+def _safe_tool_cohort_candidate_id(cohort: dict[str, Any]) -> str:
+    basis = {
+        "schema": "agentflow.openai_tool_cache_replay_safe_cohort_basis.v1",
+        "source": cohort.get("source"),
+        "outcome": cohort.get("outcome"),
+        "reason": cohort.get("reason"),
+        "source_surface": cohort.get("source_surface"),
+        "endpoint": cohort.get("endpoint"),
+        "category": cohort.get("category"),
+        "workflow_phase": cohort.get("workflow_phase"),
+        "text_bucket": cohort.get("text_bucket"),
+        "token_bucket": cohort.get("token_bucket"),
+        "file_dependency_status": cohort.get("file_dependency_status"),
+        "safe_invalidation_evidence": bool(cohort.get("safe_invalidation_evidence")),
+    }
+    digest = hashlib.sha256(yaml.safe_dump(basis, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    endpoint = str(cohort.get("endpoint") or "unknown").replace("_", "-")
+    category = str(cohort.get("category") or "unknown").replace("_", "-")
+    return _public_id(f"openai-tool-cache:{endpoint}:{category}:{digest}", "tool-cache-candidate")
+
+
+def _rule_from_safe_tool_outcome_cohort(
+    cohort: dict[str, Any],
+    *,
+    holdout_fraction: float,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    blockers: list[str] = []
+    audit = cohort.get("file_dependency_audit") if isinstance(cohort.get("file_dependency_audit"), dict) else {}
+    if str(cohort.get("outcome") or "") != "replay-ready":
+        blockers.append(str(cohort.get("outcome") or "not-replay-ready"))
+    if str(cohort.get("next_action") or "") != "stage-local-cache-replay-canary":
+        blockers.append(str(cohort.get("next_action") or "not-stageable"))
+    if str(cohort.get("source_surface") or "") != "openai_responses":
+        blockers.append("unsupported-cache-replay-surface")
+    if str(cohort.get("endpoint") or "") != "responses":
+        blockers.append("unsupported-cache-replay-endpoint")
+    if str(cohort.get("category") or "") != "tool-light":
+        blockers.append("unsupported-tool-cache-category")
+    if not bool(cohort.get("has_tools")):
+        blockers.append("tools-required")
+    if bool(cohort.get("stream")):
+        blockers.append("streaming-replay-not-supported")
+    if not bool(cohort.get("safe_invalidation_evidence")):
+        blockers.append("safe-invalidation-evidence-missing")
+    if str(cohort.get("file_dependency_status") or "") != "stable":
+        blockers.append(str(cohort.get("file_dependency_status") or "file-dependency-status-missing"))
+    if audit.get("invalidation_reason"):
+        blockers.append(str(audit.get("invalidation_reason")))
+    if _as_float(cohort.get("projected_savings_usd")) <= 0:
+        blockers.append("non-positive-projected-savings")
+    if blockers:
+        return None, blockers
+
+    candidate_id = _safe_tool_cohort_candidate_id(cohort)
+    rule_id = _public_id(candidate_id.replace("openai-tool-cache:", "openai-tool-cache-rule:"), "tool-cache-rule")
+    canary_fraction = round(1.0 - holdout_fraction, 6)
+    cohort_bucket = "/".join(
+        str(value or "unknown").replace("/", "_")
+        for value in (
+            cohort.get("source_surface"),
+            cohort.get("endpoint"),
+            cohort.get("category"),
+            cohort.get("workflow_phase"),
+            cohort.get("text_bucket"),
+            cohort.get("token_bucket"),
+        )
+    )
+    conditions = {
+        "pattern_hashes": [_REQUEST_SHAPE_PATTERN_WILDCARD],
+        "provider_family": "openai",
+        "source_surface": cohort.get("source_surface"),
+        "endpoint": cohort.get("endpoint"),
+        "category": cohort.get("category"),
+        "workflow_phase": cohort.get("workflow_phase"),
+        "text_bucket": cohort.get("text_bucket"),
+        "token_bucket": cohort.get("token_bucket"),
+        "has_tools": True,
+        "stream": False,
+        "replayability_levels": [cohort.get("replayability_level") or "local-exact-response"],
+    }
+    conditions = {key: value for key, value in conditions.items() if value not in (None, "", [])}
+    rollback_metadata = {
+        "schema": "agentflow.openai_tool_cache_replay_rollback_metadata.v1",
+        "rollback_action_type": "disable_openai_tool_cache_replay_canary",
+        "rollback_reason_codes": [
+            "safety-stop-observed",
+            "stale-dependency-evidence",
+            "cache-hit-rate-regression",
+            "error-rate-regression",
+            "retry-rate-regression",
+            "operator-requested",
+        ],
+        "disable_patch": {
+            "pattern_rules": [
+                {
+                    "id": rule_id,
+                    "enabled": False,
+                    "disabled_reason": "operator-rollback",
+                }
+            ]
+        },
+        "target_local_policy_section": "cache.pattern_rules",
+        "target_local_rule_file": "cache_rules.yaml",
+        "metadata_only": True,
+        "aggregate_only": True,
+        "rules_path_included": False,
+    }
+    return {
+        "id": rule_id,
+        "enabled": True,
+        "policy_source": "local-manual",
+        "candidate_id": candidate_id,
+        "description": "Local OpenAI tool-light exact-cache replay canary staged after safe invalidation evidence.",
+        "target_cache_policy": {
+            "schema": "agentflow.openai_tool_cache_replay_target_policy.v1",
+            "policy_section": "cache.pattern_rules",
+            "target_local_policy": "cache",
+            "target_local_rule_file": "cache_rules.yaml",
+            "policy_source": "local-manual",
+            "local_file_backed": True,
+            "managed_dependency": "optional",
+            "rules_path_included": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "conditions": conditions,
+        "action": {
+            "type": "exact_cache_pattern",
+            "allow_tool_calls": True,
+            "safe_invalidation": True,
+            "streaming": False,
+            "scope": "session",
+            "min_call_count": 2,
+            "invalidation": {
+                "schema": "agentflow.openai_tool_cache_replay_invalidation_assumptions.v1",
+                "safe_invalidation": True,
+                "safe_invalidation_evidence": True,
+                "source_schema": "agentflow.openai_cache_replay_blocker_outcomes.v1",
+                "source_reason": cohort.get("reason"),
+                "file_dependency_status": cohort.get("file_dependency_status"),
+                "file_dependency_audit": audit,
+                "paths_included": False,
+                "root_path_included": False,
+                "metadata_only": True,
+                "aggregate_only": True,
+            },
+        },
+        "rollout": {
+            "schema": PATTERN_ROLLOUT_SCHEMA,
+            "recommendation_mode": "openai-tool-cache-replay-safe-invalidation-canary",
+            "canary_enabled": True,
+            "canary_fraction": canary_fraction,
+            "holdout_fraction": holdout_fraction,
+            "canary_salt": candidate_id,
+            "canary_unit": "request_fingerprint",
+            "local_feedback_fields": [
+                "cache_hit",
+                "status_code",
+                "retry_count",
+                "latency_ms",
+                "cost_est_usd",
+                "cost_baseline_usd",
+                "cache_replay_canary",
+                "invalidation_reason",
+            ],
+        },
+        "graduation": {
+            "schema": "agentflow.openai_tool_cache_replay_safe_invalidation_activation.v1",
+            "source_schema": "agentflow.openai_cache_replay_blocker_outcomes.v1",
+            "source_reason": cohort.get("reason"),
+            "cohort_bucket": cohort_bucket,
+            "source_surface": cohort.get("source_surface"),
+            "endpoint": cohort.get("endpoint"),
+            "category": cohort.get("category"),
+            "workflow_phase": cohort.get("workflow_phase"),
+            "text_bucket": cohort.get("text_bucket"),
+            "token_bucket": cohort.get("token_bucket"),
+            "file_dependency_status": cohort.get("file_dependency_status"),
+            "safe_invalidation_evidence": True,
+            "projected_hits": cohort.get("projected_hits"),
+            "projected_savings_usd": cohort.get("projected_savings_usd"),
+            "sample_count": cohort.get("sample_count"),
+            "aggregate_only": True,
+            "graduated_at": utc_now(),
+        },
+        "rollback_metadata": rollback_metadata,
+        "promotion": {
+            "schema": "agentflow.openai_tool_cache_replay_safe_invalidation_promotion.v1",
+            "target_local_rule_file": "cache_rules.yaml",
+            "target_local_policy_section": "cache.pattern_rules",
+            "rollback_metadata": rollback_metadata,
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "raw_request_bodies_included": False,
+                "provider_bodies_included": False,
+                "tool_payloads_included": False,
+                "cache_keys_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "file_paths_included": False,
+            },
+        },
+    }, []
+
+
 def _safety_stop_count(dry_run: dict[str, Any]) -> int:
     count = 0
     for row in dry_run.get("reason_breakdown") or []:
@@ -396,6 +606,11 @@ def build_openai_cache_replay_apply_plan(
         impact_limit=impact_limit,
     )
     impact = build_openai_cache_replay_impact_report(store_obj, limit=impact_limit)
+    blocker_outcomes = build_openai_cache_replay_blocker_outcomes_report(
+        store_obj,
+        opportunity_limit=opportunity_limit,
+        impact_limit=impact_limit,
+    )
     request_shape = build_request_shape_rollups_report(
         store_obj,
         limit=opportunity_limit,
@@ -482,6 +697,81 @@ def build_openai_cache_replay_apply_plan(
         })
         if len(accepted) >= max(1, _as_int(max_candidates) or 10):
             break
+
+    safe_tool_cohorts = [
+        item
+        for item in blocker_outcomes.get("cohorts") or []
+        if isinstance(item, dict)
+    ]
+    safe_tool_cohorts.sort(
+        key=lambda item: (
+            _as_int(item.get("safe_invalidation_evidence")),
+            _as_float(item.get("projected_savings_usd")),
+            _as_int(item.get("projected_hits")),
+            _as_int(item.get("sample_count")),
+        ),
+        reverse=True,
+    )
+    tool_stage_count = 0
+    for cohort in safe_tool_cohorts:
+        if len(accepted) >= max(1, _as_int(max_candidates) or 10):
+            break
+        candidate_id = _safe_tool_cohort_candidate_id(cohort)
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        rule, blockers = _rule_from_safe_tool_outcome_cohort(cohort, holdout_fraction=holdout)
+        if rule is None:
+            skipped.append({
+                "candidate_id": candidate_id,
+                "verdict": str(cohort.get("outcome") or "unknown"),
+                "source_schema": blocker_outcomes.get("schema"),
+                "reason_codes": blockers,
+                "next_action": cohort.get("next_action"),
+                "safe_invalidation_evidence": bool(cohort.get("safe_invalidation_evidence")),
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+                "emits_cache_apply_action": False,
+            })
+            continue
+        if tool_stage_count >= 1:
+            skipped.append({
+                "candidate_id": candidate_id,
+                "verdict": str(cohort.get("outcome") or "unknown"),
+                "source_schema": blocker_outcomes.get("schema"),
+                "reason_codes": ["bounded-tool-cache-canary-already-staged"],
+                "next_action": "keep-bounded-tool-cache-canary-singleton",
+                "safe_invalidation_evidence": bool(cohort.get("safe_invalidation_evidence")),
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+                "emits_cache_apply_action": False,
+            })
+            continue
+        rules.append(rule)
+        tool_stage_count += 1
+        accepted.append({
+            "candidate_id": candidate_id,
+            "rule_id": rule["id"],
+            "verdict": "ready",
+            "source_schema": blocker_outcomes.get("schema"),
+            "reason": cohort.get("reason"),
+            "next_action": cohort.get("next_action"),
+            "cohort_bucket": rule["graduation"].get("cohort_bucket"),
+            "projected_hits": cohort.get("projected_hits"),
+            "projected_savings_usd": cohort.get("projected_savings_usd"),
+            "sample_count": cohort.get("sample_count"),
+            "canary_fraction": rule["rollout"]["canary_fraction"],
+            "holdout_fraction": holdout,
+            "allow_tool_calls": True,
+            "safe_invalidation": True,
+            "safe_invalidation_evidence": True,
+            "target_local_rule_file": "cache_rules.yaml",
+            "target_local_policy_section": "cache.pattern_rules",
+            "rollback_metadata": rule["rollback_metadata"],
+            "pattern_hash_count": 0,
+            "pattern_hashes_included": False,
+            "aggregate_only": True,
+        })
 
     shape_cohorts = [
         item
@@ -582,6 +872,14 @@ def build_openai_cache_replay_apply_plan(
                 "summary": shape_replay.get("summary") or {},
                 "privacy": shape_replay.get("privacy") or {},
             },
+        },
+        "blocker_outcome_evidence": {
+            "schema": blocker_outcomes.get("schema"),
+            "status": blocker_outcomes.get("status"),
+            "top_next_action": blocker_outcomes.get("top_next_action"),
+            "summary": blocker_outcomes.get("summary") or {},
+            "privacy": blocker_outcomes.get("privacy") or {},
+            "raw_source_reports_included": False,
         },
         "activation_dry_run": {
             "schema": canary_dry_run.get("schema"),

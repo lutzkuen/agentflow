@@ -243,6 +243,8 @@ def _cohort_row(*, source: str, candidate: dict[str, Any], outcome: str, reason:
         "workflow_phase": candidate.get("workflow_phase"),
         "stream": bool(candidate.get("stream")),
         "has_tools": bool(candidate.get("has_tools")),
+        "text_bucket": candidate.get("text_bucket"),
+        "token_bucket": candidate.get("token_bucket"),
         "cache_status": candidate.get("cache_status"),
         "cache_reason": candidate.get("cache_reason"),
         "replayability_level": candidate.get("replayability_level"),
