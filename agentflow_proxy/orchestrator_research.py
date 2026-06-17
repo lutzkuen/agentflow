@@ -6611,8 +6611,6 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
         blocker_counts["retry-observed"] += retry_count
     if stale_evidence_count:
         blocker_counts["stale-evidence"] += stale_evidence_count
-    if unknown:
-        blocker_counts["unknown-canary-lifecycle-rows"] += unknown
     if savings_per_1000 <= 0:
         blocker_counts["non-positive-estimated-savings"] += max(1, matched_count)
 
@@ -6623,7 +6621,6 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
             "missing-canary-lifecycle-evidence",
             "missing-applied-coverage",
             "missing-holdout-coverage",
-            "unknown-canary-lifecycle-rows",
         }
     ]
     if applied > 0 and holdout > 0 and not blocker_counts and savings_per_1000 > 0:

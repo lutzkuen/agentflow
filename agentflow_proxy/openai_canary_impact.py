@@ -164,6 +164,50 @@ def _canary_reason(canary: dict[str, Any]) -> str:
     return str(canary.get("reason") or canary.get("status") or canary.get("cohort") or "unknown").strip() or "unknown"
 
 
+def _durable_unknown_lifecycle_reason(canary: dict[str, Any]) -> tuple[str, str]:
+    reason = _canary_reason(canary).lower()
+    status = str(canary.get("status") or "").strip().lower()
+    cohort = str(canary.get("cohort") or "").strip().lower()
+
+    safe_bypass_markers = {
+        "disabled",
+        "noop",
+        "canary-disabled",
+        "openai-routing-disabled",
+        "target-model-already-selected",
+        "outside-canary-fraction",
+        "outside-canary-and-holdout",
+        "not-selected",
+        "not_selected",
+    }
+    if status in {"disabled", "noop"} or reason in safe_bypass_markers:
+        return "safe_bypass", reason
+
+    unsupported_markers = {
+        "category-not-enabled",
+        "request-too-small",
+        "request-too-large",
+        "requested-model-not-enabled",
+        "streaming-not-enabled",
+        "tool-request-not-enabled",
+        "token-estimate-too-small",
+        "token-estimate-too-large",
+        "workflow-phase-not-enabled",
+    }
+    if status == "ineligible" or reason in unsupported_markers:
+        return "unsupported_shape", reason
+
+    if "stale" in reason or "stale" in status or "stale" in cohort:
+        return "promotion_blocker", "stale-canary-metadata"
+    if "shape" in reason and ("mismatch" in reason or "miss" in reason):
+        return "promotion_blocker", "shape-mismatch"
+    if "marker" in reason or (not status and not cohort):
+        return "promotion_blocker", "missing-canary-marker"
+    if reason in {"missing-status", "unknown", "mystery"} or status in {"", "unknown", "mystery"} or cohort in {"", "unknown", "mystery", "none"}:
+        return "promotion_blocker", "canary-lifecycle-logging-gap"
+    return "promotion_blocker", "unrecognized-canary-lifecycle-state"
+
+
 def _classify_canary_lifecycle_reason(cohort: str, canary: dict[str, Any]) -> tuple[str, str]:
     reason = _canary_reason(canary)
     status = str(canary.get("status") or "").strip()
@@ -173,7 +217,7 @@ def _classify_canary_lifecycle_reason(cohort: str, canary: dict[str, Any]) -> tu
     if cohort == "safety_stopped" or "safety-stop" in reason_l:
         return "promotion_blocker", reason
     if cohort == "unknown":
-        return "unclassified", reason
+        return _durable_unknown_lifecycle_reason(canary)
     if cohort == "skipped" and reason_l in {
         "outside-canary-fraction",
         "outside-canary-and-holdout",
@@ -485,8 +529,6 @@ def _routing_promotion_verdict(
         reasons["fallback-observed"] += total_fallback_count
     if total_retry_count:
         reasons["retry-observed"] += total_retry_count
-    if _as_int(unknown.get("count")):
-        reasons["unknown-canary-lifecycle-rows"] += _as_int(unknown.get("count"))
     if _as_int(classification.get("unclassified_count")):
         reasons["unclassified-canary-lifecycle-rows"] += _as_int(classification.get("unclassified_count"))
     if _as_int(classification.get("unsupported_shape_count")):
@@ -511,7 +553,6 @@ def _routing_promotion_verdict(
         "missing-applied-coverage",
         "missing-holdout-coverage",
         "insufficient-volume-for-holdout",
-        "unknown-canary-lifecycle-rows",
         "unclassified-canary-lifecycle-rows",
         "skipped-canary-unsupported-shape",
         "stale-evidence",
@@ -524,7 +565,7 @@ def _routing_promotion_verdict(
         verdict = "keep-staged"
         if "skipped-canary-unsupported-shape" in reasons:
             next_action = "narrow-openai-routing-canary-shape"
-        elif "unknown-canary-lifecycle-rows" in reasons or "unclassified-canary-lifecycle-rows" in reasons:
+        elif "unclassified-canary-lifecycle-rows" in reasons:
             next_action = "classify-openai-routing-canary-skipped-unknown"
         else:
             next_action = "collect-openai-routing-canary-evidence"

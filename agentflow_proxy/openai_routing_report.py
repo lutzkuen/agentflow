@@ -319,6 +319,50 @@ def _canary_reason(canary: dict[str, Any]) -> str:
     return str(canary.get("reason") or canary.get("status") or canary.get("cohort") or "unknown").strip() or "unknown"
 
 
+def _durable_unknown_lifecycle_reason(canary: dict[str, Any]) -> tuple[str, str]:
+    reason = _canary_reason(canary).lower()
+    status = str(canary.get("status") or "").strip().lower()
+    cohort = str(canary.get("cohort") or "").strip().lower()
+
+    safe_bypass_markers = {
+        "disabled",
+        "noop",
+        "canary-disabled",
+        "openai-routing-disabled",
+        "target-model-already-selected",
+        "outside-canary-fraction",
+        "outside-canary-and-holdout",
+        "not-selected",
+        "not_selected",
+    }
+    if status in {"disabled", "noop"} or reason in safe_bypass_markers:
+        return "safe_bypass", reason
+
+    unsupported_markers = {
+        "category-not-enabled",
+        "request-too-small",
+        "request-too-large",
+        "requested-model-not-enabled",
+        "streaming-not-enabled",
+        "tool-request-not-enabled",
+        "token-estimate-too-small",
+        "token-estimate-too-large",
+        "workflow-phase-not-enabled",
+    }
+    if status == "ineligible" or reason in unsupported_markers:
+        return "unsupported_shape", reason
+
+    if "stale" in reason or "stale" in status or "stale" in cohort:
+        return "promotion_blocker", "stale-canary-metadata"
+    if "shape" in reason and ("mismatch" in reason or "miss" in reason):
+        return "promotion_blocker", "shape-mismatch"
+    if "marker" in reason or (not status and not cohort):
+        return "promotion_blocker", "missing-canary-marker"
+    if reason in {"missing-status", "unknown", "mystery"} or status in {"", "unknown", "mystery"} or cohort in {"", "unknown", "mystery", "none"}:
+        return "promotion_blocker", "canary-lifecycle-logging-gap"
+    return "promotion_blocker", "unrecognized-canary-lifecycle-state"
+
+
 def _classify_canary_lifecycle_reason(cohort: str, canary: dict[str, Any]) -> tuple[str, str]:
     reason = _canary_reason(canary)
     status = str(canary.get("status") or "").strip()
@@ -328,7 +372,7 @@ def _classify_canary_lifecycle_reason(cohort: str, canary: dict[str, Any]) -> tu
     if cohort == "safety_stopped" or "safety-stop" in reason_l:
         return "promotion_blocker", reason
     if cohort == "unknown":
-        return "unclassified", reason
+        return _durable_unknown_lifecycle_reason(canary)
     if cohort == "skipped" and reason_l in {
         "outside-canary-fraction",
         "outside-canary-and-holdout",
@@ -433,8 +477,6 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
         blocker_counts["fallback-observed"] = _as_int(raw.get("fallback_count"))
     if safety_stopped:
         blocker_counts["safety-stop-observed"] = safety_stopped
-    if unknown:
-        blocker_counts["unknown-canary-lifecycle-rows"] = unknown
     if unsupported_shape_count:
         blocker_counts["skipped-canary-unsupported-shape"] = unsupported_shape_count
     if promotion_blocker_count:
@@ -587,8 +629,6 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
         reason_codes.append("retry-observed")
     if stale:
         reason_codes.append("stale-evidence")
-    if unknown:
-        reason_codes.append("unknown-canary-lifecycle-rows")
     if unclassified_count:
         reason_codes.append("unclassified-canary-lifecycle-rows")
     if unsupported_shape_count:
@@ -606,7 +646,6 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
 
     unique_reasons = sorted(set(reason_codes))
     staged_review_reasons = missing_evidence | {
-        "unknown-canary-lifecycle-rows",
         "unclassified-canary-lifecycle-rows",
         "skipped-canary-unsupported-shape",
     }
@@ -615,7 +654,7 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
         for reason in unique_reasons
         if reason not in staged_review_reasons
     ]
-    if applied > 0 and holdout > 0 and not hard_blocking_reasons and not unknown and not unclassified_count and not unsupported_shape_count and estimated_savings > 0:
+    if applied > 0 and holdout > 0 and not hard_blocking_reasons and not unclassified_count and not unsupported_shape_count and estimated_savings > 0:
         decision = "promote"
         next_action = "promote-openai-routing-rule-draft"
         reason = "promotion-ready"
@@ -631,7 +670,7 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
         decision = "keep-staged"
         next_action = (
             "classify-openai-routing-canary-skipped-unknown"
-            if unknown or unclassified_count
+            if unclassified_count
             else "collect-openai-routing-canary-evidence"
         )
         reason = unique_reasons[0] if unique_reasons else "insufficient-promotion-evidence"
@@ -1373,8 +1412,6 @@ def _build_openai_promotion_decision(
         blocker_counts["retry-observed"] = retry_count
     if stale_evidence_count:
         blocker_counts["stale-evidence"] = stale_evidence_count
-    if unknown:
-        blocker_counts["unknown-canary-lifecycle-rows"] = unknown
     if unclassified_count:
         blocker_counts["unclassified-canary-lifecycle-rows"] = unclassified_count
     if unsupported_shape_count:
@@ -1388,7 +1425,6 @@ def _build_openai_promotion_decision(
         "missing-canary-lifecycle-evidence",
         "missing-applied-coverage",
         "missing-holdout-coverage",
-        "unknown-canary-lifecycle-rows",
         "unclassified-canary-lifecycle-rows",
         "skipped-canary-unsupported-shape",
     }
@@ -1409,7 +1445,7 @@ def _build_openai_promotion_decision(
         decision = "keep-staged"
         next_action = (
             "classify-openai-routing-canary-skipped-unknown"
-            if unknown or unclassified_count or unsupported_shape_count
+            if unclassified_count or unsupported_shape_count
             else "collect-openai-routing-canary-evidence"
         )
         reason = sorted(blocker_counts)[0] if blocker_counts else "insufficient-promotion-evidence"
