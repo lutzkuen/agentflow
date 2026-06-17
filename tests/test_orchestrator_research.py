@@ -5497,7 +5497,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("Blocked issue has been stale", comments[0]["body"])
         self.assertIn("Acceptance Criteria", comments[0]["body"])
 
-    def test_repeated_skip_diagnostics_become_a_targeted_proposal(self):
+    def test_repeated_skip_diagnostics_record_narrow_missing_dependency_blocker(self):
         with TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "run.log"
             log_path.write_text(
@@ -5522,7 +5522,38 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(diagnostics[0]["reason"], "missing-dependency-evidence")
         self.assertGreaterEqual(diagnostics[0]["count"], 2)
         created_titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
-        self.assertTrue(any("missing dependency evidence" in title for title in created_titles))
+        self.assertFalse(any("missing dependency evidence" in title for title in created_titles))
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        entries = [
+            entry for entry in ledger["entries"]
+            if entry.get("diagnostic_class") == "missing-dependency-evidence"
+        ]
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["current_status"], "keep-blocked")
+        self.assertEqual(entry["issue_worthy_status"], "blocked")
+        self.assertEqual(
+            entry["next_action"],
+            "keep-missing-dependency-evidence-blocked-until-sanitized-source-report",
+        )
+        self.assertEqual(
+            entry["keep_blocked_reason"],
+            "activation-feedback-missing-dependency-evidence-needs-sanitized-source-report",
+        )
+        self.assertEqual(entry["dependency_evidence_status"], "missing-sanitized-source-report")
+        self.assertTrue(entry["durable_action_ledger_entry"])
+        self.assertEqual(
+            entry["diagnostic_fingerprint"],
+            "agentflow.repeated-diagnostic.missing-dependency-evidence.v1",
+        )
+        self.assertIn("sanitized_source_report", entry["needed_resolution"])
+        self.assertEqual(
+            entry["missing_dependency_evidence_review"]["schema"],
+            "agentflow.activation_feedback_missing_dependency_evidence_review.v1",
+        )
+        self.assertTrue(entry["missing_dependency_evidence_review"]["privacy"]["metadata_only"])
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["activation_feedback_keep_blocked_suppressed_count"], 1)
         rendered = json.dumps(plan)
         self.assertNotIn("req-secret-12345", rendered)
         self.assertNotIn("session-secret-67890", rendered)
@@ -6407,7 +6438,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
             "safety_stop_count_zero_and_applied_holdout_coverage_present",
         )
 
-    def test_repeated_diagnostic_comments_on_existing_open_issue_not_duplicate_create(self):
+    def test_repeated_missing_dependency_diagnostic_suppresses_existing_duplicate_work(self):
         existing_issue = issue(
             444,
             "Turn repeated missing dependency evidence diagnostics into an actionable optimization issue",
@@ -6439,12 +6470,20 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         )
 
         comment_issues = plan["backlog_changes"]["comment_issues"]
-        safety_stop_comments = [c for c in comment_issues if c.get("number") == 444]
-        self.assertTrue(safety_stop_comments, "expected a repeated diagnostic comment action on issue #444")
-        comment_body = safety_stop_comments[0]["body"]
-        self.assertIn("agentflow.repeated-diagnostic.missing-dependency-evidence.v1", comment_body)
-        self.assertIn("Action: update", comment_body)
-        self.assertIn("Duplicate of open issue: #444", comment_body)
+        self.assertFalse([c for c in comment_issues if c.get("number") == 444])
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["activation_feedback_keep_blocked_suppressed_count"], 1)
+        suppressed = suppression["suppressed"][-1]
+        self.assertEqual(
+            suppressed["fingerprint"],
+            "agentflow.repeated-diagnostic.missing-dependency-evidence.v1",
+        )
+        self.assertEqual(suppressed["suppression_kind"], "durable-keep-blocked-ledger-record")
+        self.assertEqual(
+            suppressed["keep_blocked_reason"],
+            "activation-feedback-missing-dependency-evidence-needs-sanitized-source-report",
+        )
+        self.assertIn("sanitized_source_report", suppressed["needed_resolution"])
         rendered = json.dumps(plan)
         self.assertNotIn("req-secret-dup1", rendered)
         self.assertNotIn("req-secret-dup2", rendered)
@@ -6464,7 +6503,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
             _diagnostic_fingerprint("missing-dependency-evidence"),
         )
 
-    def test_repeated_diagnostic_proposal_includes_required_fields(self):
+    def test_repeated_missing_dependency_ledger_includes_required_fields(self):
         plan = build_research_plan(
             issues=[],
             log_sources=[
@@ -6479,16 +6518,22 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
             p for p in created
             if "repeated" in p.get("title", "").lower() and "missing dependency evidence" in p.get("title", "").lower()
         ]
-        self.assertTrue(repeated_proposals, "expected a repeated-diagnostic proposal with missing dependency evidence")
-        body = repeated_proposals[0]["body"]
-        self.assertIn("Evidence count:", body)
-        self.assertIn("Example excerpt:", body)
-        self.assertIn("Proposed owner:", body)
-        self.assertIn("Fingerprint:", body)
-        self.assertIn("Action:", body)
-        self.assertIn("Ledger next action:", body)
-        self.assertIn("Ledger current status:", body)
-        self.assertIn("Ledger local action family:", body)
+        self.assertFalse(repeated_proposals)
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        entry = [
+            item for item in ledger["entries"]
+            if item.get("diagnostic_class") == "missing-dependency-evidence"
+        ][0]
+        self.assertEqual(entry["sample_count"], 2)
+        self.assertEqual(entry["current_status"], "keep-blocked")
+        self.assertEqual(entry["state"], "keep-blocked")
+        self.assertEqual(entry["local_action_family"], "activation-feedback")
+        self.assertEqual(entry["evidence_schema"], "agentflow.orchestrator_research_log_diagnostics.v1")
+        self.assertEqual(entry["review_status"], "resolved-to-narrower-blocker")
+        self.assertIn("dependency_evidence_summary", entry["needed_resolution"])
+        self.assertTrue(entry["privacy"]["metadata_only"])
+        self.assertFalse(entry["privacy"]["request_ids_included"])
+        self.assertFalse(entry["privacy"]["session_ids_included"])
 
     def test_issue_532_combined_activation_feedback_and_safety_stop_fixture(self):
         # Issue #532 acceptance metric: repeated activation-feedback-blocker-review (6x) and

@@ -311,6 +311,12 @@ _ACTIVATION_FEEDBACK_BLOCKER_KEEP_BLOCKED_REASON = (
 _ACTIVATION_FEEDBACK_BLOCKER_NEXT_ACTION = (
     "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence"
 )
+_ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_KEEP_BLOCKED_REASON = (
+    "activation-feedback-missing-dependency-evidence-needs-sanitized-source-report"
+)
+_ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_NEXT_ACTION = (
+    "keep-missing-dependency-evidence-blocked-until-sanitized-source-report"
+)
 
 _UNSUPPORTED_LOCAL_ACTION_FAMILIES = {
     "server-content-processing",
@@ -827,6 +833,9 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
     if reason == "unclassified-skip-or-blocker" or diagnostic_class == "unclassified-skip-or-blocker":
         reason = "activation-feedback-blocker-review"
         diagnostic_class = "activation-feedback-blocker-review"
+    taxonomy = _diagnostic_taxonomy(diagnostic_class) or _diagnostic_taxonomy(reason)
+    if taxonomy is not None:
+        diagnostic_class = str(taxonomy["class"])
     if not reason or reason in _PASS_DIAGNOSTIC_REASONS or diagnostic_class in _PASS_DIAGNOSTIC_REASONS:
         return None
 
@@ -862,7 +871,6 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
         ),
         "source": "repeated-diagnostic",
     }
-    taxonomy = _diagnostic_taxonomy(diagnostic_class)
     acceptance_check = str(
         diagnostic.get("acceptance_check")
         or (taxonomy or {}).get("acceptance_check")
@@ -945,7 +953,40 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                 "next_action": "map-recommendation-to-supported-local-executor",
             }
         )
-    elif diagnostic_class in {"missing-dependency-evidence", "stale-evidence"}:
+    elif diagnostic_class == "missing-dependency-evidence":
+        stage.update(
+            {
+                "lever": "activation-feedback",
+                "local_action_family": "activation-feedback",
+                "state": "keep-blocked",
+                "next_action": _ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_NEXT_ACTION,
+                "review_status": "resolved-to-narrower-blocker",
+                "issue_worthy_status": "blocked",
+                "keep_blocked_reason": _ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_KEEP_BLOCKED_REASON,
+                "next_state": "keep-blocked",
+                "next_state_reason": _ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_KEEP_BLOCKED_REASON,
+                "needed_resolution": [
+                    "sanitized_source_report",
+                    "dependency_evidence_summary",
+                    "bounded_local_action_issue",
+                ],
+                "durable_action_ledger_entry": True,
+                "dependency_evidence_status": "missing-sanitized-source-report",
+                "missing_dependency_evidence_review": {
+                    "schema": "agentflow.activation_feedback_missing_dependency_evidence_review.v1",
+                    "status": "blocked",
+                    "reason": _ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_KEEP_BLOCKED_REASON,
+                    "next_action": _ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_NEXT_ACTION,
+                    "needed_resolution": [
+                        "sanitized_source_report",
+                        "dependency_evidence_summary",
+                        "bounded_local_action_issue",
+                    ],
+                    "privacy": _candidate_privacy(),
+                },
+            }
+        )
+    elif diagnostic_class == "stale-evidence":
         stage.update(
             {
                 "state": "missing-evidence",
@@ -1001,12 +1042,20 @@ def _diagnostic_ledger_stages(diagnostics: Iterable[dict[str, Any]]) -> list[dic
         stage = _diagnostic_ledger_stage(diagnostic)
         if stage is None:
             continue
-        key = (
-            str(stage.get("lever") or ""),
-            str(stage.get("local_action_family") or ""),
-            str(stage.get("next_action") or ""),
-            ",".join(str(item) for item in stage.get("blocker_codes") or []),
-        )
+        if stage.get("durable_action_ledger_entry") and stage.get("diagnostic_fingerprint"):
+            key = (
+                str(stage.get("lever") or ""),
+                str(stage.get("local_action_family") or ""),
+                str(stage.get("next_action") or ""),
+                str(stage.get("diagnostic_fingerprint") or ""),
+            )
+        else:
+            key = (
+                str(stage.get("lever") or ""),
+                str(stage.get("local_action_family") or ""),
+                str(stage.get("next_action") or ""),
+                ",".join(str(item) for item in stage.get("blocker_codes") or []),
+            )
         if key in seen:
             continue
         seen.add(key)
@@ -1019,7 +1068,7 @@ def _activation_feedback_blocker_review_suppression(diagnostic: dict[str, Any]) 
     if not stage:
         return None
     diagnostic_class = _normal_diagnostic_token(stage.get("diagnostic_class") or diagnostic.get("diagnostic_class"))
-    if diagnostic_class != "activation-feedback-blocker-review":
+    if diagnostic_class not in {"activation-feedback-blocker-review", "missing-dependency-evidence"}:
         return None
     keep_blocked_reason = str(stage.get("keep_blocked_reason") or "").strip()
     if not keep_blocked_reason:
@@ -1031,6 +1080,7 @@ def _activation_feedback_blocker_review_suppression(diagnostic: dict[str, Any]) 
         "suppression_kind": "durable-keep-blocked-ledger-record",
         "keep_blocked_reason": sanitize_value(keep_blocked_reason),
         "next_action": sanitize_value(stage.get("next_action") or _ACTIVATION_FEEDBACK_BLOCKER_NEXT_ACTION),
+        "needed_resolution": sanitize_value(stage.get("needed_resolution") or []),
     }
 
 
@@ -3836,9 +3886,12 @@ def build_evidence_to_activation_next_action_ledger(
             "rollback_proof",
             "applied_coverage",
             "holdout_coverage",
+            "missing_dependency_evidence_review",
         ):
             if isinstance(stage.get(review_key), dict):
                 entry[review_key] = sanitize_value(stage.get(review_key))
+        if stage.get("dependency_evidence_status"):
+            entry["dependency_evidence_status"] = sanitize_value(stage.get("dependency_evidence_status"))
         if stage.get("source"):
             entry["source"] = sanitize_value(stage.get("source"))
         for decision_key in (
