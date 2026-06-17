@@ -3762,6 +3762,16 @@ def build_evidence_to_activation_next_action_ledger(
 ) -> dict[str, Any] | None:
     loop = stats_summary.get("evidence_to_activation_loop") if isinstance(stats_summary.get("evidence_to_activation_loop"), dict) else {}
     stages = [stage for stage in loop.get("levers") or [] if isinstance(stage, dict)]
+    cache_policy_stage = _request_shape_cache_replay_policy_decision_loop_stage(stats_summary)
+    if isinstance(cache_policy_stage, dict):
+        stages = [
+            stage for stage in stages
+            if not (
+                str(stage.get("lever") or "") == "cache"
+                and str(stage.get("evidence_source") or "") == str(cache_policy_stage.get("evidence_source") or "")
+            )
+        ]
+        stages.insert(0, cache_policy_stage)
     stages.extend(_safety_stop_ledger_stages(safety_stop_burndown))
     stages.extend(_diagnostic_ledger_stages(diagnostics))
     if not stages:
@@ -4476,6 +4486,56 @@ def _request_shape_cache_replay_policy_decision_state(decision: str, promotion_r
     return "replay-ready"
 
 
+def _cache_replay_warmup_duplicate_suppression(
+    *,
+    decision_report: dict[str, Any],
+    top_decision: dict[str, Any],
+    reason: str,
+    reason_codes: list[str],
+    target_local_rule_file: Any,
+    target_local_policy_section: Any,
+) -> dict[str, Any]:
+    existing = (
+        decision_report.get("duplicate_suppression")
+        if isinstance(decision_report.get("duplicate_suppression"), dict)
+        else top_decision.get("duplicate_suppression")
+        if isinstance(top_decision.get("duplicate_suppression"), dict)
+        else {}
+    )
+    suppression = dict(existing)
+    suppression.setdefault(
+        "schema",
+        "agentflow.request_shape_cache_replay_warmup_carry_forward_duplicate_suppression.v1",
+    )
+    suppression.setdefault("reason", reason or "cache-replay-canary-warmup-carry-forward")
+    suppression.setdefault("metadata_only", True)
+    suppression.setdefault("aggregate_only", True)
+    suppression.setdefault("suppresses_generic_cache_replay_activation_issue", True)
+    suppression.setdefault("suppresses_generic_replay_ready_issue", True)
+    suppression.setdefault("suppresses_new_cache_replay_stage_issue", True)
+    suppression.setdefault("suppresses_closed_stage_replay_predecessor_titles", True)
+    suppression.setdefault(
+        "suppressed_predecessor_next_actions",
+        ["stage-cache-replay-canary", "turn-cache-candidate-into-local-replay-evidence"],
+    )
+    suppression.setdefault(
+        "suppressed_predecessor_title_families",
+        [
+            "Stage cache replay canary from evidence-to-activation ledger",
+            "Stage request-shape cache replay cohort",
+            "Turn tools-present cache candidate into local replay evidence",
+            "Turn missing-observed-cache-hits cache candidate into local replay evidence",
+        ],
+    )
+    if reason_codes:
+        suppression.setdefault("reason_codes", reason_codes)
+    if target_local_rule_file:
+        suppression.setdefault("target_local_rule_file", target_local_rule_file)
+    if target_local_policy_section:
+        suppression.setdefault("target_local_policy_section", target_local_policy_section)
+    return suppression
+
+
 def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     decision_report = stats_summary.get("request_shape_cache_replay_policy_decision")
     if not isinstance(decision_report, dict):
@@ -4556,6 +4616,24 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         or observed_hit_blocker
         or reason
     )
+    target_local_rule_file = summary.get("target_local_rule_file") or top_decision.get("target_local_rule_file")
+    target_local_policy_section = summary.get("target_local_policy_section") or top_decision.get("target_local_policy_section")
+    duplicate_suppression = (
+        _cache_replay_warmup_duplicate_suppression(
+            decision_report=decision_report,
+            top_decision=top_decision,
+            reason=reason,
+            reason_codes=reason_codes,
+            target_local_rule_file=target_local_rule_file,
+            target_local_policy_section=target_local_policy_section,
+        )
+        if decision == "keep-staged" or promotion_readiness == "keep-staged-warmup"
+        else decision_report.get("duplicate_suppression")
+        if isinstance(decision_report.get("duplicate_suppression"), dict)
+        else top_decision.get("duplicate_suppression")
+        if isinstance(top_decision.get("duplicate_suppression"), dict)
+        else {}
+    )
 
     return {
         "lever": "cache",
@@ -4591,8 +4669,9 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         "reason_codes": sanitize_value(reason_codes),
         "promotion_allowed": bool(summary.get("promotion_allowed")),
         "rollback_count": 1 if decision == "rollback" or bool(summary.get("rollback_required")) else 0,
-        "target_local_rule_file": sanitize_value(summary.get("target_local_rule_file") or top_decision.get("target_local_rule_file")),
-        "target_local_policy_section": sanitize_value(summary.get("target_local_policy_section") or top_decision.get("target_local_policy_section")),
+        "target_local_rule_file": sanitize_value(target_local_rule_file),
+        "target_local_policy_section": sanitize_value(target_local_policy_section),
+        "duplicate_suppression": sanitize_value(duplicate_suppression),
     }
 
 
@@ -8144,6 +8223,18 @@ def _evidence_ledger_title_token(entry: dict[str, Any]) -> str:
 def _evidence_ledger_action_title(entry: dict[str, Any]) -> str:
     lever = str(entry.get("lever") or "optimization").replace("_", "-")
     action = str(entry.get("next_action") or "advance-local-evidence").lower().replace("_", "-")
+    promotion_readiness = str(entry.get("promotion_readiness") or "").lower().replace("_", "-")
+    reason_codes = {str(item).lower().replace("_", "-") for item in entry.get("reason_codes") or []}
+    if (
+        lever == "cache"
+        and (
+            action == "keep-cache-replay-canary-staged"
+            or promotion_readiness == "keep-staged-warmup"
+            or "first-seen-cache-warmup" in reason_codes
+        )
+    ):
+        base = "Record cache replay canary warmup carry-forward in evidence ledger"
+        return f"{base} ({_evidence_ledger_title_token(entry)})"
     if lever == "cache" and "stage" in action:
         base = "Stage cache replay canary from evidence-to-activation ledger"
         return f"{base} ({_evidence_ledger_title_token(entry)})"
@@ -8178,12 +8269,15 @@ def _ledger_entry_has_progressed_next_action(entry: dict[str, Any]) -> bool:
     previous = str(entry.get("fingerprint_next_action") or entry.get("lifecycle_progressed_from_next_action") or "").lower().replace("_", "-")
     if previous and action and action != previous:
         return True
-    return any(token in action for token in ("review-", "measure-", "keep-active", "promotion-readiness", "widen", "apply"))
+    return any(token in action for token in ("review-", "measure-", "keep-active", "keep-cache-replay-canary-staged", "promotion-readiness", "widen", "apply"))
 
 
 def _ledger_entry_successor_rank(entry: dict[str, Any]) -> int:
     action = str(entry.get("next_action") or "").lower().replace("_", "-")
     lever = str(entry.get("lever") or "").lower().replace("_", "-")
+    promotion_readiness = str(entry.get("promotion_readiness") or "").lower().replace("_", "-")
+    if lever == "cache" and (action == "keep-cache-replay-canary-staged" or promotion_readiness == "keep-staged-warmup"):
+        return 0
     if lever == "cache" and "review-cache-replay-canary-promotion-readiness" in action:
         return 0
     if _ledger_entry_has_progressed_next_action(entry):
@@ -8233,6 +8327,32 @@ def _proposal_from_evidence_to_activation_ledger(stats_summary: dict[str, Any]) 
             f"Continues closed predecessor: #{prior.get('number')} {prior.get('title')} "
             f"({prior.get('url') or 'no-url'})"
         )
+    entry_evidence = [
+        f"Ledger schema: {ledger.get('schema')}",
+        f"Fingerprint: {entry.get('fingerprint')}",
+        f"Lever: {lever}",
+        f"Local action family: {entry.get('local_action_family')}",
+        f"Evidence schema: {entry.get('evidence_schema')}",
+        f"Cohort bucket: {entry.get('cohort_bucket')}",
+        f"Current status: {entry.get('current_status')}",
+        f"Issue status: {entry.get('issue_status')}",
+        f"Top next action: {next_action}",
+        f"Blocker codes: {json.dumps(entry.get('blocker_codes') or [])}",
+        f"Expected savings path: {entry.get('expected_savings_path')}",
+        closed_note,
+    ]
+    if entry.get("promotion_readiness"):
+        entry_evidence.append(f"Promotion readiness: {entry.get('promotion_readiness')}")
+    if entry.get("promotion_decision"):
+        entry_evidence.append(f"Promotion decision: {entry.get('promotion_decision')}")
+    if entry.get("policy_decision"):
+        entry_evidence.append(f"Policy decision: {entry.get('policy_decision')}")
+    if entry.get("observed_hit_blocker"):
+        entry_evidence.append(f"Observed hit blocker: {entry.get('observed_hit_blocker')}")
+    if entry.get("miss_reason_breakdown"):
+        entry_evidence.append(f"Warmup miss blocker breakdown: {json.dumps(entry.get('miss_reason_breakdown') or [])}")
+    if entry.get("duplicate_suppression"):
+        entry_evidence.append(f"Duplicate suppression: {json.dumps(entry.get('duplicate_suppression') or {}, sort_keys=True)}")
     return {
         "repo": "lutzkuen/agentflow",
         "title": title,
@@ -8243,20 +8363,7 @@ def _proposal_from_evidence_to_activation_ledger(stats_summary: dict[str, Any]) 
                 "The local evidence-to-activation ledger shows that a savings candidate has progressed past the earlier backlog title. "
                 "Research mode should create the next lifecycle action instead of recreating stale projected-evidence work."
             ),
-            evidence=[
-                f"Ledger schema: {ledger.get('schema')}",
-                f"Fingerprint: {entry.get('fingerprint')}",
-                f"Lever: {lever}",
-                f"Local action family: {entry.get('local_action_family')}",
-                f"Evidence schema: {entry.get('evidence_schema')}",
-                f"Cohort bucket: {entry.get('cohort_bucket')}",
-                f"Current status: {entry.get('current_status')}",
-                f"Issue status: {entry.get('issue_status')}",
-                f"Top next action: {next_action}",
-                f"Blocker codes: {json.dumps(entry.get('blocker_codes') or [])}",
-                f"Expected savings path: {entry.get('expected_savings_path')}",
-                closed_note,
-            ],
+            evidence=entry_evidence,
             implementation=[
                 "Start from the evidence_to_activation_next_action_ledger entry in the research plan.",
                 f"Implement or narrow the lifecycle transition `{next_action}` for the `{lever}` lever using local file-backed policy and bounded metadata reports.",

@@ -3072,7 +3072,24 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             },
         }
         plan = build_research_plan(
-            issues=[],
+            issues=[
+                issue(
+                    537,
+                    "Stage cache replay canary from evidence-to-activation ledger (evidence 243c92b5d91f)",
+                    ["backlog", "status:ready", "cache"],
+                    state="CLOSED",
+                    closed="2026-06-15T23:14:38Z",
+                    body="Fingerprint: activation:243c92b5d91f9149\nNext action: `stage-cache-replay-canary`\n",
+                ),
+                issue(
+                    622,
+                    "Turn tools-present cache candidate into local replay evidence",
+                    ["backlog", "status:ready", "cache"],
+                    state="CLOSED",
+                    closed="2026-06-17T12:00:00Z",
+                    body="Advanced cache replay warmup for fingerprint activation:243c92b5d91f9149.\n",
+                ),
+            ],
             stats={
                 "calls": 50,
                 "request_shape_cache_replay_evidence": evidence,
@@ -3115,11 +3132,39 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(cache_entry["fingerprint"], "activation:243c92b5d91f9149")
         self.assertEqual(cache_entry["policy_decision"], "keep-staged")
         self.assertEqual(cache_entry["promotion_readiness"], "keep-staged-warmup")
+        self.assertEqual(cache_entry["issue_status"], "closed-issue-seen")
         self.assertIn("first-seen-cache-warmup", cache_entry["blocker_codes"])
         self.assertEqual(cache_entry["top_miss_reason"], "first-seen-cache-warmup")
         self.assertEqual(cache_entry["promotion_blocker"], "first-seen-cache-warmup")
         self.assertEqual(cache_entry["observed_hit_blocker"], "first-seen-cache-warmup")
         self.assertEqual(cache_entry["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(
+            cache_entry["duplicate_suppression"]["schema"],
+            "agentflow.request_shape_cache_replay_warmup_carry_forward_duplicate_suppression.v1",
+        )
+        self.assertTrue(cache_entry["duplicate_suppression"]["suppresses_new_cache_replay_stage_issue"])
+        self.assertTrue(cache_entry["duplicate_suppression"]["suppresses_closed_stage_replay_predecessor_titles"])
+        self.assertIn(
+            "Stage cache replay canary from evidence-to-activation ledger",
+            cache_entry["duplicate_suppression"]["suppressed_predecessor_title_families"],
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertIn(
+            "Record cache replay canary warmup carry-forward in evidence ledger (evidence 243c92b5d91f)",
+            titles,
+        )
+        self.assertNotIn(
+            "Stage cache replay canary from evidence-to-activation ledger (evidence 243c92b5d91f)",
+            titles,
+        )
+        ledger_issue = next(
+            item for item in plan["backlog_changes"]["create_issues"]
+            if item["title"].startswith("Record cache replay canary warmup carry-forward")
+        )
+        self.assertIn("Promotion readiness: keep-staged-warmup", ledger_issue["body"])
+        self.assertIn("Warmup miss blocker breakdown:", ledger_issue["body"])
+        self.assertIn("Duplicate suppression:", ledger_issue["body"])
 
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw-cache-replay-rule-secret", rendered)
