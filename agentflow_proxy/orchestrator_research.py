@@ -1577,6 +1577,7 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     for key in (
         "pass_through_routing_report",
         "request_shape_cache_replay_evidence",
+        "request_shape_cache_replay_policy_decision",
         "crunch_savings_signal",
         "request_shape_rollup_candidates",
         "managed_recommendation_health",
@@ -1720,6 +1721,55 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
             "staged_canaries": staged_canaries[:5],
             "privacy": request_shape_cache_evidence.get("privacy")
             if isinstance(request_shape_cache_evidence.get("privacy"), dict)
+            else {},
+        }
+    request_shape_cache_policy_decision = stats.get("request_shape_cache_replay_policy_decision")
+    if isinstance(request_shape_cache_policy_decision, dict):
+        decisions = (
+            request_shape_cache_policy_decision.get("decisions")
+            if isinstance(request_shape_cache_policy_decision.get("decisions"), list)
+            else []
+        )
+        source_evidence = (
+            request_shape_cache_policy_decision.get("source_evidence")
+            if isinstance(request_shape_cache_policy_decision.get("source_evidence"), dict)
+            else {}
+        )
+        summary["request_shape_cache_replay_policy_decision"] = {
+            "schema": request_shape_cache_policy_decision.get("schema"),
+            "status": request_shape_cache_policy_decision.get("status"),
+            "decision": request_shape_cache_policy_decision.get("decision"),
+            "promotion_decision": request_shape_cache_policy_decision.get("promotion_decision"),
+            "promotion_readiness": request_shape_cache_policy_decision.get("promotion_readiness"),
+            "reason": request_shape_cache_policy_decision.get("reason"),
+            "reason_codes": request_shape_cache_policy_decision.get("reason_codes")
+            if isinstance(request_shape_cache_policy_decision.get("reason_codes"), list)
+            else [],
+            "next_action": request_shape_cache_policy_decision.get("next_action"),
+            "summary": request_shape_cache_policy_decision.get("summary")
+            if isinstance(request_shape_cache_policy_decision.get("summary"), dict)
+            else {},
+            "top_decision": request_shape_cache_policy_decision.get("top_decision")
+            if isinstance(request_shape_cache_policy_decision.get("top_decision"), dict)
+            else {},
+            "decisions": decisions[:5],
+            "source_evidence": {
+                "schema": source_evidence.get("schema"),
+                "status": source_evidence.get("status"),
+                "summary": source_evidence.get("summary") if isinstance(source_evidence.get("summary"), dict) else {},
+                "applied_miss_blocker_breakdown": source_evidence.get("applied_miss_blocker_breakdown")
+                if isinstance(source_evidence.get("applied_miss_blocker_breakdown"), list)
+                else [],
+                "stale_evidence": source_evidence.get("stale_evidence")
+                if isinstance(source_evidence.get("stale_evidence"), dict)
+                else {},
+                "privacy": source_evidence.get("privacy") if isinstance(source_evidence.get("privacy"), dict) else {},
+            },
+            "acceptance": request_shape_cache_policy_decision.get("acceptance")
+            if isinstance(request_shape_cache_policy_decision.get("acceptance"), dict)
+            else {},
+            "privacy": request_shape_cache_policy_decision.get("privacy")
+            if isinstance(request_shape_cache_policy_decision.get("privacy"), dict)
             else {},
         }
     openai_cache_readiness = stats.get("openai_cache_replay_readiness")
@@ -3466,6 +3516,7 @@ def _loop_state_rank(state: str) -> int:
         "ranked-evidence": 4,
         "missing-evidence": 5,
         "blocked": 6,
+        "keep-blocked": 6,
         "no-op": 7,
     }.get(state, 9)
 
@@ -3716,6 +3767,17 @@ def build_evidence_to_activation_next_action_ledger(
             entry["unblock_criteria"] = sanitize_value(stage.get("unblock_criteria"))
         if stage.get("source"):
             entry["source"] = sanitize_value(stage.get("source"))
+        for decision_key in (
+            "policy_decision",
+            "policy_decision_id",
+            "promotion_decision",
+            "promotion_readiness",
+            "reason",
+            "reason_codes",
+            "source_evidence_schema",
+        ):
+            if stage.get(decision_key):
+                entry[decision_key] = sanitize_value(stage.get(decision_key))
         for source_key in ("source_surface", "endpoint", "category", "workflow_phase", "required_local_executor"):
             if stage.get(source_key):
                 entry[source_key] = sanitize_value(stage.get(source_key))
@@ -4055,6 +4117,9 @@ def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _cache_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    request_shape_policy_stage = _request_shape_cache_replay_policy_decision_loop_stage(stats_summary)
+    if request_shape_policy_stage is not None:
+        return request_shape_policy_stage
     impact_stage = _openai_cache_replay_impact_loop_stage(stats_summary)
     if impact_stage is not None:
         return impact_stage
@@ -4193,6 +4258,121 @@ def _request_shape_cache_replay_evidence_blockers(evidence: dict[str, Any]) -> l
         if isinstance(row, dict) and row.get("value"):
             blockers.append(str(row.get("value")))
     return list(dict.fromkeys(blocker for blocker in blockers if blocker))
+
+
+def _request_shape_cache_replay_policy_decision_state(decision: str, promotion_readiness: str) -> str:
+    if decision == "widen" or promotion_readiness == "promotion-ready":
+        return "measured-savings"
+    if decision in {"rollback", "keep-blocked"} or promotion_readiness == "rollback-required":
+        return "keep-blocked"
+    if decision == "keep-staged":
+        return "replay-ready"
+    return "replay-ready"
+
+
+def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    decision_report = stats_summary.get("request_shape_cache_replay_policy_decision")
+    if not isinstance(decision_report, dict):
+        return None
+    summary = decision_report.get("summary") if isinstance(decision_report.get("summary"), dict) else {}
+    decision = str(decision_report.get("decision") or summary.get("decision") or "").strip()
+    if not decision:
+        return None
+
+    evidence = stats_summary.get("request_shape_cache_replay_evidence")
+    if not isinstance(evidence, dict):
+        source_evidence = decision_report.get("source_evidence") if isinstance(decision_report.get("source_evidence"), dict) else {}
+        evidence = source_evidence
+    evidence_summary = evidence.get("summary") if isinstance(evidence.get("summary"), dict) else {}
+    if (
+        _to_int(summary.get("observed_row_count") or evidence_summary.get("observed_row_count")) <= 0
+        and _to_int(summary.get("applied_count") or evidence_summary.get("applied_count")) <= 0
+        and _to_int(summary.get("holdout_count") or evidence_summary.get("holdout_count")) <= 0
+    ):
+        return None
+    promotion_readiness = str(
+        decision_report.get("promotion_readiness")
+        or summary.get("promotion_readiness")
+        or decision_report.get("promotion_recommendation")
+        or ""
+    ).strip()
+    reason = str(decision_report.get("reason") or "").strip()
+    reason_codes = [
+        str(item)
+        for item in decision_report.get("reason_codes") or []
+        if str(item or "").strip()
+    ]
+    if reason and reason not in reason_codes:
+        reason_codes.insert(0, reason)
+    state = _request_shape_cache_replay_policy_decision_state(decision, promotion_readiness)
+    blockers = [] if state == "measured-savings" else reason_codes
+
+    staged = evidence.get("staged_canaries") if isinstance(evidence.get("staged_canaries"), list) else []
+    top_canary = staged[0] if staged and isinstance(staged[0], dict) else {}
+    shape = top_canary.get("shape") if isinstance(top_canary.get("shape"), dict) else {}
+    cohort_bucket = "/".join(
+        str(part)
+        for part in (shape.get("source_surface"), shape.get("endpoint"), shape.get("category"))
+        if part
+    ) or "openai-cache-replay"
+    observed_sample_count = _to_int(summary.get("observed_row_count") or evidence_summary.get("observed_row_count"))
+    projected_sample_count = _to_int(top_canary.get("sample_count"))
+    sample_count = observed_sample_count or projected_sample_count or (
+        _to_int(summary.get("applied_count")) + _to_int(summary.get("holdout_count"))
+    )
+    fingerprint_sample_count = projected_sample_count or sample_count
+    top_decision = decision_report.get("top_decision") if isinstance(decision_report.get("top_decision"), dict) else {}
+    policy_decision_id = str(top_decision.get("decision_id") or "").strip()
+    miss_breakdown = (
+        decision_report.get("applied_miss_blocker_breakdown")
+        if isinstance(decision_report.get("applied_miss_blocker_breakdown"), list)
+        else top_decision.get("applied_miss_blocker_breakdown")
+        if isinstance(top_decision.get("applied_miss_blocker_breakdown"), list)
+        else evidence.get("applied_miss_blocker_breakdown")
+        if isinstance(evidence.get("applied_miss_blocker_breakdown"), list)
+        else []
+    )
+    top_miss_reason = (
+        summary.get("top_applied_miss_blocker")
+        or summary.get("top_blocking_applied_miss_blocker")
+        or reason
+    )
+
+    return {
+        "lever": "cache",
+        "state": state,
+        "evidence_source": decision_report.get("schema"),
+        "source_evidence_schema": evidence.get("schema"),
+        "local_action_family": "cache",
+        "next_action": str(decision_report.get("next_action") or summary.get("next_action") or "review-cache-replay-canary-promotion-readiness"),
+        "fingerprint_next_action": "stage-cache-replay-canary",
+        "fingerprint_evidence_source": "agentflow.request_shape_cache_replayability_dry_run.v1",
+        "fingerprint_cohort_bucket": sanitize_value(f"cache:{_sample_count_bucket(fingerprint_sample_count)}"),
+        "blocker_codes": sanitize_value(blockers),
+        "sample_count": sample_count,
+        "applied_count": _to_int(summary.get("applied_count") or evidence_summary.get("applied_count")),
+        "holdout_count": _to_int(summary.get("holdout_count") or evidence_summary.get("holdout_count")),
+        "actual_hits": _to_int(summary.get("observed_hits") or summary.get("exact_hit_count") or evidence_summary.get("observed_hits")),
+        "actual_saved_cost_usd": round(_to_float(summary.get("observed_savings_usd") or evidence_summary.get("observed_savings_usd")), 8),
+        "miss_count": _to_int(summary.get("miss_count") or evidence_summary.get("miss_count")),
+        "miss_reason_breakdown": sanitize_value(miss_breakdown),
+        "top_miss_reason": sanitize_value(top_miss_reason),
+        "bypass_skipped_count": _to_int(summary.get("bypass_count") or evidence_summary.get("bypass_count") or evidence_summary.get("unsupported_shape_count")),
+        "projected_hits": _to_int(summary.get("projected_hits") or evidence_summary.get("projected_hits") or top_canary.get("projected_hits")),
+        "projected_saved_usd": round(_to_float(summary.get("projected_savings_usd") or evidence_summary.get("projected_savings_usd") or top_canary.get("projected_savings_usd")), 8),
+        "cohort_bucket": sanitize_value(cohort_bucket),
+        "staged_canary_count": _to_int(summary.get("staged_canary_count") or evidence.get("staged_canary_count")),
+        "policy_decision": sanitize_value(decision),
+        "policy_decision_id": sanitize_value(policy_decision_id),
+        "promotion_decision": sanitize_value(decision_report.get("promotion_decision") or summary.get("promotion_decision")),
+        "promotion_readiness": sanitize_value(promotion_readiness),
+        "reason": sanitize_value(reason),
+        "reason_codes": sanitize_value(reason_codes),
+        "promotion_allowed": bool(summary.get("promotion_allowed")),
+        "rollback_count": 1 if decision == "rollback" or bool(summary.get("rollback_required")) else 0,
+        "target_local_rule_file": sanitize_value(summary.get("target_local_rule_file") or top_decision.get("target_local_rule_file")),
+        "target_local_policy_section": sanitize_value(summary.get("target_local_policy_section") or top_decision.get("target_local_policy_section")),
+    }
 
 
 def _request_shape_cache_replay_evidence_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:

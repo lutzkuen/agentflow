@@ -2857,6 +2857,174 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(cache_entry["actual_hits"], 1)
         self.assertAlmostEqual(cache_entry["actual_saved_cost_usd"], 0.012345)
 
+    def test_cache_replay_ledger_advances_review_action_from_policy_decision(self):
+        evidence = {
+            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "status": "observed",
+            "reason": "cache-replay-canary-evidence-observed",
+            "next_action": "review-cache-replay-canary-promotion-readiness",
+            "staged_canary_count": 1,
+            "staged_canaries": [
+                {
+                    "rank": 1,
+                    "rule_id": "raw-cache-replay-rule-secret",
+                    "shape": {
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "category": "chat",
+                        "workflow_phase": "chat",
+                        "text_bucket": "2k_8k_chars",
+                        "token_bucket": "500_2k_tokens",
+                        "stream": False,
+                        "has_tools": False,
+                    },
+                    "sample_count": 36,
+                    "projected_hits": 35,
+                    "projected_savings_usd": 0.075373,
+                }
+            ],
+            "summary": {
+                "observed_row_count": 43,
+                "applied_count": 25,
+                "holdout_count": 18,
+                "exact_hit_count": 0,
+                "miss_count": 25,
+                "bypass_count": 0,
+                "unsupported_shape_count": 0,
+                "projected_hits": 35,
+                "observed_hits": 0,
+                "projected_savings_usd": 0.075373,
+                "observed_savings_usd": 0.0,
+                "top_applied_miss_blocker": "cache-warmup-miss",
+            },
+            "applied_miss_blocker_breakdown": [{"value": "cache-warmup-miss", "count": 25}],
+            "stale_evidence": {"stale": False, "age_hours": 0.2},
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+                "individual_candidate_ids_included": False,
+            },
+        }
+        policy_decision = {
+            "schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+            "status": "decided",
+            "decision": "keep-staged",
+            "promotion_decision": "keep-staged-warmup",
+            "promotion_readiness": "keep-staged-warmup",
+            "reason": "cache-warmup-miss",
+            "reason_codes": [
+                "missing-observed-cache-hits",
+                "missing-observed-cache-savings",
+                "applied-cache-replay-miss-observed",
+                "cache-warmup-miss",
+                "applied-miss:cache-warmup-miss",
+            ],
+            "next_action": "keep-cache-replay-canary-staged",
+            "summary": {
+                "decision": "keep-staged",
+                "promotion_decision": "keep-staged-warmup",
+                "promotion_readiness": "keep-staged-warmup",
+                "next_action": "keep-cache-replay-canary-staged",
+                "promotion_allowed": False,
+                "rollback_required": False,
+                "keep_staged_warmup": True,
+                "keep_staged": True,
+                "keep_blocked": False,
+                "staged_canary_count": 1,
+                "observed_row_count": 43,
+                "applied_count": 25,
+                "holdout_count": 18,
+                "exact_hit_count": 0,
+                "miss_count": 25,
+                "bypass_count": 0,
+                "projected_hits": 35,
+                "observed_hits": 0,
+                "projected_savings_usd": 0.075373,
+                "observed_savings_usd": 0.0,
+                "top_applied_miss_blocker": "cache-warmup-miss",
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+            },
+            "top_decision": {
+                "decision_id": "cache-replay-policy-decision:public",
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+                "applied_miss_blocker_breakdown": [{"value": "cache-warmup-miss", "count": 25}],
+                "local_policy_patch": None,
+            },
+            "source_evidence": {
+                "schema": evidence["schema"],
+                "status": evidence["status"],
+                "summary": evidence["summary"],
+                "applied_miss_blocker_breakdown": evidence["applied_miss_blocker_breakdown"],
+                "privacy": evidence["privacy"],
+            },
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+                "individual_candidate_ids_included": False,
+            },
+        }
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 50,
+                "request_shape_cache_replay_evidence": evidence,
+                "request_shape_cache_replay_policy_decision": policy_decision,
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        self.assertEqual(
+            stats_summary["request_shape_cache_replay_policy_decision"]["schema"],
+            "agentflow.request_shape_cache_replay_policy_decision.v1",
+        )
+        loop = stats_summary["evidence_to_activation_loop"]
+        cache = next(row for row in loop["levers"] if row["lever"] == "cache")
+        self.assertEqual(cache["evidence_source"], "agentflow.request_shape_cache_replay_policy_decision.v1")
+        self.assertEqual(cache["source_evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache["state"], "replay-ready")
+        self.assertEqual(cache["next_action"], "keep-cache-replay-canary-staged")
+        self.assertEqual(cache["policy_decision"], "keep-staged")
+        self.assertEqual(cache["promotion_decision"], "keep-staged-warmup")
+        self.assertIn("cache-warmup-miss", cache["blocker_codes"])
+        self.assertEqual(cache["applied_count"], 25)
+        self.assertEqual(cache["holdout_count"], 18)
+        self.assertEqual(cache["actual_hits"], 0)
+        self.assertEqual(cache["projected_hits"], 35)
+
+        ledger = stats_summary["evidence_to_activation_next_action_ledger"]
+        cache_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "cache")
+        self.assertEqual(cache_entry["evidence_schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
+        self.assertEqual(cache_entry["source_evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache_entry["current_status"], "holdout")
+        self.assertEqual(cache_entry["next_action"], "keep-cache-replay-canary-staged")
+        self.assertEqual(cache_entry["fingerprint_next_action"], "stage-cache-replay-canary")
+        self.assertEqual(cache_entry["fingerprint_evidence_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(cache_entry["fingerprint_cohort_bucket"], "cache:10_99")
+        self.assertEqual(cache_entry["policy_decision"], "keep-staged")
+        self.assertEqual(cache_entry["promotion_readiness"], "keep-staged-warmup")
+        self.assertIn("cache-warmup-miss", cache_entry["blocker_codes"])
+        self.assertEqual(cache_entry["top_miss_reason"], "cache-warmup-miss")
+        self.assertEqual(cache_entry["target_local_rule_file"], "cache_rules.yaml")
+
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-cache-replay-rule-secret", rendered)
+        self.assertNotIn("raw-request-secret", rendered)
+        self.assertNotIn("raw-session-secret", rendered)
+
     def test_crunch_candidate_ranks_projected_savings_report(self):
         plan = build_research_plan(
             issues=[],

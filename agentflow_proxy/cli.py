@@ -555,6 +555,7 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
 
     from agentflow_proxy.request_shape_rollups import (
         build_request_shape_cache_replay_evidence_report,
+        build_request_shape_cache_replay_policy_decision_report,
         build_request_shape_rollups_report,
     )
 
@@ -563,7 +564,8 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
         for key in ("request_shape_rollups", "request_shape_rollup_report", "request_shape_rollup_candidates_report")
     )
     needs_cache_replay_evidence = not isinstance(stats.get("request_shape_cache_replay_evidence"), dict)
-    if not needs_rollups and not needs_cache_replay_evidence:
+    needs_cache_replay_policy_decision = not isinstance(stats.get("request_shape_cache_replay_policy_decision"), dict)
+    if not needs_rollups and not needs_cache_replay_evidence and not needs_cache_replay_policy_decision:
         return stats
 
     enriched = dict(stats)
@@ -576,6 +578,11 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
                 persist=False,
                 run_id="orchestrator-research-dry-run",
             )
+        cache_replay_evidence = (
+            enriched.get("request_shape_cache_replay_evidence")
+            if isinstance(enriched.get("request_shape_cache_replay_evidence"), dict)
+            else None
+        )
         if needs_cache_replay_evidence:
             rules_path = (
                 Path(os.getenv("AGENTFLOW_CACHE_CANARY_POLICY")).expanduser()
@@ -588,10 +595,15 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
                 ).expanduser()
                 / "cache_canary_policy.yaml"
             )
-            enriched["request_shape_cache_replay_evidence"] = build_request_shape_cache_replay_evidence_report(
+            cache_replay_evidence = build_request_shape_cache_replay_evidence_report(
                 store,
                 rules_path=rules_path,
                 limit=max(limit, 1000),
+            )
+            enriched["request_shape_cache_replay_evidence"] = cache_replay_evidence
+        if needs_cache_replay_policy_decision and isinstance(cache_replay_evidence, dict):
+            enriched["request_shape_cache_replay_policy_decision"] = build_request_shape_cache_replay_policy_decision_report(
+                cache_replay_evidence
             )
     finally:
         try:
