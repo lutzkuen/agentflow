@@ -359,6 +359,151 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         rendered = json.dumps(report, sort_keys=True)
         self.assertNotIn(str(Path(tmp).resolve()), rendered)
 
+    def test_summary_exports_cache_replay_warmup_lifecycle_outcome(self):
+        cache_evidence = {
+            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "status": "observed",
+            "reason": "cache-replay-canary-evidence-observed",
+            "next_action": "review-cache-replay-canary-promotion-readiness",
+            "staged_canary_count": 1,
+            "summary": {
+                "observed_row_count": 40,
+                "applied_count": 24,
+                "holdout_count": 16,
+                "exact_hit_count": 0,
+                "miss_count": 24,
+                "bypass_count": 0,
+                "invalidation_skipped_count": 0,
+                "unsupported_shape_count": 0,
+                "retry_count": 0,
+                "fallback_count": 0,
+                "error_count": 0,
+                "projected_hits": 35,
+                "observed_hits": 0,
+                "projected_savings_usd": 0.075373,
+                "observed_savings_usd": 0.0,
+                "hit_observation_rate": 0.0,
+                "top_blocker": None,
+                "top_applied_miss_blocker": "cache-warmup-miss",
+            },
+            "lifecycle_counts": {
+                "canary_applied_count": 24,
+                "canary_holdout_count": 16,
+                "exact_hit_count": 0,
+                "miss_count": 24,
+                "bypass_count": 0,
+                "invalidation_skipped_count": 0,
+                "unsupported_shape_count": 0,
+                "retry_count": 0,
+                "fallback_count": 0,
+                "error_count": 0,
+            },
+            "miss_reason_breakdown": [{"value": "cache-warmup-miss", "count": 24}],
+            "stale_evidence": {"stale": False, "age_hours": 1.5},
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                report = build_local_activation_outcome_summary(
+                    store,
+                    limit=20,
+                    config_dir=tmp,
+                    activation_reports=[cache_evidence],
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(report["schema"], "agentflow.local_activation_outcome_summary.v1")
+        self.assertEqual(report["egress_guard"]["status"], "passed")
+        self.assertEqual(report["summary"]["policy_decision_families"], ["cache"])
+        by_family = {row["local_action_family"]: row for row in report["outcome_summaries"]}
+        cache = by_family["cache"]
+        self.assertEqual(cache["source_evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache["local_action_family"], "cache")
+        self.assertEqual(cache["applied_count"], 24)
+        self.assertEqual(cache["holdout_count"], 16)
+        self.assertEqual(cache["miss_count"], 24)
+        self.assertEqual(cache["observed_hits"], 0)
+        self.assertEqual(cache["exact_hit_count"], 0)
+        self.assertEqual(cache["top_miss_reason"], "cache-warmup-miss")
+        self.assertEqual(cache["miss_reason_breakdown"], [{"value": "cache-warmup-miss", "count": 24}])
+        self.assertEqual(cache["next_action"], "review-cache-replay-canary-promotion-readiness")
+        self.assertEqual(cache["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(cache["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(cache["managed_dependency"], "optional")
+        self.assertTrue(cache["coverage"]["metadata_only"])
+        self.assertTrue(cache["coverage"]["aggregate_only"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+
+    def test_summary_exports_cache_replay_hit_recovery_lifecycle_outcome(self):
+        cache_evidence = {
+            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "status": "observed",
+            "reason": "cache-replay-canary-evidence-observed",
+            "next_action": "review-cache-replay-canary-promotion-readiness",
+            "staged_canary_count": 1,
+            "summary": {
+                "observed_row_count": 44,
+                "applied_count": 28,
+                "holdout_count": 16,
+                "exact_hit_count": 4,
+                "miss_count": 24,
+                "projected_hits": 35,
+                "observed_hits": 4,
+                "projected_savings_usd": 0.075373,
+                "observed_savings_usd": 0.011,
+                "hit_observation_rate": 0.142857,
+                "top_applied_miss_blocker": "cache-warmup-miss",
+            },
+            "lifecycle_counts": {
+                "canary_applied_count": 28,
+                "canary_holdout_count": 16,
+                "exact_hit_count": 4,
+                "miss_count": 24,
+                "bypass_count": 0,
+                "invalidation_skipped_count": 0,
+                "unsupported_shape_count": 0,
+                "retry_count": 0,
+                "fallback_count": 0,
+                "error_count": 0,
+            },
+            "miss_reason_breakdown": [{"value": "cache-warmup-miss", "count": 24}],
+            "stale_evidence": {"stale": False, "age_hours": 2.0},
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                report = build_local_activation_outcome_summary(
+                    store,
+                    limit=20,
+                    config_dir=tmp,
+                    activation_reports=[cache_evidence],
+                )
+            finally:
+                store.conn.close()
+
+        cache = {row["local_action_family"]: row for row in report["outcome_summaries"]}["cache"]
+        self.assertEqual(report["egress_guard"]["status"], "passed")
+        self.assertEqual(cache["source_evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache["applied_count"], 28)
+        self.assertEqual(cache["holdout_count"], 16)
+        self.assertEqual(cache["miss_count"], 24)
+        self.assertEqual(cache["observed_hits"], 4)
+        self.assertEqual(cache["exact_hit_count"], 4)
+        self.assertEqual(cache["projected_hits"], 35)
+        self.assertAlmostEqual(cache["observed_savings_usd"], 0.011)
+        self.assertAlmostEqual(cache["projected_savings_usd"], 0.075373)
+        self.assertEqual(cache["next_action"], "review-cache-replay-canary-promotion-readiness")
+        self.assertEqual(cache["outcome"], "cache-replay-lifecycle-outcome-recorded")
+
     def test_cli_emits_local_activation_outcome_summary(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")

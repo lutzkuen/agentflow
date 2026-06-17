@@ -5839,6 +5839,7 @@ def local_activation_outcome_summary_cli(argv: Sequence[str] | None = None, *, s
             limit=max(args.limit, 1000),
         )
         activation_reports.append(build_request_shape_cache_replay_policy_decision_report(cache_evidence))
+        activation_reports.append(cache_evidence)
         policy_events = recent_policy_events(limit=args.policy_event_limit).get("events", [])
         result = build_local_activation_outcome_summary(
             store,

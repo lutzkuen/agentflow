@@ -16,6 +16,7 @@ PRIVACY_SCHEMA = "agentflow.local_activation_outcome_summary_privacy.v1"
 CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
 CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "agentflow.request_shape_crunch_activation_evidence.v1"
 CACHE_REPLAY_POLICY_DECISION_SCHEMA = "agentflow.request_shape_cache_replay_policy_decision.v1"
+CACHE_REPLAY_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_replay_evidence.v1"
 
 RULE_FILES = {
     "routing": "routing_rules.yaml",
@@ -601,7 +602,11 @@ def _apply_cache_policy_decision_report(row: dict[str, Any], blockers: Counter[s
     row["decision_count"] = _decision_count(report)
     row["target_local_rule_file"] = "cache_rules.yaml"
     row["target_local_policy_section"] = "cache.pattern_rules"
-    row["next_action"] = public_label(top.get("recommended_next_action") or top.get("next_action") or summary.get("decision"), row.get("next_action") or "review")
+    current_action = str(row.get("next_action") or "").strip()
+    if current_action and current_action != "review-local-activation-outcome":
+        row["next_action"] = current_action
+    else:
+        row["next_action"] = public_label(top.get("recommended_next_action") or top.get("next_action") or summary.get("decision"), row.get("next_action") or "review")
     row["observed_hits"] = observed_hits
     row["exact_hit_count"] = exact_hit_count
     row["projected_hits"] = projected_hits
@@ -622,6 +627,133 @@ def _apply_cache_policy_decision_report(row: dict[str, Any], blockers: Counter[s
     return True
 
 
+def _apply_cache_replay_evidence_report(row: dict[str, Any], blockers: Counter[str], report: dict[str, Any]) -> bool:
+    if report.get("schema") != CACHE_REPLAY_EVIDENCE_SCHEMA:
+        return False
+    summary = _first_dict(report.get("summary"))
+    lifecycle = _first_dict(report.get("lifecycle_counts"))
+    stale = _first_dict(report.get("stale_evidence"))
+    applied = _as_int(summary.get("applied_count") or lifecycle.get("canary_applied_count"))
+    holdout = _as_int(summary.get("holdout_count") or lifecycle.get("canary_holdout_count"))
+    miss_count = _as_int(summary.get("miss_count") or lifecycle.get("miss_count"))
+    exact_hit_count = _as_int(summary.get("exact_hit_count") or lifecycle.get("exact_hit_count"))
+    observed_hits = _as_int(summary.get("observed_hits") or exact_hit_count)
+    row_count = _as_int(summary.get("observed_row_count"))
+    if row_count <= 0:
+        row_count = applied + holdout + _as_int(lifecycle.get("bypass_count"))
+    if _as_int(report.get("staged_canary_count")) <= 0 and row_count <= 0:
+        return False
+
+    bypass_count = _as_int(summary.get("bypass_count") or lifecycle.get("bypass_count"))
+    invalidation_skipped_count = _as_int(summary.get("invalidation_skipped_count") or lifecycle.get("invalidation_skipped_count"))
+    unsupported_shape_count = _as_int(summary.get("unsupported_shape_count") or lifecycle.get("unsupported_shape_count"))
+    retry_count = _as_int(summary.get("retry_count") or lifecycle.get("retry_count"))
+    fallback_count = _as_int(summary.get("fallback_count") or lifecycle.get("fallback_count"))
+    error_count = _as_int(summary.get("error_count") or lifecycle.get("error_count"))
+    safety_stop_count = _as_int(summary.get("safety_stop_count") or lifecycle.get("safety_stop_count"))
+    rollback_count = _as_int(summary.get("rollback_count") or lifecycle.get("rollback_count"))
+    projected_hits = _as_int(summary.get("projected_hits"))
+    projected_savings = _as_float(summary.get("projected_savings_usd"))
+    observed_savings = _as_float(summary.get("observed_savings_usd"))
+    top_miss_reason = public_label(
+        summary.get("top_miss_reason") or summary.get("top_applied_miss_blocker"),
+        "unknown",
+    )
+    top_blocker = public_label(summary.get("top_blocker"), "unknown")
+
+    row["row_count"] = row_count
+    row["applied_count"] = applied
+    row["holdout_count"] = holdout
+    row["skipped_count"] = max(0, row_count - applied - holdout)
+    row["error_count"] = error_count
+    row["retry_count"] = retry_count
+    row["fallback_count"] = fallback_count
+    row["safety_stopped_count"] = safety_stop_count
+    row["rollback_count"] = rollback_count
+    row["observed_savings_usd"] = observed_savings
+    row["projected_savings_usd"] = projected_savings
+    row["source_evidence_schema"] = CACHE_REPLAY_EVIDENCE_SCHEMA
+    row["source_decision_id"] = None
+    row["source_decision"] = "lifecycle-outcome"
+    row["graduation_decision"] = "review"
+    row["target_local_rule_file"] = "cache_rules.yaml"
+    row["target_local_policy_section"] = "cache.pattern_rules"
+    row["next_action"] = public_label(report.get("next_action") or summary.get("next_action"), "review-cache-replay-canary-promotion-readiness")
+    row["outcome"] = "cache-replay-lifecycle-outcome-recorded"
+    row["observed_hits"] = observed_hits
+    row["exact_hit_count"] = exact_hit_count
+    row["miss_count"] = miss_count
+    row["projected_hits"] = projected_hits
+    row["bypass_count"] = bypass_count
+    row["invalidation_skipped_count"] = invalidation_skipped_count
+    row["unsupported_shape_count"] = unsupported_shape_count
+    row["hit_observation_rate"] = round(_as_float(summary.get("hit_observation_rate")), 6)
+    if top_miss_reason != "unknown":
+        row["top_miss_reason"] = top_miss_reason
+        row["top_applied_miss_blocker"] = top_miss_reason
+        blockers[top_miss_reason] += 1
+    if top_blocker != "unknown":
+        row["top_blocker"] = top_blocker
+        blockers[top_blocker] += 1
+
+    miss_breakdown = []
+    raw_miss_breakdown = report.get("miss_reason_breakdown")
+    if not isinstance(raw_miss_breakdown, list):
+        raw_miss_breakdown = []
+    for item in raw_miss_breakdown:
+        if not isinstance(item, dict):
+            continue
+        value = public_label(item.get("value"), "unknown")
+        if value == "unknown":
+            continue
+        count = _as_int(item.get("count"))
+        miss_breakdown.append({"value": value, "count": count})
+        blockers[value] += count
+    row["miss_reason_breakdown"] = miss_breakdown
+    row["coverage"] = {
+        "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+        "source_schema": CACHE_REPLAY_EVIDENCE_SCHEMA,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "observed_count": row_count,
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "miss_count": miss_count,
+        "observed_hits": observed_hits,
+        "exact_hit_count": exact_hit_count,
+        "projected_hits": projected_hits,
+        "bypass_count": bypass_count,
+        "invalidation_skipped_count": invalidation_skipped_count,
+        "unsupported_shape_count": unsupported_shape_count,
+        "retry_count": retry_count,
+        "fallback_count": fallback_count,
+        "rollback_count": rollback_count,
+        "safety_stop_count": safety_stop_count,
+        "error_count": error_count,
+        "hit_observation_rate": row["hit_observation_rate"],
+        "stale": bool(stale.get("stale")),
+        "evidence_age_hours": stale.get("age_hours"),
+    }
+    row["source_report"] = {
+        "schema": CACHE_REPLAY_EVIDENCE_SCHEMA,
+        "status": public_label(report.get("status"), "unknown"),
+        "reason": public_label(report.get("reason"), "unknown"),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    blocker_breakdown = report.get("blocker_breakdown")
+    if isinstance(blocker_breakdown, list):
+        for item in blocker_breakdown:
+            if not isinstance(item, dict):
+                continue
+            code = public_label(item.get("value"), "unknown")
+            if code != "unknown":
+                blockers[code] += _as_int(item.get("count"))
+    for code in _reason_codes(report.get("reason"), report.get("status")):
+        blockers[code] += 1
+    return True
+
+
 def _apply_policy_decision_reports(
     summaries: dict[str, dict[str, Any]],
     blockers: dict[str, Counter[str]],
@@ -638,6 +770,9 @@ def _apply_policy_decision_reports(
             applied += 1
             continue
         if _apply_cache_policy_decision_report(summaries["cache"], blockers["cache"], report):
+            applied += 1
+            continue
+        if _apply_cache_replay_evidence_report(summaries["cache"], blockers["cache"], report):
             applied += 1
     return applied
 
@@ -758,7 +893,12 @@ def build_local_activation_outcome_summary(
                     row["local_action_family"]
                     for row in outcome_summaries
                     if row.get("source_evidence_schema")
-                    in {CRUNCH_ACTIVATION_EVIDENCE_SCHEMA, CRUNCH_POLICY_DECISION_SCHEMA, CACHE_REPLAY_POLICY_DECISION_SCHEMA}
+                    in {
+                        CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
+                        CRUNCH_POLICY_DECISION_SCHEMA,
+                        CACHE_REPLAY_POLICY_DECISION_SCHEMA,
+                        CACHE_REPLAY_EVIDENCE_SCHEMA,
+                    }
                 }
             ),
             "applied_count": sum(_as_int(row.get("applied_count")) for row in outcome_summaries),
@@ -777,6 +917,7 @@ def build_local_activation_outcome_summary(
                 CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
                 CRUNCH_POLICY_DECISION_SCHEMA,
                 CACHE_REPLAY_POLICY_DECISION_SCHEMA,
+                CACHE_REPLAY_EVIDENCE_SCHEMA,
             ],
             "managed_dependency": "optional",
             "server_ingestion_required": False,
