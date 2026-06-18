@@ -36,9 +36,13 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         has_tools: bool = False,
         status_code: int = 200,
         retry_count: int = 0,
+        latency_ms: int = 125,
         session_id: str = "secret-openai-session",
         request_json: str | None = None,
         openai_canary: dict[str, object] | None = None,
+        crunch_tokens_saved_est: int = 0,
+        cache_creation_input_tokens: int = 0,
+        cache_read_input_tokens: int = 0,
     ) -> None:
         routed_model = routed_model or requested_model
         actual_input_tokens = max(1, text_chars // 4)
@@ -65,14 +69,14 @@ class OpenAIRoutingReportTests(unittest.TestCase):
             stream=stream,
             cache_hit=0,
             status_code=status_code,
-            latency_ms=125,
+            latency_ms=latency_ms,
             input_tokens_est=actual_input_tokens,
             output_tokens_est=actual_output_tokens,
             actual_input_tokens=actual_input_tokens,
             actual_output_tokens=actual_output_tokens,
             cost_est_usd=0.001 if routed_model != requested_model else 0.002,
             cost_baseline_usd=0.002,
-            crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+            crunch_json=stable_json({"changed": bool(crunch_tokens_saved_est), "tokens_saved_est": crunch_tokens_saved_est}),
             routing_json=stable_json(routing_json),
             cache_json=stable_json(
                 {
@@ -86,8 +90,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
             response_json=None,
             session_id=session_id,
             category=category,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            cache_read_input_tokens=cache_read_input_tokens,
             retry_count=retry_count,
             thinking_output_tokens=0,
             provider="openai",
@@ -783,6 +787,18 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(gate["target_local_policy_section"], "routing.rules")
         self.assertGreater(gate["savings_per_1000_calls_usd"], 0)
         self.assertFalse(gate["regression_counters"]["stale_evidence"]["stale"])
+        canary_outcome = outcome["routing_canary_outcome"]
+        self.assertEqual(canary_outcome["schema"], "agentflow.openai_routing_canary_outcome.v1")
+        self.assertEqual(canary_outcome["next_action"], "widen")
+        self.assertEqual(canary_outcome["decision_options"], ["widen", "hold", "rollback", "collect_more"])
+        self.assertEqual(canary_outcome["reason_codes"], ["no-regression-routing-canary"])
+        self.assertGreater(canary_outcome["routing_savings"]["routing_only_savings_usd"], 0)
+        self.assertGreater(canary_outcome["routing_savings"]["routing_only_savings_per_1000_calls_usd"], 0)
+        self.assertEqual(canary_outcome["non_routing_savings"]["crunch_savings_usd"], 0)
+        self.assertEqual(canary_outcome["non_routing_savings"]["provider_prompt_cache_discount_usd"], 0)
+        self.assertFalse(canary_outcome["quality_performance_regression"]["frontend_visible_regression_reported"])
+        self.assertFalse(canary_outcome["privacy"]["raw_prompts_included"])
+        self.assertFalse(canary_outcome["privacy"]["provider_bodies_included"])
         rollback_outcome = outcome["rollback_metadata"]
         self.assertEqual(rollback_outcome["schema"], "agentflow.openai_routing_active_local_policy_rollback_metadata.v1")
         self.assertEqual(rollback_outcome["rollback_action_type"], "disable_openai_routing_rule")
@@ -826,11 +842,19 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["active_local_policy_next_action"], "keep-active")
         self.assertTrue(payload["summary"]["active_local_policy_gate_passed"])
         self.assertEqual(payload["summary"]["active_local_policy_reason_codes"], [])
+        self.assertEqual(payload["summary"]["routing_canary_outcome_count"], 1)
+        self.assertEqual(payload["summary"]["routing_canary_next_action"], "widen")
+        self.assertGreater(payload["summary"]["routing_only_savings_usd"], 0)
+        self.assertGreater(payload["summary"]["routing_only_savings_per_1000_calls_usd"], 0)
+        self.assertEqual(payload["summary"]["non_routing_crunch_savings_usd"], 0)
+        self.assertEqual(payload["summary"]["non_routing_provider_prompt_cache_discount_usd"], 0)
+        self.assertFalse(payload["summary"]["frontend_visible_regression_reported"])
         self.assertEqual(payload["summary"]["active_local_policy_rollback_action_type"], "disable_openai_routing_rule")
         self.assertGreater(payload["summary"]["active_local_policy_realized_savings_usd"], 0)
         self.assertGreater(payload["summary"]["active_local_policy_applied_minus_holdout_realized_savings_avg_usd"], 0)
         self.assertIsNotNone(payload["summary"]["active_local_policy_evidence_age_hours"])
         self.assertEqual(payload["active_local_policy_outcomes"][0]["schema"], "agentflow.openai_routing_active_local_policy_outcome.v1")
+        self.assertEqual(payload["routing_canary_outcomes"][0]["schema"], "agentflow.openai_routing_canary_outcome.v1")
         self.assertFalse(payload["privacy"]["individual_candidate_ids_included"])
 
     def test_active_openai_routing_rule_outcome_reviews_skipped_unknown_coverage(self) -> None:
@@ -964,13 +988,71 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(outcome["outcome_decision"], "rollback-required")
         self.assertEqual(outcome["deterministic_next_action"], "rollback-required")
         self.assertFalse(outcome["gate_passed"])
+        self.assertEqual(outcome["routing_canary_outcome"]["next_action"], "rollback")
+        self.assertIn("error-observed", outcome["routing_canary_outcome"]["reason_codes"])
+        self.assertGreater(outcome["routing_canary_outcome"]["routing_savings"]["routing_only_savings_usd"], 0)
         self.assertIn("error-observed", outcome["reason_codes"])
         self.assertIn("fallback-observed", outcome["reason_codes"])
         self.assertIn("retry-observed", outcome["reason_codes"])
         self.assertEqual(outcome["rollback_metadata"]["rollback_action_type"], "disable_openai_routing_rule")
         self.assertEqual(result["summary"]["active_local_policy_outcome_decision"], "rollback-required")
         self.assertEqual(result["summary"]["active_local_policy_next_action"], "rollback-required")
+        self.assertEqual(result["summary"]["routing_canary_next_action"], "rollback")
         self.assertEqual(result["summary"]["active_local_policy_rollback_action_type"], "disable_openai_routing_rule")
+
+    def test_active_openai_routing_rule_outcome_collects_more_when_sample_too_small(self) -> None:
+        self._install_active_openai_tool_light_rule()
+
+        def canary(cohort: str) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-v1",
+                "target_candidate_id": "openai-route:responses:gpt-5:tool-light:tools:nonstream:to-gpt-5-4-mini",
+                "status": "applied" if cohort == "canary_applied" else "holdout",
+                "cohort": cohort,
+                "reason": "selected-canary" if cohort == "canary_applied" else "selected-holdout",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if cohort == "canary_applied" else "gpt-5.4",
+                "category": "tool-light",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+            }
+
+        for _ in range(2):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+                crunch_tokens_saved_est=120,
+                cache_read_input_tokens=100,
+            )
+        for _ in range(3):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout"),
+            )
+        for _ in range(20):
+            self._log_openai_shadow_experiment(category="tool-light", similarity=0.95, passed=True)
+
+        result = build_openai_routing_promotion_decision_report(self.store, limit=20)
+
+        outcome = result["active_local_policy_outcomes"][0]
+        canary_outcome = outcome["routing_canary_outcome"]
+        self.assertEqual(canary_outcome["next_action"], "collect_more")
+        self.assertIn("insufficient-applied-samples", canary_outcome["reason_codes"])
+        self.assertIn("insufficient-holdout-samples", canary_outcome["reason_codes"])
+        self.assertGreater(canary_outcome["routing_savings"]["routing_only_savings_usd"], 0)
+        self.assertGreater(canary_outcome["non_routing_savings"]["crunch_savings_usd"], 0)
+        self.assertGreater(canary_outcome["non_routing_savings"]["provider_prompt_cache_discount_usd"], 0)
+        self.assertEqual(result["summary"]["routing_canary_next_action"], "collect_more")
 
     def test_targeted_promotion_decision_keeps_skipped_unknown_coverage_out_of_promotion(self) -> None:
         def canary(canary_cohort: str, **extra: object) -> dict[str, object]:

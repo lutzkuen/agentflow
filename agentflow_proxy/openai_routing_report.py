@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agentflow_proxy.optimization.openai_features import openai_endpoint, openai_model_family, openai_source_surface
-from agentflow_proxy.pricing import estimate_cost, pricing_basis
+from agentflow_proxy.pricing import estimate_cost, pricing_basis, provider_prompt_cache_accounting
 from agentflow_proxy.router import OPENAI_LARGE_DEFAULT, OPENAI_SMALL_DEFAULT, OPENAI_TINY_DEFAULT
 from agentflow_proxy.store import utc_now
 
@@ -17,6 +17,7 @@ PROMOTION_DECISION_SCHEMA = "agentflow.openai_routing_promotion_decision.v1"
 ACTIVE_LOCAL_POLICY_OUTCOME_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome.v1"
 ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
 ACTIVE_LOCAL_POLICY_SAVINGS_DELTAS_SCHEMA = "agentflow.openai_routing_active_local_policy_savings_deltas.v1"
+ROUTING_CANARY_OUTCOME_SCHEMA = "agentflow.openai_routing_canary_outcome.v1"
 PROMOTION_VERDICT_OPTIONS = ["promotion-ready", "active-local-policy", "keep-staged", "keep-blocked", "rollback-required"]
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
@@ -458,11 +459,16 @@ def _empty_cohort_costs() -> dict[str, Any]:
         "target_cost_usd": 0.0,
         "realized_savings_usd": 0.0,
         "projected_savings_usd": 0.0,
+        "routing_only_savings_usd": 0.0,
+        "crunch_savings_usd": 0.0,
+        "provider_prompt_cache_discount_usd": 0.0,
         "input_tokens": 0,
         "output_tokens": 0,
         "error_count": 0,
         "fallback_count": 0,
         "retry_count": 0,
+        "latency_ms_total": 0,
+        "latency_sample_count": 0,
     }
 
 
@@ -474,6 +480,8 @@ def _add_costs(dest: dict[str, Any], source: dict[str, Any]) -> None:
         "error_count",
         "fallback_count",
         "retry_count",
+        "latency_ms_total",
+        "latency_sample_count",
     ):
         dest[key] = _as_int(dest.get(key)) + _as_int(source.get(key))
     for key in (
@@ -482,6 +490,9 @@ def _add_costs(dest: dict[str, Any], source: dict[str, Any]) -> None:
         "target_cost_usd",
         "realized_savings_usd",
         "projected_savings_usd",
+        "routing_only_savings_usd",
+        "crunch_savings_usd",
+        "provider_prompt_cache_discount_usd",
     ):
         dest[key] = _as_float(dest.get(key)) + _as_float(source.get(key))
 
@@ -496,6 +507,11 @@ def _finalize_cohort_costs(raw: dict[str, Any]) -> dict[str, Any]:
     errors = _as_int(raw.get("error_count"))
     fallbacks = _as_int(raw.get("fallback_count"))
     retries = _as_int(raw.get("retry_count"))
+    latency_samples = _as_int(raw.get("latency_sample_count"))
+    latency_total = _as_int(raw.get("latency_ms_total"))
+    routing_only = _as_float(raw.get("routing_only_savings_usd"))
+    crunch_savings = _as_float(raw.get("crunch_savings_usd"))
+    cache_discount = _as_float(raw.get("provider_prompt_cache_discount_usd"))
     return {
         "metadata_only": True,
         "aggregate_only": True,
@@ -505,6 +521,9 @@ def _finalize_cohort_costs(raw: dict[str, Any]) -> dict[str, Any]:
         "target_cost_usd": round(target, 8),
         "realized_savings_usd": round(realized, 8),
         "projected_savings_usd": round(projected, 8),
+        "routing_only_savings_usd": round(routing_only, 8),
+        "crunch_savings_usd": round(crunch_savings, 8),
+        "provider_prompt_cache_discount_usd": round(cache_discount, 8),
         "input_tokens": _as_int(raw.get("input_tokens")),
         "output_tokens": _as_int(raw.get("output_tokens")),
         "avg_baseline_cost_usd": round(baseline / count, 8) if count else 0.0,
@@ -512,14 +531,19 @@ def _finalize_cohort_costs(raw: dict[str, Any]) -> dict[str, Any]:
         "avg_target_cost_usd": round(target / count, 8) if count else 0.0,
         "avg_realized_savings_usd": round(realized / count, 8) if count else 0.0,
         "avg_projected_savings_usd": round(projected / count, 8) if count else 0.0,
+        "avg_routing_only_savings_usd": round(routing_only / count, 8) if count else 0.0,
+        "avg_crunch_savings_usd": round(crunch_savings / count, 8) if count else 0.0,
+        "avg_provider_prompt_cache_discount_usd": round(cache_discount / count, 8) if count else 0.0,
         "savings_per_1000_calls_usd": round((realized / count) * 1000.0, 6) if count else 0.0,
         "projected_savings_per_1000_calls_usd": round((projected / count) * 1000.0, 6) if count else 0.0,
+        "routing_only_savings_per_1000_calls_usd": round((routing_only / count) * 1000.0, 6) if count else 0.0,
         "error_count": errors,
         "fallback_count": fallbacks,
         "retry_count": retries,
         "error_rate": round(errors / count, 6) if count else 0.0,
         "fallback_rate": round(fallbacks / count, 6) if count else 0.0,
         "retry_rate": round(retries / count, 6) if count else 0.0,
+        "latency_avg_ms": round(latency_total / latency_samples, 2) if latency_samples else None,
     }
 
 
@@ -541,13 +565,20 @@ def _cohort_cost_deltas(cohort_costs: dict[str, Any]) -> dict[str, Any]:
         "applied_target_cost_usd": f(applied, "target_cost_usd"),
         "applied_realized_savings_usd": f(applied, "realized_savings_usd"),
         "applied_projected_savings_usd": f(applied, "projected_savings_usd"),
+        "applied_routing_only_savings_usd": f(applied, "routing_only_savings_usd"),
+        "applied_crunch_savings_usd": f(applied, "crunch_savings_usd"),
+        "applied_provider_prompt_cache_discount_usd": f(applied, "provider_prompt_cache_discount_usd"),
         "holdout_baseline_cost_usd": f(holdout, "baseline_cost_usd"),
         "holdout_actual_cost_usd": f(holdout, "actual_cost_usd"),
         "holdout_target_cost_usd": f(holdout, "target_cost_usd"),
         "holdout_realized_savings_usd": f(holdout, "realized_savings_usd"),
         "holdout_projected_savings_usd": f(holdout, "projected_savings_usd"),
+        "holdout_routing_only_savings_usd": f(holdout, "routing_only_savings_usd"),
+        "holdout_crunch_savings_usd": f(holdout, "crunch_savings_usd"),
+        "holdout_provider_prompt_cache_discount_usd": f(holdout, "provider_prompt_cache_discount_usd"),
         "realized_savings_delta_usd": round(f(applied, "realized_savings_usd") - f(holdout, "realized_savings_usd"), 8),
         "projected_savings_delta_usd": round(f(applied, "projected_savings_usd") - f(holdout, "projected_savings_usd"), 8),
+        "routing_only_savings_delta_usd": round(f(applied, "routing_only_savings_usd") - f(holdout, "routing_only_savings_usd"), 8),
         "applied_minus_holdout_actual_cost_avg_usd": round(f(applied, "avg_actual_cost_usd") - f(holdout, "avg_actual_cost_usd"), 8),
         "applied_minus_holdout_realized_savings_avg_usd": round(
             f(applied, "avg_realized_savings_usd") - f(holdout, "avg_realized_savings_usd"),
@@ -560,8 +591,25 @@ def _cohort_cost_deltas(cohort_costs: dict[str, Any]) -> dict[str, Any]:
         "applied_minus_holdout_error_rate_delta": round(f(applied, "error_rate") - f(holdout, "error_rate"), 6),
         "applied_minus_holdout_fallback_rate_delta": round(f(applied, "fallback_rate") - f(holdout, "fallback_rate"), 6),
         "applied_minus_holdout_retry_rate_delta": round(f(applied, "retry_rate") - f(holdout, "retry_rate"), 6),
+        "applied_minus_holdout_routing_only_savings_avg_usd": round(
+            f(applied, "avg_routing_only_savings_usd") - f(holdout, "avg_routing_only_savings_usd"),
+            8,
+        ),
+        "applied_minus_holdout_latency_avg_ms": (
+            round(f(applied, "latency_avg_ms") - f(holdout, "latency_avg_ms"), 2)
+            if applied.get("latency_avg_ms") is not None and holdout.get("latency_avg_ms") is not None
+            else None
+        ),
         "privacy": _openai_promotion_decision_privacy(),
     }
+
+
+def _input_cost_for_tokens(model: str, tokens: int) -> float:
+    basis = pricing_basis(model, provider="openai")
+    price = basis.get("input_usd_per_million")
+    if price is None:
+        return 0.0
+    return (max(_as_int(tokens), 0) / 1_000_000) * _as_float(price)
 
 
 def _canary_matches_candidate(bucket: dict[str, Any], canary: dict[str, Any]) -> bool:
@@ -697,6 +745,26 @@ def _add_canary_cohort_costs(bucket: dict[str, Any], row: dict[str, Any], canary
     if actual_cost <= 0:
         actual_cost = _as_float(estimate_cost(routed_model, input_tokens, output_tokens, provider="openai"))
     target_cost = _as_float(estimate_cost(target_model, input_tokens, output_tokens, provider="openai"))
+    requested_same_tokens_cost = _as_float(estimate_cost(requested_model, input_tokens, output_tokens, provider="openai"))
+    target_same_tokens_cost = _as_float(estimate_cost(target_model, input_tokens, output_tokens, provider="openai"))
+    routing_only_savings = max(0.0, requested_same_tokens_cost - target_same_tokens_cost)
+
+    crunch = _json_obj(row.get("crunch_json"))
+    crunch_tokens_saved = _as_int(
+        crunch.get("tokens_saved_est")
+        or crunch.get("input_tokens_saved_est")
+        or crunch.get("saved_tokens")
+    )
+    crunch_savings = _input_cost_for_tokens(requested_model, crunch_tokens_saved)
+
+    cache_accounting = provider_prompt_cache_accounting(
+        routed_model,
+        provider="openai",
+        cache_creation_tokens=_as_int(row.get("cache_creation_input_tokens")),
+        cache_read_tokens=_as_int(row.get("cache_read_input_tokens")),
+    )
+    provider_cache_discount = _as_float(cache_accounting.get("net_provider_cache_discount_usd"))
+    latency_ms = _as_int(row.get("latency_ms"), -1)
 
     _add_costs(
         costs,
@@ -707,11 +775,16 @@ def _add_canary_cohort_costs(bucket: dict[str, Any], row: dict[str, Any], canary
             "target_cost_usd": target_cost,
             "realized_savings_usd": baseline_cost - actual_cost,
             "projected_savings_usd": baseline_cost - target_cost if target_cost > 0 else 0.0,
+            "routing_only_savings_usd": routing_only_savings,
+            "crunch_savings_usd": crunch_savings,
+            "provider_prompt_cache_discount_usd": provider_cache_discount,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "error_count": int(_as_int(row.get("status_code"), -1) >= 400),
             "fallback_count": int(bool(canary.get("fallback_reason"))),
             "retry_count": int(_as_int(row.get("retry_count")) > 0),
+            "latency_ms_total": latency_ms if latency_ms >= 0 else 0,
+            "latency_sample_count": 1 if latency_ms >= 0 else 0,
         },
     )
 
@@ -1250,7 +1323,8 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
                    requested_model_family, routed_model_family, stream, cache_hit,
                    status_code, latency_ms, input_tokens_est, output_tokens_est,
                    actual_input_tokens, actual_output_tokens, cost_est_usd,
-                   cost_baseline_usd, retry_count, category, routing_json, cache_json
+                   cost_baseline_usd, retry_count, category, routing_json, crunch_json,
+                   cache_json, cache_creation_input_tokens, cache_read_input_tokens
             from calls
             order by created_at desc
             limit ?
@@ -1898,6 +1972,173 @@ def _openai_active_policy_outcome_gate(
     }
 
 
+def _openai_routing_canary_outcome(
+    *,
+    target: dict[str, Any],
+    applied_count: int,
+    holdout_count: int,
+    skipped_count: int,
+    unknown_count: int,
+    safety_stop_count: int,
+    error_count: int,
+    fallback_count: int,
+    retry_count: int,
+    stale_evidence_count: int,
+    savings_deltas: dict[str, Any],
+    cohort_costs: dict[str, Any],
+    latest_observed_at: Any,
+    oldest_observed_at: Any,
+    evidence_age_hours: Any,
+) -> dict[str, Any]:
+    applied_costs = cohort_costs.get("canary_applied") if isinstance(cohort_costs.get("canary_applied"), dict) else {}
+    holdout_costs = cohort_costs.get("canary_holdout") if isinstance(cohort_costs.get("canary_holdout"), dict) else {}
+    routing_only_savings = _as_float(savings_deltas.get("applied_routing_only_savings_usd"))
+    routing_only_savings_per_1000 = (
+        round((routing_only_savings / applied_count) * 1000.0, 6)
+        if applied_count
+        else 0.0
+    )
+    latency_delta = savings_deltas.get("applied_minus_holdout_latency_avg_ms")
+
+    thresholds = {
+        "min_applied_samples": DEFAULT_MIN_SAMPLES,
+        "min_holdout_samples": DEFAULT_MIN_SAMPLES,
+        "max_error_count": 0,
+        "max_fallback_count": 0,
+        "max_retry_count": 0,
+        "max_safety_stop_count": 0,
+        "max_unknown_count": 0,
+        "max_stale_evidence_count": 0,
+        "max_latency_regression_ms": 2000,
+        "min_routing_only_savings_per_1000_calls_usd": 0.0,
+    }
+    reason_codes: list[str] = []
+    if applied_count < thresholds["min_applied_samples"]:
+        reason_codes.append("insufficient-applied-samples")
+    if holdout_count < thresholds["min_holdout_samples"]:
+        reason_codes.append("insufficient-holdout-samples")
+    if safety_stop_count > thresholds["max_safety_stop_count"]:
+        reason_codes.append("safety-stop-observed")
+    if error_count > thresholds["max_error_count"]:
+        reason_codes.append("error-observed")
+    if fallback_count > thresholds["max_fallback_count"]:
+        reason_codes.append("fallback-observed")
+    if retry_count > thresholds["max_retry_count"]:
+        reason_codes.append("retry-observed")
+    if stale_evidence_count > thresholds["max_stale_evidence_count"]:
+        reason_codes.append("stale-evidence")
+    if unknown_count > thresholds["max_unknown_count"]:
+        reason_codes.append("unknown-coverage-observed")
+    if latency_delta is not None and _as_float(latency_delta) > thresholds["max_latency_regression_ms"]:
+        reason_codes.append("latency-regression")
+    if routing_only_savings_per_1000 <= thresholds["min_routing_only_savings_per_1000_calls_usd"]:
+        reason_codes.append("non-positive-routing-only-savings")
+    if _as_float(savings_deltas.get("applied_minus_holdout_routing_only_savings_avg_usd")) < 0:
+        reason_codes.append("negative-routing-savings-delta")
+
+    collect_more_reasons = {"insufficient-applied-samples", "insufficient-holdout-samples"}
+    rollback_reasons = {"safety-stop-observed", "error-observed", "fallback-observed", "retry-observed"}
+    if any(reason in rollback_reasons for reason in reason_codes):
+        next_action = "rollback"
+    elif any(reason in collect_more_reasons for reason in reason_codes):
+        next_action = "collect_more"
+    elif reason_codes:
+        next_action = "hold"
+    else:
+        next_action = "widen"
+        reason_codes = ["no-regression-routing-canary"]
+
+    quality_performance_regression = {
+        "schema": "agentflow.openai_routing_canary_quality_performance_regression.v1",
+        "metadata_only": True,
+        "aggregate_only": True,
+        "frontend_visible_regression_reported": False,
+        "performance_regression_reported": "latency-regression" in reason_codes,
+        "latency_delta_ms": latency_delta,
+        "source": "local-metadata-counters",
+        "raw_reports_included": False,
+        "raw_prompts_included": False,
+        "raw_responses_included": False,
+    }
+
+    return {
+        "schema": ROUTING_CANARY_OUTCOME_SCHEMA,
+        "status": "ready" if next_action == "widen" else "needs-review",
+        "next_action": next_action,
+        "decision_options": ["widen", "hold", "rollback", "collect_more"],
+        "reason_codes": reason_codes,
+        "target": target,
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "evidence": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": skipped_count,
+            "unknown_count": unknown_count,
+            "safety_stop_count": safety_stop_count,
+            "error_count": error_count,
+            "fallback_count": fallback_count,
+            "retry_count": retry_count,
+            "stale_evidence_count": stale_evidence_count,
+            "latest_observed_at": latest_observed_at,
+            "oldest_observed_at": oldest_observed_at,
+            "evidence_age_hours": evidence_age_hours,
+        },
+        "thresholds": thresholds,
+        "routing_savings": {
+            "schema": "agentflow.openai_routing_canary_routing_savings.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "routing_only_savings_usd": round(routing_only_savings, 8),
+            "routing_only_savings_per_1000_calls_usd": routing_only_savings_per_1000,
+            "applied_routing_only_savings_usd": _as_float(savings_deltas.get("applied_routing_only_savings_usd")),
+            "holdout_routing_only_savings_usd": _as_float(savings_deltas.get("holdout_routing_only_savings_usd")),
+            "routing_only_savings_delta_usd": _as_float(savings_deltas.get("routing_only_savings_delta_usd")),
+            "applied_minus_holdout_routing_only_savings_avg_usd": _as_float(
+                savings_deltas.get("applied_minus_holdout_routing_only_savings_avg_usd")
+            ),
+        },
+        "non_routing_savings": {
+            "schema": "agentflow.openai_routing_canary_non_routing_savings.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "crunch_savings_usd": round(
+                _as_float(savings_deltas.get("applied_crunch_savings_usd"))
+                + _as_float(savings_deltas.get("holdout_crunch_savings_usd")),
+                8,
+            ),
+            "provider_prompt_cache_discount_usd": round(
+                _as_float(savings_deltas.get("applied_provider_prompt_cache_discount_usd"))
+                + _as_float(savings_deltas.get("holdout_provider_prompt_cache_discount_usd")),
+                8,
+            ),
+            "applied_crunch_savings_usd": _as_float(savings_deltas.get("applied_crunch_savings_usd")),
+            "holdout_crunch_savings_usd": _as_float(savings_deltas.get("holdout_crunch_savings_usd")),
+            "applied_provider_prompt_cache_discount_usd": _as_float(
+                savings_deltas.get("applied_provider_prompt_cache_discount_usd")
+            ),
+            "holdout_provider_prompt_cache_discount_usd": _as_float(
+                savings_deltas.get("holdout_provider_prompt_cache_discount_usd")
+            ),
+        },
+        "regression_metrics": {
+            "schema": "agentflow.openai_routing_canary_regression_metrics.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "applied_minus_holdout_error_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_error_rate_delta")),
+            "applied_minus_holdout_fallback_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_fallback_rate_delta")),
+            "applied_minus_holdout_retry_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_retry_rate_delta")),
+            "applied_minus_holdout_latency_avg_ms": latency_delta,
+            "applied_latency_avg_ms": applied_costs.get("latency_avg_ms"),
+            "holdout_latency_avg_ms": holdout_costs.get("latency_avg_ms"),
+        },
+        "quality_performance_regression": quality_performance_regression,
+        "privacy": _openai_promotion_decision_privacy(),
+    }
+
+
 def _openai_active_policy_rollback_metadata(
     *,
     active_local_policy_rule: dict[str, Any],
@@ -1987,6 +2228,23 @@ def _openai_active_local_policy_outcome(
         active_local_policy_rule=active_local_policy_rule,
         outcome_gate=outcome_gate,
     )
+    routing_canary_outcome = _openai_routing_canary_outcome(
+        target=target,
+        applied_count=applied,
+        holdout_count=holdout,
+        skipped_count=skipped,
+        unknown_count=unknown,
+        safety_stop_count=safety,
+        error_count=errors,
+        fallback_count=fallbacks,
+        retry_count=retries,
+        stale_evidence_count=stale_evidence_count,
+        savings_deltas=savings_deltas,
+        cohort_costs=cohort_costs,
+        latest_observed_at=lifecycle.get("latest_observed_at"),
+        oldest_observed_at=lifecycle.get("oldest_observed_at"),
+        evidence_age_hours=lifecycle.get("evidence_age_hours"),
+    )
     coverage = {
         "schema": "agentflow.openai_routing_active_local_policy_coverage.v1",
         "matched_count": matched_count,
@@ -2073,6 +2331,7 @@ def _openai_active_local_policy_outcome(
             "aggregate_only": True,
         },
         "outcome_gate": outcome_gate,
+        "routing_canary_outcome": routing_canary_outcome,
         "rollback_metadata": rollback_metadata,
         "coverage": coverage,
         "latest_observed_at": lifecycle.get("latest_observed_at"),
@@ -2081,6 +2340,16 @@ def _openai_active_local_policy_outcome(
         "stale_evidence": stale,
         "cohort_costs": cohort_costs,
         "savings_deltas": savings_deltas,
+        "routing_only_savings_usd": _as_float(savings_deltas.get("applied_routing_only_savings_usd")),
+        "routing_only_savings_per_1000_calls_usd": _as_float(
+            routing_canary_outcome.get("routing_savings", {}).get("routing_only_savings_per_1000_calls_usd")
+        )
+        if isinstance(routing_canary_outcome.get("routing_savings"), dict)
+        else 0.0,
+        "crunch_savings_usd": _as_float(savings_deltas.get("applied_crunch_savings_usd"))
+        + _as_float(savings_deltas.get("holdout_crunch_savings_usd")),
+        "provider_prompt_cache_discount_usd": _as_float(savings_deltas.get("applied_provider_prompt_cache_discount_usd"))
+        + _as_float(savings_deltas.get("holdout_provider_prompt_cache_discount_usd")),
         "realized_savings_usd": _as_float(savings_deltas.get("applied_realized_savings_usd")),
         "applied_realized_savings_usd": _as_float(savings_deltas.get("applied_realized_savings_usd")),
         "holdout_realized_savings_usd": _as_float(savings_deltas.get("holdout_realized_savings_usd")),
@@ -2422,6 +2691,12 @@ def _build_openai_promotion_decision(
         projected_savings_usd=projected_savings_usd,
         savings_per_1000=savings_per_1000,
     )
+    routing_canary_outcome = (
+        active_local_policy_outcome.get("routing_canary_outcome")
+        if isinstance(active_local_policy_outcome, dict)
+        and isinstance(active_local_policy_outcome.get("routing_canary_outcome"), dict)
+        else None
+    )
     return {
         "schema": PROMOTION_DECISION_SCHEMA,
         "decision": decision,
@@ -2463,6 +2738,7 @@ def _build_openai_promotion_decision(
         "local_policy_patch": local_policy_patch,
         "active_local_policy_rule": active_local_policy_rule,
         "active_local_policy_outcome": active_local_policy_outcome,
+        "routing_canary_outcome": routing_canary_outcome,
         "rollback_metadata": rollback_metadata,
         "duplicate_suppression": duplicate_suppression,
         "privacy": privacy,
@@ -2489,6 +2765,11 @@ def build_openai_routing_promotion_decision_report(
         category=category,
     )
     active_outcome = decision.get("active_local_policy_outcome") if isinstance(decision.get("active_local_policy_outcome"), dict) else {}
+    routing_canary_outcome = (
+        decision.get("routing_canary_outcome")
+        if isinstance(decision.get("routing_canary_outcome"), dict)
+        else {}
+    )
     return {
         "schema": PROMOTION_DECISION_REPORT_SCHEMA,
         "generated_at": utc_now(),
@@ -2514,6 +2795,34 @@ def build_openai_routing_promotion_decision_report(
             "active_local_policy_next_action": active_outcome.get("deterministic_next_action"),
             "active_local_policy_gate_passed": active_outcome.get("gate_passed"),
             "active_local_policy_reason_codes": active_outcome.get("reason_codes") or [],
+            "routing_canary_outcome_count": 1 if routing_canary_outcome else 0,
+            "routing_canary_next_action": routing_canary_outcome.get("next_action"),
+            "routing_canary_reason_codes": routing_canary_outcome.get("reason_codes") or [],
+            "routing_only_savings_usd": (
+                routing_canary_outcome.get("routing_savings", {}).get("routing_only_savings_usd")
+                if isinstance(routing_canary_outcome.get("routing_savings"), dict)
+                else None
+            ),
+            "routing_only_savings_per_1000_calls_usd": (
+                routing_canary_outcome.get("routing_savings", {}).get("routing_only_savings_per_1000_calls_usd")
+                if isinstance(routing_canary_outcome.get("routing_savings"), dict)
+                else None
+            ),
+            "non_routing_crunch_savings_usd": (
+                routing_canary_outcome.get("non_routing_savings", {}).get("crunch_savings_usd")
+                if isinstance(routing_canary_outcome.get("non_routing_savings"), dict)
+                else None
+            ),
+            "non_routing_provider_prompt_cache_discount_usd": (
+                routing_canary_outcome.get("non_routing_savings", {}).get("provider_prompt_cache_discount_usd")
+                if isinstance(routing_canary_outcome.get("non_routing_savings"), dict)
+                else None
+            ),
+            "frontend_visible_regression_reported": (
+                routing_canary_outcome.get("quality_performance_regression", {}).get("frontend_visible_regression_reported")
+                if isinstance(routing_canary_outcome.get("quality_performance_regression"), dict)
+                else None
+            ),
             "active_local_policy_rollback_action_type": (
                 active_outcome.get("rollback_metadata", {}).get("rollback_action_type")
                 if isinstance(active_outcome.get("rollback_metadata"), dict)
@@ -2567,6 +2876,9 @@ def build_openai_routing_promotion_decision_report(
         "decisions": [decision],
         "active_local_policy_outcomes": [decision["active_local_policy_outcome"]]
         if decision.get("active_local_policy_outcome")
+        else [],
+        "routing_canary_outcomes": [decision["routing_canary_outcome"]]
+        if decision.get("routing_canary_outcome")
         else [],
         "source_report_summary": report.get("summary") if isinstance(report.get("summary"), dict) else {},
         "privacy": _openai_promotion_decision_privacy()
