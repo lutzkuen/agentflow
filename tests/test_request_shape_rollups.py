@@ -516,6 +516,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         ready = next(row for row in dry_run["cohorts"] if row["readiness"] == "replay-ready")
         self.assertEqual(ready["reason"], "replay-ready-exact-non-tool-shape")
         self.assertEqual(ready["projected_hits"], 1)
+        self.assertEqual(ready["next_action"], "stage-cache-replay-canary")
+        self.assertTrue(ready["remaining_replay_ready"])
+        self.assertEqual(ready["readiness_gate"]["gate_status"], "savings-floor-met")
         reasons = {item["value"]: item["count"] for item in dry_run["skipped_reason_breakdown"]}
         self.assertEqual(reasons["streaming-replay-not-supported"], 1)
         self.assertEqual(reasons["invalidation-evidence-missing"], 1)
@@ -1222,6 +1225,119 @@ class RequestShapeRollupTests(unittest.TestCase):
             "/tmp/private/source.py",
         ):
             self.assertNotIn(forbidden, rendered)
+
+    def test_cache_replayability_gates_tiny_remaining_cohort_without_live_repeat(self) -> None:
+        for cost in (0.001, 0.002, 0.001459):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=1_200,
+                cost=cost,
+                baseline=cost,
+            )
+
+        report = build_request_shape_rollups_report(
+            self.store,
+            limit=20,
+            persist=False,
+            run_id="tiny-cache-replay-cohort",
+            mark_handled_cache_replay_cohorts=False,
+        )
+        dry_run = report["cache_replayability_dry_run"]
+
+        self.assertEqual(dry_run["summary"]["replay_ready_cohort_count"], 1)
+        self.assertEqual(dry_run["summary"]["remaining_replay_ready_cohort_count"], 0)
+        self.assertEqual(dry_run["summary"]["gated_too_small_replay_ready_cohort_count"], 1)
+        self.assertEqual(dry_run["summary"]["gated_too_small_replay_ready_rows"], 3)
+        self.assertEqual(dry_run["summary"]["gated_too_small_projected_hits"], 2)
+        self.assertAlmostEqual(dry_run["summary"]["gated_too_small_projected_savings_usd"], 0.002973)
+        self.assertTrue(dry_run["acceptance"]["gates_tiny_replay_ready_cohorts_without_live_repeat"])
+        self.assertTrue(dry_run["acceptance"]["reports_live_repeat_and_savings_floor_fields"])
+
+        cohort = next(row for row in dry_run["cohorts"] if row["readiness"] == "replay-ready")
+        self.assertFalse(cohort["remaining_replay_ready"])
+        self.assertEqual(cohort["next_action"], "no-op-too-small-without-live-repeat")
+        self.assertEqual(cohort["projected_hits"], 2)
+        self.assertAlmostEqual(cohort["projected_savings_usd"], 0.002973)
+        gate = cohort["readiness_gate"]
+        self.assertEqual(gate["gate_status"], "replay-ready-but-too-small")
+        self.assertEqual(gate["next_action"], "no-op-too-small-without-live-repeat")
+        self.assertFalse(gate["live_repeat_confirmed"])
+        self.assertEqual(gate["live_repeat_cache_hit_count"], 0)
+        self.assertEqual(gate["minimum_projected_savings_usd"], 0.01)
+        self.assertFalse(gate["savings_floor_met"])
+
+        stage = build_request_shape_cache_replay_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="tiny-cache-replay-cohort",
+            mark_handled_cache_replay_cohorts=False,
+        )
+        self.assertEqual(stage["status"], "no-stageable-cohort")
+        self.assertEqual(stage["eligible_stageable_cohort_count"], 0)
+        self.assertEqual(stage["staged_canary_count"], 0)
+        self.assertEqual(stage["next_action"], "no-op-too-small-without-live-repeat")
+        self.assertEqual(stage["reason"], "too-small-without-live-repeat")
+        self.assertFalse(stage["ok"])
+        self.assertFalse(stage["acceptance"]["has_replay_ready_openai_responses_cohort"])
+
+        rendered = json.dumps(dry_run, sort_keys=True)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("raw-cache-key-must-not-leak", rendered)
+
+    def test_cache_replayability_live_repeat_overrides_tiny_savings_gate(self) -> None:
+        for index, cost in enumerate((0.001, 0.002, 0.001459)):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                cache_hit=1 if index == 0 else 0,
+                text_chars=1_200,
+                cost=cost,
+                baseline=cost,
+            )
+
+        report = build_request_shape_rollups_report(
+            self.store,
+            limit=20,
+            persist=False,
+            run_id="tiny-cache-replay-live-repeat",
+            mark_handled_cache_replay_cohorts=False,
+        )
+        dry_run = report["cache_replayability_dry_run"]
+        cohort = dry_run["remaining_replay_ready_cohorts"][0]
+
+        self.assertEqual(dry_run["summary"]["remaining_replay_ready_cohort_count"], 1)
+        self.assertEqual(dry_run["summary"]["gated_too_small_replay_ready_cohort_count"], 0)
+        self.assertEqual(dry_run["summary"]["live_repeat_confirmed_replay_ready_cohort_count"], 1)
+        self.assertTrue(cohort["remaining_replay_ready"])
+        self.assertEqual(cohort["next_action"], "stage-cache-replay-canary")
+        self.assertEqual(cohort["readiness_gate"]["gate_status"], "live-repeat-confirmed")
+        self.assertTrue(cohort["readiness_gate"]["live_repeat_confirmed"])
+        self.assertEqual(cohort["readiness_gate"]["live_repeat_cache_hit_count"], 1)
 
     def test_cache_replayability_marks_short_completion_remaining_cohorts_handled_by_local_policy(self) -> None:
         for cost in (0.004, 0.006, 0.005):

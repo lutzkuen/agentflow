@@ -82,6 +82,9 @@ DEFAULT_CACHE_REPLAY_CANARY_ROLLOUT_FRACTION = 0.10
 DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION = 0.10
 DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS = 3600
 DEFAULT_CACHE_REPLAY_CANARY_MAX_EVIDENCE_AGE_HOURS = 72.0
+DEFAULT_CACHE_REPLAY_MIN_STAGE_ROWS = 10
+DEFAULT_CACHE_REPLAY_MIN_STAGE_PROJECTED_HITS = 5
+DEFAULT_CACHE_REPLAY_MIN_STAGE_SAVINGS_USD = 0.01
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -5829,6 +5832,8 @@ def build_request_shape_cache_replay_canary_stage_report(
         if isinstance(cohort, dict)
         and cohort.get("readiness") == "replay-ready"
         and not bool(cohort.get("handled_by_local_policy"))
+        and bool(cohort.get("remaining_replay_ready", True))
+        and cohort.get("next_action") == "stage-cache-replay-canary"
         and cohort.get("provider_family") == "openai"
         and cohort.get("source_surface") == "openai_responses"
         and cohort.get("endpoint") == "responses"
@@ -5857,6 +5862,10 @@ def build_request_shape_cache_replay_canary_stage_report(
         status = "staged"
         next_action = "apply-local-cache-replay-canary-after-review"
         reason = "staged-openai-responses-cache-replay-canary"
+    elif _as_int((dry_run.get("summary") or {}).get("gated_too_small_replay_ready_cohort_count")) > 0:
+        status = "no-stageable-cohort"
+        next_action = "no-op-too-small-without-live-repeat"
+        reason = "too-small-without-live-repeat"
     else:
         status = "no-stageable-cohort"
         next_action = "rank-request-shape-cache-replayability"
@@ -8918,6 +8927,12 @@ def build_request_shape_cache_replayability_dry_run(
     handled_projected_hits = 0
     handled_projected_savings = 0.0
     handled_rules = handled_policy_rules or []
+    gated_too_small_count = 0
+    gated_too_small_rows = 0
+    gated_too_small_projected_hits = 0
+    gated_too_small_projected_savings = 0.0
+    live_repeat_confirmed_count = 0
+    savings_floor_met_count = 0
 
     for row in replay_rows:
         decision = _shape_replayability_decision(row)
@@ -8930,6 +8945,17 @@ def build_request_shape_cache_replayability_dry_run(
             saved = max(0.0, cost - avg_cost)
         readiness = str(decision["readiness"])
         reason = str(decision["reason"])
+        cache_hit_count = _as_int(row.get("cache_hit_count"))
+        readiness_gate = (
+            _cache_replay_readiness_gate(
+                row_count=row_count,
+                projected_hits=hits,
+                projected_savings_usd=saved,
+                cache_hit_count=cache_hit_count,
+            )
+            if readiness == "replay-ready"
+            else None
+        )
         _increment(readiness_counts, readiness)
         _increment(reason_counts, reason)
         for blocker in decision.get("blockers") or []:
@@ -8962,8 +8988,13 @@ def build_request_shape_cache_replayability_dry_run(
             "text_bucket": row.get("text_bucket"),
             "token_bucket": row.get("token_bucket"),
             "row_count": row_count,
+            "cache_hit_count": cache_hit_count,
             "projected_hits": hits,
             "projected_savings_usd": round(saved, 6),
+            "live_repeat_confirmed": bool(
+                isinstance(readiness_gate, dict) and readiness_gate.get("live_repeat_confirmed")
+            ),
+            "readiness_gate": readiness_gate,
             "aggregate_only": True,
             "privacy": _replayability_privacy(),
         }
@@ -8977,11 +9008,25 @@ def build_request_shape_cache_replayability_dry_run(
             handled_projected_savings += saved
         else:
             cohort["handled_by_local_policy"] = False
-            cohort["remaining_replay_ready"] = readiness == "replay-ready"
+            gate_allows_stage = bool(readiness_gate.get("stage_allowed")) if isinstance(readiness_gate, dict) else False
+            cohort["remaining_replay_ready"] = readiness == "replay-ready" and gate_allows_stage
             if readiness == "replay-ready":
-                cohort["next_action"] = "stage-cache-replay-canary"
-                remaining_projected_hits += hits
-                remaining_projected_savings += saved
+                cohort["next_action"] = (
+                    "stage-cache-replay-canary" if gate_allows_stage else "no-op-too-small-without-live-repeat"
+                )
+                if gate_allows_stage:
+                    remaining_projected_hits += hits
+                    remaining_projected_savings += saved
+                else:
+                    gated_too_small_count += 1
+                    gated_too_small_rows += row_count
+                    gated_too_small_projected_hits += hits
+                    gated_too_small_projected_savings += saved
+            if isinstance(readiness_gate, dict):
+                if readiness_gate.get("live_repeat_confirmed"):
+                    live_repeat_confirmed_count += 1
+                if readiness_gate.get("savings_floor_met") or readiness_gate.get("row_floor_met"):
+                    savings_floor_met_count += 1
         cohorts.append(cohort)
 
     cohorts.sort(
@@ -8999,7 +9044,9 @@ def build_request_shape_cache_replayability_dry_run(
     remaining_replay_ready = [
         row
         for row in cohorts
-        if row.get("readiness") == "replay-ready" and not bool(row.get("handled_by_local_policy"))
+        if row.get("readiness") == "replay-ready"
+        and not bool(row.get("handled_by_local_policy"))
+        and bool(row.get("remaining_replay_ready"))
     ]
     handled_replay_ready = [
         row
@@ -9048,6 +9095,15 @@ def build_request_shape_cache_replayability_dry_run(
             "remaining_projected_savings_usd": round(remaining_projected_savings, 6),
             "handled_projected_hits": handled_projected_hits,
             "handled_projected_savings_usd": round(handled_projected_savings, 6),
+            "gated_too_small_replay_ready_cohort_count": gated_too_small_count,
+            "gated_too_small_replay_ready_rows": gated_too_small_rows,
+            "gated_too_small_projected_hits": gated_too_small_projected_hits,
+            "gated_too_small_projected_savings_usd": round(gated_too_small_projected_savings, 6),
+            "live_repeat_confirmed_replay_ready_cohort_count": live_repeat_confirmed_count,
+            "savings_or_repeat_floor_met_replay_ready_cohort_count": savings_floor_met_count,
+            "minimum_replay_stage_rows": DEFAULT_CACHE_REPLAY_MIN_STAGE_ROWS,
+            "minimum_replay_stage_projected_hits": DEFAULT_CACHE_REPLAY_MIN_STAGE_PROJECTED_HITS,
+            "minimum_replay_stage_savings_usd": DEFAULT_CACHE_REPLAY_MIN_STAGE_SAVINGS_USD,
             "top_blocker_code": top_blocker,
             "top_remaining_replay_ready_rank": _as_int(remaining_replay_ready[0].get("rank")) if remaining_replay_ready else 0,
             "top_remaining_replay_ready_projected_hits": _as_int(remaining_replay_ready[0].get("projected_hits")) if remaining_replay_ready else 0,
@@ -9089,6 +9145,20 @@ def build_request_shape_cache_replayability_dry_run(
             ),
             "reports_remaining_projected_hits_and_savings": remaining_projected_hits >= 0
             and remaining_projected_savings >= 0.0,
+            "gates_tiny_replay_ready_cohorts_without_live_repeat": all(
+                row.get("next_action") == "no-op-too-small-without-live-repeat"
+                and not bool(row.get("remaining_replay_ready"))
+                for row in cohorts
+                if isinstance(row.get("readiness_gate"), dict)
+                and row["readiness_gate"].get("gate_status") == "replay-ready-but-too-small"
+            ),
+            "reports_live_repeat_and_savings_floor_fields": all(
+                isinstance(row.get("readiness_gate"), dict)
+                and "live_repeat_confirmed" in row["readiness_gate"]
+                and "minimum_projected_savings_usd" in row["readiness_gate"]
+                for row in cohorts
+                if row.get("readiness") == "replay-ready"
+            ),
             "has_ranked_blocker_cohorts": bool(
                 invalidation_evidence.get("acceptance", {}).get("has_ranked_blocker_cohorts")
             ),
@@ -9431,6 +9501,50 @@ def _estimated_cache_replay_savings(row: dict[str, Any], row_count: int) -> tupl
     return projected_hits, cost * (projected_hits / float(row_count)) if row_count > 0 else 0.0
 
 
+def _cache_replay_readiness_gate(
+    *,
+    row_count: int,
+    projected_hits: int,
+    projected_savings_usd: float,
+    cache_hit_count: int = 0,
+) -> dict[str, Any]:
+    live_repeat_confirmed = cache_hit_count > 0
+    row_floor_met = (
+        row_count >= DEFAULT_CACHE_REPLAY_MIN_STAGE_ROWS
+        and projected_hits >= DEFAULT_CACHE_REPLAY_MIN_STAGE_PROJECTED_HITS
+    )
+    savings_floor_met = projected_savings_usd >= DEFAULT_CACHE_REPLAY_MIN_STAGE_SAVINGS_USD
+    stage_allowed = live_repeat_confirmed or row_floor_met or savings_floor_met
+    if live_repeat_confirmed:
+        gate_status = "live-repeat-confirmed"
+    elif savings_floor_met:
+        gate_status = "savings-floor-met"
+    elif row_floor_met:
+        gate_status = "repeat-floor-met"
+    else:
+        gate_status = "replay-ready-but-too-small"
+    return {
+        "schema": "agentflow.request_shape_cache_replay_readiness_gate.v1",
+        "gate_status": gate_status,
+        "stage_allowed": stage_allowed,
+        "next_action": "stage-cache-replay-canary" if stage_allowed else "no-op-too-small-without-live-repeat",
+        "reason": gate_status if stage_allowed else "too-small-without-live-repeat",
+        "row_count": row_count,
+        "projected_hits": projected_hits,
+        "projected_savings_usd": round(projected_savings_usd, 6),
+        "live_repeat_confirmed": live_repeat_confirmed,
+        "live_repeat_cache_hit_count": cache_hit_count,
+        "minimum_row_count": DEFAULT_CACHE_REPLAY_MIN_STAGE_ROWS,
+        "minimum_projected_hits": DEFAULT_CACHE_REPLAY_MIN_STAGE_PROJECTED_HITS,
+        "minimum_projected_savings_usd": DEFAULT_CACHE_REPLAY_MIN_STAGE_SAVINGS_USD,
+        "row_floor_met": row_floor_met,
+        "savings_floor_met": savings_floor_met,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _replayability_privacy(),
+    }
+
+
 def _shape_activation_decision(row: dict[str, Any], classes: list[str], blockers: list[str]) -> dict[str, Any]:
     class_set = set(classes)
     blocker_set = set(blockers)
@@ -9482,11 +9596,28 @@ def _shape_activation_decision(row: dict[str, Any], classes: list[str], blockers
     has_tools = bool(row.get("has_tools"))
     if "replayability" in class_set and not stream and not has_tools and cache_status in {"miss", "missing"} and row_count >= 2:
         projected_hits, projected_savings = _estimated_cache_replay_savings(row, row_count)
+        gate = _cache_replay_readiness_gate(
+            row_count=row_count,
+            projected_hits=projected_hits,
+            projected_savings_usd=projected_savings,
+            cache_hit_count=_as_int(row.get("cache_hit_count")),
+        )
+        if not bool(gate["stage_allowed"]):
+            return {
+                "readiness_state": "blocked",
+                "next_action": gate["next_action"],
+                "local_action_family": "cache",
+                "actionability_reason": gate["reason"],
+                "projected_hits": projected_hits,
+                "projected_saved_tokens": 0,
+                "projected_savings_usd": projected_savings,
+                "blocker_codes": ["too-small-without-live-repeat"],
+            }
         return {
             "readiness_state": "activation-ready",
             "next_action": "stage-cache-replay-canary",
             "local_action_family": "cache",
-            "actionability_reason": "replay-ready-exact-non-tool-shape",
+            "actionability_reason": gate["gate_status"],
             "projected_hits": projected_hits,
             "projected_saved_tokens": 0,
             "projected_savings_usd": projected_savings,
