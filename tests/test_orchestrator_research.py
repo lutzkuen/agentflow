@@ -4997,6 +4997,151 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw rollback prompt must not leak", rendered)
 
+    def test_issue_657_ranks_post_full_rollout_crunch_next_cohort_separately(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 500,
+                "evidence_to_activation_next_action_ledger": {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                    "status": "tracked",
+                    "entries": [
+                        {
+                            "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                            "fingerprint": "activation:full-rollout-keep-active",
+                            "rank": 1,
+                            "lever": "crunch",
+                            "local_action_family": "crunch",
+                            "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                            "activation_follow_up_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                            "current_status": "full-rollout",
+                            "state": "full-rollout-active",
+                            "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "blocker_codes": ["repeated-context-crunch-full-rollout-active"],
+                            "sample_count": 500,
+                            "applied_count": 107,
+                            "holdout_count": 40,
+                            "skipped_count": 280,
+                            "fallback_count": 0,
+                            "retry_count": 0,
+                            "rollback_count": 0,
+                            "safety_stop_count": 0,
+                            "error_rate_delta": 0.0,
+                            "retry_rate_delta": 0.0,
+                            "fallback_rate_delta": 0.0,
+                            "projected_saved_tokens": 8606129,
+                            "projected_saved_usd": 25.818387,
+                            "crunch_savings_usd": 25.8185,
+                            "post_max_rollout_status": "post-max-rollout-full-rollout-applied",
+                            "post_max_rollout_decision": "full-rollout-applied",
+                            "post_max_rollout_next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "target_local_policy_section": "crunch.rules",
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "active_rule_count": 1,
+                            "active_rule_ref": "local-repeated-context-crunch-current",
+                            "active_rule_source": "local-manual",
+                            "duplicate_suppression": {
+                                "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                                "reason": "repeated-context-crunch-full-rollout-active",
+                                "suppresses_generic_crunch_activation_issue": True,
+                                "suppresses_new_activation_issue": True,
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                            },
+                        },
+                        {
+                            "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                            "fingerprint": "activation:stage-next-cohort",
+                            "rank": 2,
+                            "lever": "crunch",
+                            "local_action_family": "crunch",
+                            "evidence_schema": "agentflow.request_shape_follow_up_candidates.v1",
+                            "current_status": "projected",
+                            "state": "activation-ready",
+                            "next_action": "stage-repeated-context-crunch-canary",
+                            "blocker_codes": ["repeated-context-crunch-opportunity"],
+                            "sample_count": 91,
+                            "applied_count": 0,
+                            "holdout_count": 0,
+                            "skipped_count": 91,
+                            "fallback_count": 0,
+                            "retry_count": 0,
+                            "rollback_count": 0,
+                            "safety_stop_count": 0,
+                            "projected_saved_tokens": 151000,
+                            "projected_saved_usd": 0.453,
+                            "target_local_policy_section": "crunch.rules",
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "raw_prompt": "raw next cohort prompt must not leak",
+                            "request_id": "raw-next-cohort-request-secret",
+                        },
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "local_activation_outcome_summary": {
+                    "schema": "agentflow.local_activation_outcome_summary.v1",
+                    "status": "tracked",
+                    "outcome_summaries": [
+                        {
+                            "schema": "agentflow.local_activation_outcome_summary_row.v1",
+                            "local_action_family": "crunch",
+                            "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                            "outcome": "keep-active",
+                            "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "applied_count": 107,
+                            "holdout_count": 40,
+                            "skipped_count": 280,
+                            "fallback_count": 0,
+                            "retry_count": 0,
+                            "rollback_count": 0,
+                            "safety_stopped_count": 0,
+                            "observed_saved_tokens": 8606129,
+                            "observed_savings_usd": 25.818387,
+                            "projected_saved_tokens": 8606129,
+                            "projected_savings_usd": 25.818387,
+                            "target_local_policy_section": "crunch.rules",
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "active_rule_count": 1,
+                            "active_rule_ref": "local-repeated-context-crunch-current",
+                            "active_rule_source": "local-manual",
+                            "post_max_rollout_status": "post-max-rollout-full-rollout-applied",
+                            "post_max_rollout_decision": "full-rollout-applied",
+                            "full_rollout_active": True,
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        measurement = plan["evidence"]["stats_summary"]["full_rollout_crunch_activation_measurement"]
+        gate = measurement["keep_active_regression_gate"]
+        self.assertEqual(gate["state"], "keep-active")
+        self.assertEqual(gate["deterministic_next_action"], "keep-active")
+
+        ranking = measurement["post_full_rollout_cohort_ranking"]
+        self.assertEqual(ranking["schema"], "agentflow.full_rollout_crunch_post_rollout_cohort_ranking.v1")
+        self.assertEqual(ranking["current_rule_decision"], "keep-active")
+        self.assertEqual(ranking["current_rule_realized_savings_usd"], 25.818387)
+        self.assertGreaterEqual(ranking["summary"]["ranked_cohort_count"], 2)
+        self.assertEqual(ranking["entries"][0]["cohort_decision"], "keep-current-rule-only")
+        self.assertTrue(ranking["entries"][0]["is_current_full_rollout_rule"])
+        self.assertEqual(ranking["entries"][0]["realized_savings_usd"], 25.8185)
+        recommendation = measurement["post_full_rollout_next_cohort_recommendation"]
+        self.assertEqual(recommendation["cohort_decision"], "stage-new-cohort")
+        self.assertEqual(recommendation["recommended_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(recommendation["rank"], 2)
+        self.assertEqual(recommendation["projected_savings_usd"], 0.453)
+        self.assertTrue(ranking["privacy"]["metadata_only"])
+        self.assertTrue(ranking["privacy"]["aggregate_only"])
+        self.assertFalse(ranking["privacy"]["raw_prompts_included"])
+        self.assertFalse(ranking["privacy"]["request_ids_included"])
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw next cohort prompt must not leak", rendered)
+        self.assertNotIn("raw-next-cohort-request-secret", rendered)
+
     def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
         plan = build_research_plan(
             issues=[],

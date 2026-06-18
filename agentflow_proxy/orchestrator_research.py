@@ -19,6 +19,8 @@ LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "agentflow.local_activation_next_act
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_next_action_queue_entry.v1"
 FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA = "agentflow.full_rollout_crunch_activation_measurement.v1"
 FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA = "agentflow.full_rollout_crunch_keep_active_regression_gate.v1"
+FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_SCHEMA = "agentflow.full_rollout_crunch_post_rollout_cohort_ranking.v1"
+FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_ENTRY_SCHEMA = "agentflow.full_rollout_crunch_post_rollout_cohort_ranking_entry.v1"
 LOW_BACKLOG_MILESTONE_TITLE = "Rank next savings milestone from local telemetry evidence gaps"
 OPENAI_MIN_HOLDOUT_VOLUME = 10
 
@@ -3430,6 +3432,204 @@ def _full_rollout_crunch_keep_active_gate(
     }
 
 
+def _is_full_rollout_crunch_entry(entry: dict[str, Any]) -> bool:
+    return bool(
+        entry.get("current_status") == "full-rollout"
+        or entry.get("state") == "full-rollout-active"
+        or entry.get("post_max_rollout_decision") == "full-rollout-applied"
+    )
+
+
+def _post_rollout_crunch_decision(entry: dict[str, Any], *, is_current_rule: bool) -> tuple[str, str, str | None]:
+    next_action = str(entry.get("next_action") or "").strip()
+    current_status = str(entry.get("current_status") or "").strip()
+    state = str(entry.get("state") or "").strip()
+    regression_count = (
+        _to_int(entry.get("fallback_count"))
+        + _to_int(entry.get("retry_count"))
+        + _to_int(entry.get("rollback_count"))
+        + _to_int(entry.get("safety_stop_count"))
+    )
+    if _to_float(entry.get("error_rate_delta")) > 0:
+        regression_count += 1
+    if _to_float(entry.get("retry_rate_delta")) > 0:
+        regression_count += 1
+    if _to_float(entry.get("fallback_rate_delta")) > 0:
+        regression_count += 1
+
+    if is_current_rule:
+        return "keep-current-rule-only", "keep-active", None
+    if regression_count > 0:
+        return "no-op", "keep-crunch-cohort-blocked-until-regression-clears", "regression-counters-present"
+    if "widen" in next_action or current_status in {"applied", "holdout", "measured"}:
+        return "widen-staged-cohort", next_action or "widen-repeated-context-crunch-cohort", None
+    if "stage-repeated-context-crunch-canary" in next_action or state in {"activation-ready", "ready"}:
+        return "stage-new-cohort", next_action or "stage-repeated-context-crunch-canary", None
+    if state in {"retired-no-repeat", "superseded", "keep-blocked"} or current_status in {"blocked", "superseded"}:
+        return "no-op", next_action or "keep-crunch-cohort-blocked", _queue_unblock_reason(entry)
+    return "no-op", next_action or "keep-current-rule-only", _queue_unblock_reason(entry)
+
+
+def _full_rollout_crunch_post_rollout_cohort_ranking(
+    *,
+    ledger_entries: list[dict[str, Any]],
+    current_fingerprint: Any,
+    keep_active_gate: dict[str, Any],
+    observed_savings: float,
+) -> dict[str, Any] | None:
+    current_fingerprint_text = str(current_fingerprint or "")
+    rows: list[dict[str, Any]] = []
+    for entry in ledger_entries:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("local_action_family") or entry.get("lever") or "") != "crunch":
+            continue
+        if str(entry.get("lever") or "") not in {"crunch", "request-shape-rollups", "managed-recommendation"}:
+            continue
+
+        projected = round(_queue_projected_savings(entry), 8)
+        realized = round(_queue_realized_savings(entry, projected), 8)
+        is_current_rule = bool(
+            (current_fingerprint_text and str(entry.get("fingerprint") or "") == current_fingerprint_text)
+            or _is_full_rollout_crunch_entry(entry)
+        )
+        decision, recommended_next_action, no_op_reason = _post_rollout_crunch_decision(
+            entry,
+            is_current_rule=is_current_rule,
+        )
+        applied_count = _to_int(entry.get("applied_count"))
+        holdout_count = _to_int(entry.get("holdout_count"))
+        skipped_count = _to_int(entry.get("skipped_count"))
+        observed_count = applied_count + holdout_count + skipped_count
+        regression_counters = {
+            "schema": "agentflow.full_rollout_crunch_post_rollout_regression_counters.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "fallback_count": _to_int(entry.get("fallback_count")),
+            "retry_count": _to_int(entry.get("retry_count")),
+            "rollback_count": _to_int(entry.get("rollback_count")),
+            "safety_stop_count": _to_int(entry.get("safety_stop_count")),
+            "error_rate_delta": round(_to_float(entry.get("error_rate_delta")), 6),
+            "retry_rate_delta": round(_to_float(entry.get("retry_rate_delta")), 6),
+            "fallback_rate_delta": round(_to_float(entry.get("fallback_rate_delta")), 6),
+        }
+        row = {
+            "schema": FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_ENTRY_SCHEMA,
+            "rank": 0,
+            "ledger_rank": _to_int(entry.get("rank")),
+            "fingerprint": sanitize_value(entry.get("fingerprint")),
+            "lever": sanitize_value(entry.get("lever") or "crunch"),
+            "local_action_family": "crunch",
+            "state": sanitize_value(entry.get("state") or "unknown"),
+            "current_status": sanitize_value(entry.get("current_status") or "unknown"),
+            "is_current_full_rollout_rule": is_current_rule,
+            "cohort_decision": decision,
+            "recommended_next_action": sanitize_value(recommended_next_action),
+            "no_op_reason": sanitize_value(no_op_reason) if no_op_reason else None,
+            "unblock_reason": _queue_unblock_reason(entry),
+            "sample_count": _to_int(entry.get("sample_count")),
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": skipped_count,
+            "skipped_coverage_rate": round(skipped_count / observed_count, 6) if observed_count > 0 else 0.0,
+            "realized_savings_usd": realized,
+            "projected_savings_usd": projected,
+            "target_local_policy_section": sanitize_value(entry.get("target_local_policy_section") or "crunch.rules"),
+            "target_local_rule_file": sanitize_value(entry.get("target_local_rule_file") or "crunch_rules.yaml"),
+            "duplicate_suppression_status": _queue_duplicate_suppression_status(entry),
+            "duplicate_suppression_reason": sanitize_value(
+                entry.get("duplicate_suppression", {}).get("reason")
+                if isinstance(entry.get("duplicate_suppression"), dict)
+                else None
+            ),
+            "regression_counters": regression_counters,
+            "privacy": _full_rollout_crunch_activation_measurement_privacy(),
+        }
+        preserved_empty_keys = {
+            "rank",
+            "ledger_rank",
+            "sample_count",
+            "applied_count",
+            "holdout_count",
+            "skipped_count",
+            "skipped_coverage_rate",
+            "realized_savings_usd",
+            "projected_savings_usd",
+        }
+        rows.append({key: value for key, value in row.items() if value not in (None, "", [], 0) or key in preserved_empty_keys})
+
+    if not rows:
+        return None
+
+    rows.sort(
+        key=lambda item: (
+            0 if item.get("is_current_full_rollout_rule") else 1,
+            -_to_float(item.get("realized_savings_usd")),
+            -_to_int(item.get("skipped_count")),
+            _to_int(item.get("regression_counters", {}).get("fallback_count"))
+            + _to_int(item.get("regression_counters", {}).get("retry_count"))
+            + _to_int(item.get("regression_counters", {}).get("rollback_count"))
+            + _to_int(item.get("regression_counters", {}).get("safety_stop_count")),
+            -_to_float(item.get("projected_savings_usd")),
+            _to_int(item.get("ledger_rank")),
+        )
+    )
+    for rank, item in enumerate(rows, start=1):
+        item["rank"] = rank
+
+    next_candidate = next(
+        (item for item in rows if item.get("cohort_decision") in {"widen-staged-cohort", "stage-new-cohort"}),
+        None,
+    )
+    if next_candidate is None:
+        next_candidate = {
+            "cohort_decision": "no-op",
+            "recommended_next_action": "keep-current-rule-only",
+            "no_op_reason": "no-unsuppressed-post-full-rollout-crunch-cohort",
+            "rank": 0,
+        }
+
+    top = rows[0]
+    decision_counts = Counter(str(item.get("cohort_decision") or "unknown") for item in rows)
+    result = {
+        "schema": FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_SCHEMA,
+        "status": "ranked",
+        "current_rule_decision": sanitize_value(keep_active_gate.get("state") or "unknown"),
+        "current_rule_next_action": sanitize_value(keep_active_gate.get("deterministic_next_action") or keep_active_gate.get("next_action")),
+        "current_rule_realized_savings_usd": round(observed_savings, 8),
+        "next_cohort_recommendation": sanitize_value(
+            {
+                "schema": "agentflow.full_rollout_crunch_next_cohort_recommendation.v1",
+                "metadata_only": True,
+                "aggregate_only": True,
+                "cohort_decision": next_candidate.get("cohort_decision"),
+                "recommended_next_action": next_candidate.get("recommended_next_action"),
+                "no_op_reason": next_candidate.get("no_op_reason"),
+                "rank": next_candidate.get("rank"),
+                "realized_savings_usd": next_candidate.get("realized_savings_usd"),
+                "projected_savings_usd": next_candidate.get("projected_savings_usd"),
+                "unblock_reason": next_candidate.get("unblock_reason"),
+                "target_local_policy_section": next_candidate.get("target_local_policy_section"),
+                "target_local_rule_file": next_candidate.get("target_local_rule_file"),
+            }
+        ),
+        "summary": {
+            "ranked_cohort_count": len(rows),
+            "top_cohort_decision": top.get("cohort_decision"),
+            "top_realized_savings_usd": top.get("realized_savings_usd"),
+            "top_projected_savings_usd": top.get("projected_savings_usd"),
+            "top_skipped_count": top.get("skipped_count"),
+            "next_cohort_decision": next_candidate.get("cohort_decision"),
+            "next_cohort_next_action": next_candidate.get("recommended_next_action"),
+            "next_cohort_no_op_reason": next_candidate.get("no_op_reason"),
+            "decision_counts": [{"value": key, "count": count} for key, count in sorted(decision_counts.items())],
+        },
+        "entries": rows[:10],
+        "privacy": _full_rollout_crunch_activation_measurement_privacy(),
+    }
+    return sanitize_value(result)
+
+
 def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     ledger = stats_summary.get("evidence_to_activation_next_action_ledger")
     if not isinstance(ledger, dict):
@@ -3547,6 +3747,12 @@ def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -
         target_local_policy_section=target_local_policy_section,
         target_local_rule_file=target_local_rule_file,
     )
+    post_rollout_ranking = _full_rollout_crunch_post_rollout_cohort_ranking(
+        ledger_entries=entries,
+        current_fingerprint=entry.get("fingerprint"),
+        keep_active_gate=keep_active_gate,
+        observed_savings=observed_savings,
+    )
     measurement = {
         "schema": FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA,
         "status": "progress-recorded",
@@ -3601,6 +3807,12 @@ def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -
         },
         "stale_evidence": stale_evidence,
         "keep_active_regression_gate": keep_active_gate,
+        "post_full_rollout_cohort_ranking": post_rollout_ranking,
+        "post_full_rollout_next_cohort_recommendation": (
+            post_rollout_ranking.get("next_cohort_recommendation")
+            if isinstance(post_rollout_ranking, dict)
+            else None
+        ),
         "duplicate_suppression": sanitize_value(duplicate_suppression),
         "closed_predecessor_suppression": {
             "schema": "agentflow.full_rollout_crunch_activation_predecessor_suppression.v1",
