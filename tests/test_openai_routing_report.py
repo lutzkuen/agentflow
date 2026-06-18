@@ -672,6 +672,15 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(outcome["fallback_count"], 0)
         self.assertEqual(outcome["retry_count"], 0)
         self.assertGreater(outcome["savings_per_1000_calls_usd"], 0)
+        self.assertEqual(outcome["savings_deltas"]["schema"], "agentflow.openai_routing_active_local_policy_savings_deltas.v1")
+        self.assertEqual(outcome["savings_deltas"]["applied_count"], 7)
+        self.assertEqual(outcome["savings_deltas"]["holdout_count"], 7)
+        self.assertGreater(outcome["applied_realized_savings_usd"], 0)
+        self.assertEqual(outcome["holdout_realized_savings_usd"], 0)
+        self.assertGreater(outcome["applied_minus_holdout_realized_savings_avg_usd"], 0)
+        self.assertIsNotNone(outcome["evidence_age_hours"])
+        self.assertEqual(outcome["cohort_costs"]["canary_applied"]["count"], 7)
+        self.assertEqual(outcome["cohort_costs"]["canary_holdout"]["count"], 7)
         self.assertEqual(outcome["regression_counters"]["error_count"], 0)
         self.assertEqual(outcome["regression_counters"]["fallback_count"], 0)
         self.assertEqual(outcome["regression_counters"]["retry_count"], 0)
@@ -680,6 +689,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(gate["schema"], "agentflow.openai_routing_active_local_policy_outcome_gate.v1")
         self.assertEqual(gate["state"], "keep-active")
         self.assertEqual(gate["deterministic_next_action"], "keep-active")
+        self.assertEqual(gate["decision_options"], ["keep-active", "review-stale-evidence", "rollback-required", "retune-rule", "keep-blocked"])
         rollback_outcome = outcome["rollback_metadata"]
         self.assertEqual(rollback_outcome["schema"], "agentflow.openai_routing_active_local_policy_rollback_metadata.v1")
         self.assertEqual(rollback_outcome["rollback_action_type"], "disable_openai_routing_rule")
@@ -724,6 +734,9 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertTrue(payload["summary"]["active_local_policy_gate_passed"])
         self.assertEqual(payload["summary"]["active_local_policy_reason_codes"], [])
         self.assertEqual(payload["summary"]["active_local_policy_rollback_action_type"], "disable_openai_routing_rule")
+        self.assertGreater(payload["summary"]["active_local_policy_realized_savings_usd"], 0)
+        self.assertGreater(payload["summary"]["active_local_policy_applied_minus_holdout_realized_savings_avg_usd"], 0)
+        self.assertIsNotNone(payload["summary"]["active_local_policy_evidence_age_hours"])
         self.assertEqual(payload["active_local_policy_outcomes"][0]["schema"], "agentflow.openai_routing_active_local_policy_outcome.v1")
         self.assertFalse(payload["privacy"]["individual_candidate_ids_included"])
 
@@ -788,13 +801,13 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         result = build_openai_routing_promotion_decision_report(self.store, limit=20)
 
         outcome = result["active_local_policy_outcomes"][0]
-        self.assertEqual(outcome["outcome_decision"], "review-skipped-coverage")
-        self.assertEqual(outcome["deterministic_next_action"], "review-openai-routing-skipped-coverage")
+        self.assertEqual(outcome["outcome_decision"], "retune-rule")
+        self.assertEqual(outcome["deterministic_next_action"], "retune-rule")
         self.assertFalse(outcome["gate_passed"])
         self.assertIn("skipped-coverage-observed", outcome["reason_codes"])
         self.assertIn("unknown-coverage-observed", outcome["reason_codes"])
-        self.assertEqual(result["summary"]["active_local_policy_outcome_decision"], "review-skipped-coverage")
-        self.assertEqual(result["summary"]["active_local_policy_next_action"], "review-openai-routing-skipped-coverage")
+        self.assertEqual(result["summary"]["active_local_policy_outcome_decision"], "retune-rule")
+        self.assertEqual(result["summary"]["active_local_policy_next_action"], "retune-rule")
 
     def test_active_openai_routing_rule_outcome_requires_rollback_on_regression(self) -> None:
         def canary(cohort: str, **extra: object) -> dict[str, object]:
@@ -847,14 +860,14 @@ class OpenAIRoutingReportTests(unittest.TestCase):
 
         outcome = result["active_local_policy_outcomes"][0]
         self.assertEqual(outcome["outcome_decision"], "rollback-required")
-        self.assertEqual(outcome["deterministic_next_action"], "rollback-active-openai-routing-rule")
+        self.assertEqual(outcome["deterministic_next_action"], "rollback-required")
         self.assertFalse(outcome["gate_passed"])
         self.assertIn("error-observed", outcome["reason_codes"])
         self.assertIn("fallback-observed", outcome["reason_codes"])
         self.assertIn("retry-observed", outcome["reason_codes"])
         self.assertEqual(outcome["rollback_metadata"]["rollback_action_type"], "disable_openai_routing_rule")
         self.assertEqual(result["summary"]["active_local_policy_outcome_decision"], "rollback-required")
-        self.assertEqual(result["summary"]["active_local_policy_next_action"], "rollback-active-openai-routing-rule")
+        self.assertEqual(result["summary"]["active_local_policy_next_action"], "rollback-required")
         self.assertEqual(result["summary"]["active_local_policy_rollback_action_type"], "disable_openai_routing_rule")
 
     def test_targeted_promotion_decision_keeps_skipped_unknown_coverage_out_of_promotion(self) -> None:

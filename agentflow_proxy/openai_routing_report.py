@@ -16,6 +16,7 @@ PROMOTION_DECISION_REPORT_SCHEMA = "agentflow.openai_routing_promotion_decision_
 PROMOTION_DECISION_SCHEMA = "agentflow.openai_routing_promotion_decision.v1"
 ACTIVE_LOCAL_POLICY_OUTCOME_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome.v1"
 ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
+ACTIVE_LOCAL_POLICY_SAVINGS_DELTAS_SCHEMA = "agentflow.openai_routing_active_local_policy_savings_deltas.v1"
 PROMOTION_VERDICT_OPTIONS = ["promotion-ready", "active-local-policy", "keep-staged", "keep-blocked", "rollback-required"]
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
@@ -284,8 +285,126 @@ def _empty_lifecycle() -> dict[str, Any]:
         "unsupported_shape_reason_counts": {},
         "promotion_blocker_reason_counts": {},
         "unclassified_reason_counts": {},
+        "cohort_costs": {
+            "canary_applied": _empty_cohort_costs(),
+            "canary_holdout": _empty_cohort_costs(),
+        },
         "oldest_observed_at": None,
         "latest_observed_at": None,
+    }
+
+
+def _empty_cohort_costs() -> dict[str, Any]:
+    return {
+        "count": 0,
+        "baseline_cost_usd": 0.0,
+        "actual_cost_usd": 0.0,
+        "target_cost_usd": 0.0,
+        "realized_savings_usd": 0.0,
+        "projected_savings_usd": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "error_count": 0,
+        "fallback_count": 0,
+        "retry_count": 0,
+    }
+
+
+def _add_costs(dest: dict[str, Any], source: dict[str, Any]) -> None:
+    for key in (
+        "count",
+        "input_tokens",
+        "output_tokens",
+        "error_count",
+        "fallback_count",
+        "retry_count",
+    ):
+        dest[key] = _as_int(dest.get(key)) + _as_int(source.get(key))
+    for key in (
+        "baseline_cost_usd",
+        "actual_cost_usd",
+        "target_cost_usd",
+        "realized_savings_usd",
+        "projected_savings_usd",
+    ):
+        dest[key] = _as_float(dest.get(key)) + _as_float(source.get(key))
+
+
+def _finalize_cohort_costs(raw: dict[str, Any]) -> dict[str, Any]:
+    count = _as_int(raw.get("count"))
+    baseline = _as_float(raw.get("baseline_cost_usd"))
+    actual = _as_float(raw.get("actual_cost_usd"))
+    target = _as_float(raw.get("target_cost_usd"))
+    realized = _as_float(raw.get("realized_savings_usd"))
+    projected = _as_float(raw.get("projected_savings_usd"))
+    errors = _as_int(raw.get("error_count"))
+    fallbacks = _as_int(raw.get("fallback_count"))
+    retries = _as_int(raw.get("retry_count"))
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "count": count,
+        "baseline_cost_usd": round(baseline, 8),
+        "actual_cost_usd": round(actual, 8),
+        "target_cost_usd": round(target, 8),
+        "realized_savings_usd": round(realized, 8),
+        "projected_savings_usd": round(projected, 8),
+        "input_tokens": _as_int(raw.get("input_tokens")),
+        "output_tokens": _as_int(raw.get("output_tokens")),
+        "avg_baseline_cost_usd": round(baseline / count, 8) if count else 0.0,
+        "avg_actual_cost_usd": round(actual / count, 8) if count else 0.0,
+        "avg_target_cost_usd": round(target / count, 8) if count else 0.0,
+        "avg_realized_savings_usd": round(realized / count, 8) if count else 0.0,
+        "avg_projected_savings_usd": round(projected / count, 8) if count else 0.0,
+        "savings_per_1000_calls_usd": round((realized / count) * 1000.0, 6) if count else 0.0,
+        "projected_savings_per_1000_calls_usd": round((projected / count) * 1000.0, 6) if count else 0.0,
+        "error_count": errors,
+        "fallback_count": fallbacks,
+        "retry_count": retries,
+        "error_rate": round(errors / count, 6) if count else 0.0,
+        "fallback_rate": round(fallbacks / count, 6) if count else 0.0,
+        "retry_rate": round(retries / count, 6) if count else 0.0,
+    }
+
+
+def _cohort_cost_deltas(cohort_costs: dict[str, Any]) -> dict[str, Any]:
+    applied = cohort_costs.get("canary_applied") if isinstance(cohort_costs.get("canary_applied"), dict) else {}
+    holdout = cohort_costs.get("canary_holdout") if isinstance(cohort_costs.get("canary_holdout"), dict) else {}
+
+    def f(row: dict[str, Any], key: str) -> float:
+        return _as_float(row.get(key))
+
+    return {
+        "schema": ACTIVE_LOCAL_POLICY_SAVINGS_DELTAS_SCHEMA,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "applied_count": _as_int(applied.get("count")),
+        "holdout_count": _as_int(holdout.get("count")),
+        "applied_baseline_cost_usd": f(applied, "baseline_cost_usd"),
+        "applied_actual_cost_usd": f(applied, "actual_cost_usd"),
+        "applied_target_cost_usd": f(applied, "target_cost_usd"),
+        "applied_realized_savings_usd": f(applied, "realized_savings_usd"),
+        "applied_projected_savings_usd": f(applied, "projected_savings_usd"),
+        "holdout_baseline_cost_usd": f(holdout, "baseline_cost_usd"),
+        "holdout_actual_cost_usd": f(holdout, "actual_cost_usd"),
+        "holdout_target_cost_usd": f(holdout, "target_cost_usd"),
+        "holdout_realized_savings_usd": f(holdout, "realized_savings_usd"),
+        "holdout_projected_savings_usd": f(holdout, "projected_savings_usd"),
+        "realized_savings_delta_usd": round(f(applied, "realized_savings_usd") - f(holdout, "realized_savings_usd"), 8),
+        "projected_savings_delta_usd": round(f(applied, "projected_savings_usd") - f(holdout, "projected_savings_usd"), 8),
+        "applied_minus_holdout_actual_cost_avg_usd": round(f(applied, "avg_actual_cost_usd") - f(holdout, "avg_actual_cost_usd"), 8),
+        "applied_minus_holdout_realized_savings_avg_usd": round(
+            f(applied, "avg_realized_savings_usd") - f(holdout, "avg_realized_savings_usd"),
+            8,
+        ),
+        "applied_minus_holdout_projected_savings_avg_usd": round(
+            f(applied, "avg_projected_savings_usd") - f(holdout, "avg_projected_savings_usd"),
+            8,
+        ),
+        "applied_minus_holdout_error_rate_delta": round(f(applied, "error_rate") - f(holdout, "error_rate"), 6),
+        "applied_minus_holdout_fallback_rate_delta": round(f(applied, "fallback_rate") - f(holdout, "fallback_rate"), 6),
+        "applied_minus_holdout_retry_rate_delta": round(f(applied, "retry_rate") - f(holdout, "retry_rate"), 6),
+        "privacy": _openai_promotion_decision_privacy(),
     }
 
 
@@ -400,12 +519,54 @@ def _classify_canary_lifecycle_reason(cohort: str, canary: dict[str, Any]) -> tu
     return "promotion_blocker", reason
 
 
+def _add_canary_cohort_costs(bucket: dict[str, Any], row: dict[str, Any], canary: dict[str, Any], cohort: str) -> None:
+    if cohort not in {"canary_applied", "canary_holdout"}:
+        return
+    lifecycle = bucket.setdefault("openai_canary_lifecycle", _empty_lifecycle())
+    cohort_costs = lifecycle.setdefault("cohort_costs", {})
+    costs = cohort_costs.setdefault(cohort, _empty_cohort_costs())
+
+    requested_model = str(canary.get("requested_model") or canary.get("original_model") or row.get("requested_model") or "")
+    routed_model = str(row.get("routed_model") or canary.get("actual_forwarded_model") or requested_model)
+    target_model = str(canary.get("target_model") or bucket.get("target_model") or routed_model)
+    routing = _json_obj(row.get("routing_json"))
+    text_chars = _text_chars(row, routing)
+    input_tokens = _input_tokens(row, text_chars)
+    output_tokens = _output_tokens(row)
+
+    baseline_cost = _as_float(row.get("cost_baseline_usd"))
+    if baseline_cost <= 0:
+        baseline_cost = _as_float(estimate_cost(requested_model, input_tokens, output_tokens, provider="openai"))
+    actual_cost = _as_float(row.get("cost_est_usd"))
+    if actual_cost <= 0:
+        actual_cost = _as_float(estimate_cost(routed_model, input_tokens, output_tokens, provider="openai"))
+    target_cost = _as_float(estimate_cost(target_model, input_tokens, output_tokens, provider="openai"))
+
+    _add_costs(
+        costs,
+        {
+            "count": 1,
+            "baseline_cost_usd": baseline_cost,
+            "actual_cost_usd": actual_cost,
+            "target_cost_usd": target_cost,
+            "realized_savings_usd": baseline_cost - actual_cost,
+            "projected_savings_usd": baseline_cost - target_cost if target_cost > 0 else 0.0,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "error_count": int(_as_int(row.get("status_code"), -1) >= 400),
+            "fallback_count": int(bool(canary.get("fallback_reason"))),
+            "retry_count": int(_as_int(row.get("retry_count")) > 0),
+        },
+    )
+
+
 def _add_canary_lifecycle(bucket: dict[str, Any], row: dict[str, Any], canary: dict[str, Any]) -> None:
     if not canary or not _canary_matches_candidate(bucket, canary):
         return
     lifecycle = bucket.setdefault("openai_canary_lifecycle", _empty_lifecycle())
     cohort = _canary_cohort(canary)
     lifecycle["cohort_counts"][cohort] = _as_int(lifecycle["cohort_counts"].get(cohort)) + 1
+    _add_canary_cohort_costs(bucket, row, canary, cohort)
     classification, classified_reason = _classify_canary_lifecycle_reason(cohort, canary)
     if cohort == "skipped":
         _increment(lifecycle["skipped_reason_counts"], classified_reason)
@@ -488,6 +649,16 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
     if stale:
         blocker_counts["stale-evidence"] = observed
 
+    raw_costs = raw.get("cohort_costs") if isinstance(raw.get("cohort_costs"), dict) else {}
+    cohort_costs = {
+        "canary_applied": _finalize_cohort_costs(
+            raw_costs.get("canary_applied") if isinstance(raw_costs.get("canary_applied"), dict) else _empty_cohort_costs()
+        ),
+        "canary_holdout": _finalize_cohort_costs(
+            raw_costs.get("canary_holdout") if isinstance(raw_costs.get("canary_holdout"), dict) else _empty_cohort_costs()
+        ),
+    }
+
     return {
         "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
         "status": "matched" if observed else "no-openai-canary-metadata",
@@ -519,6 +690,8 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
         "reason_breakdown": _breakdown(raw.get("reason_counts") or {}),
         "skipped_reason_breakdown": _breakdown(raw.get("skipped_reason_counts") or {}),
         "unknown_reason_breakdown": _breakdown(raw.get("unknown_reason_counts") or {}),
+        "cohort_costs": cohort_costs,
+        "savings_deltas": _cohort_cost_deltas(cohort_costs),
         "skipped_unknown_classification": {
             "schema": "agentflow.openai_routing_canary_skipped_unknown_classification.v1",
             "safe_bypass_count": safe_bypass_count,
@@ -1436,6 +1609,7 @@ def _openai_active_policy_outcome_gate(
     retry_count: int,
     stale_evidence_count: int,
     savings_per_1000: float,
+    savings_deltas: dict[str, Any],
 ) -> dict[str, Any]:
     reason_codes: list[str] = []
     if applied_count <= 0:
@@ -1458,36 +1632,37 @@ def _openai_active_policy_outcome_gate(
         reason_codes.append("unknown-coverage-observed")
     if savings_per_1000 <= 0:
         reason_codes.append("non-positive-estimated-savings")
+    if _as_float(savings_deltas.get("applied_minus_holdout_realized_savings_avg_usd")) < 0:
+        reason_codes.append("negative-applied-holdout-savings-delta")
 
     rollback_reasons = {
         "safety-stop-observed",
         "error-observed",
         "fallback-observed",
         "retry-observed",
-        "stale-evidence",
     }
     coverage_reasons = {"missing-applied-coverage", "missing-holdout-coverage"}
     skipped_review_reasons = {"skipped-coverage-observed", "unknown-coverage-observed"}
     if any(reason in rollback_reasons for reason in reason_codes):
         state = "rollback-required"
-        next_action = "rollback-active-openai-routing-rule"
+        gate_passed = False
+    elif "stale-evidence" in reason_codes:
+        state = "review-stale-evidence"
         gate_passed = False
     elif any(reason in coverage_reasons for reason in reason_codes):
-        state = "measure-more-coverage"
-        next_action = "measure-more-openai-routing-coverage"
-        gate_passed = False
-    elif any(reason in skipped_review_reasons for reason in reason_codes):
-        state = "review-skipped-coverage"
-        next_action = "review-openai-routing-skipped-coverage"
-        gate_passed = False
-    elif "non-positive-estimated-savings" in reason_codes:
         state = "keep-blocked"
-        next_action = "keep-openai-routing-blocked-until-positive-savings"
+        gate_passed = False
+    elif (
+        any(reason in skipped_review_reasons for reason in reason_codes)
+        or "non-positive-estimated-savings" in reason_codes
+        or "negative-applied-holdout-savings-delta" in reason_codes
+    ):
+        state = "retune-rule"
         gate_passed = False
     else:
         state = "keep-active"
-        next_action = "keep-active"
         gate_passed = True
+    next_action = state
 
     return {
         "schema": ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA,
@@ -1496,7 +1671,7 @@ def _openai_active_policy_outcome_gate(
         "deterministic_next_action": next_action,
         "next_action": next_action,
         "reason_codes": reason_codes,
-        "decision_options": ["keep-active", "measure-more-coverage", "rollback-required", "review-skipped-coverage", "keep-blocked"],
+        "decision_options": ["keep-active", "review-stale-evidence", "rollback-required", "retune-rule", "keep-blocked"],
         "regression_counters": {
             "schema": "agentflow.openai_routing_active_local_policy_outcome_regression_counters.v1",
             "metadata_only": True,
@@ -1511,6 +1686,9 @@ def _openai_active_policy_outcome_gate(
             "retry_count": retry_count,
             "stale_evidence_count": stale_evidence_count,
             "savings_per_1000_calls_usd": savings_per_1000,
+            "applied_minus_holdout_error_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_error_rate_delta")),
+            "applied_minus_holdout_fallback_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_fallback_rate_delta")),
+            "applied_minus_holdout_retry_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_retry_rate_delta")),
         },
         "privacy": _openai_promotion_decision_privacy(),
     }
@@ -1586,6 +1764,8 @@ def _openai_active_local_policy_outcome(
     retries = _as_int(lifecycle.get("retry_count"))
     stale = lifecycle.get("stale_evidence") if isinstance(lifecycle.get("stale_evidence"), dict) else {}
     stale_evidence_count = _as_int(lifecycle.get("observed_count")) if stale.get("stale") else 0
+    cohort_costs = lifecycle.get("cohort_costs") if isinstance(lifecycle.get("cohort_costs"), dict) else {}
+    savings_deltas = lifecycle.get("savings_deltas") if isinstance(lifecycle.get("savings_deltas"), dict) else _cohort_cost_deltas({})
     outcome_gate = _openai_active_policy_outcome_gate(
         applied_count=applied,
         holdout_count=holdout,
@@ -1597,6 +1777,7 @@ def _openai_active_local_policy_outcome(
         retry_count=retries,
         stale_evidence_count=stale_evidence_count,
         savings_per_1000=savings_per_1000,
+        savings_deltas=savings_deltas,
     )
     rollback_metadata = _openai_active_policy_rollback_metadata(
         active_local_policy_rule=active_local_policy_rule,
@@ -1671,12 +1852,19 @@ def _openai_active_local_policy_outcome(
         "retry_count": retries,
         "regression_counters": {
             "schema": "agentflow.openai_routing_active_local_policy_regression_counters.v1",
+            "applied_count": applied,
+            "holdout_count": holdout,
+            "skipped_count": skipped,
+            "unknown_count": unknown,
             "error_count": errors,
             "fallback_count": fallbacks,
             "retry_count": retries,
             "safety_stop_count": safety,
             "stale_evidence_count": stale_evidence_count,
             "rollback_count": 0,
+            "applied_minus_holdout_error_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_error_rate_delta")),
+            "applied_minus_holdout_fallback_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_fallback_rate_delta")),
+            "applied_minus_holdout_retry_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_retry_rate_delta")),
             "metadata_only": True,
             "aggregate_only": True,
         },
@@ -1685,6 +1873,16 @@ def _openai_active_local_policy_outcome(
         "coverage": coverage,
         "latest_observed_at": lifecycle.get("latest_observed_at"),
         "oldest_observed_at": lifecycle.get("oldest_observed_at"),
+        "evidence_age_hours": lifecycle.get("evidence_age_hours"),
+        "stale_evidence": stale,
+        "cohort_costs": cohort_costs,
+        "savings_deltas": savings_deltas,
+        "realized_savings_usd": _as_float(savings_deltas.get("applied_realized_savings_usd")),
+        "applied_realized_savings_usd": _as_float(savings_deltas.get("applied_realized_savings_usd")),
+        "holdout_realized_savings_usd": _as_float(savings_deltas.get("holdout_realized_savings_usd")),
+        "applied_minus_holdout_realized_savings_avg_usd": _as_float(
+            savings_deltas.get("applied_minus_holdout_realized_savings_avg_usd")
+        ),
         "savings_per_1000_calls_usd": savings_per_1000,
         "projected_savings_usd": round(projected_savings_usd, 6),
         "expected_savings_path": "Measure post-apply outcomes for the active local OpenAI routing rule.",
@@ -1742,6 +1940,10 @@ def _build_openai_promotion_decision(
     unsupported_shape_reason_counts: dict[str, int] = {}
     promotion_blocker_reason_counts: dict[str, int] = {}
     unclassified_reason_counts: dict[str, int] = {}
+    cohort_cost_totals = {
+        "canary_applied": _empty_cohort_costs(),
+        "canary_holdout": _empty_cohort_costs(),
+    }
 
     routing_rule_metadata: dict[str, Any] | None = None
     candidate_ids: list[str] = []
@@ -1775,6 +1977,11 @@ def _build_openai_promotion_decision(
         _merge_breakdown(unsupported_shape_reason_counts, classification.get("unsupported_shape_reason_breakdown"))
         _merge_breakdown(promotion_blocker_reason_counts, classification.get("promotion_blocker_reason_breakdown"))
         _merge_breakdown(unclassified_reason_counts, classification.get("unclassified_reason_breakdown"))
+        cohort_costs = lifecycle.get("cohort_costs") if isinstance(lifecycle.get("cohort_costs"), dict) else {}
+        for key in cohort_cost_totals:
+            source_costs = cohort_costs.get(key)
+            if isinstance(source_costs, dict):
+                _add_costs(cohort_cost_totals[key], source_costs)
 
     applied = cohort_counts["canary_applied"]
     holdout = cohort_counts["canary_holdout"]
@@ -1785,6 +1992,15 @@ def _build_openai_promotion_decision(
     unsupported_shape_count = sum(unsupported_shape_reason_counts.values())
     promotion_blocker_count = sum(promotion_blocker_reason_counts.values())
     unclassified_count = sum(unclassified_reason_counts.values())
+    finalized_cohort_costs = {
+        "canary_applied": _finalize_cohort_costs(cohort_cost_totals["canary_applied"]),
+        "canary_holdout": _finalize_cohort_costs(cohort_cost_totals["canary_holdout"]),
+    }
+    savings_deltas = _cohort_cost_deltas(finalized_cohort_costs)
+    evidence_age_hours = None
+    latest_observed = _parse_time(latest_observed_at)
+    if latest_observed is not None:
+        evidence_age_hours = round((datetime.now(timezone.utc) - latest_observed).total_seconds() / 3600.0, 3)
 
     blocker_counts: dict[str, int] = {}
     if not candidates:
@@ -1903,8 +2119,12 @@ def _build_openai_promotion_decision(
             "aggregate_only": True,
             "stale": stale_evidence_count > 0,
             "stale_evidence_count": stale_evidence_count,
+            "age_hours": evidence_age_hours,
             "max_age_hours": DEFAULT_MAX_EVIDENCE_AGE_HOURS,
         },
+        "evidence_age_hours": evidence_age_hours,
+        "cohort_costs": finalized_cohort_costs,
+        "savings_deltas": savings_deltas,
         "skipped_reason_breakdown": _breakdown(skipped_reason_counts),
         "unknown_reason_breakdown": _breakdown(unknown_reason_counts),
         "skipped_unknown_classification": {
@@ -2058,6 +2278,28 @@ def build_openai_routing_promotion_decision_report(
             "active_local_policy_rollback_action_type": (
                 active_outcome.get("rollback_metadata", {}).get("rollback_action_type")
                 if isinstance(active_outcome.get("rollback_metadata"), dict)
+                else None
+            ),
+            "active_local_policy_evidence_age_hours": active_outcome.get("evidence_age_hours"),
+            "active_local_policy_realized_savings_usd": active_outcome.get("realized_savings_usd"),
+            "active_local_policy_applied_realized_savings_usd": active_outcome.get("applied_realized_savings_usd"),
+            "active_local_policy_holdout_realized_savings_usd": active_outcome.get("holdout_realized_savings_usd"),
+            "active_local_policy_applied_minus_holdout_realized_savings_avg_usd": active_outcome.get(
+                "applied_minus_holdout_realized_savings_avg_usd"
+            ),
+            "active_local_policy_applied_minus_holdout_error_rate_delta": (
+                active_outcome.get("savings_deltas", {}).get("applied_minus_holdout_error_rate_delta")
+                if isinstance(active_outcome.get("savings_deltas"), dict)
+                else None
+            ),
+            "active_local_policy_applied_minus_holdout_fallback_rate_delta": (
+                active_outcome.get("savings_deltas", {}).get("applied_minus_holdout_fallback_rate_delta")
+                if isinstance(active_outcome.get("savings_deltas"), dict)
+                else None
+            ),
+            "active_local_policy_applied_minus_holdout_retry_rate_delta": (
+                active_outcome.get("savings_deltas", {}).get("applied_minus_holdout_retry_rate_delta")
+                if isinstance(active_outcome.get("savings_deltas"), dict)
                 else None
             ),
             "candidate_ids_included": False,
