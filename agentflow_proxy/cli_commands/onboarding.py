@@ -318,6 +318,11 @@ def agentflow_cli(
         help="Recent OpenAI calls to scan for live evidence, default: 1000.",
     )
     savings_demo_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    rule_drill_parser = demo_subparsers.add_parser(
+        "rule-drill",
+        help="Run a no-provider apply/rollback drill for one local savings rule.",
+    )
+    rule_drill_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     version_parser = subparsers.add_parser("version", help="Print the AgentFlow CLI version.")
     version_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -478,6 +483,26 @@ def agentflow_cli(
         return 0 if result.get("ok") else 1
 
     if args.command == "demo":
+        if args.demo_command == "rule-drill":
+            from agentflow_proxy.local_savings_rule_drill import build_local_savings_rule_drill_summary
+
+            result = build_local_savings_rule_drill_summary()
+            if args.json:
+                _write_json(stdout, result)
+            else:
+                stdout.write(
+                    "AgentFlow local savings rule drill: "
+                    f"{result.get('status')} "
+                    f"{result.get('rule_family')} "
+                    f"applied={str(bool(result.get('applied'))).lower()} "
+                    f"rollback_available={str(bool(result.get('rollback_available'))).lower()} "
+                    f"rollback_success={str(bool(result.get('rollback_success'))).lower()} "
+                    f"before={result.get('before_decision_state')} "
+                    f"after_apply={result.get('after_apply_decision_state')} "
+                    f"after_rollback={result.get('after_rollback_decision_state')}\n"
+                )
+            return 0 if result.get("ok") else 1
+
         from agentflow_proxy.golden_path import build_golden_path_summary
 
         db_path = getattr(args, "db", None)

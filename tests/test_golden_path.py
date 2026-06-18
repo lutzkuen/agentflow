@@ -9,6 +9,7 @@ from pathlib import Path
 
 from agentflow_proxy import cli
 from agentflow_proxy.golden_path import build_golden_path_summary
+from agentflow_proxy.local_savings_rule_drill import build_local_savings_rule_drill_summary
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 
 
@@ -16,6 +17,7 @@ SECRET_PROMPT = "secret golden path prompt body"
 SECRET_RESPONSE = "secret golden path response body"
 SECRET_SESSION = "secret-golden-path-session"
 SECRET_REQUEST_ID = "req-secret-golden-path"
+SECRET_RULE_DRILL_BODY = "AgentFlow local savings rollback drill fixture."
 
 
 class TestGoldenPathSummary(unittest.TestCase):
@@ -184,6 +186,78 @@ class TestGoldenPathCLI(unittest.TestCase):
         self.assertIn("agentflow_saved=$", output)
         self.assertIn("provider_prompt_cache_discount=$", output)
         self.assertIn("managed_server_required=false", output)
+
+
+class TestLocalSavingsRuleDrill(unittest.TestCase):
+    def test_apply_observe_rollback_observe_summary(self) -> None:
+        result = build_local_savings_rule_drill_summary()
+
+        self.assertEqual(result["schema"], "agentflow.local_savings_rule_drill.v1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["rule_family"], "routing")
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["rollback_available"])
+        self.assertTrue(result["rollback_success"])
+        self.assertEqual(result["before_decision_state"], "pass-through")
+        self.assertEqual(result["after_apply_decision_state"], "applied")
+        self.assertEqual(result["after_rollback_decision_state"], "pass-through")
+        self.assertEqual(result["decisions"]["before"]["routed_model"], "gpt-5.4")
+        self.assertEqual(result["decisions"]["after_apply"]["routed_model"], "gpt-5.4-mini")
+        self.assertEqual(result["decisions"]["after_rollback"]["routed_model"], "gpt-5.4")
+        self.assertTrue(result["policy_snapshot"]["restored_previous_snapshot"])
+        self.assertEqual(
+            result["policy_snapshot"]["before_sha256"],
+            result["policy_snapshot"]["after_rollback_sha256"],
+        )
+        self.assertIn("routing", result["lifecycle"]["changed_sections"])
+        self.assertIn("routing", result["lifecycle"]["restored_sections"])
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_required"])
+
+    def test_rule_drill_summary_is_metadata_only(self) -> None:
+        result = build_local_savings_rule_drill_summary()
+        rendered = json.dumps(result, sort_keys=True)
+
+        self.assertNotIn(SECRET_RULE_DRILL_BODY, rendered)
+        self.assertNotIn(SECRET_PROMPT, rendered)
+        self.assertNotIn(SECRET_RESPONSE, rendered)
+        self.assertNotIn(SECRET_SESSION, rendered)
+        self.assertNotIn(SECRET_REQUEST_ID, rendered)
+        self.assertNotIn("/routing_rules.yaml", rendered)
+
+        privacy = result["privacy"]
+        self.assertTrue(privacy["metadata_only"])
+        self.assertFalse(privacy["raw_prompts_included"])
+        self.assertFalse(privacy["raw_request_bodies_included"])
+        self.assertFalse(privacy["raw_response_bodies_included"])
+        self.assertFalse(privacy["provider_bodies_included"])
+        self.assertFalse(privacy["file_paths_included"])
+        self.assertFalse(privacy["provider_calls_made"])
+        self.assertFalse(privacy["managed_server_calls_made"])
+
+    def test_agentflow_demo_rule_drill_json(self) -> None:
+        stdout = io.StringIO()
+        code = cli.agentflow_cli(["demo", "rule-drill", "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["schema"], "agentflow.local_savings_rule_drill.v1")
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["rollback_available"])
+        self.assertTrue(result["rollback_success"])
+
+    def test_agentflow_demo_rule_drill_human_summary(self) -> None:
+        stdout = io.StringIO()
+        code = cli.agentflow_cli(["demo", "rule-drill"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("AgentFlow local savings rule drill:", output)
+        self.assertIn("applied=true", output)
+        self.assertIn("rollback_available=true", output)
+        self.assertIn("rollback_success=true", output)
+        self.assertIn("after_apply=applied", output)
 
 
 if __name__ == "__main__":
