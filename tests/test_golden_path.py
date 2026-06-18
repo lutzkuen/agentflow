@@ -28,6 +28,12 @@ class TestGoldenPathSummary(unittest.TestCase):
         self.assertEqual(result["local_action_family"], "crunch")
         self.assertIn(result["decision_status"], {"demo_applied", "active"})
         self.assertGreater(result["estimated_agentflow_savings_usd"], 0)
+        self.assertEqual(result["provider_prompt_cache_discount_usd"], 0.0)
+        self.assertEqual(
+            result["savings_breakdown"]["agentflow_generated_savings_usd"],
+            result["estimated_agentflow_savings_usd"],
+        )
+        self.assertEqual(result["savings_breakdown"]["provider_prompt_cache_discount_usd"], 0.0)
         self.assertFalse(result["managed_server_required"])
         self.assertFalse(result["provider_calls_made"])
 
@@ -136,7 +142,26 @@ class TestGoldenPathCLI(unittest.TestCase):
         self.assertIn("local_action_family", result)
         self.assertIn("decision_status", result)
         self.assertIn("estimated_agentflow_savings_usd", result)
+        self.assertIn("provider_prompt_cache_discount_usd", result)
+        self.assertEqual(
+            result["savings_breakdown"]["agentflow_generated_savings_usd"],
+            result["estimated_agentflow_savings_usd"],
+        )
         self.assertFalse(result["managed_server_required"])
+
+    def test_agentflow_demo_savings_json(self) -> None:
+        stdout = io.StringIO()
+        code = cli.agentflow_cli(["demo", "savings", "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["schema"], "agentflow.golden_path_summary.v1")
+        self.assertEqual(result["surface"], "openai_responses")
+        self.assertEqual(result["local_action_family"], "crunch")
+        self.assertGreater(result["estimated_agentflow_savings_usd"], 0)
+        self.assertEqual(result["provider_prompt_cache_discount_usd"], 0.0)
+        self.assertFalse(result["managed_server_required"])
+        self.assertFalse(result["provider_calls_made"])
 
     def test_agentflow_demo_golden_path_human_summary(self) -> None:
         stdout = io.StringIO()
@@ -145,6 +170,19 @@ class TestGoldenPathCLI(unittest.TestCase):
         self.assertEqual(code, 0)
         output = stdout.getvalue()
         self.assertIn("AgentFlow golden path:", output)
+        self.assertIn("agentflow_saved=$", output)
+        self.assertIn("provider_prompt_cache_discount=$", output)
+        self.assertIn("managed_server_required=false", output)
+
+    def test_agentflow_demo_savings_human_summary(self) -> None:
+        stdout = io.StringIO()
+        code = cli.agentflow_cli(["demo", "savings"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("AgentFlow savings demo:", output)
+        self.assertIn("agentflow_saved=$", output)
+        self.assertIn("provider_prompt_cache_discount=$", output)
         self.assertIn("managed_server_required=false", output)
 
 

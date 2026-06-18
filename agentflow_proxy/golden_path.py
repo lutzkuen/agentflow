@@ -188,6 +188,12 @@ def _build_fixture_summary() -> dict[str, Any]:
         "decision_status": "demo_applied" if changed else "demo_noop",
         "managed_server_required": False,
         "estimated_agentflow_savings_usd": _round_usd(estimated_savings),
+        "provider_prompt_cache_discount_usd": 0.0,
+        "savings_breakdown": {
+            "agentflow_generated_savings_usd": _round_usd(estimated_savings),
+            "provider_prompt_cache_discount_usd": 0.0,
+            "basis": "fixture local crunch savings only; provider prompt-cache discounts are not counted as AgentFlow-generated savings",
+        },
         "mocked_provider_response": True,
         "provider_calls_made": False,
         "outcome_evidence_written": row_count == 1,
@@ -288,6 +294,12 @@ def _live_evidence_summary(store: Any | None, *, limit: int = 1000) -> dict[str,
         "crunch_changed_count": crunch_changed,
         "crunch_tokens_saved_est": max(0, tokens_saved),
         "estimated_agentflow_savings_usd": _round_usd(estimated_savings),
+        "provider_prompt_cache_discount_usd": 0.0,
+        "savings_breakdown": {
+            "agentflow_generated_savings_usd": _round_usd(estimated_savings),
+            "provider_prompt_cache_discount_usd": 0.0,
+            "basis": "local routing/crunch/cache savings only; provider prompt-cache discounts are reported separately and not included",
+        },
         "managed_server_required": False,
         "routing_coverage": {
             "status": "openai_api_only",
@@ -314,6 +326,10 @@ def build_golden_path_summary(
         float(fixture.get("estimated_agentflow_savings_usd") or 0.0),
         float(live.get("estimated_agentflow_savings_usd") or 0.0),
     )
+    prompt_cache_discount = max(
+        float(fixture.get("provider_prompt_cache_discount_usd") or 0.0),
+        float(live.get("provider_prompt_cache_discount_usd") or 0.0),
+    )
     return {
         "schema": SCHEMA,
         "ok": True,
@@ -322,6 +338,12 @@ def build_golden_path_summary(
         "local_action_family": local_action_family,
         "decision_status": "active" if live_active else fixture["decision_status"],
         "estimated_agentflow_savings_usd": _round_usd(savings),
+        "provider_prompt_cache_discount_usd": _round_usd(prompt_cache_discount),
+        "savings_breakdown": {
+            "agentflow_generated_savings_usd": _round_usd(savings),
+            "provider_prompt_cache_discount_usd": _round_usd(prompt_cache_discount),
+            "basis": "AgentFlow savings come from local routing/crunch/cache decisions; provider prompt-cache discounts are separate provider-side savings",
+        },
         "managed_server_required": False,
         "provider_calls_made": False,
         "mocked_provider_response": True,
