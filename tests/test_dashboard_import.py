@@ -3615,6 +3615,162 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
 
+    def test_local_activation_next_action_queue_endpoint_reads_bounded_sanitized_plan(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        plan_tmp = tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False)
+        store = Store(tmp.name)
+        plan_path = Path(plan_tmp.name)
+        plan_payload = {
+            "schema": "agentflow.orchestrator_research_plan.v1",
+            "generated_at": "2026-06-18T07:00:00+00:00",
+            "evidence": {
+                "stats_summary": {
+                    "local_activation_next_action_queue": {
+                        "schema": "agentflow.local_activation_next_action_queue.v1",
+                        "status": "ranked",
+                        "source_schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                        "summary": {
+                            "queued_action_count": 2,
+                            "top_lever": "crunch",
+                            "top_state": "full-rollout-active",
+                            "top_current_status": "full-rollout",
+                            "top_next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "top_unblock_reason": "repeated-context-crunch-full-rollout-active",
+                            "top_realized_savings_usd": 25.8185,
+                            "top_projected_savings_usd": 25.818387,
+                            "total_realized_savings_usd": 27.55975,
+                            "total_projected_savings_usd": 27.559637,
+                            "lever_counts": [{"value": "crunch", "count": 1}, {"value": "routing", "count": 1}],
+                            "status_counts": [{"value": "full-rollout", "count": 1}, {"value": "applied", "count": 1}],
+                            "unblock_reason_counts": [{"value": "repeated-context-crunch-full-rollout-active", "count": 1}],
+                        },
+                        "entries": [
+                            {
+                                "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                                "rank": 1,
+                                "ledger_rank": 1,
+                                "fingerprint": "activation:queue-secret-fingerprint",
+                                "lever": "crunch",
+                                "local_action_family": "crunch",
+                                "state": "full-rollout-active",
+                                "current_status": "full-rollout",
+                                "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                                "unblock_reason": "repeated-context-crunch-full-rollout-active",
+                                "blocker_codes": ["repeated-context-crunch-full-rollout-active"],
+                                "sample_count": 2484,
+                                "applied_count": 107,
+                                "holdout_count": 40,
+                                "realized_savings_usd": 25.8185,
+                                "projected_savings_usd": 25.818387,
+                                "target_local_rule_file": "crunch_rules.yaml",
+                                "target_local_policy_section": "crunch.rules",
+                                "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                                "expected_savings_path": "Move crunch opportunity evidence into activation follow-up.",
+                                "raw_prompt": "raw prompt must not render",
+                                "request_id": "req-queue-secret",
+                                "session_id": "sess-queue-secret",
+                                "cache_key": "cache-queue-secret",
+                                "file_path": "/tmp/secret-queue-project/file.py",
+                                "privacy": {"metadata_only": True, "aggregate_only": True},
+                            },
+                            {
+                                "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                                "rank": 2,
+                                "ledger_rank": 3,
+                                "lever": "routing",
+                                "local_action_family": "routing",
+                                "state": "active-local-policy",
+                                "current_status": "applied",
+                                "next_action": "measure-openai-routing-rule-outcomes",
+                                "unblock_reason": "applied",
+                                "sample_count": 398,
+                                "applied_count": 23,
+                                "holdout_count": 19,
+                                "realized_savings_usd": 1.74125,
+                                "projected_savings_usd": 1.74125,
+                                "target_local_rule_file": "routing_rules.yaml",
+                                "target_local_policy_section": "routing.rules",
+                            },
+                        ],
+                        "privacy": {
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                            "raw_prompts_included": False,
+                            "provider_bodies_included": False,
+                            "absolute_paths_included": False,
+                            "request_ids_included": False,
+                            "session_ids_included": False,
+                            "cache_keys_included": False,
+                            "individual_candidate_ids_included": False,
+                        },
+                    }
+                }
+            },
+        }
+        try:
+            json.dump(plan_payload, plan_tmp)
+            plan_tmp.close()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path),
+                },
+                clear=False,
+            ):
+                app = create_dashboard_app(
+                    store_obj=lambda: store,
+                    default_db=tmp.name,
+                    upstream="https://anthropic.test",
+                    limiter_status=lambda: [],
+                    limiter_config={},
+                    full_stats_ttl_s=0,
+                )
+                client = TestClient(app)
+                response = client.get("/agentflow/stats/local-activation-next-action-queue?limit=1")
+                dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "agentflow.dashboard_local_activation_next_action_queue.v1")
+            self.assertEqual(payload["status"], "ranked")
+            self.assertEqual(payload["summary"]["queued_action_count"], 2)
+            self.assertEqual(len(payload["entries"]), 1)
+            self.assertEqual(payload["entries"][0]["lever"], "crunch")
+            self.assertEqual(payload["entries"][0]["target_local_rule_file"], "crunch_rules.yaml")
+            self.assertEqual(payload["entries"][0]["realized_savings_usd"], 25.8185)
+            self.assertFalse(payload["source"]["path_included"])
+            self.assertFalse(payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(payload["privacy"]["provider_bodies_included"])
+            self.assertFalse(payload["privacy"]["absolute_paths_included"])
+            self.assertFalse(payload["privacy"]["request_ids_included"])
+            self.assertFalse(payload["privacy"]["session_ids_included"])
+            self.assertFalse(payload["privacy"]["cache_keys_included"])
+            self.assertFalse(payload["privacy"]["file_paths_included"])
+            self.assertFalse(payload["privacy"]["individual_candidate_ids_included"])
+            self.assertIn("local-activation-queue-summary-tbody", dashboard.text)
+            self.assertIn("local-activation-queue-entries-tbody", dashboard.text)
+
+            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            self.assertNotIn(str(plan_path), rendered)
+            self.assertNotIn("raw prompt must not render", rendered)
+            self.assertNotIn("req-queue-secret", rendered)
+            self.assertNotIn("sess-queue-secret", rendered)
+            self.assertNotIn("cache-queue-secret", rendered)
+            self.assertNotIn("/tmp/secret-queue-project/file.py", rendered)
+            self.assertNotIn("activation:queue-secret-fingerprint", rendered)
+        finally:
+            try:
+                plan_tmp.close()
+            except Exception:
+                pass
+            try:
+                plan_path.unlink()
+            except FileNotFoundError:
+                pass
+            store.conn.close()
+            tmp.close()
+
     def test_evidence_activation_plan_discovery_includes_ops_sibling_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

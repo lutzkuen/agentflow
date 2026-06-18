@@ -19968,6 +19968,255 @@ async def stats_evidence_to_activation_next_actions(limit: int = 20) -> dict[str
     }
 
 
+def _local_activation_queue_privacy(source_privacy: dict[str, Any] | None = None) -> dict[str, bool]:
+    source_privacy = source_privacy if isinstance(source_privacy, dict) else {}
+    return {
+        "metadata_only": source_privacy.get("metadata_only", True) is True,
+        "aggregate_only": source_privacy.get("aggregate_only", True) is True,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "provider_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_responses_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "tenant_ids_included": False,
+        "tool_payloads_included": False,
+        "cache_keys_included": False,
+        "file_paths_included": False,
+        "absolute_paths_included": False,
+        "individual_candidate_ids_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "policy_files_written": False,
+        "dashboard_read_only": True,
+        "artifact_path_included": False,
+    }
+
+
+def _empty_local_activation_queue_payload(
+    *,
+    status: str,
+    status_reason: str,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.dashboard_local_activation_next_action_queue.v1",
+        "generated_at": utc_now(),
+        "status": status,
+        "status_reason": status_reason,
+        "queue_schema": None,
+        "queue_status": None,
+        "source_schema": None,
+        "source": source,
+        "summary": {
+            "queued_action_count": 0,
+            "top_lever": None,
+            "top_state": None,
+            "top_current_status": None,
+            "top_next_action": None,
+            "top_unblock_reason": None,
+            "top_realized_savings_usd": 0.0,
+            "top_projected_savings_usd": 0.0,
+            "total_realized_savings_usd": 0.0,
+            "total_projected_savings_usd": 0.0,
+            "lever_counts": [],
+            "status_counts": [],
+            "unblock_reason_counts": [],
+        },
+        "entries": [],
+        "privacy": _local_activation_queue_privacy(),
+    }
+
+
+def _public_local_activation_queue_summary(summary: dict[str, Any], entry_count: int) -> dict[str, Any]:
+    public = {
+        key: _copy_policy(summary.get(key))
+        for key in (
+            "queued_action_count",
+            "top_lever",
+            "top_state",
+            "top_current_status",
+            "top_next_action",
+            "top_unblock_reason",
+            "top_realized_savings_usd",
+            "top_projected_savings_usd",
+            "total_realized_savings_usd",
+            "total_projected_savings_usd",
+            "lever_counts",
+            "status_counts",
+            "unblock_reason_counts",
+        )
+        if summary.get(key) not in (None, "", [])
+    }
+    public["queued_action_count"] = _as_int(public.get("queued_action_count")) or entry_count
+    public["top_realized_savings_usd"] = round(_as_float(public.get("top_realized_savings_usd")), 8)
+    public["top_projected_savings_usd"] = round(_as_float(public.get("top_projected_savings_usd")), 8)
+    public["total_realized_savings_usd"] = round(_as_float(public.get("total_realized_savings_usd")), 8)
+    public["total_projected_savings_usd"] = round(_as_float(public.get("total_projected_savings_usd")), 8)
+    for key in ("lever_counts", "status_counts", "unblock_reason_counts"):
+        if not isinstance(public.get(key), list):
+            public[key] = []
+    return public
+
+
+def _public_local_activation_queue_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "rank",
+        "ledger_rank",
+        "lever",
+        "local_action_family",
+        "state",
+        "current_status",
+        "issue_worthy_status",
+        "next_action",
+        "unblock_reason",
+        "blocker_codes",
+        "sample_count",
+        "applied_count",
+        "holdout_count",
+        "fallback_count",
+        "safety_stop_count",
+        "rollback_count",
+        "realized_savings_usd",
+        "projected_savings_usd",
+        "savings_per_1000_calls_usd",
+        "target_local_rule_file",
+        "target_local_policy_section",
+        "duplicate_suppression_status",
+        "duplicate_suppression_reason",
+        "evidence_schema",
+        "expected_savings_path",
+        "requested_model",
+        "candidate_target_model",
+        "required_local_executor",
+        "source_surface",
+        "endpoint",
+        "category",
+        "workflow_phase",
+    }
+    public = {
+        key: _copy_policy(value)
+        for key, value in entry.items()
+        if key in allowed and value not in (None, "", [])
+    }
+    for key in (
+        "rank",
+        "ledger_rank",
+        "sample_count",
+        "applied_count",
+        "holdout_count",
+        "fallback_count",
+        "safety_stop_count",
+        "rollback_count",
+    ):
+        public[key] = _as_int(public.get(key))
+    for key in ("realized_savings_usd", "projected_savings_usd", "savings_per_1000_calls_usd"):
+        public[key] = round(_as_float(public.get(key)), 8)
+    if not isinstance(public.get("blocker_codes"), list):
+        public["blocker_codes"] = []
+    public["privacy"] = _local_activation_queue_privacy(entry.get("privacy") if isinstance(entry.get("privacy"), dict) else {})
+    return public
+
+
+def _extract_local_activation_queue_from_plan(payload: dict[str, Any]) -> dict[str, Any] | None:
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    stats_summary = evidence.get("stats_summary") if isinstance(evidence.get("stats_summary"), dict) else {}
+    for container in (evidence, payload, stats_summary):
+        queue = container.get("local_activation_next_action_queue") if isinstance(container, dict) else None
+        if isinstance(queue, dict):
+            return queue
+
+    ledger = None
+    for container in (evidence, payload, stats_summary):
+        candidate = container.get("evidence_to_activation_next_action_ledger") if isinstance(container, dict) else None
+        if isinstance(candidate, dict):
+            ledger = candidate
+            break
+    if not isinstance(ledger, dict):
+        return None
+    try:
+        from agentflow_proxy.orchestrator_research import build_local_activation_next_action_queue
+
+        return build_local_activation_next_action_queue({"evidence_to_activation_next_action_ledger": ledger})
+    except Exception:
+        return None
+
+
+async def stats_local_activation_next_action_queue(limit: int = 20) -> dict[str, Any]:
+    path = _evidence_to_activation_plan_path()
+    source: dict[str, Any] = {
+        "kind": "orchestrator-research-plan",
+        "configured": any(os.getenv(name) for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON")),
+        "path_class": _local_path_class(path),
+        "path_included": False,
+        "available": False,
+    }
+    try:
+        stat = path.stat()
+        source.update(
+            {
+                "available": True,
+                "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "size_bytes": stat.st_size,
+            }
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _empty_local_activation_queue_payload(
+            status="unavailable",
+            status_reason="latest research plan artifact was not found",
+            source=source,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        source["available"] = bool(path.exists())
+        return _empty_local_activation_queue_payload(
+            status="invalid-artifact",
+            status_reason=f"latest research plan artifact could not be read: {type(exc).__name__}",
+            source=source,
+        )
+    if not isinstance(payload, dict):
+        return _empty_local_activation_queue_payload(
+            status="invalid-artifact",
+            status_reason="latest research plan artifact is not a JSON object",
+            source=source,
+        )
+
+    queue = _extract_local_activation_queue_from_plan(payload)
+    if not isinstance(queue, dict):
+        return _empty_local_activation_queue_payload(
+            status="no-queue",
+            status_reason="latest research plan does not contain a local activation next-action queue",
+            source={**source, "plan_generated_at": payload.get("generated_at")},
+        )
+
+    capped = max(1, min(int(limit or 20), 50))
+    entries = [
+        _public_local_activation_queue_entry(entry)
+        for entry in queue.get("entries") or []
+        if isinstance(entry, dict)
+    ][:capped]
+    summary = _public_local_activation_queue_summary(
+        queue.get("summary") if isinstance(queue.get("summary"), dict) else {},
+        len(entries),
+    )
+    queue_privacy = queue.get("privacy") if isinstance(queue.get("privacy"), dict) else {}
+    return {
+        "schema": "agentflow.dashboard_local_activation_next_action_queue.v1",
+        "generated_at": utc_now(),
+        "status": "ranked" if entries else "empty",
+        "status_reason": "latest local activation next-action queue loaded" if entries else "latest queue has no entries",
+        "queue_schema": queue.get("schema"),
+        "queue_status": queue.get("status"),
+        "source_schema": queue.get("source_schema"),
+        "source": {**source, "plan_generated_at": payload.get("generated_at")},
+        "summary": summary,
+        "entries": entries,
+        "privacy": _local_activation_queue_privacy(queue_privacy),
+    }
+
+
 def dashboard_html() -> str:
     return """<!doctype html>
 <html lang="en">
@@ -20105,6 +20354,26 @@ def dashboard_html() -> str:
 </div>
 
 <div class="tab-panel" id="tab-activationnext">
+<div class="section">
+  <h2>Local activation next-action queue</h2>
+  <table data-table-id="local-activation-queue-summary" data-filter-label="Filter local activation queue summary">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="text">Top lever</th><th data-sort-type="text">Top action</th><th data-sort-type="text">Top unblock</th><th data-sort-type="number">Queued</th><th data-sort-type="money">Realized</th><th data-sort-type="money">Projected</th><th data-sort-type="text">Source</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="local-activation-queue-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Queued local actions</h2>
+  <div class="table-wrap">
+  <table class="activity-table" data-table-id="local-activation-queue-entries" data-filter-label="Filter local activation queue entries">
+    <thead><tr>
+      <th data-sort-type="number">Rank</th><th data-sort-type="text">Lever</th><th data-sort-type="text">Status</th><th data-sort-type="text">Next action</th><th data-sort-type="money">Savings</th><th data-sort-type="number">Samples</th><th data-sort-type="text">Unblock reason</th><th data-sort-type="text">Blockers</th><th data-sort-type="text">Policy target</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="local-activation-queue-entries-tbody"></tbody>
+  </table>
+  </div>
+</div>
 <div class="section">
   <h2>Evidence-to-activation next actions</h2>
   <table data-table-id="evidence-activation-summary" data-filter-label="Filter activation next-action summary">
@@ -24144,6 +24413,49 @@ function evidenceActivationPrivacyBadges(privacy){
     privacy.absolute_paths_included?'<span class="badge err">absolute paths</span>':'<span class="badge hit">paths omitted</span>'
   ].join(' ');
 }
+async function refreshLocalActivationQueue(){
+  try{
+    const r=await fetch('/agentflow/stats/local-activation-next-action-queue?limit=20');
+    const d=await r.json();
+    const s=d.summary||{};
+    const source=d.source||{};
+    const privacy=d.privacy||{};
+    const sourceBadges=[
+      source.available?'<span class="badge hit">latest plan</span>':'<span class="badge miss">no plan</span>',
+      source.configured?'<span class="badge provider">configured path</span>':'<span class="badge miss">default path</span>',
+      `<span class="badge miss">${esc(source.path_class||'unknown')}</span>`,
+      source.mtime?`<span class="badge provider">${esc(ago(source.mtime))}</span>`:''
+    ].filter(Boolean).join(' ');
+    document.getElementById('local-activation-queue-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${evidenceActivationStatusBadge(d.status)}">${esc(d.status||'unknown')}</span><div class="sub">${esc(d.status_reason||'')}</div></td>
+      <td><span class="badge provider">${esc(s.top_lever||'none')}</span><div class="sub">${esc(s.top_current_status||s.top_state||'')}</div></td>
+      <td class="model">${esc(s.top_next_action||'none')}</td>
+      <td class="flags"><span class="badge miss">${esc(s.top_unblock_reason||'none')}</span></td>
+      <td class="tokens">${(s.queued_action_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(s.total_realized_savings_usd||0,6)}<div class="sub">top ${fmt(s.top_realized_savings_usd||0,6)}</div></td>
+      <td class="savings">${fmt(s.total_projected_savings_usd||0,6)}<div class="sub">top ${fmt(s.top_projected_savings_usd||0,6)}</div></td>
+      <td class="flags">${sourceBadges}</td>
+      <td class="flags">${evidenceActivationPrivacyBadges(privacy)}</td>
+    </tr>`;
+    const rows=d.entries||[];
+    document.getElementById('local-activation-queue-entries-tbody').innerHTML=rows.map(row=>{
+      const policy=[row.target_local_policy_section,row.target_local_rule_file].filter(Boolean).join(' / ')||'—';
+      return `<tr>
+        <td class="tokens">${row.rank||0}<div class="sub">ledger ${row.ledger_rank||0}</div></td>
+        <td><span class="badge provider">${esc(row.lever||'unknown')}</span><div class="sub">${esc(row.local_action_family||'')}</div></td>
+        <td><span class="badge ${evidenceActivationStatusBadge(row.current_status)}">${esc(row.current_status||'unknown')}</span><div class="sub">${esc(row.state||'')}</div></td>
+        <td class="model">${esc(row.next_action||'inspect-local-evidence')}<div class="sub">${esc(row.issue_worthy_status||'')}</div></td>
+        <td class="savings">${fmt(row.realized_savings_usd||0,6)}<div class="sub">projected ${fmt(row.projected_savings_usd||0,6)} · per 1k ${fmt(row.savings_per_1000_calls_usd||0,6)}</div></td>
+        <td class="tokens">${(row.sample_count||0).toLocaleString()}<div class="sub">applied ${(row.applied_count||0).toLocaleString()} · holdout ${(row.holdout_count||0).toLocaleString()} · safety ${(row.safety_stop_count||0).toLocaleString()}</div></td>
+        <td class="flags"><span class="badge miss">${esc(row.unblock_reason||'none')}</span><div class="sub">${esc(row.duplicate_suppression_status||'none')}</div></td>
+        <td class="flags">${(row.blocker_codes||[]).slice(0,5).map(code=>`<span class="badge miss">${esc(code)}</span>`).join(' ')||'<span class="badge hit">none</span>'}</td>
+        <td class="model">${esc(policy)}<div class="sub">${esc(row.evidence_schema||'')}</div></td>
+        <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||{})}</td>
+      </tr>`;
+    }).join('')||`<tr><td colspan="10" style="color:#8b949e">${esc(d.status_reason||'No local activation next-action queue available')}</td></tr>`;
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshEvidenceActivationNextActions(){
   try{
     const r=await fetch('/agentflow/stats/evidence-to-activation-next-actions?limit=20');
@@ -24881,7 +25193,7 @@ const tabRefreshers={
   openai:[refreshManagedOpenAIActivation,refreshOpenAIOptimizationReadiness,refreshOpenAICanaryReadiness,refreshOpenAIOldContextSummary,refreshOpenAIScoreboard],
   evalqueue:[refreshOptimizationPromotionActions,refreshOptimizationEvalQueue],
   coordinator:[refreshOptimizationCoordinator],
-  activationnext:[refreshEvidenceActivationNextActions],
+  activationnext:[refreshLocalActivationQueue,refreshEvidenceActivationNextActions],
   promotionblockers:[refreshPromotionBlockerNextActions],
   managed:[refreshManaged],
   phaserouting:[refreshClaudeRoutingPromotionFunnel,refreshShadowRoutingPromotionReadiness,refreshOptimizationPromotionFunnel,refreshPhaseRouting],
