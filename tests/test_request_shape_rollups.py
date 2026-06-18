@@ -650,9 +650,11 @@ class RequestShapeRollupTests(unittest.TestCase):
                 "stable-dependency-evidence",
                 "stale-dependency-evidence",
                 "unsafe-dependency-evidence",
+                "unknown-dependency-evidence",
             },
         )
         self.assertTrue(tool_classification["supports_four_way_dependency_evidence_split"])
+        self.assertTrue(tool_classification["supports_five_way_dependency_evidence_split"])
         self.assertEqual(tool_classification["observed_evidence_classes"], ["missing-dependency-evidence"])
         self.assertFalse(tool_classification["tool_cache_replay_enabled"])
         self.assertFalse(tool_classification["streaming_replay_enabled"])
@@ -715,9 +717,11 @@ class RequestShapeRollupTests(unittest.TestCase):
                 "stable-dependency-evidence",
                 "stale-dependency-evidence",
                 "unsafe-dependency-evidence",
+                "unknown-dependency-evidence",
             },
         )
         self.assertTrue(invalidation_classification["supports_four_way_dependency_evidence_split"])
+        self.assertTrue(invalidation_classification["supports_five_way_dependency_evidence_split"])
         self.assertIn("missing-dependency-evidence", invalidation_classification["observed_evidence_classes"])
         self.assertFalse(invalidation_classification["tool_cache_replay_enabled"])
         self.assertFalse(invalidation_classification["streaming_replay_enabled"])
@@ -821,6 +825,11 @@ class RequestShapeRollupTests(unittest.TestCase):
             fingerprint_available=True,
         )
         unsafe_audit = self._dependency_audit(
+            reason="unsafe-tool-calls-without-invalidation",
+            safe=False,
+            fingerprint_available=True,
+        )
+        unknown_audit = self._dependency_audit(
             reason=None,
             safe=False,
             fingerprint_available=True,
@@ -891,7 +900,23 @@ class RequestShapeRollupTests(unittest.TestCase):
                 "safe_invalidation_evidence": False,
             },
         )
-        self._log_call(**shared, text_chars=24_000)
+        self._log_call(
+            **shared,
+            text_chars=24_000,
+            cache_extra={
+                "file_dependency_audit": unknown_audit,
+                "file_dependency_fingerprint": {
+                    "schema": "agentflow.cache_file_dependency_fingerprint.v1",
+                    "fingerprint_available": True,
+                    "fingerprint_sha256": "sha256:raw-unknown-dependency-fingerprint-must-not-leak",
+                    "paths_included": False,
+                },
+                "file_dependency_fingerprint_available": True,
+                "file_dependency_evidence_available": True,
+                "safe_invalidation_evidence": False,
+            },
+        )
+        self._log_call(**shared, text_chars=30_000)
 
         report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="dependency-states")
         skipped = report["cache_replayability_dry_run"]["skipped_openai_blockers"]
@@ -905,6 +930,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("stable", by_status)
         self.assertIn("invalidated", by_status)
         self.assertIn("unsafe", by_status)
+        self.assertIn("unknown", by_status)
         self.assertIn("missing", by_status)
 
         stable_row = by_status["stable"]
@@ -930,11 +956,17 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(missing_row["next_action"], "add-invalidation-evidence")
         self.assertIn("invalidation-evidence-missing", missing_row["blocker_codes"])
 
+        unknown_row = by_status["unknown"]
+        self.assertEqual(unknown_row["next_action"], "add-invalidation-evidence")
+        self.assertIn("dependency-evidence-unknown", unknown_row["blocker_codes"])
+        self.assertFalse(unknown_row["tool_cache_replay_enabled"])
+
         invalidation_by_status = {row["file_dependency_status"]: row for row in invalidation["cohorts"]}
         self.assertEqual(invalidation["summary"]["stable_dependency_evidence_rows"], 1)
         self.assertEqual(invalidation["summary"]["stale_dependency_evidence_rows"], 1)
         self.assertEqual(invalidation["summary"]["missing_dependency_evidence_rows"], 1)
         self.assertEqual(invalidation["summary"]["unsafe_dependency_evidence_rows"], 1)
+        self.assertEqual(invalidation["summary"]["unknown_dependency_evidence_rows"], 1)
         decision_breakdown = {
             row["value"]: row["count"]
             for row in invalidation["dependency_evidence_decision_breakdown"]
@@ -943,10 +975,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision_breakdown["stale-risk-blocker"], 1)
         self.assertEqual(decision_breakdown["missing-dependency-evidence"], 1)
         self.assertEqual(decision_breakdown["unsafe-dependency-evidence"], 1)
+        self.assertEqual(decision_breakdown["unknown-dependency-evidence"], 1)
         self.assertTrue(invalidation["acceptance"]["reports_dependency_evidence_decisions"])
         self.assertTrue(invalidation["acceptance"]["reports_dependency_evidence_burndown"])
         self.assertTrue(invalidation["acceptance"]["distinguishes_missing_stable_and_stale_dependency_evidence"])
         self.assertTrue(invalidation["acceptance"]["distinguishes_missing_stable_stale_and_unsafe_dependency_evidence"])
+        self.assertTrue(invalidation["acceptance"]["distinguishes_stable_stale_unsafe_unknown_and_missing_dependency_evidence"])
         self.assertTrue(invalidation["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
         self.assertTrue(invalidation["acceptance"]["stale_or_missing_dependency_evidence_keeps_replay_blocked"])
         self.assertTrue(invalidation["acceptance"]["unsafe_dependency_evidence_keeps_replay_blocked"])
@@ -961,6 +995,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 "stale-dependency-evidence",
                 "missing-dependency-evidence",
                 "unsafe-dependency-evidence",
+                "unknown-dependency-evidence",
             },
         )
         self.assertTrue(all(row["row_count"] == 1 for row in invalidation_burndown.values()))
@@ -989,20 +1024,29 @@ class RequestShapeRollupTests(unittest.TestCase):
             "unsafe-dependency-evidence",
         )
         self.assertEqual(
+            invalidation_by_status["unknown"]["dependency_evidence_decision"]["decision"],
+            "unknown-dependency-evidence",
+        )
+        self.assertEqual(
             invalidation_by_status["missing"]["dependency_evidence_decision"]["decision"],
             "missing-dependency-evidence",
         )
+        self.assertTrue(invalidation_by_status["stable"]["local_dependency_fingerprint"]["fingerprint_available"])
+        self.assertFalse(invalidation_by_status["stable"]["local_dependency_fingerprint"]["fingerprint_value_included"])
+        self.assertTrue(invalidation_by_status["stable"]["local_dependency_fingerprint"]["stable_dependency_snapshot"])
         tool_replay_by_status = {row["file_dependency_status"]: row for row in tool_replay["cohorts"]}
         self.assertEqual(tool_replay["summary"]["stable_dependency_evidence_rows"], 1)
         self.assertEqual(tool_replay["summary"]["stale_dependency_evidence_rows"], 1)
         self.assertEqual(tool_replay["summary"]["missing_dependency_evidence_rows"], 1)
         self.assertEqual(tool_replay["summary"]["unsafe_dependency_evidence_rows"], 1)
-        self.assertEqual(tool_replay["summary"]["tools_present_replay_evidence_rows"], 4)
+        self.assertEqual(tool_replay["summary"]["unknown_dependency_evidence_rows"], 1)
+        self.assertEqual(tool_replay["summary"]["tools_present_replay_evidence_rows"], 5)
         self.assertTrue(tool_replay["acceptance"]["reports_tools_present_replay_evidence"])
         self.assertTrue(tool_replay["acceptance"]["reduces_generic_tools_present_blocker"])
         self.assertTrue(tool_replay["acceptance"]["reports_dependency_evidence_burndown"])
         self.assertTrue(tool_replay["acceptance"]["distinguishes_missing_stable_and_stale_dependency_evidence"])
         self.assertTrue(tool_replay["acceptance"]["distinguishes_missing_stable_stale_and_unsafe_dependency_evidence"])
+        self.assertTrue(tool_replay["acceptance"]["distinguishes_stable_stale_unsafe_unknown_and_missing_dependency_evidence"])
         self.assertTrue(tool_replay["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
         tool_burndown = {
             row["dependency_evidence_class"]: row
@@ -1015,6 +1059,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 "stale-dependency-evidence",
                 "missing-dependency-evidence",
                 "unsafe-dependency-evidence",
+                "unknown-dependency-evidence",
             },
         )
         self.assertTrue(all(row["row_count"] == 1 for row in tool_burndown.values()))
@@ -1039,15 +1084,22 @@ class RequestShapeRollupTests(unittest.TestCase):
             "blocked-unsafe-dependency-evidence",
         )
         self.assertEqual(
+            tool_replay_by_status["unknown"]["evidence_state"],
+            "blocked-unknown-dependency-evidence",
+        )
+        self.assertEqual(
             tool_replay_by_status["missing"]["evidence_state"],
             "blocked-missing-dependency-evidence",
         )
+        self.assertTrue(tool_replay_by_status["stable"]["local_dependency_fingerprint"]["fingerprint_available"])
+        self.assertFalse(tool_replay_by_status["stable"]["local_dependency_fingerprint"]["fingerprint_value_included"])
         self.assertFalse(any(row["tool_cache_replay_enabled"] for row in tool_replay["cohorts"]))
 
         rendered = json.dumps([skipped, invalidation, tool_replay], sort_keys=True)
         self.assertNotIn("raw-stable-dependency-fingerprint-must-not-leak", rendered)
         self.assertNotIn("raw-stale-dependency-fingerprint-must-not-leak", rendered)
         self.assertNotIn("raw-unsafe-dependency-fingerprint-must-not-leak", rendered)
+        self.assertNotIn("raw-unknown-dependency-fingerprint-must-not-leak", rendered)
         self.assertNotIn("raw-request-fingerprint-must-not-leak", rendered)
         self.assertNotIn("raw-cache-key-must-not-leak", rendered)
         self.assertFalse(skipped["privacy"]["cache_keys_included"])

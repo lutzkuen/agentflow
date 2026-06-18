@@ -56,6 +56,7 @@ DEPENDENCY_EVIDENCE_CLASSES = (
     "stable-dependency-evidence",
     "stale-dependency-evidence",
     "unsafe-dependency-evidence",
+    "unknown-dependency-evidence",
 )
 DEPENDENCY_EVIDENCE_DECISION_OPTIONS = (
     "missing-dependency-evidence",
@@ -399,6 +400,8 @@ def _file_dependency_status(audit: dict[str, Any]) -> str:
         return "missing"
     if not audit.get("file_dependency_evidence_available"):
         return "missing"
+    if reason in {"none", "unknown", "dependency-evidence-unknown"}:
+        return "unknown"
     if audit.get("file_dependency_evidence_available") and not audit.get("safe_invalidation_evidence"):
         return "unsafe"
     return "unknown"
@@ -409,6 +412,24 @@ def _file_dependency_fingerprint_available(cache: dict[str, Any]) -> bool:
     if isinstance(fingerprint, dict):
         return bool(fingerprint.get("fingerprint_available") or fingerprint.get("fingerprint_sha256"))
     return bool(cache.get("file_dependency_fingerprint_available") or cache.get("file_dependency_fingerprint_sha256"))
+
+
+def _local_dependency_fingerprint_metadata(available: bool, audit: dict[str, Any] | None = None) -> dict[str, Any]:
+    audit = audit if isinstance(audit, dict) else {}
+    return {
+        "schema": "agentflow.local_dependency_fingerprint_metadata.v1",
+        "fingerprint_available": bool(available),
+        "fingerprint_value_included": False,
+        "fingerprint_sha256_included": False,
+        "path_hashes_included": False,
+        "paths_included": False,
+        "snapshot_count": _as_int(audit.get("snapshot_count")),
+        "snapshot_count_bucket": public_label(audit.get("snapshot_count_bucket"), "unknown"),
+        "candidate_path_count_bucket": public_label(audit.get("candidate_path_count_bucket"), "unknown"),
+        "stable_dependency_snapshot": bool(available and audit.get("safe_invalidation_evidence")),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
 
 
 def _merge_file_dependency_audit(left: dict[str, Any] | None, right: dict[str, Any]) -> dict[str, Any]:
@@ -8036,6 +8057,7 @@ def build_request_shape_cache_invalidation_evidence_report(
     stale_dependency_evidence_rows = 0
     missing_dependency_evidence_rows = 0
     unsafe_dependency_evidence_rows = 0
+    unknown_dependency_evidence_rows = 0
     dependency_decision_counts: dict[str, int] = {}
 
     for cohort in cohorts:
@@ -8088,6 +8110,8 @@ def build_request_shape_cache_invalidation_evidence_report(
             unsafe_dependency_evidence_rows += row_count
         elif decision == "missing-dependency-evidence":
             missing_dependency_evidence_rows += row_count
+        elif decision == "unknown-dependency-evidence":
+            unknown_dependency_evidence_rows += row_count
 
         rows.append(
             {
@@ -8118,6 +8142,10 @@ def build_request_shape_cache_invalidation_evidence_report(
                 "dependency_evidence_decision": dependency_evidence_decision,
                 "file_dependency_status": file_dependency_status,
                 "file_dependency_fingerprint_available": bool(cohort.get("file_dependency_fingerprint_available")),
+                "local_dependency_fingerprint": _local_dependency_fingerprint_metadata(
+                    bool(cohort.get("file_dependency_fingerprint_available")),
+                    cohort.get("file_dependency_audit") if isinstance(cohort.get("file_dependency_audit"), dict) else None,
+                ),
                 "file_dependency_audit": cohort.get("file_dependency_audit")
                 if isinstance(cohort.get("file_dependency_audit"), dict)
                 else None,
@@ -8181,6 +8209,7 @@ def build_request_shape_cache_invalidation_evidence_report(
         "maps_stale_risk_to_stale_dependency_evidence": True,
         "supports_four_way_dependency_evidence_split": True,
         "classification_buckets": list(DEPENDENCY_EVIDENCE_CLASSES),
+        "supports_five_way_dependency_evidence_split": True,
         "tool_cache_replay_enabled": False,
         "streaming_replay_enabled": False,
         "metadata_only": True,
@@ -8202,6 +8231,7 @@ def build_request_shape_cache_invalidation_evidence_report(
             "stale_dependency_evidence_rows": stale_dependency_evidence_rows,
             "missing_dependency_evidence_rows": missing_dependency_evidence_rows,
             "unsafe_dependency_evidence_rows": unsafe_dependency_evidence_rows,
+            "unknown_dependency_evidence_rows": unknown_dependency_evidence_rows,
             "dependency_evidence_decision_count": len(dependency_decision_counts),
             "exact_non_tool_rows": exact_non_tool_rows,
             "top_next_action": next_action_breakdown[0]["value"] if next_action_breakdown else None,
@@ -8266,6 +8296,10 @@ def build_request_shape_cache_invalidation_evidence_report(
             "distinguishes_missing_stable_stale_and_unsafe_dependency_evidence": bool(rows)
             and set(DEPENDENCY_EVIDENCE_CLASSES).issubset(
                 set(dependency_evidence_classification["supported_evidence_classes"])
+            ),
+            "distinguishes_stable_stale_unsafe_unknown_and_missing_dependency_evidence": bool(rows)
+            and set(DEPENDENCY_EVIDENCE_CLASSES).issubset(
+                set(dependency_evidence_classification["observed_evidence_classes"])
             ),
             "stable_dependency_evidence_does_not_activate_replay": all(
                 row.get("next_action") == "rank-safe-tool-cache-replay-readiness"
@@ -8690,6 +8724,10 @@ def build_request_shape_tool_cache_replay_evidence_report(
                 "secondary_next_actions": sorted(set(secondary_actions + ["keep-tool-cache-blocked"])),
                 "file_dependency_status": file_dependency_status,
                 "file_dependency_fingerprint_available": bool(cohort.get("file_dependency_fingerprint_available")),
+                "local_dependency_fingerprint": _local_dependency_fingerprint_metadata(
+                    bool(cohort.get("file_dependency_fingerprint_available")),
+                    cohort.get("file_dependency_audit") if isinstance(cohort.get("file_dependency_audit"), dict) else None,
+                ),
                 "safe_invalidation_evidence": bool(file_dependency_status == "stable"),
                 "tools_present_replay_evidence": True,
                 "generic_tools_present_blocker_reduced": True,
@@ -8741,6 +8779,7 @@ def build_request_shape_tool_cache_replay_evidence_report(
         "maps_stale_risk_to_stale_dependency_evidence": True,
         "supports_four_way_dependency_evidence_split": True,
         "classification_buckets": list(DEPENDENCY_EVIDENCE_CLASSES),
+        "supports_five_way_dependency_evidence_split": True,
         "tool_cache_replay_enabled": False,
         "streaming_replay_enabled": False,
         "metadata_only": True,
@@ -8814,6 +8853,10 @@ def build_request_shape_tool_cache_replay_evidence_report(
             "distinguishes_missing_stable_stale_and_unsafe_dependency_evidence": bool(rows)
             and set(DEPENDENCY_EVIDENCE_CLASSES).issubset(
                 set(dependency_evidence_classification["supported_evidence_classes"])
+            ),
+            "distinguishes_stable_stale_unsafe_unknown_and_missing_dependency_evidence": bool(rows)
+            and set(DEPENDENCY_EVIDENCE_CLASSES).issubset(
+                set(dependency_evidence_classification["observed_evidence_classes"])
             ),
             "stable_dependency_evidence_does_not_activate_replay": all(
                 row.get("next_action") == "rank-safe-tool-cache-replay-readiness"
