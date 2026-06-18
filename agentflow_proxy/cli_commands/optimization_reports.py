@@ -2188,6 +2188,43 @@ def openai_routing_report_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     return 0
 
 
+def routing_coverage_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Explain AgentFlow local routing coverage by provider and client surface")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=5000,
+        help="Recent provider calls and Codex app events to inspect, default: 5000, max: 25000",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.routing_coverage import build_routing_coverage_report
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_routing_coverage_report(store, limit=args.limit)
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def openai_routing_canary_stage_cli(
     argv: Sequence[str] | None = None,
     *,

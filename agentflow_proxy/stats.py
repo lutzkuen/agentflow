@@ -11436,6 +11436,12 @@ async def stats_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict
     return build_openai_routing_report(store_obj, limit=limit)
 
 
+async def stats_routing_coverage_report(store_obj: Any, limit: int = 5000) -> dict[str, Any]:
+    from agentflow_proxy.routing_coverage import build_routing_coverage_report
+
+    return build_routing_coverage_report(store_obj, limit=limit)
+
+
 async def stats_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
     from agentflow_proxy.openai_cache_replay_report import build_openai_cache_replay_report
 

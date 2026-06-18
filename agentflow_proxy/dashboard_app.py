@@ -299,6 +299,14 @@ def create_dashboard_router(
     async def stats_openai_canary_readiness(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_canary_readiness(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/routing-coverage")
+    async def stats_routing_coverage(limit: int = 5000) -> dict[str, Any]:
+        return await cached_expensive_stats(
+            "routing-coverage",
+            (int(limit),),
+            lambda: stats_views.stats_routing_coverage_report(_store(store_obj), limit=limit),
+        )
+
     @router.get("/agentflow/stats/claude-canary-impact")
     async def stats_claude_canary_impact(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_claude_canary_impact(_store(store_obj), limit=limit)
