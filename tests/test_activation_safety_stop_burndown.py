@@ -26,8 +26,8 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
                             {
                                 "rank": 1,
                                 "provider": "anthropic",
-                                "source_surface": "anthropic_messages",
-                                "endpoint": "/v1/messages",
+                                "source_surface": "unknown",
+                                "endpoint": "unknown",
                                 "requested_model": "claude-sonnet-4-6",
                                 "routed_model": "claude-sonnet-4-6",
                                 "candidate_target_model": "claude-haiku-4-5-20251001",

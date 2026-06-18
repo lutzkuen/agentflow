@@ -1190,6 +1190,15 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         explicit=lifecycle.get("next_action") or bucket.get("next_action"),
     )
     safety_breakdown = _sanitized_breakdown(lifecycle.get("safety_stop_breakdown"))
+    source_surface = _safe_label(bucket.get("source_surface"), "unknown")
+    endpoint = _safe_endpoint(bucket.get("endpoint"), "unknown")
+    category = _safe_label(bucket.get("category"), "unknown")
+    if source_surface == "unknown" and safety_breakdown:
+        source_surface = _safe_label(safety_breakdown[0].get("source_surface"), "unknown")
+    if endpoint == "unknown" and safety_breakdown:
+        endpoint = _safe_endpoint(safety_breakdown[0].get("endpoint"), "unknown")
+    if category == "unknown" and safety_breakdown:
+        category = _safe_label(safety_breakdown[0].get("category"), "unknown")
     primary_reason = (
         safety_breakdown[0].get("reason_code")
         if safety_breakdown
@@ -1251,8 +1260,8 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
     suppression_material = {
         "schema": PASS_THROUGH_ROUTING_SCHEMA,
         "provider": "anthropic",
-        "source_surface": _safe_label(bucket.get("source_surface"), "unknown"),
-        "endpoint": _safe_endpoint(bucket.get("endpoint"), "unknown"),
+        "source_surface": source_surface,
+        "endpoint": endpoint,
         "requested_model": _safe_label(bucket.get("requested_model"), "unknown"),
         "candidate_target_model": _safe_label(bucket.get("candidate_target_model") or bucket.get("target_model"), "unknown"),
         "activation_gate": "anthropic-routing-safety-stop-burndown",
@@ -1287,9 +1296,9 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "next_action": next_action,
         "next_action_class": "continue-blocked" if next_state == "keep-blocked" else ("unblock-bounded-canary" if next_state == "unblock-ready" else "stage-safer-threshold"),
         "provider": "anthropic",
-        "source_surface": _safe_label(bucket.get("source_surface"), "unknown"),
-        "endpoint": _safe_endpoint(bucket.get("endpoint"), "unknown"),
-        "category": _safe_label(bucket.get("category"), "unknown"),
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+        "category": category,
         "workflow_phase": workflow_phase,
         "requested_model": _safe_label(bucket.get("requested_model"), "unknown"),
         "target_model": _safe_label(bucket.get("candidate_target_model") or bucket.get("target_model"), "unknown"),
@@ -1356,8 +1365,8 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
                 "provider": "anthropic",
                 "requested_model": bucket.get("requested_model"),
                 "target_model": bucket.get("candidate_target_model") or bucket.get("target_model"),
-                "category": bucket.get("category"),
-                "endpoint": bucket.get("endpoint"),
+                "category": category,
+                "endpoint": endpoint,
             },
             prefix="policy",
         ),
