@@ -3707,7 +3707,13 @@ def _is_full_rollout_crunch_entry(entry: dict[str, Any]) -> bool:
     )
 
 
-def _post_rollout_crunch_decision(entry: dict[str, Any], *, is_current_rule: bool) -> tuple[str, str, str | None]:
+def _post_rollout_crunch_decision(
+    entry: dict[str, Any],
+    *,
+    is_current_rule: bool,
+    duplicate_suppression_status: str = "none",
+    duplicate_suppression_reason: str | None = None,
+) -> tuple[str, str, str | None]:
     next_action = str(entry.get("next_action") or "").strip()
     current_status = str(entry.get("current_status") or "").strip()
     state = str(entry.get("state") or "").strip()
@@ -3726,6 +3732,12 @@ def _post_rollout_crunch_decision(entry: dict[str, Any], *, is_current_rule: boo
 
     if is_current_rule:
         return "keep-current-rule-only", "keep-active", None
+    if duplicate_suppression_status == "suppressed":
+        return (
+            "no-op",
+            "keep-current-rule-only",
+            duplicate_suppression_reason or "duplicate-suppressed-post-full-rollout-crunch-cohort",
+        )
     if regression_count > 0:
         return "no-op", "keep-crunch-cohort-blocked-until-regression-clears", "regression-counters-present"
     if "widen" in next_action or current_status in {"applied", "holdout", "measured"}:
@@ -3760,9 +3772,20 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
             (current_fingerprint_text and str(entry.get("fingerprint") or "") == current_fingerprint_text)
             or _is_full_rollout_crunch_entry(entry)
         )
+        duplicate_suppression = entry.get("duplicate_suppression") if isinstance(entry.get("duplicate_suppression"), dict) else {}
+        duplicate_suppression_status = _queue_duplicate_suppression_status(entry)
+        duplicate_suppression_reason = (
+            str(duplicate_suppression.get("reason") or "").strip() if duplicate_suppression else ""
+        )
         decision, recommended_next_action, no_op_reason = _post_rollout_crunch_decision(
             entry,
             is_current_rule=is_current_rule,
+            duplicate_suppression_status=duplicate_suppression_status,
+            duplicate_suppression_reason=duplicate_suppression_reason or None,
+        )
+        is_successor_candidate = bool(
+            decision in {"widen-staged-cohort", "stage-new-cohort"}
+            and duplicate_suppression_status != "suppressed"
         )
         applied_count = _to_int(entry.get("applied_count"))
         holdout_count = _to_int(entry.get("holdout_count"))
@@ -3804,11 +3827,9 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
             "target_local_policy_section": sanitize_value(entry.get("target_local_policy_section") or "crunch.rules"),
             "target_local_rule_file": sanitize_value(entry.get("target_local_rule_file") or "crunch_rules.yaml"),
             "duplicate_suppression_status": _queue_duplicate_suppression_status(entry),
-            "duplicate_suppression_reason": sanitize_value(
-                entry.get("duplicate_suppression", {}).get("reason")
-                if isinstance(entry.get("duplicate_suppression"), dict)
-                else None
-            ),
+            "duplicate_suppression_reason": sanitize_value(duplicate_suppression_reason) if duplicate_suppression_reason else None,
+            "review_only": True if is_successor_candidate else False,
+            "policy_files_written": False,
             "regression_counters": regression_counters,
             "privacy": _full_rollout_crunch_activation_measurement_privacy(),
         }
@@ -3822,6 +3843,8 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
             "skipped_coverage_rate",
             "realized_savings_usd",
             "projected_savings_usd",
+            "review_only",
+            "policy_files_written",
         }
         rows.append({key: value for key, value in row.items() if value not in (None, "", [], 0) or key in preserved_empty_keys})
 
@@ -3831,6 +3854,8 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
     rows.sort(
         key=lambda item: (
             0 if item.get("is_current_full_rollout_rule") else 1,
+            0 if item.get("cohort_decision") in {"widen-staged-cohort", "stage-new-cohort"} else 1,
+            1 if item.get("duplicate_suppression_status") == "suppressed" else 0,
             -_to_float(item.get("realized_savings_usd")),
             -_to_int(item.get("skipped_count")),
             _to_int(item.get("regression_counters", {}).get("fallback_count"))
@@ -3845,7 +3870,12 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
         item["rank"] = rank
 
     next_candidate = next(
-        (item for item in rows if item.get("cohort_decision") in {"widen-staged-cohort", "stage-new-cohort"}),
+        (
+            item
+            for item in rows
+            if item.get("cohort_decision") in {"widen-staged-cohort", "stage-new-cohort"}
+            and item.get("duplicate_suppression_status") != "suppressed"
+        ),
         None,
     )
     if next_candidate is None:
@@ -3854,10 +3884,19 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
             "recommended_next_action": "keep-current-rule-only",
             "no_op_reason": "no-unsuppressed-post-full-rollout-crunch-cohort",
             "rank": 0,
+            "review_only": False,
+            "policy_files_written": False,
         }
 
     top = rows[0]
     decision_counts = Counter(str(item.get("cohort_decision") or "unknown") for item in rows)
+    suppressed_count = sum(1 for item in rows if item.get("duplicate_suppression_status") == "suppressed")
+    unsuppressed_candidate_count = sum(
+        1
+        for item in rows
+        if item.get("cohort_decision") in {"widen-staged-cohort", "stage-new-cohort"}
+        and item.get("duplicate_suppression_status") != "suppressed"
+    )
     result = {
         "schema": FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_SCHEMA,
         "status": "ranked",
@@ -3873,6 +3912,8 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
                 "recommended_next_action": next_candidate.get("recommended_next_action"),
                 "no_op_reason": next_candidate.get("no_op_reason"),
                 "rank": next_candidate.get("rank"),
+                "review_only": next_candidate.get("review_only"),
+                "policy_files_written": next_candidate.get("policy_files_written"),
                 "realized_savings_usd": next_candidate.get("realized_savings_usd"),
                 "projected_savings_usd": next_candidate.get("projected_savings_usd"),
                 "unblock_reason": next_candidate.get("unblock_reason"),
@@ -3889,6 +3930,8 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
             "next_cohort_decision": next_candidate.get("cohort_decision"),
             "next_cohort_next_action": next_candidate.get("recommended_next_action"),
             "next_cohort_no_op_reason": next_candidate.get("no_op_reason"),
+            "unsuppressed_successor_candidate_count": unsuppressed_candidate_count,
+            "suppressed_cohort_count": suppressed_count,
             "decision_counts": [{"value": key, "count": count} for key, count in sorted(decision_counts.items())],
         },
         "entries": rows[:10],

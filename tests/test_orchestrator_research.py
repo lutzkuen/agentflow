@@ -14,6 +14,7 @@ from agentflow_proxy.orchestrator_research import (
     build_local_activation_next_action_queue,
     build_research_plan,
     _dedupe_create_issue_proposals_with_metadata,
+    _full_rollout_crunch_post_rollout_cohort_ranking,
 )
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 
@@ -5368,7 +5369,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(recommendation["cohort_decision"], "stage-new-cohort")
         self.assertEqual(recommendation["recommended_next_action"], "stage-repeated-context-crunch-canary")
         self.assertEqual(recommendation["rank"], 2)
+        self.assertTrue(recommendation["review_only"])
+        self.assertFalse(recommendation["policy_files_written"])
         self.assertEqual(recommendation["projected_savings_usd"], 0.453)
+        self.assertEqual(ranking["entries"][1]["cohort_decision"], "stage-new-cohort")
+        self.assertTrue(ranking["entries"][1]["review_only"])
+        self.assertFalse(ranking["entries"][1]["policy_files_written"])
+        self.assertEqual(ranking["summary"]["unsuppressed_successor_candidate_count"], 1)
         self.assertTrue(ranking["privacy"]["metadata_only"])
         self.assertTrue(ranking["privacy"]["aggregate_only"])
         self.assertFalse(ranking["privacy"]["raw_prompts_included"])
@@ -5376,6 +5383,111 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw next cohort prompt must not leak", rendered)
         self.assertNotIn("raw-next-cohort-request-secret", rendered)
+
+    def test_issue_677_suppressed_post_full_rollout_crunch_cohorts_do_not_recreate_active_rule(self):
+        keep_active_gate = {
+            "schema": "agentflow.full_rollout_crunch_keep_active_regression_gate.v1",
+            "state": "keep-active",
+            "deterministic_next_action": "keep-active",
+        }
+        ranking = _full_rollout_crunch_post_rollout_cohort_ranking(
+            ledger_entries=[
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "fingerprint": "activation:current-full-rollout",
+                    "rank": 1,
+                    "lever": "crunch",
+                    "local_action_family": "crunch",
+                    "current_status": "full-rollout",
+                    "state": "full-rollout-active",
+                    "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                    "sample_count": 500,
+                    "applied_count": 107,
+                    "holdout_count": 40,
+                    "projected_saved_usd": 25.818387,
+                    "crunch_savings_usd": 25.8185,
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "fingerprint": "activation:suppressed-stage",
+                    "rank": 2,
+                    "lever": "crunch",
+                    "local_action_family": "crunch",
+                    "current_status": "projected",
+                    "state": "activation-ready",
+                    "next_action": "stage-repeated-context-crunch-canary",
+                    "sample_count": 91,
+                    "projected_saved_usd": 0.453,
+                    "duplicate_suppression": {
+                        "schema": "agentflow.request_shape_crunch_follow_up_duplicate_suppression.v1",
+                        "reason": "matching-repeated-context-crunch-canary-already-staged-in-local-policy",
+                        "suppresses_new_stage_action": True,
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    },
+                    "raw_prompt": "raw suppressed stage prompt must not leak",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "fingerprint": "activation:suppressed-widen",
+                    "rank": 3,
+                    "lever": "crunch",
+                    "local_action_family": "crunch",
+                    "current_status": "measured",
+                    "state": "widen-ready",
+                    "next_action": "widen-repeated-context-crunch-canary",
+                    "applied_count": 12,
+                    "holdout_count": 8,
+                    "projected_saved_usd": 0.275,
+                    "duplicate_suppression": {
+                        "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                        "reason": "repeated-context-crunch-full-rollout-active",
+                        "suppresses_new_activation_issue": True,
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    },
+                    "request_id": "raw-suppressed-request-secret",
+                },
+            ],
+            current_fingerprint="activation:current-full-rollout",
+            keep_active_gate=keep_active_gate,
+            observed_savings=25.818387,
+        )
+
+        self.assertIsNotNone(ranking)
+        self.assertEqual(ranking["schema"], "agentflow.full_rollout_crunch_post_rollout_cohort_ranking.v1")
+        self.assertEqual(ranking["next_cohort_recommendation"]["cohort_decision"], "no-op")
+        self.assertEqual(ranking["next_cohort_recommendation"]["recommended_next_action"], "keep-current-rule-only")
+        self.assertEqual(
+            ranking["next_cohort_recommendation"]["no_op_reason"],
+            "no-unsuppressed-post-full-rollout-crunch-cohort",
+        )
+        self.assertFalse(ranking["next_cohort_recommendation"]["review_only"])
+        self.assertFalse(ranking["next_cohort_recommendation"]["policy_files_written"])
+        self.assertEqual(ranking["summary"]["unsuppressed_successor_candidate_count"], 0)
+        self.assertEqual(ranking["summary"]["suppressed_cohort_count"], 2)
+
+        by_fingerprint = {item["fingerprint"]: item for item in ranking["entries"]}
+        self.assertEqual(by_fingerprint["activation:current-full-rollout"]["cohort_decision"], "keep-current-rule-only")
+        self.assertEqual(by_fingerprint["activation:suppressed-stage"]["cohort_decision"], "no-op")
+        self.assertEqual(by_fingerprint["activation:suppressed-stage"]["recommended_next_action"], "keep-current-rule-only")
+        self.assertEqual(
+            by_fingerprint["activation:suppressed-stage"]["no_op_reason"],
+            "matching-repeated-context-crunch-canary-already-staged-in-local-policy",
+        )
+        self.assertEqual(by_fingerprint["activation:suppressed-stage"]["duplicate_suppression_status"], "suppressed")
+        self.assertEqual(by_fingerprint["activation:suppressed-widen"]["cohort_decision"], "no-op")
+        self.assertEqual(
+            by_fingerprint["activation:suppressed-widen"]["duplicate_suppression_reason"],
+            "repeated-context-crunch-full-rollout-active",
+        )
+        self.assertTrue(ranking["privacy"]["metadata_only"])
+        self.assertTrue(ranking["privacy"]["aggregate_only"])
+        self.assertFalse(ranking["privacy"]["raw_prompts_included"])
+        self.assertFalse(ranking["privacy"]["request_ids_included"])
+        rendered = json.dumps(ranking, sort_keys=True)
+        self.assertNotIn("raw suppressed stage prompt must not leak", rendered)
+        self.assertNotIn("raw-suppressed-request-secret", rendered)
 
     def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
         plan = build_research_plan(
