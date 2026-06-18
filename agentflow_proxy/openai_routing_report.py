@@ -18,6 +18,7 @@ ACTIVE_LOCAL_POLICY_OUTCOME_SCHEMA = "agentflow.openai_routing_active_local_poli
 ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
 ACTIVE_LOCAL_POLICY_SAVINGS_DELTAS_SCHEMA = "agentflow.openai_routing_active_local_policy_savings_deltas.v1"
 ROUTING_CANARY_OUTCOME_SCHEMA = "agentflow.openai_routing_canary_outcome.v1"
+ROUTING_LIFECYCLE_REVIEW_SCHEMA = "agentflow.openai_routing_lifecycle_review.v1"
 PROMOTION_VERDICT_OPTIONS = ["promotion-ready", "active-local-policy", "keep-staged", "keep-blocked", "rollback-required"]
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
@@ -1838,6 +1839,55 @@ def _active_openai_local_policy_rule(target: dict[str, Any]) -> dict[str, Any] |
     return None
 
 
+def _disabled_openai_local_policy_rule(target: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        from agentflow_proxy import router as router_module
+    except Exception:
+        return None
+
+    requested_model = str(target.get("requested_model") or "").lower()
+    target_model = str(target.get("target_model") or "").lower()
+    source_surface = str(target.get("source_surface") or "").lower()
+    endpoint = str(target.get("endpoint") or "").lower()
+    category = str(target.get("category") or "").lower()
+
+    for rule in getattr(router_module, "ROUTING_RULES", []):
+        if not isinstance(rule, dict) or rule.get("enabled") is not False:
+            continue
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        if str(action.get("route_to") or "").lower() != target_model:
+            continue
+        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+        if str(conditions.get("provider") or "openai").lower() != "openai":
+            continue
+        model_pattern = str(conditions.get("model_pattern") or "").lower()
+        if model_pattern and model_pattern not in requested_model:
+            continue
+        if str(conditions.get("source_surface") or source_surface).lower() != source_surface:
+            continue
+        if str(conditions.get("endpoint") or endpoint).lower() != endpoint:
+            continue
+        if str(conditions.get("category") or category).lower() != category:
+            continue
+        if "has_tools" in conditions and bool(conditions.get("has_tools")) != category.startswith("tool-"):
+            continue
+        if "stream" in conditions and bool(conditions.get("stream")):
+            continue
+        metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
+        return {
+            "schema": "agentflow.openai_routing_disabled_local_policy_rule.v1",
+            "status": "disabled-local-policy",
+            "reason": str(rule.get("disabled_reason") or "disabled-local-policy"),
+            "policy_source": str(rule.get("policy_source") or metadata.get("policy_source") or "local-promoted"),
+            "target_local_policy_section": "routing.rules",
+            "target_local_rule_file": "routing_rules.yaml",
+            "rule_id_included": False,
+            "target_rule_id": "[REDACTED_ID]",
+            "privacy": _openai_promotion_decision_privacy(),
+        }
+    return None
+
+
 def _openai_promotion_duplicate_suppression(
     *,
     target: dict[str, Any],
@@ -2363,6 +2413,113 @@ def _openai_active_local_policy_outcome(
     }
 
 
+def _openai_routing_lifecycle_review(
+    *,
+    decision: str,
+    promotion_verdict: str,
+    next_action: str,
+    reason: str,
+    reason_codes: list[str],
+    blocker_reason_breakdown: list[dict[str, Any]],
+    target: dict[str, Any],
+    lifecycle: dict[str, Any],
+    semantic_quality: dict[str, Any],
+    disabled_local_policy_rule: dict[str, Any] | None,
+    matched_count: int,
+    blocked_count: int,
+    projected_savings_usd: float,
+    savings_per_1000: float,
+) -> dict[str, Any]:
+    blockers: dict[str, int] = {}
+    for item in blocker_reason_breakdown:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        if value is not None:
+            _increment(blockers, value, _as_int(item.get("count"), 1))
+    for code in reason_codes:
+        if str(code).strip():
+            blockers.setdefault(str(code), max(1, blocked_count or matched_count))
+
+    disabled_reason = None
+    if isinstance(disabled_local_policy_rule, dict):
+        disabled_reason = str(disabled_local_policy_rule.get("reason") or "disabled-local-policy")
+        _increment(blockers, disabled_reason, max(1, blocked_count or matched_count))
+
+    semantic_reasons = [str(code) for code in semantic_quality.get("reason_codes") or []]
+    semantic_regression = bool(
+        disabled_reason == "semantic-quality-regression-observed"
+        or "semantic-quality-pass-rate-below-threshold" in semantic_reasons
+    )
+    if semantic_regression:
+        _increment(blockers, "semantic-quality-regression-observed", max(1, blocked_count or matched_count))
+
+    if promotion_verdict == "rollback-required":
+        review_action = "rollback-required"
+    elif decision == "narrow":
+        review_action = "narrow-canary"
+    elif decision == "promote" and not blockers:
+        review_action = "ready-for-rule-draft"
+    elif blockers:
+        review_action = "keep-blocked"
+    else:
+        review_action = "keep-blocked"
+
+    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    blocker_codes = sorted(blockers)
+    return {
+        "schema": ROUTING_LIFECYCLE_REVIEW_SCHEMA,
+        "status": "reviewed",
+        "decision": review_action,
+        "deterministic_next_action": review_action,
+        "next_action": review_action,
+        "next_action_options": ["rollback-required", "keep-blocked", "narrow-canary", "ready-for-rule-draft"],
+        "source_decision": decision,
+        "source_next_action": next_action,
+        "source_reason": reason,
+        "promotion_verdict": promotion_verdict,
+        "current_status": "keep-blocked" if review_action == "keep-blocked" else review_action,
+        "reason": blocker_codes[0] if blocker_codes else "promotion-ready",
+        "reason_codes": blocker_codes,
+        "blocker_codes": blocker_codes,
+        "blocker_reason_breakdown": _breakdown(blockers),
+        "target": target,
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "matched_count": matched_count,
+        "blocked_count": blocked_count,
+        "applied_count": _as_int(lifecycle.get("applied_count") or counts.get("canary_applied")),
+        "holdout_count": _as_int(lifecycle.get("holdout_count") or counts.get("canary_holdout")),
+        "skipped_count": _as_int(lifecycle.get("skipped_count") or counts.get("skipped")),
+        "bypassed_or_disabled_count": _as_int(counts.get("bypassed_or_disabled")),
+        "unknown_count": _as_int(lifecycle.get("unknown_count") or counts.get("unknown")),
+        "safety_stop_count": _as_int(lifecycle.get("safety_stop_count") or counts.get("safety_stopped")),
+        "error_count": _as_int(lifecycle.get("error_count")),
+        "fallback_count": _as_int(lifecycle.get("fallback_count")),
+        "retry_count": _as_int(lifecycle.get("retry_count")),
+        "latest_observed_at": lifecycle.get("latest_observed_at"),
+        "oldest_observed_at": lifecycle.get("oldest_observed_at"),
+        "stale_evidence": lifecycle.get("stale_evidence"),
+        "savings_per_1000_calls_usd": savings_per_1000,
+        "projected_savings_usd": round(projected_savings_usd, 6),
+        "semantic_quality_regression": {
+            "schema": "agentflow.openai_routing_semantic_quality_regression_review.v1",
+            "observed": semantic_regression,
+            "disabled_local_policy_rule_present": isinstance(disabled_local_policy_rule, dict),
+            "disabled_local_policy_reason": disabled_reason,
+            "semantic_gate_passed": bool(semantic_quality.get("gate_passed")),
+            "semantic_reason_codes": semantic_reasons,
+            "clean_comparison_count": _as_int(semantic_quality.get("clean_comparison_count")),
+            "pass_count": _as_int(semantic_quality.get("pass_count")),
+            "fail_count": _as_int(semantic_quality.get("fail_count")),
+            "pass_rate": _as_float(semantic_quality.get("pass_rate")),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _openai_promotion_decision_privacy(),
+    }
+
+
 def _build_openai_promotion_decision(
     *,
     report: dict[str, Any],
@@ -2646,6 +2803,7 @@ def _build_openai_promotion_decision(
     }
     lifecycle["semantic_quality"] = semantic_quality
     active_local_policy_rule = _active_openai_local_policy_rule(target)
+    disabled_local_policy_rule = _disabled_openai_local_policy_rule(target)
     if decision == "promote" and active_local_policy_rule is not None:
         decision = "active-local-policy"
         next_action = "measure-openai-routing-rule-outcomes"
@@ -2697,6 +2855,22 @@ def _build_openai_promotion_decision(
         and isinstance(active_local_policy_outcome.get("routing_canary_outcome"), dict)
         else None
     )
+    lifecycle_review = _openai_routing_lifecycle_review(
+        decision=decision,
+        promotion_verdict=promotion_verdict,
+        next_action=next_action,
+        reason=reason,
+        reason_codes=reason_codes,
+        blocker_reason_breakdown=_breakdown(blocker_counts),
+        target=target,
+        lifecycle=lifecycle,
+        semantic_quality=semantic_quality,
+        disabled_local_policy_rule=disabled_local_policy_rule,
+        matched_count=matched_count,
+        blocked_count=blocked_count,
+        projected_savings_usd=projected_savings_usd,
+        savings_per_1000=savings_per_1000,
+    )
     return {
         "schema": PROMOTION_DECISION_SCHEMA,
         "decision": decision,
@@ -2737,8 +2911,10 @@ def _build_openai_promotion_decision(
         "routing_rule_metadata": routing_rule_metadata,
         "local_policy_patch": local_policy_patch,
         "active_local_policy_rule": active_local_policy_rule,
+        "disabled_local_policy_rule": disabled_local_policy_rule,
         "active_local_policy_outcome": active_local_policy_outcome,
         "routing_canary_outcome": routing_canary_outcome,
+        "routing_lifecycle_review": lifecycle_review,
         "rollback_metadata": rollback_metadata,
         "duplicate_suppression": duplicate_suppression,
         "privacy": privacy,
@@ -2770,6 +2946,11 @@ def build_openai_routing_promotion_decision_report(
         if isinstance(decision.get("routing_canary_outcome"), dict)
         else {}
     )
+    lifecycle_review = (
+        decision.get("routing_lifecycle_review")
+        if isinstance(decision.get("routing_lifecycle_review"), dict)
+        else {}
+    )
     return {
         "schema": PROMOTION_DECISION_REPORT_SCHEMA,
         "generated_at": utc_now(),
@@ -2798,6 +2979,9 @@ def build_openai_routing_promotion_decision_report(
             "routing_canary_outcome_count": 1 if routing_canary_outcome else 0,
             "routing_canary_next_action": routing_canary_outcome.get("next_action"),
             "routing_canary_reason_codes": routing_canary_outcome.get("reason_codes") or [],
+            "routing_lifecycle_next_action": lifecycle_review.get("deterministic_next_action"),
+            "routing_lifecycle_reason_codes": lifecycle_review.get("reason_codes") or [],
+            "routing_lifecycle_blocker_codes": lifecycle_review.get("blocker_codes") or [],
             "routing_only_savings_usd": (
                 routing_canary_outcome.get("routing_savings", {}).get("routing_only_savings_usd")
                 if isinstance(routing_canary_outcome.get("routing_savings"), dict)
@@ -2873,6 +3057,7 @@ def build_openai_routing_promotion_decision_report(
             "target_local_rule_file": "routing_rules.yaml",
         },
         "promotion_decision": decision,
+        "routing_lifecycle_review": lifecycle_review,
         "decisions": [decision],
         "active_local_policy_outcomes": [decision["active_local_policy_outcome"]]
         if decision.get("active_local_policy_outcome")
