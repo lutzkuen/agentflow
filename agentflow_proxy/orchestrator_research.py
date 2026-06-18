@@ -4666,6 +4666,45 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
             "individual_candidate_ids_included": False,
         },
     }
+    passthrough_keys = (
+        "keep_blocked_reason",
+        "needed_resolution",
+        "next_state",
+        "next_state_reason",
+        "status",
+        "source",
+        "source_surface",
+        "endpoint",
+        "category",
+        "workflow_phase",
+        "requested_model",
+        "candidate_target_model",
+        "required_local_executor",
+        "executor_compatible",
+        "missing_applied_coverage",
+        "missing_holdout_coverage",
+        "burndown_status",
+        "promotion_allowed",
+        "stage_allowed",
+        "active_policy_changed",
+        "wrote_active_policy_files",
+        "durable_action_ledger_entry",
+    )
+    for key in passthrough_keys:
+        if entry.get(key) is not None:
+            value = entry.get(key)
+            clean[key] = bool(value) if isinstance(value, bool) else sanitize_value(value)
+    for review_key in (
+        "unblock_criteria",
+        "safety_stop_reason_review",
+        "safer_threshold_or_executor_guard",
+        "rollback_proof",
+        "applied_coverage",
+        "holdout_coverage",
+        "local_file_backed_representation",
+    ):
+        if isinstance(entry.get(review_key), dict):
+            clean[review_key] = sanitize_value(entry.get(review_key))
     preserved_empty_keys = {
         "rank",
         "ledger_rank",
@@ -4678,6 +4717,14 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "realized_savings_usd",
         "projected_savings_usd",
         "savings_per_1000_calls_usd",
+        "promotion_allowed",
+        "stage_allowed",
+        "active_policy_changed",
+        "wrote_active_policy_files",
+        "executor_compatible",
+        "missing_applied_coverage",
+        "missing_holdout_coverage",
+        "durable_action_ledger_entry",
     }
     return {key: value for key, value in clean.items() if value not in (None, "", [], 0) or key in preserved_empty_keys}
 

@@ -1420,6 +1420,39 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(burndown_entry["unblock_criteria"]["promotion_allowed"])
         self.assertFalse(burndown_entry["unblock_criteria"]["stage_allowed"])
 
+        queue = plan["evidence"]["stats_summary"]["local_activation_next_action_queue"]
+        queue_entry = next(
+            row
+            for row in queue["entries"]
+            if row.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
+            and row.get("local_action_family") == "routing"
+        )
+        self.assertTrue(str(queue_entry["fingerprint"]).startswith("activation:"))
+        self.assertEqual(queue_entry["current_status"], "keep-blocked")
+        self.assertEqual(queue_entry["safety_stop_count"], 51)
+        self.assertEqual(queue_entry["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(queue_entry["target_local_policy_section"], "routing.rules")
+        self.assertIn("safety_stop_reason_review", queue_entry["needed_resolution"])
+        self.assertIn("safer_threshold_or_executor_guard", queue_entry["needed_resolution"])
+        self.assertIn("rollback_proof", queue_entry["needed_resolution"])
+        self.assertIn("applied_coverage", queue_entry["needed_resolution"])
+        self.assertIn("holdout_coverage", queue_entry["needed_resolution"])
+        self.assertTrue(queue_entry["missing_applied_coverage"])
+        self.assertTrue(queue_entry["missing_holdout_coverage"])
+        self.assertEqual(queue_entry["safety_stop_reason_review"]["status"], "missing")
+        self.assertEqual(queue_entry["safer_threshold_or_executor_guard"]["status"], "missing")
+        self.assertEqual(queue_entry["rollback_proof"]["status"], "missing")
+        self.assertEqual(queue_entry["applied_coverage"]["status"], "missing")
+        self.assertEqual(queue_entry["holdout_coverage"]["status"], "missing")
+        self.assertEqual(queue_entry["unblock_criteria"]["status"], "blocked")
+        self.assertFalse(queue_entry["unblock_criteria"]["safety_stop_count_zero"])
+        self.assertFalse(queue_entry["unblock_criteria"]["applied_coverage_present"])
+        self.assertFalse(queue_entry["unblock_criteria"]["holdout_coverage_present"])
+        self.assertFalse(queue_entry["promotion_allowed"])
+        self.assertFalse(queue_entry["stage_allowed"])
+        self.assertFalse(queue_entry["active_policy_changed"])
+        self.assertFalse(queue_entry["wrote_active_policy_files"])
+
         routing_candidate = next(
             row for row in plan["evidence"]["optimization_candidates"]
             if row["lever"] == "routing"
