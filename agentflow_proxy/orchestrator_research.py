@@ -20,6 +20,7 @@ LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_ne
 OPENAI_ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
 FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA = "agentflow.full_rollout_crunch_activation_measurement.v1"
 FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA = "agentflow.full_rollout_crunch_keep_active_regression_gate.v1"
+FULL_ROLLOUT_CRUNCH_ACTIVATION_OUTCOME_SCHEMA = "agentflow.full_rollout_crunch_activation_outcome.v1"
 FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_SCHEMA = "agentflow.full_rollout_crunch_post_rollout_cohort_ranking.v1"
 FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_ENTRY_SCHEMA = "agentflow.full_rollout_crunch_post_rollout_cohort_ranking_entry.v1"
 LOW_BACKLOG_MILESTONE_TITLE = "Rank next savings milestone from local telemetry evidence gaps"
@@ -3743,6 +3744,97 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
     return sanitize_value(result)
 
 
+def _full_rollout_crunch_activation_outcome(
+    *,
+    entry: dict[str, Any],
+    keep_active_gate: dict[str, Any],
+    post_rollout_ranking: dict[str, Any] | None,
+    applied_count: int,
+    holdout_count: int,
+    skipped_count: int,
+    fallback_count: int,
+    retry_count: int,
+    rollback_count: int,
+    safety_stop_count: int,
+    error_rate_delta: float,
+    retry_rate_delta: float,
+    fallback_rate_delta: float,
+    observed_saved_tokens: int,
+    observed_savings: float,
+    projected_saved_tokens: int,
+    projected_savings: float,
+    target_local_policy_section: Any,
+    target_local_rule_file: Any,
+) -> dict[str, Any]:
+    next_recommendation = (
+        post_rollout_ranking.get("next_cohort_recommendation")
+        if isinstance(post_rollout_ranking, dict)
+        and isinstance(post_rollout_ranking.get("next_cohort_recommendation"), dict)
+        else {}
+    )
+    state = str(keep_active_gate.get("state") or "keep-blocked")
+    outcome_next_action = str(
+        keep_active_gate.get("deterministic_next_action")
+        or keep_active_gate.get("next_action")
+        or "keep-crunch-rollout-blocked-until-applied-coverage"
+    )
+    no_op_reason = (
+        next_recommendation.get("no_op_reason")
+        if isinstance(next_recommendation, dict) and next_recommendation.get("no_op_reason")
+        else "current-full-rollout-crunch-rule-measured"
+    )
+    successor_next_action = (
+        next_recommendation.get("recommended_next_action")
+        if isinstance(next_recommendation, dict) and next_recommendation.get("recommended_next_action")
+        else "keep-current-rule-only"
+    )
+    successor_decision = (
+        next_recommendation.get("cohort_decision")
+        if isinstance(next_recommendation, dict) and next_recommendation.get("cohort_decision")
+        else "no-op"
+    )
+    return sanitize_value(
+        {
+            "schema": FULL_ROLLOUT_CRUNCH_ACTIVATION_OUTCOME_SCHEMA,
+            "durable_outcome_ledger_entry": True,
+            "source_schema": FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA,
+            "source_ledger_schema": entry.get("schema"),
+            "ledger_fingerprint": entry.get("fingerprint"),
+            "ledger_rank": _to_int(entry.get("rank")),
+            "lever": "crunch",
+            "local_action_family": "crunch",
+            "state": state,
+            "outcome": state,
+            "outcome_options": ["keep-active", "review-stale-evidence", "rollback-required", "keep-blocked"],
+            "next_action": outcome_next_action,
+            "current_status": entry.get("current_status") or "full-rollout",
+            "evidence_schema": entry.get("evidence_schema"),
+            "activation_follow_up_evidence_schema": entry.get("activation_follow_up_evidence_schema"),
+            "target_local_policy_section": target_local_policy_section or "crunch.rules",
+            "target_local_rule_file": target_local_rule_file or "crunch_rules.yaml",
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": skipped_count,
+            "fallback_count": fallback_count,
+            "retry_count": retry_count,
+            "rollback_count": rollback_count,
+            "safety_stop_count": safety_stop_count,
+            "error_rate_delta": round(error_rate_delta, 6),
+            "retry_rate_delta": round(retry_rate_delta, 6),
+            "fallback_rate_delta": round(fallback_rate_delta, 6),
+            "observed_saved_tokens": observed_saved_tokens,
+            "observed_savings_usd": round(observed_savings, 8),
+            "projected_saved_tokens": projected_saved_tokens,
+            "projected_savings_usd": round(projected_savings, 8),
+            "keep_active_regression_gate": keep_active_gate,
+            "successor_decision": successor_decision,
+            "successor_next_action": successor_next_action,
+            "successor_no_op_reason": no_op_reason,
+            "privacy": _full_rollout_crunch_activation_measurement_privacy(),
+        }
+    )
+
+
 def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     ledger = stats_summary.get("evidence_to_activation_next_action_ledger")
     if not isinstance(ledger, dict):
@@ -3866,6 +3958,27 @@ def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -
         keep_active_gate=keep_active_gate,
         observed_savings=observed_savings,
     )
+    durable_outcome = _full_rollout_crunch_activation_outcome(
+        entry=entry,
+        keep_active_gate=keep_active_gate,
+        post_rollout_ranking=post_rollout_ranking,
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        skipped_count=skipped_count,
+        fallback_count=fallback_count,
+        retry_count=retry_count,
+        rollback_count=rollback_count,
+        safety_stop_count=safety_stop_count,
+        error_rate_delta=error_rate_delta,
+        retry_rate_delta=retry_rate_delta,
+        fallback_rate_delta=fallback_rate_delta,
+        observed_saved_tokens=observed_saved_tokens,
+        observed_savings=observed_savings,
+        projected_saved_tokens=projected_saved_tokens,
+        projected_savings=projected_savings,
+        target_local_policy_section=target_local_policy_section,
+        target_local_rule_file=target_local_rule_file,
+    )
     measurement = {
         "schema": FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA,
         "status": "progress-recorded",
@@ -3920,6 +4033,7 @@ def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -
         },
         "stale_evidence": stale_evidence,
         "keep_active_regression_gate": keep_active_gate,
+        "durable_full_rollout_outcome": durable_outcome,
         "post_full_rollout_cohort_ranking": post_rollout_ranking,
         "post_full_rollout_next_cohort_recommendation": (
             post_rollout_ranking.get("next_cohort_recommendation")
@@ -4934,6 +5048,50 @@ def _refresh_ledger_summary(ledger: dict[str, Any]) -> dict[str, Any]:
     return refreshed
 
 
+def _merge_full_rollout_crunch_measurement_into_ledger(
+    ledger: dict[str, Any],
+    measurement: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(ledger, dict) or not isinstance(measurement, dict):
+        return ledger
+    fingerprint = str(measurement.get("ledger_fingerprint") or "").strip()
+    durable_outcome = (
+        measurement.get("durable_full_rollout_outcome")
+        if isinstance(measurement.get("durable_full_rollout_outcome"), dict)
+        else {}
+    )
+    if not fingerprint or not durable_outcome:
+        return ledger
+
+    merged_entries: list[dict[str, Any]] = []
+    changed = False
+    for entry in ledger.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        merged = dict(entry)
+        if str(entry.get("fingerprint") or "") == fingerprint:
+            changed = True
+            merged.update(
+                {
+                    "durable_outcome_ledger_entry": True,
+                    "full_rollout_activation_outcome": sanitize_value(durable_outcome),
+                    "full_rollout_outcome": sanitize_value(durable_outcome.get("outcome")),
+                    "full_rollout_outcome_next_action": sanitize_value(durable_outcome.get("next_action")),
+                    "full_rollout_successor_decision": sanitize_value(durable_outcome.get("successor_decision")),
+                    "full_rollout_successor_next_action": sanitize_value(durable_outcome.get("successor_next_action")),
+                    "full_rollout_successor_no_op_reason": sanitize_value(durable_outcome.get("successor_no_op_reason")),
+                    "keep_active_regression_gate": sanitize_value(measurement.get("keep_active_regression_gate")),
+                    "measured_full_rollout_activation": True,
+                }
+            )
+        merged_entries.append(merged)
+    if not changed:
+        return ledger
+    merged_ledger = dict(ledger)
+    merged_ledger["entries"] = merged_entries
+    return _refresh_ledger_summary(merged_ledger)
+
+
 def _queue_duplicate_suppression_status(entry: dict[str, Any]) -> str:
     suppression = entry.get("duplicate_suppression")
     if not isinstance(suppression, dict):
@@ -5106,6 +5264,13 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "wrote_active_policy_files",
         "policy_files_written",
         "durable_action_ledger_entry",
+        "durable_outcome_ledger_entry",
+        "full_rollout_outcome",
+        "full_rollout_outcome_next_action",
+        "full_rollout_successor_decision",
+        "full_rollout_successor_next_action",
+        "full_rollout_successor_no_op_reason",
+        "measured_full_rollout_activation",
     )
     for key in passthrough_keys:
         if entry.get(key) is not None:
@@ -5122,6 +5287,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "dependency_evidence_review",
         "active_rule_regression_gate",
         "outcome_gate",
+        "keep_active_regression_gate",
+        "full_rollout_activation_outcome",
     ):
         if isinstance(entry.get(review_key), dict):
             clean[review_key] = sanitize_value(entry.get(review_key))
@@ -5171,6 +5338,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "missing_applied_coverage",
         "missing_holdout_coverage",
         "durable_action_ledger_entry",
+        "durable_outcome_ledger_entry",
+        "measured_full_rollout_activation",
     }
     return {key: value for key, value in clean.items() if value not in (None, "", [], 0) or key in preserved_empty_keys}
 
@@ -10656,6 +10825,11 @@ def build_research_plan(
     full_rollout_crunch_measurement = _full_rollout_crunch_activation_measurement(summary)
     if full_rollout_crunch_measurement is not None:
         summary["full_rollout_crunch_activation_measurement"] = full_rollout_crunch_measurement
+        if isinstance(summary.get("evidence_to_activation_next_action_ledger"), dict):
+            summary["evidence_to_activation_next_action_ledger"] = _merge_full_rollout_crunch_measurement_into_ledger(
+                summary["evidence_to_activation_next_action_ledger"],
+                full_rollout_crunch_measurement,
+            )
     activation_queue = build_local_activation_next_action_queue(summary)
     if activation_queue is not None:
         summary["local_activation_next_action_queue"] = activation_queue

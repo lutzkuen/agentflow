@@ -4823,6 +4823,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_issue_650_measures_full_rollout_crunch_from_ledger_fingerprint(self):
         closed_title = "Measure request-shape repeated-context crunch canary impact"
+        closed_title_650 = "Measure full-rollout repeated-context crunch activation outcomes"
+        closed_title_657 = "Rank post-full-rollout crunch cohorts by realized keep-active savings"
         plan = build_research_plan(
             issues=[
                 issue(
@@ -4831,6 +4833,20 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     ["backlog", "status:ready", "crunch", "privacy"],
                     state="CLOSED",
                     closed="2026-06-18T00:15:00Z",
+                ),
+                issue(
+                    650,
+                    closed_title_650,
+                    ["backlog", "status:ready", "crunch", "privacy"],
+                    state="CLOSED",
+                    closed="2026-06-18T00:45:00Z",
+                ),
+                issue(
+                    657,
+                    closed_title_657,
+                    ["backlog", "status:ready", "crunch", "privacy"],
+                    state="CLOSED",
+                    closed="2026-06-18T01:15:00Z",
                 )
             ],
             stats={
@@ -4999,6 +5015,45 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(counters["rollback_count"], 0)
         self.assertEqual(counters["safety_stop_count"], 0)
         self.assertFalse(counters["stale_evidence"]["stale"])
+        durable_outcome = measurement["durable_full_rollout_outcome"]
+        self.assertEqual(durable_outcome["schema"], "agentflow.full_rollout_crunch_activation_outcome.v1")
+        self.assertTrue(durable_outcome["durable_outcome_ledger_entry"])
+        self.assertEqual(durable_outcome["ledger_fingerprint"], "activation:f5f6eae5f0a0081a")
+        self.assertEqual(durable_outcome["outcome"], "keep-active")
+        self.assertEqual(durable_outcome["next_action"], "keep-active")
+        self.assertEqual(durable_outcome["applied_count"], 107)
+        self.assertEqual(durable_outcome["holdout_count"], 40)
+        self.assertEqual(durable_outcome["fallback_count"], 0)
+        self.assertEqual(durable_outcome["rollback_count"], 0)
+        self.assertEqual(durable_outcome["safety_stop_count"], 0)
+        self.assertEqual(durable_outcome["observed_saved_tokens"], 8606129)
+        self.assertAlmostEqual(durable_outcome["observed_savings_usd"], 25.818387)
+        self.assertEqual(durable_outcome["successor_decision"], "no-op")
+        self.assertEqual(durable_outcome["successor_next_action"], "keep-current-rule-only")
+        self.assertEqual(durable_outcome["successor_no_op_reason"], "no-unsuppressed-post-full-rollout-crunch-cohort")
+        self.assertTrue(durable_outcome["privacy"]["metadata_only"])
+        self.assertTrue(durable_outcome["privacy"]["aggregate_only"])
+        ledger_entry = next(
+            item for item in stats_summary["evidence_to_activation_next_action_ledger"]["entries"]
+            if item["fingerprint"] == "activation:f5f6eae5f0a0081a"
+        )
+        self.assertTrue(ledger_entry["durable_outcome_ledger_entry"])
+        self.assertTrue(ledger_entry["measured_full_rollout_activation"])
+        self.assertEqual(ledger_entry["full_rollout_outcome"], "keep-active")
+        self.assertEqual(ledger_entry["full_rollout_outcome_next_action"], "keep-active")
+        self.assertEqual(ledger_entry["full_rollout_successor_decision"], "no-op")
+        self.assertEqual(ledger_entry["full_rollout_successor_no_op_reason"], "no-unsuppressed-post-full-rollout-crunch-cohort")
+        self.assertEqual(ledger_entry["full_rollout_activation_outcome"]["ledger_fingerprint"], "activation:f5f6eae5f0a0081a")
+        self.assertEqual(ledger_entry["keep_active_regression_gate"]["state"], "keep-active")
+        queue_entry = next(
+            item for item in stats_summary["local_activation_next_action_queue"]["entries"]
+            if item["fingerprint"] == "activation:f5f6eae5f0a0081a"
+        )
+        self.assertTrue(queue_entry["durable_outcome_ledger_entry"])
+        self.assertTrue(queue_entry["measured_full_rollout_activation"])
+        self.assertEqual(queue_entry["full_rollout_outcome"], "keep-active")
+        self.assertEqual(queue_entry["full_rollout_activation_outcome"]["outcome"], "keep-active")
+        self.assertEqual(queue_entry["keep_active_regression_gate"]["state"], "keep-active")
         self.assertTrue(measurement["duplicate_suppression"]["suppresses_new_activation_issue"])
         predecessor = measurement["closed_predecessor_suppression"]
         self.assertTrue(predecessor["closed_prior_issue_seen"])
@@ -5007,6 +5062,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("full_rollout_crunch_activation_measurement", plan["evidence"]["inspected_sources"])
         titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
         self.assertNotIn(closed_title, titles)
+        self.assertNotIn(closed_title_650, titles)
+        self.assertNotIn(closed_title_657, titles)
         self.assertTrue(measurement["privacy"]["metadata_only"])
         self.assertTrue(measurement["privacy"]["aggregate_only"])
         self.assertFalse(measurement["privacy"]["raw_prompts_included"])
