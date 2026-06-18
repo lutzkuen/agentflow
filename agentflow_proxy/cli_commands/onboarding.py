@@ -281,6 +281,28 @@ def agentflow_cli(
         help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
     )
 
+    demo_parser = subparsers.add_parser(
+        "demo",
+        help="Run deterministic no-provider AgentFlow demos.",
+    )
+    demo_subparsers = demo_parser.add_subparsers(dest="demo_command", required=True)
+    golden_path_parser = demo_subparsers.add_parser(
+        "golden-path",
+        help="Prove OpenAI/Codex local savings with fixture-backed metadata only.",
+    )
+    golden_path_parser.add_argument(
+        "--db",
+        default=None,
+        help="Optional local AgentFlow SQLite path to include live OpenAI/Codex metadata evidence.",
+    )
+    golden_path_parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent OpenAI calls to scan for live evidence, default: 1000.",
+    )
+    golden_path_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     version_parser = subparsers.add_parser("version", help="Print the AgentFlow CLI version.")
     version_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
@@ -437,6 +459,38 @@ def agentflow_cli(
             _write_json(stdout, result)
         else:
             _write_savings_report_summary(stdout, result)
+        return 0 if result.get("ok") else 1
+
+    if args.command == "demo":
+        from agentflow_proxy.golden_path import build_golden_path_summary
+
+        db_path = getattr(args, "db", None)
+        store = None
+        if db_path:
+            db_path_obj = Path(db_path)
+            if db_path_obj.exists():
+                try:
+                    store = _open_store_for_db(db_path)
+                except Exception:
+                    store = None
+        try:
+            result = build_golden_path_summary(store=store, limit=int(getattr(args, "limit", 1000)))
+        finally:
+            if store is not None:
+                try:
+                    store.conn.close()
+                except Exception:
+                    pass
+        if args.json:
+            _write_json(stdout, result)
+        else:
+            stdout.write(
+                "AgentFlow golden path: "
+                f"{result.get('decision_status')} "
+                f"{result.get('local_action_family')} "
+                f"saved=${float(result.get('estimated_agentflow_savings_usd') or 0.0):.6f} "
+                f"managed_server_required={str(bool(result.get('managed_server_required'))).lower()}\n"
+            )
         return 0 if result.get("ok") else 1
 
     if args.command == "version":
@@ -965,5 +1019,4 @@ def _write_doctor_summary(stdout: Any, result: dict[str, Any]) -> None:
         stdout.write(f"Running upstream: {health.get('upstream')}\n")
     for issue in result.get("issues") or []:
         stdout.write(f"- {issue.get('code')}: {issue.get('message')}\n")
-
 
