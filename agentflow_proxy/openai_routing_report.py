@@ -15,6 +15,7 @@ SCHEMA = "agentflow.openai_routing_opportunity.v1"
 PROMOTION_DECISION_REPORT_SCHEMA = "agentflow.openai_routing_promotion_decision_report.v1"
 PROMOTION_DECISION_SCHEMA = "agentflow.openai_routing_promotion_decision.v1"
 ACTIVE_LOCAL_POLICY_OUTCOME_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome.v1"
+ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
 PROMOTION_VERDICT_OPTIONS = ["promotion-ready", "active-local-policy", "keep-staged", "keep-blocked", "rollback-required"]
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
@@ -1423,6 +1424,140 @@ def _openai_promotion_duplicate_suppression(
     }
 
 
+def _openai_active_policy_outcome_gate(
+    *,
+    applied_count: int,
+    holdout_count: int,
+    skipped_count: int,
+    unknown_count: int,
+    safety_stop_count: int,
+    error_count: int,
+    fallback_count: int,
+    retry_count: int,
+    stale_evidence_count: int,
+    savings_per_1000: float,
+) -> dict[str, Any]:
+    reason_codes: list[str] = []
+    if applied_count <= 0:
+        reason_codes.append("missing-applied-coverage")
+    if holdout_count <= 0:
+        reason_codes.append("missing-holdout-coverage")
+    if safety_stop_count > 0:
+        reason_codes.append("safety-stop-observed")
+    if error_count > 0:
+        reason_codes.append("error-observed")
+    if fallback_count > 0:
+        reason_codes.append("fallback-observed")
+    if retry_count > 0:
+        reason_codes.append("retry-observed")
+    if stale_evidence_count > 0:
+        reason_codes.append("stale-evidence")
+    if skipped_count > 0:
+        reason_codes.append("skipped-coverage-observed")
+    if unknown_count > 0:
+        reason_codes.append("unknown-coverage-observed")
+    if savings_per_1000 <= 0:
+        reason_codes.append("non-positive-estimated-savings")
+
+    rollback_reasons = {
+        "safety-stop-observed",
+        "error-observed",
+        "fallback-observed",
+        "retry-observed",
+        "stale-evidence",
+    }
+    coverage_reasons = {"missing-applied-coverage", "missing-holdout-coverage"}
+    skipped_review_reasons = {"skipped-coverage-observed", "unknown-coverage-observed"}
+    if any(reason in rollback_reasons for reason in reason_codes):
+        state = "rollback-required"
+        next_action = "rollback-active-openai-routing-rule"
+        gate_passed = False
+    elif any(reason in coverage_reasons for reason in reason_codes):
+        state = "measure-more-coverage"
+        next_action = "measure-more-openai-routing-coverage"
+        gate_passed = False
+    elif any(reason in skipped_review_reasons for reason in reason_codes):
+        state = "review-skipped-coverage"
+        next_action = "review-openai-routing-skipped-coverage"
+        gate_passed = False
+    elif "non-positive-estimated-savings" in reason_codes:
+        state = "keep-blocked"
+        next_action = "keep-openai-routing-blocked-until-positive-savings"
+        gate_passed = False
+    else:
+        state = "keep-active"
+        next_action = "keep-active"
+        gate_passed = True
+
+    return {
+        "schema": ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA,
+        "state": state,
+        "gate_passed": gate_passed,
+        "deterministic_next_action": next_action,
+        "next_action": next_action,
+        "reason_codes": reason_codes,
+        "decision_options": ["keep-active", "measure-more-coverage", "rollback-required", "review-skipped-coverage", "keep-blocked"],
+        "regression_counters": {
+            "schema": "agentflow.openai_routing_active_local_policy_outcome_regression_counters.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": skipped_count,
+            "unknown_count": unknown_count,
+            "safety_stop_count": safety_stop_count,
+            "error_count": error_count,
+            "fallback_count": fallback_count,
+            "retry_count": retry_count,
+            "stale_evidence_count": stale_evidence_count,
+            "savings_per_1000_calls_usd": savings_per_1000,
+        },
+        "privacy": _openai_promotion_decision_privacy(),
+    }
+
+
+def _openai_active_policy_rollback_metadata(
+    *,
+    active_local_policy_rule: dict[str, Any],
+    outcome_gate: dict[str, Any],
+) -> dict[str, Any]:
+    reason_codes = outcome_gate.get("reason_codes") if isinstance(outcome_gate.get("reason_codes"), list) else []
+    disabled_reason = str(reason_codes[0]) if reason_codes else "operator-requested"
+    return {
+        "schema": "agentflow.openai_routing_active_local_policy_rollback_metadata.v1",
+        "required_for_active_policy_measurement": True,
+        "rollback_action_type": "disable_openai_routing_rule",
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "target_rule_id": "[REDACTED_ID]",
+        "rule_id_included": False,
+        "policy_files_written": False,
+        "disable_patch": {
+            "rules": [
+                {
+                    "id": "[REDACTED_ID]",
+                    "enabled": False,
+                    "disabled_reason": disabled_reason,
+                }
+            ]
+        },
+        "rollback_reason_codes": [
+            "operator-requested",
+            "safety-stop-observed",
+            "error-observed",
+            "fallback-observed",
+            "retry-observed",
+            "stale-evidence",
+        ],
+        "preserve_previous_rule_required": bool(
+            (active_local_policy_rule.get("rollback_metadata") or {}).get("preserve_previous_rule_required", True)
+        )
+        if isinstance(active_local_policy_rule.get("rollback_metadata"), dict)
+        else True,
+        "privacy": _openai_promotion_decision_privacy(),
+    }
+
+
 def _openai_active_local_policy_outcome(
     *,
     decision: str,
@@ -1438,7 +1573,7 @@ def _openai_active_local_policy_outcome(
     projected_savings_usd: float,
     savings_per_1000: float,
 ) -> dict[str, Any] | None:
-    if decision != "active-local-policy" or active_local_policy_rule is None:
+    if active_local_policy_rule is None:
         return None
 
     applied = _as_int(lifecycle.get("applied_count"))
@@ -1451,6 +1586,22 @@ def _openai_active_local_policy_outcome(
     retries = _as_int(lifecycle.get("retry_count"))
     stale = lifecycle.get("stale_evidence") if isinstance(lifecycle.get("stale_evidence"), dict) else {}
     stale_evidence_count = _as_int(lifecycle.get("observed_count")) if stale.get("stale") else 0
+    outcome_gate = _openai_active_policy_outcome_gate(
+        applied_count=applied,
+        holdout_count=holdout,
+        skipped_count=skipped,
+        unknown_count=unknown,
+        safety_stop_count=safety,
+        error_count=errors,
+        fallback_count=fallbacks,
+        retry_count=retries,
+        stale_evidence_count=stale_evidence_count,
+        savings_per_1000=savings_per_1000,
+    )
+    rollback_metadata = _openai_active_policy_rollback_metadata(
+        active_local_policy_rule=active_local_policy_rule,
+        outcome_gate=outcome_gate,
+    )
     coverage = {
         "schema": "agentflow.openai_routing_active_local_policy_coverage.v1",
         "matched_count": matched_count,
@@ -1471,9 +1622,14 @@ def _openai_active_local_policy_outcome(
         "status": "active-local-policy",
         "state": "active-local-policy",
         "current_status": "applied",
-        "outcome": "measure-active-local-policy",
+        "outcome": outcome_gate["state"],
+        "outcome_decision": outcome_gate["state"],
         "decision": decision,
-        "next_action": next_action,
+        "measurement_next_action": next_action,
+        "next_action": outcome_gate["next_action"],
+        "deterministic_next_action": outcome_gate["deterministic_next_action"],
+        "reason_codes": outcome_gate["reason_codes"],
+        "gate_passed": outcome_gate["gate_passed"],
         "reason": reason,
         "local_action_family": "routing",
         "target": target,
@@ -1524,6 +1680,8 @@ def _openai_active_local_policy_outcome(
             "metadata_only": True,
             "aggregate_only": True,
         },
+        "outcome_gate": outcome_gate,
+        "rollback_metadata": rollback_metadata,
         "coverage": coverage,
         "latest_observed_at": lifecycle.get("latest_observed_at"),
         "oldest_observed_at": lifecycle.get("oldest_observed_at"),
@@ -1739,6 +1897,14 @@ def _build_openai_promotion_decision(
         "retry_count": retry_count,
         "latest_observed_at": latest_observed_at,
         "oldest_observed_at": oldest_observed_at,
+        "stale_evidence": {
+            "schema": "agentflow.openai_routing_active_local_policy_stale_evidence.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "stale": stale_evidence_count > 0,
+            "stale_evidence_count": stale_evidence_count,
+            "max_age_hours": DEFAULT_MAX_EVIDENCE_AGE_HOURS,
+        },
         "skipped_reason_breakdown": _breakdown(skipped_reason_counts),
         "unknown_reason_breakdown": _breakdown(unknown_reason_counts),
         "skipped_unknown_classification": {
@@ -1863,6 +2029,7 @@ def build_openai_routing_promotion_decision_report(
         endpoint=endpoint,
         category=category,
     )
+    active_outcome = decision.get("active_local_policy_outcome") if isinstance(decision.get("active_local_policy_outcome"), dict) else {}
     return {
         "schema": PROMOTION_DECISION_REPORT_SCHEMA,
         "generated_at": utc_now(),
@@ -1884,6 +2051,15 @@ def build_openai_routing_promotion_decision_report(
             "blocked_count": decision["blocked_count"],
             "candidate_count": decision["candidate_count"],
             "active_local_policy_outcome_count": 1 if decision.get("active_local_policy_outcome") else 0,
+            "active_local_policy_outcome_decision": active_outcome.get("outcome_decision"),
+            "active_local_policy_next_action": active_outcome.get("deterministic_next_action"),
+            "active_local_policy_gate_passed": active_outcome.get("gate_passed"),
+            "active_local_policy_reason_codes": active_outcome.get("reason_codes") or [],
+            "active_local_policy_rollback_action_type": (
+                active_outcome.get("rollback_metadata", {}).get("rollback_action_type")
+                if isinstance(active_outcome.get("rollback_metadata"), dict)
+                else None
+            ),
             "candidate_ids_included": False,
             "current_routed_count": decision["current_routed_count"],
             "applied_count": decision["lifecycle"]["applied_count"],

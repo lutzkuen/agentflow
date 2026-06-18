@@ -656,7 +656,12 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "active-local-policy")
         self.assertEqual(outcome["state"], "active-local-policy")
         self.assertEqual(outcome["current_status"], "applied")
-        self.assertEqual(outcome["next_action"], "measure-openai-routing-rule-outcomes")
+        self.assertEqual(outcome["measurement_next_action"], "measure-openai-routing-rule-outcomes")
+        self.assertEqual(outcome["outcome_decision"], "keep-active")
+        self.assertEqual(outcome["next_action"], "keep-active")
+        self.assertEqual(outcome["deterministic_next_action"], "keep-active")
+        self.assertTrue(outcome["gate_passed"])
+        self.assertEqual(outcome["reason_codes"], [])
         self.assertEqual(outcome["target_local_policy_section"], "routing.rules")
         self.assertEqual(outcome["target_local_rule_file"], "routing_rules.yaml")
         self.assertEqual(outcome["matched_count"], 14)
@@ -671,6 +676,16 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(outcome["regression_counters"]["fallback_count"], 0)
         self.assertEqual(outcome["regression_counters"]["retry_count"], 0)
         self.assertEqual(outcome["regression_counters"]["safety_stop_count"], 0)
+        gate = outcome["outcome_gate"]
+        self.assertEqual(gate["schema"], "agentflow.openai_routing_active_local_policy_outcome_gate.v1")
+        self.assertEqual(gate["state"], "keep-active")
+        self.assertEqual(gate["deterministic_next_action"], "keep-active")
+        rollback_outcome = outcome["rollback_metadata"]
+        self.assertEqual(rollback_outcome["schema"], "agentflow.openai_routing_active_local_policy_rollback_metadata.v1")
+        self.assertEqual(rollback_outcome["rollback_action_type"], "disable_openai_routing_rule")
+        self.assertEqual(rollback_outcome["target_rule_id"], "[REDACTED_ID]")
+        self.assertFalse(rollback_outcome["rule_id_included"])
+        self.assertFalse(rollback_outcome["policy_files_written"])
         self.assertFalse(outcome["candidate_ids_included"])
         self.assertFalse(outcome["candidate_set"]["individual_candidate_ids_included"])
         self.assertFalse(outcome["privacy"]["raw_prompts_included"])
@@ -704,8 +719,143 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["holdout_count"], 7)
         self.assertEqual(payload["summary"]["next_action"], "measure-openai-routing-rule-outcomes")
         self.assertEqual(payload["summary"]["active_local_policy_outcome_count"], 1)
+        self.assertEqual(payload["summary"]["active_local_policy_outcome_decision"], "keep-active")
+        self.assertEqual(payload["summary"]["active_local_policy_next_action"], "keep-active")
+        self.assertTrue(payload["summary"]["active_local_policy_gate_passed"])
+        self.assertEqual(payload["summary"]["active_local_policy_reason_codes"], [])
+        self.assertEqual(payload["summary"]["active_local_policy_rollback_action_type"], "disable_openai_routing_rule")
         self.assertEqual(payload["active_local_policy_outcomes"][0]["schema"], "agentflow.openai_routing_active_local_policy_outcome.v1")
         self.assertFalse(payload["privacy"]["individual_candidate_ids_included"])
+
+    def test_active_openai_routing_rule_outcome_reviews_skipped_unknown_coverage(self) -> None:
+        def canary(cohort: str, **extra: object) -> dict[str, object]:
+            status = "applied" if cohort == "canary_applied" else "holdout"
+            if cohort == "skipped":
+                status = "not_selected"
+            if cohort == "unknown":
+                status = "mystery"
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-v1",
+                "target_candidate_id": "openai-route:responses:gpt-5:tool-light:tools:nonstream:to-gpt-5-4-mini",
+                "status": status,
+                "cohort": cohort,
+                "reason": "outside-canary-fraction" if cohort == "skipped" else "selected-canary",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if cohort == "canary_applied" else "gpt-5.4",
+                "category": "tool-light",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                **extra,
+            }
+
+        for _ in range(4):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+            )
+        for _ in range(4):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout", reason="selected-holdout"),
+            )
+        self._log_openai_call(
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4",
+            category="tool-light",
+            text_chars=4000,
+            has_tools=True,
+            openai_canary=canary("skipped"),
+        )
+        self._log_openai_call(
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4",
+            category="tool-light",
+            text_chars=4000,
+            has_tools=True,
+            openai_canary=canary("unknown", reason="missing-status"),
+        )
+
+        result = build_openai_routing_promotion_decision_report(self.store, limit=20)
+
+        outcome = result["active_local_policy_outcomes"][0]
+        self.assertEqual(outcome["outcome_decision"], "review-skipped-coverage")
+        self.assertEqual(outcome["deterministic_next_action"], "review-openai-routing-skipped-coverage")
+        self.assertFalse(outcome["gate_passed"])
+        self.assertIn("skipped-coverage-observed", outcome["reason_codes"])
+        self.assertIn("unknown-coverage-observed", outcome["reason_codes"])
+        self.assertEqual(result["summary"]["active_local_policy_outcome_decision"], "review-skipped-coverage")
+        self.assertEqual(result["summary"]["active_local_policy_next_action"], "review-openai-routing-skipped-coverage")
+
+    def test_active_openai_routing_rule_outcome_requires_rollback_on_regression(self) -> None:
+        def canary(cohort: str, **extra: object) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-v1",
+                "target_candidate_id": "openai-route:responses:gpt-5:tool-light:tools:nonstream:to-gpt-5-4-mini",
+                "status": "applied" if cohort == "canary_applied" else "holdout",
+                "cohort": cohort,
+                "reason": "selected-canary" if cohort == "canary_applied" else "selected-holdout",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if cohort == "canary_applied" else "gpt-5.4",
+                "category": "tool-light",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                **extra,
+            }
+
+        for _ in range(3):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+            )
+        self._log_openai_call(
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4-mini",
+            category="tool-light",
+            text_chars=4000,
+            has_tools=True,
+            status_code=500,
+            retry_count=1,
+            openai_canary=canary("canary_applied", fallback_reason="rate_limited"),
+        )
+        for _ in range(4):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout"),
+            )
+
+        result = build_openai_routing_promotion_decision_report(self.store, limit=20)
+
+        outcome = result["active_local_policy_outcomes"][0]
+        self.assertEqual(outcome["outcome_decision"], "rollback-required")
+        self.assertEqual(outcome["deterministic_next_action"], "rollback-active-openai-routing-rule")
+        self.assertFalse(outcome["gate_passed"])
+        self.assertIn("error-observed", outcome["reason_codes"])
+        self.assertIn("fallback-observed", outcome["reason_codes"])
+        self.assertIn("retry-observed", outcome["reason_codes"])
+        self.assertEqual(outcome["rollback_metadata"]["rollback_action_type"], "disable_openai_routing_rule")
+        self.assertEqual(result["summary"]["active_local_policy_outcome_decision"], "rollback-required")
+        self.assertEqual(result["summary"]["active_local_policy_next_action"], "rollback-active-openai-routing-rule")
+        self.assertEqual(result["summary"]["active_local_policy_rollback_action_type"], "disable_openai_routing_rule")
 
     def test_targeted_promotion_decision_keeps_skipped_unknown_coverage_out_of_promotion(self) -> None:
         def canary(canary_cohort: str, **extra: object) -> dict[str, object]:
