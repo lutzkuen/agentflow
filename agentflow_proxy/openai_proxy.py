@@ -146,6 +146,30 @@ def _openai_cache_replay_blockers(
     return blockers
 
 
+def _should_collect_openai_file_dependency_evidence(
+    *,
+    can_cache: bool,
+    has_tool_blocks: bool,
+    selected_before_cache: str | None,
+    category: str | None,
+    stream: bool,
+) -> bool:
+    """Collect review-only invalidation evidence even when cache replay is skipped."""
+    if can_cache:
+        return True
+    if has_tool_blocks:
+        return True
+    if stream and category in {"tool-light", "tool-result", "tool-heavy"}:
+        return True
+    if selected_before_cache in {"routing", "old_context_summary"} and category in {
+        "tool-light",
+        "tool-result",
+        "tool-heavy",
+    }:
+        return True
+    return False
+
+
 def provider_disabled_response(context: ProviderContext, expected: str) -> JSONResponse:
     return JSONResponse(
         {
@@ -857,7 +881,13 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                         error = upstream_error_text(b"".join(upstream_error_chunks), status_code)
                     stream_cache_meta = cache_decision_meta("skipped", "streaming")
                     stream_has_tool_blocks = has_tools(crunched)
-                    if stream_has_tool_blocks or category in {"tool-light", "tool-result", "tool-heavy"}:
+                    if _should_collect_openai_file_dependency_evidence(
+                        can_cache=False,
+                        has_tool_blocks=stream_has_tool_blocks,
+                        selected_before_cache=None,
+                        category=category,
+                        stream=True,
+                    ):
                         stream_file_deps = cache_file_dependency_snapshots(crunched)
                         attach_file_dependency_cache_meta(
                             stream_cache_meta,
@@ -1010,8 +1040,12 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 store_obj=context.store,
                 managed_profile=managed_cache_profile,
             )
-        inspect_cache_dependencies = can_cache or (
-            has_tool_blocks and selected_before_cache not in {"routing", "old_context_summary"}
+        inspect_cache_dependencies = _should_collect_openai_file_dependency_evidence(
+            can_cache=can_cache,
+            has_tool_blocks=has_tool_blocks,
+            selected_before_cache=selected_before_cache,
+            category=category,
+            stream=False,
         )
         file_deps = cache_file_dependency_snapshots(crunched) if inspect_cache_dependencies else []
         if inspect_cache_dependencies:
