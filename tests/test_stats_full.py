@@ -2575,6 +2575,108 @@ request_shape_repeated_context_canaries:
         self.assertNotIn("secret-cache-key-must-not-appear", rendered)
         self.assertNotIn("codex-readiness-session-secret", rendered)
 
+    def test_openai_codex_readiness_card_reports_demo_only_without_live_evidence(self):
+        result = asyncio.run(stats_views.stats_openai_codex_readiness(server.store, limit=20))
+
+        self.assertEqual(result["schema"], "agentflow.openai_codex_savings_readiness.v1")
+        self.assertEqual(result["vertical"], "openai_codex_savings")
+        self.assertEqual(result["state"], "demo_only")
+        self.assertEqual(result["active_surface"], "none")
+        self.assertEqual(result["active_action_family"], "none")
+        self.assertGreater(result["agentflow_generated_savings_usd"], 0)
+        self.assertEqual(result["live_agentflow_generated_savings_usd"], 0.0)
+        self.assertEqual(result["provider_prompt_cache_discount_usd"], 0.0)
+        self.assertEqual(result["top_blocker_reason"], "no-live-openai-or-codex-savings-evidence")
+        self.assertFalse(result["managed_server_required"])
+        self.assertFalse(result["privacy"]["raw_prompts_included"])
+        self.assertFalse(result["privacy"]["request_ids_included"])
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        with TestClient(app) as client:
+            response = client.get("/agentflow/stats/openai-codex-readiness?limit=20")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["state"], "demo_only")
+
+        html = stats_views.dashboard_html()
+        self.assertIn("/agentflow/stats/openai-codex-readiness", html)
+        self.assertIn("OpenAI/Codex savings readiness", html)
+        self.assertIn("openai-codex-readiness-card", html)
+
+    def test_openai_codex_readiness_card_separates_live_agentflow_and_provider_cache_savings(self):
+        secret = "raw openai codex readiness secret must not leak"
+        server.store.log_call(
+            id="openai-codex-live-call",
+            created_at=utc_now(),
+            path="/v1/responses",
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4-mini",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=25,
+            input_tokens_est=1000,
+            output_tokens_est=30,
+            actual_input_tokens=800,
+            actual_output_tokens=30,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.005,
+            crunch_json=stable_json({"changed": False, "tokens_saved_est": 0, "debug": secret}),
+            routing_json=stable_json(
+                {
+                    "provider": "openai",
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "requested_model": "gpt-5.4",
+                    "routed_model": "gpt-5.4-mini",
+                    "reason": "live OpenAI routing readiness evidence",
+                }
+            ),
+            cache_json=stable_json({"status": "skipped", "reason": "fixture", "cache_key": secret}),
+            error=None,
+            request_json=json.dumps({"input": secret}),
+            response_json=json.dumps({"output_text": secret}),
+            session_id="openai-codex-secret-session",
+            category="tool-light",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=1000,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="openai",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+        )
+
+        result = asyncio.run(stats_views.stats_openai_codex_readiness(server.store, limit=20))
+
+        self.assertEqual(result["state"], "active")
+        self.assertEqual(result["active_surface"], "openai_responses")
+        self.assertEqual(result["active_action_family"], "routing")
+        self.assertGreater(result["live_agentflow_generated_savings_usd"], 0)
+        self.assertEqual(
+            result["agentflow_generated_savings_usd"],
+            result["live_agentflow_generated_savings_usd"],
+        )
+        self.assertGreater(result["provider_prompt_cache_discount_usd"], 0)
+        self.assertNotEqual(
+            result["agentflow_generated_savings_usd"],
+            result["provider_prompt_cache_discount_usd"],
+        )
+        self.assertTrue(result["rollback_available"])
+        self.assertFalse(result["managed_server_required"])
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("openai-codex-secret-session", rendered)
+
     def test_codex_effectiveness_endpoint_keeps_terminal_compaction_metadata_content_free(self):
         raw_request_id = "raw-codex-terminal-dashboard-request-id-must-not-leak"
         raw_thread_id = "raw-codex-terminal-dashboard-thread-id-must-not-leak"

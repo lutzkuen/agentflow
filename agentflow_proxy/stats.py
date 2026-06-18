@@ -29,6 +29,7 @@ from agentflow_proxy.pricing import (
     estimate_cost,
     provider_prompt_cache_accounting,
 )
+from agentflow_proxy.golden_path import build_golden_path_summary
 from agentflow_proxy.paths import agentflow_config_path
 from agentflow_proxy.public_metadata import public_id, public_label
 from agentflow_proxy.quality import (
@@ -15993,6 +15994,181 @@ def _codex_readiness_check(name: str, status: str, detail: str, metrics: dict[st
     }
 
 
+def _openai_provider_prompt_cache_discount(store_obj: Any, *, limit: int) -> float:
+    try:
+        rows = store_obj.conn.execute(
+            """
+            select coalesce(routed_model, requested_model) as model,
+                   sum(coalesce(cache_creation_input_tokens, 0)) as creation_tok,
+                   sum(coalesce(cache_read_input_tokens, 0)) as read_tok
+            from calls
+            where coalesce(provider, 'anthropic') = 'openai'
+              and (coalesce(cache_creation_input_tokens, 0) > 0 or coalesce(cache_read_input_tokens, 0) > 0)
+            group by coalesce(routed_model, requested_model)
+            limit ?
+            """,
+            (max(1, min(int(limit or 1000), 5000)),),
+        ).fetchall()
+    except Exception:
+        return 0.0
+    discount = 0.0
+    for row in rows:
+        accounting = provider_prompt_cache_accounting(
+            str(row["model"] or ""),
+            provider="openai",
+            cache_creation_tokens=_as_int(row["creation_tok"]),
+            cache_read_tokens=_as_int(row["read_tok"]),
+        )
+        discount += _as_float(accounting.get("read_discount_usd"))
+    return round(discount, 8)
+
+
+def _openai_codex_blocker(codex_readiness: dict[str, Any], *, state: str) -> str | None:
+    if state == "demo_only":
+        return "no-live-openai-or-codex-savings-evidence"
+    for check in codex_readiness.get("readiness_checks") or []:
+        if not isinstance(check, dict):
+            continue
+        if check.get("status") == "blocked":
+            return str(check.get("name") or check.get("detail") or "codex-readiness-blocked")
+    if state == "ready":
+        return "waiting-for-applied-savings-evidence"
+    return None
+
+
+async def stats_openai_codex_readiness(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    capped_limit = max(1, min(int(limit or 1000), 5000))
+    golden = build_golden_path_summary(store=store_obj, limit=capped_limit)
+    codex_readiness = await stats_codex_readiness(store_obj, limit=min(capped_limit, 1000))
+    codex_impact = await stats_codex_canary_impact(store_obj, limit=capped_limit)
+
+    live = golden.get("live_evidence") if isinstance(golden.get("live_evidence"), dict) else {}
+    fixture = golden.get("fixture") if isinstance(golden.get("fixture"), dict) else {}
+    codex_summary = codex_readiness.get("summary") if isinstance(codex_readiness.get("summary"), dict) else {}
+    codex_exact_cache = codex_readiness.get("exact_cache") if isinstance(codex_readiness.get("exact_cache"), dict) else {}
+    codex_impact_summary = codex_impact.get("summary") if isinstance(codex_impact.get("summary"), dict) else {}
+
+    openai_live_savings = _as_float(live.get("estimated_agentflow_savings_usd"))
+    openai_live_family = str(live.get("local_action_family") or "none")
+    openai_live_active = bool(
+        live.get("status") == "active"
+        and (
+            openai_live_savings > 0.0
+            or _as_int(live.get("routing_applied_count")) > 0
+            or _as_int(live.get("crunch_changed_count")) > 0
+        )
+    )
+
+    codex_hint_savings = _as_float(codex_summary.get("summary_model_hint_estimated_savings_usd"))
+    codex_cache_savings = _as_float(codex_exact_cache.get("estimated_saved_cost_usd"))
+    codex_impact_savings = _as_float(codex_impact_summary.get("estimated_savings_usd"))
+    codex_live_savings = max(codex_hint_savings + codex_cache_savings, codex_impact_savings)
+    codex_turn_count = _as_int(codex_summary.get("turn_start_rows"))
+    codex_active = bool(
+        codex_live_savings > 0.0
+        or _as_int(codex_summary.get("summary_model_hint_applied")) > 0
+        or _as_int(codex_summary.get("exact_cache_hits")) > 0
+    )
+    codex_ready = codex_readiness.get("status") == "ready"
+    codex_blocked = any(
+        isinstance(check, dict) and check.get("status") == "blocked"
+        for check in codex_readiness.get("readiness_checks") or []
+    )
+
+    live_savings = openai_live_savings + codex_live_savings
+    fixture_savings = _as_float(fixture.get("estimated_agentflow_savings_usd") or golden.get("estimated_agentflow_savings_usd"))
+    if openai_live_active or codex_active:
+        state = "active"
+        agentflow_savings = live_savings
+        evidence_basis = "live-local-metadata"
+    elif codex_ready:
+        state = "ready"
+        agentflow_savings = 0.0
+        evidence_basis = "ready-local-metadata"
+    elif codex_turn_count > 0 and codex_blocked:
+        state = "blocked"
+        agentflow_savings = 0.0
+        evidence_basis = "blocked-local-metadata"
+    else:
+        state = "demo_only"
+        agentflow_savings = fixture_savings
+        evidence_basis = "golden-path-fixture"
+
+    codex_family = "cache" if codex_cache_savings >= codex_hint_savings and codex_cache_savings > 0 else "routing"
+    if not codex_active:
+        codex_family = "none"
+    if openai_live_active and (openai_live_savings >= codex_live_savings or not codex_active):
+        active_surface = str(live.get("surface") or "openai_responses")
+        active_action_family = openai_live_family if openai_live_family in {"routing", "crunch", "cache"} else "routing"
+    elif codex_active or codex_ready:
+        active_surface = CODEX_APP_SOURCE_SURFACE
+        active_action_family = codex_family if codex_active else "none"
+    else:
+        active_surface = "none"
+        active_action_family = "none"
+
+    top_blocker = _openai_codex_blocker(codex_readiness, state=state)
+    provider_prompt_cache_discount = _openai_provider_prompt_cache_discount(store_obj, limit=capped_limit)
+
+    return {
+        "schema": "agentflow.openai_codex_savings_readiness.v1",
+        "generated_at": utc_now(),
+        "vertical": "openai_codex_savings",
+        "state": state,
+        "active_surface": active_surface,
+        "active_action_family": active_action_family,
+        "demonstrated_action_family": fixture.get("local_action_family") or "none",
+        "agentflow_generated_savings_usd": round(agentflow_savings, 8),
+        "live_agentflow_generated_savings_usd": round(live_savings, 8),
+        "demonstrated_agentflow_savings_usd": round(fixture_savings, 8),
+        "provider_prompt_cache_discount_usd": provider_prompt_cache_discount,
+        "top_blocker_reason": top_blocker,
+        "rollback_available": bool(state == "active" and active_action_family in {"routing", "crunch", "cache"}),
+        "managed_server_required": False,
+        "evidence_basis": evidence_basis,
+        "surfaces": {
+            "openai_responses": {
+                "state": "active" if openai_live_active else "demo_available",
+                "agentflow_generated_savings_usd": round(openai_live_savings, 8),
+                "local_action_family": openai_live_family,
+                "routing_applied_count": _as_int(live.get("routing_applied_count")),
+                "crunch_changed_count": _as_int(live.get("crunch_changed_count")),
+            },
+            CODEX_APP_SOURCE_SURFACE: {
+                "state": "active" if codex_active else str(codex_readiness.get("status") or "no-data"),
+                "agentflow_generated_savings_usd": round(codex_live_savings, 8),
+                "turn_start_rows": codex_turn_count,
+                "summary_model_hint_applied": _as_int(codex_summary.get("summary_model_hint_applied")),
+                "exact_cache_hits": _as_int(codex_summary.get("exact_cache_hits")),
+            },
+        },
+        "savings_breakdown": {
+            "agentflow_generated_savings_usd": round(agentflow_savings, 8),
+            "live_agentflow_generated_savings_usd": round(live_savings, 8),
+            "demonstrated_agentflow_savings_usd": round(fixture_savings, 8),
+            "provider_prompt_cache_discount_usd": provider_prompt_cache_discount,
+            "basis": "AgentFlow-generated routing/crunch/cache savings are kept separate from provider prompt-cache discounts.",
+        },
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_response_bodies_included": False,
+            "raw_transcripts_included": False,
+            "request_ids_included": False,
+            "thread_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "dashboard_read_only": True,
+        },
+    }
+
+
 async def stats_codex_readiness(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     capped_limit = max(1, min(int(limit or 500), 5000))
     effectiveness = await stats_codex_effectiveness(store_obj, limit=capped_limit)
@@ -20241,6 +20417,13 @@ def dashboard_html() -> str:
   .card.green .value{color:#3fb950}
   .card.yellow .value{color:#d29922}
   .card.blue .value{color:#58a6ff}
+  .product-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 18px}
+  .product-card .title{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .product-card h3{font-size:15px;font-weight:600;color:#f0f6fc}
+  .product-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  .product-metric .label{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:0;margin-bottom:4px}
+  .product-metric .value{font-size:18px;font-weight:600;color:#f0f6fc;overflow-wrap:anywhere}
+  .product-metric .sub{color:#8b949e;font-size:11px;line-height:1.35;margin-top:3px;overflow-wrap:anywhere}
   .tabs{display:flex;padding:0 24px;border-bottom:1px solid #30363d}
   .tab-btn{background:none;border:none;border-bottom:2px solid transparent;color:#8b949e;cursor:pointer;font-family:inherit;font-size:13px;margin-bottom:-1px;padding:10px 16px}
   .tab-btn.active{border-bottom-color:#58a6ff;color:#f0f6fc}
@@ -20509,6 +20692,21 @@ def dashboard_html() -> str:
 </div>
 
 <div class="tab-panel" id="tab-codex">
+<div class="section">
+  <h2>OpenAI/Codex savings readiness</h2>
+  <div class="product-card" id="openai-codex-readiness-card">
+    <div class="title">
+      <h3>OpenAI/Codex savings</h3>
+      <span class="badge miss" id="openai-codex-state">loading</span>
+    </div>
+    <div class="product-grid">
+      <div class="product-metric"><div class="label">Active surface</div><div class="value" id="openai-codex-surface">-</div><div class="sub" id="openai-codex-family">- action family</div></div>
+      <div class="product-metric"><div class="label">AgentFlow savings</div><div class="value savings" id="openai-codex-savings">-</div><div class="sub" id="openai-codex-savings-sub">local routing/crunch/cache only</div></div>
+      <div class="product-metric"><div class="label">Provider discount</div><div class="value" id="openai-codex-provider-discount">-</div><div class="sub">prompt-cache billing discount, separate from AgentFlow savings</div></div>
+      <div class="product-metric"><div class="label">Next blocker</div><div class="value" id="openai-codex-blocker">-</div><div class="sub" id="openai-codex-safety">-</div></div>
+    </div>
+  </div>
+</div>
 <div class="section">
   <h2>Codex optimization readiness</h2>
   <table data-table-id="codex-readiness" data-filter-label="Filter Codex readiness">
@@ -22174,9 +22372,39 @@ function topBreakdownValue(rows){
 
 function readinessBadge(status){
   if(status==='ready')return'hit';
+  if(status==='active')return'hit';
+  if(status==='demo_only')return'routed';
   if(status==='partial'||status==='disabled'||status==='no-data')return'routed';
   if(status==='blocked')return'err';
   return'miss';
+}
+
+async function refreshOpenAICodexReadiness(){
+  try{
+    const r=await fetch('/agentflow/stats/openai-codex-readiness?limit=1000');
+    const d=await r.json();
+    const state=d.state||'unknown';
+    document.getElementById('openai-codex-state').className='badge '+readinessBadge(state);
+    document.getElementById('openai-codex-state').textContent=state;
+    document.getElementById('openai-codex-surface').textContent=shortSurface(d.active_surface||'none');
+    const family=d.active_action_family||'none';
+    const demoFamily=d.demonstrated_action_family||'none';
+    document.getElementById('openai-codex-family').textContent=family==='none'&&demoFamily!=='none'
+      ? `demo action family: ${demoFamily}`
+      : `${family} action family`;
+    document.getElementById('openai-codex-savings').textContent=fmt(d.agentflow_generated_savings_usd||0,6);
+    const basis=d.evidence_basis||'metadata';
+    const live=d.live_agentflow_generated_savings_usd||0;
+    const demonstrated=d.demonstrated_agentflow_savings_usd||0;
+    document.getElementById('openai-codex-savings-sub').textContent=`${basis} · live ${fmt(live,6)} · demo ${fmt(demonstrated,6)}`;
+    document.getElementById('openai-codex-provider-discount').textContent=fmt(d.provider_prompt_cache_discount_usd||0,6);
+    document.getElementById('openai-codex-blocker').textContent=d.top_blocker_reason||'none';
+    document.getElementById('openai-codex-safety').innerHTML=[
+      d.rollback_available?'<span class="badge hit">rollback available</span>':'<span class="badge miss">no live rollback</span>',
+      d.managed_server_required?'<span class="badge err">managed required</span>':'<span class="badge hit">local only</span>',
+      ((d.privacy||{}).metadata_only)?'<span class="badge hit">metadata only</span>':'<span class="badge err">privacy unclear</span>'
+    ].join(' ');
+  }catch(e){}
 }
 
 async function refreshCodexReadiness(){
@@ -25180,7 +25408,7 @@ const tabRefreshers={
   adoption:[refreshProviderAdoptionHealth],
   activity:[refreshActivity],
   usage:[refreshUsage],
-  codex:[refreshCodexReadiness,refreshCodexQuota,refreshCodexCanaryImpact],
+  codex:[refreshOpenAICodexReadiness,refreshCodexReadiness,refreshCodexQuota,refreshCodexCanaryImpact],
   weekly:[refreshWeekly],
   categories:[refreshCategories],
   cache:[refreshCache,refreshOpenAICacheReplayReadiness,refreshOpenAIToolCacheInvalidationBurndown],

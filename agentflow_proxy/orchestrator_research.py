@@ -8247,6 +8247,18 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
         active_local_policy_rule = _active_openai_local_policy_rule(target)
     except Exception:
         active_local_policy_rule = None
+    disabled_local_policy_rule = _disabled_openai_local_policy_rule(target)
+    if disabled_local_policy_rule is not None:
+        blocker_counts[str(disabled_local_policy_rule.get("reason") or "disabled-local-policy")] += max(1, matched_count)
+    hard_blockers = [
+        reason
+        for reason in sorted(blocker_counts)
+        if reason not in {
+            "missing-canary-lifecycle-evidence",
+            "missing-applied-coverage",
+            "missing-holdout-coverage",
+        }
+    ]
 
     if applied > 0 and holdout > 0 and not blocker_counts and savings_per_1000 > 0 and active_local_policy_rule is not None:
         decision = "active-local-policy"
@@ -8415,6 +8427,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
             "unknown_reason_breakdown": unknown_breakdown,
         },
         "active_local_policy_rule": active_local_policy_rule,
+        "disabled_local_policy_rule": disabled_local_policy_rule,
         "active_local_policy_outcome": active_outcome,
         "privacy": privacy,
     }
@@ -8464,6 +8477,66 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
         "active_local_policy_outcomes": [active_outcome] if active_outcome else [],
         "privacy": privacy | {"basis": "sanitized pass-through routing lifecycle evidence only"},
     }
+
+
+def _disabled_openai_local_policy_rule(target: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        from agentflow_proxy import router as router_module
+    except Exception:
+        return None
+
+    requested_model = str(target.get("requested_model") or "").lower()
+    target_model = str(target.get("target_model") or "").lower()
+    source_surface = str(target.get("source_surface") or "").lower()
+    endpoint = str(target.get("endpoint") or "").lower()
+    category = str(target.get("category") or "").lower()
+
+    for rule in getattr(router_module, "ROUTING_RULES", []):
+        if not isinstance(rule, dict) or rule.get("enabled") is not False:
+            continue
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        if str(action.get("route_to") or "").lower() != target_model:
+            continue
+        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+        if str(conditions.get("provider") or "openai").lower() != "openai":
+            continue
+        model_pattern = str(conditions.get("model_pattern") or "").lower()
+        if model_pattern and model_pattern not in requested_model:
+            continue
+        if str(conditions.get("source_surface") or source_surface).lower() != source_surface:
+            continue
+        if str(conditions.get("endpoint") or endpoint).lower() != endpoint:
+            continue
+        if str(conditions.get("category") or category).lower() != category:
+            continue
+        if "has_tools" in conditions and bool(conditions.get("has_tools")) != category.startswith("tool-"):
+            continue
+        if "stream" in conditions and bool(conditions.get("stream")):
+            continue
+        metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
+        reason = str(rule.get("disabled_reason") or "disabled-local-policy")
+        return {
+            "schema": "agentflow.openai_routing_disabled_local_policy_rule.v1",
+            "status": "disabled-local-policy",
+            "reason": reason,
+            "policy_source": str(rule.get("policy_source") or metadata.get("policy_source") or "local-promoted"),
+            "target_local_policy_section": "routing.rules",
+            "target_local_rule_file": "routing_rules.yaml",
+            "rule_id_included": True,
+            "target_rule_id": str(rule.get("id") or "promoted-openai-routing-rule"),
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "raw_messages_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+                "absolute_paths_included": False,
+            },
+        }
+    return None
 
 
 def _candidate(
