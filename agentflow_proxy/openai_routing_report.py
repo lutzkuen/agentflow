@@ -26,6 +26,9 @@ DEFAULT_SMALL_TEXT_CHARS_LT = 6000
 DEFAULT_TINY_TEXT_CHARS_LT = 1500
 DEFAULT_OPENAI_GPT54_CANARY_TEXT_CHARS_LT = 16000
 DEFAULT_MIN_HOLDOUT_VOLUME = 10
+DEFAULT_MIN_SEMANTIC_COMPARISONS = 20
+DEFAULT_MIN_SEMANTIC_PASSES = 20
+DEFAULT_MIN_SEMANTIC_PASS_RATE = 0.90
 
 
 def _env_int(name: str, default: int) -> int:
@@ -40,6 +43,27 @@ OPENAI_TINY_TEXT_CHARS_LT = _env_int("AGENTFLOW_OPENAI_TINY_TEXT_CHARS_LT", DEFA
 OPENAI_GPT54_CANARY_TEXT_CHARS_LT = _env_int(
     "AGENTFLOW_OPENAI_GPT54_CANARY_TEXT_CHARS_LT",
     DEFAULT_OPENAI_GPT54_CANARY_TEXT_CHARS_LT,
+)
+OPENAI_ROUTING_MIN_SEMANTIC_COMPARISONS = _env_int(
+    "AGENTFLOW_OPENAI_ROUTING_MIN_SEMANTIC_COMPARISONS",
+    DEFAULT_MIN_SEMANTIC_COMPARISONS,
+)
+OPENAI_ROUTING_MIN_SEMANTIC_PASSES = _env_int(
+    "AGENTFLOW_OPENAI_ROUTING_MIN_SEMANTIC_PASSES",
+    DEFAULT_MIN_SEMANTIC_PASSES,
+)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+OPENAI_ROUTING_MIN_SEMANTIC_PASS_RATE = _env_float(
+    "AGENTFLOW_OPENAI_ROUTING_MIN_SEMANTIC_PASS_RATE",
+    DEFAULT_MIN_SEMANTIC_PASS_RATE,
 )
 
 
@@ -97,6 +121,138 @@ def _breakdown(counter: dict[str, int]) -> list[dict[str, Any]]:
         {"value": key, "count": value}
         for key, value in sorted(counter.items(), key=lambda item: (-item[1], item[0]))
     ]
+
+
+def _semantic_quality_key(
+    *,
+    source_surface: Any,
+    endpoint: Any,
+    category: Any,
+    requested_model: Any,
+    target_model: Any,
+) -> tuple[str, str, str, str, str]:
+    return (
+        str(source_surface or "unknown").lower(),
+        str(endpoint or "unknown").lower(),
+        str(category or "unknown").lower(),
+        str(requested_model or "").lower(),
+        str(target_model or "").lower(),
+    )
+
+
+def _empty_semantic_quality_summary() -> dict[str, Any]:
+    return {
+        "schema": "agentflow.openai_routing_semantic_quality_gate.v1",
+        "clean_comparison_count": 0,
+        "pass_count": 0,
+        "fail_count": 0,
+        "pass_rate": 0.0,
+        "avg_output_similarity": None,
+        "min_clean_comparison_count": OPENAI_ROUTING_MIN_SEMANTIC_COMPARISONS,
+        "min_pass_count": OPENAI_ROUTING_MIN_SEMANTIC_PASSES,
+        "min_pass_rate": OPENAI_ROUTING_MIN_SEMANTIC_PASS_RATE,
+        "gate_passed": False,
+        "reason_codes": ["missing-semantic-quality-evidence"],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+        },
+    }
+
+
+def _finalize_semantic_quality_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    clean = _as_int(summary.get("clean_comparison_count"))
+    passed = _as_int(summary.get("pass_count"))
+    failed = _as_int(summary.get("fail_count"))
+    pass_rate = (passed / clean) if clean else 0.0
+    reasons: list[str] = []
+    if clean <= 0:
+        reasons.append("missing-semantic-quality-evidence")
+    elif clean < OPENAI_ROUTING_MIN_SEMANTIC_COMPARISONS:
+        reasons.append("insufficient-semantic-quality-comparisons")
+    if passed < OPENAI_ROUTING_MIN_SEMANTIC_PASSES:
+        reasons.append("insufficient-semantic-quality-passes")
+    if clean > 0 and pass_rate < OPENAI_ROUTING_MIN_SEMANTIC_PASS_RATE:
+        reasons.append("semantic-quality-pass-rate-below-threshold")
+    return {
+        **summary,
+        "pass_rate": round(pass_rate, 6),
+        "avg_output_similarity": (
+            round(_as_float(summary.get("similarity_total")) / clean, 6)
+            if clean
+            else None
+        ),
+        "min_clean_comparison_count": OPENAI_ROUTING_MIN_SEMANTIC_COMPARISONS,
+        "min_pass_count": OPENAI_ROUTING_MIN_SEMANTIC_PASSES,
+        "min_pass_rate": OPENAI_ROUTING_MIN_SEMANTIC_PASS_RATE,
+        "gate_passed": not reasons,
+        "reason_codes": reasons,
+        "fail_count": failed,
+    }
+
+
+def _openai_routing_semantic_quality_by_target(store_obj: Any) -> dict[tuple[str, str, str, str, str], dict[str, Any]]:
+    try:
+        rows = store_obj.conn.execute(
+            """
+            select
+              coalesce(source_surface, 'unknown') as source_surface,
+              coalesce(json_extract(experiment_json, '$.endpoint'), 'responses') as endpoint,
+              coalesce(category, 'unknown') as category,
+              requested_model,
+              shadow_model as target_model,
+              count(*) as clean_comparison_count,
+              sum(case when passed_threshold = 1 then 1 else 0 end) as pass_count,
+              sum(case when passed_threshold = 0 then 1 else 0 end) as fail_count,
+              sum(coalesce(output_similarity, 0)) as similarity_total
+            from routing_experiments
+            where coalesce(provider, 'openai') = 'openai'
+              and coalesce(source_surface, '') = 'openai_responses'
+              and primary_status_code < 400
+              and shadow_status_code < 400
+              and output_similarity is not null
+              and (error is null or error = '')
+            group by 1, 2, 3, 4, 5
+            """
+        ).fetchall()
+    except Exception:
+        return {}
+
+    summaries: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        data = dict(row)
+        summary = {
+            "schema": "agentflow.openai_routing_semantic_quality_gate.v1",
+            "clean_comparison_count": _as_int(data.get("clean_comparison_count")),
+            "pass_count": _as_int(data.get("pass_count")),
+            "fail_count": _as_int(data.get("fail_count")),
+            "similarity_total": _as_float(data.get("similarity_total")),
+            "privacy": _empty_semantic_quality_summary()["privacy"],
+        }
+        key = _semantic_quality_key(
+            source_surface=data.get("source_surface"),
+            endpoint=data.get("endpoint"),
+            category=data.get("category"),
+            requested_model=data.get("requested_model"),
+            target_model=data.get("target_model"),
+        )
+        summaries[key] = _finalize_semantic_quality_summary(summary)
+    return summaries
+
+
+def _merge_semantic_quality_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    merged = _empty_semantic_quality_summary()
+    merged["clean_comparison_count"] = sum(_as_int(item.get("clean_comparison_count")) for item in summaries)
+    merged["pass_count"] = sum(_as_int(item.get("pass_count")) for item in summaries)
+    merged["fail_count"] = sum(_as_int(item.get("fail_count")) for item in summaries)
+    merged["similarity_total"] = sum(
+        _as_float(item.get("avg_output_similarity")) * _as_int(item.get("clean_comparison_count"))
+        for item in summaries
+    )
+    return _finalize_semantic_quality_summary(merged)
 
 
 def _text_bucket(text_chars: int) -> str:
@@ -768,7 +924,11 @@ def _routing_rule_metadata(bucket: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> dict[str, Any]:
+def _promotion_readiness(
+    bucket: dict[str, Any],
+    lifecycle: dict[str, Any],
+    semantic_quality: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
     classification = (
         lifecycle.get("skipped_unknown_classification")
@@ -790,6 +950,8 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
     retry_count = _as_int(lifecycle.get("retry_count"))
     stale = bool((lifecycle.get("stale_evidence") or {}).get("stale")) if isinstance(lifecycle.get("stale_evidence"), dict) else False
     estimated_savings = _as_float(bucket.get("estimated_savings_per_1000_calls_usd"))
+    semantic_quality = semantic_quality if isinstance(semantic_quality, dict) else _empty_semantic_quality_summary()
+    semantic_reason_codes = [str(code) for code in semantic_quality.get("reason_codes") or []]
     candidate_blockers = [str(code) for code in bucket.get("blockers") or []]
     lifecycle_blockers = [str(code) for code in lifecycle.get("blocker_codes") or []]
     missing_evidence = {
@@ -823,6 +985,9 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
         reason_codes.append("skipped-canary-promotion-blocker")
     if estimated_savings <= 0:
         reason_codes.append("non-positive-estimated-savings")
+    for blocker in semantic_reason_codes:
+        if blocker not in reason_codes:
+            reason_codes.append(blocker)
     for blocker in candidate_blockers:
         if blocker not in reason_codes:
             reason_codes.append(blocker)
@@ -832,6 +997,9 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
 
     unique_reasons = sorted(set(reason_codes))
     staged_review_reasons = missing_evidence | {
+        "missing-semantic-quality-evidence",
+        "insufficient-semantic-quality-comparisons",
+        "insufficient-semantic-quality-passes",
         "unclassified-canary-lifecycle-rows",
         "skipped-canary-unsupported-shape",
     }
@@ -840,7 +1008,15 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
         for reason in unique_reasons
         if reason not in staged_review_reasons
     ]
-    if applied > 0 and holdout > 0 and not hard_blocking_reasons and not unclassified_count and not unsupported_shape_count and estimated_savings > 0:
+    if (
+        applied > 0
+        and holdout > 0
+        and bool(semantic_quality.get("gate_passed"))
+        and not hard_blocking_reasons
+        and not unclassified_count
+        and not unsupported_shape_count
+        and estimated_savings > 0
+    ):
         decision = "promote"
         next_action = "promote-openai-routing-rule-draft"
         reason = "promotion-ready"
@@ -882,6 +1058,7 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
             "fallback_count": fallback_count,
             "retry_count": retry_count,
             "estimated_savings_per_1000_calls_usd": estimated_savings,
+            "semantic_quality": semantic_quality,
             "latest_observed_at": lifecycle.get("latest_observed_at"),
             "oldest_observed_at": lifecycle.get("oldest_observed_at"),
             "stale_evidence": lifecycle.get("stale_evidence"),
@@ -899,6 +1076,7 @@ def _promotion_readiness(bucket: dict[str, Any], lifecycle: dict[str, Any]) -> d
             "requires_zero_fallbacks": True,
             "requires_zero_retries": True,
             "requires_positive_estimated_savings": True,
+            "requires_semantic_quality_pass": True,
         },
         "routing_rule_metadata": _routing_rule_metadata(bucket),
         "privacy": {
@@ -973,7 +1151,10 @@ def _new_bucket(row: dict[str, Any], *, candidate_id: str, target_model: str, ta
     }
 
 
-def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+def _finalize_bucket(
+    bucket: dict[str, Any],
+    semantic_quality_by_target: dict[tuple[str, str, str, str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     matched = _as_int(bucket.get("matched_count"))
     latency_values = bucket.pop("latency_values", [])
     blocker_counts = bucket.pop("blocker_counts", {})
@@ -1018,8 +1199,24 @@ def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
         bucket.pop("openai_canary_lifecycle", None),
         matched_count=matched,
     )
+    semantic_key = _semantic_quality_key(
+        source_surface=bucket.get("source_surface"),
+        endpoint=bucket.get("endpoint"),
+        category=bucket.get("category"),
+        requested_model=bucket.get("requested_model"),
+        target_model=bucket.get("target_model"),
+    )
+    semantic_quality = (
+        semantic_quality_by_target.get(semantic_key)
+        if isinstance(semantic_quality_by_target, dict)
+        else None
+    )
+    if not isinstance(semantic_quality, dict):
+        semantic_quality = _empty_semantic_quality_summary()
     bucket["openai_canary_lifecycle_evidence"] = lifecycle
-    bucket["promotion_readiness"] = _promotion_readiness(bucket, lifecycle)
+    bucket["semantic_quality_key"] = list(semantic_key)
+    bucket["semantic_quality_evidence"] = semantic_quality
+    bucket["promotion_readiness"] = _promotion_readiness(bucket, lifecycle, semantic_quality)
     bucket["suggested_canary_fraction"] = suggested
     bucket["privacy"] = {
         "metadata_only": True,
@@ -1172,7 +1369,8 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
         else:
             bucket["projected_savings_usd"] += savings
 
-    candidates = [_finalize_bucket(bucket) for bucket in buckets.values()]
+    semantic_quality_by_target = _openai_routing_semantic_quality_by_target(store_obj)
+    candidates = [_finalize_bucket(bucket, semantic_quality_by_target) for bucket in buckets.values()]
     candidates.sort(
         key=lambda item: (
             _as_float(item.get("projected_savings_usd")),
@@ -1571,6 +1769,7 @@ def _openai_promotion_duplicate_suppression(
     target: dict[str, Any],
     promotion_verdict: str,
     reason_codes: list[str],
+    reason: str | None = None,
 ) -> dict[str, Any]:
     fingerprint = _stable_fingerprint(
         "openai-routing-promotion",
@@ -1585,7 +1784,7 @@ def _openai_promotion_duplicate_suppression(
     return {
         "schema": "agentflow.openai_routing_promotion_duplicate_suppression.v1",
         "fingerprint": f"routing-promotion:{fingerprint}",
-        "reason": reason_codes[0] if reason_codes else promotion_verdict,
+        "reason": reason or (reason_codes[0] if reason_codes else promotion_verdict),
         "promotion_verdict": promotion_verdict,
         "metadata_only": True,
         "aggregate_only": True,
@@ -1924,6 +2123,24 @@ def _build_openai_promotion_decision(
     projected_savings_usd = sum(_as_float(candidate.get("projected_savings_usd")) for candidate in candidates)
     baseline_cost_usd = sum(_as_float(candidate.get("estimated_baseline_cost_usd")) for candidate in candidates)
     savings_per_1000 = round((projected_savings_usd / matched_count) * 1000.0, 6) if matched_count else 0.0
+    semantic_summaries_by_key: dict[tuple[str, ...], dict[str, Any]] = {}
+    for candidate in candidates:
+        semantic_summary = candidate.get("semantic_quality_evidence")
+        if not isinstance(semantic_summary, dict):
+            continue
+        semantic_key_value = candidate.get("semantic_quality_key")
+        if isinstance(semantic_key_value, list):
+            semantic_key = tuple(str(part) for part in semantic_key_value)
+        else:
+            semantic_key = _semantic_quality_key(
+                source_surface=candidate.get("source_surface"),
+                endpoint=candidate.get("endpoint"),
+                category=candidate.get("category"),
+                requested_model=candidate.get("requested_model"),
+                target_model=candidate.get("target_model"),
+            )
+        semantic_summaries_by_key[semantic_key] = semantic_summary
+    semantic_quality = _merge_semantic_quality_summaries(list(semantic_summaries_by_key.values()))
 
     cohort_counts = {
         "canary_applied": 0,
@@ -2036,16 +2253,29 @@ def _build_openai_promotion_decision(
         blocker_counts["skipped-canary-promotion-blocker"] = promotion_blocker_count
     if savings_per_1000 <= 0:
         blocker_counts["non-positive-estimated-savings"] = matched_count
+    for reason_code in semantic_quality.get("reason_codes") or []:
+        reason = str(reason_code)
+        if reason in {
+            "missing-semantic-quality-evidence",
+            "insufficient-semantic-quality-comparisons",
+            "insufficient-semantic-quality-passes",
+        }:
+            blocker_counts[reason] = max(1, _as_int(semantic_quality.get("clean_comparison_count")))
+        elif reason == "semantic-quality-pass-rate-below-threshold":
+            blocker_counts[reason] = max(1, _as_int(semantic_quality.get("fail_count")))
 
     staged_review_reasons = {
         "missing-canary-lifecycle-evidence",
         "missing-applied-coverage",
         "missing-holdout-coverage",
+        "missing-semantic-quality-evidence",
+        "insufficient-semantic-quality-comparisons",
+        "insufficient-semantic-quality-passes",
         "unclassified-canary-lifecycle-rows",
         "skipped-canary-unsupported-shape",
     }
     hard_blockers = [reason for reason in sorted(blocker_counts) if reason not in staged_review_reasons]
-    if applied > 0 and holdout > 0 and not blocker_counts and savings_per_1000 > 0:
+    if applied > 0 and holdout > 0 and semantic_quality.get("gate_passed") and not blocker_counts and savings_per_1000 > 0:
         decision = "promote"
         next_action = "draft-openai-routing-rule"
         reason = "promotion-ready"
@@ -2145,6 +2375,7 @@ def _build_openai_promotion_decision(
             "unclassified_reason_breakdown": _breakdown(unclassified_reason_counts),
         },
     }
+    lifecycle["semantic_quality"] = semantic_quality
     active_local_policy_rule = _active_openai_local_policy_rule(target)
     if decision == "promote" and active_local_policy_rule is not None:
         decision = "active-local-policy"
@@ -2174,6 +2405,7 @@ def _build_openai_promotion_decision(
         target=target,
         promotion_verdict=promotion_verdict,
         reason_codes=reason_codes,
+        reason=reason,
     )
     candidate_set = _candidate_set_metadata(candidate_ids)
     active_local_policy_outcome = _openai_active_local_policy_outcome(
@@ -2213,6 +2445,7 @@ def _build_openai_promotion_decision(
         "savings_per_1000_calls_usd": savings_per_1000,
         "estimated_savings_per_1000_calls_usd": savings_per_1000,
         "lifecycle": lifecycle,
+        "semantic_quality": semantic_quality,
         "quality_gates": {
             "requires_fresh_evidence": True,
             "requires_applied_coverage": True,
@@ -2223,6 +2456,7 @@ def _build_openai_promotion_decision(
             "requires_zero_fallbacks": True,
             "requires_zero_retries": True,
             "requires_positive_estimated_savings": True,
+            "requires_semantic_quality_pass": True,
             "requires_file_backed_local_policy": True,
         },
         "routing_rule_metadata": routing_rule_metadata,

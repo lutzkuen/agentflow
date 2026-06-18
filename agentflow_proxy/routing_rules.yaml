@@ -137,7 +137,8 @@ openai_canary:
 rules:
 
 - id: promoted-openai-gpt54-tool-light-mini
-  enabled: true
+  enabled: false
+  disabled_reason: semantic-quality-regression-observed
   policy_source: local-promoted
   conditions:
     provider: openai

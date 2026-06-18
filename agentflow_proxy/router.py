@@ -1706,6 +1706,34 @@ def _route_openai_from_rule(
     return target, meta
 
 
+def _openai_promoted_rule_semantic_gate_passed(rule: dict[str, Any]) -> bool:
+    if not _is_promoted_permanent_rule(rule):
+        return True
+    metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
+    promotion_decision = (
+        metadata.get("promotion_decision")
+        if isinstance(metadata.get("promotion_decision"), dict)
+        else {}
+    )
+    semantic_quality = (
+        metadata.get("semantic_quality")
+        if isinstance(metadata.get("semantic_quality"), dict)
+        else promotion_decision.get("semantic_quality")
+        if isinstance(promotion_decision.get("semantic_quality"), dict)
+        else {}
+    )
+    quality_gates = (
+        metadata.get("quality_gates")
+        if isinstance(metadata.get("quality_gates"), dict)
+        else promotion_decision.get("quality_gates")
+        if isinstance(promotion_decision.get("quality_gates"), dict)
+        else {}
+    )
+    if quality_gates.get("requires_semantic_quality_pass") is False:
+        return True
+    return bool(semantic_quality.get("gate_passed"))
+
+
 def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple[str, dict[str, Any]]:
     requested = str(body.get("model") or SONNET_DEFAULT)
     text_chars = len(extract_text(body))
@@ -1921,6 +1949,30 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             endpoint=endpoint,
         )
         if not matched:
+            continue
+        if not _openai_promoted_rule_semantic_gate_passed(rule):
+            metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
+            meta.update({
+                "enabled": True,
+                "reason": "promoted OpenAI routing rule blocked by semantic quality gate",
+                "policy_source": "local-promoted-review",
+                "openai_routing_rule": {
+                    "status": "blocked",
+                    "reason": "semantic-quality-gate-not-passed",
+                    "source": metadata.get("source") or "openai_routing_promotion_decision",
+                    "promoted_from_canary": True,
+                    "rule_id": rule.get("id") or metadata.get("rule_id"),
+                    "promotion_source_policy_id": metadata.get("promotion_source_policy_id"),
+                    "target_local_policy_section": metadata.get("target_local_policy_section") or "routing.rules",
+                    "target_local_rule_file": metadata.get("target_local_rule_file") or "routing_rules.yaml",
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "provider_bodies_included": False,
+                    },
+                },
+            })
             continue
         routed, rule_meta = _route_openai_from_rule(
             rule,

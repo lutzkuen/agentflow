@@ -388,26 +388,25 @@ rules:
         self.assertEqual(meta["thinking_gate"]["status"], "blocked")
         self.assertEqual(meta["thinking_gate"]["reason"], "assistant-thinking-history")
 
-    def test_openai_promoted_tool_light_rule_routes_gpt_5_4_to_mini_by_default(self):
+    def test_openai_promoted_tool_light_rule_stays_on_requested_model_by_default(self):
         routed, meta = router_module.route_openai_model({
             "model": "gpt-5.4",
             "input": "Inspect the small tool result and decide whether another lookup is needed.",
             "tools": [{"type": "function", "name": "lookup_file"}],
         })
 
-        self.assertEqual(routed, "gpt-5.4-mini")
+        self.assertEqual(routed, "gpt-5.4")
         self.assertTrue(meta["enabled"])
         self.assertEqual(meta["provider"], "openai")
-        self.assertEqual(meta["reason"], "promoted OpenAI gpt-5.4 tool-light routing rule")
         self.assertEqual(meta["category"], "tool-light")
         self.assertTrue(meta["has_tools"])
-        self.assertEqual(meta["policy_source"], "local-promoted")
-        rule = meta["openai_routing_rule"]
-        self.assertEqual(rule["status"], "applied")
-        self.assertTrue(rule["promoted_from_canary"])
-        self.assertEqual(rule["promotion_source_policy_id"], "local-openai-routing-canary-v1")
-        self.assertEqual(rule["target_local_policy_section"], "routing.rules")
-        self.assertEqual(rule["target_local_rule_file"], "routing_rules.yaml")
+        self.assertIn(meta["reason"], {
+            "OpenAI canary selected shadow route; keep requested model",
+            "OpenAI canary holdout; keep requested model",
+            "OpenAI canary not selected; keep requested model",
+        })
+        self.assertEqual(meta["routed_model"], "gpt-5.4")
+        self.assertEqual(meta["openai_canary"]["target_model"], "gpt-5.4-mini")
 
     def test_openai_canary_remains_enabled_for_non_promoted_chat_gpt_5_4_by_default(self):
         routed, meta = router_module.route_openai_model({
@@ -425,16 +424,16 @@ rules:
         self.assertIn(canary["status"], {"applied", "holdout", "not_selected"})
         self.assertEqual(router_module.ROUTING_OPENAI_CANARY["safety_stop"]["max_error_rate"], 0.03)
 
-    def test_openai_promoted_tool_light_rule_covers_wider_cohort(self):
+    def test_openai_tool_light_canary_covers_wider_cohort_without_live_downroute(self):
         routed, meta = router_module.route_openai_model({
             "model": "gpt-5.4",
             "input": "Inspect this tool-light payload.\n" + ("x" * 12000),
             "tools": [{"type": "function", "name": "lookup_file"}],
         })
 
-        self.assertEqual(routed, "gpt-5.4-mini")
+        self.assertEqual(routed, "gpt-5.4")
         self.assertEqual(meta["category"], "tool-light")
-        self.assertEqual(meta["openai_routing_rule"]["status"], "applied")
+        self.assertEqual(meta["openai_canary"]["target_model"], "gpt-5.4-mini")
 
         _, heavy_meta = router_module.route_openai_model({
             "model": "gpt-5.4",

@@ -97,6 +97,87 @@ class OpenAIRoutingReportTests(unittest.TestCase):
             routed_model_family="gpt-5",
         )
 
+    def _log_openai_shadow_experiment(
+        self,
+        *,
+        category: str = "tool-light",
+        similarity: float = 0.95,
+        passed: bool = True,
+        requested_model: str = "gpt-5.4",
+        shadow_model: str = "gpt-5.4-mini",
+    ) -> None:
+        self.store.log_routing_experiment(
+            id=str(uuid.uuid4()),
+            call_id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            provider="openai",
+            source_surface="openai_responses",
+            stream=0,
+            requested_model=requested_model,
+            routed_model=shadow_model,
+            primary_model=requested_model,
+            shadow_model=shadow_model,
+            category=category,
+            routing_reason="shadow semantic quality fixture",
+            input_tokens_est=1000,
+            primary_status_code=200,
+            shadow_status_code=200,
+            primary_latency_ms=100,
+            shadow_latency_ms=100,
+            primary_output_chars=1000,
+            shadow_output_chars=980,
+            primary_output_sha256="primary",
+            shadow_output_sha256="shadow",
+            output_similarity=similarity,
+            passed_threshold=1 if passed else 0,
+            primary_cost_est_usd=0.002,
+            shadow_cost_est_usd=0.001,
+            error=None,
+            experiment_json=stable_json({"endpoint": "responses"}),
+        )
+
+    def _active_openai_tool_light_rule(self) -> dict[str, object]:
+        return {
+            "id": "test-promoted-openai-gpt54-tool-light-mini",
+            "enabled": True,
+            "policy_source": "local-promoted",
+            "conditions": {
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "model_pattern": "gpt-5.4",
+                "category": "tool-light",
+                "has_tools": True,
+                "stream": False,
+            },
+            "action": {
+                "route_to": "gpt-5.4-mini",
+                "reason": "test promoted OpenAI gpt-5.4 tool-light routing rule",
+            },
+            "metadata": {
+                "source": "openai_routing_promotion_decision",
+                "promoted_from_canary": True,
+                "promotion_decision": {
+                    "quality_gates": {
+                        "requires_semantic_quality_pass": True,
+                    },
+                    "semantic_quality": {
+                        "gate_passed": True,
+                        "clean_comparison_count": 20,
+                        "pass_count": 20,
+                        "pass_rate": 1.0,
+                    },
+                },
+            },
+        }
+
+    def _install_active_openai_tool_light_rule(self) -> None:
+        from agentflow_proxy import router as router_module
+
+        previous = list(getattr(router_module, "ROUTING_RULES", []))
+        router_module.ROUTING_RULES = [self._active_openai_tool_light_rule()]
+        self.addCleanup(setattr, router_module, "ROUTING_RULES", previous)
+
     def test_report_surfaces_disabled_openai_routing_candidates_without_raw_fields(self) -> None:
         for _ in range(6):
             self._log_openai_call(category="chat", text_chars=1200, request_json='{"input":"secret raw prompt"}')
@@ -478,6 +559,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
                 has_tools=True,
                 openai_canary=canary("canary_holdout"),
             )
+        for _ in range(20):
+            self._log_openai_shadow_experiment(category="tool-light", similarity=0.95, passed=True)
 
         result = build_openai_routing_report(self.store, limit=20)
 
@@ -512,6 +595,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(readiness["evidence"]["fallback_count"], 0)
         self.assertEqual(readiness["evidence"]["retry_count"], 0)
         self.assertGreater(readiness["evidence"]["estimated_savings_per_1000_calls_usd"], 0)
+        self.assertTrue(readiness["evidence"]["semantic_quality"]["gate_passed"])
+        self.assertEqual(readiness["evidence"]["semantic_quality"]["clean_comparison_count"], 20)
         rule = readiness["routing_rule_metadata"]["rule_preview"]
         self.assertEqual(rule["conditions"]["model_pattern"], "gpt-5.4")
         self.assertEqual(rule["conditions"]["category"], "tool-light")
@@ -531,6 +616,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertFalse(readiness["privacy"]["cache_keys_included"])
 
     def test_targeted_gpt54_tool_light_promotion_decision_aggregates_lifecycle_buckets(self) -> None:
+        self._install_active_openai_tool_light_rule()
+
         def canary(cohort: str) -> dict[str, object]:
             return {
                 "enabled": True,
@@ -585,6 +672,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
                 has_tools=True,
                 openai_canary=canary("canary_holdout"),
             )
+        for _ in range(20):
+            self._log_openai_shadow_experiment(category="tool-light", similarity=0.95, passed=True)
 
         result = build_openai_routing_promotion_decision_report(self.store, limit=20)
 
@@ -745,6 +834,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["individual_candidate_ids_included"])
 
     def test_active_openai_routing_rule_outcome_reviews_skipped_unknown_coverage(self) -> None:
+        self._install_active_openai_tool_light_rule()
+
         def canary(cohort: str, **extra: object) -> dict[str, object]:
             status = "applied" if cohort == "canary_applied" else "holdout"
             if cohort == "skipped":
@@ -801,6 +892,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
             has_tools=True,
             openai_canary=canary("unknown", reason="missing-status"),
         )
+        for _ in range(20):
+            self._log_openai_shadow_experiment(category="tool-light", similarity=0.95, passed=True)
 
         result = build_openai_routing_promotion_decision_report(self.store, limit=20)
 
@@ -815,6 +908,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(result["summary"]["active_local_policy_next_action"], "keep-blocked")
 
     def test_active_openai_routing_rule_outcome_requires_rollback_on_regression(self) -> None:
+        self._install_active_openai_tool_light_rule()
+
         def canary(cohort: str, **extra: object) -> dict[str, object]:
             return {
                 "enabled": True,
@@ -860,6 +955,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
                 has_tools=True,
                 openai_canary=canary("canary_holdout"),
             )
+        for _ in range(20):
+            self._log_openai_shadow_experiment(category="tool-light", similarity=0.95, passed=True)
 
         result = build_openai_routing_promotion_decision_report(self.store, limit=20)
 
@@ -1023,13 +1120,24 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(result["summary"]["reason"], "skipped-canary-unsupported-shape")
         self.assertEqual(
             result["summary"]["blocker_reason_breakdown"],
-            [{"value": "skipped-canary-unsupported-shape", "count": 2}],
+            [
+                {"value": "skipped-canary-unsupported-shape", "count": 2},
+                {"value": "insufficient-semantic-quality-passes", "count": 1},
+                {"value": "missing-semantic-quality-evidence", "count": 1},
+            ],
         )
         decision = result["promotion_decision"]
         self.assertEqual(decision["decision"], "narrow")
         self.assertEqual(decision["promotion_verdict"], "keep-staged")
         self.assertEqual(decision["lifecycle"]["skipped_unknown_classification"]["unsupported_shape_count"], 2)
-        self.assertEqual(decision["reason_codes"], ["skipped-canary-unsupported-shape"])
+        self.assertEqual(
+            decision["reason_codes"],
+            [
+                "insufficient-semantic-quality-passes",
+                "missing-semantic-quality-evidence",
+                "skipped-canary-unsupported-shape",
+            ],
+        )
         self.assertEqual(decision["target"]["target_local_rule_file"], "routing_rules.yaml")
         self.assertIsNone(decision["local_policy_patch"])
         self.assertEqual(decision["rollback_metadata"]["target_local_policy_section"], "routing.rules")
@@ -1097,7 +1205,11 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(result["summary"]["skipped_reason_breakdown"], [{"value": "request-too-large", "count": 2}])
         self.assertEqual(
             result["summary"]["blocker_reason_breakdown"],
-            [{"value": "skipped-canary-unsupported-shape", "count": 2}],
+            [
+                {"value": "skipped-canary-unsupported-shape", "count": 2},
+                {"value": "insufficient-semantic-quality-passes", "count": 1},
+                {"value": "missing-semantic-quality-evidence", "count": 1},
+            ],
         )
         decision = result["promotion_decision"]
         classification = decision["lifecycle"]["skipped_unknown_classification"]
@@ -1105,7 +1217,14 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertIsNone(decision["local_policy_patch"])
         self.assertEqual(classification["unsupported_shape_count"], 2)
         self.assertEqual(classification["unsupported_shape_reason_breakdown"], [{"value": "request-too-large", "count": 2}])
-        self.assertEqual(decision["reason_codes"], ["skipped-canary-unsupported-shape"])
+        self.assertEqual(
+            decision["reason_codes"],
+            [
+                "insufficient-semantic-quality-passes",
+                "missing-semantic-quality-evidence",
+                "skipped-canary-unsupported-shape",
+            ],
+        )
         self.assertFalse(decision["privacy"]["raw_prompts_included"])
         self.assertFalse(decision["privacy"]["request_ids_included"])
         self.assertNotIn("secret-openai-session", json.dumps(result, sort_keys=True))
