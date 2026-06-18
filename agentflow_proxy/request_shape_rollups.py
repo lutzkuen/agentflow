@@ -40,6 +40,8 @@ CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
 CRUNCH_CANARY_APPLY_BATCH_SCHEMA = "agentflow.request_shape_crunch_canary_apply_batch.v1"
 CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
 CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
+CRUNCH_CANARY_IMPACT_ROWS_SCHEMA = "agentflow.request_shape_crunch_canary_impact_rows.v1"
+CRUNCH_CANARY_IMPACT_ROW_SCHEMA = "agentflow.request_shape_crunch_canary_impact_row.v1"
 CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
 CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "agentflow.request_shape_crunch_activation_evidence.v1"
 CRUNCH_REMAINING_MEASUREMENT_SCHEMA = "agentflow.request_shape_crunch_remaining_measurement_cohorts.v1"
@@ -1483,6 +1485,407 @@ def _crunch_impact_activation_ready_measurements(
     }
 
 
+def _crunch_impact_row_ref(value: dict[str, Any], *, prefix: str) -> str:
+    return public_id(stable_json(value), prefix=prefix, fallback=f"{prefix}:unknown") or f"{prefix}:unknown"
+
+
+def _crunch_impact_state_from_measurement(value: dict[str, Any]) -> str:
+    state = public_label(value.get("state"), "unknown")
+    if state == "measured":
+        return "measured"
+    if state in {"keep-staged", "stageable"}:
+        return "measurement-required"
+    if state == "blocked":
+        return "blocked"
+    return "measurement-required"
+
+
+def _crunch_impact_state_from_candidate(value: dict[str, Any]) -> str:
+    recommendation = public_label(value.get("impact_recommendation"), "unknown")
+    reasons = {public_label(reason, "unknown") for reason in (value.get("reason_codes") or [])}
+    if recommendation == "promotion-ready":
+        return "measured"
+    if recommendation in {"rollback", "keep-blocked"}:
+        return "blocked"
+    if reasons & {"canary-safety-stopped", "rollback-observed", "fallback-observed", "error-rate-regression"}:
+        return "blocked"
+    return "measurement-required"
+
+
+def _crunch_impact_row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    state_priority = {"measured": 4, "measurement-required": 3, "blocked": 2, "superseded": 1}
+    next_action_priority = {
+        "measure-full-rollout-repeated-context-crunch-outcomes": 5,
+        "measure-repeated-context-crunch-canary-impact": 4,
+        "stage-repeated-context-crunch-canary": 3,
+        "widen": 2,
+        "rollback": 2,
+    }
+    return (
+        public_label(row.get("local_action_family"), "unknown") == "crunch",
+        state_priority.get(public_label(row.get("measurement_state"), "unknown"), 0),
+        next_action_priority.get(public_label(row.get("next_action"), "unknown"), 0),
+        _as_float(row.get("observed_saved_usd")),
+        _as_float(row.get("projected_saved_usd")),
+        _as_int(row.get("sample_count")),
+    )
+
+
+def _crunch_impact_rows_from_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    metadata = candidate.get("cohort_metadata") if isinstance(candidate.get("cohort_metadata"), dict) else {}
+    coverage = candidate.get("coverage") if isinstance(candidate.get("coverage"), dict) else {}
+    row_basis = {
+        "source": "impact_candidate",
+        "policy": candidate.get("policy_id"),
+        "cohort": candidate.get("cohort_id"),
+        "metadata": metadata,
+    }
+    applied_count = _as_int(candidate.get("applied_count"))
+    holdout_count = _as_int(candidate.get("holdout_count"))
+    skipped_count = _as_int(coverage.get("skipped_count"))
+    sample_count = _as_int(candidate.get("observed_count")) or applied_count + holdout_count + skipped_count
+    return {
+        "schema": CRUNCH_CANARY_IMPACT_ROW_SCHEMA,
+        "source": "crunch_canary_impact",
+        "source_schema": public_label(candidate.get("schema"), "unknown"),
+        "cohort_ref": _crunch_impact_row_ref(row_basis, prefix="crunch-impact"),
+        "policy_ref": _crunch_impact_row_ref({"policy": candidate.get("policy_id")}, prefix="policy"),
+        "measurement_state": _crunch_impact_state_from_candidate(candidate),
+        "local_action_family": "crunch",
+        "readiness_state": public_label(candidate.get("verdict"), "unknown"),
+        "next_action": public_label(candidate.get("durable_next_action") or candidate.get("next_action"), "unknown"),
+        "blocker_codes": _public_label_list(candidate.get("reason_codes")),
+        "sample_count": sample_count,
+        "row_count": sample_count,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "skipped_count": skipped_count,
+        "fallback_count": _as_int(candidate.get("fallback_count")),
+        "error_count": _as_int(candidate.get("applied_error_count")) + _as_int(candidate.get("holdout_error_count")),
+        "retry_count": _as_int(candidate.get("applied_retry_count")) + _as_int(candidate.get("holdout_retry_count")),
+        "rollback_count": _as_int(candidate.get("rollback_count")),
+        "safety_stop_count": _as_int(candidate.get("safety_stop_count")),
+        "projected_saved_tokens": _as_int(candidate.get("projected_saved_tokens")),
+        "projected_saved_usd": round(_as_float(candidate.get("projected_saved_usd")), 8),
+        "observed_saved_tokens": _as_int(candidate.get("saved_tokens")),
+        "observed_saved_usd": round(_as_float(candidate.get("saved_usd")), 8),
+        "provider_family": public_label(metadata.get("provider_family"), "unknown"),
+        "source_surface": public_label(metadata.get("source_surface"), "unknown"),
+        "endpoint": public_label(metadata.get("endpoint"), "unknown"),
+        "category": public_label(metadata.get("category"), "unknown"),
+        "workflow_phase": public_label(metadata.get("workflow_phase"), "unknown"),
+        "stream": bool(metadata.get("stream")),
+        "has_tools": bool(metadata.get("has_tools")),
+        "cache_status": public_label(metadata.get("cache_status"), "unknown"),
+        "routing_status": public_label(metadata.get("routing_status"), "unknown"),
+        "text_bucket": public_label(metadata.get("text_bucket"), "unknown"),
+        "token_bucket": public_label(metadata.get("token_bucket"), "unknown"),
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _crunch_impact_rows_from_measurement(row: dict[str, Any]) -> dict[str, Any]:
+    row_basis = {
+        "source": "activation_ready_measurement",
+        "rank": row.get("rank"),
+        "cohort": row.get("cohort_id"),
+        "shape": _crunch_remaining_shape_key(row),
+    }
+    return {
+        "schema": CRUNCH_CANARY_IMPACT_ROW_SCHEMA,
+        "source": "activation_ready_measurement",
+        "source_schema": public_label(row.get("schema"), "unknown"),
+        "cohort_ref": _crunch_impact_row_ref(row_basis, prefix="crunch-impact"),
+        "policy_ref": _crunch_impact_row_ref({"policy": row.get("policy_id")}, prefix="policy"),
+        "measurement_state": _crunch_impact_state_from_measurement(row),
+        "local_action_family": "crunch",
+        "readiness_state": public_label(row.get("readiness"), "unknown"),
+        "next_action": public_label(row.get("next_action"), "unknown"),
+        "blocker_codes": _public_label_list(row.get("reason_codes") or row.get("evidence_blocker_codes")),
+        "sample_count": _as_int(row.get("sample_count") or row.get("row_count")),
+        "row_count": _as_int(row.get("row_count") or row.get("sample_count")),
+        "applied_count": _as_int(row.get("applied_count")),
+        "holdout_count": _as_int(row.get("holdout_count")),
+        "skipped_count": _as_int(row.get("skipped_count")),
+        "fallback_count": _as_int(row.get("fallback_count")),
+        "error_count": _as_int(row.get("error_count")),
+        "retry_count": _as_int(row.get("retry_count")),
+        "rollback_count": _as_int(row.get("rollback_count")),
+        "safety_stop_count": _as_int(row.get("safety_stop_count")),
+        "projected_saved_tokens": _as_int(row.get("projected_saved_tokens")),
+        "projected_saved_usd": round(_as_float(row.get("projected_saved_usd")), 8),
+        "observed_saved_tokens": _as_int(row.get("observed_saved_tokens")),
+        "observed_saved_usd": round(_as_float(row.get("observed_saved_usd")), 8),
+        "provider_family": public_label(row.get("provider_family"), "unknown"),
+        "source_surface": public_label(row.get("source_surface"), "unknown"),
+        "endpoint": public_label(row.get("endpoint"), "unknown"),
+        "category": public_label(row.get("category"), "unknown"),
+        "workflow_phase": public_label(row.get("workflow_phase"), "unknown"),
+        "stream": bool(row.get("stream")),
+        "has_tools": bool(row.get("has_tools")),
+        "cache_status": public_label(row.get("cache_status"), "unknown"),
+        "routing_status": public_label(row.get("routing_status"), "unknown"),
+        "text_bucket": public_label(row.get("text_bucket"), "unknown"),
+        "token_bucket": public_label(row.get("token_bucket"), "unknown"),
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _crunch_impact_rows_from_follow_up(
+    candidate: dict[str, Any],
+    *,
+    superseded: bool,
+) -> dict[str, Any]:
+    state = "superseded" if superseded else "measurement-required"
+    readiness_state = public_label(candidate.get("readiness_state"), "unknown")
+    if readiness_state == "blocked":
+        state = "blocked"
+    row_basis = {
+        "source": "follow_up_candidate",
+        "rank": candidate.get("rank"),
+        "shape": _crunch_remaining_shape_key(candidate),
+        "next_action": candidate.get("next_action"),
+    }
+    projected_saved_tokens = _as_int(candidate.get("projected_saved_tokens") or candidate.get("projected_crunch_tokens_saved"))
+    projected_saved_usd = _as_float(candidate.get("projected_savings_usd") or candidate.get("projected_crunch_savings_usd"))
+    observed_saved_usd = _as_float(candidate.get("observed_savings_usd"))
+    return {
+        "schema": CRUNCH_CANARY_IMPACT_ROW_SCHEMA,
+        "source": "follow_up_candidates",
+        "source_schema": public_label(candidate.get("schema"), FOLLOW_UP_CANDIDATES_SCHEMA),
+        "cohort_ref": _crunch_impact_row_ref(row_basis, prefix="crunch-impact"),
+        "policy_ref": None,
+        "measurement_state": state,
+        "local_action_family": public_label(candidate.get("local_action_family"), "unknown"),
+        "readiness_state": readiness_state,
+        "next_action": public_label(candidate.get("next_action"), "unknown"),
+        "blocker_codes": _public_label_list(candidate.get("blocker_codes")),
+        "sample_count": _as_int(candidate.get("sample_count") or candidate.get("row_count")),
+        "row_count": _as_int(candidate.get("row_count") or candidate.get("sample_count")),
+        "applied_count": 0,
+        "holdout_count": 0,
+        "skipped_count": 0,
+        "fallback_count": _as_int(candidate.get("fallback_count")),
+        "error_count": _as_int(candidate.get("error_count")),
+        "retry_count": _as_int(candidate.get("retry_count")),
+        "rollback_count": _as_int(candidate.get("rollback_count")),
+        "safety_stop_count": _as_int(candidate.get("safety_stop_count")),
+        "projected_saved_tokens": projected_saved_tokens,
+        "projected_saved_usd": round(projected_saved_usd, 8),
+        "observed_saved_tokens": _as_int(candidate.get("observed_saved_tokens")),
+        "observed_saved_usd": round(observed_saved_usd, 8),
+        "provider_family": public_label(candidate.get("provider_family"), "unknown"),
+        "source_surface": public_label(candidate.get("source_surface"), "unknown"),
+        "endpoint": public_label(candidate.get("endpoint"), "unknown"),
+        "category": public_label(candidate.get("category"), "unknown"),
+        "workflow_phase": public_label(candidate.get("workflow_phase"), "unknown"),
+        "stream": bool(candidate.get("stream")),
+        "has_tools": bool(candidate.get("has_tools")),
+        "cache_status": public_label(candidate.get("cache_status"), "unknown"),
+        "routing_status": public_label(candidate.get("routing_status"), "unknown"),
+        "text_bucket": public_label(candidate.get("text_bucket"), "unknown"),
+        "token_bucket": public_label(candidate.get("token_bucket"), "unknown"),
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _crunch_impact_row_from_activation_evidence(activation_evidence: dict[str, Any]) -> dict[str, Any] | None:
+    summary = activation_evidence.get("summary") if isinstance(activation_evidence.get("summary"), dict) else {}
+    if not summary and not activation_evidence:
+        return None
+    applied_count = _as_int(summary.get("applied_count") or activation_evidence.get("applied_count"))
+    holdout_count = _as_int(summary.get("holdout_count") or activation_evidence.get("holdout_count"))
+    observed_saved_tokens = _as_int(summary.get("observed_saved_tokens") or activation_evidence.get("observed_saved_tokens"))
+    observed_saved_usd = _as_float(summary.get("observed_saved_usd") or activation_evidence.get("observed_saved_usd"))
+    if applied_count <= 0 and holdout_count <= 0 and observed_saved_tokens <= 0 and observed_saved_usd <= 0:
+        return None
+    source_status = public_label(activation_evidence.get("status") or summary.get("post_widening_status"), "unknown")
+    row_basis = {
+        "source": "activation_evidence",
+        "decision": activation_evidence.get("decision_id") or summary.get("decision_id"),
+        "status": source_status,
+        "next_action": activation_evidence.get("next_action") or summary.get("next_action"),
+    }
+    return {
+        "schema": CRUNCH_CANARY_IMPACT_ROW_SCHEMA,
+        "source": "crunch_activation_evidence",
+        "source_schema": public_label(activation_evidence.get("schema"), CRUNCH_ACTIVATION_EVIDENCE_SCHEMA),
+        "cohort_ref": _crunch_impact_row_ref(row_basis, prefix="crunch-impact"),
+        "policy_ref": _crunch_impact_row_ref({"decision": activation_evidence.get("decision_id")}, prefix="policy"),
+        "measurement_state": "measured",
+        "local_action_family": "crunch",
+        "readiness_state": public_label(summary.get("post_widening_status") or source_status, "unknown"),
+        "next_action": public_label(activation_evidence.get("next_action") or summary.get("next_action"), "unknown"),
+        "blocker_codes": _public_label_list(
+            activation_evidence.get("missing_measurements")
+            or summary.get("post_widening_reason_codes")
+            or summary.get("post_max_rollout_reason_codes")
+        ),
+        "sample_count": applied_count + holdout_count + _as_int(summary.get("skipped_count")),
+        "row_count": applied_count + holdout_count + _as_int(summary.get("skipped_count")),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "skipped_count": _as_int(summary.get("skipped_count")),
+        "fallback_count": _as_int(summary.get("fallback_count")),
+        "error_count": 0,
+        "retry_count": 0,
+        "rollback_count": _as_int(summary.get("rollback_count")),
+        "safety_stop_count": _as_int(summary.get("safety_stop_count")),
+        "projected_saved_tokens": _as_int(summary.get("observed_saved_tokens") or summary.get("projected_saved_tokens")),
+        "projected_saved_usd": round(_as_float(summary.get("observed_saved_usd") or summary.get("projected_saved_usd")), 8),
+        "observed_saved_tokens": observed_saved_tokens,
+        "observed_saved_usd": round(observed_saved_usd, 8),
+        "provider_family": "unknown",
+        "source_surface": "unknown",
+        "endpoint": "unknown",
+        "category": "unknown",
+        "workflow_phase": "unknown",
+        "stream": False,
+        "has_tools": False,
+        "cache_status": "unknown",
+        "routing_status": "unknown",
+        "text_bucket": "unknown",
+        "token_bucket": "unknown",
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def build_request_shape_crunch_canary_impact_rows_report(
+    *,
+    impact_candidates: list[dict[str, Any]],
+    activation_ready_measurements: dict[str, Any] | None = None,
+    follow_up_candidates: dict[str, Any] | None = None,
+    activation_evidence: dict[str, Any] | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for candidate in impact_candidates:
+        if isinstance(candidate, dict):
+            rows.append(_crunch_impact_rows_from_candidate(candidate))
+
+    measurement_rows = (
+        activation_ready_measurements.get("cohorts")
+        if isinstance(activation_ready_measurements, dict) and isinstance(activation_ready_measurements.get("cohorts"), list)
+        else []
+    )
+    for row in measurement_rows:
+        if isinstance(row, dict):
+            rows.append(_crunch_impact_rows_from_measurement(row))
+
+    duplicate = activation_evidence.get("duplicate_suppression") if isinstance(activation_evidence, dict) and isinstance(activation_evidence.get("duplicate_suppression"), dict) else {}
+    superseded_by_active_rule = bool(
+        duplicate.get("suppresses_new_activation_issue")
+        or duplicate.get("suppresses_generic_crunch_activation_issue")
+    )
+    follow_up_rows = (
+        follow_up_candidates.get("candidates")
+        if isinstance(follow_up_candidates, dict) and isinstance(follow_up_candidates.get("candidates"), list)
+        else []
+    )
+    for candidate in follow_up_rows:
+        if not isinstance(candidate, dict):
+            continue
+        if public_label(candidate.get("local_action_family"), "unknown") != "crunch":
+            continue
+        if public_label(candidate.get("next_action"), "unknown") not in {
+            "measure-repeated-context-crunch-canary-impact",
+            "measure-full-rollout-repeated-context-crunch-outcomes",
+            "stage-repeated-context-crunch-canary",
+        }:
+            continue
+        rows.append(_crunch_impact_rows_from_follow_up(candidate, superseded=superseded_by_active_rule))
+
+    activation_row = _crunch_impact_row_from_activation_evidence(activation_evidence or {})
+    if activation_row is not None:
+        rows.append(activation_row)
+
+    deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            row.get("source"),
+            row.get("cohort_ref"),
+            row.get("next_action"),
+            row.get("measurement_state"),
+        )
+        existing = deduped.get(key)
+        if existing is None or _crunch_impact_row_sort_key(row) > _crunch_impact_row_sort_key(existing):
+            deduped[key] = row
+    ranked_rows = sorted(deduped.values(), key=_crunch_impact_row_sort_key, reverse=True)
+    for rank, row in enumerate(ranked_rows, start=1):
+        row["rank"] = rank
+
+    state_counts: dict[str, int] = {}
+    next_action_counts: dict[str, int] = {}
+    readiness_counts: dict[str, int] = {}
+    local_family_counts: dict[str, int] = {}
+    for row in ranked_rows:
+        _increment(state_counts, row.get("measurement_state"))
+        _increment(next_action_counts, row.get("next_action"))
+        _increment(readiness_counts, row.get("readiness_state"))
+        _increment(local_family_counts, row.get("local_action_family"))
+
+    capped_limit = max(1, min(_as_int(limit, 50), 100))
+    return {
+        "schema": CRUNCH_CANARY_IMPACT_ROWS_SCHEMA,
+        "status": "ranked" if ranked_rows else "no-repeated-context-crunch-impact-rows",
+        "read_only": True,
+        "row_count": len(ranked_rows),
+        "reported_count": min(len(ranked_rows), capped_limit),
+        "state_breakdown": _breakdown(state_counts),
+        "next_action_breakdown": _breakdown(next_action_counts),
+        "readiness_state_breakdown": _breakdown(readiness_counts),
+        "local_action_family_breakdown": _breakdown(local_family_counts),
+        "summary": {
+            "ranked_row_count": len(ranked_rows),
+            "measured_count": _as_int(state_counts.get("measured")),
+            "measurement_required_count": _as_int(state_counts.get("measurement-required")),
+            "blocked_count": _as_int(state_counts.get("blocked")),
+            "superseded_count": _as_int(state_counts.get("superseded")),
+            "applied_count": sum(_as_int(row.get("applied_count")) for row in ranked_rows),
+            "holdout_count": sum(_as_int(row.get("holdout_count")) for row in ranked_rows),
+            "skipped_count": sum(_as_int(row.get("skipped_count")) for row in ranked_rows),
+            "projected_saved_tokens": sum(_as_int(row.get("projected_saved_tokens")) for row in ranked_rows),
+            "projected_saved_usd": round(sum(_as_float(row.get("projected_saved_usd")) for row in ranked_rows), 8),
+            "observed_saved_tokens": sum(_as_int(row.get("observed_saved_tokens")) for row in ranked_rows),
+            "observed_saved_usd": round(sum(_as_float(row.get("observed_saved_usd")) for row in ranked_rows), 8),
+            "top_state": ranked_rows[0]["measurement_state"] if ranked_rows else None,
+            "top_next_action": ranked_rows[0]["next_action"] if ranked_rows else None,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "policy_files_written": False,
+        },
+        "acceptance": {
+            "has_ranked_repeated_context_crunch_impact_rows": bool(ranked_rows),
+            "has_rank": all(_as_int(row.get("rank")) > 0 for row in ranked_rows),
+            "has_blocker_codes": all(isinstance(row.get("blocker_codes"), list) for row in ranked_rows),
+            "has_local_action_family": all(public_label(row.get("local_action_family"), "unknown") != "unknown" for row in ranked_rows),
+            "has_readiness_state": all(public_label(row.get("readiness_state"), "unknown") != "unknown" for row in ranked_rows),
+            "has_next_action": all(public_label(row.get("next_action"), "unknown") != "unknown" for row in ranked_rows),
+            "has_sample_count": all("sample_count" in row for row in ranked_rows),
+            "has_canary_counts": all("applied_count" in row and "holdout_count" in row and "skipped_count" in row for row in ranked_rows),
+            "has_projected_and_observed_savings": all("projected_saved_usd" in row and "observed_saved_usd" in row for row in ranked_rows),
+            "emits_durable_measurement_state": all(
+                public_label(row.get("measurement_state"), "unknown")
+                in {"measured", "measurement-required", "blocked", "superseded"}
+                for row in ranked_rows
+            ),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "rows": ranked_rows[:capped_limit],
+        "top_row": ranked_rows[0] if ranked_rows else None,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
 def _crunch_impact_newly_staged_measurement(measurements: dict[str, Any]) -> dict[str, Any]:
     rows = measurements.get("cohorts") if isinstance(measurements.get("cohorts"), list) else []
     newly_staged: list[dict[str, Any]] = []
@@ -1849,6 +2252,10 @@ def build_request_shape_crunch_canary_impact_report(
         impact_candidates=finalized,
     )
     newly_staged_measurement = _crunch_impact_newly_staged_measurement(activation_ready_measurements)
+    repeated_context_impact_rows = build_request_shape_crunch_canary_impact_rows_report(
+        impact_candidates=finalized,
+        activation_ready_measurements=activation_ready_measurements,
+    )
     return {
         "schema": CRUNCH_CANARY_IMPACT_SCHEMA,
         "status": status,
@@ -1935,6 +2342,11 @@ def build_request_shape_crunch_canary_impact_report(
             "newly_staged_rollback_count": newly_staged_measurement["rollback_count"],
             "newly_staged_safety_stop_count": newly_staged_measurement["safety_stop_count"],
             "active_max_rollout_suppressed_cohort_count": newly_staged_measurement["active_max_rollout_suppressed_count"],
+            "repeated_context_impact_row_count": repeated_context_impact_rows["summary"]["ranked_row_count"],
+            "repeated_context_measured_count": repeated_context_impact_rows["summary"]["measured_count"],
+            "repeated_context_measurement_required_count": repeated_context_impact_rows["summary"]["measurement_required_count"],
+            "repeated_context_blocked_count": repeated_context_impact_rows["summary"]["blocked_count"],
+            "repeated_context_superseded_count": repeated_context_impact_rows["summary"]["superseded_count"],
         },
         "verdict_breakdown": _breakdown(verdict_counts),
         "impact_recommendation_breakdown": recommendation_breakdown,
@@ -1943,6 +2355,7 @@ def build_request_shape_crunch_canary_impact_report(
         "cohort_family_actions": cohort_family_actions,
         "activation_ready_measurements": activation_ready_measurements,
         "newly_staged_measurement": newly_staged_measurement,
+        "repeated_context_impact_rows": repeated_context_impact_rows,
         "candidates": finalized,
         "activation_lifecycle_feedback": _crunch_impact_activation_lifecycle_feedback(finalized),
         "privacy": _crunch_opportunity_privacy(),
@@ -9401,6 +9814,23 @@ def build_request_shape_rollups_report(
         activation_evidence=crunch_activation_evidence,
         limit=10,
     )
+    repeated_context_impact_rows = build_request_shape_crunch_canary_impact_rows_report(
+        impact_candidates=crunch_canary_impact.get("candidates") if isinstance(crunch_canary_impact.get("candidates"), list) else [],
+        activation_ready_measurements=crunch_canary_impact.get("activation_ready_measurements")
+        if isinstance(crunch_canary_impact.get("activation_ready_measurements"), dict)
+        else {},
+        follow_up_candidates=follow_up_candidates,
+        activation_evidence=crunch_activation_evidence,
+    )
+    crunch_canary_impact = dict(crunch_canary_impact)
+    crunch_canary_impact["repeated_context_impact_rows"] = repeated_context_impact_rows
+    if isinstance(crunch_canary_impact.get("summary"), dict):
+        crunch_canary_impact["summary"] = dict(crunch_canary_impact["summary"])
+        crunch_canary_impact["summary"]["repeated_context_impact_row_count"] = repeated_context_impact_rows["summary"]["ranked_row_count"]
+        crunch_canary_impact["summary"]["repeated_context_measured_count"] = repeated_context_impact_rows["summary"]["measured_count"]
+        crunch_canary_impact["summary"]["repeated_context_measurement_required_count"] = repeated_context_impact_rows["summary"]["measurement_required_count"]
+        crunch_canary_impact["summary"]["repeated_context_blocked_count"] = repeated_context_impact_rows["summary"]["blocked_count"]
+        crunch_canary_impact["summary"]["repeated_context_superseded_count"] = repeated_context_impact_rows["summary"]["superseded_count"]
 
     return {
         "schema": SCHEMA,
