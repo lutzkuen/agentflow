@@ -7314,6 +7314,84 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         classified = next(d for d in diagnostics if d["reason"] == "stale-quality-evidence")
         self.assertEqual(classified.get("reclassification_source"), "stale-lifecycle-pattern")
 
+    def test_stale_lifecycle_feedback_emits_durable_freshness_gate(self):
+        plan = build_research_plan(
+            issues=[],
+            log_sources=[
+                "activation skipped: stale-lifecycle-evidence latest_observed_at=2020-01-01T00:00:00Z",
+                "activation skipped: stale-lifecycle-evidence latest_observed_at=2020-01-01T00:00:00Z",
+            ],
+            threshold=1,
+            now=NOW,
+        )
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        stale_entries = [
+            entry
+            for entry in ledger["entries"]
+            if entry.get("diagnostic_class") == "stale-evidence"
+        ]
+        self.assertEqual(len(stale_entries), 1)
+        entry = stale_entries[0]
+        self.assertEqual(entry["lever"], "activation-feedback")
+        self.assertEqual(entry["local_action_family"], "activation-feedback")
+        self.assertEqual(entry["current_status"], "keep-blocked")
+        self.assertEqual(entry["issue_worthy_status"], "blocked")
+        self.assertEqual(
+            entry["next_action"],
+            "collect-fresh-activation-feedback-evidence-before-activation",
+        )
+        self.assertEqual(
+            entry["keep_blocked_reason"],
+            "activation-feedback-stale-evidence-blocked-until-fresh-local-evidence",
+        )
+        self.assertTrue(entry["durable_action_ledger_entry"])
+        self.assertEqual(entry["evidence_freshness_status"], "stale-blocked")
+        self.assertGreater(entry["evidence_age_hours"], 72.0)
+        self.assertEqual(entry["max_evidence_age_hours"], 72.0)
+        gate = entry["activation_feedback_freshness_gate"]
+        self.assertEqual(gate["schema"], "agentflow.activation_feedback_evidence_freshness_gate.v1")
+        self.assertEqual(gate["status"], "stale-blocked")
+        self.assertEqual(gate["deterministic_decision"], "stale-blocked")
+        self.assertEqual(gate["evidence_timestamp"], "2020-01-01T00:00:00Z")
+        self.assertEqual(gate["evidence_timestamp_source"], "diagnostic.example")
+        self.assertTrue(gate["timestamp_present"])
+        self.assertEqual(gate["next_action"], "collect-fresh-activation-feedback-evidence-before-activation")
+        self.assertTrue(gate["privacy"]["metadata_only"])
+        self.assertTrue(gate["privacy"]["aggregate_only"])
+        self.assertFalse(gate["privacy"]["raw_prompts_included"])
+        self.assertFalse(gate["privacy"]["provider_bodies_included"])
+        self.assertFalse(gate["privacy"]["request_ids_included"])
+        self.assertFalse(gate["privacy"]["session_ids_included"])
+        self.assertFalse(gate["privacy"]["cache_keys_included"])
+        self.assertFalse(gate["privacy"]["absolute_paths_included"])
+
+        queue = plan["evidence"]["stats_summary"]["local_activation_next_action_queue"]
+        queued = [
+            item
+            for item in queue["entries"]
+            if item.get("diagnostic_class") == "stale-evidence"
+        ]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["evidence_freshness_status"], "stale-blocked")
+        self.assertEqual(
+            queued[0]["activation_feedback_freshness_gate"]["status"],
+            "stale-blocked",
+        )
+        self.assertEqual(
+            queued[0]["unblock_reason"],
+            "stale-lifecycle-evidence",
+        )
+
+        created_titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn("Resolve repeated-stale-evidence activation feedback blocker", created_titles)
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["activation_feedback_keep_blocked_suppressed_count"], 1)
+        self.assertEqual(
+            suppression["suppressed"][-1]["keep_blocked_reason"],
+            "activation-feedback-stale-evidence-blocked-until-fresh-local-evidence",
+        )
+
     def test_privacy_redacts_raw_fields_paths_and_ids(self):
         plan = build_research_plan(
             issues=[

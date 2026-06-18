@@ -17,6 +17,7 @@ EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA = "agentflow.evidence_to_activation_next_ac
 EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger_entry.v1"
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "agentflow.local_activation_next_action_queue.v1"
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_next_action_queue_entry.v1"
+ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA = "agentflow.activation_feedback_evidence_freshness_gate.v1"
 OPENAI_ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
 FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA = "agentflow.full_rollout_crunch_activation_measurement.v1"
 FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA = "agentflow.full_rollout_crunch_keep_active_regression_gate.v1"
@@ -331,6 +332,13 @@ _ACTIVATION_FEEDBACK_NO_LOCAL_REPRESENTATION_KEEP_BLOCKED_REASON = (
 _ACTIVATION_FEEDBACK_NO_LOCAL_REPRESENTATION_NEXT_ACTION = (
     "record-review-only-local-representation-and-wait-for-supported-local-action"
 )
+_ACTIVATION_FEEDBACK_STALE_EVIDENCE_KEEP_BLOCKED_REASON = (
+    "activation-feedback-stale-evidence-blocked-until-fresh-local-evidence"
+)
+_ACTIVATION_FEEDBACK_STALE_EVIDENCE_NEXT_ACTION = (
+    "collect-fresh-activation-feedback-evidence-before-activation"
+)
+_ACTIVATION_FEEDBACK_FRESHNESS_MAX_AGE_HOURS = 72.0
 
 _UNSUPPORTED_LOCAL_ACTION_FAMILIES = {
     "server-content-processing",
@@ -841,6 +849,118 @@ def _normal_diagnostic_token(value: Any) -> str:
     )
 
 
+_ISO_TIMESTAMP_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\b")
+
+
+def _parse_public_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _diagnostic_evidence_timestamp(diagnostic: dict[str, Any], lifecycle_context: dict[str, Any]) -> tuple[str | None, str]:
+    for key in (
+        "latest_observed_at",
+        "evidence_timestamp",
+        "observed_at",
+        "generated_at",
+        "created_at",
+    ):
+        value = diagnostic.get(key)
+        if value:
+            return str(value), f"diagnostic.{key}"
+    for key in (
+        "latest_observed_at",
+        "evidence_timestamp",
+        "observed_at",
+        "generated_at",
+    ):
+        value = lifecycle_context.get(key)
+        if value:
+            return str(value), f"lifecycle_context.{key}"
+    example = str(diagnostic.get("example") or "")
+    match = _ISO_TIMESTAMP_RE.search(example)
+    if match:
+        return match.group(0), "diagnostic.example"
+    return None, "missing"
+
+
+def _activation_feedback_freshness_gate(
+    diagnostic: dict[str, Any],
+    lifecycle_context: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    max_age_hours = _to_float(
+        diagnostic.get("max_age_hours")
+        or lifecycle_context.get("max_age_hours")
+        or _ACTIVATION_FEEDBACK_FRESHNESS_MAX_AGE_HOURS,
+        _ACTIVATION_FEEDBACK_FRESHNESS_MAX_AGE_HOURS,
+    )
+    timestamp, timestamp_source = _diagnostic_evidence_timestamp(diagnostic, lifecycle_context)
+    parsed = _parse_public_timestamp(timestamp)
+    age_hours = None
+    if parsed is not None:
+        age_hours = round((datetime.now(timezone.utc) - parsed).total_seconds() / 3600.0, 3)
+    reason_text = " ".join(
+        str(part or "")
+        for part in (
+            reason,
+            diagnostic.get("diagnostic_class"),
+            diagnostic.get("example"),
+            lifecycle_context.get("blocker_code"),
+        )
+    ).lower()
+    superseded = any(
+        token in reason_text
+        for token in (
+            "full-rollout-local-policy-active",
+            "repeated-context-crunch-full-rollout-active",
+            "already-resolved",
+            "superseded",
+        )
+    )
+    if superseded:
+        status = "superseded-by-local-policy"
+    elif parsed is None:
+        status = "missing"
+    elif age_hours is not None and age_hours > max_age_hours:
+        status = "stale-blocked"
+    else:
+        status = "fresh"
+    next_action = (
+        "use-fresh-activation-feedback-evidence"
+        if status == "fresh"
+        else "keep-current-local-policy-and-suppress-stale-activation-issue"
+        if status == "superseded-by-local-policy"
+        else _ACTIVATION_FEEDBACK_STALE_EVIDENCE_NEXT_ACTION
+    )
+    return {
+        "schema": ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA,
+        "status": status,
+        "deterministic_decision": status,
+        "next_action": next_action,
+        "evidence_timestamp": sanitize_value(timestamp),
+        "evidence_timestamp_source": sanitize_value(timestamp_source),
+        "timestamp_present": parsed is not None,
+        "age_hours": age_hours,
+        "max_age_hours": max_age_hours,
+        "lifecycle_source": sanitize_value(lifecycle_context.get("source") or "orchestrator-log-diagnostic"),
+        "source_schema": sanitize_value(lifecycle_context.get("report_schema") or "agentflow.orchestrator_research_log_diagnostics.v1"),
+        "reason": sanitize_value(reason or "stale-evidence"),
+        "privacy": _candidate_privacy(),
+    }
+
+
 def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | None:
     reason = _normal_diagnostic_token(diagnostic.get("reason"))
     diagnostic_class = _normal_diagnostic_token(diagnostic.get("diagnostic_class") or reason)
@@ -1042,10 +1162,42 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
             }
         )
     elif diagnostic_class == "stale-evidence":
+        freshness_gate = _activation_feedback_freshness_gate(
+            diagnostic,
+            lifecycle_context,
+            reason=reason or "stale-evidence",
+        )
+        freshness_status = str(freshness_gate.get("status") or "missing")
+        fresh_enough = freshness_status == "fresh"
         stage.update(
             {
-                "state": "missing-evidence",
-                "next_action": "collect-missing-activation-dependency-evidence",
+                "lever": "activation-feedback",
+                "local_action_family": "activation-feedback",
+                "state": "missing-evidence" if fresh_enough else "keep-blocked",
+                "next_action": (
+                    "review-fresh-activation-feedback-evidence"
+                    if fresh_enough
+                    else _ACTIVATION_FEEDBACK_STALE_EVIDENCE_NEXT_ACTION
+                ),
+                "review_status": "freshness-gate-passed" if fresh_enough else "blocked-by-evidence-freshness-gate",
+                "issue_worthy_status": "ready" if fresh_enough else "blocked",
+                "keep_blocked_reason": None if fresh_enough else _ACTIVATION_FEEDBACK_STALE_EVIDENCE_KEEP_BLOCKED_REASON,
+                "next_state": "missing-evidence" if fresh_enough else "keep-blocked",
+                "next_state_reason": "fresh-activation-feedback-evidence-available"
+                if fresh_enough
+                else _ACTIVATION_FEEDBACK_STALE_EVIDENCE_KEEP_BLOCKED_REASON,
+                "needed_resolution": []
+                if fresh_enough
+                else [
+                    "fresh_sanitized_evidence_timestamp",
+                    "activation_feedback_source_report",
+                    "bounded_local_action_issue",
+                ],
+                "durable_action_ledger_entry": True,
+                "activation_feedback_freshness_gate": freshness_gate,
+                "evidence_freshness_status": freshness_status,
+                "max_evidence_age_hours": freshness_gate.get("max_age_hours"),
+                "evidence_age_hours": freshness_gate.get("age_hours"),
             }
         )
     elif diagnostic_class == "activation-feedback-blocker-review":
@@ -1127,6 +1279,7 @@ def _activation_feedback_blocker_review_suppression(diagnostic: dict[str, Any]) 
         "activation-feedback-blocker-review",
         "missing-dependency-evidence",
         "no-local-representation",
+        "stale-evidence",
     }:
         return None
     keep_blocked_reason = str(stage.get("keep_blocked_reason") or "").strip()
@@ -4763,6 +4916,12 @@ def build_evidence_to_activation_next_action_ledger(
             entry["verification_check"] = sanitize_value(stage.get("verification_check"))
         if stage.get("review_status"):
             entry["review_status"] = sanitize_value(stage.get("review_status"))
+        if stage.get("evidence_freshness_status"):
+            entry["evidence_freshness_status"] = sanitize_value(stage.get("evidence_freshness_status"))
+        if stage.get("evidence_age_hours") is not None:
+            entry["evidence_age_hours"] = round(_to_float(stage.get("evidence_age_hours")), 3)
+        if stage.get("max_evidence_age_hours") is not None:
+            entry["max_evidence_age_hours"] = round(_to_float(stage.get("max_evidence_age_hours")), 3)
         if stage.get("durable_action_ledger_entry"):
             entry["durable_action_ledger_entry"] = bool(stage.get("durable_action_ledger_entry"))
         if isinstance(stage.get("privacy"), dict):
@@ -4803,6 +4962,7 @@ def build_evidence_to_activation_next_action_ledger(
             "applied_coverage",
             "holdout_coverage",
             "missing_dependency_evidence_review",
+            "activation_feedback_freshness_gate",
         ):
             if isinstance(stage.get(review_key), dict):
                 entry[review_key] = sanitize_value(stage.get(review_key))
@@ -4970,6 +5130,8 @@ def build_evidence_to_activation_next_action_ledger(
             "wrote_active_policy_files",
             "policy_files_written",
             "executor_compatible",
+            "evidence_age_hours",
+            "max_evidence_age_hours",
         }
         entries.append({key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in preserved_empty_keys})
 
@@ -5197,6 +5359,9 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "duplicate_suppression_reason": sanitize_value(suppression.get("reason")) if suppression else None,
         "evidence_schema": sanitize_value(entry.get("evidence_schema")),
         "expected_savings_path": sanitize_value(entry.get("expected_savings_path")),
+        "diagnostic_class": sanitize_value(entry.get("diagnostic_class")),
+        "diagnostic_reason": sanitize_value(entry.get("diagnostic_reason")),
+        "diagnostic_fingerprint": sanitize_value(entry.get("diagnostic_fingerprint")),
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -5271,6 +5436,9 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "full_rollout_successor_next_action",
         "full_rollout_successor_no_op_reason",
         "measured_full_rollout_activation",
+        "evidence_freshness_status",
+        "evidence_age_hours",
+        "max_evidence_age_hours",
     )
     for key in passthrough_keys:
         if entry.get(key) is not None:
@@ -5289,6 +5457,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "outcome_gate",
         "keep_active_regression_gate",
         "full_rollout_activation_outcome",
+        "activation_feedback_freshness_gate",
     ):
         if isinstance(entry.get(review_key), dict):
             clean[review_key] = sanitize_value(entry.get(review_key))
@@ -5340,6 +5509,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "durable_action_ledger_entry",
         "durable_outcome_ledger_entry",
         "measured_full_rollout_activation",
+        "evidence_age_hours",
+        "max_evidence_age_hours",
     }
     return {key: value for key, value in clean.items() if value not in (None, "", [], 0) or key in preserved_empty_keys}
 
