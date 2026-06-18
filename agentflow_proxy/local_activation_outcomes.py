@@ -12,6 +12,7 @@ from agentflow_proxy.store import utc_now
 
 SCHEMA = "agentflow.local_activation_outcome_summary.v1"
 OUTCOME_SCHEMA = "agentflow.local_activation_outcome_summary_row.v1"
+OUTCOME_LEDGER_ENTRY_SCHEMA = "agentflow.local_activation_outcome_ledger_entry.v1"
 PRIVACY_SCHEMA = "agentflow.local_activation_outcome_summary_privacy.v1"
 CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
 CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "agentflow.request_shape_crunch_activation_evidence.v1"
@@ -92,6 +93,7 @@ def _privacy() -> dict[str, Any]:
         "session_ids_included": False,
         "tenant_ids_included": False,
         "individual_candidate_ids_included": False,
+        "file_paths_included": False,
         "absolute_paths_included": False,
         "policy_file_contents_included": False,
     }
@@ -528,7 +530,10 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
     cap_reason = public_label(summary.get("post_max_rollout_cap_reason"), "")
     if cap_reason:
         row["post_max_rollout_cap_reason"] = cap_reason
-    row["outcome"] = post_max_decision if post_max_decision in {"promote-full", "full-rollout-applied", "keep-capped", "rollback"} else ("keep-active" if keep_active else post_next_action)
+    if post_max_decision == "full-rollout-applied":
+        row["outcome"] = "keep-active"
+    else:
+        row["outcome"] = post_max_decision if post_max_decision in {"promote-full", "keep-capped", "rollback"} else ("keep-active" if keep_active else post_next_action)
     row["next_action"] = post_max_next_action or post_next_action
     row["error_rate_delta"] = round(_as_float(summary.get("error_rate_delta")), 6)
     row["retry_rate_delta"] = round(_as_float(summary.get("retry_rate_delta")), 6)
@@ -805,6 +810,81 @@ def _apply_policy_decision_reports(
     return applied
 
 
+def _outcome_ledger_entry(row: dict[str, Any]) -> dict[str, Any] | None:
+    source_schema = str(row.get("source_evidence_schema") or "").strip()
+    if source_schema not in {
+        CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
+        CRUNCH_POLICY_DECISION_SCHEMA,
+        CACHE_REPLAY_POLICY_DECISION_SCHEMA,
+        CACHE_REPLAY_EVIDENCE_SCHEMA,
+    }:
+        return None
+    local_action_family = public_label(row.get("local_action_family"), "unknown")
+    outcome = public_label(row.get("outcome") or row.get("source_decision"), "unknown")
+    next_action = public_label(row.get("next_action"), "review-local-activation-outcome")
+    target_rule_file = public_label(row.get("target_local_rule_file"), "")
+    target_policy_section = public_label(row.get("target_local_policy_section"), "")
+    source_decision_id = public_label(row.get("source_decision_id"), "")
+    fingerprint_material = {
+        "local_action_family": local_action_family,
+        "source_schema": source_schema,
+        "source_decision_id": source_decision_id,
+        "outcome": outcome,
+        "next_action": next_action,
+        "target_local_rule_file": target_rule_file,
+        "target_local_policy_section": target_policy_section,
+    }
+    entry = {
+        "schema": OUTCOME_LEDGER_ENTRY_SCHEMA,
+        "ledger_ref": public_id(json.dumps(fingerprint_material, sort_keys=True), prefix="activation"),
+        "durable_outcome_ledger_entry": True,
+        "local_action_family": local_action_family,
+        "policy_section": public_label(row.get("policy_section"), local_action_family),
+        "source_evidence_schema": source_schema,
+        "source_decision_id": source_decision_id or None,
+        "source_decision": public_label(row.get("source_decision"), "unknown"),
+        "graduation_decision": public_label(row.get("graduation_decision"), "unknown"),
+        "outcome": outcome,
+        "next_action": next_action,
+        "applied_count": _as_int(row.get("applied_count")),
+        "holdout_count": _as_int(row.get("holdout_count")),
+        "skipped_count": _as_int(row.get("skipped_count")),
+        "fallback_count": _as_int(row.get("fallback_count")),
+        "rollback_count": _as_int(row.get("rollback_count")),
+        "safety_stop_count": _as_int(row.get("safety_stopped_count")),
+        "observed_saved_tokens": _as_int(row.get("observed_saved_tokens")),
+        "observed_savings_usd": round(_as_float(row.get("observed_savings_usd")), 8),
+        "projected_savings_usd": round(_as_float(row.get("projected_savings_usd")), 8),
+        "safety_stop_state": public_label(row.get("safety_stop_state"), "none"),
+        "target_local_rule_file": target_rule_file or None,
+        "target_local_policy_section": target_policy_section or None,
+        "active_rule_count": _as_int(row.get("active_rule_count")),
+        "widened_rule_count": _as_int(row.get("widened_rule_count")),
+        "active_rule_ref": public_label(row.get("active_rule_ref"), "") or None,
+        "active_rule_source": public_label(row.get("active_rule_source"), "") or None,
+        "active_rule_decision_id": public_label(row.get("active_rule_decision_id"), "") or None,
+        "active_rule_source_evidence_schema": public_label(row.get("active_rule_source_evidence_schema"), "") or None,
+        "coverage": row.get("coverage") if isinstance(row.get("coverage"), dict) else None,
+        "duplicate_suppression": row.get("duplicate_suppression") if isinstance(row.get("duplicate_suppression"), dict) else None,
+        "privacy": _privacy(),
+    }
+    for key in (
+        "post_widening_status",
+        "post_widening_next_action",
+        "post_widening_reason_codes",
+        "post_max_rollout_status",
+        "post_max_rollout_decision",
+        "post_max_rollout_next_action",
+        "post_max_rollout_reason_codes",
+        "post_max_rollout_promotion_allowed",
+        "full_rollout_active",
+    ):
+        value = row.get(key)
+        if value not in (None, "", []):
+            entry[key] = value
+    return {key: value for key, value in entry.items() if value not in (None, "", [])}
+
+
 def _fetch_rows(store_obj: Any, *, limit: int) -> list[dict[str, Any]]:
     capped = max(1, min(int(limit or 1), 20_000))
     return [
@@ -903,6 +983,11 @@ def build_local_activation_outcome_summary(
     policy_decision_report_count = _apply_policy_decision_reports(summaries, blockers, activation_reports)
 
     outcome_summaries = [_finalize_row(summaries[section], blockers[section]) for section in ("routing", "crunch", "cache")]
+    outcome_ledger_entries = [
+        entry
+        for entry in (_outcome_ledger_entry(row) for row in outcome_summaries)
+        if entry is not None
+    ]
     result = {
         "schema": SCHEMA,
         "generated_at": utc_now(),
@@ -916,6 +1001,7 @@ def build_local_activation_outcome_summary(
             "lookback_limit": max(1, min(int(limit or 1), 20_000)),
             "local_action_family_count": len(outcome_summaries),
             "policy_decision_report_count": policy_decision_report_count,
+            "outcome_ledger_entry_count": len(outcome_ledger_entries),
             "policy_decision_families": sorted(
                 {
                     row["local_action_family"]
@@ -938,6 +1024,7 @@ def build_local_activation_outcome_summary(
             "projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in outcome_summaries), 8),
         },
         "outcome_summaries": outcome_summaries,
+        "outcome_ledger_entries": outcome_ledger_entries,
         "local_policy_handoff": {
             "source": "local-activation-outcome-summary",
             "supported_local_action_families": ["routing", "crunch", "cache"],

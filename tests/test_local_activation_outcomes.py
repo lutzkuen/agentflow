@@ -557,6 +557,18 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
                     "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
                 }
             ],
+            "duplicate_suppression": {
+                "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                "fingerprint": "activation:full-rollout-test",
+                "matching_local_policy": "crunch_rules",
+                "reason": "repeated-context-crunch-full-rollout-active",
+                "suppresses_generic_crunch_activation_issue": True,
+                "suppresses_new_activation_issue": True,
+                "target_local_policy_section": "crunch.rules",
+                "target_local_rule_file": "crunch_rules.yaml",
+                "metadata_only": True,
+                "aggregate_only": True,
+            },
             "privacy": {"metadata_only": True, "aggregate_only": True},
         }
 
@@ -575,7 +587,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
         crunch = {row["local_action_family"]: row for row in report["outcome_summaries"]}["crunch"]
         self.assertEqual(crunch["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
-        self.assertEqual(crunch["outcome"], "full-rollout-applied")
+        self.assertEqual(crunch["outcome"], "keep-active")
         self.assertEqual(crunch["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
         self.assertTrue(crunch["full_rollout_active"])
         self.assertEqual(crunch["full_rollout_fraction"], 1.0)
@@ -584,6 +596,54 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertTrue(crunch["post_max_rollout_full_rollout_allowed"])
         self.assertEqual(crunch["observed_saved_tokens"], 8_606_129)
         self.assertAlmostEqual(crunch["observed_savings_usd"], 25.818387)
+        self.assertEqual(report["summary"]["outcome_ledger_entry_count"], 1)
+        self.assertEqual(len(report["outcome_ledger_entries"]), 1)
+        ledger_entry = report["outcome_ledger_entries"][0]
+        self.assertEqual(ledger_entry["schema"], "agentflow.local_activation_outcome_ledger_entry.v1")
+        self.assertTrue(ledger_entry["durable_outcome_ledger_entry"])
+        self.assertTrue(str(ledger_entry["ledger_ref"]).startswith("activation:"))
+        self.assertEqual(ledger_entry["local_action_family"], "crunch")
+        self.assertEqual(ledger_entry["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(ledger_entry["source_decision_id"], "request-shape-crunch-policy-decision:test")
+        self.assertEqual(ledger_entry["outcome"], "keep-active")
+        self.assertEqual(ledger_entry["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
+        self.assertEqual(ledger_entry["applied_count"], 107)
+        self.assertEqual(ledger_entry["holdout_count"], 40)
+        self.assertEqual(ledger_entry["skipped_count"], 280)
+        self.assertEqual(ledger_entry["observed_saved_tokens"], 8_606_129)
+        self.assertAlmostEqual(ledger_entry["observed_savings_usd"], 25.818387)
+        self.assertEqual(ledger_entry["safety_stop_state"], "none")
+        self.assertEqual(ledger_entry["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(ledger_entry["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(ledger_entry["active_rule_ref"], "local-repeated-context-crunch-canary-test")
+        self.assertEqual(ledger_entry["active_rule_decision_id"], "request-shape-crunch-policy-decision:test")
+        self.assertEqual(ledger_entry["coverage"]["applied_count"], 107)
+        self.assertEqual(ledger_entry["coverage"]["holdout_count"], 40)
+        self.assertEqual(ledger_entry["coverage"]["safety_stop_count"], 0)
+        ledger_suppression = ledger_entry["duplicate_suppression"]
+        self.assertEqual(ledger_suppression["reason"], "repeated-context-crunch-full-rollout-active")
+        self.assertTrue(ledger_suppression["suppresses_new_activation_issue"])
+        self.assertTrue(ledger_suppression["suppresses_generic_crunch_activation_issue"])
+        self.assertTrue(ledger_entry["privacy"]["metadata_only"])
+        self.assertTrue(ledger_entry["privacy"]["aggregate_only"])
+        self.assertFalse(ledger_entry["privacy"]["raw_prompts_included"])
+        self.assertFalse(ledger_entry["privacy"]["provider_bodies_included"])
+        self.assertFalse(ledger_entry["privacy"]["file_paths_included"])
+        self.assertFalse(ledger_entry["privacy"]["request_ids_included"])
+        self.assertFalse(ledger_entry["privacy"]["session_ids_included"])
+        self.assertFalse(ledger_entry["privacy"]["cache_keys_included"])
+        self.assertFalse(ledger_entry["privacy"]["individual_candidate_ids_included"])
+        rendered = json.dumps(report, sort_keys=True)
+        for forbidden in (
+            "raw prompt",
+            "provider body",
+            str(Path(tmp).resolve()),
+            "request-secret",
+            "session-secret",
+            "cache-key-secret",
+            "candidate-secret",
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def test_cli_emits_local_activation_outcome_summary(self):
         with TemporaryDirectory() as tmp:
