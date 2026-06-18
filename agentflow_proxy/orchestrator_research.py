@@ -17,6 +17,7 @@ EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA = "agentflow.evidence_to_activation_next_ac
 EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger_entry.v1"
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "agentflow.local_activation_next_action_queue.v1"
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_next_action_queue_entry.v1"
+LOCAL_ACTIVATION_SUCCESSOR_ACTION_SCHEMA = "agentflow.local_activation_successor_action.v1"
 ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA = "agentflow.activation_feedback_evidence_freshness_gate.v1"
 OPENAI_ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
 FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA = "agentflow.full_rollout_crunch_activation_measurement.v1"
@@ -5356,6 +5357,165 @@ def _queue_realized_savings(entry: dict[str, Any], projected: float) -> float:
     return 0.0
 
 
+def _successor_action_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "provider_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_responses_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "tenant_ids_included": False,
+        "tool_payloads_included": False,
+        "cache_keys_included": False,
+        "file_paths_included": False,
+        "absolute_paths_included": False,
+        "individual_candidate_ids_included": False,
+        "policy_file_contents_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
+
+
+def _successor_action_acceptance_metric(entry: dict[str, Any]) -> str:
+    family = str(entry.get("local_action_family") or entry.get("lever") or "").strip()
+    blockers = {str(item) for item in entry.get("blocker_codes") or []}
+    next_action = str(entry.get("next_action") or "")
+    state = str(entry.get("state") or "")
+    if family == "routing" and "semantic-quality-regression-observed" in blockers:
+        return (
+            "A narrower routing canary or rollback review records applied/holdout coverage, "
+            "semantic regression blocker status, and no local policy write until the blocker clears."
+        )
+    if family == "routing" and (
+        entry.get("safety_stop_count")
+        or "safety-stop" in " ".join(sorted(blockers))
+        or "anthropic-routing" in str(entry.get("unblock_reason") or "")
+    ):
+        return (
+            "Anthropic routing remains blocked until safety_stop_count is zero and safety-stop reason "
+            "review, safer executor guard, rollback proof, applied coverage, and holdout coverage pass."
+        )
+    if family == "routing":
+        return (
+            "Routing successors record applied/holdout coverage, blocker status, regression status, "
+            "and the narrower local canary or rollback action before any local policy write."
+        )
+    if family == "cache":
+        return (
+            "Tool-cache replay candidates classify dependency evidence as stable, stale, unsafe, "
+            "unknown, or missing, while emitting no cache apply actions or cache entries for unsafe shapes."
+        )
+    if family == "crunch" or "crunch" in next_action or "crunch" in state:
+        return (
+            "Full-rollout repeated-context crunch stays keep-active with applied coverage, holdout coverage, "
+            "zero safety stops, zero rollbacks, and duplicate activation issue suppression."
+        )
+    if family == "managed-recommendation":
+        return (
+            "Managed recommendation omissions resolve to local file-backed handoff or explicit no-op rows "
+            "without requiring managed-server execution."
+        )
+    return (
+        "The successor action has a stable fingerprint, concrete next action, local action family, "
+        "and metadata-only privacy flags."
+    )
+
+
+def _successor_action_status(entry: dict[str, Any]) -> str:
+    duplicate_status = str(entry.get("duplicate_suppression_status") or "")
+    current_status = str(entry.get("current_status") or "")
+    state = str(entry.get("state") or "")
+    issue_status = str(entry.get("issue_worthy_status") or "")
+    if duplicate_status == "suppressed":
+        if current_status == "full-rollout" or entry.get("measured_full_rollout_activation"):
+            return "keep-current-rule"
+        return "suppress-duplicate"
+    if issue_status == "blocked" or current_status in {"blocked", "keep-blocked"} or state == "keep-blocked":
+        return "keep-blocked"
+    if entry.get("emits_cache_apply_action") is False or entry.get("policy_files_written") is False:
+        return "review-only"
+    if issue_status == "ready":
+        return "ready"
+    return "review"
+
+
+def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
+    fingerprint = sanitize_value(entry.get("fingerprint") or "")
+    material = {
+        "fingerprint": fingerprint,
+        "next_action": sanitize_value(entry.get("next_action") or "inspect-local-evidence"),
+        "local_action_family": sanitize_value(entry.get("local_action_family") or entry.get("lever") or "unknown"),
+    }
+    action_fingerprint = public_id(json.dumps(material, sort_keys=True), prefix="successor")
+    action = {
+        "schema": LOCAL_ACTIVATION_SUCCESSOR_ACTION_SCHEMA,
+        "rank": 0,
+        "source_queue_rank": _to_int(entry.get("rank")),
+        "source_ledger_rank": _to_int(entry.get("ledger_rank")),
+        "fingerprint": action_fingerprint,
+        "source_fingerprint": fingerprint,
+        "lever": sanitize_value(entry.get("lever") or "unknown"),
+        "local_action_family": sanitize_value(entry.get("local_action_family") or entry.get("lever") or "unknown"),
+        "successor_status": _successor_action_status(entry),
+        "current_status": sanitize_value(entry.get("current_status") or "unknown"),
+        "state": sanitize_value(entry.get("state") or "unknown"),
+        "recommended_next_action": sanitize_value(entry.get("next_action") or "inspect-local-evidence"),
+        "unblock_reason": sanitize_value(entry.get("unblock_reason")),
+        "blocker_codes": sanitize_value([str(item) for item in entry.get("blocker_codes") or [] if str(item or "").strip()]),
+        "target_local_rule_file": sanitize_value(entry.get("target_local_rule_file")),
+        "target_local_policy_section": sanitize_value(entry.get("target_local_policy_section")),
+        "acceptance_metric": _successor_action_acceptance_metric(entry),
+        "expected_savings_path": sanitize_value(entry.get("expected_savings_path")),
+        "sample_count": _to_int(entry.get("sample_count")),
+        "realized_savings_usd": round(_to_float(entry.get("realized_savings_usd")), 8),
+        "projected_savings_usd": round(_to_float(entry.get("projected_savings_usd")), 8),
+        "issue_worthy_status": sanitize_value(entry.get("issue_worthy_status") or "review"),
+        "duplicate_suppression_status": sanitize_value(entry.get("duplicate_suppression_status")),
+        "duplicate_suppression_reason": sanitize_value(entry.get("duplicate_suppression_reason")),
+        "privacy": _successor_action_privacy(),
+    }
+    for key in (
+        "emits_cache_apply_action",
+        "policy_files_written",
+        "tool_cache_replay_enabled",
+        "streaming_replay_enabled",
+        "promotion_allowed",
+        "stage_allowed",
+        "missing_applied_coverage",
+        "missing_holdout_coverage",
+        "measured_full_rollout_activation",
+        "durable_action_ledger_entry",
+        "durable_outcome_ledger_entry",
+    ):
+        if entry.get(key) is not None:
+            action[key] = bool(entry.get(key))
+    return {
+        key: value
+        for key, value in action.items()
+        if value not in (None, "", [], 0) or key in {"rank", "source_queue_rank", "source_ledger_rank", "sample_count", "realized_savings_usd", "projected_savings_usd"}
+    }
+
+
+def build_local_activation_successor_actions(queue: dict[str, Any]) -> list[dict[str, Any]]:
+    entries = [entry for entry in queue.get("entries") or [] if isinstance(entry, dict)]
+    actions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        action = _local_activation_successor_action(entry)
+        fingerprint = str(action.get("fingerprint") or "")
+        if not fingerprint or fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        action["rank"] = len(actions) + 1
+        actions.append(action)
+    return actions
+
+
 def _queue_rank_bucket(entry: dict[str, Any], realized: float, projected: float) -> int:
     status = str(entry.get("current_status") or "").strip()
     state = str(entry.get("state") or "").strip()
@@ -5601,6 +5761,7 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             blocker_counts[reason] += 1
         for code in item.get("blocker_codes") or []:
             blocker_counts[str(code)] += 1
+    successor_actions = build_local_activation_successor_actions({"entries": entries})
 
     result = {
         "schema": LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA,
@@ -5608,6 +5769,8 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
         "source_schema": ledger.get("schema"),
         "summary": {
             "queued_action_count": len(entries),
+            "successor_action_count": len(successor_actions),
+            "non_duplicate_successor_action_count": len({str(action.get("fingerprint")) for action in successor_actions if action.get("fingerprint")}),
             "top_lever": top.get("lever"),
             "top_state": top.get("state"),
             "top_current_status": top.get("current_status"),
@@ -5625,6 +5788,7 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             ],
         },
         "entries": entries[:20],
+        "successor_actions": successor_actions[:20],
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -7356,6 +7520,17 @@ def build_evidence_to_activation_burndown(
     )
     if isinstance(next_action_queue, dict):
         result["next_action_queue"] = next_action_queue
+        successor_actions = next_action_queue.get("successor_actions")
+        if not isinstance(successor_actions, list):
+            successor_actions = build_local_activation_successor_actions(next_action_queue)
+        if isinstance(successor_actions, list):
+            result["successor_actions"] = successor_actions
+            result["summary"]["successor_action_count"] = len(successor_actions)
+            result["summary"]["non_duplicate_successor_action_count"] = len({
+                str(action.get("fingerprint"))
+                for action in successor_actions
+                if isinstance(action, dict) and action.get("fingerprint")
+            })
     return sanitize_value(result)
 
 

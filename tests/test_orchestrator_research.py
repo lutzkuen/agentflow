@@ -2030,6 +2030,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         self.assertEqual(queue["schema"], "agentflow.local_activation_next_action_queue.v1")
         self.assertEqual(queue["status"], "ranked")
+        self.assertEqual(queue["summary"]["successor_action_count"], 4)
+        self.assertEqual(queue["summary"]["non_duplicate_successor_action_count"], 4)
         self.assertEqual(
             [(entry["lever"], entry["next_action"]) for entry in queue["entries"]],
             [
@@ -2049,6 +2051,27 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(queue["entries"][3]["duplicate_suppression_status"], "suppressed")
         self.assertEqual(queue["summary"]["top_lever"], "crunch")
         self.assertEqual(queue["summary"]["top_unblock_reason"], "repeated-context-crunch-active-at-max-rollout")
+        successor_actions = queue["successor_actions"]
+        self.assertGreaterEqual(len(successor_actions), 3)
+        self.assertEqual(len({item["fingerprint"] for item in successor_actions}), len(successor_actions))
+        by_family = {item["local_action_family"]: item for item in successor_actions}
+        self.assertEqual(by_family["crunch"]["successor_status"], "suppress-duplicate")
+        self.assertEqual(by_family["routing"]["target_local_rule_file"], "routing_rules.yaml")
+        self.assertIn("applied/holdout coverage", by_family["routing"]["acceptance_metric"])
+        self.assertEqual(by_family["cache"]["target_local_policy_section"], "cache.pattern_rules")
+        self.assertIn("dependency evidence", by_family["cache"]["acceptance_metric"])
+        for action in successor_actions:
+            self.assertEqual(action["schema"], "agentflow.local_activation_successor_action.v1")
+            self.assertTrue(action["fingerprint"].startswith("successor:"))
+            self.assertTrue(action["source_fingerprint"].startswith("activation:"))
+            self.assertIn("acceptance_metric", action)
+            self.assertFalse(action["privacy"]["raw_prompts_included"])
+            self.assertFalse(action["privacy"]["provider_bodies_included"])
+            self.assertFalse(action["privacy"]["tool_payloads_included"])
+            self.assertFalse(action["privacy"]["request_ids_included"])
+            self.assertFalse(action["privacy"]["session_ids_included"])
+            self.assertFalse(action["privacy"]["file_paths_included"])
+            self.assertFalse(action["privacy"]["cache_keys_included"])
         self.assertTrue(queue["privacy"]["metadata_only"])
         self.assertTrue(queue["privacy"]["aggregate_only"])
         self.assertFalse(queue["privacy"]["raw_prompts_included"])
@@ -2072,6 +2095,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             report["next_action_queue"]["entries"][0]["next_action"],
             "keep-active",
         )
+        self.assertGreaterEqual(report["summary"]["non_duplicate_successor_action_count"], 3)
+        self.assertEqual(report["successor_actions"][0]["schema"], "agentflow.local_activation_successor_action.v1")
         rendered = json.dumps({"queue": queue, "report": report}, sort_keys=True)
         self.assertNotIn("req-queue-secret", rendered)
         self.assertNotIn("session-queue-secret", rendered)
