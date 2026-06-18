@@ -909,8 +909,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
 
         review = result["routing_lifecycle_review"]
         self.assertEqual(review["schema"], "agentflow.openai_routing_lifecycle_review.v1")
-        self.assertEqual(review["next_action"], "keep-blocked")
-        self.assertEqual(review["deterministic_next_action"], "keep-blocked")
+        self.assertEqual(review["next_action"], "rollback-required")
+        self.assertEqual(review["deterministic_next_action"], "rollback-required")
         self.assertEqual(review["target_local_policy_section"], "routing.rules")
         self.assertEqual(review["target_local_rule_file"], "routing_rules.yaml")
         self.assertEqual(review["applied_count"], 6)
@@ -927,7 +927,40 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertTrue(semantic["observed"])
         self.assertTrue(semantic["disabled_local_policy_rule_present"])
         self.assertEqual(semantic["disabled_local_policy_reason"], "semantic-quality-regression-observed")
-        self.assertEqual(result["summary"]["routing_lifecycle_next_action"], "keep-blocked")
+        action = review["semantic_regression_action"]
+        self.assertEqual(action["schema"], "agentflow.openai_routing_semantic_regression_action.v1")
+        self.assertTrue(action["observed"])
+        self.assertEqual(action["status"], "classified")
+        self.assertEqual(action["action_classification"], "rollback-required")
+        self.assertEqual(action["deterministic_next_action"], "draft-openai-routing-rollback")
+        self.assertEqual(action["target_local_policy_section"], "routing.rules")
+        self.assertEqual(action["target_local_rule_file"], "routing_rules.yaml")
+        self.assertTrue(action["fingerprint"].startswith("openai-routing-semantic-regression:"))
+        self.assertIn("semantic-quality-regression-observed", action["reason_codes"])
+        self.assertEqual(action["counters"]["matched_count"], 13)
+        self.assertEqual(action["counters"]["applied_count"], 6)
+        self.assertEqual(action["counters"]["holdout_count"], 7)
+        self.assertEqual(action["counters"]["error_count"], 0)
+        self.assertEqual(action["counters"]["retry_count"], 0)
+        self.assertEqual(action["counters"]["fallback_count"], 0)
+        self.assertEqual(action["counters"]["safety_stop_count"], 0)
+        self.assertEqual(action["review_draft"]["draft_action"], "rollback-local-routing-rule")
+        self.assertFalse(action["review_draft"]["policy_files_written"])
+        self.assertEqual(action["review_draft"]["target_local_rule_file"], "routing_rules.yaml")
+        self.assertTrue(action["duplicate_suppression"]["suppresses_generic_semantic_regression_issue"])
+        self.assertFalse(action["privacy"]["raw_prompts_included"])
+        self.assertFalse(action["privacy"]["provider_bodies_included"])
+        self.assertFalse(action["privacy"]["request_ids_included"])
+        self.assertFalse(action["privacy"]["session_ids_included"])
+        self.assertFalse(action["privacy"]["cache_keys_included"])
+        self.assertFalse(action["privacy"]["file_paths_included"])
+        self.assertEqual(result["promotion_decision"]["semantic_regression_action"]["action_classification"], "rollback-required")
+        self.assertEqual(result["semantic_regression_action"]["action_classification"], "rollback-required")
+        self.assertEqual(result["summary"]["routing_lifecycle_next_action"], "rollback-required")
+        self.assertEqual(result["summary"]["semantic_regression_action_count"], 1)
+        self.assertEqual(result["summary"]["semantic_regression_action"], "rollback-required")
+        self.assertEqual(result["summary"]["semantic_regression_next_action"], "draft-openai-routing-rollback")
+        self.assertTrue(result["summary"]["semantic_regression_fingerprint"].startswith("openai-routing-semantic-regression:"))
         self.assertIn("semantic-quality-regression-observed", result["summary"]["routing_lifecycle_blocker_codes"])
         disabled = result["promotion_decision"]["disabled_local_policy_rule"]
         self.assertEqual(disabled["schema"], "agentflow.openai_routing_disabled_local_policy_rule.v1")
@@ -945,6 +978,66 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertFalse(review["privacy"]["cache_keys_included"])
         self.assertFalse(review["privacy"]["file_paths_included"])
         self.assertFalse(review["privacy"]["individual_candidate_ids_included"])
+
+    def test_targeted_report_delegates_semantic_action_when_promotion_ready(self) -> None:
+        from agentflow_proxy import router as router_module
+
+        previous = list(getattr(router_module, "ROUTING_RULES", []))
+        router_module.ROUTING_RULES = []
+        self.addCleanup(setattr, router_module, "ROUTING_RULES", previous)
+
+        def canary(cohort: str) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-v1",
+                "target_candidate_id": "openai-route:responses:gpt-5:tool-light:tools:nonstream:to-gpt-5-4-mini",
+                "status": "applied" if cohort == "canary_applied" else "holdout",
+                "cohort": cohort,
+                "reason": "selected-canary" if cohort == "canary_applied" else "selected-holdout",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if cohort == "canary_applied" else "gpt-5.4",
+                "category": "tool-light",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+            }
+
+        for _ in range(6):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_applied"),
+            )
+        for _ in range(7):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="tool-light",
+                text_chars=4000,
+                has_tools=True,
+                openai_canary=canary("canary_holdout"),
+            )
+        for _ in range(20):
+            self._log_openai_shadow_experiment(category="tool-light", similarity=0.95, passed=True)
+
+        result = build_openai_routing_promotion_decision_report(self.store, limit=20)
+
+        self.assertEqual(result["decision"], "promote")
+        self.assertTrue(result["promotion_ready"])
+        self.assertEqual(result["summary"]["semantic_regression_action_count"], 0)
+        action = result["semantic_regression_action"]
+        self.assertFalse(action["observed"])
+        self.assertEqual(action["status"], "not-applicable")
+        self.assertEqual(action["action_classification"], "delegate-existing-promotion-path")
+        self.assertEqual(action["deterministic_next_action"], "use-existing-openai-routing-promotion-decision")
+        self.assertIsNone(action["review_draft"])
+        self.assertFalse(action["privacy"]["raw_prompts_included"])
+        self.assertFalse(action["privacy"]["provider_bodies_included"])
+        self.assertFalse(action["privacy"]["request_ids_included"])
+        self.assertNotIn("secret-openai-session", json.dumps(result, sort_keys=True))
 
     def test_active_openai_routing_rule_outcome_reviews_skipped_unknown_coverage(self) -> None:
         self._install_active_openai_tool_light_rule()

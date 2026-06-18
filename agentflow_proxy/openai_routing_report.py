@@ -19,6 +19,7 @@ ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local
 ACTIVE_LOCAL_POLICY_SAVINGS_DELTAS_SCHEMA = "agentflow.openai_routing_active_local_policy_savings_deltas.v1"
 ROUTING_CANARY_OUTCOME_SCHEMA = "agentflow.openai_routing_canary_outcome.v1"
 ROUTING_LIFECYCLE_REVIEW_SCHEMA = "agentflow.openai_routing_lifecycle_review.v1"
+SEMANTIC_REGRESSION_ACTION_SCHEMA = "agentflow.openai_routing_semantic_regression_action.v1"
 PROMOTION_VERDICT_OPTIONS = ["promotion-ready", "active-local-policy", "keep-staged", "keep-blocked", "rollback-required"]
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
@@ -2454,8 +2455,53 @@ def _openai_routing_lifecycle_review(
     if semantic_regression:
         _increment(blockers, "semantic-quality-regression-observed", max(1, blocked_count or matched_count))
 
+    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    applied_count = _as_int(lifecycle.get("applied_count") or counts.get("canary_applied"))
+    holdout_count = _as_int(lifecycle.get("holdout_count") or counts.get("canary_holdout"))
+    skipped_count = _as_int(lifecycle.get("skipped_count") or counts.get("skipped"))
+    bypassed_or_disabled_count = _as_int(counts.get("bypassed_or_disabled"))
+    unknown_count = _as_int(lifecycle.get("unknown_count") or counts.get("unknown"))
+    safety_stop_count = _as_int(lifecycle.get("safety_stop_count") or counts.get("safety_stopped"))
+    error_count = _as_int(lifecycle.get("error_count"))
+    fallback_count = _as_int(lifecycle.get("fallback_count"))
+    retry_count = _as_int(lifecycle.get("retry_count"))
+    classification = (
+        lifecycle.get("skipped_unknown_classification")
+        if isinstance(lifecycle.get("skipped_unknown_classification"), dict)
+        else {}
+    )
+    unsupported_shape_count = _as_int(classification.get("unsupported_shape_count"))
+    promotion_blocker_count = _as_int(classification.get("promotion_blocker_count"))
+    unclassified_count = _as_int(classification.get("unclassified_count"))
+
+    semantic_regression_action = _openai_semantic_regression_action(
+        target=target,
+        semantic_regression=semantic_regression,
+        disabled_reason=disabled_reason,
+        semantic_reasons=semantic_reasons,
+        semantic_quality=semantic_quality,
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        skipped_count=skipped_count,
+        bypassed_or_disabled_count=bypassed_or_disabled_count,
+        unknown_count=unknown_count,
+        safety_stop_count=safety_stop_count,
+        error_count=error_count,
+        fallback_count=fallback_count,
+        retry_count=retry_count,
+        unsupported_shape_count=unsupported_shape_count,
+        promotion_blocker_count=promotion_blocker_count,
+        unclassified_count=unclassified_count,
+        matched_count=matched_count,
+        blocked_count=blocked_count,
+    )
+
     if promotion_verdict == "rollback-required":
         review_action = "rollback-required"
+    elif semantic_regression_action["action_classification"] == "rollback-required":
+        review_action = "rollback-required"
+    elif semantic_regression_action["action_classification"] == "narrow-canary-shape":
+        review_action = "narrow-canary"
     elif decision == "narrow":
         review_action = "narrow-canary"
     elif decision == "promote" and not blockers:
@@ -2465,7 +2511,6 @@ def _openai_routing_lifecycle_review(
     else:
         review_action = "keep-blocked"
 
-    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
     blocker_codes = sorted(blockers)
     return {
         "schema": ROUTING_LIFECYCLE_REVIEW_SCHEMA,
@@ -2488,15 +2533,15 @@ def _openai_routing_lifecycle_review(
         "target_local_rule_file": "routing_rules.yaml",
         "matched_count": matched_count,
         "blocked_count": blocked_count,
-        "applied_count": _as_int(lifecycle.get("applied_count") or counts.get("canary_applied")),
-        "holdout_count": _as_int(lifecycle.get("holdout_count") or counts.get("canary_holdout")),
-        "skipped_count": _as_int(lifecycle.get("skipped_count") or counts.get("skipped")),
-        "bypassed_or_disabled_count": _as_int(counts.get("bypassed_or_disabled")),
-        "unknown_count": _as_int(lifecycle.get("unknown_count") or counts.get("unknown")),
-        "safety_stop_count": _as_int(lifecycle.get("safety_stop_count") or counts.get("safety_stopped")),
-        "error_count": _as_int(lifecycle.get("error_count")),
-        "fallback_count": _as_int(lifecycle.get("fallback_count")),
-        "retry_count": _as_int(lifecycle.get("retry_count")),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "skipped_count": skipped_count,
+        "bypassed_or_disabled_count": bypassed_or_disabled_count,
+        "unknown_count": unknown_count,
+        "safety_stop_count": safety_stop_count,
+        "error_count": error_count,
+        "fallback_count": fallback_count,
+        "retry_count": retry_count,
         "latest_observed_at": lifecycle.get("latest_observed_at"),
         "oldest_observed_at": lifecycle.get("oldest_observed_at"),
         "stale_evidence": lifecycle.get("stale_evidence"),
@@ -2515,6 +2560,168 @@ def _openai_routing_lifecycle_review(
             "pass_rate": _as_float(semantic_quality.get("pass_rate")),
             "metadata_only": True,
             "aggregate_only": True,
+        },
+        "semantic_regression_action": semantic_regression_action,
+        "privacy": _openai_promotion_decision_privacy(),
+    }
+
+
+def _openai_semantic_regression_action(
+    *,
+    target: dict[str, Any],
+    semantic_regression: bool,
+    disabled_reason: str | None,
+    semantic_reasons: list[str],
+    semantic_quality: dict[str, Any],
+    applied_count: int,
+    holdout_count: int,
+    skipped_count: int,
+    bypassed_or_disabled_count: int,
+    unknown_count: int,
+    safety_stop_count: int,
+    error_count: int,
+    fallback_count: int,
+    retry_count: int,
+    unsupported_shape_count: int,
+    promotion_blocker_count: int,
+    unclassified_count: int,
+    matched_count: int,
+    blocked_count: int,
+) -> dict[str, Any]:
+    action_options = [
+        "rollback-required",
+        "hold-current-canary",
+        "narrow-canary-shape",
+        "needs-quality-evidence",
+        "delegate-existing-promotion-path",
+    ]
+    reason_codes: list[str] = []
+    if semantic_regression:
+        reason_codes.append("semantic-quality-regression-observed")
+    if disabled_reason:
+        reason_codes.append(disabled_reason)
+    for reason in semantic_reasons:
+        if reason not in reason_codes:
+            reason_codes.append(reason)
+    if applied_count <= 0:
+        reason_codes.append("missing-applied-coverage")
+    if holdout_count <= 0:
+        reason_codes.append("missing-holdout-coverage")
+    if safety_stop_count:
+        reason_codes.append("safety-stop-observed")
+    if error_count:
+        reason_codes.append("error-observed")
+    if fallback_count:
+        reason_codes.append("fallback-observed")
+    if retry_count:
+        reason_codes.append("retry-observed")
+    if unsupported_shape_count:
+        reason_codes.append("skipped-canary-unsupported-shape")
+    if promotion_blocker_count:
+        reason_codes.append("skipped-canary-promotion-blocker")
+    if unclassified_count:
+        reason_codes.append("unclassified-canary-lifecycle-rows")
+
+    unique_reasons = sorted(set(reason_codes))
+    if not semantic_regression:
+        action = "delegate-existing-promotion-path"
+        next_action = "use-existing-openai-routing-promotion-decision"
+        status = "not-applicable"
+    elif applied_count <= 0 or holdout_count <= 0:
+        action = "needs-quality-evidence"
+        next_action = "collect-openai-routing-quality-evidence"
+        status = "classified"
+    elif unsupported_shape_count and not (safety_stop_count or error_count or fallback_count or retry_count):
+        action = "narrow-canary-shape"
+        next_action = "draft-narrow-openai-routing-canary-shape"
+        status = "classified"
+    elif safety_stop_count or error_count or fallback_count or retry_count or disabled_reason == "semantic-quality-regression-observed":
+        action = "rollback-required"
+        next_action = "draft-openai-routing-rollback"
+        status = "classified"
+    else:
+        action = "hold-current-canary"
+        next_action = "hold-openai-routing-canary-pending-quality-review"
+        status = "classified"
+
+    fingerprint = _stable_fingerprint(
+        "openai-routing-semantic-regression",
+        target.get("source_surface"),
+        target.get("endpoint"),
+        target.get("category"),
+        target.get("requested_model"),
+        target.get("target_model"),
+        action,
+        ",".join(unique_reasons),
+    )
+    draft_record: dict[str, Any] | None = None
+    if action in {"rollback-required", "narrow-canary-shape"}:
+        draft_record = {
+            "schema": "agentflow.openai_routing_semantic_regression_review_draft.v1",
+            "draft_action": "rollback-local-routing-rule" if action == "rollback-required" else "narrow-local-routing-canary",
+            "operator_apply_required": True,
+            "policy_files_written": False,
+            "target_local_policy_section": "routing.rules",
+            "target_local_rule_file": "routing_rules.yaml",
+            "target_rule_id": "[REDACTED_ID]",
+            "rule_id_included": False,
+            "reason_codes": unique_reasons,
+            "privacy": _openai_promotion_decision_privacy(),
+        }
+
+    return {
+        "schema": SEMANTIC_REGRESSION_ACTION_SCHEMA,
+        "status": status,
+        "observed": semantic_regression,
+        "action_classification": action,
+        "deterministic_next_action": next_action,
+        "next_action": next_action,
+        "action_options": action_options,
+        "fingerprint": f"openai-routing-semantic-regression:{fingerprint}",
+        "reason_codes": unique_reasons,
+        "target": target,
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "counters": {
+            "schema": "agentflow.openai_routing_semantic_regression_action_counters.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "matched_count": matched_count,
+            "blocked_count": blocked_count,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": skipped_count,
+            "bypassed_or_disabled_count": bypassed_or_disabled_count,
+            "unknown_count": unknown_count,
+            "safety_stop_count": safety_stop_count,
+            "error_count": error_count,
+            "fallback_count": fallback_count,
+            "retry_count": retry_count,
+            "unsupported_shape_count": unsupported_shape_count,
+            "promotion_blocker_count": promotion_blocker_count,
+            "unclassified_count": unclassified_count,
+        },
+        "semantic_quality": {
+            "schema": "agentflow.openai_routing_semantic_regression_quality_evidence.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "gate_passed": bool(semantic_quality.get("gate_passed")),
+            "clean_comparison_count": _as_int(semantic_quality.get("clean_comparison_count")),
+            "pass_count": _as_int(semantic_quality.get("pass_count")),
+            "fail_count": _as_int(semantic_quality.get("fail_count")),
+            "pass_rate": _as_float(semantic_quality.get("pass_rate")),
+            "reason_codes": semantic_reasons,
+        },
+        "review_draft": draft_record,
+        "duplicate_suppression": {
+            "schema": "agentflow.openai_routing_semantic_regression_duplicate_suppression.v1",
+            "fingerprint": f"openai-routing-semantic-regression:{fingerprint}",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "suppresses_generic_semantic_regression_issue": semantic_regression,
+            "suppresses_new_openai_routing_blocker_issue": semantic_regression,
+            "target_local_policy_section": "routing.rules",
+            "target_local_rule_file": "routing_rules.yaml",
         },
         "privacy": _openai_promotion_decision_privacy(),
     }
@@ -2871,6 +3078,11 @@ def _build_openai_promotion_decision(
         projected_savings_usd=projected_savings_usd,
         savings_per_1000=savings_per_1000,
     )
+    semantic_regression_action = (
+        lifecycle_review.get("semantic_regression_action")
+        if isinstance(lifecycle_review.get("semantic_regression_action"), dict)
+        else None
+    )
     return {
         "schema": PROMOTION_DECISION_SCHEMA,
         "decision": decision,
@@ -2915,6 +3127,7 @@ def _build_openai_promotion_decision(
         "active_local_policy_outcome": active_local_policy_outcome,
         "routing_canary_outcome": routing_canary_outcome,
         "routing_lifecycle_review": lifecycle_review,
+        "semantic_regression_action": semantic_regression_action,
         "rollback_metadata": rollback_metadata,
         "duplicate_suppression": duplicate_suppression,
         "privacy": privacy,
@@ -2951,6 +3164,11 @@ def build_openai_routing_promotion_decision_report(
         if isinstance(decision.get("routing_lifecycle_review"), dict)
         else {}
     )
+    semantic_regression_action = (
+        decision.get("semantic_regression_action")
+        if isinstance(decision.get("semantic_regression_action"), dict)
+        else {}
+    )
     return {
         "schema": PROMOTION_DECISION_REPORT_SCHEMA,
         "generated_at": utc_now(),
@@ -2982,6 +3200,14 @@ def build_openai_routing_promotion_decision_report(
             "routing_lifecycle_next_action": lifecycle_review.get("deterministic_next_action"),
             "routing_lifecycle_reason_codes": lifecycle_review.get("reason_codes") or [],
             "routing_lifecycle_blocker_codes": lifecycle_review.get("blocker_codes") or [],
+            "semantic_regression_action_count": 1
+            if semantic_regression_action.get("observed")
+            and semantic_regression_action.get("status") == "classified"
+            else 0,
+            "semantic_regression_action": semantic_regression_action.get("action_classification"),
+            "semantic_regression_next_action": semantic_regression_action.get("deterministic_next_action"),
+            "semantic_regression_fingerprint": semantic_regression_action.get("fingerprint"),
+            "semantic_regression_reason_codes": semantic_regression_action.get("reason_codes") or [],
             "routing_only_savings_usd": (
                 routing_canary_outcome.get("routing_savings", {}).get("routing_only_savings_usd")
                 if isinstance(routing_canary_outcome.get("routing_savings"), dict)
@@ -3058,6 +3284,7 @@ def build_openai_routing_promotion_decision_report(
         },
         "promotion_decision": decision,
         "routing_lifecycle_review": lifecycle_review,
+        "semantic_regression_action": semantic_regression_action,
         "decisions": [decision],
         "active_local_policy_outcomes": [decision["active_local_policy_outcome"]]
         if decision.get("active_local_policy_outcome")
