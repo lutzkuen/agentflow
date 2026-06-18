@@ -17,6 +17,7 @@ EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA = "agentflow.evidence_to_activation_next_ac
 EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger_entry.v1"
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "agentflow.local_activation_next_action_queue.v1"
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_next_action_queue_entry.v1"
+FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA = "agentflow.full_rollout_crunch_activation_measurement.v1"
 LOW_BACKLOG_MILESTONE_TITLE = "Rank next savings milestone from local telemetry evidence gaps"
 OPENAI_MIN_HOLDOUT_VOLUME = 10
 
@@ -3276,6 +3277,192 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
             "raw_values_logged": False,
         },
     }
+
+
+def _full_rollout_crunch_activation_measurement_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "raw_response_bodies_included": False,
+        "provider_bodies_included": False,
+        "tool_payloads_included": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "tenant_ids_included": False,
+        "individual_candidate_ids_included": False,
+        "file_paths_included": False,
+        "absolute_paths_included": False,
+        "policy_file_contents_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
+
+
+def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    ledger = stats_summary.get("evidence_to_activation_next_action_ledger")
+    if not isinstance(ledger, dict):
+        return None
+    entries = [entry for entry in ledger.get("entries") or [] if isinstance(entry, dict)]
+    entry = next(
+        (
+            item
+            for item in entries
+            if item.get("lever") == "crunch"
+            and item.get("local_action_family") == "crunch"
+            and item.get("next_action") == "measure-full-rollout-repeated-context-crunch-outcomes"
+            and (
+                item.get("current_status") == "full-rollout"
+                or item.get("state") == "full-rollout-active"
+                or item.get("post_max_rollout_decision") == "full-rollout-applied"
+            )
+        ),
+        None,
+    )
+    if entry is None:
+        return None
+
+    local_summary = (
+        stats_summary.get("local_activation_outcome_summary")
+        if isinstance(stats_summary.get("local_activation_outcome_summary"), dict)
+        else {}
+    )
+    local_rows = [
+        row
+        for row in local_summary.get("outcome_summaries") or []
+        if isinstance(row, dict) and row.get("local_action_family") == "crunch"
+    ]
+    local_row = next(
+        (
+            row
+            for row in local_rows
+            if row.get("next_action") == "measure-full-rollout-repeated-context-crunch-outcomes"
+            or row.get("post_max_rollout_decision") == "full-rollout-applied"
+            or row.get("full_rollout_active") is True
+        ),
+        local_rows[0] if local_rows else {},
+    )
+
+    coverage = local_row.get("coverage") if isinstance(local_row.get("coverage"), dict) else {}
+    duplicate_suppression = (
+        local_row.get("duplicate_suppression")
+        if isinstance(local_row.get("duplicate_suppression"), dict)
+        else entry.get("duplicate_suppression")
+        if isinstance(entry.get("duplicate_suppression"), dict)
+        else {}
+    )
+    prior_issue = entry.get("prior_issue") if isinstance(entry.get("prior_issue"), dict) else {}
+    closed_prior_seen = entry.get("issue_status") == "closed-issue-seen"
+    observed_savings = _to_float(
+        local_row.get("observed_savings_usd")
+        or entry.get("observed_savings_usd")
+        or entry.get("crunch_savings_usd")
+        or entry.get("projected_saved_usd")
+    )
+    projected_savings = _to_float(
+        local_row.get("projected_savings_usd")
+        or entry.get("projected_savings_usd")
+        or entry.get("projected_saved_usd")
+    )
+    observed_saved_tokens = _to_int(local_row.get("observed_saved_tokens") or entry.get("observed_saved_tokens") or entry.get("projected_saved_tokens"))
+    projected_saved_tokens = _to_int(local_row.get("projected_saved_tokens") or entry.get("projected_saved_tokens"))
+    stale_source = entry.get("stale_evidence") if isinstance(entry.get("stale_evidence"), dict) else {}
+    stale_evidence = {
+        "schema": "agentflow.full_rollout_crunch_activation_stale_evidence.v1",
+        "metadata_only": True,
+        "aggregate_only": True,
+        "stale": bool(stale_source.get("stale", False)),
+        "status": sanitize_value(stale_source.get("status") or ("stale" if stale_source.get("stale") else "fresh-or-active")),
+        "reason": sanitize_value(stale_source.get("reason") or "full-rollout-local-policy-active"),
+    }
+    measurement = {
+        "schema": FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA,
+        "status": "progress-recorded",
+        "measurement_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+        "ledger_fingerprint": sanitize_value(entry.get("fingerprint")),
+        "ledger_rank": _to_int(entry.get("rank")),
+        "lever": "crunch",
+        "local_action_family": "crunch",
+        "current_status": sanitize_value(entry.get("current_status") or "full-rollout"),
+        "state": sanitize_value(entry.get("state") or "full-rollout-active"),
+        "next_action": sanitize_value(entry.get("next_action")),
+        "evidence_schema": sanitize_value(entry.get("evidence_schema")),
+        "activation_follow_up_evidence_schema": sanitize_value(entry.get("activation_follow_up_evidence_schema")),
+        "applied_count": _to_int(local_row.get("applied_count") or entry.get("applied_count")),
+        "holdout_count": _to_int(local_row.get("holdout_count") or entry.get("holdout_count")),
+        "skipped_count": _to_int(local_row.get("skipped_count") or entry.get("skipped_count")),
+        "fallback_count": _to_int(local_row.get("fallback_count") or entry.get("fallback_count")),
+        "retry_count": _to_int(local_row.get("retry_count") or entry.get("retry_count")),
+        "rollback_count": _to_int(local_row.get("rollback_count") or entry.get("rollback_count")),
+        "safety_stop_count": _to_int(local_row.get("safety_stopped_count") or entry.get("safety_stop_count")),
+        "error_rate_delta": round(_to_float(local_row.get("error_rate_delta") or entry.get("error_rate_delta")), 6),
+        "retry_rate_delta": round(_to_float(local_row.get("retry_rate_delta") or entry.get("retry_rate_delta")), 6),
+        "fallback_rate_delta": round(_to_float(local_row.get("fallback_rate_delta") or entry.get("fallback_rate_delta")), 6),
+        "observed_saved_tokens": observed_saved_tokens,
+        "observed_savings_usd": round(observed_savings, 8),
+        "projected_saved_tokens": projected_saved_tokens,
+        "projected_savings_usd": round(projected_savings, 8),
+        "today_crunch_savings_usd": round(_to_float(entry.get("today_crunch_savings_usd")), 8),
+        "target_local_policy_section": sanitize_value(local_row.get("target_local_policy_section") or entry.get("target_local_policy_section") or "crunch.rules"),
+        "target_local_rule_file": sanitize_value(local_row.get("target_local_rule_file") or entry.get("target_local_rule_file") or "crunch_rules.yaml"),
+        "active_rule_count": _to_int(local_row.get("active_rule_count") or entry.get("active_rule_count")),
+        "active_rule_ref": sanitize_value(local_row.get("active_rule_ref") or entry.get("active_rule_ref")),
+        "active_rule_source": sanitize_value(local_row.get("active_rule_source") or entry.get("active_rule_source")),
+        "active_rule_decision_id": sanitize_value(local_row.get("active_rule_decision_id") or entry.get("active_rule_decision_id")),
+        "post_max_rollout_status": sanitize_value(local_row.get("post_max_rollout_status") or entry.get("post_max_rollout_status")),
+        "post_max_rollout_decision": sanitize_value(local_row.get("post_max_rollout_decision") or entry.get("post_max_rollout_decision")),
+        "post_max_rollout_next_action": sanitize_value(local_row.get("post_max_rollout_next_action") or entry.get("post_max_rollout_next_action")),
+        "post_max_rollout_reason_codes": sanitize_value(local_row.get("post_max_rollout_reason_codes") or entry.get("post_max_rollout_reason_codes")),
+        "coverage": {
+            "schema": "agentflow.full_rollout_crunch_activation_measurement_coverage.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "applied_count": _to_int(coverage.get("applied_count") or local_row.get("applied_count") or entry.get("applied_count")),
+            "holdout_count": _to_int(coverage.get("holdout_count") or local_row.get("holdout_count") or entry.get("holdout_count")),
+            "skipped_count": _to_int(coverage.get("skipped_count") or local_row.get("skipped_count")),
+            "fallback_count": _to_int(coverage.get("fallback_count") or local_row.get("fallback_count") or entry.get("fallback_count")),
+            "rollback_count": _to_int(coverage.get("rollback_count") or local_row.get("rollback_count") or entry.get("rollback_count")),
+            "safety_stop_count": _to_int(coverage.get("safety_stop_count") or local_row.get("safety_stopped_count") or entry.get("safety_stop_count")),
+            "canary_fraction": round(_to_float(coverage.get("canary_fraction") or entry.get("canary_fraction")), 6),
+            "max_rollout_fraction": round(_to_float(coverage.get("max_rollout_fraction") or entry.get("max_rollout_fraction")), 6),
+            "full_rollout_active": True,
+        },
+        "stale_evidence": stale_evidence,
+        "duplicate_suppression": sanitize_value(duplicate_suppression),
+        "closed_predecessor_suppression": {
+            "schema": "agentflow.full_rollout_crunch_activation_predecessor_suppression.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "closed_prior_issue_seen": bool(closed_prior_seen),
+            "suppresses_closed_title_recreation": True,
+            "prior_issue_number": _to_int(prior_issue.get("number")) if prior_issue else 0,
+            "prior_issue_title": sanitize_value(prior_issue.get("title")) if prior_issue else None,
+        },
+        "privacy": _full_rollout_crunch_activation_measurement_privacy(),
+    }
+    preserved_empty_keys = {
+        "ledger_rank",
+        "applied_count",
+        "holdout_count",
+        "skipped_count",
+        "fallback_count",
+        "retry_count",
+        "rollback_count",
+        "safety_stop_count",
+        "error_rate_delta",
+        "retry_rate_delta",
+        "fallback_rate_delta",
+        "observed_saved_tokens",
+        "observed_savings_usd",
+        "projected_saved_tokens",
+        "projected_savings_usd",
+        "today_crunch_savings_usd",
+        "active_rule_count",
+    }
+    return sanitize_value({key: value for key, value in measurement.items() if value not in (None, "", [], 0) or key in preserved_empty_keys})
 
 
 def _shape_row_classes(row: dict[str, Any]) -> list[str]:
@@ -9612,6 +9799,9 @@ def build_research_plan(
         summary["evidence_to_activation_next_action_ledger"] = activation_ledger
     elif precomputed_activation_ledger is not None:
         summary["evidence_to_activation_next_action_ledger"] = precomputed_activation_ledger
+    full_rollout_crunch_measurement = _full_rollout_crunch_activation_measurement(summary)
+    if full_rollout_crunch_measurement is not None:
+        summary["full_rollout_crunch_activation_measurement"] = full_rollout_crunch_measurement
     activation_queue = build_local_activation_next_action_queue(summary)
     if activation_queue is not None:
         summary["local_activation_next_action_queue"] = activation_queue
@@ -9761,6 +9951,8 @@ def build_research_plan(
         inspected_sources.append("promotion_blocker_next_action_status")
     if "evidence_to_activation_next_action_ledger" in summary:
         inspected_sources.append("evidence_to_activation_next_action_ledger")
+    if "full_rollout_crunch_activation_measurement" in summary:
+        inspected_sources.append("full_rollout_crunch_activation_measurement")
     if "local_activation_next_action_queue" in summary:
         inspected_sources.append("local_activation_next_action_queue")
     if "promotion_outcome_feedback" in summary:

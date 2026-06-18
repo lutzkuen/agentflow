@@ -4672,6 +4672,188 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-full-rollout-session-secret", rendered)
         self.assertNotIn("raw full rollout prompt must not leak", rendered)
 
+    def test_issue_650_measures_full_rollout_crunch_from_ledger_fingerprint(self):
+        closed_title = "Measure request-shape repeated-context crunch canary impact"
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    644,
+                    closed_title,
+                    ["backlog", "status:ready", "crunch", "privacy"],
+                    state="CLOSED",
+                    closed="2026-06-18T00:15:00Z",
+                )
+            ],
+            stats={
+                "calls": 2484,
+                "evidence_to_activation_next_action_ledger": {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                    "status": "tracked",
+                    "entries": [
+                        {
+                            "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                            "fingerprint": "activation:f5f6eae5f0a0081a",
+                            "rank": 1,
+                            "lever": "crunch",
+                            "local_action_family": "crunch",
+                            "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                            "activation_follow_up_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                            "current_status": "full-rollout",
+                            "state": "full-rollout-active",
+                            "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "blocker_codes": ["repeated-context-crunch-full-rollout-active"],
+                            "sample_count": 2484,
+                            "applied_count": 107,
+                            "holdout_count": 40,
+                            "fallback_count": 0,
+                            "safety_stop_count": 0,
+                            "rollback_count": 0,
+                            "error_rate_delta": 0.0,
+                            "retry_rate_delta": 0.0,
+                            "fallback_rate_delta": 0.0,
+                            "projected_saved_tokens": 8606129,
+                            "projected_saved_usd": 25.818387,
+                            "crunch_savings_usd": 25.8185,
+                            "post_max_rollout_status": "post-max-rollout-full-rollout-applied",
+                            "post_max_rollout_decision": "full-rollout-applied",
+                            "post_max_rollout_next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "post_max_rollout_reason_codes": ["full-rollout-policy-active"],
+                            "target_local_policy_section": "crunch.rules",
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "active_rule_count": 1,
+                            "active_rule_ref": "local-repeated-context-crunch-canary-a8814a13d90e",
+                            "active_rule_source": "local-manual",
+                            "active_rule_decision_id": "request-shape-crunch-policy-decision:9db327d1abdec766",
+                            "issue_status": "closed-issue-seen",
+                            "prior_issue": {
+                                "number": 644,
+                                "repo": "lutzkuen/agentflow",
+                                "title": closed_title,
+                                "url": "https://github.com/lutzkuen/agentflow/issues/644",
+                            },
+                            "duplicate_suppression": {
+                                "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                                "fingerprint": "activation:00e25680f3fed407",
+                                "matching_local_policy": "crunch_rules",
+                                "reason": "repeated-context-crunch-full-rollout-active",
+                                "suppresses_generic_crunch_activation_issue": True,
+                                "suppresses_new_activation_issue": True,
+                                "target_local_policy_section": "crunch.rules",
+                                "target_local_rule_file": "crunch_rules.yaml",
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                            },
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "local_activation_outcome_summary": {
+                    "schema": "agentflow.local_activation_outcome_summary.v1",
+                    "status": "tracked",
+                    "outcome_summaries": [
+                        {
+                            "schema": "agentflow.local_activation_outcome_summary_row.v1",
+                            "local_action_family": "crunch",
+                            "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                            "source_decision_id": "request-shape-crunch-policy-decision:9db327d1abdec766",
+                            "outcome": "keep-active",
+                            "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "applied_count": 107,
+                            "holdout_count": 40,
+                            "skipped_count": 280,
+                            "fallback_count": 0,
+                            "retry_count": 0,
+                            "rollback_count": 0,
+                            "safety_stopped_count": 0,
+                            "observed_saved_tokens": 8606129,
+                            "observed_savings_usd": 25.818387,
+                            "projected_saved_tokens": 8606129,
+                            "projected_savings_usd": 25.818387,
+                            "target_local_policy_section": "crunch.rules",
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "active_rule_count": 1,
+                            "active_rule_ref": "local-repeated-context-crunch-canary-a8814a13d90e",
+                            "active_rule_source": "local-manual",
+                            "active_rule_decision_id": "request-shape-crunch-policy-decision:9db327d1abdec766",
+                            "post_max_rollout_status": "post-max-rollout-full-rollout-applied",
+                            "post_max_rollout_decision": "full-rollout-applied",
+                            "post_max_rollout_next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "post_max_rollout_reason_codes": ["full-rollout-policy-active"],
+                            "full_rollout_active": True,
+                            "coverage": {
+                                "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                                "applied_count": 107,
+                                "holdout_count": 40,
+                                "skipped_count": 280,
+                                "fallback_count": 0,
+                                "rollback_count": 0,
+                                "safety_stop_count": 0,
+                                "canary_fraction": 1.0,
+                                "max_rollout_fraction": 1.0,
+                                "request_id": "raw-measurement-request-secret",
+                            },
+                            "duplicate_suppression": {
+                                "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                                "reason": "repeated-context-crunch-full-rollout-active",
+                                "suppresses_generic_crunch_activation_issue": True,
+                                "suppresses_new_activation_issue": True,
+                                "target_local_policy_section": "crunch.rules",
+                                "target_local_rule_file": "crunch_rules.yaml",
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                            },
+                            "raw_prompt": "raw measurement prompt must not leak",
+                            "session_id": "raw-measurement-session-secret",
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        measurement = stats_summary["full_rollout_crunch_activation_measurement"]
+        self.assertEqual(measurement["schema"], "agentflow.full_rollout_crunch_activation_measurement.v1")
+        self.assertEqual(measurement["status"], "progress-recorded")
+        self.assertEqual(measurement["ledger_fingerprint"], "activation:f5f6eae5f0a0081a")
+        self.assertEqual(measurement["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
+        self.assertEqual(measurement["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(measurement["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(measurement["applied_count"], 107)
+        self.assertEqual(measurement["holdout_count"], 40)
+        self.assertEqual(measurement["skipped_count"], 280)
+        self.assertEqual(measurement["fallback_count"], 0)
+        self.assertEqual(measurement["retry_count"], 0)
+        self.assertEqual(measurement["rollback_count"], 0)
+        self.assertEqual(measurement["safety_stop_count"], 0)
+        self.assertEqual(measurement["observed_saved_tokens"], 8606129)
+        self.assertAlmostEqual(measurement["observed_savings_usd"], 25.818387)
+        self.assertEqual(measurement["projected_saved_tokens"], 8606129)
+        self.assertAlmostEqual(measurement["projected_savings_usd"], 25.818387)
+        self.assertFalse(measurement["stale_evidence"]["stale"])
+        self.assertTrue(measurement["duplicate_suppression"]["suppresses_new_activation_issue"])
+        predecessor = measurement["closed_predecessor_suppression"]
+        self.assertTrue(predecessor["closed_prior_issue_seen"])
+        self.assertTrue(predecessor["suppresses_closed_title_recreation"])
+        self.assertEqual(predecessor["prior_issue_number"], 644)
+        self.assertIn("full_rollout_crunch_activation_measurement", plan["evidence"]["inspected_sources"])
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn(closed_title, titles)
+        self.assertTrue(measurement["privacy"]["metadata_only"])
+        self.assertTrue(measurement["privacy"]["aggregate_only"])
+        self.assertFalse(measurement["privacy"]["raw_prompts_included"])
+        self.assertFalse(measurement["privacy"]["provider_bodies_included"])
+        self.assertFalse(measurement["privacy"]["request_ids_included"])
+        self.assertFalse(measurement["privacy"]["session_ids_included"])
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-measurement-request-secret", rendered)
+        self.assertNotIn("raw-measurement-session-secret", rendered)
+        self.assertNotIn("raw measurement prompt must not leak", rendered)
+
     def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
         plan = build_research_plan(
             issues=[],
