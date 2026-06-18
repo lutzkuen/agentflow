@@ -1602,6 +1602,22 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 reason="invalidation-evidence-missing",
             ),
         )
+        self._log_openai_call(
+            endpoint="responses",
+            category="tool-light",
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="unsafe-tool-calls-without-invalidation",
+            file_dependency_audit={
+                **self._audit(safe=False),
+                "file_dependency_evidence_available": True,
+                "safe_invalidation_evidence": False,
+                "paths": ["/tmp/openai-secret-unsafe.py"],
+                "root_path": "/tmp",
+            },
+            cost=0.025,
+            cost_baseline=0.025,
+        )
 
         report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
         self.assertEqual(report["schema"], "agentflow.openai_cache_replay_readiness.v1")
@@ -1632,6 +1648,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertGreaterEqual(burndown["summary"]["missing_dependency_evidence_count"], 1)
         self.assertGreaterEqual(burndown["summary"]["safe_dependency_evidence_count"], 1)
         self.assertGreaterEqual(burndown["summary"]["stale_dependency_count"], 1)
+        self.assertGreaterEqual(burndown["summary"]["unsafe_dependency_count"], 1)
         self.assertEqual(burndown["summary"]["applied_count"], 2)
         self.assertEqual(burndown["summary"]["holdout_count"], 2)
         self.assertEqual(burndown["summary"]["exact_hit_count"], 2)
@@ -1641,6 +1658,12 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertFalse(burndown["privacy"]["request_ids_included"])
         self.assertFalse(burndown["privacy"]["session_ids_included"])
         self.assertTrue(burndown["blockers"])
+        self.assertTrue(
+            any(
+                row["outcome"] == "unsafe-dependency"
+                for row in burndown["outcome_breakdown"]
+            )
+        )
 
         app = create_dashboard_app(
             store_obj=lambda: self.store,
@@ -1667,6 +1690,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             "agentflow.openai_tool_cache_invalidation_burndown.v1",
         )
         self.assertGreaterEqual(burndown_response.json()["summary"]["missing_dependency_evidence_count"], 1)
+        self.assertGreaterEqual(burndown_response.json()["summary"]["unsafe_dependency_count"], 1)
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn("/agentflow/stats/openai-cache-replay-readiness", dashboard.text)
         self.assertIn("/agentflow/stats/openai-tool-cache-invalidation-burndown", dashboard.text)
@@ -1796,6 +1820,21 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             cost=0.06,
         )
         self._log_openai_call(
+            endpoint="responses",
+            category="tool-light",
+            cache_status="skipped",
+            cache_reason="unsafe-tool-calls-without-invalidation",
+            has_tools=True,
+            file_dependency_audit={
+                **self._audit(safe=False),
+                "file_dependency_evidence_available": True,
+                "safe_invalidation_evidence": False,
+                "paths": ["/tmp/private-openai-unsafe-file.py"],
+                "root_path": "/tmp",
+            },
+            cost=0.07,
+        )
+        self._log_openai_call(
             cache_status="skipped",
             cache_reason="streaming",
             stream=1,
@@ -1827,27 +1866,36 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(report["top_next_action"], "stage-local-cache-replay-canary")
         self.assertGreaterEqual(report["summary"]["replay_ready_count"], 2)
         self.assertGreaterEqual(report["summary"]["stale_dependency_count"], 1)
+        self.assertGreaterEqual(report["summary"]["unsafe_dependency_count"], 1)
         self.assertGreaterEqual(report["summary"]["missing_invalidation_count"], 1)
         self.assertGreaterEqual(report["summary"]["noop_count"], 1)
         self.assertGreaterEqual(report["summary"]["ranked_cohort_count"], 4)
         outcomes = {row["outcome"]: row["count"] for row in report["outcome_breakdown"]}
         self.assertIn("replay-ready", outcomes)
         self.assertIn("stale-dependency", outcomes)
+        self.assertIn("unsafe-dependency", outcomes)
         self.assertIn("missing-invalidation", outcomes)
         self.assertIn("noop", outcomes)
         self.assertTrue(report["acceptance"]["emits_ranked_replay_ready_stale_and_missing_cohorts"])
+        self.assertTrue(report["acceptance"]["emits_ranked_dependency_evidence_classes"])
         cohorts = {(row["outcome"], row["reason"]): row for row in report["cohorts"]}
         safe = cohorts[("replay-ready", "safe-invalidation-evidence-present")]
         stale = next(row for row in report["cohorts"] if row["outcome"] == "stale-dependency")
+        unsafe = next(row for row in report["cohorts"] if row["outcome"] == "unsafe-dependency")
         missing = next(row for row in report["cohorts"] if row["outcome"] == "missing-invalidation")
         self.assertEqual(safe["next_action"], "stage-local-cache-replay-canary")
         self.assertTrue(safe["safe_invalidation_evidence"])
         self.assertFalse(safe["tool_cache_replay_enabled"])
         self.assertFalse(safe["policy_files_written"])
         self.assertEqual(stale["next_action"], "refresh-cache-replay-dependency-evidence")
+        self.assertEqual(unsafe["next_action"], "collect-safe-invalidation-evidence")
+        self.assertFalse(unsafe["tool_cache_replay_enabled"])
+        self.assertFalse(unsafe["streaming_replay_enabled"])
+        self.assertFalse(unsafe["emits_cache_apply_action"])
         self.assertEqual(missing["next_action"], "collect-safe-invalidation-evidence")
         reasons = {row["value"]: row["count"] for row in report["reason_breakdown"]}
         self.assertIn("stale-risk-blockers", reasons)
+        self.assertIn("unsafe-tool-calls-without-invalidation", reasons)
         self.assertIn("invalidation-evidence-missing", reasons)
         self.assertIn("unsupported-streaming-shape", reasons)
         self.assertFalse(report["source_reports"]["individual_candidate_ids_included"])

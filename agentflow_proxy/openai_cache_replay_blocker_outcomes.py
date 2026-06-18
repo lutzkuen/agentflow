@@ -35,6 +35,10 @@ MISSING_INVALIDATION_REASONS = {
     "tool-call-cache-disabled",
     "unsafe-tool-calls-without-invalidation",
 }
+UNSAFE_DEPENDENCY_REASONS = {
+    "unsafe-dependency-evidence",
+    "unsafe-tool-calls-without-invalidation",
+}
 NOOP_REASONS = {
     "already-cache-hit",
     "canary-holdout-only",
@@ -49,6 +53,7 @@ SUPPORTED_REPLAY_ENDPOINTS = {"responses", "chat_completions"}
 OUTCOME_PRIORITY = {
     "replay-ready": 4,
     "stale-dependency": 3,
+    "unsafe-dependency": 3,
     "missing-invalidation": 2,
     "noop": 1,
 }
@@ -136,6 +141,8 @@ def _outcome_for_opportunity(candidate: dict[str, Any]) -> tuple[str, str]:
             return "stale-dependency", invalidation_reason or "stale-dependency-evidence"
         if safe_dependency:
             return "replay-ready", "safe-invalidation-evidence-present"
+        if dependency_status == "unsafe" or reasons & UNSAFE_DEPENDENCY_REASONS:
+            return "unsafe-dependency", "unsafe-tool-calls-without-invalidation"
         if dependency_status == "missing" or reasons & MISSING_INVALIDATION_REASONS:
             return "missing-invalidation", "invalidation-evidence-missing"
         return "noop", "dependency-evidence-unknown"
@@ -158,6 +165,8 @@ def _outcome_for_impact(candidate: dict[str, Any]) -> tuple[str, str]:
     cohorts = candidate.get("cohort_counts") if isinstance(candidate.get("cohort_counts"), dict) else {}
     if reasons & STALE_DEPENDENCY_REASONS or _as_int(cohorts.get("invalidated")):
         return "stale-dependency", sorted((reasons & STALE_DEPENDENCY_REASONS) or {"invalidated-cohort-observed"})[0]
+    if reasons & UNSAFE_DEPENDENCY_REASONS:
+        return "unsafe-dependency", "unsafe-tool-calls-without-invalidation"
     if reasons & MISSING_INVALIDATION_REASONS:
         return "missing-invalidation", sorted(reasons & MISSING_INVALIDATION_REASONS)[0]
     if verdict in {"widen", "promote"} or _as_int(cohorts.get("applied")) or _as_int(cohorts.get("holdout")):
@@ -186,6 +195,8 @@ def _next_action_for_outcome(outcome: str, reason: str) -> str:
         return "stage-local-cache-replay-canary"
     if outcome == "stale-dependency":
         return "refresh-cache-replay-dependency-evidence"
+    if outcome == "unsafe-dependency":
+        return "collect-safe-invalidation-evidence"
     if outcome == "missing-invalidation":
         return "collect-safe-invalidation-evidence"
     if reason in {"unsupported-streaming-shape", "streaming-replay-not-supported"}:
@@ -425,6 +436,7 @@ def build_openai_cache_replay_blocker_outcomes_report(
             "outcome_count": sum(outcome_counts.values()),
             "replay_ready_count": outcome_counts.get("replay-ready", 0),
             "stale_dependency_count": outcome_counts.get("stale-dependency", 0),
+            "unsafe_dependency_count": outcome_counts.get("unsafe-dependency", 0),
             "missing_invalidation_count": outcome_counts.get("missing-invalidation", 0),
             "noop_count": outcome_counts.get("noop", 0),
             "staged_canary_count": 1 if staged_status == "staged-policy-can-run" else 0,
@@ -451,6 +463,10 @@ def build_openai_cache_replay_blocker_outcomes_report(
                 outcome in {row.get("outcome") for row in cohorts}
                 for outcome in ("replay-ready", "stale-dependency", "missing-invalidation")
             ),
+            "emits_ranked_dependency_evidence_classes": all(
+                outcome in {row.get("outcome") for row in cohorts}
+                for outcome in ("replay-ready", "stale-dependency", "unsafe-dependency", "missing-invalidation")
+            ),
             "safe_rows_stage_local_cache_replay_canary": all(
                 row.get("next_action") == "stage-local-cache-replay-canary"
                 for row in cohorts
@@ -460,6 +476,11 @@ def build_openai_cache_replay_blocker_outcomes_report(
                 row.get("next_action") == "refresh-cache-replay-dependency-evidence"
                 for row in cohorts
                 if row.get("outcome") == "stale-dependency"
+            ),
+            "unsafe_rows_collect_safe_invalidation_evidence": all(
+                row.get("next_action") == "collect-safe-invalidation-evidence"
+                for row in cohorts
+                if row.get("outcome") == "unsafe-dependency"
             ),
             "missing_rows_collect_safe_invalidation_evidence": all(
                 row.get("next_action") == "collect-safe-invalidation-evidence"
