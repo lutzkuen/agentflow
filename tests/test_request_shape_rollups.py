@@ -3728,6 +3728,102 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(payload["privacy"]["aggregate_only"])
         self.assertNotIn("raw prompt must not leak", stdout.getvalue())
 
+    def test_crunch_canary_stage_reports_activation_ready_rollup_selection_and_skips(self) -> None:
+        for _ in range(3):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=132_000,
+                actual_input_tokens=100,
+                cost=0.10,
+                baseline=0.10,
+            )
+        for _ in range(3):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                category="tool-heavy",
+                workflow_phase="summary",
+                text_chars=132_000,
+                actual_input_tokens=9_000,
+                cost=0.10,
+                baseline=0.10,
+            )
+
+        rules_path = Path(self.tmpdir.name) / "missing-crunch-rules.yaml"
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="activation-ready-selection",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+            rules_path=rules_path,
+            max_new_canaries=1,
+        )
+
+        self.assertEqual(report["status"], "staged")
+        self.assertEqual(report["staged_canary_count"], 1)
+        self.assertFalse(rules_path.exists())
+        self.assertTrue(report["acceptance"]["has_activation_ready_rollup_selection"])
+        self.assertTrue(report["acceptance"]["drafts_only_activation_ready_rollups"])
+        self.assertTrue(report["acceptance"]["reports_skipped_rollup_reasons"])
+
+        selection = report["activation_ready_rollup_selection"]
+        self.assertEqual(selection["schema"], "agentflow.request_shape_crunch_canary_stage_rollup_selection.v1")
+        self.assertEqual(selection["activation_ready_cohort_count"], 2)
+        self.assertEqual(selection["drafted_count"], 1)
+        self.assertEqual(selection["skipped_count"], 1)
+        self.assertEqual(selection["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(selection["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertFalse(selection["policy_files_written"])
+        skipped_reasons = {item["value"]: item["count"] for item in selection["skipped_reason_breakdown"]}
+        self.assertIn("stage-action-limit-reached", skipped_reasons)
+
+        drafted = next(row for row in selection["rows"] if row["state"] == "drafted")
+        skipped = next(row for row in selection["rows"] if row["state"] == "skipped")
+        self.assertTrue(drafted["selected_for_stage"])
+        self.assertEqual(drafted["activation_readiness"], "activation-ready")
+        self.assertEqual(drafted["canary_fraction"], 0.05)
+        self.assertEqual(drafted["holdout_fraction"], 0.2)
+        self.assertEqual(drafted["rollback_metadata"]["rollback_action_type"], "disable_repeated_context_crunch_canary")
+        self.assertEqual(drafted["source_evidence_schema"], "agentflow.request_shape_rollup_row.v1")
+        self.assertFalse(skipped["selected_for_stage"])
+        self.assertEqual(skipped["activation_readiness"], "activation-ready")
+        self.assertEqual(skipped["skip_reason"], "stage-action-limit-reached")
+
+        action = report["top_stage_action"]
+        self.assertEqual(action["source_readiness"], "activation-ready")
+        self.assertIn("measurement-ready", action["source_readiness_aliases"])
+        self.assertEqual(action["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(action["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(action["source_evidence_schema"], "agentflow.request_shape_rollup_row.v1")
+        self.assertTrue(action["privacy"]["metadata_only"])
+        self.assertTrue(action["privacy"]["aggregate_only"])
+        self.assertFalse(action["privacy"]["raw_prompts_included"])
+        self.assertFalse(action["privacy"]["provider_bodies_included"])
+        self.assertFalse(action["privacy"]["request_ids_included"])
+        self.assertFalse(action["privacy"]["session_ids_included"])
+        self.assertFalse(action["privacy"]["file_paths_included"])
+
+        rendered = json.dumps(report, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            str(rules_path),
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_crunch_canary_stage_cli_apply_writes_file_backed_local_rule(self) -> None:
         for cost in (0.08, 0.07, 0.09):
             self._log_call(

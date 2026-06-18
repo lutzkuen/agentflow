@@ -3949,9 +3949,13 @@ def _request_shape_crunch_canary_action(
         "schema": CRUNCH_CANARY_ACTION_SCHEMA,
         "action_type": "stage-local-repeated-context-crunch-canary",
         "target_local_policy": "crunch_rules",
+        "target_local_policy_section": "crunch.rules",
+        "target_local_rule_file": "crunch_rules.yaml",
         "policy_section": "crunch",
         "policy_id": policy_id,
         "cohort_id": cohort_id,
+        "source_readiness": "activation-ready",
+        "source_readiness_aliases": ["activation-ready", "measurement-ready"],
         "source_evidence_schema": cohort.get("source_evidence_schema") or CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
         "source_evidence_schemas": [
             FOLLOW_UP_CANDIDATES_SCHEMA,
@@ -4028,6 +4032,119 @@ def _request_shape_crunch_canary_action(
         "rollback_threshold": DEFAULT_CRUNCH_CANARY_ROLLBACK_ERROR_RATE,
         "rollback_metadata": rollback_metadata,
         "next_action": "apply-local-crunch-canary-after-review",
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _request_shape_crunch_stage_rollup_selection_review(
+    *,
+    cohorts: list[dict[str, Any]],
+    actions: list[dict[str, Any]],
+    stage_action_limit: int,
+) -> dict[str, Any]:
+    actions_by_cohort = {
+        public_label(action.get("cohort_id"), "unknown"): action
+        for action in actions
+        if isinstance(action, dict)
+    }
+    rows: list[dict[str, Any]] = []
+    state_counts: dict[str, int] = {}
+    skipped_reasons: dict[str, int] = {}
+
+    for cohort in cohorts:
+        if not isinstance(cohort, dict):
+            continue
+        cohort_id = public_label(cohort.get("cohort_id"), "unknown")
+        readiness = public_label(cohort.get("readiness"), "unknown")
+        activation_ready = readiness in {"activation-ready", "measurement-ready"}
+        duplicate = cohort.get("duplicate_suppression") if isinstance(cohort.get("duplicate_suppression"), dict) else {}
+        action = actions_by_cohort.get(cohort_id)
+        if action:
+            state = "drafted"
+            reason = "activation-ready-stage-action-drafted"
+            skipped = False
+        else:
+            state = "skipped"
+            skipped = True
+            if activation_ready and bool(duplicate.get("suppresses_new_stage_action")):
+                reason = public_label(duplicate.get("reason"), "matching-repeated-context-crunch-canary-already-staged-in-local-policy")
+            elif activation_ready:
+                reason = "stage-action-limit-reached"
+            else:
+                blockers = _public_label_list(cohort.get("blockers") or cohort.get("evidence_blocker_codes"))
+                reason = public_label(cohort.get("reason") or (blockers[0] if blockers else "not-activation-ready"), "not-activation-ready")
+            _increment(skipped_reasons, reason, _as_int(cohort.get("row_count")) or 1)
+        _increment(state_counts, state)
+        row: dict[str, Any] = {
+            "schema": "agentflow.request_shape_crunch_canary_stage_rollup_selection_row.v1",
+            "rank": _as_int(cohort.get("rank")),
+            "cohort_id": cohort_id,
+            "policy_id": public_label(cohort.get("policy_id"), "unknown"),
+            "state": state,
+            "selected_for_stage": bool(action),
+            "skipped": skipped,
+            "skip_reason": None if action else reason,
+            "selection_reason": reason,
+            "readiness": readiness,
+            "activation_readiness": "activation-ready" if activation_ready else "not-activation-ready",
+            "next_action": "stage-repeated-context-crunch-canary" if activation_ready else "skip-repeated-context-crunch-canary",
+            "source_evidence_schema": public_label(cohort.get("source_evidence_schema"), "unknown"),
+            "provider_family": public_label(cohort.get("provider_family"), "unknown"),
+            "source_surface": public_label(cohort.get("source_surface"), "unknown"),
+            "endpoint": public_label(cohort.get("endpoint"), "unknown"),
+            "category": public_label(cohort.get("category"), "unknown"),
+            "workflow_phase": public_label(cohort.get("workflow_phase"), "unknown"),
+            "stream": bool(cohort.get("stream")),
+            "has_tools": bool(cohort.get("has_tools")),
+            "cache_status": public_label(cohort.get("cache_status"), "unknown"),
+            "routing_status": public_label(cohort.get("routing_status"), "unknown"),
+            "text_bucket": public_label(cohort.get("text_bucket"), "unknown"),
+            "token_bucket": public_label(cohort.get("token_bucket"), "unknown"),
+            "row_count": _as_int(cohort.get("row_count")),
+            "sample_count": _as_int(cohort.get("row_count")),
+            "projected_saved_tokens": _as_int(cohort.get("projected_saved_tokens")),
+            "projected_saved_usd": round(_as_float(cohort.get("projected_saved_usd")), 8),
+            "target_local_policy_section": "crunch.rules",
+            "target_local_rule_file": "crunch_rules.yaml",
+            "duplicate_suppression": {
+                "suppressed": bool(duplicate.get("suppressed") or duplicate.get("suppresses_new_stage_action")),
+                "reason": public_label(duplicate.get("reason"), "unknown"),
+                "matching_local_policy": public_label(duplicate.get("matching_local_policy"), "unknown"),
+                "metadata_only": True,
+                "aggregate_only": True,
+            },
+            "privacy": _crunch_opportunity_privacy(),
+        }
+        if action:
+            row.update(
+                {
+                    "canary_fraction": round(_as_float(action.get("canary_fraction") or action.get("rollout_fraction")), 6),
+                    "holdout_fraction": round(_as_float(action.get("holdout_fraction")), 6),
+                    "rollback_metadata": action.get("rollback_metadata"),
+                }
+            )
+        rows.append(row)
+
+    activation_ready_count = sum(1 for row in rows if row["activation_readiness"] == "activation-ready")
+    drafted_count = _as_int(state_counts.get("drafted"))
+    skipped_count = _as_int(state_counts.get("skipped"))
+    return {
+        "schema": "agentflow.request_shape_crunch_canary_stage_rollup_selection.v1",
+        "status": "drafted" if drafted_count else "no-activation-ready-drafts",
+        "source_schema": CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
+        "cohort_count": len(rows),
+        "activation_ready_cohort_count": activation_ready_count,
+        "drafted_count": drafted_count,
+        "skipped_count": skipped_count,
+        "stage_action_limit": stage_action_limit,
+        "skipped_reason_breakdown": _breakdown(skipped_reasons),
+        "state_breakdown": _breakdown(state_counts),
+        "target_local_policy_section": "crunch.rules",
+        "target_local_rule_file": "crunch_rules.yaml",
+        "policy_files_written": False,
+        "provider_calls_made": 0,
+        "managed_server_calls_made": 0,
+        "rows": rows[:50],
         "privacy": _crunch_opportunity_privacy(),
     }
 
@@ -5022,6 +5139,12 @@ def build_request_shape_crunch_canary_stage_report(
         if isinstance(action, dict) and action.get("schema") == CRUNCH_CANARY_ACTION_SCHEMA
     ]
     cohorts = [cohort for cohort in dry_run.get("cohorts") or [] if isinstance(cohort, dict)]
+    stage_action_limit = (dry_run.get("summary") or {}).get("stage_action_limit", max_new_canaries)
+    rollup_selection = _request_shape_crunch_stage_rollup_selection_review(
+        cohorts=cohorts,
+        actions=actions,
+        stage_action_limit=_as_int(stage_action_limit) or max_new_canaries,
+    )
     top_action = actions[0] if actions else None
     top_cohort = cohorts[0] if cohorts else None
     top_stage_cohort = next(
@@ -5140,6 +5263,7 @@ def build_request_shape_crunch_canary_stage_report(
         "already_staged_canary_count": len(already_staged_cohorts),
         "reported_canary_count": reported_canary_count,
         "stage_actions": actions,
+        "activation_ready_rollup_selection": rollup_selection,
         "top_stage_action": top_action,
         "top_reported_canary": top_reported_canary,
         "top_cohort": top_cohort,
@@ -5191,6 +5315,15 @@ def build_request_shape_crunch_canary_stage_report(
             "has_duplicate_suppression": isinstance(duplicate_suppression, dict)
             and duplicate_suppression.get("schema") == "agentflow.request_shape_crunch_stage_duplicate_suppression_summary.v1",
             "has_file_backed_target": True,
+            "has_activation_ready_rollup_selection": rollup_selection.get("schema")
+            == "agentflow.request_shape_crunch_canary_stage_rollup_selection.v1",
+            "drafts_only_activation_ready_rollups": all(
+                row.get("activation_readiness") == "activation-ready"
+                for row in rollup_selection.get("rows") or []
+                if row.get("selected_for_stage")
+            ),
+            "reports_skipped_rollup_reasons": rollup_selection.get("skipped_count") == 0
+            or bool(rollup_selection.get("skipped_reason_breakdown")),
             "unsafe_or_stale_cohorts_remain_skipped": all(
                 item.get("readiness") == "measurement-ready"
                 or _as_int(item.get("projected_skipped_count")) > 0
