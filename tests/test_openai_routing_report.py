@@ -689,7 +689,11 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(gate["schema"], "agentflow.openai_routing_active_local_policy_outcome_gate.v1")
         self.assertEqual(gate["state"], "keep-active")
         self.assertEqual(gate["deterministic_next_action"], "keep-active")
-        self.assertEqual(gate["decision_options"], ["keep-active", "review-stale-evidence", "rollback-required", "retune-rule", "keep-blocked"])
+        self.assertEqual(gate["decision_options"], ["keep-active", "review-stale-evidence", "rollback-required", "keep-blocked"])
+        self.assertEqual(gate["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(gate["target_local_policy_section"], "routing.rules")
+        self.assertGreater(gate["savings_per_1000_calls_usd"], 0)
+        self.assertFalse(gate["regression_counters"]["stale_evidence"]["stale"])
         rollback_outcome = outcome["rollback_metadata"]
         self.assertEqual(rollback_outcome["schema"], "agentflow.openai_routing_active_local_policy_rollback_metadata.v1")
         self.assertEqual(rollback_outcome["rollback_action_type"], "disable_openai_routing_rule")
@@ -801,13 +805,14 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         result = build_openai_routing_promotion_decision_report(self.store, limit=20)
 
         outcome = result["active_local_policy_outcomes"][0]
-        self.assertEqual(outcome["outcome_decision"], "retune-rule")
-        self.assertEqual(outcome["deterministic_next_action"], "retune-rule")
+        self.assertEqual(outcome["outcome_decision"], "keep-blocked")
+        self.assertEqual(outcome["deterministic_next_action"], "keep-blocked")
         self.assertFalse(outcome["gate_passed"])
-        self.assertIn("skipped-coverage-observed", outcome["reason_codes"])
         self.assertIn("unknown-coverage-observed", outcome["reason_codes"])
-        self.assertEqual(result["summary"]["active_local_policy_outcome_decision"], "retune-rule")
-        self.assertEqual(result["summary"]["active_local_policy_next_action"], "retune-rule")
+        self.assertEqual(outcome["regression_counters"]["skipped_count"], 1)
+        self.assertEqual(outcome["regression_counters"]["unknown_count"], 1)
+        self.assertEqual(result["summary"]["active_local_policy_outcome_decision"], "keep-blocked")
+        self.assertEqual(result["summary"]["active_local_policy_next_action"], "keep-blocked")
 
     def test_active_openai_routing_rule_outcome_requires_rollback_on_regression(self) -> None:
         def canary(cohort: str, **extra: object) -> dict[str, object]:

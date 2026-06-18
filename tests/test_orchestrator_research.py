@@ -1005,6 +1005,22 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(decision_report["summary"]["retry_count"], 0)
         self.assertEqual(decision_report["summary"]["next_action"], "measure-openai-routing-rule-outcomes")
         self.assertEqual(decision_report["summary"]["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(decision_report["summary"]["active_local_policy_outcome_decision"], "keep-active")
+        self.assertEqual(decision_report["summary"]["active_local_policy_next_action"], "keep-active")
+        self.assertTrue(decision_report["summary"]["active_local_policy_gate_passed"])
+        active_outcome = decision_report["active_local_policy_outcomes"][0]
+        gate = active_outcome["active_rule_regression_gate"]
+        self.assertEqual(gate["schema"], "agentflow.openai_routing_active_local_policy_outcome_gate.v1")
+        self.assertEqual(gate["state"], "keep-active")
+        self.assertEqual(gate["deterministic_next_action"], "keep-active")
+        self.assertEqual(gate["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(gate["target_local_policy_section"], "routing.rules")
+        self.assertEqual(gate["savings_per_1000_calls_usd"], 4.375)
+        self.assertEqual(gate["regression_counters"]["applied_count"], 12)
+        self.assertEqual(gate["regression_counters"]["holdout_count"], 15)
+        self.assertEqual(gate["regression_counters"]["skipped_count"], 10)
+        self.assertEqual(gate["regression_counters"]["unknown_count"], 0)
+        self.assertFalse(gate["regression_counters"]["stale_evidence"]["stale"])
 
         loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
         routing_lever = next(row for row in loop["levers"] if row["lever"] == "routing")
@@ -1013,6 +1029,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(routing_lever["next_action"], "measure-openai-routing-rule-outcomes")
         self.assertEqual(routing_lever["applied_count"], 12)
         self.assertEqual(routing_lever["holdout_count"], 15)
+        self.assertEqual(routing_lever["active_rule_regression_gate"]["state"], "keep-active")
 
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
         routing_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "routing")
@@ -1021,10 +1038,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(routing_entry["next_action"], "measure-openai-routing-rule-outcomes")
         self.assertEqual(routing_entry["applied_count"], 12)
         self.assertEqual(routing_entry["holdout_count"], 15)
+        self.assertEqual(routing_entry["active_rule_regression_gate"]["deterministic_next_action"], "keep-active")
         queue = plan["evidence"]["stats_summary"]["local_activation_next_action_queue"]
         routing_queue = next(entry for entry in queue["entries"] if entry["lever"] == "routing")
         self.assertEqual(routing_queue["current_status"], "applied")
         self.assertEqual(routing_queue["next_action"], "measure-openai-routing-rule-outcomes")
+        self.assertEqual(routing_queue["active_rule_regression_gate"]["state"], "keep-active")
+        self.assertEqual(routing_queue["active_rule_regression_gate"]["regression_counters"]["applied_count"], 12)
 
         routing_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "routing")
         self.assertEqual(routing_candidate["blocker"], "openai-routing-promotion-active-local-policy")

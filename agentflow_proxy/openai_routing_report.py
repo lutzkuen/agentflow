@@ -1626,8 +1626,6 @@ def _openai_active_policy_outcome_gate(
         reason_codes.append("retry-observed")
     if stale_evidence_count > 0:
         reason_codes.append("stale-evidence")
-    if skipped_count > 0:
-        reason_codes.append("skipped-coverage-observed")
     if unknown_count > 0:
         reason_codes.append("unknown-coverage-observed")
     if savings_per_1000 <= 0:
@@ -1642,22 +1640,20 @@ def _openai_active_policy_outcome_gate(
         "retry-observed",
     }
     coverage_reasons = {"missing-applied-coverage", "missing-holdout-coverage"}
-    skipped_review_reasons = {"skipped-coverage-observed", "unknown-coverage-observed"}
     if any(reason in rollback_reasons for reason in reason_codes):
         state = "rollback-required"
         gate_passed = False
     elif "stale-evidence" in reason_codes:
         state = "review-stale-evidence"
         gate_passed = False
-    elif any(reason in coverage_reasons for reason in reason_codes):
+    elif any(reason in coverage_reasons for reason in reason_codes) or "unknown-coverage-observed" in reason_codes:
         state = "keep-blocked"
         gate_passed = False
     elif (
-        any(reason in skipped_review_reasons for reason in reason_codes)
-        or "non-positive-estimated-savings" in reason_codes
+        "non-positive-estimated-savings" in reason_codes
         or "negative-applied-holdout-savings-delta" in reason_codes
     ):
-        state = "retune-rule"
+        state = "keep-blocked"
         gate_passed = False
     else:
         state = "keep-active"
@@ -1671,7 +1667,10 @@ def _openai_active_policy_outcome_gate(
         "deterministic_next_action": next_action,
         "next_action": next_action,
         "reason_codes": reason_codes,
-        "decision_options": ["keep-active", "review-stale-evidence", "rollback-required", "retune-rule", "keep-blocked"],
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "savings_per_1000_calls_usd": savings_per_1000,
+        "decision_options": ["keep-active", "review-stale-evidence", "rollback-required", "keep-blocked"],
         "regression_counters": {
             "schema": "agentflow.openai_routing_active_local_policy_outcome_regression_counters.v1",
             "metadata_only": True,
@@ -1685,6 +1684,12 @@ def _openai_active_policy_outcome_gate(
             "fallback_count": fallback_count,
             "retry_count": retry_count,
             "stale_evidence_count": stale_evidence_count,
+            "stale_evidence": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "stale": stale_evidence_count > 0,
+                "status": "stale" if stale_evidence_count > 0 else "fresh",
+            },
             "savings_per_1000_calls_usd": savings_per_1000,
             "applied_minus_holdout_error_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_error_rate_delta")),
             "applied_minus_holdout_fallback_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_fallback_rate_delta")),
