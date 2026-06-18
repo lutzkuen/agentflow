@@ -4222,6 +4222,7 @@ def build_evidence_to_activation_next_action_ledger(
             )
         ]
         stages.insert(0, cache_policy_stage)
+    stages.extend(_request_shape_tool_cache_dependency_stages(stats_summary))
     stages.extend(_safety_stop_ledger_stages(safety_stop_burndown))
     stages.extend(_diagnostic_ledger_stages(diagnostics))
     if not stages:
@@ -4365,6 +4366,49 @@ def build_evidence_to_activation_next_action_ledger(
                 entry[review_key] = sanitize_value(stage.get(review_key))
         if stage.get("dependency_evidence_status"):
             entry["dependency_evidence_status"] = sanitize_value(stage.get("dependency_evidence_status"))
+        for dependency_key in (
+            "dependency_evidence_class",
+            "dependency_evidence_decision",
+            "dependency_evidence_reason",
+            "evidence_state",
+        ):
+            if stage.get(dependency_key):
+                entry[dependency_key] = sanitize_value(stage.get(dependency_key))
+        for count_key in (
+            "affected_rows",
+            "tools_present_rows",
+            "tools_present_replay_evidence_rows",
+            "generic_tools_present_blocker_reduced_rows",
+            "unsafe_tool_call_blocker_rows",
+            "missing_dependency_evidence_rows",
+            "stable_dependency_evidence_rows",
+            "stale_dependency_evidence_rows",
+            "unsafe_dependency_evidence_rows",
+            "unknown_dependency_evidence_rows",
+            "cache_apply_action_count",
+            "cache_entries_written",
+        ):
+            if stage.get(count_key) is not None:
+                entry[count_key] = _to_int(stage.get(count_key))
+        for gate_key in (
+            "tool_cache_replay_enabled",
+            "streaming_replay_enabled",
+            "emits_cache_apply_action",
+            "tools_present_replay_evidence",
+            "generic_tools_present_blocker_reduced",
+        ):
+            if stage.get(gate_key) is not None:
+                entry[gate_key] = bool(stage.get(gate_key))
+        for breakdown_key in (
+            "blocker_breakdown",
+            "dependency_evidence_decision_breakdown",
+            "evidence_state_breakdown",
+            "next_action_breakdown",
+        ):
+            if isinstance(stage.get(breakdown_key), list):
+                entry[breakdown_key] = sanitize_value(stage.get(breakdown_key))
+        if isinstance(stage.get("dependency_evidence_review"), dict):
+            entry["dependency_evidence_review"] = sanitize_value(stage.get("dependency_evidence_review"))
         if isinstance(stage.get("local_action_representation"), dict):
             entry["local_action_representation"] = sanitize_value(stage.get("local_action_representation"))
         if stage.get("source"):
@@ -4398,6 +4442,8 @@ def build_evidence_to_activation_next_action_ledger(
         for gate_key in ("promotion_allowed", "stage_allowed", "active_policy_changed", "wrote_active_policy_files"):
             if stage.get(gate_key) is not None:
                 entry[gate_key] = bool(stage.get(gate_key))
+        if stage.get("policy_files_written") is not None:
+            entry["policy_files_written"] = bool(stage.get("policy_files_written"))
         if stage.get("omitted_reason"):
             entry["omitted_reason"] = sanitize_value(stage.get("omitted_reason"))
         if stage.get("follow_up_owner"):
@@ -4459,10 +4505,28 @@ def build_evidence_to_activation_next_action_ledger(
             "projected_saved_usd",
             "crunch_savings_usd",
             "today_crunch_savings_usd",
+            "affected_rows",
+            "tools_present_rows",
+            "tools_present_replay_evidence_rows",
+            "generic_tools_present_blocker_reduced_rows",
+            "unsafe_tool_call_blocker_rows",
+            "missing_dependency_evidence_rows",
+            "stable_dependency_evidence_rows",
+            "stale_dependency_evidence_rows",
+            "unsafe_dependency_evidence_rows",
+            "unknown_dependency_evidence_rows",
+            "cache_apply_action_count",
+            "cache_entries_written",
+            "tool_cache_replay_enabled",
+            "streaming_replay_enabled",
+            "emits_cache_apply_action",
+            "tools_present_replay_evidence",
+            "generic_tools_present_blocker_reduced",
             "promotion_allowed",
             "stage_allowed",
             "active_policy_changed",
             "wrote_active_policy_files",
+            "policy_files_written",
             "executor_compatible",
         }
         entries.append({key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in preserved_empty_keys})
@@ -4667,6 +4731,15 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         },
     }
     passthrough_keys = (
+        "affected_rows",
+        "cache_apply_action_count",
+        "cache_entries_written",
+        "dependency_evidence_class",
+        "dependency_evidence_decision",
+        "dependency_evidence_reason",
+        "dependency_evidence_status",
+        "emits_cache_apply_action",
+        "evidence_state",
         "keep_blocked_reason",
         "needed_resolution",
         "next_state",
@@ -4677,10 +4750,25 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "endpoint",
         "category",
         "workflow_phase",
+        "provider_family",
+        "has_tools",
         "requested_model",
         "candidate_target_model",
         "required_local_executor",
         "executor_compatible",
+        "tool_cache_replay_enabled",
+        "streaming_replay_enabled",
+        "tools_present_replay_evidence",
+        "generic_tools_present_blocker_reduced",
+        "tools_present_rows",
+        "tools_present_replay_evidence_rows",
+        "generic_tools_present_blocker_reduced_rows",
+        "unsafe_tool_call_blocker_rows",
+        "missing_dependency_evidence_rows",
+        "stable_dependency_evidence_rows",
+        "stale_dependency_evidence_rows",
+        "unsafe_dependency_evidence_rows",
+        "unknown_dependency_evidence_rows",
         "missing_applied_coverage",
         "missing_holdout_coverage",
         "burndown_status",
@@ -4688,6 +4776,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "stage_allowed",
         "active_policy_changed",
         "wrote_active_policy_files",
+        "policy_files_written",
         "durable_action_ledger_entry",
     )
     for key in passthrough_keys:
@@ -4702,9 +4791,18 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "applied_coverage",
         "holdout_coverage",
         "local_file_backed_representation",
+        "dependency_evidence_review",
     ):
         if isinstance(entry.get(review_key), dict):
             clean[review_key] = sanitize_value(entry.get(review_key))
+    for breakdown_key in (
+        "blocker_breakdown",
+        "dependency_evidence_decision_breakdown",
+        "evidence_state_breakdown",
+        "next_action_breakdown",
+    ):
+        if isinstance(entry.get(breakdown_key), list):
+            clean[breakdown_key] = sanitize_value(entry.get(breakdown_key))
     preserved_empty_keys = {
         "rank",
         "ledger_rank",
@@ -4717,10 +4815,28 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "realized_savings_usd",
         "projected_savings_usd",
         "savings_per_1000_calls_usd",
+        "affected_rows",
+        "cache_apply_action_count",
+        "cache_entries_written",
+        "emits_cache_apply_action",
+        "tool_cache_replay_enabled",
+        "streaming_replay_enabled",
+        "tools_present_replay_evidence",
+        "generic_tools_present_blocker_reduced",
+        "tools_present_rows",
+        "tools_present_replay_evidence_rows",
+        "generic_tools_present_blocker_reduced_rows",
+        "unsafe_tool_call_blocker_rows",
+        "missing_dependency_evidence_rows",
+        "stable_dependency_evidence_rows",
+        "stale_dependency_evidence_rows",
+        "unsafe_dependency_evidence_rows",
+        "unknown_dependency_evidence_rows",
         "promotion_allowed",
         "stage_allowed",
         "active_policy_changed",
         "wrote_active_policy_files",
+        "policy_files_written",
         "executor_compatible",
         "missing_applied_coverage",
         "missing_holdout_coverage",
@@ -5167,6 +5283,134 @@ def _cache_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         "sample_count": calls,
         "cache_hits": cache_hits,
     }
+
+
+def _first_breakdown_value(rows: Any) -> str | None:
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("value") or "").strip():
+            return str(row.get("value"))
+    return None
+
+
+def _request_shape_tool_cache_dependency_stages(stats_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    shape_signal = stats_summary.get("request_shape_rollup_candidates")
+    shape_replay = shape_signal.get("cache_replayability_dry_run") if isinstance(shape_signal, dict) else None
+    if not isinstance(shape_replay, dict):
+        return []
+    report = shape_replay.get("tool_replay_evidence")
+    if not isinstance(report, dict):
+        return []
+    rows = [row for row in report.get("cohorts") or [] if isinstance(row, dict)]
+    if not rows:
+        return []
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    stages: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for row in rows[:10]:
+        provider_family = str(row.get("provider_family") or "openai").strip() or "openai"
+        source_surface = str(row.get("source_surface") or "openai_responses").strip() or "openai_responses"
+        endpoint = str(row.get("endpoint") or "responses").strip() or "responses"
+        category = str(row.get("category") or "tool-cache").strip() or "tool-cache"
+        workflow_phase = str(row.get("workflow_phase") or "tool-cache").strip() or "tool-cache"
+        next_action = str(row.get("next_action") or report.get("next_action") or summary.get("top_next_action") or "collect-file-invalidation-evidence").strip()
+        blocker_codes = [
+            str(item)
+            for item in row.get("blocker_codes") or []
+            if str(item or "").strip()
+        ]
+        if not blocker_codes:
+            for breakdown in report.get("blocker_breakdown") or []:
+                if isinstance(breakdown, dict) and breakdown.get("value"):
+                    blocker_codes.append(str(breakdown.get("value")))
+        reason = str(row.get("evidence_reason") or row.get("reason") or summary.get("top_blocker_code") or (blocker_codes[0] if blocker_codes else "invalidation-evidence-missing")).strip()
+        if reason and reason not in blocker_codes:
+            blocker_codes.insert(0, reason)
+        decision = row.get("dependency_evidence_decision") if isinstance(row.get("dependency_evidence_decision"), dict) else {}
+        decision_value = str(
+            decision.get("decision")
+            or _first_breakdown_value(report.get("dependency_evidence_decision_breakdown"))
+            or "missing-dependency-evidence"
+        ).strip()
+        evidence_class = str(decision.get("evidence_class") or decision_value or "missing-dependency-evidence").strip()
+        evidence_state = str(row.get("evidence_state") or summary.get("top_evidence_state") or "blocked-missing-dependency-evidence").strip()
+        dependency_status = str(row.get("dependency_evidence_status") or decision.get("status") or row.get("file_dependency_status") or "missing").strip()
+        sample_count = _to_int(row.get("sample_count") or row.get("row_count") or summary.get("affected_rows") or summary.get("sample_count"))
+        cohort_bucket = "/".join(
+            part for part in (provider_family, source_surface, endpoint, category, workflow_phase) if part
+        )
+        key = (source_surface, endpoint, category, workflow_phase)
+        if key in seen:
+            continue
+        seen.add(key)
+        stages.append(
+            {
+                "lever": "cache",
+                "state": "missing-evidence",
+                "evidence_source": report.get("schema") or "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "local_action_family": "cache",
+                "next_action": next_action,
+                "fingerprint_next_action": next_action,
+                "fingerprint_evidence_source": report.get("schema") or "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "fingerprint_cohort_bucket": sanitize_value(cohort_bucket),
+                "blocker_codes": sanitize_value(blocker_codes),
+                "sample_count": sample_count,
+                "affected_rows": _to_int(summary.get("affected_rows") or sample_count),
+                "projected_hits": _to_int(row.get("projected_hits") or summary.get("projected_hits")),
+                "projected_saved_usd": round(_to_float(row.get("projected_savings_usd") or summary.get("projected_savings_usd")), 8),
+                "cohort_bucket": sanitize_value(cohort_bucket),
+                "provider_family": sanitize_value(provider_family),
+                "source_surface": sanitize_value(source_surface),
+                "endpoint": sanitize_value(endpoint),
+                "category": sanitize_value(category),
+                "workflow_phase": sanitize_value(workflow_phase),
+                "has_tools": bool(row.get("has_tools", True)),
+                "dependency_evidence_class": sanitize_value(evidence_class),
+                "dependency_evidence_decision": sanitize_value(decision_value),
+                "dependency_evidence_status": sanitize_value(dependency_status),
+                "dependency_evidence_reason": sanitize_value(reason),
+                "evidence_state": sanitize_value(evidence_state),
+                "dependency_evidence_review": {
+                    "schema": "agentflow.openai_tool_cache_dependency_next_action.v1",
+                    "status": sanitize_value(dependency_status),
+                    "evidence_class": sanitize_value(evidence_class),
+                    "decision": sanitize_value(decision_value),
+                    "reason": sanitize_value(reason),
+                    "next_action": sanitize_value(next_action),
+                    "requires_explicit_invalidation_safety_evidence": True,
+                    "tool_cache_replay_enabled": False,
+                    "streaming_replay_enabled": False,
+                    "emits_cache_apply_action": False,
+                    "privacy": _candidate_privacy(),
+                },
+                "blocker_breakdown": sanitize_value(report.get("blocker_breakdown") or []),
+                "dependency_evidence_decision_breakdown": sanitize_value(report.get("dependency_evidence_decision_breakdown") or []),
+                "evidence_state_breakdown": sanitize_value(report.get("evidence_state_breakdown") or []),
+                "next_action_breakdown": sanitize_value(report.get("next_action_breakdown") or []),
+                "tool_cache_replay_enabled": bool(row.get("tool_cache_replay_enabled")) if row.get("tool_cache_replay_enabled") is not None else False,
+                "streaming_replay_enabled": bool(row.get("streaming_replay_enabled")) if row.get("streaming_replay_enabled") is not None else False,
+                "emits_cache_apply_action": bool(row.get("emits_cache_apply_action")) if row.get("emits_cache_apply_action") is not None else False,
+                "tools_present_replay_evidence": bool(row.get("tools_present_replay_evidence", True)),
+                "generic_tools_present_blocker_reduced": bool(row.get("generic_tools_present_blocker_reduced", True)),
+                "tools_present_rows": _to_int(summary.get("tools_present_rows")),
+                "tools_present_replay_evidence_rows": _to_int(summary.get("tools_present_replay_evidence_rows")),
+                "generic_tools_present_blocker_reduced_rows": _to_int(summary.get("generic_tools_present_blocker_reduced_rows")),
+                "unsafe_tool_call_blocker_rows": _to_int(summary.get("unsafe_tool_call_blocker_rows")),
+                "missing_dependency_evidence_rows": _to_int(summary.get("missing_dependency_evidence_rows")),
+                "stable_dependency_evidence_rows": _to_int(summary.get("stable_dependency_evidence_rows")),
+                "stale_dependency_evidence_rows": _to_int(summary.get("stale_dependency_evidence_rows")),
+                "unsafe_dependency_evidence_rows": _to_int(summary.get("unsafe_dependency_evidence_rows")),
+                "unknown_dependency_evidence_rows": _to_int(summary.get("unknown_dependency_evidence_rows")),
+                "cache_apply_action_count": _to_int(summary.get("cache_apply_action_count")),
+                "cache_entries_written": _to_int(summary.get("cache_entries_written")),
+                "policy_files_written": False,
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+                "privacy": _candidate_privacy(),
+            }
+        )
+    return stages
 
 
 def _first_cache_replay_candidate(report: dict[str, Any]) -> dict[str, Any]:

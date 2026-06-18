@@ -5937,6 +5937,40 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(tool_replay["privacy"]["metadata_only"])
         self.assertTrue(tool_replay["privacy"]["aggregate_only"])
 
+        queue = stats_summary["local_activation_next_action_queue"]
+        tool_cache_entry = next(
+            entry
+            for entry in queue["entries"]
+            if entry["evidence_schema"] == "agentflow.request_shape_tool_cache_replay_evidence.v1"
+        )
+        self.assertEqual(tool_cache_entry["next_action"], "collect-file-invalidation-evidence")
+        self.assertEqual(tool_cache_entry["affected_rows"], 30)
+        self.assertEqual(tool_cache_entry["sample_count"], 30)
+        self.assertEqual(tool_cache_entry["dependency_evidence_class"], "missing-dependency-evidence")
+        self.assertEqual(tool_cache_entry["dependency_evidence_decision"], "missing-dependency-evidence")
+        self.assertEqual(tool_cache_entry["dependency_evidence_status"], "missing")
+        self.assertEqual(tool_cache_entry["dependency_evidence_reason"], "invalidation-evidence-missing")
+        self.assertEqual(tool_cache_entry["evidence_state"], "blocked-missing-dependency-evidence")
+        self.assertEqual(tool_cache_entry["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(tool_cache_entry["target_local_policy_section"], "cache.pattern_rules")
+        self.assertFalse(tool_cache_entry["tool_cache_replay_enabled"])
+        self.assertFalse(tool_cache_entry["streaming_replay_enabled"])
+        self.assertFalse(tool_cache_entry["emits_cache_apply_action"])
+        self.assertEqual(tool_cache_entry["cache_apply_action_count"], 0)
+        self.assertEqual(tool_cache_entry["cache_entries_written"], 0)
+        self.assertFalse(tool_cache_entry["policy_files_written"])
+        self.assertEqual(tool_cache_entry["tools_present_replay_evidence_rows"], 30)
+        self.assertEqual(tool_cache_entry["generic_tools_present_blocker_reduced_rows"], 30)
+        self.assertEqual(tool_cache_entry["unsafe_tool_call_blocker_rows"], 30)
+        self.assertEqual(tool_cache_entry["missing_dependency_evidence_rows"], 30)
+        self.assertIn(
+            {"value": "missing-dependency-evidence", "count": 30},
+            tool_cache_entry["dependency_evidence_decision_breakdown"],
+        )
+        self.assertTrue(tool_cache_entry["dependency_evidence_review"]["privacy"]["metadata_only"])
+        self.assertFalse(tool_cache_entry["privacy"]["cache_keys_included"])
+        self.assertFalse(tool_cache_entry["privacy"]["file_paths_included"])
+
         loop = stats_summary["evidence_to_activation_loop"]
         cache_stage = next(row for row in loop["levers"] if row["lever"] == "cache")
         self.assertEqual(cache_stage["state"], "missing-evidence")
