@@ -14,6 +14,7 @@ from agentflow_proxy.store import utc_now
 SCHEMA = "agentflow.openai_routing_opportunity.v1"
 PROMOTION_DECISION_REPORT_SCHEMA = "agentflow.openai_routing_promotion_decision_report.v1"
 PROMOTION_DECISION_SCHEMA = "agentflow.openai_routing_promotion_decision.v1"
+ACTIVE_LOCAL_POLICY_OUTCOME_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome.v1"
 PROMOTION_VERDICT_OPTIONS = ["promotion-ready", "active-local-policy", "keep-staged", "keep-blocked", "rollback-required"]
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
@@ -543,6 +544,8 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
             "session_ids_included": False,
             "cache_keys_included": False,
             "file_paths_included": False,
+            "absolute_paths_included": False,
+            "individual_candidate_ids_included": False,
         },
     }
 
@@ -572,11 +575,20 @@ def _routing_rule_metadata(bucket: dict[str, Any]) -> dict[str, Any]:
         "target_local_policy_section": "routing.rules",
         "required_local_executor": "openai-routing-canary",
         "rule_preview": {
-            "id": f"promote-{bucket.get('candidate_id')}",
+            "id": (
+                "promote-openai-routing:"
+                f"{bucket.get('source_surface') or 'openai_responses'}:"
+                f"{bucket.get('endpoint') or 'responses'}:"
+                f"{category}:to-{str(bucket.get('target_model') or 'target').lower().replace('.', '-')}"
+            ),
             "conditions": conditions,
             "action": {
                 "route_to": bucket.get("target_model"),
-                "reason": f"promote OpenAI routing canary {bucket.get('candidate_id')}",
+                "reason": (
+                    "promote OpenAI routing canary "
+                    f"{bucket.get('source_surface') or 'openai_responses'}/"
+                    f"{bucket.get('endpoint') or 'responses'}/{category}"
+                ),
             },
         },
     }
@@ -849,6 +861,8 @@ def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
         "tool_payloads_included": False,
         "cache_keys_included": False,
         "file_paths_included": False,
+        "absolute_paths_included": False,
+        "individual_candidate_ids_included": False,
     }
     bucket.pop("stream_count", None)
     return bucket
@@ -1092,6 +1106,8 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
             "cache_keys_included": False,
             "session_ids_included": False,
             "file_paths_included": False,
+            "absolute_paths_included": False,
+            "individual_candidate_ids_included": False,
             "secrets_included": False,
             "provider_calls_made": False,
             "basis": "local calls table metadata plus sanitized routing/cache decision summaries only",
@@ -1143,6 +1159,8 @@ def _openai_promotion_decision_privacy() -> dict[str, Any]:
         "tool_payloads_included": False,
         "cache_keys_included": False,
         "file_paths_included": False,
+        "absolute_paths_included": False,
+        "individual_candidate_ids_included": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
         "policy_files_written": False,
@@ -1152,6 +1170,20 @@ def _openai_promotion_decision_privacy() -> dict[str, Any]:
 def _stable_fingerprint(*parts: Any) -> str:
     normalized = "|".join(str(part or "") for part in parts)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _candidate_set_metadata(candidate_ids: list[str]) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.openai_routing_candidate_set_metadata.v1",
+        "candidate_count": len(candidate_ids),
+        "candidate_fingerprint": f"openai-routing-candidates:{_stable_fingerprint(*sorted(candidate_ids))}"
+        if candidate_ids
+        else None,
+        "candidate_ids_included": False,
+        "individual_candidate_ids_included": False,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
 
 
 def _promotion_verdict(
@@ -1388,6 +1420,117 @@ def _openai_promotion_duplicate_suppression(
         "suppresses_generic_routing_activation_issue": True,
         "suppresses_new_openai_routing_promotion_issue": True,
         "suppresses_repeated_canary_decision_issue": True,
+    }
+
+
+def _openai_active_local_policy_outcome(
+    *,
+    decision: str,
+    next_action: str,
+    reason: str,
+    target: dict[str, Any],
+    lifecycle: dict[str, Any],
+    active_local_policy_rule: dict[str, Any] | None,
+    matched_count: int,
+    current_routed_count: int,
+    candidate_count: int,
+    candidate_set: dict[str, Any],
+    projected_savings_usd: float,
+    savings_per_1000: float,
+) -> dict[str, Any] | None:
+    if decision != "active-local-policy" or active_local_policy_rule is None:
+        return None
+
+    applied = _as_int(lifecycle.get("applied_count"))
+    holdout = _as_int(lifecycle.get("holdout_count"))
+    skipped = _as_int(lifecycle.get("skipped_count"))
+    unknown = _as_int(lifecycle.get("unknown_count"))
+    safety = _as_int(lifecycle.get("safety_stop_count"))
+    errors = _as_int(lifecycle.get("error_count"))
+    fallbacks = _as_int(lifecycle.get("fallback_count"))
+    retries = _as_int(lifecycle.get("retry_count"))
+    stale = lifecycle.get("stale_evidence") if isinstance(lifecycle.get("stale_evidence"), dict) else {}
+    stale_evidence_count = _as_int(lifecycle.get("observed_count")) if stale.get("stale") else 0
+    coverage = {
+        "schema": "agentflow.openai_routing_active_local_policy_coverage.v1",
+        "matched_count": matched_count,
+        "observed_count": _as_int(lifecycle.get("observed_count")),
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "skipped_count": skipped,
+        "unknown_count": unknown,
+        "current_routed_count": current_routed_count,
+        "applied_rate": round(applied / matched_count, 6) if matched_count else 0.0,
+        "holdout_rate": round(holdout / matched_count, 6) if matched_count else 0.0,
+        "current_routed_rate": round(current_routed_count / matched_count, 6) if matched_count else 0.0,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    return {
+        "schema": ACTIVE_LOCAL_POLICY_OUTCOME_SCHEMA,
+        "status": "active-local-policy",
+        "state": "active-local-policy",
+        "current_status": "applied",
+        "outcome": "measure-active-local-policy",
+        "decision": decision,
+        "next_action": next_action,
+        "reason": reason,
+        "local_action_family": "routing",
+        "target": target,
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "local_file_backed_representation": {
+            "schema": "agentflow.openai_routing_local_file_backed_representation.v1",
+            "exists": True,
+            "policy_section": "routing",
+            "policy_source": "local-file-backed",
+            "rule_file": "routing_rules.yaml",
+            "path_included": False,
+            "policy_file_contents_included": False,
+        },
+        "active_local_policy_rule": {
+            "schema": "agentflow.openai_routing_active_local_policy_rule_reference.v1",
+            "status": active_local_policy_rule.get("status"),
+            "reason": active_local_policy_rule.get("reason"),
+            "policy_source": active_local_policy_rule.get("policy_source"),
+            "promoted_from_canary": bool(active_local_policy_rule.get("promoted_from_canary")),
+            "rule_id_included": False,
+            "target_rule_id": "[REDACTED_ID]",
+            "target_local_policy_section": "routing.rules",
+            "target_local_rule_file": "routing_rules.yaml",
+        },
+        "candidate_set": candidate_set,
+        "candidate_count": candidate_count,
+        "candidate_ids_included": False,
+        "matched_count": matched_count,
+        "current_routed_count": current_routed_count,
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "skipped_count": skipped,
+        "unknown_count": unknown,
+        "stale_evidence_count": stale_evidence_count,
+        "safety_stop_count": safety,
+        "error_count": errors,
+        "fallback_count": fallbacks,
+        "retry_count": retries,
+        "regression_counters": {
+            "schema": "agentflow.openai_routing_active_local_policy_regression_counters.v1",
+            "error_count": errors,
+            "fallback_count": fallbacks,
+            "retry_count": retries,
+            "safety_stop_count": safety,
+            "stale_evidence_count": stale_evidence_count,
+            "rollback_count": 0,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "coverage": coverage,
+        "latest_observed_at": lifecycle.get("latest_observed_at"),
+        "oldest_observed_at": lifecycle.get("oldest_observed_at"),
+        "savings_per_1000_calls_usd": savings_per_1000,
+        "projected_savings_usd": round(projected_savings_usd, 6),
+        "expected_savings_path": "Measure post-apply outcomes for the active local OpenAI routing rule.",
+        "privacy": _openai_promotion_decision_privacy(),
     }
 
 
@@ -1641,6 +1784,21 @@ def _build_openai_promotion_decision(
         promotion_verdict=promotion_verdict,
         reason_codes=reason_codes,
     )
+    candidate_set = _candidate_set_metadata(candidate_ids)
+    active_local_policy_outcome = _openai_active_local_policy_outcome(
+        decision=decision,
+        next_action=next_action,
+        reason=reason,
+        target=target,
+        lifecycle=lifecycle,
+        active_local_policy_rule=active_local_policy_rule,
+        matched_count=matched_count,
+        current_routed_count=current_routed_count,
+        candidate_count=len(candidates),
+        candidate_set=candidate_set,
+        projected_savings_usd=projected_savings_usd,
+        savings_per_1000=savings_per_1000,
+    )
     return {
         "schema": PROMOTION_DECISION_SCHEMA,
         "decision": decision,
@@ -1653,7 +1811,8 @@ def _build_openai_promotion_decision(
         "blocker_reason_breakdown": _breakdown(blocker_counts),
         "target": target,
         "candidate_count": len(candidates),
-        "candidate_ids": sorted(candidate_ids),
+        "candidate_set": candidate_set,
+        "candidate_ids_included": False,
         "matched_count": matched_count,
         "current_routed_count": current_routed_count,
         "blocked_count": blocked_count,
@@ -1678,6 +1837,7 @@ def _build_openai_promotion_decision(
         "routing_rule_metadata": routing_rule_metadata,
         "local_policy_patch": local_policy_patch,
         "active_local_policy_rule": active_local_policy_rule,
+        "active_local_policy_outcome": active_local_policy_outcome,
         "rollback_metadata": rollback_metadata,
         "duplicate_suppression": duplicate_suppression,
         "privacy": privacy,
@@ -1723,6 +1883,8 @@ def build_openai_routing_promotion_decision_report(
             "matched_count": decision["matched_count"],
             "blocked_count": decision["blocked_count"],
             "candidate_count": decision["candidate_count"],
+            "active_local_policy_outcome_count": 1 if decision.get("active_local_policy_outcome") else 0,
+            "candidate_ids_included": False,
             "current_routed_count": decision["current_routed_count"],
             "applied_count": decision["lifecycle"]["applied_count"],
             "holdout_count": decision["lifecycle"]["holdout_count"],
@@ -1746,6 +1908,9 @@ def build_openai_routing_promotion_decision_report(
         },
         "promotion_decision": decision,
         "decisions": [decision],
+        "active_local_policy_outcomes": [decision["active_local_policy_outcome"]]
+        if decision.get("active_local_policy_outcome")
+        else [],
         "source_report_summary": report.get("summary") if isinstance(report.get("summary"), dict) else {},
         "privacy": _openai_promotion_decision_privacy()
         | {
