@@ -22,6 +22,10 @@ ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
 REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
 REPLAY_INVALIDATION_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence.v1"
 REPLAY_INVALIDATION_EVIDENCE_COHORT_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence_cohort.v1"
+REPLAY_DEPENDENCY_FINGERPRINT_COVERAGE_SCHEMA = "agentflow.request_shape_tool_cache_dependency_fingerprint_coverage.v1"
+REPLAY_DEPENDENCY_FINGERPRINT_COVERAGE_ROW_SCHEMA = (
+    "agentflow.request_shape_tool_cache_dependency_fingerprint_coverage_row.v1"
+)
 REPLAY_SKIPPED_OPENAI_BLOCKERS_SCHEMA = "agentflow.request_shape_skipped_openai_cache_replay_blockers.v1"
 REPLAY_SKIPPED_OPENAI_BLOCKER_ROW_SCHEMA = "agentflow.request_shape_skipped_openai_cache_replay_blocker.v1"
 REPLAY_TOOL_REPLAY_EVIDENCE_SCHEMA = "agentflow.request_shape_tool_cache_replay_evidence.v1"
@@ -8048,6 +8052,317 @@ def _dependency_evidence_burndown(rows: list[dict[str, Any]]) -> list[dict[str, 
     )
 
 
+def _dependency_fingerprint_missing_reason(row: dict[str, Any]) -> str:
+    audit = row.get("file_dependency_audit") if isinstance(row.get("file_dependency_audit"), dict) else {}
+    decision_meta = row.get("dependency_evidence_decision")
+    decision = (
+        public_label(decision_meta.get("decision"), "unknown-dependency-evidence")
+        if isinstance(decision_meta, dict)
+        else "unknown-dependency-evidence"
+    )
+    status = public_label(row.get("file_dependency_status") or row.get("dependency_evidence_status"), "missing")
+    invalidation_reason = public_label(audit.get("invalidation_reason"), "none")
+    capture_reason = public_label(audit.get("dependency_capture_reason"), "unknown")
+    snapshot_bucket = public_label(audit.get("snapshot_count_bucket"), "unknown")
+    candidate_bucket = public_label(audit.get("candidate_path_count_bucket"), "unknown")
+    raw_candidate_bucket = public_label(audit.get("raw_candidate_path_count_bucket"), "unknown")
+
+    if decision == "stable-dependency-evidence" or status == "stable":
+        return "safe-invalidation-evidence-present"
+    if decision == "stale-risk-blocker" or status == "invalidated":
+        return "stale-dependency-evidence"
+    if decision == "unsafe-dependency-evidence" or status == "unsafe":
+        return "unsafe-tool-calls-without-invalidation"
+    if decision == "unknown-dependency-evidence" or status == "unknown":
+        return "dependency-evidence-unknown"
+    if capture_reason not in {"unknown", "complete"}:
+        return capture_reason
+    if invalidation_reason not in {"none", "unknown"}:
+        return invalidation_reason
+    if snapshot_bucket in {"0", "unknown"} and raw_candidate_bucket not in {"0", "unknown"}:
+        return "candidate-paths-not-snapshotted"
+    if snapshot_bucket in {"0", "unknown"} and candidate_bucket in {"0", "unknown"}:
+        return "no-stable-file-dependency-snapshots"
+    return "invalidation-evidence-missing"
+
+
+def _dependency_fingerprint_coverage_next_action(
+    *,
+    stable_rows: int,
+    stale_rows: int,
+    unsafe_rows: int,
+    missing_rows: int,
+    unknown_rows: int,
+) -> str:
+    if stable_rows > 0:
+        return "rank-safe-tool-cache-replay-readiness"
+    if stale_rows > 0:
+        return "refresh-file-invalidation-evidence"
+    if unsafe_rows > 0 or missing_rows > 0 or unknown_rows > 0:
+        return "collect-file-invalidation-evidence"
+    return "keep-tool-cache-replay-blocked"
+
+
+def _dependency_fingerprint_coverage_decision(
+    *,
+    stable_rows: int,
+    stale_rows: int,
+    unsafe_rows: int,
+    missing_rows: int,
+    unknown_rows: int,
+) -> str:
+    if stable_rows > 0:
+        return "stable-coverage-observed"
+    if stale_rows > 0 or unsafe_rows > 0:
+        return "nonstable-coverage-blocked"
+    if missing_rows > 0:
+        return "missing-stable-coverage"
+    if unknown_rows > 0:
+        return "unknown-coverage"
+    return "no-tool-cache-dependency-coverage"
+
+
+def _build_dependency_fingerprint_coverage_report(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    coverage_rows: list[dict[str, Any]] = []
+    decision_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    evidence_state_counts: dict[str, int] = {}
+    missing_reason_counts: dict[str, int] = {}
+    snapshot_bucket_counts: dict[str, int] = {}
+    candidate_bucket_counts: dict[str, int] = {}
+    raw_candidate_bucket_counts: dict[str, int] = {}
+    fingerprint_available_rows = 0
+    fingerprint_missing_rows = 0
+    safe_invalidation_rows = 0
+    stable_rows = 0
+    stale_rows = 0
+    missing_rows = 0
+    unsafe_rows = 0
+    unknown_rows = 0
+    affected_rows = 0
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_count = _as_int(row.get("row_count") or row.get("sample_count"))
+        if row_count <= 0:
+            continue
+        decision_meta = row.get("dependency_evidence_decision")
+        decision = (
+            public_label(decision_meta.get("decision"), "unknown-dependency-evidence")
+            if isinstance(decision_meta, dict)
+            else "unknown-dependency-evidence"
+        )
+        evidence_class = (
+            public_label(decision_meta.get("evidence_class"), decision)
+            if isinstance(decision_meta, dict)
+            else "unknown-dependency-evidence"
+        )
+        status = public_label(row.get("dependency_evidence_status") or row.get("file_dependency_status"), "missing")
+        evidence_state = public_label(row.get("evidence_state"), _cache_dependency_evidence_state(decision))
+        audit = row.get("file_dependency_audit") if isinstance(row.get("file_dependency_audit"), dict) else {}
+        snapshot_bucket = public_label(audit.get("snapshot_count_bucket"), "unknown")
+        candidate_bucket = public_label(audit.get("candidate_path_count_bucket"), "unknown")
+        raw_candidate_bucket = public_label(audit.get("raw_candidate_path_count_bucket"), "unknown")
+        missing_reason = _dependency_fingerprint_missing_reason(row)
+        fingerprint_available = bool(row.get("file_dependency_fingerprint_available"))
+        safe_invalidation = bool(row.get("safe_invalidation_evidence"))
+
+        affected_rows += row_count
+        _increment(decision_counts, decision, row_count)
+        _increment(status_counts, status, row_count)
+        _increment(evidence_state_counts, evidence_state, row_count)
+        _increment(missing_reason_counts, missing_reason, row_count)
+        _increment(snapshot_bucket_counts, snapshot_bucket, row_count)
+        _increment(candidate_bucket_counts, candidate_bucket, row_count)
+        _increment(raw_candidate_bucket_counts, raw_candidate_bucket, row_count)
+        if fingerprint_available:
+            fingerprint_available_rows += row_count
+        else:
+            fingerprint_missing_rows += row_count
+        if safe_invalidation:
+            safe_invalidation_rows += row_count
+        if decision == "stable-dependency-evidence":
+            stable_rows += row_count
+        elif decision == "stale-risk-blocker":
+            stale_rows += row_count
+        elif decision == "missing-dependency-evidence":
+            missing_rows += row_count
+        elif decision == "unsafe-dependency-evidence":
+            unsafe_rows += row_count
+        else:
+            unknown_rows += row_count
+
+        coverage_rows.append(
+            {
+                "schema": REPLAY_DEPENDENCY_FINGERPRINT_COVERAGE_ROW_SCHEMA,
+                "rank": 0,
+                "provider_family": public_label(row.get("provider_family"), "unknown"),
+                "source_surface": public_label(row.get("source_surface"), "unknown"),
+                "endpoint": public_label(row.get("endpoint"), "unknown"),
+                "category": public_label(row.get("category"), "unknown"),
+                "workflow_phase": public_label(row.get("workflow_phase"), "unknown"),
+                "stream": bool(row.get("stream")),
+                "has_tools": bool(row.get("has_tools")),
+                "row_count": row_count,
+                "sample_count": row_count,
+                "dependency_evidence_decision": decision,
+                "dependency_evidence_class": evidence_class,
+                "dependency_evidence_status": status,
+                "evidence_state": evidence_state,
+                "file_dependency_status": public_label(row.get("file_dependency_status"), status),
+                "file_dependency_fingerprint_available": fingerprint_available,
+                "safe_invalidation_evidence": safe_invalidation,
+                "missing_or_blocked_reason": missing_reason,
+                "snapshot_count_bucket": snapshot_bucket,
+                "candidate_path_count_bucket": candidate_bucket,
+                "raw_candidate_path_count_bucket": raw_candidate_bucket,
+                "local_dependency_fingerprint": row.get("local_dependency_fingerprint")
+                if isinstance(row.get("local_dependency_fingerprint"), dict)
+                else _local_dependency_fingerprint_metadata(fingerprint_available, audit),
+                "next_action": public_label(row.get("next_action"), "collect-file-invalidation-evidence"),
+                "tool_cache_replay_enabled": False,
+                "streaming_replay_enabled": False,
+                "emits_cache_apply_action": False,
+                "cache_entries_written": 0,
+                "policy_files_written": False,
+                "aggregate_only": True,
+                "metadata_only": True,
+            }
+        )
+
+    coverage_rows.sort(
+        key=lambda item: (
+            {
+                "missing-dependency-evidence": 5,
+                "stale-risk-blocker": 4,
+                "unsafe-dependency-evidence": 4,
+                "unknown-dependency-evidence": 3,
+                "stable-dependency-evidence": 2,
+            }.get(str(item.get("dependency_evidence_decision")), 0),
+            _as_int(item.get("row_count")),
+            str(item.get("source_surface")),
+            str(item.get("endpoint")),
+            str(item.get("category")),
+        ),
+        reverse=True,
+    )
+    capped_limit = max(1, min(_as_int(limit) or 25, 1000))
+    for rank, row in enumerate(coverage_rows[:capped_limit], start=1):
+        row["rank"] = rank
+
+    next_action = _dependency_fingerprint_coverage_next_action(
+        stable_rows=stable_rows,
+        stale_rows=stale_rows,
+        unsafe_rows=unsafe_rows,
+        missing_rows=missing_rows,
+        unknown_rows=unknown_rows,
+    )
+    coverage_decision = _dependency_fingerprint_coverage_decision(
+        stable_rows=stable_rows,
+        stale_rows=stale_rows,
+        unsafe_rows=unsafe_rows,
+        missing_rows=missing_rows,
+        unknown_rows=unknown_rows,
+    )
+    missing_reason_breakdown = _breakdown(missing_reason_counts)
+    top_missing_reason = missing_reason_breakdown[0]["value"] if missing_reason_breakdown else None
+    return {
+        "schema": REPLAY_DEPENDENCY_FINGERPRINT_COVERAGE_SCHEMA,
+        "status": "reported" if coverage_rows else "no-tool-cache-dependency-fingerprint-coverage",
+        "read_only": True,
+        "coverage_decision": coverage_decision,
+        "next_action": next_action,
+        "no_apply_guarantee": {
+            "schema": "agentflow.request_shape_tool_cache_dependency_fingerprint_no_apply_guarantee.v1",
+            "emits_cache_apply_action": False,
+            "tool_cache_replay_enabled": False,
+            "streaming_replay_enabled": False,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "summary": {
+            "cohort_count": len(coverage_rows),
+            "affected_rows": affected_rows,
+            "sample_count": affected_rows,
+            "stable_dependency_evidence_rows": stable_rows,
+            "stale_dependency_evidence_rows": stale_rows,
+            "missing_dependency_evidence_rows": missing_rows,
+            "unsafe_dependency_evidence_rows": unsafe_rows,
+            "unknown_dependency_evidence_rows": unknown_rows,
+            "file_dependency_fingerprint_available_rows": fingerprint_available_rows,
+            "file_dependency_fingerprint_missing_rows": fingerprint_missing_rows,
+            "safe_invalidation_evidence_rows": safe_invalidation_rows,
+            "safe_invalidation_coverage_rate": round((safe_invalidation_rows / affected_rows), 6)
+            if affected_rows
+            else 0.0,
+            "top_missing_or_blocked_reason": top_missing_reason,
+            "top_next_action": next_action,
+            "cache_apply_action_count": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+            "tool_cache_replay_enabled": False,
+            "streaming_replay_enabled": False,
+        },
+        "dependency_evidence_decision_breakdown": _breakdown(decision_counts),
+        "dependency_evidence_status_breakdown": _breakdown(status_counts),
+        "evidence_state_breakdown": _breakdown(evidence_state_counts),
+        "missing_or_blocked_reason_breakdown": missing_reason_breakdown,
+        "snapshot_count_bucket_breakdown": _breakdown(snapshot_bucket_counts),
+        "candidate_path_count_bucket_breakdown": _breakdown(candidate_bucket_counts),
+        "raw_candidate_path_count_bucket_breakdown": _breakdown(raw_candidate_bucket_counts),
+        "cohorts": coverage_rows[:capped_limit],
+        "acceptance": {
+            "reports_dependency_fingerprint_coverage_after_capture": bool(coverage_rows),
+            "reports_stable_stale_missing_unsafe_unknown_rows": all(
+                key in {
+                    "stable_dependency_evidence_rows",
+                    "stale_dependency_evidence_rows",
+                    "missing_dependency_evidence_rows",
+                    "unsafe_dependency_evidence_rows",
+                    "unknown_dependency_evidence_rows",
+                }
+                for key in (
+                    "stable_dependency_evidence_rows",
+                    "stale_dependency_evidence_rows",
+                    "missing_dependency_evidence_rows",
+                    "unsafe_dependency_evidence_rows",
+                    "unknown_dependency_evidence_rows",
+                )
+            ),
+            "reports_narrow_no_safe_invalidation_reason": bool(coverage_rows)
+            and (
+                stable_rows > 0
+                or bool(top_missing_reason and top_missing_reason != "invalidation-evidence-missing")
+                or bool(missing_reason_breakdown)
+            ),
+            "stable_dependency_evidence_does_not_activate_replay": all(
+                not bool(row.get("tool_cache_replay_enabled")) and not bool(row.get("streaming_replay_enabled"))
+                for row in coverage_rows
+                if row.get("dependency_evidence_decision") == "stable-dependency-evidence"
+            ),
+            "emits_no_cache_apply_actions": True,
+            "tool_and_streaming_replay_remain_disabled": all(
+                not bool(row.get("tool_cache_replay_enabled")) and not bool(row.get("streaming_replay_enabled"))
+                for row in coverage_rows
+            ),
+            "no_cache_entries_written": True,
+            "policy_files_written": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _replayability_privacy(),
+    }
+
+
 def build_request_shape_cache_invalidation_evidence_report(
     cohorts: list[dict[str, Any]],
     *,
@@ -8775,6 +9090,7 @@ def build_request_shape_tool_cache_replay_evidence_report(
     evidence_state_breakdown = _breakdown(evidence_state_counts)
     next_action_breakdown = _breakdown(next_action_counts)
     dependency_evidence_burndown = _dependency_evidence_burndown(rows)
+    dependency_fingerprint_coverage = _build_dependency_fingerprint_coverage_report(rows, limit=capped_limit)
     dependency_evidence_classes = {
         public_label(row.get("dependency_evidence_decision", {}).get("evidence_class"), "unknown-dependency-evidence")
         for row in rows
@@ -8816,6 +9132,19 @@ def build_request_shape_tool_cache_replay_evidence_report(
             "missing_dependency_evidence_rows": missing_dependency_rows,
             "unsafe_dependency_evidence_rows": unsafe_dependency_rows,
             "unknown_dependency_evidence_rows": unknown_dependency_rows,
+            "file_dependency_fingerprint_available_rows": dependency_fingerprint_coverage["summary"][
+                "file_dependency_fingerprint_available_rows"
+            ],
+            "file_dependency_fingerprint_missing_rows": dependency_fingerprint_coverage["summary"][
+                "file_dependency_fingerprint_missing_rows"
+            ],
+            "safe_invalidation_evidence_rows": dependency_fingerprint_coverage["summary"][
+                "safe_invalidation_evidence_rows"
+            ],
+            "dependency_fingerprint_coverage_decision": dependency_fingerprint_coverage["coverage_decision"],
+            "dependency_fingerprint_top_missing_or_blocked_reason": dependency_fingerprint_coverage["summary"][
+                "top_missing_or_blocked_reason"
+            ],
             "dependency_evidence_decision_count": len(dependency_decision_counts),
             "top_evidence_state": evidence_state_breakdown[0]["value"] if evidence_state_breakdown else None,
             "top_next_action": next_action_breakdown[0]["value"] if next_action_breakdown else None,
@@ -8830,6 +9159,7 @@ def build_request_shape_tool_cache_replay_evidence_report(
         "dependency_evidence_decision_breakdown": _breakdown(dependency_decision_counts),
         "dependency_evidence_burndown": dependency_evidence_burndown,
         "dependency_evidence_classification": dependency_evidence_classification,
+        "dependency_fingerprint_coverage": dependency_fingerprint_coverage,
         "next_action_breakdown": next_action_breakdown,
         "blocker_breakdown": _breakdown(blocker_counts),
         "cohorts": rows[:capped_limit],
@@ -8846,6 +9176,16 @@ def build_request_shape_tool_cache_replay_evidence_report(
             ),
             "reports_dependency_evidence_burndown": bool(dependency_evidence_burndown)
             and all(_as_int(item.get("row_count")) > 0 for item in dependency_evidence_burndown),
+            "reports_dependency_fingerprint_coverage_after_capture": bool(
+                dependency_fingerprint_coverage.get("acceptance", {}).get(
+                    "reports_dependency_fingerprint_coverage_after_capture"
+                )
+            ),
+            "reports_narrow_no_safe_invalidation_reason": bool(
+                dependency_fingerprint_coverage.get("acceptance", {}).get(
+                    "reports_narrow_no_safe_invalidation_reason"
+                )
+            ),
             "distinguishes_missing_stable_and_stale_dependency_evidence": bool(rows)
             and set(DEPENDENCY_EVIDENCE_CLASSES).issubset(
                 set(dependency_evidence_classification["supported_evidence_classes"])
@@ -9110,6 +9450,12 @@ def build_request_shape_cache_replayability_dry_run(
             "top_remaining_replay_ready_projected_savings_usd": (
                 remaining_replay_ready[0].get("projected_savings_usd") if remaining_replay_ready else 0.0
             ),
+            "dependency_fingerprint_coverage_decision": tool_replay_evidence["summary"].get(
+                "dependency_fingerprint_coverage_decision"
+            ),
+            "dependency_fingerprint_top_missing_or_blocked_reason": tool_replay_evidence["summary"].get(
+                "dependency_fingerprint_top_missing_or_blocked_reason"
+            ),
             "provider_calls_made": 0,
             "cache_entries_written": 0,
             "policy_files_written": False,
@@ -9170,6 +9516,14 @@ def build_request_shape_cache_replayability_dry_run(
             ),
             "reduces_generic_tools_present_blocker": bool(
                 tool_replay_evidence.get("acceptance", {}).get("reduces_generic_tools_present_blocker")
+            ),
+            "reports_dependency_fingerprint_coverage_after_capture": bool(
+                tool_replay_evidence.get("acceptance", {}).get(
+                    "reports_dependency_fingerprint_coverage_after_capture"
+                )
+            ),
+            "reports_narrow_no_safe_invalidation_reason": bool(
+                tool_replay_evidence.get("acceptance", {}).get("reports_narrow_no_safe_invalidation_reason")
             ),
             "tool_and_streaming_replay_remain_disabled": bool(
                 invalidation_evidence.get("acceptance", {}).get("tool_and_streaming_replay_remain_disabled")

@@ -641,10 +641,31 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(tool_replay_evidence["acceptance"]["reduces_generic_tools_present_blocker"])
         self.assertTrue(tool_replay_evidence["acceptance"]["reports_dependency_evidence_decisions"])
         self.assertTrue(tool_replay_evidence["acceptance"]["reports_dependency_evidence_burndown"])
+        self.assertTrue(tool_replay_evidence["acceptance"]["reports_dependency_fingerprint_coverage_after_capture"])
+        self.assertTrue(tool_replay_evidence["acceptance"]["reports_narrow_no_safe_invalidation_reason"])
         self.assertTrue(tool_replay_evidence["acceptance"]["distinguishes_missing_stable_and_stale_dependency_evidence"])
         self.assertTrue(tool_replay_evidence["acceptance"]["unsafe_or_missing_dependency_keeps_tool_replay_blocked"])
         self.assertTrue(tool_replay_evidence["acceptance"]["emits_no_cache_apply_actions"])
         self.assertTrue(tool_replay_evidence["acceptance"]["tool_and_streaming_replay_remain_disabled"])
+        dependency_coverage = tool_replay_evidence["dependency_fingerprint_coverage"]
+        self.assertEqual(
+            dependency_coverage["schema"],
+            "agentflow.request_shape_tool_cache_dependency_fingerprint_coverage.v1",
+        )
+        self.assertEqual(dependency_coverage["coverage_decision"], "missing-stable-coverage")
+        self.assertEqual(dependency_coverage["summary"]["missing_dependency_evidence_rows"], 1)
+        self.assertEqual(dependency_coverage["summary"]["stable_dependency_evidence_rows"], 0)
+        self.assertEqual(dependency_coverage["summary"]["file_dependency_fingerprint_missing_rows"], 1)
+        self.assertEqual(dependency_coverage["summary"]["safe_invalidation_evidence_rows"], 0)
+        self.assertEqual(dependency_coverage["next_action"], "collect-file-invalidation-evidence")
+        self.assertEqual(dependency_coverage["no_apply_guarantee"]["cache_entries_written"], 0)
+        self.assertFalse(dependency_coverage["no_apply_guarantee"]["tool_cache_replay_enabled"])
+        self.assertFalse(dependency_coverage["no_apply_guarantee"]["streaming_replay_enabled"])
+        self.assertTrue(dependency_coverage["acceptance"]["reports_dependency_fingerprint_coverage_after_capture"])
+        self.assertTrue(dependency_coverage["acceptance"]["reports_narrow_no_safe_invalidation_reason"])
+        self.assertTrue(dependency_coverage["acceptance"]["emits_no_cache_apply_actions"])
+        self.assertTrue(dependency_coverage["privacy"]["metadata_only"])
+        self.assertFalse(dependency_coverage["privacy"]["file_paths_included"])
         tool_classification = tool_replay_evidence["dependency_evidence_classification"]
         self.assertEqual(
             set(tool_classification["supported_evidence_classes"]),
@@ -1051,6 +1072,26 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(tool_replay["acceptance"]["distinguishes_missing_stable_stale_and_unsafe_dependency_evidence"])
         self.assertTrue(tool_replay["acceptance"]["distinguishes_stable_stale_unsafe_unknown_and_missing_dependency_evidence"])
         self.assertTrue(tool_replay["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
+        self.assertTrue(tool_replay["acceptance"]["reports_dependency_fingerprint_coverage_after_capture"])
+        self.assertTrue(tool_replay["acceptance"]["reports_narrow_no_safe_invalidation_reason"])
+        coverage = tool_replay["dependency_fingerprint_coverage"]
+        self.assertEqual(coverage["schema"], "agentflow.request_shape_tool_cache_dependency_fingerprint_coverage.v1")
+        self.assertEqual(coverage["coverage_decision"], "stable-coverage-observed")
+        self.assertEqual(coverage["next_action"], "rank-safe-tool-cache-replay-readiness")
+        self.assertEqual(coverage["summary"]["stable_dependency_evidence_rows"], 1)
+        self.assertEqual(coverage["summary"]["stale_dependency_evidence_rows"], 1)
+        self.assertEqual(coverage["summary"]["missing_dependency_evidence_rows"], 1)
+        self.assertEqual(coverage["summary"]["unsafe_dependency_evidence_rows"], 1)
+        self.assertEqual(coverage["summary"]["unknown_dependency_evidence_rows"], 1)
+        self.assertEqual(coverage["summary"]["file_dependency_fingerprint_available_rows"], 4)
+        self.assertEqual(coverage["summary"]["file_dependency_fingerprint_missing_rows"], 1)
+        self.assertEqual(coverage["summary"]["safe_invalidation_evidence_rows"], 1)
+        self.assertEqual(coverage["summary"]["cache_apply_action_count"], 0)
+        self.assertFalse(coverage["summary"]["tool_cache_replay_enabled"])
+        self.assertFalse(coverage["summary"]["streaming_replay_enabled"])
+        self.assertTrue(coverage["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
+        self.assertTrue(coverage["acceptance"]["emits_no_cache_apply_actions"])
+        self.assertFalse(any(row["tool_cache_replay_enabled"] for row in coverage["cohorts"]))
         tool_burndown = {
             row["dependency_evidence_class"]: row
             for row in tool_replay["dependency_evidence_burndown"]
@@ -1108,6 +1149,76 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(skipped["privacy"]["cache_keys_included"])
         self.assertFalse(skipped["privacy"]["request_ids_included"])
         self.assertFalse(skipped["privacy"]["session_ids_included"])
+
+    def test_tool_cache_dependency_coverage_records_narrow_missing_reason_after_capture(self) -> None:
+        audit = self._dependency_audit(safe=False, fingerprint_available=False)
+        audit["raw_candidate_path_count_bucket"] = "6_20"
+        audit["candidate_path_count_bucket"] = "0"
+        audit["distinct_candidate_path_count_bucket"] = "0"
+        audit["snapshot_count_bucket"] = "0"
+        audit["dependency_capture_reason"] = "complete"
+        audit["invalidation_reason"] = None
+
+        self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="tool-light",
+            workflow_phase="tool-light",
+            stream=0,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="tools-disabled",
+            text_chars=8_000,
+            cost=0.02,
+            baseline=0.02,
+            cache_extra={
+                "file_dependency_audit": audit,
+                "file_dependency_fingerprint_available": False,
+                "file_dependency_evidence_available": False,
+                "safe_invalidation_evidence": False,
+            },
+        )
+
+        report = build_request_shape_rollups_report(
+            self.store,
+            limit=20,
+            persist=False,
+            run_id="dependency-coverage-missing",
+        )
+        dry_run = report["cache_replayability_dry_run"]
+        tool_replay = dry_run["tool_replay_evidence"]
+        coverage = tool_replay["dependency_fingerprint_coverage"]
+
+        self.assertTrue(dry_run["acceptance"]["reports_dependency_fingerprint_coverage_after_capture"])
+        self.assertTrue(dry_run["acceptance"]["reports_narrow_no_safe_invalidation_reason"])
+        self.assertEqual(coverage["coverage_decision"], "missing-stable-coverage")
+        self.assertEqual(coverage["next_action"], "collect-file-invalidation-evidence")
+        self.assertEqual(coverage["summary"]["affected_rows"], 1)
+        self.assertEqual(coverage["summary"]["stable_dependency_evidence_rows"], 0)
+        self.assertEqual(coverage["summary"]["missing_dependency_evidence_rows"], 1)
+        self.assertEqual(coverage["summary"]["file_dependency_fingerprint_missing_rows"], 1)
+        self.assertEqual(coverage["summary"]["safe_invalidation_evidence_rows"], 0)
+        self.assertEqual(coverage["summary"]["top_missing_or_blocked_reason"], "no-stable-file-dependency-snapshots")
+        reasons = {row["value"]: row["count"] for row in coverage["missing_or_blocked_reason_breakdown"]}
+        self.assertEqual(reasons["no-stable-file-dependency-snapshots"], 1)
+        self.assertEqual(coverage["summary"]["cache_apply_action_count"], 0)
+        self.assertEqual(coverage["no_apply_guarantee"]["cache_entries_written"], 0)
+        self.assertFalse(coverage["no_apply_guarantee"]["tool_cache_replay_enabled"])
+        self.assertFalse(coverage["no_apply_guarantee"]["streaming_replay_enabled"])
+        self.assertTrue(coverage["acceptance"]["reports_dependency_fingerprint_coverage_after_capture"])
+        self.assertTrue(coverage["acceptance"]["reports_narrow_no_safe_invalidation_reason"])
+        self.assertTrue(coverage["acceptance"]["emits_no_cache_apply_actions"])
+        self.assertTrue(coverage["privacy"]["metadata_only"])
+        rendered = json.dumps(coverage, sort_keys=True)
+        self.assertNotIn("raw-request-fingerprint-must-not-leak", rendered)
+        self.assertNotIn("raw-cache-key-must-not-leak", rendered)
+        self.assertNotIn("/tmp/private/source.py", rendered)
 
     def test_cache_replayability_ranks_remaining_replay_ready_after_handled_policy(self) -> None:
         for cost in (0.01, 0.03, 0.02):
