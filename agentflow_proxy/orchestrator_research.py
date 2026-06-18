@@ -8567,6 +8567,79 @@ def _candidate(
     }
 
 
+_GOLDEN_PATH_READINESS_DIMENSIONS = {
+    "openai_codex_local_capture": "OpenAI-compatible or Codex traffic can be captured locally",
+    "safe_local_savings_action": "one local savings action can be safely applied",
+    "metadata_only_outcome_evidence": "outcome evidence can be logged metadata-only",
+    "agentflow_savings_reporting": "AgentFlow-generated savings can be reported separately from provider discounts",
+    "rollback_safety_visibility": "rollback/safety state is visible",
+    "user_explainability": "the dashboard or demo command can explain the state to a user",
+}
+
+
+def _golden_path_dimension_score(dimension: str | None) -> int:
+    return {
+        "safe_local_savings_action": 0,
+        "rollback_safety_visibility": 1,
+        "metadata_only_outcome_evidence": 2,
+        "agentflow_savings_reporting": 3,
+        "openai_codex_local_capture": 4,
+        "user_explainability": 5,
+    }.get(str(dimension or ""), 99)
+
+
+def _candidate_golden_path_readiness_dimension(candidate: dict[str, Any]) -> str | None:
+    lever = str(candidate.get("lever") or "").lower()
+    blocker = str(candidate.get("blocker") or "").lower().replace("_", "-")
+    bucket = str(candidate.get("provider_surface_bucket") or "").lower()
+    safety = str(candidate.get("safety_status") or "").lower().replace("_", "-")
+    path = str(candidate.get("estimated_savings_path") or "").lower()
+    signal = candidate.get("projected_savings_signal") if isinstance(candidate.get("projected_savings_signal"), dict) else {}
+    signal_text = json.dumps(signal, sort_keys=True).lower() if signal else ""
+    combined = " ".join([lever, blocker, bucket, safety, path, signal_text])
+
+    generic_churn_blockers = {
+        "managed-recommendation-health-not-ranked",
+        "shape-rollup-candidates-not-ranked",
+        "request-shape-rollup-candidates-empty",
+    }
+    if blocker in generic_churn_blockers:
+        return None
+
+    if any(token in combined for token in ("rollback", "safety", "keep-blocked", "quality-regression", "regression")):
+        return "rollback_safety_visibility"
+    if any(token in combined for token in ("widen", "stage", "apply", "promotion-ready", "active-local-policy", "local-policy", "local action", "rule")):
+        return "safe_local_savings_action"
+    if any(token in combined for token in ("outcome", "metadata", "evidence", "applied", "holdout", "lifecycle", "measure")):
+        return "metadata_only_outcome_evidence"
+    if lever == "cache" and any(token in combined for token in ("zero-cache", "cache", "replay", "invalidation")):
+        return "metadata_only_outcome_evidence"
+    if lever == "crunch" and any(token in combined for token in ("savings", "saved", "projected")):
+        return "agentflow_savings_reporting"
+    if lever == "routing" and "missing-routing-breakdown" in blocker:
+        return "openai_codex_local_capture"
+    if lever == "request-shape-rollups" and "report-missing" in blocker:
+        return "metadata_only_outcome_evidence"
+    if any(token in combined for token in ("openai", "codex", "openai-responses", "openai_responses", "gpt-")):
+        return "openai_codex_local_capture"
+    return None
+
+
+def _candidate_with_golden_path_readiness(candidate: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(candidate)
+    dimension = _candidate_golden_path_readiness_dimension(enriched)
+    if dimension:
+        enriched["golden_path_readiness_dimension"] = dimension
+        enriched["golden_path_readiness_label"] = _GOLDEN_PATH_READINESS_DIMENSIONS[dimension]
+        return enriched
+    if not str(enriched.get("issue_generation_status") or "").startswith("suppressed-"):
+        enriched["issue_generation_status"] = "suppressed-generic-telemetry-churn"
+        enriched["issue_generation_suppression_reason"] = (
+            "candidate-does-not-improve-openai-codex-golden-path-readiness"
+        )
+    return enriched
+
+
 def _routing_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     canary_row, _ = _top_openai_routing_canary_row(stats_summary)
     if canary_row is not None:
@@ -9273,7 +9346,7 @@ def _optimization_candidates(
         clean = dict(item)
         clean.pop("_score", None)
         clean["rank"] = rank
-        ranked.append(clean)
+        ranked.append(_candidate_with_golden_path_readiness(clean))
     return ranked
 
 
@@ -9307,11 +9380,70 @@ def _issue_body(
     )
 
 
+def _proposal_golden_path_readiness_dimension(proposal: dict[str, Any]) -> str | None:
+    explicit = str(proposal.get("golden_path_readiness_dimension") or "").strip()
+    if explicit in _GOLDEN_PATH_READINESS_DIMENSIONS:
+        return explicit
+    labels = {str(label).lower() for label in proposal.get("labels") or []}
+    text = " ".join(
+        [
+            str(proposal.get("title") or ""),
+            str(proposal.get("body") or ""),
+            " ".join(sorted(labels)),
+        ]
+    ).lower().replace("_", "-")
+
+    if "rank next savings milestone" in text or "openai/codex" in text or "readiness" in text:
+        return "user_explainability"
+    if any(token in text for token in ("rollback", "safety", "keep-blocked", "quality-regression", "regression")):
+        return "rollback_safety_visibility"
+    if any(token in text for token in ("widen", "stage", "apply", "promote", "local rule", "local policy", "canary", "one local savings action")):
+        return "safe_local_savings_action"
+    if any(token in text for token in ("outcome evidence", "metadata-only", "applied/holdout", "applied", "holdout", "lifecycle", "measure")):
+        return "metadata_only_outcome_evidence"
+    if any(token in text for token in ("agentflow-generated savings", "provider prompt-cache", "savings separately", "savings demo", "crunch savings")):
+        return "agentflow_savings_reporting"
+    if any(token in text for token in ("openai-compatible", "codex traffic", "openai traffic", "openai api", "openai responses")):
+        return "openai_codex_local_capture"
+    return None
+
+
+def _proposal_product_loop_impact(dimension: str, proposal: dict[str, Any]) -> str:
+    label = _GOLDEN_PATH_READINESS_DIMENSIONS[dimension]
+    title = str(proposal.get("title") or "this issue")
+    if dimension == "safe_local_savings_action":
+        action = "moves from evidence toward a reviewed local routing, crunching, cache, or rollback-safe policy action."
+    elif dimension == "rollback_safety_visibility":
+        action = "keeps the product loop safe by making rollback, blocker, safety-stop, or quality-regression state explicit before more traffic is widened."
+    elif dimension == "metadata_only_outcome_evidence":
+        action = "turns the next step into metadata-only applied, holdout, lifecycle, or outcome evidence that later runs can rank without raw content."
+    elif dimension == "agentflow_savings_reporting":
+        action = "helps separate AgentFlow-generated savings from provider discounts so a user can see whether AgentFlow itself created value."
+    elif dimension == "openai_codex_local_capture":
+        action = "improves local capture or classification of OpenAI-compatible or Codex traffic before savings are claimed."
+    else:
+        action = "makes the OpenAI/Codex savings state explainable in the dashboard, demo command, or research handoff."
+    return f"{title} improves golden-path readiness because {label}; it {action}"
+
+
 def _finalize_create_issue_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
     finalized = dict(proposal)
     labels = [redact_text(str(label)) for label in finalized.get("labels") or []]
     finalized["labels"] = list(dict.fromkeys(label for label in labels if label))
     body = redact_text(str(finalized.get("body") or ""))
+    dimension = _proposal_golden_path_readiness_dimension(finalized)
+    if dimension is not None:
+        finalized["golden_path_readiness_dimension"] = dimension
+        finalized["golden_path_readiness_label"] = _GOLDEN_PATH_READINESS_DIMENSIONS[dimension]
+        impact = redact_text(str(finalized.get("openai_codex_product_loop_impact") or _proposal_product_loop_impact(dimension, finalized)))
+        finalized["openai_codex_product_loop_impact"] = impact
+        if "## OpenAI/Codex Product Loop Impact" not in body:
+            impact_section = f"## OpenAI/Codex Product Loop Impact\n\n{impact}\n\n"
+            marker = "## Implementation Approach\n\n"
+            if marker in body:
+                body = body.replace(marker, impact_section + marker, 1)
+            else:
+                body = f"{body.rstrip()}\n\n{impact_section.rstrip()}\n"
     if "## Labels" not in body:
         label_lines = "\n".join(f"- {label}" for label in finalized["labels"]) or "- none"
         label_section = f"## Labels\n\n{label_lines}\n\n"
@@ -9324,6 +9456,30 @@ def _finalize_create_issue_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
     finalized["title"] = redact_text(str(finalized.get("title") or ""))
     finalized["repo"] = redact_text(str(finalized.get("repo") or "lutzkuen/agentflow"))
     return finalized
+
+
+def _filter_golden_path_ready_proposals(
+    proposals: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    kept: list[dict[str, Any]] = []
+    suppressed: list[dict[str, Any]] = []
+    for proposal in proposals:
+        dimension = _proposal_golden_path_readiness_dimension(proposal)
+        if dimension is None:
+            suppressed.append(
+                {
+                    "title": sanitize_value(proposal.get("title")),
+                    "repo": sanitize_value(proposal.get("repo") or "lutzkuen/agentflow"),
+                    "reason": "candidate-does-not-improve-openai-codex-golden-path-readiness",
+                    "suppression_kind": "generic-telemetry-churn",
+                }
+            )
+            continue
+        enriched = dict(proposal)
+        enriched["golden_path_readiness_dimension"] = dimension
+        enriched["golden_path_readiness_label"] = _GOLDEN_PATH_READINESS_DIMENSIONS[dimension]
+        kept.append(enriched)
+    return kept, suppressed
 
 
 def _default_issue_labels(priority: str = "priority:p1") -> list[str]:
@@ -9630,6 +9786,8 @@ def _proposal_from_optimization_candidate(candidate: dict[str, Any]) -> dict[str
         "repo": candidate.get("repo") or "lutzkuen/agentflow",
         "title": title,
         "labels": _candidate_labels(candidate),
+        "golden_path_readiness_dimension": candidate.get("golden_path_readiness_dimension"),
+        "golden_path_readiness_label": candidate.get("golden_path_readiness_label"),
         "body": _issue_body(
             title=title,
             rationale=(
@@ -9874,6 +10032,7 @@ def _next_backlog_milestone(
         lever = _proposal_lever(proposal, candidate_by_title)
         priority = _proposal_priority(labels)
         source = _proposal_summary_source(title, candidate)
+        dimension = _proposal_golden_path_readiness_dimension(proposal)
         issue_rows.append(
             {
                 "rank": rank,
@@ -9883,6 +10042,10 @@ def _next_backlog_milestone(
                 "priority": priority,
                 "labels": labels,
                 "source": source,
+                "golden_path_readiness_dimension": sanitize_value(dimension),
+                "golden_path_readiness_label": sanitize_value(
+                    _GOLDEN_PATH_READINESS_DIMENSIONS.get(str(dimension or ""), "")
+                ),
                 "candidate_rank": _to_int(candidate.get("rank")) if candidate is not None else None,
                 "expected_savings_path": sanitize_value(
                     (candidate or {}).get("estimated_savings_path")
@@ -9896,6 +10059,7 @@ def _next_backlog_milestone(
         key=lambda row: (
             1 if row["lever"] == "milestone-planning" else 0,
             _proposal_source_score(str(row["source"])),
+            _golden_path_dimension_score(str(row.get("golden_path_readiness_dimension") or "")),
             _proposal_priority_score(str(row["priority"])),
             _to_int(row.get("candidate_rank"), 10_000),
             _to_int(row["rank"], 10_000),
@@ -9921,6 +10085,7 @@ def _next_backlog_milestone(
                 "repo": top_issue["repo"],
                 "lever": top_issue["lever"],
                 "priority": top_issue["priority"],
+                "golden_path_readiness_dimension": top_issue["golden_path_readiness_dimension"],
             } if top_issue is not None else None,
             "recommended_next_issue": {
                 "rank": recommended_issue["rank"],
@@ -9930,6 +10095,7 @@ def _next_backlog_milestone(
                 "lever": recommended_issue["lever"],
                 "priority": recommended_issue["priority"],
                 "source": recommended_issue["source"],
+                "golden_path_readiness_dimension": recommended_issue["golden_path_readiness_dimension"],
             } if recommended_issue is not None else None,
         },
         "issues": issue_rows,
@@ -11183,6 +11349,13 @@ def build_research_plan(
             proposal_suppression["activation_feedback_keep_blocked_suppressed_count"] = len(
                 activation_feedback_suppressed_diagnostics
             )
+        create_issues, golden_path_suppressed = _filter_golden_path_ready_proposals(create_issues)
+        if golden_path_suppressed:
+            proposal_suppression["suppressed"].extend(golden_path_suppressed[:20])
+            proposal_suppression["suppressed_count"] = _to_int(proposal_suppression.get("suppressed_count")) + len(
+                golden_path_suppressed
+            )
+            proposal_suppression["golden_path_readiness_suppressed_count"] = len(golden_path_suppressed)
         create_issues = [_finalize_create_issue_proposal(proposal) for proposal in create_issues]
         next_backlog_milestone = _next_backlog_milestone(
             create_issues=create_issues,

@@ -142,6 +142,75 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(milestone["privacy"]["request_ids_included"])
         self.assertFalse(milestone["privacy"]["session_ids_included"])
 
+    def test_issue_669_research_proposals_are_golden_path_ranked_and_generic_churn_is_suppressed(self):
+        promoted_plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 100,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "category": "tool-light",
+                        "c": 40,
+                    }
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        created = promoted_plan["backlog_changes"]["create_issues"]
+        self.assertGreaterEqual(len(created), 1)
+        promoted = next(
+            item for item in created
+            if item["title"].startswith("Collect routing lifecycle evidence")
+            or item["title"].startswith("Stage routing evidence")
+        )
+        self.assertIn(
+            promoted["golden_path_readiness_dimension"],
+            {
+                "openai_codex_local_capture",
+                "metadata_only_outcome_evidence",
+                "safe_local_savings_action",
+                "rollback_safety_visibility",
+            },
+        )
+        self.assertIn("## OpenAI/Codex Product Loop Impact", promoted["body"])
+        self.assertIn("golden-path readiness", promoted["body"])
+
+        milestone = promoted_plan["evidence"]["next_backlog_milestone"]
+        self.assertIn("golden_path_readiness_dimension", milestone["issues"][0])
+        self.assertIn(
+            "golden_path_readiness_dimension",
+            milestone["summary"]["recommended_next_issue"],
+        )
+
+        suppressed_plan = build_research_plan(
+            issues=[],
+            stats={"calls": 0, "cache_hits": 0, "cache_hit_rate": 0.0},
+            threshold=3,
+            now=NOW,
+        )
+        suppressed_candidates = [
+            candidate for candidate in suppressed_plan["evidence"]["optimization_candidates"]
+            if candidate.get("issue_generation_status") == "suppressed-generic-telemetry-churn"
+        ]
+        self.assertGreaterEqual(len(suppressed_candidates), 1)
+        self.assertEqual(
+            suppressed_candidates[0]["issue_generation_suppression_reason"],
+            "candidate-does-not-improve-openai-codex-golden-path-readiness",
+        )
+        self.assertNotIn(
+            suppressed_candidates[0]["blocker"],
+            " ".join(item["title"] for item in suppressed_plan["backlog_changes"]["create_issues"]),
+        )
+
     def test_issue_533_low_backlog_milestone_is_targeted_ranked_and_private(self):
         plan = build_research_plan(
             issues=[
