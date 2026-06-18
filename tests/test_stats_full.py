@@ -4409,6 +4409,104 @@ request_shape_repeated_context_canaries:
         self.assertEqual(breakdown[("hit", "exact-match", "exact")], 1)
         json.dumps(result["cache_decision_breakdown"])
 
+    def test_crunch_rule_breakdown_groups_rule_taxonomy_without_raw_content(self):
+        secret = "raw crunch prompt must not leak"
+        crunch_json = {
+            "changed": True,
+            "saved_chars": 1200,
+            "tokens_saved_est": 300,
+            "policy_source": "local-default",
+            "applied_rules": [
+                {
+                    "rule_id": "whitespace_normalization",
+                    "rule_group": "lossless_normalization",
+                    "lossiness_class": "lossless",
+                    "canary_state": "active",
+                    "status": "applied",
+                    "reason": "whitespace-normalized",
+                    "policy_source": "local-default",
+                    "count": 2,
+                    "saved_chars": 40,
+                    "tokens_saved_est": 10,
+                    "debug": secret,
+                },
+                {
+                    "rule_id": "near_duplicate_block_omission",
+                    "rule_group": "structural_dedup",
+                    "lossiness_class": "semantic_loss_risk",
+                    "canary_state": "active",
+                    "status": "applied",
+                    "reason": "near-duplicate-text-block-omitted",
+                    "policy_source": "local-default",
+                    "count": 1,
+                    "saved_chars": 1160,
+                    "tokens_saved_est": 290,
+                },
+            ],
+            "skipped_rules": [
+                {
+                    "rule_id": "old_context_summarization",
+                    "rule_group": "old_context_summarization",
+                    "lossiness_class": "model_generated_summary",
+                    "canary_state": "held",
+                    "status": "skipped",
+                    "reason": "rule-not-allowed",
+                    "policy_source": "local-manual",
+                    "count": 1,
+                }
+            ],
+        }
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=100,
+            output_tokens_est=10,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json(crunch_json),
+            routing_json=None,
+            cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+            error=None,
+            request_json=stable_json({"messages": [{"content": secret}]}),
+            response_json=None,
+            session_id="session-crunch-secret",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        by_rule = {
+            (row["rule_id"], row["status"]): row
+            for row in result["crunch_rule_breakdown"]
+        }
+        by_group = {
+            (row["rule_group"], row["lossiness_class"], row["status"]): row
+            for row in result["crunch_rule_group_breakdown"]
+        }
+
+        self.assertEqual(by_rule[("whitespace_normalization", "applied")]["count"], 2)
+        self.assertEqual(by_rule[("near_duplicate_block_omission", "applied")]["tokens_saved_est"], 290)
+        self.assertEqual(by_rule[("old_context_summarization", "skipped")]["canary_state"], "held")
+        self.assertEqual(by_group[("lossless_normalization", "lossless", "applied")]["tokens_saved_est"], 10)
+        self.assertEqual(by_group[("structural_dedup", "semantic_loss_risk", "applied")]["count"], 1)
+        rendered = json.dumps({
+            "rules": result["crunch_rule_breakdown"],
+            "groups": result["crunch_rule_group_breakdown"],
+        }, sort_keys=True)
+        self.assertNotIn(secret, rendered)
+
     def test_cache_zero_hit_blocker_ladder_ranks_provider_surface_blockers_without_raw_data(self):
         secret_prompt = "raw cache blocker prompt must not leak"
         secret_session = "cache-blocker-session-secret"

@@ -45,6 +45,144 @@ ENHANCED_CRUNCH_PROVIDER_MODES = {
     "customer_controlled_endpoint",
 }
 
+CRUNCH_RULE_TAXONOMY_SCHEMA = "agentflow.crunch_rule_taxonomy.v1"
+CRUNCH_RULE_DECISION_SCHEMA = "agentflow.crunch_rule_decision.v1"
+CRUNCH_RULE_GROUP_BREAKDOWN_SCHEMA = "agentflow.crunch_rule_group_breakdown.v1"
+CRUNCH_CANARY_STATES = {"off", "shadow", "canary", "active", "held", "rollback"}
+
+CRUNCH_RULE_CATALOG: dict[str, dict[str, Any]] = {
+    "whitespace_normalization": {
+        "rule_group": "lossless_normalization",
+        "lossiness_class": "lossless",
+        "surfaces": ["anthropic_messages", "openai_responses", "openai_chat_completions", "codex_turn"],
+        "requires_canary": False,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 1.0,
+        "canary_state": "active",
+    },
+    "exact_duplicate_block_omission": {
+        "rule_group": "structural_dedup",
+        "lossiness_class": "structure_preserving",
+        "surfaces": ["anthropic_messages", "openai_responses", "openai_chat_completions", "codex_turn"],
+        "requires_canary": False,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 1.0,
+        "canary_state": "active",
+    },
+    "near_duplicate_block_omission": {
+        "rule_group": "structural_dedup",
+        "lossiness_class": "semantic_loss_risk",
+        "surfaces": ["anthropic_messages", "openai_responses", "openai_chat_completions", "codex_turn"],
+        "requires_canary": True,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 1.0,
+        "canary_state": "active",
+    },
+    "old_text_collapse": {
+        "rule_group": "structural_dedup",
+        "lossiness_class": "structure_preserving",
+        "surfaces": ["anthropic_messages", "openai_responses", "openai_chat_completions"],
+        "requires_canary": False,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 1.0,
+        "canary_state": "active",
+    },
+    "thinking_deduplication": {
+        "rule_group": "structural_dedup",
+        "lossiness_class": "semantic_loss_risk",
+        "surfaces": ["anthropic_messages"],
+        "requires_canary": True,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 1.0,
+        "canary_state": "active",
+    },
+    "terminal_log_boilerplate": {
+        "rule_group": "lossless_normalization",
+        "lossiness_class": "structure_preserving",
+        "surfaces": ["anthropic_messages", "openai_responses", "codex_turn"],
+        "requires_canary": False,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 1.0,
+        "canary_state": "active",
+    },
+    "pattern_rules": {
+        "rule_group": "structural_dedup",
+        "lossiness_class": "semantic_loss_risk",
+        "surfaces": ["anthropic_messages", "openai_responses", "openai_chat_completions", "codex_turn"],
+        "requires_canary": True,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 0.0,
+        "canary_state": "off",
+    },
+    "old_context_summarization": {
+        "rule_group": "old_context_summarization",
+        "lossiness_class": "model_generated_summary",
+        "surfaces": ["anthropic_messages", "openai_responses", "openai_chat_completions"],
+        "requires_canary": True,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 0.0,
+        "canary_state": "off",
+    },
+    "anthropic_thinking_history_compaction": {
+        "rule_group": "semantic_compaction",
+        "lossiness_class": "semantic_loss_risk",
+        "surfaces": ["anthropic_messages"],
+        "requires_canary": True,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 0.0,
+        "canary_state": "off",
+    },
+    "terminal_output_compaction": {
+        "rule_group": "semantic_compaction",
+        "lossiness_class": "semantic_loss_risk",
+        "surfaces": ["anthropic_messages"],
+        "requires_canary": True,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 0.0,
+        "canary_state": "off",
+    },
+    "instruction_section_deduplication": {
+        "rule_group": "semantic_compaction",
+        "lossiness_class": "semantic_loss_risk",
+        "surfaces": ["anthropic_messages", "openai_responses", "openai_chat_completions", "codex_turn"],
+        "requires_canary": True,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 0.0,
+        "canary_state": "off",
+    },
+    "repeated_provider_scaffolding": {
+        "rule_group": "semantic_compaction",
+        "lossiness_class": "semantic_loss_risk",
+        "surfaces": ["anthropic_messages", "openai_responses", "openai_chat_completions"],
+        "requires_canary": True,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 0.0,
+        "canary_state": "off",
+    },
+    "request_shape_repeated_context_canary": {
+        "rule_group": "semantic_compaction",
+        "lossiness_class": "semantic_loss_risk",
+        "surfaces": ["anthropic_messages", "openai_responses", "openai_chat_completions"],
+        "requires_canary": True,
+        "requires_server_decision": False,
+        "rollback_supported": True,
+        "default_rollout_fraction": 0.0,
+        "canary_state": "off",
+    },
+}
+
 
 def _as_bool(value: Any, default: bool) -> bool:
     if value is None:
@@ -69,9 +207,253 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _normalized_crunch_policy_yaml(data: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    nested = data.get("crunch")
+    if not isinstance(nested, dict):
+        return data
+    merged = dict(data)
+    for key, value in nested.items():
+        merged[key] = value
+    return merged
+
+
+def _normalize_allowed_rules(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    values = value if isinstance(value, list) else [value]
+    rules = [str(item).strip() for item in values if str(item).strip()]
+    return sorted(set(rules))
+
+
+def _canary_fraction(raw_canary: Any) -> float | None:
+    if not isinstance(raw_canary, dict):
+        return None
+    for key in ("fraction", "canary_fraction", "rollout_fraction"):
+        if raw_canary.get(key) is not None:
+            try:
+                return max(0.0, min(1.0, float(raw_canary[key])))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _holdout_fraction(raw_canary: Any) -> float | None:
+    if not isinstance(raw_canary, dict):
+        return None
+    if raw_canary.get("holdout_fraction") is None:
+        return None
+    try:
+        return max(0.0, min(1.0, float(raw_canary["holdout_fraction"])))
+    except (TypeError, ValueError):
+        return None
+
+
+def _derive_canary_state(
+    *,
+    enabled: bool | None,
+    canary: Any = None,
+    configured_state: Any = None,
+    default_state: str = "off",
+) -> str:
+    raw_state = str(configured_state or "").strip().lower().replace("_", "-")
+    normalized = raw_state.replace("-", "_")
+    if normalized in CRUNCH_CANARY_STATES:
+        return normalized
+    if enabled is False:
+        return "off"
+    if not isinstance(canary, dict):
+        return "active" if enabled else default_state
+    if not _as_bool(canary.get("enabled"), False):
+        return "active" if enabled else "off"
+    fraction = _canary_fraction(canary)
+    holdout = _holdout_fraction(canary)
+    if fraction is None:
+        fraction = 0.0
+    if fraction >= 1.0:
+        return "active"
+    if fraction > 0.0:
+        return "canary"
+    if holdout and holdout > 0.0:
+        return "held"
+    return "shadow"
+
+
+def _crunch_rule_metadata(
+    rule_id: str,
+    *,
+    policy_source: str | None = None,
+    rule_path: str | None = None,
+    enabled: bool | None = None,
+    canary: Any = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    catalog = dict(CRUNCH_RULE_CATALOG.get(rule_id) or {})
+    if overrides:
+        for key, value in overrides.items():
+            if value is not None:
+                catalog[key] = value
+    if not catalog:
+        catalog = {
+            "rule_group": "custom",
+            "lossiness_class": "semantic_loss_risk",
+            "surfaces": [],
+            "requires_canary": True,
+            "requires_server_decision": False,
+            "rollback_supported": True,
+            "default_rollout_fraction": 0.0,
+            "canary_state": "off",
+        }
+    state = _derive_canary_state(
+        enabled=enabled,
+        canary=canary,
+        configured_state=None if canary is not None else catalog.get("canary_state"),
+        default_state=str(catalog.get("canary_state") or "off"),
+    )
+    meta = {
+        "schema": CRUNCH_RULE_DECISION_SCHEMA,
+        "rule_id": str(rule_id),
+        "rule_group": str(catalog.get("rule_group") or "custom"),
+        "lossiness_class": str(catalog.get("lossiness_class") or "semantic_loss_risk"),
+        "surfaces": [str(item) for item in (catalog.get("surfaces") or [])],
+        "requires_canary": bool(catalog.get("requires_canary")),
+        "requires_server_decision": bool(catalog.get("requires_server_decision")),
+        "rollback_supported": bool(catalog.get("rollback_supported")),
+        "default_rollout_fraction": float(catalog.get("default_rollout_fraction") or 0.0),
+        "canary_state": state,
+    }
+    if policy_source is not None:
+        meta["policy_source"] = str(policy_source)
+    if rule_path is not None:
+        meta["rule_path"] = str(rule_path)
+    return meta
+
+
+def _allowed_crunch_rule_ids(policy: dict[str, Any]) -> set[str] | None:
+    normalized = _normalize_allowed_rules(policy.get("allowed_rules"))
+    return None if normalized is None else set(normalized)
+
+
+def _crunch_rule_allowed(rule_id: str) -> bool:
+    return ALLOWED_CRUNCH_RULES is None or rule_id in ALLOWED_CRUNCH_RULES
+
+
+def _crunch_rule_decision(
+    rule_id: str,
+    *,
+    status: str,
+    reason: str,
+    policy_source: str,
+    rule_path: str,
+    count: int = 1,
+    saved_chars: int = 0,
+    tokens_saved_est: int | None = None,
+    enabled: bool | None = None,
+    canary: Any = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    meta = _crunch_rule_metadata(
+        rule_id,
+        policy_source=policy_source,
+        rule_path=rule_path,
+        enabled=enabled,
+        canary=canary,
+        overrides=overrides,
+    )
+    meta.update({
+        "status": str(status),
+        "reason": str(reason),
+        "count": max(0, int(count)),
+        "saved_chars": int(saved_chars or 0),
+        "tokens_saved_est": int(tokens_saved_est if tokens_saved_est is not None else int(saved_chars or 0) // TOKEN_CHARS),
+    })
+    return meta
+
+
+def _crunch_rule_group_breakdown(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in decisions:
+        key = (
+            str(item.get("rule_group") or "unknown"),
+            str(item.get("lossiness_class") or "unknown"),
+            str(item.get("status") or "unknown"),
+        )
+        bucket = grouped.setdefault(
+            key,
+            {
+                "schema": CRUNCH_RULE_GROUP_BREAKDOWN_SCHEMA,
+                "rule_group": key[0],
+                "lossiness_class": key[1],
+                "status": key[2],
+                "count": 0,
+                "decision_count": 0,
+                "saved_chars": 0,
+                "tokens_saved_est": 0,
+                "rule_ids": [],
+            },
+        )
+        bucket["count"] += int(item.get("count") or 0)
+        bucket["decision_count"] += 1
+        bucket["saved_chars"] += int(item.get("saved_chars") or 0)
+        bucket["tokens_saved_est"] += int(item.get("tokens_saved_est") or 0)
+        rule_id = str(item.get("rule_id") or "")
+        if rule_id and rule_id not in bucket["rule_ids"]:
+            bucket["rule_ids"].append(rule_id)
+    return sorted(grouped.values(), key=lambda row: (row["status"] != "applied", -row["tokens_saved_est"], row["rule_group"]))
+
+
+def _crunch_rule_taxonomy_meta(*, policy_source: str, rule_path: str) -> dict[str, Any]:
+    allowed = sorted(ALLOWED_CRUNCH_RULES) if ALLOWED_CRUNCH_RULES is not None else None
+    try:
+        sections = {
+            "old_context_summarization": OLD_CONTEXT_SUMMARY_POLICY,
+            "thinking_deduplication": THINKING_DEDUP_POLICY,
+            "terminal_log_boilerplate": TERMINAL_LOG_POLICY,
+            "anthropic_thinking_history_compaction": ANTHROPIC_THINKING_COMPACTION_POLICY,
+            "terminal_output_compaction": TERMINAL_OUTPUT_COMPACTION_POLICY,
+            "instruction_section_deduplication": INSTRUCTION_SECTION_DEDUP_POLICY,
+            "repeated_provider_scaffolding": REPEATED_PROVIDER_SCAFFOLDING_POLICY,
+            "request_shape_repeated_context_canary": REQUEST_SHAPE_REPEATED_CONTEXT_CANARIES_POLICY,
+        }
+    except NameError:
+        sections = {}
+    return {
+        "schema": CRUNCH_RULE_TAXONOMY_SCHEMA,
+        "policy_source": policy_source,
+        "rule_path": rule_path,
+        "allowed_rules": allowed if allowed is not None else ["*"],
+        "allowed_rule_count": len(allowed) if allowed is not None else len(CRUNCH_RULE_CATALOG),
+        "rules": [
+            _crunch_rule_metadata(
+                rule_id,
+                policy_source=policy_source,
+                rule_path=rule_path,
+                enabled=(
+                    _crunch_rule_allowed(rule_id)
+                    and _as_bool(sections.get(rule_id, {}).get("enabled"), True)
+                    if isinstance(sections.get(rule_id), dict)
+                    else _crunch_rule_allowed(rule_id)
+                ),
+                canary=sections.get(rule_id, {}).get("canary") if isinstance(sections.get(rule_id), dict) else None,
+            )
+            for rule_id in sorted(CRUNCH_RULE_CATALOG)
+        ],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+        },
+    }
+
+
 def _default_crunch_policy() -> dict[str, Any]:
     return {
         "enabled": True,
+        "allowed_rules": None,
         "threshold_chars": 24000,
         "prompt_cache": {
             "enabled": True,
@@ -343,10 +725,12 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
         if not path.exists():
             continue
         with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+            data = _normalized_crunch_policy_yaml(yaml.safe_load(f) or {})
         if isinstance(data, dict):
             policy = _default_crunch_policy()
             policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
+            if "allowed_rules" in data:
+                policy["allowed_rules"] = _normalize_allowed_rules(data.get("allowed_rules"))
             if data.get("threshold_chars") is not None:
                 policy["threshold_chars"] = int(data["threshold_chars"])
             prompt_cache = data.get("prompt_cache") or {}
@@ -420,9 +804,11 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
     policy = _default_crunch_policy()
     if defaults_path.exists():
         with open(defaults_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+            data = _normalized_crunch_policy_yaml(yaml.safe_load(f) or {})
         if isinstance(data, dict):
             policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
+            if "allowed_rules" in data:
+                policy["allowed_rules"] = _normalize_allowed_rules(data.get("allowed_rules"))
             if data.get("threshold_chars") is not None:
                 policy["threshold_chars"] = int(data["threshold_chars"])
             prompt_cache = data.get("prompt_cache") or {}
@@ -1587,6 +1973,7 @@ def _apply_session_memory_hints_policy_yaml(policy: dict[str, Any], session_memo
 CRUNCH_POLICY, CRUNCH_POLICY_SOURCE, CRUNCH_RULES_PATH = _load_crunch_policy()
 CRUNCH_RULES_LOADED_AT = utc_now()
 CRUNCH_RULES_LOADED_FILE = policy_file_snapshot(CRUNCH_RULES_PATH)
+ALLOWED_CRUNCH_RULES = _allowed_crunch_rule_ids(CRUNCH_POLICY)
 CRUNCH_ENABLED = bool(CRUNCH_POLICY["enabled"])
 CRUNCH_THRESHOLD_CHARS = int(CRUNCH_POLICY["threshold_chars"])
 PROMPT_CACHE_ENABLED = bool(CRUNCH_POLICY["prompt_cache"]["enabled"])
@@ -6446,11 +6833,26 @@ def crunch_body(
     if not CRUNCH_ENABLED:
         category = _crunch_request_category(body) if isinstance(body, dict) else None
         request_shape_canary_meta = _request_shape_repeated_context_canary_base_meta(False, "global-crunch-disabled")
+        skipped_rules = [
+            _crunch_rule_decision(
+                rule_id,
+                status="skipped",
+                reason="global-crunch-disabled",
+                policy_source=policy_source,
+                rule_path=CRUNCH_RULES_PATH,
+                enabled=False,
+            )
+            for rule_id in sorted(CRUNCH_RULE_CATALOG)
+        ]
         meta = {
             "enabled": False,
             "changed": False,
             "policy_source": policy_source,
             "rule_path": CRUNCH_RULES_PATH,
+            "rule_taxonomy": _crunch_rule_taxonomy_meta(policy_source=policy_source, rule_path=CRUNCH_RULES_PATH),
+            "applied_rules": [],
+            "skipped_rules": skipped_rules,
+            "rule_group_breakdown": _crunch_rule_group_breakdown(skipped_rules),
             "managed_profile": managed_profile,
             "request_shape_repeated_context_canaries": request_shape_canary_meta,
             "anthropic_thinking_history_compaction": _anthropic_thinking_compaction_base_meta(
@@ -6531,18 +6933,36 @@ def crunch_body(
     near_replacements = 0
     thinking_near_replacements = 0
     shortened = 0
+    whitespace_normalized = 0
+    skipped_rule_counts: dict[tuple[str, str], int] = {}
     terminal_log_metas: list[dict[str, Any]] = []
 
+    def skip_rule(rule_id: str, reason: str, count: int = 1) -> None:
+        skipped_rule_counts[(rule_id, reason)] = skipped_rule_counts.get((rule_id, reason), 0) + max(0, int(count))
+
     def process_content(content: Any, allow_shorten: bool) -> Any:
-        nonlocal replacements, near_replacements, shortened
+        nonlocal replacements, near_replacements, shortened, whitespace_normalized
         if isinstance(content, str):
-            terminal_text, terminal_meta = _simplify_terminal_log_boilerplate_text(content)
+            if _crunch_rule_allowed("terminal_log_boilerplate"):
+                terminal_text, terminal_meta = _simplify_terminal_log_boilerplate_text(content)
+            else:
+                terminal_text = content
+                terminal_meta = _terminal_log_meta("skipped", "rule-not-allowed")
+                skip_rule("terminal_log_boilerplate", "rule-not-allowed")
             terminal_log_metas.append(terminal_meta)
-            txt = normalize_text(terminal_text)
+            if _crunch_rule_allowed("whitespace_normalization"):
+                txt = normalize_text(terminal_text)
+                if txt != terminal_text:
+                    whitespace_normalized += 1
+            else:
+                txt = terminal_text
+                skip_rule("whitespace_normalization", "rule-not-allowed")
             h = sha256_text(txt)
             if len(txt) > 1000 and h in seen:
-                replacements += 1
-                return f"[AgentFlow: exact duplicate text block omitted; same as earlier block #{seen[h]} hash={h[:12]}]"
+                if _crunch_rule_allowed("exact_duplicate_block_omission"):
+                    replacements += 1
+                    return f"[AgentFlow: exact duplicate text block omitted; same as earlier block #{seen[h]} hash={h[:12]}]"
+                skip_rule("exact_duplicate_block_omission", "rule-not-allowed")
             seen[h] = len(seen) + 1
             if len(txt) > 2000:
                 shingles = _shingles(txt)
@@ -6552,12 +6972,16 @@ def crunch_body(
                         matched_idx = prev_idx
                         break
                 if matched_idx is not None:
-                    near_replacements += 1
-                    return f"[AgentFlow: near-duplicate text block omitted; similar to earlier block #{matched_idx} jaccard>0.85; original_chars={len(txt)}]"
+                    if _crunch_rule_allowed("near_duplicate_block_omission"):
+                        near_replacements += 1
+                        return f"[AgentFlow: near-duplicate text block omitted; similar to earlier block #{matched_idx} jaccard>0.85; original_chars={len(txt)}]"
+                    skip_rule("near_duplicate_block_omission", "rule-not-allowed")
                 seen_shingles.append((shingles, len(seen)))
             if allow_shorten and len(txt) > 8000:
-                shortened += 1
-                return txt[:3500] + f"\n\n[AgentFlow: middle of long older text block omitted; hash={h[:12]}; original_chars={len(txt)}]\n\n" + txt[-2500:]
+                if _crunch_rule_allowed("old_text_collapse"):
+                    shortened += 1
+                    return txt[:3500] + f"\n\n[AgentFlow: middle of long older text block omitted; hash={h[:12]}; original_chars={len(txt)}]\n\n" + txt[-2500:]
+                skip_rule("old_text_collapse", "rule-not-allowed")
             return txt
         if isinstance(content, list):
             out = []
@@ -6597,10 +7021,109 @@ def crunch_body(
         allow_shorten = huge and idx < max(0, len(messages) - 4)
         if isinstance(msg, dict) and "content" in msg:
             msg["content"] = process_content(msg["content"], allow_shorten=allow_shorten)
-    thinking_near_replacements = _dedupe_thinking_blocks(messages)
+    if _crunch_rule_allowed("thinking_deduplication"):
+        thinking_near_replacements = _dedupe_thinking_blocks(messages)
+    else:
+        skip_rule("thinking_deduplication", "rule-not-allowed")
     terminal_log_meta = _terminal_log_aggregate_meta(terminal_log_metas)
 
     after = len(stable_json(new_body))
+    applied_rules: list[dict[str, Any]] = []
+    skipped_rules: list[dict[str, Any]] = []
+
+    def add_applied(rule_id: str, reason: str, count: int, saved_chars: int = 0, *, canary: Any = None, enabled: bool | None = True) -> None:
+        if count <= 0:
+            return
+        applied_rules.append(_crunch_rule_decision(
+            rule_id,
+            status="applied",
+            reason=reason,
+            policy_source=policy_source,
+            rule_path=CRUNCH_RULES_PATH,
+            count=count,
+            saved_chars=saved_chars,
+            enabled=enabled,
+            canary=canary,
+        ))
+
+    add_applied(
+        "whitespace_normalization",
+        "whitespace-normalized",
+        whitespace_normalized,
+    )
+    add_applied(
+        "exact_duplicate_block_omission",
+        "exact-duplicate-text-block-omitted",
+        replacements,
+    )
+    add_applied(
+        "near_duplicate_block_omission",
+        "near-duplicate-text-block-omitted",
+        near_replacements,
+    )
+    add_applied(
+        "old_text_collapse",
+        "old-text-head-tail-collapse",
+        shortened,
+    )
+    add_applied(
+        "thinking_deduplication",
+        "near-duplicate-thinking-block-omitted",
+        thinking_near_replacements,
+        enabled=THINKING_DEDUP_ENABLED,
+    )
+    add_applied(
+        "terminal_log_boilerplate",
+        "terminal-log-boilerplate-simplified",
+        int(terminal_log_meta.get("text_blocks_changed") or 0),
+        int(terminal_log_meta.get("saved_chars") or 0),
+        enabled=TERMINAL_LOG_ENABLED,
+    )
+    if pattern_rules_meta.get("applied_count"):
+        add_applied(
+            "pattern_rules",
+            "reviewed-pattern-rule-applied",
+            int(pattern_rules_meta.get("applied_count") or 0),
+            int(pattern_rules_meta.get("saved_chars") or 0),
+            canary={"enabled": True, "canary_fraction": 1.0},
+            enabled=bool(PATTERN_RULES),
+        )
+    if provider_scaffolding_meta.get("applied_count"):
+        add_applied(
+            "repeated_provider_scaffolding",
+            "repeated-provider-scaffolding-collapsed",
+            int(provider_scaffolding_meta.get("applied_count") or 0),
+            int(provider_scaffolding_meta.get("saved_chars") or 0),
+            enabled=bool(REPEATED_PROVIDER_SCAFFOLDING_POLICY.get("enabled")),
+            canary=REPEATED_PROVIDER_SCAFFOLDING_POLICY.get("canary"),
+        )
+    for (rule_id, reason), count in sorted(skipped_rule_counts.items()):
+        skipped_rules.append(_crunch_rule_decision(
+            rule_id,
+            status="skipped",
+            reason=reason,
+            policy_source=policy_source,
+            rule_path=CRUNCH_RULES_PATH,
+            count=count,
+            enabled=False,
+        ))
+    for rule_id, section in (
+        ("old_context_summarization", OLD_CONTEXT_SUMMARY_POLICY),
+        ("anthropic_thinking_history_compaction", ANTHROPIC_THINKING_COMPACTION_POLICY),
+        ("terminal_output_compaction", TERMINAL_OUTPUT_COMPACTION_POLICY),
+        ("instruction_section_deduplication", INSTRUCTION_SECTION_DEDUP_POLICY),
+    ):
+        if not _crunch_rule_allowed(rule_id):
+            skipped_rules.append(_crunch_rule_decision(
+                rule_id,
+                status="skipped",
+                reason="rule-not-allowed",
+                policy_source=policy_source,
+                rule_path=CRUNCH_RULES_PATH,
+                enabled=False,
+                canary=section.get("canary") if isinstance(section, dict) else None,
+            ))
+    rule_group_breakdown = _crunch_rule_group_breakdown(applied_rules + skipped_rules)
     meta = {
         "enabled": True,
         "changed": after != before,
@@ -6631,6 +7154,12 @@ def crunch_body(
         "anthropic_thinking_history": thinking_history_meta,
         "policy_source": policy_source,
         "rule_path": CRUNCH_RULES_PATH,
+        "rule_id": "local-crunch-policy",
+        "rule_group": "multi_rule",
+        "rule_taxonomy": _crunch_rule_taxonomy_meta(policy_source=policy_source, rule_path=CRUNCH_RULES_PATH),
+        "applied_rules": applied_rules,
+        "skipped_rules": skipped_rules,
+        "rule_group_breakdown": rule_group_breakdown,
         "threshold_chars": threshold_chars,
         "managed_profile": managed_profile,
         "thinking_deduplication": {

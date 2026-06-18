@@ -296,6 +296,96 @@ prompt_cache:
             self.assertEqual(meta["long_blocks_shortened"], 1)
             self.assertIn("middle of long older text block omitted", crunched["messages"][0]["content"])
 
+    def test_crunch_rule_taxonomy_records_lossless_applied_rule(self):
+        manual = importlib.reload(crunch_module)
+
+        _crunched, meta = manual.crunch_body({
+            "messages": [{"role": "user", "content": "alpha    beta\n\n\n\n gamma"}],
+        })
+
+        applied = {row["rule_id"]: row for row in meta["applied_rules"]}
+        self.assertIn("whitespace_normalization", applied)
+        whitespace = applied["whitespace_normalization"]
+        self.assertEqual(whitespace["rule_group"], "lossless_normalization")
+        self.assertEqual(whitespace["lossiness_class"], "lossless")
+        self.assertEqual(whitespace["canary_state"], "active")
+        self.assertFalse(whitespace["requires_server_decision"])
+        rendered = json.dumps(meta, sort_keys=True)
+        self.assertNotIn('"raw_prompt"', rendered)
+
+    def test_crunch_rule_taxonomy_tracks_semantic_risk_held_canary(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+crunch:
+  enabled: true
+  allowed_rules:
+    - anthropic_thinking_history_compaction
+  anthropic_thinking_history_compaction:
+    enabled: true
+    canary:
+      enabled: true
+      canary_fraction: 0.0
+      holdout_fraction: 1.0
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+
+            _crunched, meta = manual.crunch_body({"messages": [{"role": "user", "content": "hello"}]})
+
+            taxonomy = {row["rule_id"]: row for row in meta["rule_taxonomy"]["rules"]}
+            semantic = taxonomy["anthropic_thinking_history_compaction"]
+            self.assertEqual(semantic["rule_group"], "semantic_compaction")
+            self.assertEqual(semantic["lossiness_class"], "semantic_loss_risk")
+            self.assertTrue(semantic["requires_canary"])
+            self.assertEqual(semantic["canary_state"], "held")
+
+    def test_allowed_rules_blocks_old_text_collapse_with_rule_metadata(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+crunch:
+  enabled: true
+  threshold_chars: 10
+  allowed_rules:
+    - whitespace_normalization
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            long_text = "alpha " * 1600
+            body = {
+                "messages": [
+                    {"role": "user", "content": long_text},
+                    {"role": "assistant", "content": "one"},
+                    {"role": "user", "content": "two"},
+                    {"role": "assistant", "content": "three"},
+                    {"role": "user", "content": "four"},
+                ]
+            }
+
+            crunched, meta = manual.crunch_body(body)
+
+            self.assertEqual(crunched["messages"][0]["content"], long_text.strip())
+            self.assertEqual(meta["long_blocks_shortened"], 0)
+            skipped = {
+                (row["rule_id"], row["reason"]): row
+                for row in meta["skipped_rules"]
+            }
+            blocked = skipped[("old_text_collapse", "rule-not-allowed")]
+            self.assertEqual(blocked["rule_group"], "structural_dedup")
+            self.assertEqual(blocked["lossiness_class"], "structure_preserving")
+            self.assertEqual(blocked["status"], "skipped")
+
     def test_request_shape_repeated_context_canary_records_applied_and_holdout_metadata(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

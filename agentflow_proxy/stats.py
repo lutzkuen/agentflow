@@ -4331,6 +4331,112 @@ def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = 
     return breakdown
 
 
+def _crunch_rule_breakdowns(
+    rows: list[dict[str, Any]],
+    *,
+    today_only: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    by_rule: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    by_group: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        if today_only and not row.get("is_today"):
+            continue
+        crunch = _json_obj(row.get("crunch_json"))
+        decisions: list[dict[str, Any]] = []
+        for key, status in (("applied_rules", "applied"), ("skipped_rules", "skipped")):
+            values = crunch.get(key)
+            if isinstance(values, list):
+                for item in values:
+                    if isinstance(item, dict):
+                        decision = dict(item)
+                        decision.setdefault("status", status)
+                        decisions.append(decision)
+        if not decisions and crunch.get("changed"):
+            decisions.append({
+                "rule_id": str(crunch.get("rule_id") or "legacy_crunch"),
+                "rule_group": str(crunch.get("rule_group") or "legacy"),
+                "lossiness_class": str(crunch.get("lossiness_class") or "unknown"),
+                "canary_state": str(crunch.get("canary_state") or "active"),
+                "policy_source": str(crunch.get("policy_source") or "unknown"),
+                "status": "applied",
+                "reason": "legacy-crunch-metadata",
+                "count": 1,
+                "saved_chars": _as_int(crunch.get("saved_chars")),
+                "tokens_saved_est": _as_int(crunch.get("tokens_saved_est")),
+            })
+        for item in decisions:
+            status = str(item.get("status") or "unknown")
+            rule_id = str(item.get("rule_id") or "unknown")
+            rule_group = str(item.get("rule_group") or "unknown")
+            lossiness = str(item.get("lossiness_class") or "unknown")
+            canary_state = str(item.get("canary_state") or "unknown")
+            policy_source = str(item.get("policy_source") or crunch.get("policy_source") or "unknown")
+            reason = str(item.get("reason") or "unknown")
+            count = max(0, _as_int(item.get("count")) or 1)
+            saved_chars = _as_int(item.get("saved_chars"))
+            tokens_saved = _as_int(item.get("tokens_saved_est"))
+            rule_key = (rule_id, rule_group, lossiness, canary_state, status, policy_source)
+            rule_bucket = by_rule.setdefault(
+                rule_key,
+                {
+                    "rule_id": rule_id,
+                    "rule_group": rule_group,
+                    "lossiness_class": lossiness,
+                    "canary_state": canary_state,
+                    "status": status,
+                    "policy_source": policy_source,
+                    "count": 0,
+                    "decision_count": 0,
+                    "saved_chars": 0,
+                    "tokens_saved_est": 0,
+                    "reason_counts": {},
+                },
+            )
+            rule_bucket["count"] += count
+            rule_bucket["decision_count"] += 1
+            rule_bucket["saved_chars"] += saved_chars
+            rule_bucket["tokens_saved_est"] += tokens_saved
+            reasons = rule_bucket["reason_counts"]
+            reasons[reason] = reasons.get(reason, 0) + count
+
+            group_key = (rule_group, lossiness, canary_state, status)
+            group_bucket = by_group.setdefault(
+                group_key,
+                {
+                    "rule_group": rule_group,
+                    "lossiness_class": lossiness,
+                    "canary_state": canary_state,
+                    "status": status,
+                    "count": 0,
+                    "decision_count": 0,
+                    "saved_chars": 0,
+                    "tokens_saved_est": 0,
+                    "rule_ids": set(),
+                },
+            )
+            group_bucket["count"] += count
+            group_bucket["decision_count"] += 1
+            group_bucket["saved_chars"] += saved_chars
+            group_bucket["tokens_saved_est"] += tokens_saved
+            group_bucket["rule_ids"].add(rule_id)
+
+    rule_rows = []
+    for row in by_rule.values():
+        reasons = row.pop("reason_counts", {})
+        row["reason_breakdown"] = [
+            {"value": key, "count": reasons[key]}
+            for key in sorted(reasons, key=lambda key: (-reasons[key], key))
+        ]
+        rule_rows.append(row)
+    group_rows = []
+    for row in by_group.values():
+        row["rule_ids"] = sorted(row["rule_ids"])
+        group_rows.append(row)
+    rule_rows.sort(key=lambda row: (row["status"] != "applied", -row["tokens_saved_est"], -row["count"], row["rule_id"]))
+    group_rows.sort(key=lambda row: (row["status"] != "applied", -row["tokens_saved_est"], -row["count"], row["rule_group"]))
+    return rule_rows, group_rows
+
+
 _CACHE_BLOCKER_SCAN_LIMIT = 1000
 
 _CACHE_BLOCKER_NEXT_ACTIONS = {
@@ -18678,6 +18784,18 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     """, (today_start, CODEX_APP_SOURCE_SURFACE, today_start))
     cache_decision_breakdown = _cache_decision_breakdown(cache_rows)
     today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
+    crunch_rule_rows = q("""
+        select created_at,
+               crunch_json,
+               coalesce(provider, 'anthropic') as provider,
+               source_surface,
+               category,
+               (created_at >= ?) as is_today
+        from calls
+        where crunch_json is not null
+    """, (today_start,))
+    crunch_rule_breakdown, crunch_rule_group_breakdown = _crunch_rule_breakdowns(crunch_rule_rows)
+    today_crunch_rule_breakdown, today_crunch_rule_group_breakdown = _crunch_rule_breakdowns(crunch_rule_rows, today_only=True)
     cache_ladder_rows = q("""
         select created_at, stream, cache_hit, status_code, cache_json, routing_json,
                path, coalesce(provider, 'anthropic') as provider,
@@ -18879,6 +18997,10 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "category_breakdown": category_breakdown,
         "cache_decision_breakdown": cache_decision_breakdown,
         "today_cache_decision_breakdown": today_cache_decision_breakdown,
+        "crunch_rule_breakdown": crunch_rule_breakdown,
+        "today_crunch_rule_breakdown": today_crunch_rule_breakdown,
+        "crunch_rule_group_breakdown": crunch_rule_group_breakdown,
+        "today_crunch_rule_group_breakdown": today_crunch_rule_group_breakdown,
         "cache_zero_hit_blocker_ladder": cache_zero_hit_blocker_ladder,
         "cache_effectiveness": cache_effectiveness,
         "cache_replayability": cache_replayability,
@@ -20930,6 +21052,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Crunch rule groups today</h2>
+  <table data-table-id="crunch-rule-groups-today" data-filter-label="Filter crunch rule groups today">
+    <thead><tr>
+      <th data-sort-type="text">Group</th><th data-sort-type="text">Lossiness</th><th data-sort-type="text">Canary state</th><th data-sort-type="text">Status</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Rules</th><th data-sort-type="number">Saved chars</th><th data-sort-type="number">Saved tokens</th>
+    </tr></thead>
+    <tbody id="crunch-rule-groups-today-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Crunch rules all time</h2>
+  <table data-table-id="crunch-rules-all" data-filter-label="Filter all crunch rules">
+    <thead><tr>
+      <th data-sort-type="text">Rule</th><th data-sort-type="text">Group</th><th data-sort-type="text">Lossiness</th><th data-sort-type="text">Canary state</th><th data-sort-type="text">Status</th><th data-sort-type="text">Policy source</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Saved chars</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="text">Reasons</th>
+    </tr></thead>
+    <tbody id="crunch-rules-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Pattern decision outcomes today</h2>
   <table data-table-id="pattern-decisions-today" data-filter-label="Filter pattern decisions today">
     <thead><tr>
@@ -22975,6 +23115,39 @@ async function refreshCache(){
       <td class="tokens">${(row.tokens_saved_est||0).toLocaleString()}</td>
       <td class="savings">${fmt(row.estimated_cost_savings_usd||0,6)}</td>
     </tr>`).join('')||'<tr><td colspan="11" style="color:#8b949e">No pattern decision outcomes yet</td></tr>';
+    const renderCrunchGroupRows=(rows)=>rows.map(row=>{
+      const cls=row.status==='applied'?'hit':row.status==='skipped'?'miss':'provider';
+      const canary=row.canary_state==='active'?'hit':row.canary_state==='canary'?'routed':row.canary_state==='held'?'stream':row.canary_state==='rollback'?'err':'miss';
+      return `<tr>
+        <td class="model">${esc(row.rule_group||'unknown')}</td>
+        <td><span class="badge ${row.lossiness_class==='lossless'?'hit':row.lossiness_class==='semantic_loss_risk'||row.lossiness_class==='model_generated_summary'?'routed':'provider'}">${esc(row.lossiness_class||'unknown')}</span></td>
+        <td><span class="badge ${canary}">${esc(row.canary_state||'unknown')}</span></td>
+        <td><span class="badge ${cls}">${esc(row.status||'unknown')}</span></td>
+        <td class="tokens">${(row.count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.rule_ids||[]).length.toLocaleString()}</td>
+        <td class="tokens">${(row.saved_chars||0).toLocaleString()}</td>
+        <td class="tokens">${(row.tokens_saved_est||0).toLocaleString()}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="8" style="color:#8b949e">No crunch rule group metadata yet</td></tr>';
+    const renderCrunchRuleRows=(rows)=>rows.map(row=>{
+      const reasons=(row.reason_breakdown||[]).slice(0,3).map(item=>`<span class="badge provider">${esc(item.value||'unknown')} ${(item.count||0).toLocaleString()}</span>`).join(' ');
+      const cls=row.status==='applied'?'hit':row.status==='skipped'?'miss':'provider';
+      const canary=row.canary_state==='active'?'hit':row.canary_state==='canary'?'routed':row.canary_state==='held'?'stream':row.canary_state==='rollback'?'err':'miss';
+      return `<tr>
+        <td class="model">${esc(row.rule_id||'unknown')}</td>
+        <td class="model">${esc(row.rule_group||'unknown')}</td>
+        <td><span class="badge ${row.lossiness_class==='lossless'?'hit':row.lossiness_class==='semantic_loss_risk'||row.lossiness_class==='model_generated_summary'?'routed':'provider'}">${esc(row.lossiness_class||'unknown')}</span></td>
+        <td><span class="badge ${canary}">${esc(row.canary_state||'unknown')}</span></td>
+        <td><span class="badge ${cls}">${esc(row.status||'unknown')}</span></td>
+        <td><span class="badge provider">${esc(row.policy_source||'unknown')}</span></td>
+        <td class="tokens">${(row.count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.saved_chars||0).toLocaleString()}</td>
+        <td class="tokens">${(row.tokens_saved_est||0).toLocaleString()}</td>
+        <td class="flags">${reasons||'<span class="badge miss">none</span>'}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="10" style="color:#8b949e">No crunch rule metadata yet</td></tr>';
+    document.getElementById('crunch-rule-groups-today-tbody').innerHTML=renderCrunchGroupRows(d.today_crunch_rule_group_breakdown||[]);
+    document.getElementById('crunch-rules-tbody').innerHTML=renderCrunchRuleRows(d.crunch_rule_breakdown||[]);
     document.getElementById('pattern-decisions-today-tbody').innerHTML=renderPatternRows(d.today_pattern_decision_breakdown||[]);
     document.getElementById('pattern-decisions-tbody').innerHTML=renderPatternRows(d.pattern_decision_breakdown||[]);
     document.getElementById('cache-today-tbody').innerHTML=renderRows(d.today_cache_decision_breakdown||[]);
