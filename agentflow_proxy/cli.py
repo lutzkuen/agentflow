@@ -483,7 +483,7 @@ def _attach_recent_closed_github_issues_for_research(
         repos = sorted({repo.strip() for repo in env_repos.split(",") if repo.strip().count("/") == 1})
     if not repos:
         return issues
-    limit = os.getenv("AGENTFLOW_RESEARCH_CLOSED_ISSUE_LIMIT", "50")
+    limit = os.getenv("AGENTFLOW_RESEARCH_CLOSED_ISSUE_LIMIT", "200")
     try:
         limit_value = str(max(1, min(200, int(limit))))
     except ValueError:

@@ -2537,6 +2537,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(suppressed["reason"], "evidence-fingerprint-already-exists")
         self.assertEqual(suppressed["suppression_kind"], "closed-prior-issue")
         self.assertEqual(suppressed["existing_issue"]["number"], 616)
+        self.assertTrue(suppressed["successor_required"])
+        self.assertEqual(suppressed["successor_reason"], "recent-closed-exact-title-match")
+        self.assertEqual(suppression["suppressed_closed_predecessor_count"], 1)
+        self.assertEqual(suppression["successor_required_count"], 1)
 
     def test_recent_closed_issue_with_same_fingerprint_allows_advanced_next_action(self):
         proposal = {
@@ -2567,6 +2571,98 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(deduped[0]["closed_lifecycle_predecessor_reason"], "same-fingerprint-next-action-progressed")
         self.assertEqual(suppression["fingerprint_match_count"], 0)
         self.assertEqual(suppression["closed_prior_issue_count"], 0)
+
+    def test_recent_closed_exact_titles_require_successor_or_suppression(self):
+        milestone_title = "Rank next savings milestone from local telemetry evidence gaps"
+        cache_title = "Stage remaining replay-ready cache cohort for replay-ready on openai/openai_responses/responses"
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    603,
+                    milestone_title,
+                    ["backlog", "status:ready", "priority:p1"],
+                    state="CLOSED",
+                    closed="2026-06-17T05:25:20Z",
+                ),
+                issue(
+                    605,
+                    cache_title,
+                    ["backlog", "status:ready", "priority:p1", "cache", "privacy"],
+                    state="CLOSED",
+                    closed="2026-06-17T05:38:38Z",
+                ),
+            ],
+            stats={
+                "calls": 2511,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "request_shape_rollup_candidates": {
+                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "status": "candidates-ranked",
+                    "summary": {
+                        "calls": 2511,
+                        "ranked_candidate_count": 1,
+                        "top_next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                        "top_local_action_family": "crunch",
+                    },
+                    "cache_replayability_dry_run": {
+                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "status": "ranked",
+                        "summary": {
+                            "remaining_replay_ready_cohort_count": 1,
+                            "remaining_replay_ready_rows": 3,
+                            "remaining_projected_hits": 2,
+                            "remaining_projected_savings_usd": 0.002973,
+                        },
+                        "cohorts": [
+                            {
+                                "readiness": "replay-ready",
+                                "remaining_replay_ready": True,
+                                "provider_family": "openai",
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "chat",
+                                "workflow_phase": "chat",
+                                "stream": False,
+                                "has_tools": False,
+                                "cache_status": "miss",
+                                "row_count": 3,
+                                "projected_hits": 2,
+                                "projected_savings_usd": 0.002973,
+                                "request_id": "raw-closed-title-request-secret",
+                                "session_id": "raw-closed-title-session-secret",
+                                "cache_key": "raw-closed-title-cache-secret",
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=datetime(2026, 6, 18, 10, 0, tzinfo=timezone.utc),
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn(milestone_title, titles)
+        self.assertNotIn(cache_title, titles)
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertGreaterEqual(suppression["suppressed_closed_predecessor_count"], 2)
+        self.assertGreaterEqual(suppression["successor_required_count"], 2)
+        suppressed = {row["title"]: row for row in suppression["suppressed"] if row.get("title")}
+        self.assertTrue(suppressed[milestone_title]["successor_required"])
+        self.assertTrue(suppressed[cache_title]["successor_required"])
+        self.assertEqual(suppressed[milestone_title]["existing_issue"]["number"], 603)
+        self.assertEqual(suppressed[cache_title]["existing_issue"]["number"], 605)
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-closed-title-request-secret", rendered)
+        self.assertNotIn("raw-closed-title-session-secret", rendered)
+        self.assertNotIn("raw-closed-title-cache-secret", rendered)
+        self.assertFalse(plan["privacy"]["raw_prompts_included"])
+        self.assertFalse(plan["privacy"]["provider_bodies_included"])
+        self.assertFalse(plan["privacy"]["request_ids_included"])
+        self.assertFalse(plan["privacy"]["session_ids_included"])
+        self.assertFalse(plan["privacy"].get("cache_keys_included", False))
 
     def test_saved_research_plan_summary_ranks_advanced_lifecycle_titles(self):
         now = datetime(2026, 6, 17, 4, 30, tzinfo=timezone.utc)
@@ -7205,6 +7301,27 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
 
 class OrchestratorResearchCliTests(unittest.TestCase):
+    def test_cli_closed_issue_enrichment_fetches_bounded_history_by_default(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return cli.subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+        with patch("agentflow_proxy.cli.shutil.which", return_value="/usr/bin/gh"), patch(
+            "agentflow_proxy.cli.subprocess.run",
+            side_effect=fake_run,
+        ):
+            enriched = cli._attach_recent_closed_github_issues_for_research(
+                [issue(1, "Ready", ["status:ready"], repo="lutzkuen/agentflow")],
+                trusted_author="lutzkuen",
+            )
+
+        self.assertEqual(len(enriched), 1)
+        self.assertEqual(len(calls), 1)
+        limit_index = calls[0].index("--limit")
+        self.assertEqual(calls[0][limit_index + 1], "200")
+
     def test_cli_reads_json_files_and_emits_plan(self):
         with TemporaryDirectory() as tmp:
             issues_path = Path(tmp) / "issues.json"

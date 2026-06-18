@@ -8898,13 +8898,17 @@ def _dedupe_create_issue_proposals_with_metadata(
             if matched_fingerprint:
                 row["evidence_fingerprint"] = sanitize_value(matched_fingerprint)
             if matched_issue is not None:
+                matched_issue_is_closed = not _is_open(matched_issue)
                 row.update(
                     {
                         "existing_issue": _issue_ref(matched_issue),
                         "existing_issue_state": sanitize_value(matched_issue.get("state") or "OPEN"),
-                        "suppression_kind": "closed-prior-issue" if not _is_open(matched_issue) else "open-existing-issue",
+                        "suppression_kind": "closed-prior-issue" if matched_issue_is_closed else "open-existing-issue",
                     }
                 )
+                if matched_issue_is_closed:
+                    row["successor_required"] = True
+                    row["successor_reason"] = "recent-closed-exact-title-match"
             else:
                 row["suppression_kind"] = "duplicate-generated-proposal"
             suppressed.append(row)
@@ -8918,6 +8922,10 @@ def _dedupe_create_issue_proposals_with_metadata(
         "schema": "agentflow.research_issue_proposal_suppression.v1",
         "suppressed_count": len(suppressed),
         "closed_prior_issue_count": sum(1 for item in suppressed if item.get("suppression_kind") == "closed-prior-issue"),
+        "suppressed_closed_predecessor_count": sum(
+            1 for item in suppressed if item.get("suppression_kind") == "closed-prior-issue"
+        ),
+        "successor_required_count": sum(1 for item in suppressed if item.get("successor_required")),
         "open_existing_issue_count": sum(1 for item in suppressed if item.get("suppression_kind") == "open-existing-issue"),
         "fingerprint_match_count": sum(1 for item in suppressed if item.get("reason") == "evidence-fingerprint-already-exists"),
         "recent_closed_days": recent_closed_days,
