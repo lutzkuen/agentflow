@@ -18,6 +18,7 @@ EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_n
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "agentflow.local_activation_next_action_queue.v1"
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_next_action_queue_entry.v1"
 FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA = "agentflow.full_rollout_crunch_activation_measurement.v1"
+FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA = "agentflow.full_rollout_crunch_keep_active_regression_gate.v1"
 LOW_BACKLOG_MILESTONE_TITLE = "Rank next savings milestone from local telemetry evidence gaps"
 OPENAI_MIN_HOLDOUT_VOLUME = 10
 
@@ -3168,6 +3169,31 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
         "canary_fraction": round(_to_float(report.get("canary_fraction")), 6),
         "max_rollout_fraction": round(_to_float(report.get("max_rollout_fraction")), 6),
     }
+    stale_source = report.get("stale_evidence") if isinstance(report.get("stale_evidence"), dict) else {}
+    stale_evidence = {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "stale": bool(stale_source.get("stale", False)),
+        "status": sanitize_value(stale_source.get("status") or ("stale" if stale_source.get("stale") else "fresh-or-active")),
+        "reason": sanitize_value(stale_source.get("reason") or "full-rollout-local-policy-active"),
+    }
+    keep_active_gate = _full_rollout_crunch_keep_active_gate(
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        skipped_count=skipped_count,
+        fallback_count=fallback_count,
+        retry_count=_to_int(report.get("retry_count")),
+        rollback_count=rollback_count,
+        safety_stop_count=safety_stop_count,
+        error_rate_delta=coverage["error_rate_delta"],
+        retry_rate_delta=coverage["retry_rate_delta"],
+        fallback_rate_delta=coverage["fallback_rate_delta"],
+        stale_evidence=stale_evidence,
+        decision_age_hours=_to_float(stale_source.get("age_hours") or stale_source.get("decision_age_hours")),
+        full_rollout_active=True,
+        target_local_policy_section=target_policy_section,
+        target_local_rule_file=target_rule_file,
+    )
     post_max_status = sanitize_value(report.get("post_max_rollout_status"))
     post_max_decision = sanitize_value(report.get("post_max_rollout_decision"))
     post_max_next_action = sanitize_value(report.get("post_max_rollout_next_action"))
@@ -3227,6 +3253,7 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
         "retry_rate_delta": round(_to_float(report.get("retry_rate_delta")), 6),
         "fallback_rate_delta": round(_to_float(report.get("fallback_rate_delta")), 6),
         "coverage": coverage,
+        "keep_active_regression_gate": keep_active_gate,
         "duplicate_suppression": duplicate_suppression,
         "source_report": {
             "schema": sanitize_value(report.get("schema")),
@@ -3299,6 +3326,107 @@ def _full_rollout_crunch_activation_measurement_privacy() -> dict[str, Any]:
         "policy_file_contents_included": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
+    }
+
+
+def _full_rollout_crunch_keep_active_gate(
+    *,
+    applied_count: int,
+    holdout_count: int,
+    skipped_count: int,
+    fallback_count: int,
+    retry_count: int,
+    rollback_count: int,
+    safety_stop_count: int,
+    error_rate_delta: float,
+    retry_rate_delta: float,
+    fallback_rate_delta: float,
+    stale_evidence: dict[str, Any],
+    decision_age_hours: float,
+    full_rollout_active: bool,
+    target_local_policy_section: Any,
+    target_local_rule_file: Any,
+) -> dict[str, Any]:
+    stale = bool(stale_evidence.get("stale"))
+    reason_codes: list[str] = []
+    if not full_rollout_active:
+        reason_codes.append("full-rollout-policy-not-active")
+    if applied_count <= 0:
+        reason_codes.append("missing-applied-coverage")
+    if rollback_count > 0:
+        reason_codes.append("rollback-observed")
+    if safety_stop_count > 0:
+        reason_codes.append("safety-stop-observed")
+    if fallback_count > 0:
+        reason_codes.append("fallback-observed")
+    if error_rate_delta > 0:
+        reason_codes.append("error-rate-regression")
+    if retry_rate_delta > 0:
+        reason_codes.append("retry-rate-regression")
+    if fallback_rate_delta > 0:
+        reason_codes.append("fallback-rate-regression")
+    if stale:
+        reason_codes.append("stale-evidence")
+
+    rollback_reasons = {
+        "rollback-observed",
+        "safety-stop-observed",
+        "fallback-observed",
+        "error-rate-regression",
+        "retry-rate-regression",
+        "fallback-rate-regression",
+    }
+    if any(reason in rollback_reasons for reason in reason_codes):
+        state = "rollback-required"
+        next_action = "rollback-full-rollout-repeated-context-crunch-rule"
+        gate_passed = False
+    elif "stale-evidence" in reason_codes:
+        state = "review-stale-evidence"
+        next_action = "refresh-full-rollout-repeated-context-crunch-evidence"
+        gate_passed = False
+    elif {"full-rollout-policy-not-active", "missing-applied-coverage"} & set(reason_codes):
+        state = "keep-blocked"
+        next_action = "keep-crunch-rollout-blocked-until-applied-coverage"
+        gate_passed = False
+    else:
+        state = "keep-active"
+        next_action = "keep-active"
+        gate_passed = True
+
+    return {
+        "schema": FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA,
+        "state": state,
+        "gate_passed": gate_passed,
+        "deterministic_next_action": next_action,
+        "next_action": next_action,
+        "reason_codes": reason_codes,
+        "target_local_policy_section": sanitize_value(target_local_policy_section or "crunch.rules"),
+        "target_local_rule_file": sanitize_value(target_local_rule_file or "crunch_rules.yaml"),
+        "regression_counters": {
+            "schema": "agentflow.full_rollout_crunch_keep_active_regression_counters.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": skipped_count,
+            "fallback_count": fallback_count,
+            "retry_count": retry_count,
+            "rollback_count": rollback_count,
+            "safety_stop_count": safety_stop_count,
+            "error_rate_delta": round(error_rate_delta, 6),
+            "retry_rate_delta": round(retry_rate_delta, 6),
+            "fallback_rate_delta": round(fallback_rate_delta, 6),
+            "decision_age_hours": round(max(0.0, decision_age_hours), 3),
+            "stale_evidence": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "stale": stale,
+                "status": sanitize_value(stale_evidence.get("status") or ("stale" if stale else "fresh-or-active")),
+                "reason": sanitize_value(stale_evidence.get("reason") or "full-rollout-local-policy-active"),
+            },
+        },
+        "decision_options": ["keep-active", "review-stale-evidence", "rollback-required", "keep-blocked"],
+        "privacy": _full_rollout_crunch_activation_measurement_privacy(),
     }
 
 
@@ -3378,6 +3506,47 @@ def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -
         "status": sanitize_value(stale_source.get("status") or ("stale" if stale_source.get("stale") else "fresh-or-active")),
         "reason": sanitize_value(stale_source.get("reason") or "full-rollout-local-policy-active"),
     }
+    decision_age_hours = _to_float(
+        stale_source.get("age_hours")
+        or stale_source.get("decision_age_hours")
+        or local_row.get("evidence_age_hours")
+        or local_row.get("decision_age_hours")
+    )
+    applied_count = _to_int(local_row.get("applied_count") or entry.get("applied_count"))
+    holdout_count = _to_int(local_row.get("holdout_count") or entry.get("holdout_count"))
+    skipped_count = _to_int(local_row.get("skipped_count") or entry.get("skipped_count"))
+    fallback_count = _to_int(local_row.get("fallback_count") or entry.get("fallback_count"))
+    retry_count = _to_int(local_row.get("retry_count") or entry.get("retry_count"))
+    rollback_count = _to_int(local_row.get("rollback_count") or entry.get("rollback_count"))
+    safety_stop_count = _to_int(local_row.get("safety_stopped_count") or entry.get("safety_stop_count"))
+    error_rate_delta = round(_to_float(local_row.get("error_rate_delta") or entry.get("error_rate_delta")), 6)
+    retry_rate_delta = round(_to_float(local_row.get("retry_rate_delta") or entry.get("retry_rate_delta")), 6)
+    fallback_rate_delta = round(_to_float(local_row.get("fallback_rate_delta") or entry.get("fallback_rate_delta")), 6)
+    target_local_policy_section = local_row.get("target_local_policy_section") or entry.get("target_local_policy_section") or "crunch.rules"
+    target_local_rule_file = local_row.get("target_local_rule_file") or entry.get("target_local_rule_file") or "crunch_rules.yaml"
+    active_rule_count = _to_int(local_row.get("active_rule_count") or entry.get("active_rule_count"))
+    full_rollout_active = bool(
+        local_row.get("full_rollout_active") is True
+        or entry.get("state") == "full-rollout-active"
+        or entry.get("post_max_rollout_decision") == "full-rollout-applied"
+    )
+    keep_active_gate = _full_rollout_crunch_keep_active_gate(
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        skipped_count=skipped_count,
+        fallback_count=fallback_count,
+        retry_count=retry_count,
+        rollback_count=rollback_count,
+        safety_stop_count=safety_stop_count,
+        error_rate_delta=error_rate_delta,
+        retry_rate_delta=retry_rate_delta,
+        fallback_rate_delta=fallback_rate_delta,
+        stale_evidence=stale_evidence,
+        decision_age_hours=decision_age_hours,
+        full_rollout_active=full_rollout_active,
+        target_local_policy_section=target_local_policy_section,
+        target_local_rule_file=target_local_rule_file,
+    )
     measurement = {
         "schema": FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA,
         "status": "progress-recorded",
@@ -3391,24 +3560,24 @@ def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -
         "next_action": sanitize_value(entry.get("next_action")),
         "evidence_schema": sanitize_value(entry.get("evidence_schema")),
         "activation_follow_up_evidence_schema": sanitize_value(entry.get("activation_follow_up_evidence_schema")),
-        "applied_count": _to_int(local_row.get("applied_count") or entry.get("applied_count")),
-        "holdout_count": _to_int(local_row.get("holdout_count") or entry.get("holdout_count")),
-        "skipped_count": _to_int(local_row.get("skipped_count") or entry.get("skipped_count")),
-        "fallback_count": _to_int(local_row.get("fallback_count") or entry.get("fallback_count")),
-        "retry_count": _to_int(local_row.get("retry_count") or entry.get("retry_count")),
-        "rollback_count": _to_int(local_row.get("rollback_count") or entry.get("rollback_count")),
-        "safety_stop_count": _to_int(local_row.get("safety_stopped_count") or entry.get("safety_stop_count")),
-        "error_rate_delta": round(_to_float(local_row.get("error_rate_delta") or entry.get("error_rate_delta")), 6),
-        "retry_rate_delta": round(_to_float(local_row.get("retry_rate_delta") or entry.get("retry_rate_delta")), 6),
-        "fallback_rate_delta": round(_to_float(local_row.get("fallback_rate_delta") or entry.get("fallback_rate_delta")), 6),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "skipped_count": skipped_count,
+        "fallback_count": fallback_count,
+        "retry_count": retry_count,
+        "rollback_count": rollback_count,
+        "safety_stop_count": safety_stop_count,
+        "error_rate_delta": error_rate_delta,
+        "retry_rate_delta": retry_rate_delta,
+        "fallback_rate_delta": fallback_rate_delta,
         "observed_saved_tokens": observed_saved_tokens,
         "observed_savings_usd": round(observed_savings, 8),
         "projected_saved_tokens": projected_saved_tokens,
         "projected_savings_usd": round(projected_savings, 8),
         "today_crunch_savings_usd": round(_to_float(entry.get("today_crunch_savings_usd")), 8),
-        "target_local_policy_section": sanitize_value(local_row.get("target_local_policy_section") or entry.get("target_local_policy_section") or "crunch.rules"),
-        "target_local_rule_file": sanitize_value(local_row.get("target_local_rule_file") or entry.get("target_local_rule_file") or "crunch_rules.yaml"),
-        "active_rule_count": _to_int(local_row.get("active_rule_count") or entry.get("active_rule_count")),
+        "target_local_policy_section": sanitize_value(target_local_policy_section),
+        "target_local_rule_file": sanitize_value(target_local_rule_file),
+        "active_rule_count": active_rule_count,
         "active_rule_ref": sanitize_value(local_row.get("active_rule_ref") or entry.get("active_rule_ref")),
         "active_rule_source": sanitize_value(local_row.get("active_rule_source") or entry.get("active_rule_source")),
         "active_rule_decision_id": sanitize_value(local_row.get("active_rule_decision_id") or entry.get("active_rule_decision_id")),
@@ -3431,6 +3600,7 @@ def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -
             "full_rollout_active": True,
         },
         "stale_evidence": stale_evidence,
+        "keep_active_regression_gate": keep_active_gate,
         "duplicate_suppression": sanitize_value(duplicate_suppression),
         "closed_predecessor_suppression": {
             "schema": "agentflow.full_rollout_crunch_activation_predecessor_suppression.v1",

@@ -4835,6 +4835,21 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(measurement["projected_saved_tokens"], 8606129)
         self.assertAlmostEqual(measurement["projected_savings_usd"], 25.818387)
         self.assertFalse(measurement["stale_evidence"]["stale"])
+        gate = measurement["keep_active_regression_gate"]
+        self.assertEqual(gate["schema"], "agentflow.full_rollout_crunch_keep_active_regression_gate.v1")
+        self.assertEqual(gate["state"], "keep-active")
+        self.assertTrue(gate["gate_passed"])
+        self.assertEqual(gate["deterministic_next_action"], "keep-active")
+        self.assertEqual(gate["reason_codes"], [])
+        counters = gate["regression_counters"]
+        self.assertEqual(counters["applied_count"], 107)
+        self.assertEqual(counters["holdout_count"], 40)
+        self.assertEqual(counters["skipped_count"], 280)
+        self.assertEqual(counters["fallback_count"], 0)
+        self.assertEqual(counters["retry_count"], 0)
+        self.assertEqual(counters["rollback_count"], 0)
+        self.assertEqual(counters["safety_stop_count"], 0)
+        self.assertFalse(counters["stale_evidence"]["stale"])
         self.assertTrue(measurement["duplicate_suppression"]["suppresses_new_activation_issue"])
         predecessor = measurement["closed_predecessor_suppression"]
         self.assertTrue(predecessor["closed_prior_issue_seen"])
@@ -4853,6 +4868,101 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-measurement-request-secret", rendered)
         self.assertNotIn("raw-measurement-session-secret", rendered)
         self.assertNotIn("raw measurement prompt must not leak", rendered)
+
+    def test_issue_651_rollout_gate_requires_rollback_on_regression_counter(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 400,
+                "evidence_to_activation_next_action_ledger": {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                    "status": "tracked",
+                    "entries": [
+                        {
+                            "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                            "fingerprint": "activation:rollback-required-test",
+                            "rank": 1,
+                            "lever": "crunch",
+                            "local_action_family": "crunch",
+                            "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                            "activation_follow_up_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                            "current_status": "full-rollout",
+                            "state": "full-rollout-active",
+                            "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "applied_count": 25,
+                            "holdout_count": 5,
+                            "skipped_count": 3,
+                            "fallback_count": 1,
+                            "retry_count": 0,
+                            "rollback_count": 1,
+                            "safety_stop_count": 0,
+                            "error_rate_delta": 0.0,
+                            "retry_rate_delta": 0.0,
+                            "fallback_rate_delta": 0.02,
+                            "projected_saved_tokens": 1000,
+                            "projected_saved_usd": 0.003,
+                            "post_max_rollout_status": "post-max-rollout-full-rollout-applied",
+                            "post_max_rollout_decision": "full-rollout-applied",
+                            "post_max_rollout_next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "target_local_policy_section": "crunch.rules",
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "active_rule_count": 1,
+                            "active_rule_ref": "local-repeated-context-crunch-rollback-test",
+                            "active_rule_source": "local-manual",
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "local_activation_outcome_summary": {
+                    "schema": "agentflow.local_activation_outcome_summary.v1",
+                    "status": "tracked",
+                    "outcome_summaries": [
+                        {
+                            "schema": "agentflow.local_activation_outcome_summary_row.v1",
+                            "local_action_family": "crunch",
+                            "outcome": "keep-active",
+                            "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                            "applied_count": 25,
+                            "holdout_count": 5,
+                            "skipped_count": 3,
+                            "fallback_count": 1,
+                            "retry_count": 0,
+                            "rollback_count": 1,
+                            "safety_stopped_count": 0,
+                            "error_rate_delta": 0.0,
+                            "retry_rate_delta": 0.0,
+                            "fallback_rate_delta": 0.02,
+                            "target_local_policy_section": "crunch.rules",
+                            "target_local_rule_file": "crunch_rules.yaml",
+                            "active_rule_count": 1,
+                            "active_rule_ref": "local-repeated-context-crunch-rollback-test",
+                            "active_rule_source": "local-manual",
+                            "post_max_rollout_status": "post-max-rollout-full-rollout-applied",
+                            "post_max_rollout_decision": "full-rollout-applied",
+                            "full_rollout_active": True,
+                            "raw_prompt": "raw rollback prompt must not leak",
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        measurement = plan["evidence"]["stats_summary"]["full_rollout_crunch_activation_measurement"]
+        gate = measurement["keep_active_regression_gate"]
+        self.assertEqual(gate["state"], "rollback-required")
+        self.assertFalse(gate["gate_passed"])
+        self.assertEqual(gate["deterministic_next_action"], "rollback-full-rollout-repeated-context-crunch-rule")
+        self.assertIn("rollback-observed", gate["reason_codes"])
+        self.assertIn("fallback-observed", gate["reason_codes"])
+        self.assertIn("fallback-rate-regression", gate["reason_codes"])
+        self.assertEqual(gate["regression_counters"]["rollback_count"], 1)
+        self.assertEqual(gate["regression_counters"]["fallback_count"], 1)
+        self.assertEqual(gate["target_local_rule_file"], "crunch_rules.yaml")
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw rollback prompt must not leak", rendered)
 
     def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
         plan = build_research_plan(

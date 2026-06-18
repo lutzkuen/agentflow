@@ -596,6 +596,17 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertTrue(crunch["post_max_rollout_full_rollout_allowed"])
         self.assertEqual(crunch["observed_saved_tokens"], 8_606_129)
         self.assertAlmostEqual(crunch["observed_savings_usd"], 25.818387)
+        gate = crunch["keep_active_regression_gate"]
+        self.assertEqual(gate["schema"], "agentflow.full_rollout_crunch_keep_active_regression_gate.v1")
+        self.assertEqual(gate["state"], "keep-active")
+        self.assertTrue(gate["gate_passed"])
+        self.assertEqual(gate["deterministic_next_action"], "keep-active")
+        self.assertEqual(gate["reason_codes"], [])
+        self.assertEqual(gate["regression_counters"]["applied_count"], 107)
+        self.assertEqual(gate["regression_counters"]["holdout_count"], 40)
+        self.assertEqual(gate["regression_counters"]["rollback_count"], 0)
+        self.assertEqual(gate["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(gate["target_local_rule_file"], "crunch_rules.yaml")
         self.assertEqual(report["summary"]["outcome_ledger_entry_count"], 1)
         self.assertEqual(len(report["outcome_ledger_entries"]), 1)
         ledger_entry = report["outcome_ledger_entries"][0]
@@ -620,6 +631,8 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertEqual(ledger_entry["coverage"]["applied_count"], 107)
         self.assertEqual(ledger_entry["coverage"]["holdout_count"], 40)
         self.assertEqual(ledger_entry["coverage"]["safety_stop_count"], 0)
+        self.assertEqual(ledger_entry["keep_active_regression_gate"]["state"], "keep-active")
+        self.assertTrue(ledger_entry["keep_active_regression_gate"]["gate_passed"])
         ledger_suppression = ledger_entry["duplicate_suppression"]
         self.assertEqual(ledger_suppression["reason"], "repeated-context-crunch-full-rollout-active")
         self.assertTrue(ledger_suppression["suppresses_new_activation_issue"])
@@ -628,6 +641,80 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertTrue(ledger_entry["privacy"]["aggregate_only"])
         self.assertFalse(ledger_entry["privacy"]["raw_prompts_included"])
         self.assertFalse(ledger_entry["privacy"]["provider_bodies_included"])
+
+    def test_summary_exports_full_rollout_crunch_rollback_gate(self):
+        crunch_evidence = {
+            "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+            "status": "active-rule-evidence-observed",
+            "decision": "widen",
+            "graduation_decision": "widen",
+            "decision_id": "request-shape-crunch-policy-decision:rollback-test",
+            "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+            "summary": {
+                "applied_count": 107,
+                "holdout_count": 40,
+                "skipped_count": 280,
+                "safety_stop_count": 0,
+                "rollback_count": 1,
+                "fallback_count": 1,
+                "retry_count": 0,
+                "fallback_rate_delta": 0.01,
+                "observed_saved_tokens": 8_606_129,
+                "observed_saved_usd": 25.818387,
+                "target_local_rule_file": "crunch_rules.yaml",
+                "target_local_policy_section": "crunch.rules",
+                "active_rule_count": 1,
+                "full_rollout_active": True,
+                "full_rollout_fraction": 1.0,
+                "post_widening_status": "post-widening-active-at-max-rollout",
+                "post_widening_next_action": "keep-active",
+                "post_max_rollout_status": "post-max-rollout-full-rollout-applied",
+                "post_max_rollout_decision": "full-rollout-applied",
+                "post_max_rollout_next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                "stale_evidence": {
+                    "stale": False,
+                    "age_hours": 2.5,
+                    "status": "fresh",
+                    "reason": "recent-local-outcome-window",
+                },
+            },
+            "rules": [
+                {
+                    "rule_ref": "local-repeated-context-crunch-canary-rollback-test",
+                    "policy_source": "local-manual",
+                    "decision_id": "request-shape-crunch-policy-decision:rollback-test",
+                    "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                }
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                report = build_local_activation_outcome_summary(
+                    store,
+                    limit=20,
+                    config_dir=tmp,
+                    activation_reports=[crunch_evidence],
+                )
+            finally:
+                store.conn.close()
+
+        crunch = {row["local_action_family"]: row for row in report["outcome_summaries"]}["crunch"]
+        gate = crunch["keep_active_regression_gate"]
+        self.assertEqual(gate["state"], "rollback-required")
+        self.assertFalse(gate["gate_passed"])
+        self.assertEqual(gate["deterministic_next_action"], "rollback-full-rollout-repeated-context-crunch-rule")
+        self.assertIn("rollback-observed", gate["reason_codes"])
+        self.assertIn("fallback-observed", gate["reason_codes"])
+        self.assertIn("fallback-rate-regression", gate["reason_codes"])
+        self.assertEqual(gate["regression_counters"]["decision_age_hours"], 2.5)
+        self.assertFalse(gate["regression_counters"]["stale_evidence"]["stale"])
+        ledger_entry = report["outcome_ledger_entries"][0]
+        self.assertEqual(ledger_entry["keep_active_regression_gate"]["state"], "rollback-required")
+        self.assertEqual(ledger_entry["keep_active_regression_gate"]["target_local_rule_file"], "crunch_rules.yaml")
         self.assertFalse(ledger_entry["privacy"]["file_paths_included"])
         self.assertFalse(ledger_entry["privacy"]["request_ids_included"])
         self.assertFalse(ledger_entry["privacy"]["session_ids_included"])

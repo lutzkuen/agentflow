@@ -16,6 +16,7 @@ OUTCOME_LEDGER_ENTRY_SCHEMA = "agentflow.local_activation_outcome_ledger_entry.v
 PRIVACY_SCHEMA = "agentflow.local_activation_outcome_summary_privacy.v1"
 CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
 CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "agentflow.request_shape_crunch_activation_evidence.v1"
+FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA = "agentflow.full_rollout_crunch_keep_active_regression_gate.v1"
 CACHE_REPLAY_POLICY_DECISION_SCHEMA = "agentflow.request_shape_cache_replay_policy_decision.v1"
 CACHE_REPLAY_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_replay_evidence.v1"
 
@@ -96,6 +97,107 @@ def _privacy() -> dict[str, Any]:
         "file_paths_included": False,
         "absolute_paths_included": False,
         "policy_file_contents_included": False,
+    }
+
+
+def _full_rollout_crunch_keep_active_gate(
+    *,
+    applied_count: int,
+    holdout_count: int,
+    skipped_count: int,
+    fallback_count: int,
+    retry_count: int,
+    rollback_count: int,
+    safety_stop_count: int,
+    error_rate_delta: float,
+    retry_rate_delta: float,
+    fallback_rate_delta: float,
+    stale_evidence: dict[str, Any],
+    decision_age_hours: float,
+    full_rollout_active: bool,
+    target_local_policy_section: Any,
+    target_local_rule_file: Any,
+) -> dict[str, Any]:
+    stale = bool(stale_evidence.get("stale"))
+    reason_codes: list[str] = []
+    if not full_rollout_active:
+        reason_codes.append("full-rollout-policy-not-active")
+    if applied_count <= 0:
+        reason_codes.append("missing-applied-coverage")
+    if rollback_count > 0:
+        reason_codes.append("rollback-observed")
+    if safety_stop_count > 0:
+        reason_codes.append("safety-stop-observed")
+    if fallback_count > 0:
+        reason_codes.append("fallback-observed")
+    if error_rate_delta > 0:
+        reason_codes.append("error-rate-regression")
+    if retry_rate_delta > 0:
+        reason_codes.append("retry-rate-regression")
+    if fallback_rate_delta > 0:
+        reason_codes.append("fallback-rate-regression")
+    if stale:
+        reason_codes.append("stale-evidence")
+
+    rollback_reasons = {
+        "rollback-observed",
+        "safety-stop-observed",
+        "fallback-observed",
+        "error-rate-regression",
+        "retry-rate-regression",
+        "fallback-rate-regression",
+    }
+    if any(reason in rollback_reasons for reason in reason_codes):
+        state = "rollback-required"
+        next_action = "rollback-full-rollout-repeated-context-crunch-rule"
+        gate_passed = False
+    elif "stale-evidence" in reason_codes:
+        state = "review-stale-evidence"
+        next_action = "refresh-full-rollout-repeated-context-crunch-evidence"
+        gate_passed = False
+    elif {"full-rollout-policy-not-active", "missing-applied-coverage"} & set(reason_codes):
+        state = "keep-blocked"
+        next_action = "keep-crunch-rollout-blocked-until-applied-coverage"
+        gate_passed = False
+    else:
+        state = "keep-active"
+        next_action = "keep-active"
+        gate_passed = True
+
+    return {
+        "schema": FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA,
+        "state": state,
+        "gate_passed": gate_passed,
+        "deterministic_next_action": next_action,
+        "next_action": next_action,
+        "reason_codes": reason_codes,
+        "target_local_policy_section": public_label(target_local_policy_section, "crunch.rules"),
+        "target_local_rule_file": public_label(target_local_rule_file, "crunch_rules.yaml"),
+        "regression_counters": {
+            "schema": "agentflow.full_rollout_crunch_keep_active_regression_counters.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": skipped_count,
+            "fallback_count": fallback_count,
+            "retry_count": retry_count,
+            "rollback_count": rollback_count,
+            "safety_stop_count": safety_stop_count,
+            "error_rate_delta": round(error_rate_delta, 6),
+            "retry_rate_delta": round(retry_rate_delta, 6),
+            "fallback_rate_delta": round(fallback_rate_delta, 6),
+            "decision_age_hours": round(max(0.0, decision_age_hours), 3),
+            "stale_evidence": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "stale": stale,
+                "status": public_label(stale_evidence.get("status"), "stale" if stale else "fresh-or-active"),
+                "reason": public_label(stale_evidence.get("reason"), "full-rollout-local-policy-active"),
+            },
+        },
+        "decision_options": ["keep-active", "review-stale-evidence", "rollback-required", "keep-blocked"],
+        "privacy": _privacy(),
     }
 
 
@@ -455,6 +557,7 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
     safety_stop_count = _as_int(summary.get("safety_stop_count"))
     rollback_count = _as_int(summary.get("rollback_count"))
     fallback_count = _as_int(summary.get("fallback_count"))
+    retry_count = _as_int(summary.get("retry_count"))
     observed_tokens = _as_int(summary.get("observed_saved_tokens") or summary.get("projected_saved_tokens"))
     observed_savings = _as_float(summary.get("observed_saved_usd") or summary.get("projected_saved_usd"))
     row_count = applied + holdout + skipped
@@ -478,6 +581,7 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
     row["safety_stopped_count"] = max(_as_int(row.get("safety_stopped_count")), safety_stop_count)
     row["rollback_count"] = max(_as_int(row.get("rollback_count")), rollback_count)
     row["fallback_count"] = max(_as_int(row.get("fallback_count")), fallback_count)
+    row["retry_count"] = max(_as_int(row.get("retry_count")), retry_count)
     row["observed_savings_usd"] = max(_as_float(row.get("observed_savings_usd")), observed_savings)
     row["projected_savings_usd"] = max(_as_float(row.get("projected_savings_usd")), observed_savings)
     row["observed_saved_tokens"] = max(_as_int(row.get("observed_saved_tokens")), observed_tokens)
@@ -538,6 +642,30 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
     row["error_rate_delta"] = round(_as_float(summary.get("error_rate_delta")), 6)
     row["retry_rate_delta"] = round(_as_float(summary.get("retry_rate_delta")), 6)
     row["fallback_rate_delta"] = round(_as_float(summary.get("fallback_rate_delta")), 6)
+    stale_evidence = summary.get("stale_evidence") if isinstance(summary.get("stale_evidence"), dict) else {}
+    decision_age_hours = _as_float(
+        stale_evidence.get("age_hours")
+        or stale_evidence.get("decision_age_hours")
+        or summary.get("evidence_age_hours")
+        or summary.get("decision_age_hours")
+    )
+    row["keep_active_regression_gate"] = _full_rollout_crunch_keep_active_gate(
+        applied_count=row["applied_count"],
+        holdout_count=row["holdout_count"],
+        skipped_count=row["skipped_count"],
+        fallback_count=row["fallback_count"],
+        retry_count=row["retry_count"],
+        rollback_count=row["rollback_count"],
+        safety_stop_count=row["safety_stopped_count"],
+        error_rate_delta=row["error_rate_delta"],
+        retry_rate_delta=row["retry_rate_delta"],
+        fallback_rate_delta=row["fallback_rate_delta"],
+        stale_evidence=stale_evidence,
+        decision_age_hours=decision_age_hours,
+        full_rollout_active=full_rollout_active,
+        target_local_policy_section=target_policy_section,
+        target_local_rule_file=target_rule_file,
+    )
     row["coverage"] = {
         "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
         "source_schema": CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
@@ -550,6 +678,7 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
         "safety_stop_count": safety_stop_count,
         "rollback_count": rollback_count,
         "fallback_count": fallback_count,
+        "retry_count": retry_count,
         "error_rate_delta": row["error_rate_delta"],
         "retry_rate_delta": row["retry_rate_delta"],
         "fallback_rate_delta": row["fallback_rate_delta"],
@@ -865,6 +994,7 @@ def _outcome_ledger_entry(row: dict[str, Any]) -> dict[str, Any] | None:
         "active_rule_decision_id": public_label(row.get("active_rule_decision_id"), "") or None,
         "active_rule_source_evidence_schema": public_label(row.get("active_rule_source_evidence_schema"), "") or None,
         "coverage": row.get("coverage") if isinstance(row.get("coverage"), dict) else None,
+        "keep_active_regression_gate": row.get("keep_active_regression_gate") if isinstance(row.get("keep_active_regression_gate"), dict) else None,
         "duplicate_suppression": row.get("duplicate_suppression") if isinstance(row.get("duplicate_suppression"), dict) else None,
         "privacy": _privacy(),
     }
