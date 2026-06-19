@@ -21,6 +21,7 @@ LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "agentflow.local_activation_next_act
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_next_action_queue_entry.v1"
 LOCAL_ACTIVATION_SUCCESSOR_ACTION_SCHEMA = "agentflow.local_activation_successor_action.v1"
 PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA = "agentflow.preview_verified_activation_successor_gate.v1"
+MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "agentflow.managed_activation_preview_health_gate.v1"
 ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA = "agentflow.activation_feedback_evidence_freshness_gate.v1"
 OPENAI_ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
 FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA = "agentflow.full_rollout_crunch_activation_measurement.v1"
@@ -5472,6 +5473,34 @@ def _managed_preview_outcomes_report(stats_summary: dict[str, Any]) -> dict[str,
     return None
 
 
+def _managed_preview_health_report(
+    stats_summary: dict[str, Any],
+    managed_preview_outcomes: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    for key in (
+        "managed_activation_preview_health",
+        "local_activation_executor_handoff_preview_health",
+        "managed_activation_handoff_preview_health",
+        "managed_preview_health",
+    ):
+        value = stats_summary.get(key)
+        if isinstance(value, dict):
+            return value
+    if isinstance(stats_summary.get("managed_activation_preview_result"), dict):
+        return stats_summary["managed_activation_preview_result"]
+    if isinstance(managed_preview_outcomes, dict):
+        for key in (
+            "managed_activation_preview_health",
+            "local_activation_executor_handoff_preview_health",
+            "health",
+            "source_health",
+        ):
+            value = managed_preview_outcomes.get(key)
+            if isinstance(value, dict):
+                return value
+    return managed_preview_outcomes if isinstance(managed_preview_outcomes, dict) else None
+
+
 def _managed_preview_successor_privacy(*, managed_server_calls_made: bool = False) -> dict[str, Any]:
     return {
         "metadata_only": True,
@@ -5499,6 +5528,201 @@ def _managed_preview_successor_privacy(*, managed_server_calls_made: bool = Fals
         "managed_server_calls_made": bool(managed_server_calls_made),
         "current_run_managed_server_calls_made": False,
     }
+
+
+def _first_preview_reason(rows: Any) -> str | None:
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for key in ("reason_code", "reason", "value", "code", "status"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    return sanitize_value(value)
+    return None
+
+
+def _managed_preview_family_count(report: dict[str, Any], keys: tuple[str, ...], family: str) -> int:
+    for key in keys:
+        value = report.get(key)
+        if isinstance(value, dict):
+            return _to_int(value.get(family))
+    return 0
+
+
+def _managed_preview_health_age_hours(report: dict[str, Any]) -> float | None:
+    for key in ("latest_preview_age_hours", "preview_age_hours", "age_hours"):
+        if report.get(key) is not None:
+            return _to_float(report.get(key))
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    for key in ("latest_preview_age_hours", "preview_age_hours", "age_hours"):
+        if summary.get(key) is not None:
+            return _to_float(summary.get(key))
+    latest = report.get("newest_preview_at") or report.get("latest_preview_at") or report.get("generated_at")
+    parsed = _parse_time(latest)
+    if parsed is None:
+        return None
+    return max(0.0, round((datetime.now(timezone.utc) - parsed).total_seconds() / 3600.0, 3))
+
+
+def _managed_preview_health_gate(
+    health_report: dict[str, Any] | None,
+    *,
+    family: str,
+    managed_preview_outcomes: dict[str, Any] | None,
+) -> dict[str, Any]:
+    report = health_report if isinstance(health_report, dict) else {}
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
+    fetch = report.get("fetch") if isinstance(report.get("fetch"), dict) else {}
+    outcome_summary = (
+        managed_preview_outcomes.get("summary")
+        if isinstance(managed_preview_outcomes, dict) and isinstance(managed_preview_outcomes.get("summary"), dict)
+        else {}
+    )
+    outcomes = [row for row in (managed_preview_outcomes or {}).get("outcomes", []) if isinstance(row, dict)]
+    family_outcomes = [
+        row
+        for row in outcomes
+        if str(row.get("local_action_family") or "") == family
+    ]
+    status_text = str(report.get("status") or summary.get("status") or "").strip()
+    fetch_status = str(fetch.get("status") or "").strip()
+    stale_after_hours = _to_float(
+        report.get("stale_after_hours")
+        or summary.get("stale_after_hours")
+        or (managed_preview_outcomes or {}).get("stale_after_hours")
+        or outcome_summary.get("stale_after_hours")
+        or 72.0,
+        72.0,
+    )
+    age_hours = _managed_preview_health_age_hours(report)
+    stale = bool(
+        report.get("stale")
+        or summary.get("stale")
+        or (age_hours is not None and age_hours > max(0.0, stale_after_hours))
+    )
+    accepted_batch_count = _to_int(
+        report.get("accepted_batch_count")
+        or summary.get("accepted_batch_count")
+        or (1 if fetch_status == "ok" or status_text in {"previewed", "tracked"} else 0)
+    )
+    rejected_batch_count = _to_int(report.get("rejected_batch_count") or summary.get("rejected_batch_count"))
+    submitted_row_count = _to_int(
+        report.get("submitted_row_count")
+        or summary.get("submitted_row_count")
+        or coverage.get("handoff_row_count")
+        or summary.get("handoff_row_count")
+    )
+    previewed_row_count = _to_int(
+        report.get("previewed_row_count")
+        or summary.get("previewed_row_count")
+        or coverage.get("preview_decision_count")
+        or summary.get("preview_decision_count")
+        or summary.get("preview_row_count")
+        or len(outcomes)
+    )
+    omitted_row_count = _to_int(
+        report.get("omitted_row_count")
+        or summary.get("omitted_row_count")
+        or coverage.get("omitted_count")
+        or summary.get("omitted_count")
+        or summary.get("omission_count")
+        or sum(1 for row in outcomes if row.get("omitted_reason"))
+    )
+    rejected_row_count = _to_int(report.get("rejected_row_count") or summary.get("rejected_row_count"))
+    privacy_rejection_count = _to_int(report.get("privacy_rejection_count") or summary.get("privacy_rejection_count"))
+    validation_error_count = _to_int(report.get("validation_error_count") or summary.get("validation_error_count"))
+    stored_count = _to_int(
+        summary.get("stored_preview_outcome_count")
+        or report.get("stored_preview_outcome_count")
+        or len(outcomes)
+    )
+    fresh_outcome_count = sum(
+        1
+        for row in family_outcomes
+        if not bool(row.get("stale"))
+        and not bool(row.get("missing_preview_decision"))
+        and not bool(row.get("failed_closed"))
+        and not bool(row.get("disagrees_with_local_evidence"))
+    )
+    family_previewed_count = _managed_preview_family_count(
+        report,
+        ("previewed_counts_by_local_action_family", "local_action_family_counts"),
+        family,
+    ) or len(family_outcomes)
+    family_omitted_count = _managed_preview_family_count(
+        report,
+        ("omitted_counts_by_local_action_family",),
+        family,
+    )
+    family_rejected_count = _managed_preview_family_count(
+        report,
+        ("rejected_counts_by_local_action_family",),
+        family,
+    )
+    top_omission_reason = _first_preview_reason(report.get("top_omission_reasons"))
+    top_rejection_reason = _first_preview_reason(report.get("top_rejection_reasons"))
+    fetch_reason = str(fetch.get("reason") or report.get("reason") or "").strip()
+    if top_rejection_reason is None and fetch_reason:
+        top_rejection_reason = sanitize_value(fetch_reason)
+    has_report = bool(report)
+    if privacy_rejection_count > 0 or str(top_rejection_reason or "").lower() == "privacy-rejection":
+        status = "privacy-rejected-preview-health"
+        reason = "privacy-rejection"
+        next_action = "review-managed-activation-preview-privacy-rejection"
+    elif rejected_batch_count > 0 or rejected_row_count > 0 or validation_error_count > 0 or fetch_status in {"blocked", "error"} or status_text in {"blocked", "error", "unavailable"}:
+        status = "rejected-preview-health"
+        reason = top_rejection_reason or fetch_reason or "managed-preview-health-rejected"
+        next_action = "review-managed-activation-preview-rejection"
+    elif not has_report or status_text in {"", "no-data", "skipped"} or (accepted_batch_count == 0 and previewed_row_count == 0 and stored_count == 0):
+        status = "no-data-preview-health"
+        reason = fetch_reason or "managed-preview-health-no-data"
+        next_action = "refresh-managed-activation-preview"
+    elif stale:
+        status = "stale-preview-health"
+        reason = "managed-preview-health-stale"
+        next_action = "refresh-managed-activation-preview"
+    elif accepted_batch_count <= 0 or previewed_row_count <= 0 or (family_previewed_count <= 0 and family_outcomes):
+        status = "incomplete-preview-health"
+        reason = "managed-preview-health-incomplete"
+        next_action = "refresh-managed-activation-preview"
+    else:
+        status = "fresh-preview-health"
+        reason = "managed-preview-health-fresh"
+        next_action = "use-managed-preview-gate"
+    passed = status == "fresh-preview-health"
+    gate = {
+        "schema": MANAGED_PREVIEW_HEALTH_GATE_SCHEMA,
+        "status": status,
+        "passed": passed,
+        "reason": reason,
+        "next_action": next_action,
+        "managed_dependency": "optional",
+        "managed_server_calls_made": bool(report.get("managed_server_calls_made") or fetch.get("managed_server_calls_made")),
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "accepted_batch_count": accepted_batch_count,
+        "rejected_batch_count": rejected_batch_count,
+        "submitted_row_count": submitted_row_count,
+        "previewed_row_count": previewed_row_count,
+        "omitted_row_count": omitted_row_count,
+        "rejected_row_count": rejected_row_count,
+        "privacy_rejection_count": privacy_rejection_count,
+        "validation_error_count": validation_error_count,
+        "stored_preview_outcome_count": stored_count,
+        "family_previewed_count": family_previewed_count,
+        "family_omitted_count": family_omitted_count,
+        "family_rejected_count": family_rejected_count,
+        "latest_preview_age_hours": age_hours,
+        "stale_after_hours": stale_after_hours,
+        "top_omission_reason": top_omission_reason,
+        "top_rejection_reason": top_rejection_reason,
+        "privacy": _managed_preview_successor_privacy(
+            managed_server_calls_made=bool(report.get("managed_server_calls_made") or fetch.get("managed_server_calls_made"))
+        ),
+    }
+    return sanitize_value(gate)
 
 
 def _managed_preview_required_for_successor(entry: dict[str, Any]) -> bool:
@@ -5582,32 +5806,53 @@ def _managed_preview_outcome_for_entry(
 def _managed_preview_successor_gate(
     entry: dict[str, Any],
     managed_preview_outcomes: dict[str, Any] | None,
+    managed_preview_health: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     required = _managed_preview_required_for_successor(entry)
     local_gate = _managed_preview_local_executor_gate(entry)
+    family = str(entry.get("local_action_family") or entry.get("lever") or "").strip()
+    health_gate = _managed_preview_health_gate(
+        managed_preview_health,
+        family=family,
+        managed_preview_outcomes=managed_preview_outcomes,
+    )
+    health_blocks_required = bool(required and not health_gate.get("passed"))
     report_summary = (
         managed_preview_outcomes.get("summary")
         if isinstance(managed_preview_outcomes, dict) and isinstance(managed_preview_outcomes.get("summary"), dict)
         else {}
     )
     outcome = _managed_preview_outcome_for_entry(entry, managed_preview_outcomes)
-    if outcome is None:
-        status = "missing-preview"
+    if outcome is None or health_blocks_required:
+        status = str(health_gate.get("status") or "missing-preview") if health_blocks_required else "missing-preview"
+        next_action = (
+            health_gate.get("next_action")
+            if health_blocks_required
+            else "refresh-managed-activation-preview"
+        )
+        reason = (
+            health_gate.get("reason")
+            if health_blocks_required
+            else ("managed-preview-outcome-missing" if required else "managed-preview-optional")
+        )
         return {
             "schema": PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA,
             "required": required,
             "status": status,
             "verified": False,
             "decision": "keep-blocked" if required else "preview-optional",
-            "next_action": "refresh-managed-activation-preview" if required else sanitize_value(entry.get("next_action")),
+            "next_action": sanitize_value(next_action if required else entry.get("next_action")),
             "local_executor_gate": local_gate,
+            "health_gate": health_gate,
             "managed_dependency": "optional",
             "policy_files_written": False,
             "provider_calls_made": False,
-            "managed_server_calls_made": False,
+            "managed_server_calls_made": bool(health_gate.get("managed_server_calls_made")),
             "stored_preview_outcome_count": _to_int(report_summary.get("stored_preview_outcome_count")),
-            "reason": "managed-preview-outcome-missing" if required else "managed-preview-optional",
-            "privacy": _managed_preview_successor_privacy(),
+            "reason": reason,
+            "privacy": _managed_preview_successor_privacy(
+                managed_server_calls_made=bool(health_gate.get("managed_server_calls_made"))
+            ),
         }
 
     classification = str(outcome.get("classification") or "unknown").strip() or "unknown"
@@ -5631,6 +5876,7 @@ def _managed_preview_successor_gate(
         and not disagreement
         and not preview_policy_write
         and not preview_provider_call
+        and (health_gate.get("passed") or not required)
     )
     action_status = _successor_action_status(entry)
     if verified:
@@ -5671,6 +5917,7 @@ def _managed_preview_successor_gate(
         "decision": decision,
         "next_action": sanitize_value(next_action),
         "local_executor_gate": local_gate,
+        "health_gate": health_gate,
         "managed_dependency": "optional",
         "policy_files_written": False,
         "provider_calls_made": False,
@@ -6081,9 +6328,14 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
     if not entries:
         return None
     managed_preview_outcomes = _managed_preview_outcomes_report(stats_summary)
-    if isinstance(managed_preview_outcomes, dict):
+    managed_preview_health = _managed_preview_health_report(stats_summary, managed_preview_outcomes)
+    if isinstance(managed_preview_outcomes, dict) or isinstance(managed_preview_health, dict):
         for entry in entries:
-            entry["managed_preview_gate"] = _managed_preview_successor_gate(entry, managed_preview_outcomes)
+            entry["managed_preview_gate"] = _managed_preview_successor_gate(
+                entry,
+                managed_preview_outcomes,
+                managed_preview_health,
+            )
     entries.sort(
         key=lambda item: (
             _queue_rank_bucket(item, _to_float(item.get("realized_savings_usd")), _to_float(item.get("projected_savings_usd"))),

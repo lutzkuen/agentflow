@@ -2263,6 +2263,213 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw managed preview prompt must not leak", rendered)
         self.assertNotIn('"policy_files_written": true', rendered.lower())
 
+    def test_local_activation_successors_gate_on_managed_preview_health_freshness(self):
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:preview-health-routing",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "state": "keep-blocked",
+                    "current_status": "review",
+                    "issue_worthy_status": "ready",
+                    "next_action": "draft-openai-routing-recovery-canary",
+                    "blocker_codes": ["semantic-quality-regression-observed"],
+                    "sample_count": 342,
+                    "stage_allowed": True,
+                    "policy_files_written": False,
+                    "request_id": "req-health-secret",
+                },
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        def outcome_rows() -> list[dict[str, object]]:
+            return [
+                {
+                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "outcome_fingerprint": "managed-preview-outcome:health-routing",
+                    "preview_ref": "preview:health-routing",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "classification": "review-only",
+                    "decision": "review-only-recommendation",
+                    "next_action": "draft-openai-routing-recovery-canary",
+                    "preview_age_hours": 1.0,
+                    "stale_after_hours": 72.0,
+                    "stale": False,
+                    "missing_preview_decision": False,
+                    "failed_closed": False,
+                    "disagrees_with_local_evidence": False,
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": True,
+                },
+            ]
+
+        def preview_outcomes(rows: list[dict[str, object]]) -> dict[str, object]:
+            return {
+                "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                "status": "tracked" if rows else "empty",
+                "managed_dependency": "optional",
+                "managed_server_calls_made": True,
+                "summary": {
+                    "stored_preview_outcome_count": len(rows),
+                    "stale_count": 0,
+                    "missing_preview_decision_count": 0,
+                    "failed_closed_count": 0,
+                    "disagreement_count": 0,
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                },
+                "outcomes": rows,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            }
+
+        cases = [
+            (
+                "fresh",
+                preview_outcomes(outcome_rows()),
+                {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": 1,
+                    "previewed_row_count": 1,
+                    "omitted_row_count": 0,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {"routing": 1},
+                    "top_omission_reasons": [{"reason_code": "none", "count": 0}],
+                    "top_rejection_reasons": [],
+                    "privacy_summary": {"metadata_only": True, "request_ids_returned": False},
+                },
+                "fresh-preview-health",
+                "ready",
+                "draft-openai-routing-recovery-canary",
+                True,
+            ),
+            (
+                "no-data",
+                preview_outcomes([]),
+                {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "no-data",
+                    "accepted_batch_count": 0,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": 0,
+                    "previewed_row_count": 0,
+                    "omitted_row_count": 0,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "top_omission_reasons": [],
+                    "top_rejection_reasons": [],
+                    "privacy_summary": {"metadata_only": True, "request_ids_returned": False},
+                },
+                "no-data-preview-health",
+                "keep-blocked",
+                "refresh-managed-activation-preview",
+                False,
+            ),
+            (
+                "rejected",
+                preview_outcomes(outcome_rows()),
+                {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 1,
+                    "submitted_row_count": 1,
+                    "previewed_row_count": 1,
+                    "omitted_row_count": 1,
+                    "rejected_row_count": 1,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {"routing": 1},
+                    "rejected_counts_by_local_action_family": {"routing": 1},
+                    "top_omission_reasons": [{"reason_code": "semantic-quality-regression-observed", "count": 1}],
+                    "top_rejection_reasons": [{"reason_code": "validation-error", "count": 1}],
+                    "privacy_summary": {"metadata_only": True, "request_ids_returned": False},
+                },
+                "rejected-preview-health",
+                "keep-blocked",
+                "review-managed-activation-preview-rejection",
+                False,
+            ),
+            (
+                "privacy-rejected",
+                preview_outcomes(outcome_rows()),
+                {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 1,
+                    "submitted_row_count": 1,
+                    "previewed_row_count": 1,
+                    "omitted_row_count": 0,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 1,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {"routing": 1},
+                    "top_omission_reasons": [],
+                    "top_rejection_reasons": [{"reason_code": "privacy-rejection", "count": 1}],
+                    "privacy_summary": {"metadata_only": True, "request_ids_returned": False},
+                    "raw_prompt": "raw health prompt must not leak",
+                },
+                "privacy-rejected-preview-health",
+                "keep-blocked",
+                "review-managed-activation-preview-privacy-rejection",
+                False,
+            ),
+        ]
+
+        for label, outcomes, health, expected_health, expected_status, expected_next, expected_verified in cases:
+            with self.subTest(label=label):
+                queue = build_local_activation_next_action_queue(
+                    {
+                        "evidence_to_activation_next_action_ledger": ledger,
+                        "managed_activation_preview_outcomes": outcomes,
+                        "managed_activation_preview_health": health,
+                    }
+                )
+                action = queue["successor_actions"][0]
+                gate = action["managed_preview_gate"]
+                health_gate = gate["health_gate"]
+
+                self.assertEqual(health_gate["schema"], "agentflow.managed_activation_preview_health_gate.v1")
+                self.assertEqual(health_gate["status"], expected_health)
+                self.assertEqual(action["successor_status"], expected_status)
+                self.assertEqual(action["recommended_next_action"], expected_next)
+                self.assertEqual(action["preview_verified"], expected_verified)
+                self.assertEqual(health_gate["accepted_batch_count"], health["accepted_batch_count"])
+                self.assertEqual(health_gate["rejected_batch_count"], health["rejected_batch_count"])
+                self.assertEqual(health_gate["submitted_row_count"], health["submitted_row_count"])
+                self.assertEqual(health_gate["previewed_row_count"], health["previewed_row_count"])
+                self.assertEqual(health_gate["omitted_row_count"], health["omitted_row_count"])
+                self.assertEqual(health_gate["privacy_rejection_count"], health["privacy_rejection_count"])
+                self.assertTrue(health_gate["privacy"]["metadata_only"])
+                self.assertFalse(health_gate["policy_files_written"])
+                self.assertFalse(health_gate["provider_calls_made"])
+                self.assertFalse(gate["policy_files_written"])
+                self.assertFalse(gate["provider_calls_made"])
+                if label == "rejected":
+                    self.assertEqual(health_gate["top_omission_reason"], "semantic-quality-regression-observed")
+                    self.assertEqual(health_gate["top_rejection_reason"], "validation-error")
+                if label == "privacy-rejected":
+                    self.assertEqual(health_gate["top_rejection_reason"], "privacy-rejection")
+
+                rendered = json.dumps(queue, sort_keys=True)
+                self.assertNotIn("req-health-secret", rendered)
+                self.assertNotIn("raw health prompt must not leak", rendered)
+                self.assertNotIn('"policy_files_written": true', rendered.lower())
+
     def test_activation_burndown_report_ranks_successors_after_keep_active_crunch(self):
         ledger = {
             "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
