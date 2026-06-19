@@ -1319,11 +1319,12 @@ def _without_suppressed_activation_feedback_blocker_review_diagnostics(
 
 def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
     reason = str(group.get("keep_blocked_reason") or group.get("blocker_code") or group.get("safety_stop_reason") or "").strip()
-    count = _to_int(group.get("safety_stop_count") or group.get("event_count"))
+    safety_stop_count = _to_int(group.get("safety_stop_count"))
+    count = safety_stop_count or _to_int(group.get("event_count") or group.get("sample_count") or group.get("observed_count"))
     if not reason or count <= 0:
         return None
     next_state = str(group.get("next_state") or "keep-blocked").strip().replace("_", "-")
-    if next_state not in {"keep-blocked", "retry-later", "superseded"}:
+    if next_state not in {"keep-blocked", "retry-later", "superseded", "unblock-ready"}:
         next_state = "keep-blocked"
     needed = [str(item) for item in group.get("needed_resolution") or [] if str(item or "").strip()]
     action_family = str(group.get("action_family") or "activation-feedback").strip() or "activation-feedback"
@@ -1344,8 +1345,12 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
         "needed_resolution": needed,
         "next_state": next_state,
         "next_state_reason": group.get("next_state_reason") or reason,
-        "safety_stop_count": count,
-        "safety_stopped_count": count,
+        "safety_stop_count": safety_stop_count,
+        "safety_stopped_count": safety_stop_count,
+        "applied_count": _to_int(group.get("applied_count")),
+        "holdout_count": _to_int(group.get("holdout_count")),
+        "fallback_count": _to_int(group.get("fallback_count")),
+        "rollback_count": _to_int(group.get("rollback_count")),
     }
     for source_key in (
         "source_surface",
@@ -1379,6 +1384,8 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
         stage["duplicate_suppression"] = group.get("duplicate_suppression")
     if isinstance(group.get("unblock_criteria"), dict):
         stage["unblock_criteria"] = group.get("unblock_criteria")
+    if isinstance(group.get("rollback_metadata"), dict):
+        stage["rollback_metadata"] = group.get("rollback_metadata")
     for review_key in (
         "safety_stop_reason_review",
         "safer_threshold_or_executor_guard",
@@ -4732,6 +4739,8 @@ def _loop_progress_state(state: str) -> bool:
 def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
     state = str(stage.get("state") or "").strip().lower().replace("_", "-")
     blockers = [str(item).lower().replace("_", "-") for item in stage.get("blocker_codes") or []]
+    if state == "unblock-ready":
+        return "staged"
     if state == "retired-no-repeat":
         return "superseded"
     if state in {"keep-blocked", "retry-later", "superseded"}:
@@ -5005,6 +5014,7 @@ def build_evidence_to_activation_next_action_ledger(
             "safety_stop_reason_review",
             "safer_threshold_or_executor_guard",
             "rollback_proof",
+            "rollback_metadata",
             "applied_coverage",
             "holdout_coverage",
             "missing_dependency_evidence_review",
@@ -5576,6 +5586,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "target_local_policy_section": sanitize_value(entry.get("target_local_policy_section")),
         "duplicate_suppression_status": duplicate_status,
         "duplicate_suppression_reason": sanitize_value(suppression.get("reason")) if suppression else None,
+        "duplicate_suppression": sanitize_value(suppression) if suppression else None,
         "evidence_schema": sanitize_value(entry.get("evidence_schema")),
         "expected_savings_path": sanitize_value(entry.get("expected_savings_path")),
         "diagnostic_class": sanitize_value(entry.get("diagnostic_class")),
@@ -5668,6 +5679,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "safety_stop_reason_review",
         "safer_threshold_or_executor_guard",
         "rollback_proof",
+        "rollback_metadata",
         "applied_coverage",
         "holdout_coverage",
         "local_file_backed_representation",
@@ -5744,6 +5756,19 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
         if isinstance(stats_summary.get("evidence_to_activation_next_action_ledger"), dict)
         else None
     )
+    if not isinstance(ledger, dict):
+        safety_stop_burndown = (
+            stats_summary
+            if stats_summary.get("schema") == "agentflow.activation_safety_stop_burndown.v1"
+            else stats_summary.get("activation_safety_stop_burndown")
+            if isinstance(stats_summary.get("activation_safety_stop_burndown"), dict)
+            else None
+        )
+        if isinstance(safety_stop_burndown, dict):
+            ledger = build_evidence_to_activation_next_action_ledger(
+                {},
+                safety_stop_burndown=safety_stop_burndown,
+            )
     if not isinstance(ledger, dict):
         return None
     entries = [

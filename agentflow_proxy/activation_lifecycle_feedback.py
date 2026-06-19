@@ -1175,9 +1175,6 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         for item in (list(lifecycle.get("blocker_codes") or []) + list(bucket.get("blocker_codes") or []))
         if str(item or "").strip()
     })
-    if safety_stop_count <= 0 and "safety-stop-observed" not in blockers:
-        return None
-
     applied_count = _as_int(counts.get("canary_applied"))
     holdout_count = _as_int(counts.get("canary_holdout"))
     stale = bool(stale_evidence.get("stale"))
@@ -1209,6 +1206,14 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         or (safety_breakdown[0].get("durable_blocked_reason") if safety_breakdown else None)
         or "anthropic-routing-safety-stop-keep-blocked"
     )
+    required_local_executor = _safe_label(
+        bucket.get("required_local_executor") or (safety_breakdown[0].get("expected_local_executor") if safety_breakdown else None),
+        "unknown",
+    )
+    executor_compatible = any(bool(row.get("executor_compatible")) for row in safety_breakdown)
+    if not executor_compatible and not safety_breakdown and required_local_executor == "anthropic-routing-rules":
+        executor_compatible = True
+
     needed = []
     if applied_count <= 0 or "missing-applied-coverage" in blockers:
         needed.append("applied_coverage")
@@ -1218,18 +1223,14 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         needed.append("fresh_lifecycle_evidence")
     if safety_stop_count > 0 or "safety-stop-observed" in blockers:
         needed.extend(["safety_stop_reason_review", "safer_threshold_or_executor_guard", "rollback_proof"])
+    if not executor_compatible:
+        needed.append("safer_threshold_or_executor_guard")
     needed = sorted(set(needed))
     workflow_phase = _safe_label(bucket.get("workflow_phase"), "unknown")
     if workflow_phase == "unknown" and safety_breakdown:
         workflow_phase = _safe_label(safety_breakdown[0].get("workflow_phase"), "unknown")
     if workflow_phase == "unknown" and _safe_label(bucket.get("category"), "unknown") == "tool-result":
         workflow_phase = "tool-execution"
-    executor_compatible = any(bool(row.get("executor_compatible")) for row in safety_breakdown)
-    required_local_executor = _safe_label(
-        bucket.get("required_local_executor") or (safety_breakdown[0].get("expected_local_executor") if safety_breakdown else None),
-        "unknown",
-    )
-
     matched_count = _as_int(lifecycle.get("matched_count") or coverage.get("matched_count") or bucket.get("sample_count"))
     observed_count = _as_int(lifecycle.get("observed_count"))
     if observed_count <= 0:

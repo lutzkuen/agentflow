@@ -11,6 +11,7 @@ from agentflow_proxy.activation_lifecycle_feedback import (
     build_activation_safety_stop_burndown,
     build_activation_staged_lifecycle_feedback,
 )
+from agentflow_proxy.orchestrator_research import build_local_activation_next_action_queue
 from agentflow_proxy.store import Store, stable_json, utc_now
 
 
@@ -254,6 +255,93 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         )
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertTrue(report["privacy"]["aggregate_only"])
+
+        queue = build_local_activation_next_action_queue({"activation_safety_stop_burndown": report})
+        self.assertIsNotNone(queue)
+        queue_row = queue["entries"][0]
+        self.assertEqual(queue_row["evidence_schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(queue_row["local_action_family"], "routing")
+        self.assertEqual(queue_row["current_status"], "keep-blocked")
+        self.assertEqual(queue_row["next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
+        self.assertEqual(queue_row["safety_stop_count"], 390)
+        self.assertEqual(queue_row["applied_count"], 0)
+        self.assertEqual(queue_row["holdout_count"], 0)
+        self.assertFalse(queue_row["promotion_allowed"])
+        self.assertFalse(queue_row["stage_allowed"])
+        self.assertFalse(queue_row["active_policy_changed"])
+        self.assertFalse(queue_row["wrote_active_policy_files"])
+        self.assertEqual(queue_row["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(queue_row["target_local_policy_section"], "routing.rules")
+        self.assertEqual(queue_row["required_local_executor"], "anthropic-routing-rules")
+        self.assertEqual(queue_row["candidate_target_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(queue_row["unblock_criteria"]["status"], "blocked")
+        for field in queue_row["unblock_criteria"]["required_resolution_fields"]:
+            self.assertFalse(queue_row["unblock_criteria"]["criterion_results"][field]["passed"])
+        self.assertEqual(queue_row["rollback_metadata"]["keep_disabled_action"], "do-not-stage-or-widen-until-unblock-criteria-pass")
+        self.assertFalse(queue_row["rollback_metadata"]["policy_file_contents_included"])
+        self.assertEqual(queue_row["duplicate_suppression_status"], "suppressed")
+        self.assertTrue(queue_row["duplicate_suppression"]["suppresses_new_activation_issue"])
+
+    def test_anthropic_routing_cleared_safety_stop_is_queue_stage_eligible_only_after_all_criteria(self):
+        plan = self._anthropic_routing_safety_stop_plan()
+        bucket = plan["evidence"]["stats_summary"]["pass_through_routing_report"]["buckets"][0]
+        lifecycle = bucket["anthropic_canary_lifecycle_evidence"]
+        lifecycle["observed_count"] = 15
+        lifecycle["cohort_counts"]["canary_applied"] = 8
+        lifecycle["cohort_counts"]["canary_holdout"] = 7
+        lifecycle["cohort_counts"]["safety_stopped"] = 0
+        lifecycle["coverage"]["observed_rate"] = 1.0
+        lifecycle["coverage"]["applied_rate"] = 0.533333
+        lifecycle["coverage"]["holdout_rate"] = 0.466667
+        lifecycle["blocker_codes"] = []
+        lifecycle["blocker_reason_breakdown"] = []
+        lifecycle["safety_stop_breakdown"] = []
+        lifecycle["durable_blocked_reason"] = None
+        lifecycle["next_action"] = None
+
+        report = build_activation_safety_stop_burndown(research_plan=plan)
+
+        group = report["groups"][0]
+        self.assertEqual(group["next_state"], "unblock-ready")
+        self.assertEqual(group["status"], "unblock-ready")
+        self.assertEqual(group["burndown_status"], "unblock-ready")
+        self.assertEqual(group["safety_stop_count"], 0)
+        self.assertEqual(group["applied_count"], 8)
+        self.assertEqual(group["holdout_count"], 7)
+        self.assertTrue(group["executor_compatible"])
+        self.assertTrue(group["promotion_allowed"])
+        self.assertTrue(group["stage_allowed"])
+        self.assertTrue(group["safety_stop_reason_review"]["passed"])
+        self.assertTrue(group["safer_threshold_or_executor_guard"]["passed"])
+        self.assertTrue(group["rollback_proof"]["passed"])
+        self.assertTrue(group["applied_coverage"]["passed"])
+        self.assertTrue(group["holdout_coverage"]["passed"])
+        unblock = group["unblock_criteria"]
+        self.assertEqual(unblock["status"], "unblock-ready")
+        self.assertTrue(unblock["safety_stop_count_zero"])
+        self.assertTrue(unblock["applied_coverage_present"])
+        self.assertTrue(unblock["holdout_coverage_present"])
+        self.assertTrue(unblock["safer_threshold_or_executor_guard_present"])
+        self.assertTrue(unblock["rollback_proof_present"])
+        self.assertTrue(unblock["promotion_allowed"])
+        self.assertTrue(unblock["stage_allowed"])
+
+        queue = build_local_activation_next_action_queue(report)
+        self.assertIsNotNone(queue)
+        queue_row = queue["entries"][0]
+        self.assertEqual(queue_row["local_action_family"], "routing")
+        self.assertEqual(queue_row["state"], "unblock-ready")
+        self.assertEqual(queue_row["current_status"], "staged")
+        self.assertEqual(queue_row["next_action"], "unblock-for-bounded-anthropic-routing-canary")
+        self.assertEqual(queue_row["safety_stop_count"], 0)
+        self.assertEqual(queue_row["applied_count"], 8)
+        self.assertEqual(queue_row["holdout_count"], 7)
+        self.assertTrue(queue_row["promotion_allowed"])
+        self.assertTrue(queue_row["stage_allowed"])
+        self.assertEqual(queue_row["unblock_criteria"]["status"], "unblock-ready")
+        self.assertTrue(queue_row["safer_threshold_or_executor_guard"]["passed"])
+        self.assertTrue(queue_row["rollback_proof"]["passed"])
+        self.assertFalse(queue_row["duplicate_suppression"]["suppresses_new_activation_issue"])
 
     def test_anthropic_routing_safety_stop_stays_blocked_even_with_applied_holdout_coverage(self):
         plan = self._anthropic_routing_safety_stop_plan()
