@@ -1001,6 +1001,22 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(tool_classification["supports_four_way_dependency_evidence_split"])
         self.assertTrue(tool_classification["supports_five_way_dependency_evidence_split"])
         self.assertEqual(tool_classification["observed_evidence_classes"], ["missing-dependency-evidence"])
+        self.assertEqual(tool_classification["observed_evidence_class_count"], 1)
+        self.assertEqual(
+            set(tool_classification["missing_observed_evidence_classes"]),
+            {
+                "stable-dependency-evidence",
+                "stale-dependency-evidence",
+                "unsafe-dependency-evidence",
+                "unknown-dependency-evidence",
+            },
+        )
+        self.assertTrue(tool_classification["all_rows_classified_into_supported_evidence_classes"])
+        self.assertTrue(
+            tool_replay_evidence["acceptance"][
+                "distinguishes_stable_stale_unsafe_unknown_and_missing_dependency_evidence"
+            ]
+        )
         self.assertFalse(tool_classification["tool_cache_replay_enabled"])
         self.assertFalse(tool_classification["streaming_replay_enabled"])
         self.assertTrue(tool_replay_evidence["privacy"]["metadata_only"])
@@ -1017,6 +1033,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(tool_burndown["dependency_evidence_class"], "missing-dependency-evidence")
         self.assertEqual(tool_burndown["row_count"], 1)
         self.assertEqual(tool_burndown["next_action"], "collect-file-invalidation-evidence")
+        self.assertEqual(tool_burndown["top_blocker_reason"], "invalidation-evidence-missing")
+        self.assertEqual(tool_burndown["reason_breakdown"], [{"value": "invalidation-evidence-missing", "count": 1}])
         self.assertFalse(tool_burndown["tool_cache_replay_enabled"])
         self.assertFalse(tool_burndown["streaming_replay_enabled"])
         self.assertEqual(tool_burndown["cache_entries_written"], 0)
@@ -1068,6 +1086,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(invalidation_classification["supports_four_way_dependency_evidence_split"])
         self.assertTrue(invalidation_classification["supports_five_way_dependency_evidence_split"])
         self.assertIn("missing-dependency-evidence", invalidation_classification["observed_evidence_classes"])
+        self.assertTrue(invalidation_classification["all_rows_classified_into_supported_evidence_classes"])
+        self.assertTrue(
+            invalidation_evidence["acceptance"][
+                "distinguishes_stable_stale_unsafe_unknown_and_missing_dependency_evidence"
+            ]
+        )
         self.assertFalse(invalidation_classification["tool_cache_replay_enabled"])
         self.assertFalse(invalidation_classification["streaming_replay_enabled"])
         self.assertTrue(invalidation_evidence["privacy"]["metadata_only"])
