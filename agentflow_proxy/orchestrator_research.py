@@ -6092,6 +6092,9 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "policy_files_written",
         "tool_cache_replay_enabled",
         "streaming_replay_enabled",
+        "live_repeat_confirmed",
+        "observed_hit_proof",
+        "review_only",
         "promotion_allowed",
         "stage_allowed",
         "missing_applied_coverage",
@@ -6111,6 +6114,20 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "retry_count",
         "rollback_count",
         "safety_stop_count",
+        "affected_rows",
+        "cache_apply_action_count",
+        "cache_entries_written",
+        "observed_hits",
+        "exact_hit_count",
+        "tools_present_rows",
+        "tools_present_replay_evidence_rows",
+        "generic_tools_present_blocker_reduced_rows",
+        "unsafe_tool_call_blocker_rows",
+        "missing_dependency_evidence_rows",
+        "stable_dependency_evidence_rows",
+        "stale_dependency_evidence_rows",
+        "unsafe_dependency_evidence_rows",
+        "unknown_dependency_evidence_rows",
         "observed_saved_tokens",
         "projected_saved_tokens",
     ):
@@ -6138,14 +6155,28 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "full_rollout_successor_decision",
         "full_rollout_successor_next_action",
         "full_rollout_successor_no_op_reason",
+        "dependency_evidence_class",
+        "dependency_evidence_decision",
+        "dependency_evidence_reason",
+        "dependency_evidence_status",
+        "evidence_state",
     ):
         if entry.get(key) is not None:
             action[key] = sanitize_value(entry.get(key))
     for key in (
         "full_rollout_activation_outcome",
         "keep_active_regression_gate",
+        "dependency_evidence_review",
     ):
         if isinstance(entry.get(key), dict):
+            action[key] = sanitize_value(entry.get(key))
+    for key in (
+        "blocker_breakdown",
+        "dependency_evidence_decision_breakdown",
+        "evidence_state_breakdown",
+        "next_action_breakdown",
+    ):
+        if isinstance(entry.get(key), list):
             action[key] = sanitize_value(entry.get(key))
     return {
         key: value
@@ -6160,6 +6191,20 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             "preview_verified",
             "preview_verification_status",
             "preview_verification_decision",
+            "cache_apply_action_count",
+            "cache_entries_written",
+            "tool_cache_replay_enabled",
+            "streaming_replay_enabled",
+            "emits_cache_apply_action",
+            "live_repeat_confirmed",
+            "observed_hit_proof",
+            "observed_hits",
+            "exact_hit_count",
+            "missing_dependency_evidence_rows",
+            "stable_dependency_evidence_rows",
+            "stale_dependency_evidence_rows",
+            "unsafe_dependency_evidence_rows",
+            "unknown_dependency_evidence_rows",
         }
     }
 
@@ -6486,6 +6531,180 @@ def _openai_routing_recovery_proposal_from_rows(
     }
 
 
+def _is_tool_cache_dependency_successor(action: dict[str, Any]) -> bool:
+    family = str(action.get("local_action_family") or action.get("lever") or "").strip()
+    evidence_schema = str(action.get("evidence_schema") or "")
+    blockers = {str(item) for item in action.get("blocker_codes") or [] if str(item or "").strip()}
+    return bool(
+        family == "cache"
+        and (
+            evidence_schema == "agentflow.request_shape_tool_cache_replay_evidence.v1"
+            or str(action.get("dependency_evidence_class") or "")
+            or str(action.get("dependency_evidence_decision") or "")
+            or "invalidation-evidence-missing" in blockers
+            or "unsafe-tool-calls-without-invalidation" in blockers
+        )
+    )
+
+
+def _is_missing_tool_cache_dependency_drill(action: dict[str, Any], decision: dict[str, Any]) -> bool:
+    if not _is_tool_cache_dependency_successor(action):
+        return False
+    evidence_class = str(action.get("dependency_evidence_class") or "").strip()
+    evidence_decision = str(action.get("dependency_evidence_decision") or "").strip()
+    evidence_status = str(action.get("dependency_evidence_status") or "").strip()
+    reason = str(action.get("dependency_evidence_reason") or action.get("unblock_reason") or "").strip()
+    next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "").strip()
+    blockers = {str(item) for item in action.get("blocker_codes") or [] if str(item or "").strip()}
+    preview_status = str(decision.get("preview_agreement_status") or "").strip()
+    missing = bool(
+        "missing" in evidence_class
+        or "missing" in evidence_decision
+        or evidence_status == "missing"
+        or reason == "invalidation-evidence-missing"
+        or "invalidation-evidence-missing" in blockers
+    )
+    safe_collection_action = next_action in {
+        "collect-file-invalidation-evidence",
+        "collect-tool-cache-invalidation-evidence",
+        "collect-tool-call-cache-invalidation-evidence",
+        "add-invalidation-evidence",
+    }
+    return bool(missing and safe_collection_action and decision.get("preview_verified") and preview_status == "agreed")
+
+
+def _tool_cache_dependency_issue_title(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+) -> str:
+    token = _activation_successor_title_token(action, decision)
+    category = str(action.get("category") or "tool-cache").replace("_", "-")
+    return f"Collect tool-cache invalidation drill for missing dependency evidence ({category}, {token})"
+
+
+def _breakdown_evidence_lines(prefix: str, rows: Any) -> list[str]:
+    if not isinstance(rows, list):
+        return [f"{prefix}: []"]
+    lines: list[str] = []
+    for row in rows[:8]:
+        if not isinstance(row, dict):
+            continue
+        value = sanitize_value(row.get("value") or row.get("reason_code") or row.get("reason") or row.get("status") or "unknown")
+        count = _to_int(row.get("count"))
+        lines.append(f"{prefix}: {value} count={count}")
+    return lines or [f"{prefix}: []"]
+
+
+def _tool_cache_dependency_evidence(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+) -> list[str]:
+    source_fingerprint = str(decision.get("source_fingerprint") or action.get("source_fingerprint") or "").strip()
+    action_fingerprint = str(decision.get("successor_action_fingerprint") or action.get("fingerprint") or "").strip()
+    gate = action.get("managed_preview_gate") if isinstance(action.get("managed_preview_gate"), dict) else {}
+    health_gate = gate.get("health_gate") if isinstance(gate.get("health_gate"), dict) else {}
+    evidence = [
+        f"Source metadata: {LOCAL_ACTIVATION_SUCCESSOR_DECISION_SCHEMA}",
+        f"Fingerprint: {source_fingerprint}",
+        f"Successor action fingerprint: {action_fingerprint}",
+        "Provider scope: openai",
+        "Local action family: cache",
+        f"Dependency evidence class: {action.get('dependency_evidence_class')}",
+        f"Dependency evidence decision: {action.get('dependency_evidence_decision')}",
+        f"Dependency evidence status: {action.get('dependency_evidence_status')}",
+        f"Dependency evidence reason: {action.get('dependency_evidence_reason')}",
+        f"Evidence state: {action.get('evidence_state')}",
+        f"Affected rows: {_count_text(action.get('affected_rows') or action.get('sample_count'))}",
+        f"Sample count: {_count_text(action.get('sample_count'))}",
+        f"Missing dependency evidence rows: {_count_text(action.get('missing_dependency_evidence_rows'))}",
+        f"Stable dependency evidence rows: {_count_text(action.get('stable_dependency_evidence_rows'))}",
+        f"Stale dependency evidence rows: {_count_text(action.get('stale_dependency_evidence_rows'))}",
+        f"Unsafe dependency evidence rows: {_count_text(action.get('unsafe_dependency_evidence_rows'))}",
+        f"Unknown dependency evidence rows: {_count_text(action.get('unknown_dependency_evidence_rows'))}",
+        f"Unsafe tool-call blocker rows: {_count_text(action.get('unsafe_tool_call_blocker_rows'))}",
+        f"Tools-present replay evidence rows: {_count_text(action.get('tools_present_replay_evidence_rows'))}",
+        f"Live repeat confirmed: {bool(action.get('live_repeat_confirmed'))}",
+        f"Observed hit proof: {bool(action.get('observed_hit_proof'))}",
+        f"Observed hits: {_count_text(action.get('observed_hits'))}",
+        f"Exact hit count: {_count_text(action.get('exact_hit_count'))}",
+        f"Tool-cache replay enabled: {bool(action.get('tool_cache_replay_enabled'))}",
+        f"Streaming replay enabled: {bool(action.get('streaming_replay_enabled'))}",
+        f"Emits cache apply action: {bool(action.get('emits_cache_apply_action'))}",
+        f"Cache apply action count: {_count_text(action.get('cache_apply_action_count'))}",
+        f"Cache entries written: {_count_text(action.get('cache_entries_written'))}",
+        f"Policy files written: {bool(action.get('policy_files_written'))}",
+        f"Preview verified: {decision.get('preview_verified')}",
+        f"Preview agreement status: {decision.get('preview_agreement_status')}",
+        f"Preview verification status: {decision.get('preview_verification_status')}",
+        f"Preview omitted reason: {decision.get('preview_omitted_reason')}",
+        f"Preview no-op reason: {decision.get('preview_no_op_reason')}",
+        f"Preview health status: {health_gate.get('status')}",
+        f"Preview health reason: {health_gate.get('reason')}",
+        f"Target local rule file: {action.get('target_local_rule_file')}",
+        f"Target local policy section: {action.get('target_local_policy_section')}",
+        f"Expected savings path: {action.get('expected_savings_path')}",
+        f"Acceptance metric: {action.get('acceptance_metric')}",
+        "Replay-disabled acceptance gate: keep tool-cache replay and streaming replay disabled unless stable dependency evidence plus live-repeat or observed-hit proof is present.",
+        _activation_successor_privacy_evidence(action, decision),
+    ]
+    evidence.extend(_breakdown_evidence_lines("Dependency decision breakdown", action.get("dependency_evidence_decision_breakdown")))
+    evidence.extend(_breakdown_evidence_lines("Evidence state breakdown", action.get("evidence_state_breakdown")))
+    evidence.extend(_breakdown_evidence_lines("Blocker breakdown", action.get("blocker_breakdown")))
+    return evidence
+
+
+def _tool_cache_dependency_proposal_from_rows(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    title = _tool_cache_dependency_issue_title(action, decision)
+    source_fingerprint = str(decision.get("source_fingerprint") or action.get("source_fingerprint") or "").strip()
+    action_fingerprint = str(decision.get("successor_action_fingerprint") or action.get("fingerprint") or "").strip()
+    next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "collect-file-invalidation-evidence")
+    return {
+        "repo": "lutzkuen/agentflow",
+        "title": title,
+        "labels": _activation_successor_issue_labels(action, "status:ready"),
+        "proposal_source": "preview-verified-activation-successor",
+        "fingerprint": sanitize_value(source_fingerprint),
+        "successor_action_fingerprint": sanitize_value(action_fingerprint),
+        "expected_savings_path": sanitize_value(
+            action.get("expected_savings_path")
+            or "Removes the missing invalidation-evidence blocker before any tool-cache replay activation is considered."
+        ),
+        "body": _issue_body(
+            title=title,
+            rationale=(
+                "The local activation successor queue has a preview-agreed tool-cache dependency blocker. "
+                "This proposal turns missing dependency evidence into a safe invalidation drill while "
+                "leaving tool-call replay disabled."
+            ),
+            evidence=_tool_cache_dependency_evidence(action, decision),
+            implementation=[
+                "Start from the matching local_activation_successor_decision and cache successor action in the research plan.",
+                f"Run `{next_action}` as an invalidation/dependency evidence drill only; do not stage, widen, or enable tool-cache replay.",
+                "Classify dependency evidence as stable, stale, unsafe, unknown, or missing using metadata-only file dependency snapshots.",
+                "Keep unsafe, stale, unknown, and stable-without-proof cohorts blocked; do not write cache_rules.yaml for replay activation.",
+                "Record dependency class counts, live-repeat or observed-hit proof status, and zero cache apply actions in the next report.",
+            ],
+            acceptance=[
+                "A fixture with missing, unsafe, stale, unknown, and stable dependency evidence emits one ready invalidation drill issue for missing evidence.",
+                "Unsafe, stale, unknown, and stable-without-proof shapes remain blocked from replay activation.",
+                "The report emits no cache apply actions, no cache entries, no provider calls, and no cache policy writes for unsafe or missing dependency evidence.",
+                "The issue body includes dependency class counts and the explicit replay-disabled acceptance gate.",
+                "Generated and follow-up evidence excludes raw prompts, provider bodies, absolute paths, request IDs, session IDs, cache keys, file paths, and individual candidate IDs.",
+            ],
+            savings_path=str(
+                action.get("expected_savings_path")
+                or "Removes the invalidation-evidence bottleneck that prevents safe tool-call cache replay evaluation."
+            ),
+            sequencing=(
+                "Sequence after preview-gated successor decisions and before any tool-cache replay canary, cache_rules.yaml write, or cache entry creation."
+            ),
+        ),
+    }
+
+
 def _activation_successor_proposal_from_rows(
     action: dict[str, Any],
     decision: dict[str, Any],
@@ -6494,6 +6713,8 @@ def _activation_successor_proposal_from_rows(
 ) -> dict[str, Any]:
     if _is_openai_semantic_regression_routing_successor(action):
         return _openai_routing_recovery_proposal_from_rows(action, decision, status_label=status_label)
+    if _is_missing_tool_cache_dependency_drill(action, decision):
+        return _tool_cache_dependency_proposal_from_rows(action, decision)
     title = _activation_successor_issue_title(action, decision, status_label=status_label)
     family = str(action.get("local_action_family") or decision.get("local_action_family") or "optimization")
     next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "inspect-local-evidence")
@@ -6614,6 +6835,10 @@ def _proposals_from_activation_successor_decisions(stats_summary: dict[str, Any]
         decision_text = str(decision.get("decision") or "").strip()
         issue_status = str(decision.get("issue_worthy_status") or "").strip()
         if issue_status == "suppressed" or decision_text in {"keep-current-rule", "suppress-duplicate"}:
+            continue
+        if _is_tool_cache_dependency_successor(action):
+            if _is_missing_tool_cache_dependency_drill(action, decision):
+                proposals.append(_tool_cache_dependency_proposal_from_rows(action, decision))
             continue
         preview_verified = bool(decision.get("preview_verified") or action.get("preview_verified"))
         if preview_verified and issue_status in {"ready", "review"} and decision_text in {"ready", "review", "review-only"}:
@@ -7805,6 +8030,10 @@ def _request_shape_tool_cache_dependency_stages(stats_summary: dict[str, Any]) -
                 "tool_cache_replay_enabled": bool(row.get("tool_cache_replay_enabled")) if row.get("tool_cache_replay_enabled") is not None else False,
                 "streaming_replay_enabled": bool(row.get("streaming_replay_enabled")) if row.get("streaming_replay_enabled") is not None else False,
                 "emits_cache_apply_action": bool(row.get("emits_cache_apply_action")) if row.get("emits_cache_apply_action") is not None else False,
+                "live_repeat_confirmed": bool(row.get("live_repeat_confirmed")),
+                "observed_hit_proof": bool(row.get("observed_hit_proof")),
+                "observed_hits": _to_int(row.get("observed_hits") or summary.get("observed_hits")),
+                "exact_hit_count": _to_int(row.get("exact_hit_count") or summary.get("exact_hit_count")),
                 "tools_present_replay_evidence": bool(row.get("tools_present_replay_evidence", True)),
                 "generic_tools_present_blocker_reduced": bool(row.get("generic_tools_present_blocker_reduced", True)),
                 "tools_present_rows": _to_int(summary.get("tools_present_rows")),

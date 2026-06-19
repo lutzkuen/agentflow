@@ -2962,6 +2962,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "semantic-quality-regression-observed",
             ),
             (
+                "activation:cache-preview-blocked",
+                "cache",
+                "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "blocked",
+                "collect-file-invalidation-evidence",
+                "keep-blocked",
+                "omitted_reason",
+                "invalidation-evidence-missing",
+            ),
+            (
                 "activation:closed-ready",
                 "activation-feedback",
                 "agentflow.orchestrator_research_log_diagnostics.v1",
@@ -3038,9 +3048,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "latest_preview_age_hours": 1.0,
                     "previewed_counts_by_local_action_family": {
                         "routing": 2,
+                        "cache": 1,
                         "activation-feedback": 1,
                     },
-                    "omitted_counts_by_local_action_family": {"routing": 1},
+                    "omitted_counts_by_local_action_family": {"routing": 1, "cache": 1},
                     "top_omission_reasons": [
                         {"reason_code": "semantic-quality-regression-observed", "count": 1}
                     ],
@@ -3064,8 +3075,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("activation:closed-ready", by_fingerprint)
         self.assertEqual(by_fingerprint["activation:ready-routing"]["labels"][by_fingerprint["activation:ready-routing"]["labels"].index("status:ready")], "status:ready")
         self.assertIn("routing", by_fingerprint["activation:ready-routing"]["labels"])
-        self.assertIn("status:blocked", by_fingerprint["activation:cache-preview-blocked"]["labels"])
+        self.assertIn("status:ready", by_fingerprint["activation:cache-preview-blocked"]["labels"])
         self.assertIn("cache", by_fingerprint["activation:cache-preview-blocked"]["labels"])
+        self.assertIn("Replay-disabled acceptance gate", by_fingerprint["activation:cache-preview-blocked"]["body"])
         self.assertIn("status:blocked", by_fingerprint["activation:routing-keep-blocked"]["labels"])
         for proposal in successor_proposals:
             self.assertIn("## Rationale", proposal["body"])
@@ -3091,6 +3103,267 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("activation:closed-ready", " ".join(item["fingerprint"] for item in successor_proposals))
         self.assertNotIn("raw successor issue prompt must not leak", rendered)
         self.assertNotIn("req-successor-issue-secret", rendered)
+
+    def test_tool_cache_dependency_preview_blockers_emit_safe_invalidation_drill_issue(self):
+        dependency_rows = [
+            (
+                "activation:tool-cache-missing",
+                "missing-dependency-evidence",
+                "missing-dependency-evidence",
+                "missing",
+                "invalidation-evidence-missing",
+                "blocked-missing-dependency-evidence",
+                "collect-file-invalidation-evidence",
+                ["invalidation-evidence-missing", "tools-present", "unsafe-tool-calls-without-invalidation"],
+                113,
+                False,
+                False,
+            ),
+            (
+                "activation:tool-cache-unsafe",
+                "unsafe-dependency-evidence",
+                "unsafe-dependency-evidence",
+                "unsafe",
+                "unsafe-tool-calls-without-invalidation",
+                "blocked-unsafe-dependency-evidence",
+                "keep-tool-cache-blocked",
+                ["tools-present", "unsafe-tool-calls-without-invalidation"],
+                44,
+                False,
+                False,
+            ),
+            (
+                "activation:tool-cache-stale",
+                "stale-dependency-evidence",
+                "stale-dependency-evidence",
+                "stale",
+                "stale-dependency-evidence",
+                "blocked-stale-dependency-evidence",
+                "refresh-file-invalidation-evidence",
+                ["tools-present", "stale-dependency-evidence"],
+                31,
+                False,
+                False,
+            ),
+            (
+                "activation:tool-cache-unknown",
+                "unknown-dependency-evidence",
+                "unknown-dependency-evidence",
+                "unknown",
+                "unknown-dependency-evidence",
+                "blocked-unknown-dependency-evidence",
+                "classify-file-invalidation-evidence",
+                ["tools-present", "unknown-dependency-evidence"],
+                27,
+                False,
+                False,
+            ),
+            (
+                "activation:tool-cache-stable-without-proof",
+                "stable-dependency-evidence",
+                "stable-dependency-evidence",
+                "stable",
+                "stable-dependency-evidence-no-live-repeat",
+                "blocked-stable-dependency-evidence-without-proof",
+                "review-stable-dependency-evidence",
+                ["tools-present", "stable-dependency-evidence-no-live-repeat"],
+                19,
+                False,
+                False,
+            ),
+        ]
+        class_counts = {
+            "missing_dependency_evidence_rows": 113,
+            "unsafe_dependency_evidence_rows": 44,
+            "stale_dependency_evidence_rows": 31,
+            "unknown_dependency_evidence_rows": 27,
+            "stable_dependency_evidence_rows": 19,
+        }
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": index,
+                    "fingerprint": source,
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "category": "tool-light",
+                    "workflow_phase": "tool-light",
+                    "provider_family": "openai",
+                    "state": "missing-evidence" if status == "missing" else "keep-blocked",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": next_action,
+                    "blocker_codes": blockers,
+                    "sample_count": sample_count,
+                    "affected_rows": sample_count,
+                    "dependency_evidence_class": evidence_class,
+                    "dependency_evidence_decision": evidence_decision,
+                    "dependency_evidence_status": status,
+                    "dependency_evidence_reason": reason,
+                    "evidence_state": evidence_state,
+                    "dependency_evidence_decision_breakdown": [
+                        {"value": "missing-dependency-evidence", "count": 113},
+                        {"value": "unsafe-dependency-evidence", "count": 44},
+                        {"value": "stale-dependency-evidence", "count": 31},
+                        {"value": "unknown-dependency-evidence", "count": 27},
+                        {"value": "stable-dependency-evidence", "count": 19},
+                    ],
+                    "evidence_state_breakdown": [
+                        {"value": "blocked-missing-dependency-evidence", "count": 113},
+                        {"value": "blocked-unsafe-dependency-evidence", "count": 44},
+                    ],
+                    "blocker_breakdown": [
+                        {"value": "invalidation-evidence-missing", "count": 113},
+                        {"value": "unsafe-tool-calls-without-invalidation", "count": 44},
+                        {"value": "stale-dependency-evidence", "count": 31},
+                        {"value": "unknown-dependency-evidence", "count": 27},
+                    ],
+                    "tool_cache_replay_enabled": False,
+                    "streaming_replay_enabled": False,
+                    "emits_cache_apply_action": False,
+                    "cache_apply_action_count": 0,
+                    "cache_entries_written": 0,
+                    "policy_files_written": False,
+                    "live_repeat_confirmed": live_repeat,
+                    "observed_hit_proof": observed_hit,
+                    "observed_hits": 0,
+                    "exact_hit_count": 0,
+                    "tools_present_rows": sample_count,
+                    "tools_present_replay_evidence_rows": sample_count,
+                    "generic_tools_present_blocker_reduced_rows": sample_count,
+                    "unsafe_tool_call_blocker_rows": 44,
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "expected_savings_path": "Move tool-cache replay evidence toward safe invalidation evidence.",
+                    "request_id": f"req-tool-cache-secret-{index}",
+                    **class_counts,
+                }
+                for index, (
+                    source,
+                    evidence_class,
+                    evidence_decision,
+                    status,
+                    reason,
+                    evidence_state,
+                    next_action,
+                    blockers,
+                    sample_count,
+                    live_repeat,
+                    observed_hit,
+                ) in enumerate(dependency_rows, start=1)
+            ],
+        }
+        outcomes = [
+            {
+                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": f"managed-preview-outcome:{source}",
+                "source_fingerprint": source,
+                "preview_ref": f"preview:{source}",
+                "local_action_family": "cache",
+                "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "current_status": "blocked",
+                "classification": "review-only",
+                "decision": "keep-blocked",
+                "next_action": next_action,
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "omitted_reason": reason,
+            }
+            for source, _evidence_class, _evidence_decision, _status, reason, _evidence_state, next_action, _blockers, _sample_count, _live_repeat, _observed_hit in dependency_rows
+        ]
+
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 1883,
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "status": "tracked",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": True,
+                    "summary": {
+                        "stored_preview_outcome_count": len(outcomes),
+                        "stale_count": 0,
+                        "missing_preview_decision_count": 0,
+                        "failed_closed_count": 0,
+                        "disagreement_count": 0,
+                    },
+                    "outcomes": outcomes,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "managed_activation_preview_health": {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": len(outcomes),
+                    "previewed_row_count": len(outcomes),
+                    "omitted_row_count": len(outcomes),
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {"cache": len(outcomes)},
+                    "omitted_counts_by_local_action_family": {"cache": len(outcomes)},
+                    "top_omission_reasons": [
+                        {"reason_code": "invalidation-evidence-missing", "count": 113}
+                    ],
+                    "top_rejection_reasons": [],
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        proposals = [
+            item
+            for item in plan["backlog_changes"]["create_issues"]
+            if item.get("proposal_source") == "preview-verified-activation-successor"
+            and item.get("local_action_family") != "routing"
+        ]
+        cache_proposals = [item for item in proposals if "tool-cache invalidation drill" in item["title"]]
+        self.assertEqual(len(cache_proposals), 1)
+        proposal = cache_proposals[0]
+        self.assertEqual(proposal["fingerprint"], "activation:tool-cache-missing")
+        self.assertIn("status:ready", proposal["labels"])
+        self.assertIn("cache", proposal["labels"])
+        self.assertIn("Dependency evidence class: missing-dependency-evidence", proposal["body"])
+        self.assertIn("Missing dependency evidence rows: 113", proposal["body"])
+        self.assertIn("Unsafe dependency evidence rows: 44", proposal["body"])
+        self.assertIn("Stale dependency evidence rows: 31", proposal["body"])
+        self.assertIn("Unknown dependency evidence rows: 27", proposal["body"])
+        self.assertIn("Stable dependency evidence rows: 19", proposal["body"])
+        self.assertIn("Live repeat confirmed: False", proposal["body"])
+        self.assertIn("Observed hit proof: False", proposal["body"])
+        self.assertIn("Tool-cache replay enabled: False", proposal["body"])
+        self.assertIn("Streaming replay enabled: False", proposal["body"])
+        self.assertIn("Emits cache apply action: False", proposal["body"])
+        self.assertIn("Cache apply action count: 0", proposal["body"])
+        self.assertIn("Cache entries written: 0", proposal["body"])
+        self.assertIn("Replay-disabled acceptance gate", proposal["body"])
+        self.assertIn("stable dependency evidence plus live-repeat or observed-hit proof", proposal["body"])
+        self.assertNotIn("activation:tool-cache-unsafe", " ".join(item["fingerprint"] for item in cache_proposals))
+        self.assertNotIn("activation:tool-cache-stale", " ".join(item["fingerprint"] for item in cache_proposals))
+        self.assertNotIn("activation:tool-cache-unknown", " ".join(item["fingerprint"] for item in cache_proposals))
+        self.assertNotIn("activation:tool-cache-stable-without-proof", " ".join(item["fingerprint"] for item in cache_proposals))
+
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("req-tool-cache-secret", rendered)
+        self.assertNotIn('"cache_entries_written": true', rendered.lower())
+        self.assertNotIn('"emits_cache_apply_action": true', rendered.lower())
 
     def test_openai_routing_semantic_successor_issue_proposal_tracks_preview_state(self):
         cases = [
