@@ -275,6 +275,30 @@ def _executor_handoff_fixture_plan():
                 "schema": "agentflow.local_activation_next_action_queue_entry.v1",
                 "rank": 2,
                 "ledger_rank": 2,
+                "fingerprint": "activation:openai-routing-blocked",
+                "lever": "routing",
+                "local_action_family": "routing",
+                "evidence_schema": "agentflow.pass_through_routing_activation_candidates.v1",
+                "current_status": "keep-blocked",
+                "state": "keep-blocked",
+                "successor_status": "keep-blocked",
+                "next_action": "keep-openai-routing-blocked-until-canary-coverage",
+                "blocker_codes": ["missing-applied-coverage", "missing-holdout-coverage"],
+                "sample_count": 2,
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "tool-heavy",
+                "requested_model": "gpt-5.4",
+                "candidate_target_model": "gpt-5.4-mini",
+                "required_local_executor": "openai-routing-canary",
+                "target_local_policy_section": "routing.rules",
+                "target_local_rule_file": "routing_rules.yaml",
+                "request_id": "req-openai-routing-secret",
+            },
+            {
+                "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                "rank": 3,
+                "ledger_rank": 3,
                 "fingerprint": "activation:routing-blocked",
                 "lever": "routing",
                 "local_action_family": "routing",
@@ -298,8 +322,8 @@ def _executor_handoff_fixture_plan():
             },
             {
                 "schema": "agentflow.local_activation_next_action_queue_entry.v1",
-                "rank": 3,
-                "ledger_rank": 3,
+                "rank": 4,
+                "ledger_rank": 4,
                 "fingerprint": "activation:cache-review",
                 "lever": "cache",
                 "local_action_family": "cache",
@@ -413,7 +437,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
         self.assertEqual(result["schema"], "agentflow.local_activation_managed_handoff.v1")
         self.assertEqual(result["status"], "exported")
-        self.assertEqual(result["summary"]["handoff_row_count"], 3)
+        self.assertEqual(result["summary"]["handoff_row_count"], 4)
         self.assertFalse(result["provider_calls_made"])
         self.assertFalse(result["managed_server_calls_made"])
         self.assertFalse(result["policy_files_written"])
@@ -439,27 +463,37 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertFalse(privacy["absolute_paths_included"])
         self.assertFalse(privacy["policy_file_contents_included"])
 
-        by_family = {row["local_action_family"]: row for row in result["rows"]}
-        self.assertEqual(set(by_family), {"crunch", "routing", "cache"})
-        self.assertEqual(by_family["crunch"]["executor_action_class"], "keep-current-rule")
-        self.assertEqual(by_family["crunch"]["activation_outcome"], "keep-active")
-        self.assertEqual(by_family["crunch"]["coverage"]["applied_count"], 107)
-        self.assertEqual(by_family["crunch"]["coverage"]["holdout_count"], 40)
-        self.assertEqual(by_family["crunch"]["coverage"]["safety_stop_count"], 0)
-        self.assertEqual(by_family["crunch"]["coverage"]["rollback_count"], 0)
-        self.assertEqual(by_family["routing"]["executor_action_class"], "keep-blocked")
-        self.assertEqual(by_family["routing"]["executor_next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
-        self.assertEqual(by_family["routing"]["coverage"]["safety_stop_count"], 492)
-        self.assertEqual(by_family["cache"]["executor_action_class"], "review-only")
-        self.assertEqual(by_family["cache"]["executor_next_action"], "review-cache-replay-canary-promotion-readiness")
-        self.assertEqual(by_family["cache"]["target_local_rule_file"], "cache_rules.yaml")
-        self.assertTrue(by_family["cache"]["handoff_ref"].startswith("handoff:"))
-        self.assertNotIn("fingerprint", by_family["cache"])
-        self.assertNotIn("request_id", by_family["cache"])
-        self.assertNotIn("session_id", by_family["routing"])
-        self.assertNotIn("cache_key", by_family["cache"])
+        by_next_action = {row["executor_next_action"]: row for row in result["rows"]}
+        crunch = by_next_action["keep-current-rule-only"]
+        openai_routing = by_next_action["keep-openai-routing-blocked-until-canary-coverage"]
+        anthropic_routing = by_next_action["keep-anthropic-routing-blocked-until-safety-stop-burndown"]
+        cache = by_next_action["review-cache-replay-canary-promotion-readiness"]
+        self.assertEqual(crunch["local_action_family"], "crunch")
+        self.assertEqual(crunch["executor_action_class"], "keep-current-rule")
+        self.assertEqual(crunch["activation_outcome"], "keep-active")
+        self.assertEqual(crunch["coverage"]["applied_count"], 107)
+        self.assertEqual(crunch["coverage"]["holdout_count"], 40)
+        self.assertEqual(crunch["coverage"]["safety_stop_count"], 0)
+        self.assertEqual(crunch["coverage"]["rollback_count"], 0)
+        self.assertEqual(openai_routing["local_action_family"], "routing")
+        self.assertEqual(openai_routing["source_surface"], "openai_responses")
+        self.assertEqual(openai_routing["executor_action_class"], "keep-blocked")
+        self.assertIn("missing-applied-coverage", openai_routing["blocker_codes"])
+        self.assertEqual(anthropic_routing["local_action_family"], "routing")
+        self.assertEqual(anthropic_routing["source_surface"], "anthropic_messages")
+        self.assertEqual(anthropic_routing["executor_action_class"], "keep-blocked")
+        self.assertEqual(anthropic_routing["coverage"]["safety_stop_count"], 492)
+        self.assertEqual(cache["local_action_family"], "cache")
+        self.assertEqual(cache["executor_action_class"], "review-only")
+        self.assertEqual(cache["target_local_rule_file"], "cache_rules.yaml")
+        self.assertTrue(cache["handoff_ref"].startswith("handoff:"))
+        self.assertNotIn("fingerprint", cache)
+        self.assertNotIn("request_id", openai_routing)
+        self.assertNotIn("session_id", anthropic_routing)
+        self.assertNotIn("cache_key", cache)
 
         rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("req-openai-routing-secret", rendered)
         self.assertNotIn("session-routing-secret", rendered)
         self.assertNotIn("cache-review-secret", rendered)
         self.assertNotIn("/tmp/private-cache-review.py", rendered)
@@ -479,14 +513,14 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
         self.assertEqual(result["schema"], "agentflow.local_activation_managed_handoff.v1")
-        self.assertEqual(result["summary"]["handoff_row_count"], 3)
+        self.assertEqual(result["summary"]["handoff_row_count"], 4)
         self.assertEqual(result["egress_guard"]["status"], "passed")
 
     def test_managed_activation_preview_request_is_feature_only(self):
         result = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
 
         self.assertEqual(result["schema"], "agentflow.managed_activation_preview_request.v1")
-        self.assertEqual(result["summary"]["handoff_row_count"], 3)
+        self.assertEqual(result["summary"]["handoff_row_count"], 4)
         self.assertFalse(result["provider_calls_made"])
         self.assertFalse(result["managed_server_calls_made"])
         self.assertFalse(result["policy_files_written"])
@@ -527,14 +561,17 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
         self.assertEqual(result["schema"], "agentflow.managed_activation_preview_result.v1")
         self.assertEqual(result["status"], "previewed")
-        self.assertEqual(result["coverage"]["handoff_row_count"], 3)
+        self.assertEqual(result["coverage"]["handoff_row_count"], 4)
         self.assertEqual(result["coverage"]["preview_decision_count"], 2)
         self.assertEqual(result["coverage"]["matched_handoff_ref_count"], 2)
-        self.assertEqual(result["coverage"]["missing_preview_decision_count"], 1)
+        self.assertEqual(result["coverage"]["missing_preview_decision_count"], 2)
         self.assertEqual(result["coverage"]["no_op_count"], 2)
         self.assertEqual(result["coverage"]["omitted_count"], 1)
         self.assertEqual(result["coverage"]["review_only_count"], 2)
         self.assertEqual(result["coverage"]["active_policy_write_count"], 0)
+        self.assertEqual(result["summary"]["submitted_row_count"], 4)
+        self.assertEqual(result["summary"]["preview_row_count"], 2)
+        self.assertEqual(result["summary"]["omission_count"], 1)
         self.assertTrue(result["coverage"]["managed_server_calls_made"])
         self.assertFalse(result["coverage"]["provider_calls_made"])
         self.assertFalse(result["coverage"]["policy_files_written"])
@@ -558,7 +595,10 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["fetch"]["reason"], "managed-preview-url-not-configured")
         self.assertFalse(result["coverage"]["managed_server_calls_made"])
-        self.assertEqual(result["coverage"]["handoff_row_count"], 3)
+        self.assertEqual(result["coverage"]["handoff_row_count"], 4)
+        self.assertEqual(result["summary"]["submitted_row_count"], 4)
+        self.assertEqual(result["summary"]["preview_row_count"], 0)
+        self.assertEqual(result["summary"]["omission_count"], 0)
         self.assertEqual(result["egress_guard"]["status"], "passed")
 
     def test_managed_activation_preview_cli_posts_opt_in_payload(self):
@@ -603,7 +643,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(post_mock.call_count, 1)
         posted = post_mock.call_args.kwargs["json"]
         self.assertEqual(posted["schema"], "agentflow.managed_activation_preview_request.v1")
-        self.assertEqual(posted["summary"]["handoff_row_count"], 3)
+        self.assertEqual(posted["summary"]["handoff_row_count"], 4)
         self.assertEqual(managed_egress_violations(posted), [])
         self.assertEqual(result["status"], "previewed")
         self.assertTrue(result["coverage"]["managed_server_calls_made"])
@@ -611,6 +651,9 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertFalse(result["coverage"]["policy_files_written"])
         self.assertEqual(result["coverage"]["preview_decision_count"], 1)
         self.assertEqual(result["coverage"]["matched_handoff_ref_count"], 1)
+        self.assertEqual(result["summary"]["submitted_row_count"], 4)
+        self.assertEqual(result["summary"]["preview_row_count"], 1)
+        self.assertEqual(result["summary"]["omission_count"], 0)
         self.assertEqual(result["egress_guard"]["status"], "passed")
         self.assertEqual(managed_egress_violations(result), [])
 
