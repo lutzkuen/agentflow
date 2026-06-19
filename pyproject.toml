@@ -140,6 +140,7 @@ agentflow-orchestrator-research = "agentflow_proxy.cli:orchestrator_research_mai
 agentflow-evidence-to-activation-burndown = "agentflow_proxy.cli:evidence_to_activation_burndown_main"
 agentflow-activation-burndown = "agentflow_proxy.cli:activation_burndown_main"
 agentflow-local-activation-executor = "agentflow_proxy.cli:local_activation_executor_main"
+agentflow-managed-activation-preview = "agentflow_proxy.cli:managed_activation_preview_main"
 agentflow-dashboard = "agentflow_proxy.dashboard:main"
 
 [tool.setuptools]

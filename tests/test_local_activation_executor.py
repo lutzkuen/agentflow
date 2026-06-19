@@ -4,9 +4,12 @@ from datetime import datetime, timezone
 from tempfile import TemporaryDirectory
 from pathlib import Path
 import unittest
+from unittest.mock import Mock, patch
 
 from agentflow_proxy import cli
 from agentflow_proxy.local_activation_executor import (
+    build_managed_activation_preview_request,
+    build_managed_activation_preview_result,
     build_local_activation_executor_managed_handoff,
     build_local_activation_executor_plan,
 )
@@ -478,6 +481,138 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["schema"], "agentflow.local_activation_managed_handoff.v1")
         self.assertEqual(result["summary"]["handoff_row_count"], 3)
         self.assertEqual(result["egress_guard"]["status"], "passed")
+
+    def test_managed_activation_preview_request_is_feature_only(self):
+        result = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
+
+        self.assertEqual(result["schema"], "agentflow.managed_activation_preview_request.v1")
+        self.assertEqual(result["summary"]["handoff_row_count"], 3)
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+        self.assertFalse(result["policy_files_written"])
+        self.assertTrue(result["feature_only"])
+        self.assertTrue(result["locally_executed"])
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
+
+    def test_managed_activation_preview_result_summarizes_review_only_decisions(self):
+        request_payload = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
+        first_ref = request_payload["rows"][0]["handoff_ref"]
+        second_ref = request_payload["rows"][1]["handoff_ref"]
+        response_payload = {
+            "schema": "agentflow.managed_activation_preview_response.v1",
+            "decisions": [
+                {
+                    "handoff_ref": first_ref,
+                    "decision": "no-op",
+                    "no_op_reason": "full-rollout-policy-active",
+                    "review_only": True,
+                    "raw_prompt": "raw server value must not leak",
+                },
+                {
+                    "handoff_ref": second_ref,
+                    "decision": "keep-blocked",
+                    "omitted_reason": "safety-stop-observed",
+                    "reason_codes": ["safety-stop-observed"],
+                    "review_only": True,
+                },
+            ],
+        }
+
+        result = build_managed_activation_preview_result(
+            request_payload,
+            response_payload=response_payload,
+            fetch={"status": "ok", "status_code": 200, "managed_server_calls_made": True},
+        )
+
+        self.assertEqual(result["schema"], "agentflow.managed_activation_preview_result.v1")
+        self.assertEqual(result["status"], "previewed")
+        self.assertEqual(result["coverage"]["handoff_row_count"], 3)
+        self.assertEqual(result["coverage"]["preview_decision_count"], 2)
+        self.assertEqual(result["coverage"]["matched_handoff_ref_count"], 2)
+        self.assertEqual(result["coverage"]["missing_preview_decision_count"], 1)
+        self.assertEqual(result["coverage"]["no_op_count"], 2)
+        self.assertEqual(result["coverage"]["omitted_count"], 1)
+        self.assertEqual(result["coverage"]["review_only_count"], 2)
+        self.assertEqual(result["coverage"]["active_policy_write_count"], 0)
+        self.assertTrue(result["coverage"]["managed_server_calls_made"])
+        self.assertFalse(result["coverage"]["provider_calls_made"])
+        self.assertFalse(result["coverage"]["policy_files_written"])
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn('"raw_prompt":', rendered)
+        self.assertNotIn("raw server value must not leak", rendered)
+
+    def test_managed_activation_preview_cli_skips_without_url(self):
+        with TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.json"
+            plan_path.write_text(json.dumps(_executor_handoff_fixture_plan()), encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.managed_activation_preview_cli(["--plan-json", str(plan_path), "--pretty"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["schema"], "agentflow.managed_activation_preview_result.v1")
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["fetch"]["reason"], "managed-preview-url-not-configured")
+        self.assertFalse(result["coverage"]["managed_server_calls_made"])
+        self.assertEqual(result["coverage"]["handoff_row_count"], 3)
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+
+    def test_managed_activation_preview_cli_posts_opt_in_payload(self):
+        with TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.json"
+            plan_path.write_text(json.dumps(_executor_handoff_fixture_plan()), encoding="utf-8")
+            stdout = io.StringIO()
+            response = Mock()
+            response.status_code = 200
+            response.text = "{}"
+
+            def response_json():
+                posted = post_mock.call_args.kwargs["json"]
+                return {
+                    "schema": "agentflow.managed_activation_preview_response.v1",
+                    "decisions": [
+                        {
+                            "handoff_ref": posted["rows"][0]["handoff_ref"],
+                            "decision": "no-op",
+                            "no_op_reason": "full-rollout-policy-active",
+                            "review_only": True,
+                        }
+                    ],
+                }
+
+            response.json.side_effect = response_json
+
+            with patch("agentflow_proxy.cli.httpx.post", return_value=response) as post_mock:
+                code = cli.managed_activation_preview_cli(
+                    [
+                        "--plan-json",
+                        str(plan_path),
+                        "--managed-preview-url",
+                        "https://managed.example.test/v1/activation-preview",
+                        "--pretty",
+                    ],
+                    stdout=stdout,
+                )
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(post_mock.call_count, 1)
+        posted = post_mock.call_args.kwargs["json"]
+        self.assertEqual(posted["schema"], "agentflow.managed_activation_preview_request.v1")
+        self.assertEqual(posted["summary"]["handoff_row_count"], 3)
+        self.assertEqual(managed_egress_violations(posted), [])
+        self.assertEqual(result["status"], "previewed")
+        self.assertTrue(result["coverage"]["managed_server_calls_made"])
+        self.assertFalse(result["coverage"]["provider_calls_made"])
+        self.assertFalse(result["coverage"]["policy_files_written"])
+        self.assertEqual(result["coverage"]["preview_decision_count"], 1)
+        self.assertEqual(result["coverage"]["matched_handoff_ref_count"], 1)
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
 
     def test_full_rollout_crunch_collapses_to_durable_keep_current_rule_outcome(self):
         result = build_local_activation_executor_plan(

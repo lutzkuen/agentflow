@@ -19,6 +19,9 @@ PRIVACY_SCHEMA = "agentflow.local_activation_executor_privacy.v1"
 HANDOFF_SCHEMA = "agentflow.local_activation_managed_handoff.v1"
 HANDOFF_ROW_SCHEMA = "agentflow.local_activation_managed_handoff_row.v1"
 HANDOFF_PRIVACY_SCHEMA = "agentflow.local_activation_managed_handoff_privacy.v1"
+PREVIEW_REQUEST_SCHEMA = "agentflow.managed_activation_preview_request.v1"
+PREVIEW_RESULT_SCHEMA = "agentflow.managed_activation_preview_result.v1"
+PREVIEW_DECISION_SCHEMA = "agentflow.managed_activation_preview_decision.v1"
 
 SAFE_SELECTABLE_CLASSES = {"draft-local-policy", "review-only", "retire"}
 
@@ -630,6 +633,199 @@ def build_local_activation_executor_managed_handoff(
             "managed_enforced": False,
         },
         "privacy": privacy,
+    }
+    result = sanitize_value(result)
+    violations = managed_egress_violations(result)
+    result["egress_guard"] = {
+        "schema": "agentflow.managed_egress_guard.v1",
+        "status": "passed" if not violations else "blocked",
+        "blocked": bool(violations),
+        "violation_count": len(violations),
+        "raw_values_logged": False,
+    }
+    if violations:
+        result["egress_guard"]["blocked_keys"] = sorted({item.get("key", "unknown") for item in violations})
+    return result
+
+
+def build_managed_activation_preview_request(
+    source: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build the feature-only batch request for an opt-in managed activation preview."""
+    handoff = (
+        source
+        if source.get("schema") == HANDOFF_SCHEMA
+        else build_local_activation_executor_managed_handoff(source, now=now)
+    )
+    rows = [row for row in handoff.get("rows") or [] if isinstance(row, dict)]
+    result = {
+        "schema": PREVIEW_REQUEST_SCHEMA,
+        "generated_at": handoff.get("generated_at")
+        or (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(),
+        "mode": "review-only",
+        "dry_run": True,
+        "managed_dependency": "optional",
+        "feature_only": True,
+        "locally_executed": True,
+        "provider_forwarding": False,
+        "server_content_processing": False,
+        "managed_enforced": False,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "source_handoff_schema": sanitize_value(handoff.get("schema")),
+        "source_handoff_status": sanitize_value(handoff.get("status")),
+        "source_handoff_summary": sanitize_value(handoff.get("summary") or {}),
+        "supported_local_action_families": sanitize_value(handoff.get("supported_local_action_families") or []),
+        "rows": rows,
+        "summary": {
+            "handoff_row_count": len(rows),
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        },
+        "privacy": _handoff_privacy(),
+    }
+    result = sanitize_value(result)
+    violations = managed_egress_violations(result)
+    result["egress_guard"] = {
+        "schema": "agentflow.managed_egress_guard.v1",
+        "status": "passed" if not violations else "blocked",
+        "blocked": bool(violations),
+        "violation_count": len(violations),
+        "raw_values_logged": False,
+    }
+    if violations:
+        result["egress_guard"]["blocked_keys"] = sorted({item.get("key", "unknown") for item in violations})
+    return result
+
+
+def _preview_decision_rows(response_payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(response_payload, dict):
+        return []
+    for key in ("decisions", "preview_decisions", "results", "rows"):
+        value = response_payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    preview = response_payload.get("preview")
+    if isinstance(preview, dict):
+        return _preview_decision_rows(preview)
+    return []
+
+
+def _decision_bool(row: dict[str, Any], *keys: str) -> bool:
+    return any(bool(row.get(key)) for key in keys)
+
+
+def _preview_decision(row: dict[str, Any]) -> dict[str, Any]:
+    decision = str(
+        row.get("preview_decision")
+        or row.get("policy_decision")
+        or row.get("decision")
+        or row.get("status")
+        or "review-only"
+    ).strip()
+    omitted_reason = str(row.get("omitted_reason") or "").strip()
+    reason_codes = row.get("reason_codes") if isinstance(row.get("reason_codes"), list) else []
+    result = {
+        "schema": PREVIEW_DECISION_SCHEMA,
+        "handoff_ref": sanitize_value(row.get("handoff_ref") or row.get("source_handoff_ref")),
+        "preview_ref": _public_ref(row.get("preview_ref") or row.get("decision_id") or row.get("handoff_ref"), prefix="preview"),
+        "local_action_family": sanitize_value(row.get("local_action_family") or row.get("family")),
+        "executor_action_class": sanitize_value(row.get("executor_action_class")),
+        "decision": sanitize_value(decision),
+        "status": sanitize_value(row.get("status") or decision),
+        "recommended_next_action": sanitize_value(row.get("recommended_next_action") or row.get("next_action")),
+        "omitted_reason": sanitize_value(omitted_reason) if omitted_reason else None,
+        "no_op_reason": sanitize_value(row.get("no_op_reason")),
+        "reason_codes": sanitize_value([str(item) for item in reason_codes if str(item or "").strip()]),
+        "review_only": True if row.get("review_only") is None else bool(row.get("review_only")),
+        "feature_only": True,
+        "locally_executed": True,
+        "provider_forwarding": False,
+        "server_content_processing": False,
+        "managed_enforced": bool(row.get("managed_enforced")),
+        "policy_files_written": bool(row.get("policy_files_written")),
+        "provider_calls_made": bool(row.get("provider_calls_made")),
+    }
+    preserved = {
+        "review_only",
+        "feature_only",
+        "locally_executed",
+        "provider_forwarding",
+        "server_content_processing",
+        "managed_enforced",
+        "policy_files_written",
+        "provider_calls_made",
+    }
+    return {key: value for key, value in result.items() if value not in (None, "", []) or key in preserved}
+
+
+def build_managed_activation_preview_result(
+    request_payload: dict[str, Any],
+    *,
+    response_payload: Any | None = None,
+    fetch: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Summarize an optional managed preview response without retaining raw server payloads."""
+    rows = [row for row in request_payload.get("rows") or [] if isinstance(row, dict)]
+    decisions = [_preview_decision(row) for row in _preview_decision_rows(response_payload)]
+    handoff_refs = {str(row.get("handoff_ref") or "") for row in rows if row.get("handoff_ref")}
+    decision_refs = {str(row.get("handoff_ref") or "") for row in decisions if row.get("handoff_ref")}
+    matched_refs = sorted(handoff_refs & decision_refs)
+    no_op_count = sum(
+        1
+        for row in decisions
+        if str(row.get("decision") or "").lower() in {"no-op", "noop", "omitted"}
+        or bool(row.get("no_op_reason"))
+        or bool(row.get("omitted_reason"))
+    )
+    omitted_count = sum(1 for row in decisions if bool(row.get("omitted_reason")))
+    review_only_count = sum(1 for row in decisions if bool(row.get("review_only")))
+    active_policy_write_count = sum(
+        1
+        for row in decisions
+        if _decision_bool(row, "policy_files_written", "managed_enforced", "provider_calls_made")
+    )
+    managed_calls_made = bool((fetch or {}).get("managed_server_calls_made"))
+    fetch_status = str((fetch or {}).get("status") or "").strip()
+    status = "previewed" if managed_calls_made and fetch_status == "ok" else fetch_status or "skipped"
+    result = {
+        "schema": PREVIEW_RESULT_SCHEMA,
+        "status": status,
+        "mode": "review-only",
+        "preview_request": request_payload,
+        "fetch": sanitize_value(fetch or {
+            "status": "skipped",
+            "reason": "managed-preview-url-not-configured",
+            "managed_server_calls_made": False,
+        }),
+        "preview": {
+            "schema": "agentflow.managed_activation_preview_decisions.v1",
+            "decision_count": len(decisions),
+            "decisions": decisions,
+        },
+        "coverage": {
+            "schema": "agentflow.managed_activation_preview_coverage.v1",
+            "handoff_row_count": len(rows),
+            "preview_decision_count": len(decisions),
+            "matched_handoff_ref_count": len(matched_refs),
+            "missing_preview_decision_count": max(0, len(rows) - len(matched_refs)),
+            "omitted_count": omitted_count,
+            "no_op_count": no_op_count,
+            "review_only_count": review_only_count,
+            "active_policy_write_count": active_policy_write_count,
+            "policy_files_written": active_policy_write_count > 0,
+            "provider_calls_made": any(bool(row.get("provider_calls_made")) for row in decisions),
+            "managed_server_calls_made": managed_calls_made,
+        },
+        "privacy": {
+            **_handoff_privacy(),
+            "managed_server_calls_made": managed_calls_made,
+            "policy_files_written": active_policy_write_count > 0,
+        },
     }
     result = sanitize_value(result)
     violations = managed_egress_violations(result)

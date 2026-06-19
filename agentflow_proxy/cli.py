@@ -719,6 +719,148 @@ def local_activation_executor_cli(argv: Sequence[str] | None = None, *, stdout: 
     return 0
 
 
+def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Opt in to a feature-only managed preview for local activation executor handoff rows"
+    )
+    parser.add_argument(
+        "--plan-json",
+        required=True,
+        help="Path to an AgentFlow orchestrator research plan, activation queue, ledger, burndown, or handoff JSON.",
+    )
+    parser.add_argument(
+        "--managed-preview-url",
+        default=os.getenv("AGENTFLOW_MANAGED_ACTIVATION_PREVIEW_URL", ""),
+        help="Full managed preview endpoint URL. If omitted, no managed server call is made.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_MANAGED_ACTIVATION_PREVIEW_TIMEOUT", "10")),
+        help="HTTP timeout in seconds for the opt-in managed preview call, default: 10.",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=MANAGED_POLICY_API_KEY_ENV,
+        help=f"Environment variable containing a bearer token, default: {MANAGED_POLICY_API_KEY_ENV}.",
+    )
+    parser.add_argument(
+        "--allow-insecure-managed-url",
+        action="store_true",
+        help="Allow non-loopback HTTP managed preview URLs. HTTPS and loopback HTTP are allowed by default.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    from agentflow_proxy.local_activation_executor import (
+        build_managed_activation_preview_request,
+        build_managed_activation_preview_result,
+    )
+    from agentflow_proxy.managed_egress import managed_egress_violations
+    from agentflow_proxy.orchestrator_research import load_json_file, write_json
+
+    try:
+        plan = load_json_file(args.plan_json)
+    except (OSError, ValueError, TypeError) as exc:
+        _write_json(stderr, {"ok": False, "error": {"type": exc.__class__.__name__, "message": str(exc)}})
+        return 1
+    if not isinstance(plan, dict):
+        _write_json(stderr, {"ok": False, "error": {"type": "invalid_plan_json", "message": "plan JSON must be an object"}})
+        return 1
+
+    request_payload = build_managed_activation_preview_request(plan)
+    violations = managed_egress_violations(request_payload)
+    if violations:
+        result = build_managed_activation_preview_result(
+            request_payload,
+            fetch={
+                "status": "blocked",
+                "reason": "unsafe-egress-payload",
+                "managed_server_calls_made": False,
+                "violation_count": len(violations),
+                "blocked_keys": sorted({item.get("key", "unknown") for item in violations}),
+            },
+        )
+        write_json(stdout, result, pretty=args.pretty)
+        return 1
+
+    url = str(args.managed_preview_url or "").strip()
+    if not url:
+        result = build_managed_activation_preview_result(
+            request_payload,
+            fetch={
+                "status": "skipped",
+                "reason": "managed-preview-url-not-configured",
+                "managed_server_calls_made": False,
+            },
+        )
+        write_json(stdout, result, pretty=args.pretty)
+        return 0
+
+    if url.startswith("http://") and not _is_loopback_url(url) and not args.allow_insecure_managed_url:
+        result = build_managed_activation_preview_result(
+            request_payload,
+            fetch={
+                "status": "blocked",
+                "reason": "insecure-managed-preview-url",
+                "url": _redact_url(url),
+                "managed_server_calls_made": False,
+            },
+        )
+        write_json(stdout, result, pretty=args.pretty)
+        return 2
+
+    headers = {"content-type": "application/json"}
+    token = os.getenv(str(args.api_key_env or ""))
+    if token:
+        headers["authorization"] = f"Bearer {token}"
+
+    started = time.time()
+    response_payload: Any | None = None
+    fetch: dict[str, Any] = {
+        "status": "ok",
+        "url": _redact_url(url),
+        "timeout_seconds": float(args.timeout),
+        "managed_server_calls_made": True,
+        "provider_calls_made": False,
+        "policy_files_written": False,
+        "api_key_value_included": False,
+    }
+    try:
+        response = httpx.post(url, json=request_payload, headers=headers, timeout=float(args.timeout))
+        fetch["latency_ms"] = int((time.time() - started) * 1000)
+        fetch["status_code"] = response.status_code
+        try:
+            response_payload = response.json()
+            fetch["response_json"] = True
+        except ValueError:
+            response_payload = None
+            fetch["response_json"] = False
+        if response.status_code >= 400:
+            fetch.update({
+                "status": "error",
+                "reason": "managed-preview-server-error",
+                "error": response.text[:500],
+            })
+    except httpx.HTTPError as exc:
+        fetch.update({
+            "status": "error",
+            "reason": exc.__class__.__name__,
+            "error": str(exc)[:500],
+        })
+
+    result = build_managed_activation_preview_result(
+        request_payload,
+        response_payload=response_payload,
+        fetch=fetch,
+    )
+    write_json(stdout, result, pretty=args.pretty)
+    return 0 if fetch.get("status") == "ok" else 1
+
+
 def proxy_main() -> None:
     # The provider proxy forwards real API credentials and request bodies upstream.
     # Keep installed CLI defaults localhost-only unless the user explicitly opts in
@@ -1180,6 +1322,10 @@ def activation_burndown_main() -> None:
 
 def local_activation_executor_main() -> None:
     raise SystemExit(local_activation_executor_cli())
+
+
+def managed_activation_preview_main() -> None:
+    raise SystemExit(managed_activation_preview_cli())
 
 
 def post_promotion_priority_delta_review_main() -> None:
