@@ -26,6 +26,7 @@ from agentflow_proxy.request_shape_rollups import (
     build_request_shape_crunch_policy_decision_report,
     build_request_shape_crunch_canary_stage_report,
     build_request_shape_rollups_report,
+    build_request_shape_tool_cache_replay_evidence_report,
     record_request_shape_crunch_policy_decision_ledger,
     request_shape_crunch_canary_lifecycle,
 )
@@ -113,6 +114,158 @@ class RequestShapeRollupTests(unittest.TestCase):
             "path_hashes_included": False,
             "raw_stat_values_included": False,
         }
+
+    def test_tool_cache_stable_dependency_evidence_emits_review_only_candidate(self) -> None:
+        cohorts = [
+            {
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "tool-light",
+                "workflow_phase": "tool-light",
+                "stream": False,
+                "has_tools": True,
+                "cache_status": "skipped",
+                "routing_status": "passthrough",
+                "readiness": "skipped",
+                "reason": "safe-invalidation-evidence-present",
+                "blockers": ["safe-invalidation-evidence-present", "tools-present"],
+                "row_count": 12,
+                "projected_hits": 8,
+                "projected_savings_usd": 0.02,
+                "file_dependency_status": "stable",
+                "file_dependency_fingerprint_available": True,
+                "file_dependency_audit": self._dependency_audit(safe=True, fingerprint_available=True),
+            }
+        ]
+
+        report = build_request_shape_tool_cache_replay_evidence_report(cohorts, limit=10)
+
+        self.assertEqual(report["schema"], "agentflow.request_shape_tool_cache_replay_evidence.v1")
+        self.assertEqual(report["summary"]["stable_dependency_evidence_rows"], 12)
+        self.assertEqual(report["summary"]["review_only_candidate_count"], 1)
+        self.assertEqual(report["summary"]["review_ready_rows"], 12)
+        self.assertEqual(report["summary"]["stageable_after_review_rows"], 12)
+        self.assertTrue(report["acceptance"]["promotes_stable_dependency_evidence_to_review_only_candidates"])
+        self.assertTrue(report["acceptance"]["review_only_candidates_require_live_repeat_or_savings_floor"])
+        review = report["review_only_candidates"]
+        self.assertEqual(review["schema"], "agentflow.request_shape_tool_cache_review_candidates.v1")
+        self.assertEqual(review["summary"]["review_only_candidate_count"], 1)
+        self.assertEqual(review["summary"]["cache_entries_written"], 0)
+        self.assertFalse(review["summary"]["policy_files_written"])
+        self.assertFalse(review["summary"]["tool_cache_replay_enabled"])
+        self.assertFalse(review["summary"]["streaming_replay_enabled"])
+        self.assertTrue(review["acceptance"]["stable_dependency_evidence_emits_review_only_candidate"])
+        candidate = review["candidates"][0]
+        self.assertTrue(candidate["review_only"])
+        self.assertEqual(candidate["candidate_status"], "review-ready")
+        self.assertEqual(candidate["candidate_decision"], "review-only-candidate")
+        self.assertEqual(candidate["next_action"], "review-tool-cache-replay-candidate")
+        self.assertTrue(candidate["stageable_after_review"])
+        self.assertFalse(candidate["stage_allowed"])
+        self.assertEqual(candidate["readiness_gate"]["gate_status"], "savings-floor-met")
+        self.assertTrue(candidate["readiness_gate"]["stage_allowed"])
+        self.assertEqual(candidate["projected_hits"], 8)
+        self.assertEqual(candidate["projected_savings_usd"], 0.02)
+        self.assertFalse(candidate["tool_cache_replay_enabled"])
+        self.assertFalse(candidate["streaming_replay_enabled"])
+        self.assertFalse(candidate["emits_cache_apply_action"])
+        self.assertEqual(candidate["cache_entries_written"], 0)
+        self.assertFalse(candidate["policy_files_written"])
+        self.assertTrue(candidate["privacy"]["metadata_only"])
+        self.assertFalse(candidate["privacy"]["cache_keys_included"])
+        self.assertFalse(candidate["privacy"]["file_paths_included"])
+
+    def test_tool_cache_nonstable_dependency_evidence_emits_blocked_review_rows(self) -> None:
+        base = {
+            "provider_family": "openai",
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "category": "tool-light",
+            "workflow_phase": "tool-light",
+            "stream": False,
+            "has_tools": True,
+            "cache_status": "skipped",
+            "routing_status": "passthrough",
+            "readiness": "skipped",
+            "row_count": 3,
+            "projected_hits": 2,
+            "projected_savings_usd": 0.005,
+        }
+        cohorts = [
+            {
+                **base,
+                "reason": "stale-dependency-evidence",
+                "blockers": ["stale-dependency-evidence", "tools-present"],
+                "file_dependency_status": "invalidated",
+                "file_dependency_fingerprint_available": True,
+                "file_dependency_audit": self._dependency_audit(
+                    reason="dependency-changed",
+                    safe=False,
+                    fingerprint_available=True,
+                ),
+            },
+            {
+                **base,
+                "reason": "unsafe-tool-calls-without-invalidation",
+                "blockers": ["unsafe-tool-calls-without-invalidation", "tools-present"],
+                "file_dependency_status": "unsafe",
+                "file_dependency_fingerprint_available": True,
+                "file_dependency_audit": self._dependency_audit(
+                    reason="unsafe-tool-calls-without-invalidation",
+                    safe=False,
+                    fingerprint_available=True,
+                ),
+            },
+            {
+                **base,
+                "reason": "invalidation-evidence-missing",
+                "blockers": ["invalidation-evidence-missing", "tools-present"],
+                "file_dependency_status": "missing",
+                "file_dependency_fingerprint_available": False,
+                "file_dependency_audit": self._dependency_audit(safe=False, fingerprint_available=False),
+            },
+        ]
+
+        report = build_request_shape_tool_cache_replay_evidence_report(cohorts, limit=10)
+
+        review = report["review_only_candidates"]
+        self.assertEqual(review["summary"]["review_only_candidate_count"], 3)
+        self.assertEqual(review["summary"]["blocked_rows"], 9)
+        self.assertEqual(review["summary"]["review_ready_rows"], 0)
+        self.assertEqual(review["summary"]["cache_entries_written"], 0)
+        self.assertFalse(review["summary"]["policy_files_written"])
+        self.assertTrue(review["acceptance"]["blocked_dependency_evidence_has_distinct_reason_codes"])
+        by_reason = {row["blocker_reason"]: row for row in review["candidates"]}
+        self.assertEqual(
+            set(by_reason),
+            {
+                "stale-dependency-evidence",
+                "unsafe-tool-calls-without-invalidation",
+                "invalidation-evidence-missing",
+            },
+        )
+        self.assertEqual(by_reason["stale-dependency-evidence"]["next_action"], "refresh-file-invalidation-evidence")
+        self.assertEqual(
+            by_reason["unsafe-tool-calls-without-invalidation"]["next_action"],
+            "collect-file-invalidation-evidence",
+        )
+        self.assertEqual(
+            by_reason["invalidation-evidence-missing"]["next_action"],
+            "collect-file-invalidation-evidence",
+        )
+        for candidate in review["candidates"]:
+            self.assertTrue(candidate["review_only"])
+            self.assertEqual(candidate["candidate_status"], "blocked")
+            self.assertFalse(candidate["stageable_after_review"])
+            self.assertFalse(candidate["stage_allowed"])
+            self.assertFalse(candidate["tool_cache_replay_enabled"])
+            self.assertFalse(candidate["streaming_replay_enabled"])
+            self.assertFalse(candidate["emits_cache_apply_action"])
+            self.assertEqual(candidate["cache_entries_written"], 0)
+            self.assertFalse(candidate["policy_files_written"])
+            self.assertTrue(candidate["privacy"]["metadata_only"])
+            self.assertFalse(candidate["privacy"]["tool_payloads_included"])
 
     def _log_call(
         self,
