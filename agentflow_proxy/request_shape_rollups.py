@@ -32,6 +32,9 @@ REPLAY_TOOL_REPLAY_EVIDENCE_SCHEMA = "agentflow.request_shape_tool_cache_replay_
 REPLAY_TOOL_REPLAY_EVIDENCE_ROW_SCHEMA = "agentflow.request_shape_tool_cache_replay_evidence_row.v1"
 REPLAY_TOOL_REVIEW_CANDIDATES_SCHEMA = "agentflow.request_shape_tool_cache_review_candidates.v1"
 REPLAY_TOOL_REVIEW_CANDIDATE_ROW_SCHEMA = "agentflow.request_shape_tool_cache_review_candidate.v1"
+REPLAY_TOOL_MANAGED_LOCAL_PREVIEWS_SCHEMA = "agentflow.request_shape_tool_cache_managed_local_replay_previews.v1"
+REPLAY_TOOL_MANAGED_LOCAL_PREVIEW_ROW_SCHEMA = "agentflow.request_shape_tool_cache_managed_local_replay_preview.v1"
+REPLAY_TOOL_MANAGED_PREVIEW_AGREEMENT_SCHEMA = "agentflow.request_shape_tool_cache_managed_preview_agreement.v1"
 REPLAY_BLOCKER_CLASSIFICATION_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification.v1"
 REPLAY_BLOCKER_CLASSIFICATION_ROW_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification_row.v1"
 REPLAY_CACHE_CANARY_ACTION_SCHEMA = "agentflow.request_shape_cache_replay_canary_action.v1"
@@ -9265,10 +9268,361 @@ def _build_tool_cache_review_candidates(rows: list[dict[str, Any]], *, limit: in
     }
 
 
+def _managed_preview_outcome_rows(report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(report, dict):
+        return []
+    rows = report.get("outcomes")
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _normalized_tool_cache_preview_action(value: Any, *, decision: Any = None) -> str:
+    text = public_label(value, "unknown")
+    decision_text = public_label(decision, "unknown")
+    review_actions = {
+        "review-tool-cache-replay-candidate",
+        "rank-safe-tool-cache-replay-readiness",
+        "review-only-recommendation",
+        "preview-tool-cache-replay-candidate",
+        "draft-tool-cache-replay-review",
+    }
+    if text in review_actions or decision_text == "review-only-recommendation":
+        return "review-tool-cache-replay-candidate"
+    if text in {
+        "wait-for-live-repeat-or-observed-hit-proof",
+        "keep-tool-cache-replay-retired-no-repeat",
+        "keep-cache-replay-noop",
+        "noop",
+        "no-op",
+    } or decision_text in {"no-op", "noop"}:
+        return "no-op"
+    if text in {
+        "collect-file-invalidation-evidence",
+        "refresh-file-invalidation-evidence",
+        "keep-tool-cache-blocked",
+        "add-invalidation-evidence",
+    } or decision_text in {"keep-blocked", "omitted"}:
+        return "keep-blocked"
+    return text
+
+
+def _managed_tool_cache_preview_outcome(managed_preview_outcomes: dict[str, Any] | None) -> dict[str, Any]:
+    rows = [
+        row
+        for row in _managed_preview_outcome_rows(managed_preview_outcomes)
+        if public_label(row.get("local_action_family"), "unknown") == "cache"
+        and public_label(row.get("evidence_schema"), "unknown") == REPLAY_TOOL_REPLAY_EVIDENCE_SCHEMA
+    ]
+    if not rows:
+        return {}
+
+    def _priority(row: dict[str, Any]) -> tuple[int, float]:
+        classification = public_label(row.get("classification"), "unknown")
+        if bool(row.get("failed_closed")):
+            score = 0
+        elif bool(row.get("stale")) or classification == "stale-preview":
+            score = 1
+        elif bool(row.get("missing_preview_decision")):
+            score = 2
+        elif bool(row.get("disagrees_with_local_evidence")) or classification == "managed-local-disagreement":
+            score = 3
+        elif classification == "review-only":
+            score = 5
+        else:
+            score = 4
+        age = _as_float(row.get("preview_age_hours"), 999999.0)
+        return (score, -age)
+
+    return sorted(rows, key=_priority, reverse=True)[0]
+
+
+def _tool_cache_managed_preview_agreement(
+    candidate: dict[str, Any],
+    managed_preview_outcomes: dict[str, Any] | None,
+) -> dict[str, Any]:
+    selected = _managed_tool_cache_preview_outcome(managed_preview_outcomes)
+    local_next_action = public_label(candidate.get("next_action"), "unknown")
+    local_decision = public_label(candidate.get("candidate_decision"), "unknown")
+    normalized_local = _normalized_tool_cache_preview_action(local_next_action, decision=local_decision)
+    required = candidate.get("candidate_status") == "review-ready"
+
+    if not selected:
+        reason = "missing-managed-preview-outcome" if required else "managed-preview-not-required-for-local-noop"
+        normalized_managed = "missing"
+        agreed = False
+    elif bool(selected.get("failed_closed")):
+        reason = "managed-preview-failed-closed"
+        normalized_managed = _normalized_tool_cache_preview_action(selected.get("next_action"), decision=selected.get("decision"))
+        agreed = False
+    elif bool(selected.get("stale")) or public_label(selected.get("classification"), "unknown") == "stale-preview":
+        reason = "stale-managed-preview-outcome"
+        normalized_managed = _normalized_tool_cache_preview_action(selected.get("next_action"), decision=selected.get("decision"))
+        agreed = False
+    elif bool(selected.get("missing_preview_decision")):
+        reason = "missing-managed-preview-decision"
+        normalized_managed = _normalized_tool_cache_preview_action(selected.get("next_action"), decision=selected.get("decision"))
+        agreed = False
+    elif bool(selected.get("disagrees_with_local_evidence")) or public_label(
+        selected.get("classification"),
+        "unknown",
+    ) == "managed-local-disagreement":
+        reason = "managed-local-disagreement"
+        normalized_managed = _normalized_tool_cache_preview_action(selected.get("next_action"), decision=selected.get("decision"))
+        agreed = False
+    else:
+        normalized_managed = _normalized_tool_cache_preview_action(selected.get("next_action"), decision=selected.get("decision"))
+        agreed = normalized_local == normalized_managed and (not required or normalized_local == "review-tool-cache-replay-candidate")
+        if agreed:
+            reason = "local-managed-preview-agree" if required else "local-noop-managed-preview-compatible"
+        elif not required and normalized_managed == "review-tool-cache-replay-candidate":
+            reason = "local-proof-gate-blocks-managed-preview"
+        else:
+            reason = "managed-preview-action-disagreement"
+
+    return {
+        "schema": REPLAY_TOOL_MANAGED_PREVIEW_AGREEMENT_SCHEMA,
+        "required": required,
+        "agreed": agreed,
+        "reason": reason,
+        "local_next_action": local_next_action,
+        "managed_next_action": selected.get("next_action") if selected else None,
+        "normalized_local_action": normalized_local,
+        "normalized_managed_action": normalized_managed,
+        "managed_classification": selected.get("classification") if selected else None,
+        "managed_decision": selected.get("decision") if selected else None,
+        "managed_preview_age_hours": selected.get("preview_age_hours") if selected else None,
+        "handoff_ref": selected.get("handoff_ref") if selected else None,
+        "preview_ref": selected.get("preview_ref") if selected else None,
+        "review_only": True,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _replayability_privacy(),
+    }
+
+
+def _tool_cache_replay_preview_from_candidate(
+    candidate: dict[str, Any],
+    managed_preview_outcomes: dict[str, Any] | None,
+) -> dict[str, Any]:
+    agreement = _tool_cache_managed_preview_agreement(candidate, managed_preview_outcomes)
+    candidate_status = public_label(candidate.get("candidate_status"), "blocked")
+    if candidate_status == "review-ready":
+        preview_status = "review-ready"
+        preview_decision = "review-only-replay-preview"
+    elif candidate_status == "review-only-gated":
+        preview_status = "review-only-noop"
+        preview_decision = "no-op-missing-live-repeat-proof"
+    else:
+        preview_status = "blocked"
+        preview_decision = "keep-blocked"
+
+    return {
+        "schema": REPLAY_TOOL_MANAGED_LOCAL_PREVIEW_ROW_SCHEMA,
+        "rank": 0,
+        "provider_family": "openai",
+        "source_surface": public_label(candidate.get("source_surface"), "unknown"),
+        "endpoint": public_label(candidate.get("endpoint"), "unknown"),
+        "category": public_label(candidate.get("category"), "unknown"),
+        "workflow_phase": public_label(candidate.get("workflow_phase"), "unknown"),
+        "stream": bool(candidate.get("stream")),
+        "has_tools": True,
+        "sample_count": _as_int(candidate.get("sample_count") or candidate.get("row_count")),
+        "row_count": _as_int(candidate.get("row_count") or candidate.get("sample_count")),
+        "preview_status": preview_status,
+        "preview_decision": preview_decision,
+        "candidate_status": candidate_status,
+        "candidate_decision": public_label(candidate.get("candidate_decision"), "unknown"),
+        "local_next_action": public_label(candidate.get("next_action"), "unknown"),
+        "next_action": public_label(candidate.get("next_action"), "unknown"),
+        "no_op_reason": public_label(candidate.get("no_op_reason"), "none")
+        if candidate.get("no_op_reason")
+        else None,
+        "blocker_reason": public_label(candidate.get("blocker_reason"), "none")
+        if candidate.get("blocker_reason")
+        else None,
+        "review_only": True,
+        "stageable_after_review": bool(candidate.get("stageable_after_review")),
+        "stage_allowed": False,
+        "requires_operator_review": True,
+        "requires_explicit_later_promotion": True,
+        "managed_preview_agreement": agreement,
+        "dependency_evidence_status": public_label(candidate.get("dependency_evidence_status"), "missing"),
+        "dependency_evidence_decision": candidate.get("dependency_evidence_decision")
+        if isinstance(candidate.get("dependency_evidence_decision"), dict)
+        else {},
+        "file_dependency_status": public_label(candidate.get("file_dependency_status"), "missing"),
+        "safe_invalidation_evidence": bool(candidate.get("safe_invalidation_evidence")),
+        "file_dependency_fingerprint_available": bool(candidate.get("file_dependency_fingerprint_available")),
+        "local_dependency_fingerprint": candidate.get("local_dependency_fingerprint")
+        if isinstance(candidate.get("local_dependency_fingerprint"), dict)
+        else _local_dependency_fingerprint_metadata(False),
+        "replay_proof": candidate.get("replay_proof") if isinstance(candidate.get("replay_proof"), dict) else {},
+        "projected_hits": _as_int(candidate.get("projected_hits")),
+        "projected_savings_usd": round(_as_float(candidate.get("projected_savings_usd")), 6),
+        "tool_cache_replay_enabled": False,
+        "streaming_replay_enabled": False,
+        "emits_cache_apply_action": False,
+        "cache_entries_written": 0,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "aggregate_only": True,
+        "metadata_only": True,
+        "privacy": _replayability_privacy(),
+    }
+
+
+def _build_tool_cache_managed_local_replay_previews(
+    review_candidates: dict[str, Any],
+    *,
+    managed_preview_outcomes: dict[str, Any] | None = None,
+    limit: int,
+) -> dict[str, Any]:
+    raw_candidates = review_candidates.get("candidates") if isinstance(review_candidates, dict) else []
+    previews = [
+        _tool_cache_replay_preview_from_candidate(candidate, managed_preview_outcomes)
+        for candidate in raw_candidates
+        if isinstance(candidate, dict)
+    ]
+    previews.sort(
+        key=lambda item: (
+            {
+                "review-ready": 5,
+                "review-only-noop": 4,
+                "blocked": 3,
+            }.get(str(item.get("preview_status")), 0),
+            bool(item.get("managed_preview_agreement", {}).get("agreed")),
+            _as_float(item.get("projected_savings_usd")),
+            _as_int(item.get("projected_hits")),
+            _as_int(item.get("row_count")),
+        ),
+        reverse=True,
+    )
+    capped_limit = max(1, min(_as_int(limit) or 25, 1000))
+    for rank, row in enumerate(previews[:capped_limit], start=1):
+        row["rank"] = rank
+
+    status_counts: dict[str, int] = {}
+    agreement_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    dependency_counts: dict[str, int] = {}
+    review_ready_rows = 0
+    noop_rows = 0
+    blocked_rows = 0
+    managed_required_rows = 0
+    managed_agreed_rows = 0
+    managed_missing_rows = 0
+    for row in previews:
+        row_count = _as_int(row.get("row_count"))
+        _increment(status_counts, row.get("preview_status"), row_count)
+        _increment(action_counts, row.get("next_action"), row_count)
+        decision_meta = row.get("dependency_evidence_decision") if isinstance(row.get("dependency_evidence_decision"), dict) else {}
+        _increment(dependency_counts, decision_meta.get("decision") or "unknown-dependency-evidence", row_count)
+        agreement = row.get("managed_preview_agreement") if isinstance(row.get("managed_preview_agreement"), dict) else {}
+        _increment(agreement_counts, agreement.get("reason") or "unknown", row_count)
+        if row.get("preview_status") == "review-ready":
+            review_ready_rows += row_count
+        elif row.get("preview_status") == "review-only-noop":
+            noop_rows += row_count
+        else:
+            blocked_rows += row_count
+        if agreement.get("required"):
+            managed_required_rows += row_count
+            if agreement.get("agreed"):
+                managed_agreed_rows += row_count
+            if agreement.get("reason") == "missing-managed-preview-outcome":
+                managed_missing_rows += row_count
+
+    return {
+        "schema": REPLAY_TOOL_MANAGED_LOCAL_PREVIEWS_SCHEMA,
+        "status": "ranked" if previews else "no-tool-cache-replay-previews",
+        "read_only": True,
+        "review_only": True,
+        "authoritative_for_active_policy": False,
+        "next_action": _breakdown(action_counts)[0]["value"] if action_counts else "keep-tool-cache-replay-blocked",
+        "summary": {
+            "preview_count": len(previews),
+            "review_ready_preview_rows": review_ready_rows,
+            "review_only_noop_rows": noop_rows,
+            "blocked_preview_rows": blocked_rows,
+            "managed_preview_required_rows": managed_required_rows,
+            "managed_preview_agreement_rows": managed_agreed_rows,
+            "managed_preview_missing_rows": managed_missing_rows,
+            "cache_apply_action_count": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+            "tool_cache_replay_enabled": False,
+            "streaming_replay_enabled": False,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+        },
+        "status_breakdown": _breakdown(status_counts),
+        "next_action_breakdown": _breakdown(action_counts),
+        "managed_preview_agreement_breakdown": _breakdown(agreement_counts),
+        "dependency_evidence_decision_breakdown": _breakdown(dependency_counts),
+        "previews": previews[:capped_limit],
+        "acceptance": {
+            "emits_managed_local_replay_previews": bool(previews),
+            "stable_with_proof_emits_review_ready_preview": any(
+                row.get("preview_status") == "review-ready"
+                and isinstance(row.get("dependency_evidence_decision"), dict)
+                and row["dependency_evidence_decision"].get("decision") == "stable-dependency-evidence"
+                and bool(row.get("replay_proof", {}).get("proof_available"))
+                for row in previews
+            ),
+            "stable_without_live_repeat_or_observed_hit_is_noop": all(
+                row.get("preview_decision") == "no-op-missing-live-repeat-proof"
+                for row in previews
+                if isinstance(row.get("dependency_evidence_decision"), dict)
+                and row["dependency_evidence_decision"].get("decision") == "stable-dependency-evidence"
+                and isinstance(row.get("replay_proof"), dict)
+                and not bool(row.get("replay_proof", {}).get("proof_available"))
+            ),
+            "unsafe_or_missing_dependency_emits_no_apply_actions": all(
+                not bool(row.get("emits_cache_apply_action"))
+                and not bool(row.get("tool_cache_replay_enabled"))
+                and _as_int(row.get("cache_entries_written")) == 0
+                for row in previews
+                if isinstance(row.get("dependency_evidence_decision"), dict)
+                and row["dependency_evidence_decision"].get("decision")
+                in {"unsafe-dependency-evidence", "missing-dependency-evidence", "unknown-dependency-evidence"}
+            ),
+            "review_ready_previews_require_stable_dependency_and_proof": all(
+                isinstance(row.get("dependency_evidence_decision"), dict)
+                and row["dependency_evidence_decision"].get("decision") == "stable-dependency-evidence"
+                and isinstance(row.get("replay_proof"), dict)
+                and bool(row["replay_proof"].get("proof_available"))
+                for row in previews
+                if row.get("preview_status") == "review-ready"
+            ),
+            "managed_preview_agreement_is_review_only": all(
+                isinstance(row.get("managed_preview_agreement"), dict)
+                and row["managed_preview_agreement"].get("review_only") is True
+                and not bool(row["managed_preview_agreement"].get("policy_files_written"))
+                and not bool(row["managed_preview_agreement"].get("provider_calls_made"))
+                for row in previews
+            ),
+            "emits_no_cache_apply_actions": True,
+            "tool_and_streaming_replay_remain_disabled": all(
+                not bool(row.get("tool_cache_replay_enabled")) and not bool(row.get("streaming_replay_enabled"))
+                for row in previews
+            ),
+            "no_cache_entries_written": True,
+            "policy_files_written": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _replayability_privacy(),
+    }
+
+
 def build_request_shape_tool_cache_replay_evidence_report(
     cohorts: list[dict[str, Any]],
     *,
     limit: int = 25,
+    managed_preview_outcomes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     evidence_state_counts: dict[str, int] = {}
@@ -9430,6 +9784,11 @@ def build_request_shape_tool_cache_replay_evidence_report(
     dependency_evidence_burndown = _dependency_evidence_burndown(rows)
     dependency_fingerprint_coverage = _build_dependency_fingerprint_coverage_report(rows, limit=capped_limit)
     review_only_candidates = _build_tool_cache_review_candidates(rows, limit=capped_limit)
+    managed_local_replay_previews = _build_tool_cache_managed_local_replay_previews(
+        review_only_candidates,
+        managed_preview_outcomes=managed_preview_outcomes,
+        limit=capped_limit,
+    )
     dependency_evidence_classes = {
         public_label(row.get("dependency_evidence_decision", {}).get("evidence_class"), "unknown-dependency-evidence")
         for row in rows
@@ -9484,6 +9843,10 @@ def build_request_shape_tool_cache_replay_evidence_report(
             "review_ready_rows": review_only_candidates["summary"]["review_ready_rows"],
             "review_only_gated_rows": review_only_candidates["summary"]["review_only_gated_rows"],
             "stageable_after_review_rows": review_only_candidates["summary"]["stageable_after_review_rows"],
+            "managed_local_replay_preview_count": managed_local_replay_previews["summary"]["preview_count"],
+            "review_ready_preview_rows": managed_local_replay_previews["summary"]["review_ready_preview_rows"],
+            "managed_preview_agreement_rows": managed_local_replay_previews["summary"]["managed_preview_agreement_rows"],
+            "managed_preview_missing_rows": managed_local_replay_previews["summary"]["managed_preview_missing_rows"],
             "dependency_fingerprint_coverage_decision": dependency_fingerprint_coverage["coverage_decision"],
             "dependency_fingerprint_top_missing_or_blocked_reason": dependency_fingerprint_coverage["summary"][
                 "top_missing_or_blocked_reason"
@@ -9504,6 +9867,7 @@ def build_request_shape_tool_cache_replay_evidence_report(
         "dependency_evidence_classification": dependency_evidence_classification,
         "dependency_fingerprint_coverage": dependency_fingerprint_coverage,
         "review_only_candidates": review_only_candidates,
+        "managed_local_replay_previews": managed_local_replay_previews,
         "next_action_breakdown": next_action_breakdown,
         "blocker_breakdown": _breakdown(blocker_counts),
         "cohorts": rows[:capped_limit],
@@ -9535,6 +9899,14 @@ def build_request_shape_tool_cache_replay_evidence_report(
                     "stable_dependency_evidence_emits_review_only_candidate"
                 )
             ),
+            "promotes_stable_dependency_evidence_to_managed_local_replay_previews": bool(
+                managed_local_replay_previews.get("acceptance", {}).get("emits_managed_local_replay_previews")
+            ),
+            "stable_with_proof_emits_review_ready_replay_preview": bool(
+                managed_local_replay_previews.get("acceptance", {}).get(
+                    "stable_with_proof_emits_review_ready_preview"
+                )
+            ),
             "review_only_candidates_require_live_repeat_or_savings_floor": bool(
                 review_only_candidates.get("acceptance", {}).get("requires_live_repeat_or_savings_floor")
             ),
@@ -9543,6 +9915,11 @@ def build_request_shape_tool_cache_replay_evidence_report(
             ),
             "stable_without_live_repeat_or_observed_hit_is_noop": bool(
                 review_only_candidates.get("acceptance", {}).get("stable_without_live_repeat_or_observed_hit_is_noop")
+            ),
+            "stable_without_live_repeat_or_observed_hit_preview_is_noop": bool(
+                managed_local_replay_previews.get("acceptance", {}).get(
+                    "stable_without_live_repeat_or_observed_hit_is_noop"
+                )
             ),
             "retired_no_repeat_emits_noop": bool(
                 review_only_candidates.get("acceptance", {}).get("retired_no_repeat_emits_noop")
@@ -9585,6 +9962,16 @@ def build_request_shape_tool_cache_replay_evidence_report(
                     "unknown-dependency-evidence",
                 }
             ),
+            "unsafe_or_missing_dependency_previews_emit_no_apply_actions": bool(
+                managed_local_replay_previews.get("acceptance", {}).get(
+                    "unsafe_or_missing_dependency_emits_no_apply_actions"
+                )
+            ),
+            "managed_local_replay_previews_are_review_only": bool(
+                managed_local_replay_previews.get("acceptance", {}).get(
+                    "managed_preview_agreement_is_review_only"
+                )
+            ),
             "emits_no_cache_apply_actions": True,
             "tool_and_streaming_replay_remain_disabled": all(
                 not bool(row.get("tool_cache_replay_enabled")) and not bool(row.get("streaming_replay_enabled"))
@@ -9604,6 +9991,7 @@ def build_request_shape_cache_replayability_dry_run(
     *,
     limit: int = 25,
     handled_policy_rules: list[dict[str, Any]] | None = None,
+    managed_preview_outcomes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     replay_rows = [
         row
@@ -9775,6 +10163,7 @@ def build_request_shape_cache_replayability_dry_run(
     tool_replay_evidence = build_request_shape_tool_cache_replay_evidence_report(
         cohorts,
         limit=capped_limit,
+        managed_preview_outcomes=managed_preview_outcomes,
     )
     return {
         "schema": REPLAYABILITY_DRY_RUN_SCHEMA,
@@ -10604,6 +10993,7 @@ def build_request_shape_rollups_report(
     run_id: str | None = None,
     max_crunch_canary_evidence_age_hours: float = DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS,
     mark_handled_cache_replay_cohorts: bool = True,
+    managed_preview_outcomes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     capped_limit = max(1, min(int(limit or 1000), 10_000))
     generated_at = utc_now()
@@ -10813,6 +11203,7 @@ def build_request_shape_rollups_report(
         rollups,
         limit=25,
         handled_policy_rules=handled_cache_replay_rules,
+        managed_preview_outcomes=managed_preview_outcomes,
     )
     cache_replay_blocker_classification = build_request_shape_cache_replay_blocker_classification_report(
         cache_replayability_dry_run,

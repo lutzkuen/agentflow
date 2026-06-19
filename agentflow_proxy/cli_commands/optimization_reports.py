@@ -5250,7 +5250,7 @@ def cache_replayability_report_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
-def request_shape_rollups_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+def request_shape_rollups_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stdin: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Build and persist privacy-safe request-shape rollups from local call metadata")
     parser.add_argument(
         "--db",
@@ -5265,6 +5265,13 @@ def request_shape_rollups_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     )
     parser.add_argument("--run-id", help="Optional stable rollup run id. Defaults to a generated local id.")
     parser.add_argument(
+        "--managed-preview-outcomes",
+        help=(
+            "Managed activation preview outcomes report JSON path. If omitted, stored local preview outcomes "
+            "are used when the DB table already exists."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Build the report without writing request_shape_rollups rows.",
@@ -5276,17 +5283,33 @@ def request_shape_rollups_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     )
     args = parser.parse_args(argv)
 
+    stdin = stdin if stdin is not None else sys.stdin
     stdout = stdout if stdout is not None else sys.stdout
 
     from agentflow_proxy.request_shape_rollups import build_request_shape_rollups_report
 
     store = _open_store_for_db(str(args.db))
     try:
+        if args.managed_preview_outcomes:
+            managed_preview_outcomes = _read_json_input(str(args.managed_preview_outcomes), stdin=stdin)
+        else:
+            table = store.conn.execute(
+                "select name from sqlite_master where type='table' and name='managed_activation_preview_outcomes'"
+            ).fetchone()
+            if table:
+                from agentflow_proxy.managed_activation_preview_outcomes import (
+                    build_managed_activation_preview_outcomes_report,
+                )
+
+                managed_preview_outcomes = build_managed_activation_preview_outcomes_report(store, limit=args.limit)
+            else:
+                managed_preview_outcomes = None
         result = build_request_shape_rollups_report(
             store,
             limit=args.limit,
             persist=not args.dry_run,
             run_id=args.run_id,
+            managed_preview_outcomes=managed_preview_outcomes,
         )
     finally:
         store.conn.close()

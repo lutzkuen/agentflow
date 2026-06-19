@@ -117,6 +117,39 @@ class RequestShapeRollupTests(unittest.TestCase):
             "raw_stat_values_included": False,
         }
 
+    def _managed_tool_cache_preview_outcomes(
+        self,
+        *,
+        next_action: str = "review-tool-cache-replay-candidate",
+        classification: str = "review-only",
+        decision: str = "review-only-recommendation",
+    ) -> dict[str, object]:
+        return {
+            "schema": "agentflow.managed_activation_preview_outcomes.v1",
+            "review_only": True,
+            "outcomes": [
+                {
+                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "handoff_ref": "managed-preview-cache-ref",
+                    "preview_ref": "managed-preview-cache-preview",
+                    "local_action_family": "cache",
+                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "classification": classification,
+                    "decision": decision,
+                    "next_action": next_action,
+                    "review_only": True,
+                    "failed_closed": False,
+                    "stale": False,
+                    "missing_preview_decision": False,
+                    "disagrees_with_local_evidence": False,
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                }
+            ],
+        }
+
     def test_tool_cache_stable_dependency_evidence_emits_review_only_candidate(self) -> None:
         cohorts = [
             {
@@ -142,7 +175,11 @@ class RequestShapeRollupTests(unittest.TestCase):
             }
         ]
 
-        report = build_request_shape_tool_cache_replay_evidence_report(cohorts, limit=10)
+        report = build_request_shape_tool_cache_replay_evidence_report(
+            cohorts,
+            limit=10,
+            managed_preview_outcomes=self._managed_tool_cache_preview_outcomes(),
+        )
 
         self.assertEqual(report["schema"], "agentflow.request_shape_tool_cache_replay_evidence.v1")
         self.assertEqual(report["summary"]["stable_dependency_evidence_rows"], 12)
@@ -150,6 +187,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["summary"]["review_ready_rows"], 12)
         self.assertEqual(report["summary"]["stageable_after_review_rows"], 12)
         self.assertTrue(report["acceptance"]["promotes_stable_dependency_evidence_to_review_only_candidates"])
+        self.assertTrue(report["acceptance"]["promotes_stable_dependency_evidence_to_managed_local_replay_previews"])
+        self.assertTrue(report["acceptance"]["stable_with_proof_emits_review_ready_replay_preview"])
         self.assertTrue(report["acceptance"]["review_only_candidates_require_live_repeat_or_savings_floor"])
         self.assertTrue(report["acceptance"]["review_only_candidates_require_live_repeat_or_observed_hit_proof"])
         review = report["review_only_candidates"]
@@ -182,6 +221,27 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(candidate["privacy"]["metadata_only"])
         self.assertFalse(candidate["privacy"]["cache_keys_included"])
         self.assertFalse(candidate["privacy"]["file_paths_included"])
+        previews = report["managed_local_replay_previews"]
+        self.assertEqual(previews["schema"], "agentflow.request_shape_tool_cache_managed_local_replay_previews.v1")
+        self.assertEqual(previews["summary"]["preview_count"], 1)
+        self.assertEqual(previews["summary"]["review_ready_preview_rows"], 12)
+        self.assertEqual(previews["summary"]["managed_preview_required_rows"], 12)
+        self.assertEqual(previews["summary"]["managed_preview_agreement_rows"], 12)
+        self.assertEqual(previews["summary"]["cache_entries_written"], 0)
+        self.assertFalse(previews["summary"]["policy_files_written"])
+        self.assertFalse(previews["summary"]["tool_cache_replay_enabled"])
+        preview = previews["previews"][0]
+        self.assertEqual(preview["preview_status"], "review-ready")
+        self.assertEqual(preview["preview_decision"], "review-only-replay-preview")
+        self.assertTrue(preview["managed_preview_agreement"]["required"])
+        self.assertTrue(preview["managed_preview_agreement"]["agreed"])
+        self.assertEqual(preview["managed_preview_agreement"]["reason"], "local-managed-preview-agree")
+        self.assertFalse(preview["tool_cache_replay_enabled"])
+        self.assertFalse(preview["streaming_replay_enabled"])
+        self.assertFalse(preview["emits_cache_apply_action"])
+        self.assertEqual(preview["cache_entries_written"], 0)
+        self.assertFalse(preview["policy_files_written"])
+        self.assertTrue(previews["acceptance"]["managed_preview_agreement_is_review_only"])
 
     def test_tool_cache_stable_dependency_without_repeat_proof_is_noop_review_drill(self) -> None:
         cohorts = [
@@ -230,6 +290,15 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(review["acceptance"]["requires_live_repeat_or_observed_hit_proof"])
         self.assertTrue(review["acceptance"]["stable_without_live_repeat_or_observed_hit_is_noop"])
         self.assertTrue(report["acceptance"]["stable_without_live_repeat_or_observed_hit_is_noop"])
+        preview = report["managed_local_replay_previews"]["previews"][0]
+        self.assertEqual(preview["preview_status"], "review-only-noop")
+        self.assertEqual(preview["preview_decision"], "no-op-missing-live-repeat-proof")
+        self.assertFalse(preview["managed_preview_agreement"]["required"])
+        self.assertFalse(preview["tool_cache_replay_enabled"])
+        self.assertFalse(preview["streaming_replay_enabled"])
+        self.assertFalse(preview["emits_cache_apply_action"])
+        self.assertEqual(preview["cache_entries_written"], 0)
+        self.assertTrue(report["acceptance"]["stable_without_live_repeat_or_observed_hit_preview_is_noop"])
 
     def test_tool_cache_nonstable_dependency_evidence_emits_blocked_review_rows(self) -> None:
         base = {
@@ -316,6 +385,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(review["acceptance"]["blocked_dependency_evidence_has_distinct_reason_codes"])
         self.assertTrue(review["acceptance"]["retired_no_repeat_emits_noop"])
         self.assertTrue(report["acceptance"]["retired_no_repeat_emits_noop"])
+        previews = report["managed_local_replay_previews"]
+        self.assertEqual(previews["summary"]["preview_count"], 5)
+        self.assertEqual(previews["summary"]["cache_entries_written"], 0)
+        self.assertFalse(previews["summary"]["policy_files_written"])
+        self.assertFalse(previews["summary"]["tool_cache_replay_enabled"])
+        self.assertTrue(previews["acceptance"]["unsafe_or_missing_dependency_emits_no_apply_actions"])
         by_reason = {row["blocker_reason"]: row for row in review["candidates"]}
         self.assertEqual(
             set(by_reason),
