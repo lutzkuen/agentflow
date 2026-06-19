@@ -35,10 +35,13 @@ FEATURE_SCHEMA_VERSION = "agentflow.optimization_unit_features.v1"
 POLICY_DECISION_PREFLIGHT_SCHEMA = "agentflow.policy_decision_preflight.v1"
 POLICY_DECISION_SCHEMA = "agentflow.policy_decision.v1"
 MANAGED_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
+RECOMMENDATION_ENABLED_ENV = "AGENTFLOW_RECOMMENDATION_ENABLED"
+RECOMMENDATIONS_ENABLED_ENV = "AGENTFLOW_RECOMMENDATIONS_ENABLED"
 RECOMMENDATION_SERVER_URL_ENV = "AGENTFLOW_RECOMMENDATION_SERVER_URL"
 RECOMMENDATION_TIMEOUT_ENV = "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"
 RECOMMENDATION_FAILURE_MODE_ENV = "AGENTFLOW_RECOMMENDATION_FAILURE_MODE"
 POLICY_DECISION_ENABLED_ENV = "AGENTFLOW_POLICY_DECISION_ENABLED"
+POLICY_DECISIONS_ENABLED_ENV = "AGENTFLOW_POLICY_DECISIONS_ENABLED"
 POLICY_DECISION_MIN_CONFIDENCE_ENV = "AGENTFLOW_POLICY_DECISION_MIN_CONFIDENCE"
 POLICY_DECISION_CANARY_FRACTION_ENV = "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION"
 POLICY_DECISION_CANARY_SALT_ENV = "AGENTFLOW_POLICY_DECISION_CANARY_SALT"
@@ -558,7 +561,9 @@ def _as_bool(value: str | None, default: bool = False) -> bool:
 
 
 def recommendations_enabled() -> bool:
-    return _as_bool(os.getenv("AGENTFLOW_RECOMMENDATION_ENABLED"), False)
+    if os.getenv(RECOMMENDATIONS_ENABLED_ENV) is not None:
+        return _as_bool(os.getenv(RECOMMENDATIONS_ENABLED_ENV), False)
+    return _as_bool(os.getenv(RECOMMENDATION_ENABLED_ENV), False)
 
 
 def recommendation_server_url() -> str:
@@ -914,6 +919,8 @@ def _base_meta() -> dict[str, Any]:
 
 
 def policy_decisions_enabled() -> bool:
+    if os.getenv(POLICY_DECISIONS_ENABLED_ENV) is not None:
+        return _as_bool(os.getenv(POLICY_DECISIONS_ENABLED_ENV), False)
     return _env_enabled(POLICY_DECISION_ENABLED_ENV)
 
 
@@ -1034,6 +1041,7 @@ def _copy_policy_decision_response_fields(body: dict[str, Any]) -> dict[str, Any
             normalized[key] = _sanitize_features(value)
     for key in (
         "routing",
+        "routing_action",
         "crunch",
         "cache",
         "canary",
@@ -1062,19 +1070,39 @@ def _normalize_policy_decision(body: Any) -> tuple[dict[str, Any] | None, str | 
     if body.get("provider_forwarding") is True or body.get("server_content_processing") is True:
         return None, "managed-server-forwarding-not-allowed"
 
-    routing = body.get("routing")
-    if not isinstance(routing, dict):
+    routing = body.get("routing") if isinstance(body.get("routing"), dict) else {}
+    routing_action = body.get("routing_action")
+    if not isinstance(routing_action, dict):
+        routing_action = routing.get("routing_action") if isinstance(routing.get("routing_action"), dict) else {}
+    explicit_routing_action = bool(routing_action.get("recommended") is True)
+    if not routing and not routing_action:
         return None, "missing-routing-section"
     confidence = body.get("confidence")
+    if not isinstance(confidence, (int, float)):
+        confidence = routing_action.get("confidence")
     if not isinstance(confidence, (int, float)):
         confidence = routing.get("confidence")
     if not isinstance(confidence, (int, float)):
         confidence = 0.0
-    route_to = body.get("route_to") or routing.get("route_to")
-    target_model = routing.get("target_model") or route_to
-    policy_id = body.get("policy_id") or routing.get("policy_id") or body.get("decision_id") or "managed-policy-decision"
+    route_to = body.get("route_to") or routing_action.get("target_model") or routing.get("route_to")
+    target_model = routing_action.get("target_model") or routing.get("target_model") or route_to
+    policy_id = (
+        body.get("policy_id")
+        or routing_action.get("policy_id")
+        or routing.get("policy_id")
+        or body.get("decision_id")
+        or "managed-policy-decision"
+    )
     reason_codes = routing.get("reason_codes") if isinstance(routing.get("reason_codes"), list) else []
-    reason = ", ".join(str(item) for item in reason_codes if item) or "managed policy decision"
+    action_reason = routing_action.get("reason")
+    reason = (
+        str(action_reason)
+        if isinstance(action_reason, str) and action_reason
+        else ", ".join(str(item) for item in reason_codes if item) or "managed policy decision"
+    )
+    recommended_mode = routing_action.get("recommended_mode") or routing.get("recommended_mode")
+    if explicit_routing_action and not recommended_mode:
+        recommended_mode = "route_to"
     normalized = _copy_policy_decision_response_fields(body)
     normalized.update({
         "schema": POLICY_DECISION_SCHEMA,
@@ -1085,12 +1113,13 @@ def _normalize_policy_decision(body: Any) -> tuple[dict[str, Any] | None, str | 
         "confidence": float(confidence),
         "policy_id": str(policy_id),
         "reason": reason,
-        "routing_status": routing.get("status"),
-        "recommended_mode": routing.get("recommended_mode"),
-        "route_down_probability": routing.get("route_down_probability"),
-        "model_artifact_version": routing.get("model_artifact_version"),
-        "model_evidence_hash": routing.get("model_evidence_hash"),
-        "predictor_rule_id": routing.get("predictor_rule_id"),
+        "routing_status": routing.get("status") or ("recommended" if explicit_routing_action else None),
+        "recommended_mode": recommended_mode,
+        "route_down_probability": routing_action.get("route_down_probability", routing.get("route_down_probability")),
+        "model_artifact_version": routing_action.get("model_artifact_version", routing.get("model_artifact_version")),
+        "model_evidence_hash": routing_action.get("model_evidence_hash", routing.get("model_evidence_hash")),
+        "predictor_rule_id": routing_action.get("predictor_rule_id", routing.get("predictor_rule_id")),
+        "explicit_routing_action": explicit_routing_action,
         "required_local_gates": routing.get("required_local_gates") if isinstance(routing.get("required_local_gates"), list) else [],
         "replacement_prompt_present": False,
         "raw_payload_included": False,
@@ -1454,7 +1483,10 @@ def _policy_decision_routing_gate(meta: dict[str, Any], *, target_model: str, cu
         confidence = min(confidence, float(probability))
     if confidence < policy_decision_min_confidence():
         return "routing-predictor-confidence-too-low"
-    if not isinstance(meta.get("model_artifact_version"), str) or not meta.get("model_artifact_version"):
+    if (
+        not meta.get("explicit_routing_action")
+        and (not isinstance(meta.get("model_artifact_version"), str) or not meta.get("model_artifact_version"))
+    ):
         return "routing-predictor-model-version-missing"
     return None
 
@@ -1529,9 +1561,25 @@ def apply_policy_decision_routing_to_body(
         return meta
 
     recommended_mode = str(meta.get("recommended_mode") or "observe").lower()
-    if meta.get("route_to_present") and recommended_mode in {"", "observe", "shadow", "none"}:
+    if meta.get("route_to_present") and recommended_mode in {"", "observe", "shadow", "none", "route_to"}:
+        canary = policy_decision_canary_sample(meta, current_model=current_model, target_model=target_model)
+        if policy_decision_canary_fraction() > 0.0:
+            meta["local_canary"] = canary
+            if not canary["selected"]:
+                meta.update({
+                    "applied": False,
+                    "changed_model": False,
+                    "apply_reason": "local-canary-holdout",
+                    "fallback": "local-policy",
+                    "would_route_model": target_model,
+                    "local_action_taken": "canary_holdout",
+                    "local_policy_decision_mode": "route_to",
+                })
+                return meta
         body["model"] = target_model
         routing_meta["routed_model"] = target_model
+        routing_meta["managed_routing_applied"] = True
+        routing_meta["managed_routing_confidence"] = meta.get("confidence")
         routing_meta["final_policy_source"] = "managed-recommended"
         routing_meta["managed_policy_id"] = meta.get("policy_id")
         routing_meta["managed_reason"] = meta.get("reason")
@@ -1540,10 +1588,12 @@ def apply_policy_decision_routing_to_body(
             "applied": True,
             "changed_model": True,
             "fallback": None,
-            "apply_reason": "route-to-local-safety-gate-passed",
-            "local_action_taken": "route_to",
+            "apply_reason": "local-canary-selected" if policy_decision_canary_fraction() > 0.0 else "route-to-local-safety-gate-passed",
+            "local_action_taken": "canary_applied" if policy_decision_canary_fraction() > 0.0 else "route_to",
             "local_policy_decision_mode": "route_to",
         })
+        if policy_decision_canary_fraction() > 0.0:
+            meta["local_canary"] = canary
         return meta
 
     if recommended_mode in {"observe", "shadow"}:
@@ -1585,6 +1635,8 @@ def apply_policy_decision_routing_to_body(
 
     body["model"] = target_model
     routing_meta["routed_model"] = target_model
+    routing_meta["managed_routing_applied"] = True
+    routing_meta["managed_routing_confidence"] = meta.get("confidence")
     routing_meta["final_policy_source"] = "managed-recommended"
     routing_meta["managed_policy_id"] = meta.get("policy_id")
     routing_meta["managed_reason"] = meta.get("reason")

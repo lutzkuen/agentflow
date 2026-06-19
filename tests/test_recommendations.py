@@ -67,11 +67,13 @@ class _NoQueueStore:
 class RecommendationTest(unittest.TestCase):
     ENV_KEYS = (
         "AGENTFLOW_RECOMMENDATION_ENABLED",
+        "AGENTFLOW_RECOMMENDATIONS_ENABLED",
         "AGENTFLOW_RECOMMENDATION_SERVER_URL",
         "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
         "AGENTFLOW_RECOMMENDATION_FAILURE_MODE",
         "AGENTFLOW_MANAGED_API_KEY",
         "AGENTFLOW_POLICY_DECISION_ENABLED",
+        "AGENTFLOW_POLICY_DECISIONS_ENABLED",
         "AGENTFLOW_POLICY_DECISION_MIN_CONFIDENCE",
         "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION",
         "AGENTFLOW_POLICY_DECISION_CANARY_SALT",
@@ -793,6 +795,59 @@ class RecommendationTest(unittest.TestCase):
         self.assertTrue(applied["applied"])
         self.assertEqual(applied["local_action_taken"], "canary_applied")
         self.assertEqual(body["model"], "claude-haiku-4-5-20251001")
+
+    def test_policy_decision_plural_env_and_routing_action_apply_live_route(self):
+        os.environ["AGENTFLOW_RECOMMENDATIONS_ENABLED"] = "1"
+        os.environ["AGENTFLOW_POLICY_DECISIONS_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["AGENTFLOW_POLICY_DECISION_MIN_CONFIDENCE"] = "0.8"
+        FakeAsyncClient.response = FakeResponse(body={
+            "schema": "agentflow.policy_decision.v1",
+            "policy_id": "managed-route-1",
+            "provider_forwarding": False,
+            "server_content_processing": False,
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+            "routing_action": {
+                "recommended": True,
+                "target_model": "claude-haiku-4-5-20251001",
+                "confidence": 0.91,
+                "reason": "lossless downgrade predictor",
+            },
+        })
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_policy_decision({
+                "source_surface": "anthropic_messages",
+                "granularity": "provider_request",
+                "app_family": "claude_code",
+                "requested_model": "claude-sonnet-4-6",
+                "candidate_target_model": "claude-haiku-4-5-20251001",
+                "input_features": {"category": "tool-result"},
+                "tool_features": {"has_tools": True},
+                "replayability_level": "features_only",
+            }))
+
+        body = {"model": "claude-sonnet-4-6"}
+        routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "local route"}
+        applied = recommendations.apply_recommendation_to_body(
+            provider="anthropic",
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta=meta,
+        )
+
+        self.assertEqual(FakeAsyncClient.last_url, "http://127.0.0.1:4100/v1/policy-decision")
+        self.assertEqual(meta["status"], "received")
+        self.assertTrue(meta["explicit_routing_action"])
+        self.assertEqual(meta["target_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(meta["confidence"], 0.91)
+        self.assertTrue(applied["applied"])
+        self.assertEqual(applied["local_action_taken"], "route_to")
+        self.assertEqual(applied["apply_reason"], "route-to-local-safety-gate-passed")
+        self.assertEqual(body["model"], "claude-haiku-4-5-20251001")
+        self.assertTrue(routing_meta["managed_routing_applied"])
+        self.assertEqual(routing_meta["managed_routing_confidence"], 0.91)
+        self.assertEqual(routing_meta["managed_policy_id"], "managed-route-1")
 
     def test_unsafe_replacement_prompt_is_not_applied_and_raw_text_is_not_stored(self):
         routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "keep requested model"}

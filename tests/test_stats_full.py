@@ -1006,6 +1006,9 @@ request_shape_repeated_context_canaries:
         self.assertEqual(summary["enabled_count"], 2)
         self.assertEqual(summary["received_count"], 1)
         self.assertEqual(summary["applied_count"], 1)
+        self.assertEqual(summary["requests_24h"], 0)
+        self.assertEqual(summary["applied_24h"], 0)
+        self.assertIsNone(summary["avg_confidence_24h"])
         self.assertEqual(summary["changed_model_count"], 1)
         self.assertAlmostEqual(summary["observed_savings_usd"], 0.002, places=6)
         self.assertAlmostEqual(summary["applied_observed_savings_usd"], 0.002, places=6)
@@ -1031,10 +1034,64 @@ request_shape_repeated_context_canaries:
         self.assertTrue(applied_recent["observed_savings_attributed_to_managed"])
         json.dumps(result)
 
+    def test_managed_recommendation_stats_use_managed_routing_json_for_24h_widget(self):
+        server.store.log_call(
+            id="managed-routing-24h",
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=10,
+            input_tokens_est=100,
+            output_tokens_est=10,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.003,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=stable_json({"reason": "managed route"}),
+            managed_routing_json=stable_json({
+                "schema": "agentflow.managed_policy_decision_evaluation.v1",
+                "enabled": True,
+                "server_url": "http://managed.local",
+                "status": "received",
+                "policy_id": "managed-route-24h",
+                "target_model": "claude-haiku-4-5-20251001",
+                "confidence": 0.91,
+                "applied": True,
+                "changed_model": True,
+                "local_action_taken": "route_to",
+                "latency_ms": 80,
+            }),
+            cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+            session_id="managed-session",
+            category="tool-result",
+            provider="anthropic",
+        )
+
+        result = asyncio.run(stats_views.stats_managed_recommendations(server.store, limit=20))
+
+        summary = result["summary"]
+        self.assertEqual(summary["metadata_rows"], 1)
+        self.assertEqual(summary["requests_24h"], 1)
+        self.assertEqual(summary["applied_24h"], 1)
+        self.assertEqual(summary["avg_confidence_24h"], 0.91)
+        self.assertEqual({row["value"]: row["count"] for row in result["policy_ids"]}, {"managed-route-24h": 1})
+        self.assertTrue(result["recent"][0]["applied"])
+
     def test_managed_recommendation_dashboard_endpoint_and_panel_render_without_server(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
-            {"AGENTFLOW_POLICY_EVENTS_LOG": os.path.join(tmp, "policy_events.jsonl")},
+            {
+                "AGENTFLOW_POLICY_EVENTS_LOG": os.path.join(tmp, "policy_events.jsonl"),
+                "AGENTFLOW_RECOMMENDATIONS_ENABLED": "0",
+                "AGENTFLOW_RECOMMENDATION_ENABLED": "0",
+                "AGENTFLOW_POLICY_DECISIONS_ENABLED": "0",
+                "AGENTFLOW_POLICY_DECISION_ENABLED": "0",
+            },
             clear=False,
         ):
             from agentflow_proxy.policy_events import log_policy_event

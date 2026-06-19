@@ -9672,6 +9672,9 @@ def _managed_pattern_adoption_from_store(
 async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.recommendations import (
         managed_auth_configured,
+        policy_decision_canary_fraction,
+        policy_decision_min_confidence,
+        policy_decisions_enabled,
         recommendation_failure_mode,
         recommendation_server_configured,
         recommendation_server_url,
@@ -9688,7 +9691,7 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
             """
             select id, created_at, path, coalesce(provider, 'anthropic') as provider,
                    requested_model, routed_model, status_code, latency_ms,
-                   cost_est_usd, cost_baseline_usd, routing_json
+                   cost_est_usd, cost_baseline_usd, routing_json, managed_routing_json
             from calls
             order by created_at desc
             limit ?
@@ -9705,7 +9708,9 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
     policy_counts: dict[str, int] = {}
     latency_values: list[int] = []
     feedback_latency_values: list[int] = []
+    confidence_values_24h: list[float] = []
     recent: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
 
     metadata_rows = 0
     historical_null_rows = 0
@@ -9725,12 +9730,18 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
     applied_observed_savings_usd = 0.0
     changed_model_observed_savings_usd = 0.0
     positive_savings_count = 0
+    requests_24h = 0
+    applied_24h = 0
     last_recommendation_error_class = None
     last_feedback_error_class = None
 
     for row in rows:
+        row_created_at = _parse_utc_datetime(row.get("created_at"))
+        is_recent_24h = row_created_at is not None and (now - row_created_at) <= timedelta(hours=24)
         routing = _json_obj(row.get("routing_json"))
-        managed = routing.get("managed_recommendation")
+        managed = _json_obj(row.get("managed_routing_json"))
+        if not isinstance(managed, dict) or not managed:
+            managed = routing.get("managed_recommendation")
         if not isinstance(managed, dict) or not managed:
             historical_null_rows += 1
             if len(recent) < 50:
@@ -9759,6 +9770,8 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
             continue
 
         metadata_rows += 1
+        if is_recent_24h:
+            requests_24h += 1
         status = str(managed.get("status") or "missing")
         reason = str(managed.get("reason") or "unknown")
         _increment_count(status_counts, status)
@@ -9772,6 +9785,8 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
         managed_applied = bool(managed.get("applied"))
         if managed_applied:
             applied_count += 1
+            if is_recent_24h:
+                applied_24h += 1
         if bool(managed.get("changed_model")):
             changed_model_count += 1
         row_savings = max(_as_float(row.get("cost_baseline_usd")) - _as_float(row.get("cost_est_usd")), 0.0)
@@ -9803,6 +9818,11 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
         latency_ms = managed.get("latency_ms")
         if latency_ms is not None:
             latency_values.append(_as_int(latency_ms))
+        if is_recent_24h:
+            try:
+                confidence_values_24h.append(float(managed.get("confidence")))
+            except (TypeError, ValueError):
+                pass
 
         feedback = managed.get("outcome_feedback")
         feedback_status = "missing"
@@ -9893,6 +9913,13 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
         "applied_observed_savings_usd": round(applied_observed_savings_usd, 8),
         "changed_model_observed_savings_usd": round(changed_model_observed_savings_usd, 8),
         "positive_savings_count": positive_savings_count,
+        "requests_24h": requests_24h,
+        "applied_24h": applied_24h,
+        "avg_confidence_24h": (
+            round(sum(confidence_values_24h) / len(confidence_values_24h), 6)
+            if confidence_values_24h
+            else None
+        ),
         "observed_savings_basis": "calls.cost_baseline_usd-minus-cost_est_usd",
         "observed_savings_attribution": "managed-recommendation-model-change",
         "avg_feedback_latency_ms": _avg_or_none(feedback_latency_values),
@@ -9907,10 +9934,13 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
         "limit": capped_limit,
         "current_config": {
             "enabled": recommendations_enabled(),
+            "policy_decisions_enabled": policy_decisions_enabled(),
             "mode": "managed-recommendation-bridge" if recommendations_enabled() else "local-only",
             "server_url": recommendation_server_url(),
             "server_configured": recommendation_server_configured(),
             "timeout_seconds": recommendation_timeout_seconds(),
+            "min_confidence": policy_decision_min_confidence(),
+            "canary_fraction": policy_decision_canary_fraction(),
             "failure_mode": recommendation_failure_mode(),
             "auth_configured": managed_auth_configured(),
             "api_key_value_included": False,
@@ -22339,7 +22369,7 @@ def dashboard_html() -> str:
   <h2>Managed recommendation status</h2>
   <table data-table-id="managed-summary" data-filter-label="Filter managed summary">
     <thead><tr>
-      <th data-sort-type="text">Bridge</th><th data-sort-type="number">Window calls</th><th data-sort-type="number">Metadata</th><th data-sort-type="number">Disabled</th><th data-sort-type="number">Received</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Errors</th><th data-sort-type="latency">Avg recommendation</th><th data-sort-type="latency">Avg feedback</th><th data-sort-type="text">Last error</th>
+      <th data-sort-type="text">Bridge</th><th data-sort-type="text">Policy server</th><th data-sort-type="text">Policy decisions</th><th data-sort-type="number">24h sent</th><th data-sort-type="number">24h applied</th><th data-sort-type="number">24h avg confidence</th><th data-sort-type="number">Window calls</th><th data-sort-type="number">Metadata</th><th data-sort-type="number">Disabled</th><th data-sort-type="number">Received</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Errors</th><th data-sort-type="latency">Avg recommendation</th><th data-sort-type="latency">Avg feedback</th><th data-sort-type="text">Last error</th>
     </tr></thead>
     <tbody id="managed-summary-tbody"></tbody>
   </table>
@@ -25766,6 +25796,11 @@ async function refreshManaged(){
     const lastSent=queue.last_successful_flush||{};
     document.getElementById('managed-summary-tbody').innerHTML=`<tr>
       <td class="flags">${cfg.enabled?'<span class="badge hit">enabled</span>':'<span class="badge miss">offline / local-only</span>'} <span class="badge provider">${esc(cfg.server_url||'—')}</span></td>
+      <td class="flags">${cfg.server_configured?'<span class="badge hit">configured</span>':'<span class="badge miss">not configured</span>'}</td>
+      <td class="flags">${cfg.policy_decisions_enabled?'<span class="badge hit">enabled</span>':'<span class="badge miss">disabled</span>'} <span class="badge miss">min ${Number(cfg.min_confidence||0).toFixed(2)}</span> <span class="badge miss">canary ${Number(cfg.canary_fraction||0).toFixed(2)}</span></td>
+      <td class="tokens">${(s.requests_24h||0).toLocaleString()}</td>
+      <td class="tokens">${(s.applied_24h||0).toLocaleString()}</td>
+      <td class="tokens">${s.avg_confidence_24h==null?'—':Number(s.avg_confidence_24h).toFixed(2)}</td>
       <td class="tokens">${(s.window_calls||0).toLocaleString()}</td>
       <td class="tokens">${(s.metadata_rows||0).toLocaleString()}</td>
       <td class="tokens">${(s.disabled_count||0).toLocaleString()}</td>

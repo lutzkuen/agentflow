@@ -38,6 +38,16 @@ def _parse_json_object(value: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _managed_routing_json_from_routing(routing_json: Any) -> str | None:
+    routing = _parse_json_object(routing_json)
+    if not isinstance(routing, dict):
+        return None
+    managed = routing.get("managed_recommendation")
+    if not isinstance(managed, dict) or not managed:
+        return None
+    return stable_json(managed)
+
+
 def _safe_metadata_label(value: Any, *, fallback: str = "unknown") -> str:
     text = str(value or "").strip()
     if not text:
@@ -671,6 +681,7 @@ class SQLiteStore:
             self._ensure_column("calls", "requested_model_family", "text")
             self._ensure_column("calls", "routed_model_family", "text")
             self._ensure_column("calls", "routing_outcome_label", "text")
+            self._ensure_column("calls", "managed_routing_json", "text")
             cur.execute("""
             create table if not exists provider_tool_adoption_windows (
               id text primary key,
@@ -1099,6 +1110,8 @@ class SQLiteStore:
             stream=kwargs.get("stream"),
             category=kwargs.get("category"),
         )
+        if kwargs.get("managed_routing_json") in (None, ""):
+            kwargs["managed_routing_json"] = _managed_routing_json_from_routing(kwargs.get("routing_json"))
         kwargs.setdefault("routing_outcome_label", "unknown")
         cols = [
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
@@ -1106,6 +1119,7 @@ class SQLiteStore:
             "cost_est_usd", "cost_baseline_usd", "crunch_json", "routing_json", "cache_json", "error", "request_json", "response_json", "session_id",
             "category", "cache_creation_input_tokens", "cache_read_input_tokens", "retry_count", "thinking_output_tokens", "provider",
             "source_surface", "endpoint", "requested_model_family", "routed_model_family", "routing_outcome_label",
+            "managed_routing_json",
         ]
         values = [kwargs.get(c, "anthropic") if c == "provider" else kwargs.get(c) for c in cols]
         with self._lock:
@@ -2220,7 +2234,8 @@ class PostgresStore(SQLiteStore):
               endpoint text,
               requested_model_family text,
               routed_model_family text,
-              routing_outcome_label text
+              routing_outcome_label text,
+              managed_routing_json text
             )
             """,
             """
@@ -2439,7 +2454,7 @@ class PostgresStore(SQLiteStore):
             self.conn.execute(sql)
         for column in ("routing_json", "crunch_json", "cache_json", "event_window_json", "metadata_json"):
             self.conn.execute(f"alter table codex_app_events add column if not exists {column} text")
-        for column in ("source_surface", "endpoint", "requested_model_family", "routed_model_family", "routing_outcome_label"):
+        for column in ("source_surface", "endpoint", "requested_model_family", "routed_model_family", "routing_outcome_label", "managed_routing_json"):
             self.conn.execute(f"alter table calls add column if not exists {column} text")
         for column, definition in (
             ("provider", "text"),
