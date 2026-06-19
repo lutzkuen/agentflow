@@ -569,18 +569,49 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
     )
     needs_cache_replay_evidence = not isinstance(stats.get("request_shape_cache_replay_evidence"), dict)
     needs_cache_replay_policy_decision = not isinstance(stats.get("request_shape_cache_replay_policy_decision"), dict)
-    if not needs_rollups and not needs_cache_replay_evidence and not needs_cache_replay_policy_decision:
+    needs_managed_preview_outcomes = not any(
+        isinstance(stats.get(key), dict)
+        for key in (
+            "managed_activation_preview_outcomes",
+            "managed_preview_outcomes",
+            "managed_activation_preview_outcome_summary",
+        )
+    )
+    if (
+        not needs_rollups
+        and not needs_cache_replay_evidence
+        and not needs_cache_replay_policy_decision
+        and not needs_managed_preview_outcomes
+    ):
         return stats
 
     enriched = dict(stats)
     store = _open_store_for_db(db_arg)
     try:
+        managed_preview_outcomes = (
+            enriched.get("managed_activation_preview_outcomes")
+            if isinstance(enriched.get("managed_activation_preview_outcomes"), dict)
+            else enriched.get("managed_preview_outcomes")
+            if isinstance(enriched.get("managed_preview_outcomes"), dict)
+            else None
+        )
+        if needs_managed_preview_outcomes:
+            from agentflow_proxy.managed_activation_preview_outcomes import (
+                build_managed_activation_preview_outcomes_report,
+            )
+
+            managed_preview_outcomes = build_managed_activation_preview_outcomes_report(
+                store,
+                limit=limit,
+            )
+            enriched["managed_activation_preview_outcomes"] = managed_preview_outcomes
         if needs_rollups:
             enriched["request_shape_rollups"] = build_request_shape_rollups_report(
                 store,
                 limit=limit,
                 persist=False,
                 run_id="orchestrator-research-dry-run",
+                managed_preview_outcomes=managed_preview_outcomes,
             )
         cache_replay_evidence = (
             enriched.get("request_shape_cache_replay_evidence")

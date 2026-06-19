@@ -5765,6 +5765,25 @@ def _managed_preview_local_executor_gate(entry: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _managed_preview_public_ref(value: Any, *, prefix: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return public_id(text, prefix=prefix, fallback=None)
+
+
+def _managed_preview_entry_successor_fingerprint(entry: dict[str, Any]) -> str | None:
+    source_fingerprint = sanitize_value(entry.get("source_fingerprint") or entry.get("fingerprint") or "")
+    if not source_fingerprint:
+        return None
+    material = {
+        "fingerprint": source_fingerprint,
+        "next_action": sanitize_value(entry.get("next_action") or "inspect-local-evidence"),
+        "local_action_family": sanitize_value(entry.get("local_action_family") or entry.get("lever") or "unknown"),
+    }
+    return public_id(json.dumps(material, sort_keys=True), prefix="successor", fallback=None)
+
+
 def _managed_preview_outcome_match_score(entry: dict[str, Any], outcome: dict[str, Any]) -> int:
     score = 0
     entry_source = str(entry.get("source_fingerprint") or entry.get("fingerprint") or "").strip()
@@ -5780,11 +5799,27 @@ def _managed_preview_outcome_match_score(entry: dict[str, Any], outcome: dict[st
             score += 25
         else:
             return -1
+    entry_source_ref = _managed_preview_public_ref(entry_source, prefix="activation-ref")
+    outcome_source_ref = str(outcome.get("source_activation_ref") or "").strip()
+    if entry_source_ref and outcome_source_ref:
+        if entry_source_ref == outcome_source_ref:
+            score += 24
+        else:
+            return -1
     entry_successor = str(entry.get("source_successor_fingerprint") or "").strip()
+    if not entry_successor:
+        entry_successor = _managed_preview_entry_successor_fingerprint(entry) or ""
     outcome_successor = str(outcome.get("source_successor_fingerprint") or outcome.get("successor_fingerprint") or "").strip()
     if entry_successor and outcome_successor:
         if entry_successor == outcome_successor:
             score += 12
+        else:
+            return -1
+    entry_successor_ref = _managed_preview_public_ref(entry_successor, prefix="successor-ref")
+    outcome_successor_ref = str(outcome.get("source_successor_ref") or "").strip()
+    if entry_successor_ref and outcome_successor_ref:
+        if entry_successor_ref == outcome_successor_ref:
+            score += 11
         else:
             return -1
     entry_family = str(entry.get("local_action_family") or entry.get("lever") or "").strip()
@@ -5955,7 +5990,11 @@ def _managed_preview_successor_gate(
         "managed_server_calls_made": bool(outcome.get("managed_server_calls_made")),
         "stored_preview_outcome_count": _to_int(report_summary.get("stored_preview_outcome_count")),
         "outcome_fingerprint": sanitize_value(outcome.get("outcome_fingerprint")),
+        "handoff_ref": sanitize_value(outcome.get("handoff_ref")),
         "preview_ref": sanitize_value(outcome.get("preview_ref")),
+        "source_executor_ref": sanitize_value(outcome.get("source_executor_ref")),
+        "source_activation_ref": sanitize_value(outcome.get("source_activation_ref")),
+        "source_successor_ref": sanitize_value(outcome.get("source_successor_ref")),
         "preview_age_hours": outcome.get("preview_age_hours"),
         "stale_after_hours": outcome.get("stale_after_hours"),
         "classification": classification,

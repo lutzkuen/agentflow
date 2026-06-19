@@ -2470,6 +2470,134 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 self.assertNotIn("raw health prompt must not leak", rendered)
                 self.assertNotIn('"policy_files_written": true', rendered.lower())
 
+    def test_preview_outcome_classes_drive_successor_decisions(self):
+        rows = [
+            ("activation:fresh", "routing", "ready", "draft-openai-routing-recovery-canary"),
+            ("activation:stale", "cache", "blocked", "collect-file-invalidation-evidence"),
+            ("activation:missing", "activation-feedback", "blocked", "review-activation-feedback-safety-stop-and-record-keep-blocked-reason"),
+            ("activation:rejected", "routing", "blocked", "review-openai-routing-canary-blockers"),
+            ("activation:disagreed", "routing", "blocked", "review-openai-routing-canary-blockers"),
+        ]
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": index,
+                    "fingerprint": source,
+                    "lever": family,
+                    "local_action_family": family,
+                    "evidence_schema": f"agentflow.{family}.preview_fixture.v1",
+                    "state": "keep-blocked" if issue_status == "blocked" else "review",
+                    "current_status": "keep-blocked" if issue_status == "blocked" else "review",
+                    "issue_worthy_status": issue_status,
+                    "next_action": next_action,
+                    "blocker_codes": ["preview-fixture"],
+                    "sample_count": 10,
+                    "stage_allowed": issue_status == "ready",
+                    "target_local_rule_file": f"{family}_rules.yaml",
+                    "target_local_policy_section": f"{family}.rules",
+                }
+                for index, (source, family, issue_status, next_action) in enumerate(rows, start=1)
+            ],
+        }
+        outcomes = []
+        for source, family, _issue_status, next_action in rows:
+            outcome = {
+                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": f"managed-preview-outcome:{source}",
+                "source_fingerprint": source,
+                "preview_ref": f"preview:{source}",
+                "local_action_family": family,
+                "evidence_schema": f"agentflow.{family}.preview_fixture.v1",
+                "classification": "review-only",
+                "decision": "review-only-recommendation",
+                "next_action": next_action,
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+            }
+            if source.endswith("stale"):
+                outcome.update({"classification": "stale-preview", "stale": True, "preview_age_hours": 80.0})
+            if source.endswith("missing"):
+                outcome.update({"classification": "missing-preview-decision", "missing_preview_decision": True})
+            if source.endswith("rejected"):
+                outcome.update({"classification": "failed-closed", "failed_closed": True, "omitted_reason": "managed-preview-rejected"})
+            if source.endswith("disagreed"):
+                outcome.update({"classification": "managed-local-disagreement", "disagrees_with_local_evidence": True})
+            outcomes.append(outcome)
+
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "status": "tracked",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": True,
+                    "summary": {
+                        "stored_preview_outcome_count": len(outcomes),
+                        "stale_count": 1,
+                        "missing_preview_decision_count": 1,
+                        "failed_closed_count": 1,
+                        "disagreement_count": 1,
+                    },
+                    "outcomes": outcomes,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "managed_activation_preview_health": {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": len(outcomes),
+                    "previewed_row_count": len(outcomes),
+                    "omitted_row_count": 1,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {"routing": 3, "cache": 1, "activation-feedback": 1},
+                    "top_omission_reasons": [{"reason_code": "managed-preview-rejected", "count": 1}],
+                    "top_rejection_reasons": [],
+                },
+            }
+        )
+
+        decisions = {row["source_fingerprint"]: row for row in queue["successor_decisions"]}
+        self.assertEqual(decisions["activation:fresh"]["preview_agreement_status"], "agreed")
+        self.assertTrue(decisions["activation:fresh"]["preview_verified"])
+        self.assertEqual(decisions["activation:fresh"]["decision"], "ready")
+        expected_blocked = {
+            "activation:stale": "stale-preview",
+            "activation:missing": "missing-preview-decision",
+            "activation:rejected": "failed-closed",
+            "activation:disagreed": "managed-local-disagreement",
+        }
+        for source, status in expected_blocked.items():
+            with self.subTest(source=source):
+                self.assertEqual(decisions[source]["preview_agreement_status"], status)
+                self.assertFalse(decisions[source]["preview_verified"])
+                self.assertEqual(decisions[source]["issue_worthy_status"], "blocked")
+        self.assertEqual(decisions["activation:rejected"]["preview_omitted_reason"], "managed-preview-rejected")
+        family_rows = {
+            row["local_action_family"]: row
+            for row in queue["summary"]["preview_agreement_by_local_action_family"]
+        }
+        self.assertEqual(family_rows["routing"]["agreed_count"], 1)
+        self.assertEqual(family_rows["routing"]["disagreed_count"], 2)
+        self.assertEqual(family_rows["cache"]["stale_count"], 1)
+        self.assertEqual(family_rows["activation-feedback"]["missing_count"], 1)
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("raw preview fixture value must not leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+
     def test_preview_agreed_activation_outcomes_emit_successor_decisions(self):
         ledger = {
             "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
@@ -8435,6 +8563,126 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["schema"], "agentflow.orchestrator_research_plan.v1")
         self.assertTrue(payload["research_trigger"]["should_run"])
+
+    def test_cli_attaches_stored_managed_preview_outcomes_to_successor_queue(self):
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:cli-preview-routing",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "state": "review",
+                    "current_status": "review",
+                    "issue_worthy_status": "ready",
+                    "next_action": "draft-openai-routing-recovery-canary",
+                    "blocker_codes": ["semantic-quality-regression-observed"],
+                    "sample_count": 342,
+                    "stage_allowed": True,
+                    "target_local_rule_file": "routing_rules.yaml",
+                    "target_local_policy_section": "routing.rules",
+                    "request_id": "req-cli-preview-secret",
+                },
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        with TemporaryDirectory() as tmp:
+            preview_now = datetime.now(timezone.utc)
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            queue = build_local_activation_next_action_queue(
+                {"evidence_to_activation_next_action_ledger": ledger}
+            )
+            from agentflow_proxy.local_activation_executor import (
+                build_managed_activation_preview_request,
+                build_managed_activation_preview_result,
+            )
+            from agentflow_proxy.managed_activation_preview_outcomes import (
+                persist_managed_activation_preview_outcomes,
+            )
+
+            request_payload = build_managed_activation_preview_request(queue, now=preview_now)
+            response_payload = {
+                "schema": "agentflow.managed_activation_preview_response.v1",
+                "decisions": [
+                    {
+                        "handoff_ref": request_payload["rows"][0]["handoff_ref"],
+                        "decision": "review-only-recommendation",
+                        "recommended_next_action": "draft-openai-routing-recovery-canary",
+                        "reason_codes": ["managed-preview-would-draft-recovery"],
+                        "review_only": True,
+                        "raw_prompt": "raw cli managed preview must not leak",
+                    }
+                ],
+            }
+            preview_result = build_managed_activation_preview_result(
+                request_payload,
+                response_payload=response_payload,
+                fetch={"status": "ok", "status_code": 200, "managed_server_calls_made": True},
+            )
+            store = SQLiteStore(db_path)
+            try:
+                persist_managed_activation_preview_outcomes(store, preview_result, now=preview_now)
+            finally:
+                store.conn.close()
+
+            issues_path = Path(tmp) / "issues.json"
+            stats_path = Path(tmp) / "stats.json"
+            issues_path.write_text(json.dumps([]), encoding="utf-8")
+            stats_path.write_text(
+                json.dumps(
+                    {
+                        "calls": 0,
+                        "cache_hit_rate": 0.0,
+                        "db": db_path,
+                        "evidence_to_activation_next_action_ledger": ledger,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            code = cli.orchestrator_research_cli(
+                ["--issues-json", str(issues_path), "--stats-json", str(stats_path), "--threshold", "3"],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        stats_summary = payload["evidence"]["stats_summary"]
+        self.assertEqual(
+            stats_summary["managed_activation_preview_outcomes"]["summary"]["stored_preview_outcome_count"],
+            1,
+        )
+        queue = stats_summary["local_activation_next_action_queue"]
+        decision = next(
+            row
+            for row in queue["successor_decisions"]
+            if row["source_fingerprint"] == "activation:cli-preview-routing"
+        )
+        self.assertEqual(decision["source_fingerprint"], "activation:cli-preview-routing")
+        self.assertEqual(decision["preview_agreement_status"], "agreed")
+        self.assertTrue(decision["preview_verified"])
+        self.assertEqual(decision["decision"], "ready")
+        gate = next(
+            row
+            for row in queue["successor_actions"]
+            if row["source_fingerprint"] == "activation:cli-preview-routing"
+        )["managed_preview_gate"]
+        self.assertEqual(gate["source_activation_ref"], request_payload["rows"][0]["source_activation_ref"])
+        self.assertEqual(gate["source_successor_ref"], request_payload["rows"][0]["source_successor_ref"])
+        self.assertTrue(gate["source_activation_ref"])
+        self.assertTrue(gate["source_successor_ref"])
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("req-cli-preview-secret", rendered)
+        self.assertNotIn("raw cli managed preview must not leak", rendered)
 
     def test_cli_builds_request_shape_rollups_from_stats_db(self):
         with TemporaryDirectory() as tmp:
