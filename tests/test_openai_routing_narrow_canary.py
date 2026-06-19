@@ -93,6 +93,14 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         self.assertFalse(draft["privacy"]["provider_calls_made"])
         self.assertFalse(draft["privacy"]["managed_server_calls_made"])
         self.assertFalse(draft["privacy"]["raw_prompts_included"])
+        self.assertEqual(draft["recovery_plan"]["selected_option"], "restage-review-only")
+        self.assertEqual(draft["recovery_plan"]["blocker_status"], "cleared")
+        self.assertEqual(draft["recovery_plan"]["coverage"]["applied_count"], 12)
+        self.assertEqual(draft["recovery_plan"]["coverage"]["holdout_count"], 14)
+        self.assertFalse(draft["recovery_plan"]["rollback_no_write"]["policy_files_written"])
+        self.assertFalse(draft["recovery_plan"]["rollback_no_write"]["active_policy_changed"])
+        self.assertEqual(result["recovery_plan"]["selected_option"], "restage-review-only")
+        self.assertEqual(result["summary"]["recovery_selected_option"], "restage-review-only")
 
         regressed = result["regressed_cohorts"][0]
         self.assertEqual(regressed["reason"], "semantic-quality-regression-observed")
@@ -125,6 +133,65 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         self.assertFalse(result["wrote_active_policy_files"])
         self.assertFalse(result["provider_calls_made"])
         self.assertFalse(result["managed_server_calls_made"])
+        self.assertEqual(result["recovery_plan"]["selected_option"], "keep-blocked")
+        self.assertEqual(result["recovery_plan"]["blocker_status"], "active")
+        self.assertEqual(result["recovery_plan"]["blocker_reason"], "semantic-quality-regression-observed")
+        self.assertEqual(result["recovery_plan"]["coverage"]["applied_count"], 25)
+        self.assertEqual(result["recovery_plan"]["coverage"]["holdout_count"], 21)
+        self.assertEqual(result["recovery_plan"]["target_local_policy_section"], "routing.rules")
+        self.assertEqual(result["recovery_plan"]["target_local_rule_file"], "routing_rules.yaml")
+        self.assertFalse(result["recovery_plan"]["rollback_no_write"]["active_policy_changed"])
+        self.assertFalse(result["recovery_plan"]["rollback_no_write"]["policy_files_written"])
+        options = {item["option"]: item for item in result["recovery_plan"]["options"]}
+        self.assertTrue(options["keep-blocked"]["selected"])
+        self.assertTrue(options["retire-disabled-rule"]["allowed"])
+        self.assertFalse(options["restage-review-only"]["allowed"])
+
+    def test_cleared_semantic_blocker_with_fresh_coverage_emits_review_only_recovery_plan(self) -> None:
+        report = {
+            "schema": "agentflow.openai_routing_semantic_regression_fixture.v1",
+            "generated_at": utc_now(),
+            "cohorts": [
+                {
+                    **self._cohort(category="tool-light", applied_count=25, holdout_count=21),
+                    "openai_canary_lifecycle_evidence": {
+                        "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+                        "status": "matched",
+                        "latest_observed_at": "2026-06-18T17:37:11.818295+00:00",
+                        "applied_count": 25,
+                        "holdout_count": 21,
+                        "safety_stop_count": 0,
+                        "error_count": 0,
+                        "fallback_count": 0,
+                        "retry_count": 0,
+                        "stale_evidence": {
+                            "stale": False,
+                            "age_hours": 9.634,
+                            "max_age_hours": 72.0,
+                        },
+                    },
+                }
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        result = build_openai_routing_narrow_canary_review(report)
+
+        self.assertEqual(result["decision"], "draft-narrower-canary")
+        self.assertEqual(result["status"], "review-only")
+        self.assertEqual(result["recovery_plan"]["selected_option"], "restage-review-only")
+        self.assertEqual(result["recovery_plan"]["blocker_status"], "cleared")
+        self.assertEqual(result["recovery_plan"]["stale_evidence"]["status"], "fresh")
+        self.assertEqual(result["recovery_plan"]["coverage"]["applied_count"], 25)
+        self.assertEqual(result["recovery_plan"]["coverage"]["holdout_count"], 21)
+        self.assertTrue(result["recovery_plan"]["coverage"]["has_no_safety_stops"])
+        self.assertFalse(result["recovery_plan"]["rollback_no_write"]["policy_files_written"])
+        self.assertFalse(result["recovery_plan"]["rollback_no_write"]["provider_calls_made"])
+        options = {item["option"]: item for item in result["recovery_plan"]["options"]}
+        self.assertTrue(options["restage-review-only"]["selected"])
+        self.assertTrue(options["restage-review-only"]["allowed"])
+        self.assertTrue(options["narrow-threshold"]["allowed"])
+        self.assertFalse(options["retire-disabled-rule"]["allowed"])
 
     def test_cli_reads_fixture_from_stdin(self) -> None:
         report = {

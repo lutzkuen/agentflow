@@ -10,12 +10,19 @@ from agentflow_proxy.store import utc_now
 SCHEMA = "agentflow.openai_routing_narrow_canary_review.v1"
 DRAFT_SCHEMA = "agentflow.openai_routing_narrow_canary_draft.v1"
 OMISSION_SCHEMA = "agentflow.openai_routing_narrow_canary_omission.v1"
+RECOVERY_PLAN_SCHEMA = "agentflow.openai_routing_recovery_plan.v1"
+RECOVERY_OPTION_SCHEMA = "agentflow.openai_routing_recovery_option.v1"
+RECOVERY_COVERAGE_SCHEMA = "agentflow.openai_routing_recovery_coverage.v1"
+RECOVERY_ROLLBACK_SCHEMA = "agentflow.openai_routing_recovery_rollback_no_write.v1"
+RECOVERY_STALE_EVIDENCE_SCHEMA = "agentflow.openai_routing_recovery_stale_evidence.v1"
 PRIVACY = {
     "local_only": True,
     "metadata_only": True,
     "aggregate_only": True,
     "raw_prompts_included": False,
     "raw_messages_included": False,
+    "raw_request_bodies_included": False,
+    "raw_response_bodies_included": False,
     "provider_bodies_included": False,
     "raw_provider_bodies_included": False,
     "request_ids_included": False,
@@ -23,8 +30,10 @@ PRIVACY = {
     "session_ids_included": False,
     "raw_session_ids_included": False,
     "cache_keys_included": False,
+    "individual_candidate_ids_included": False,
     "file_paths_included": False,
     "secrets_included": False,
+    "policy_file_contents_included": False,
     "policy_files_written": False,
     "provider_calls_made": False,
     "managed_server_calls_made": False,
@@ -192,6 +201,170 @@ def _cohort_counts(cohort: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _lifecycle(cohort: dict[str, Any]) -> dict[str, Any]:
+    lifecycle = cohort.get("openai_canary_lifecycle_evidence")
+    if isinstance(lifecycle, dict):
+        return lifecycle
+    lifecycle = cohort.get("lifecycle")
+    return lifecycle if isinstance(lifecycle, dict) else {}
+
+
+def _stale_evidence(cohort: dict[str, Any]) -> dict[str, Any]:
+    stale = cohort.get("stale_evidence")
+    if not isinstance(stale, dict):
+        lifecycle = _lifecycle(cohort)
+        stale = lifecycle.get("stale_evidence") if isinstance(lifecycle.get("stale_evidence"), dict) else {}
+    is_stale = bool(stale.get("stale")) if stale else False
+    latest = stale.get("latest_observed_at") if stale else None
+    if latest is None:
+        latest = _lifecycle(cohort).get("latest_observed_at")
+    age_hours = stale.get("age_hours") if stale else None
+    max_age_hours = stale.get("max_age_hours") if stale else 72.0
+    if stale:
+        status = "stale" if is_stale else "fresh"
+    elif latest:
+        status = "fresh-or-active"
+    else:
+        status = "unknown"
+    return {
+        "schema": RECOVERY_STALE_EVIDENCE_SCHEMA,
+        "status": status,
+        "stale": is_stale,
+        "latest_observed_at": latest,
+        "age_hours": age_hours,
+        "max_age_hours": max_age_hours,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _coverage(cohort: dict[str, Any]) -> dict[str, Any]:
+    counts = _cohort_counts(cohort)
+    lifecycle = _lifecycle(cohort)
+    return {
+        "schema": RECOVERY_COVERAGE_SCHEMA,
+        "matched_count": counts["matched"],
+        "applied_count": counts["applied"],
+        "holdout_count": counts["holdout"],
+        "safety_stop_count": counts["safety_stop"],
+        "skipped_count": counts["skipped"],
+        "unknown_count": counts["unknown"],
+        "error_count": _as_int(cohort.get("error_count") or lifecycle.get("error_count")),
+        "fallback_count": _as_int(cohort.get("fallback_count") or lifecycle.get("fallback_count")),
+        "retry_count": _as_int(cohort.get("retry_count") or lifecycle.get("retry_count")),
+        "has_applied_coverage": counts["applied"] > 0,
+        "has_holdout_coverage": counts["holdout"] > 0,
+        "has_no_safety_stops": counts["safety_stop"] == 0,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _rollback_no_write(selected_option: str) -> dict[str, Any]:
+    return {
+        "schema": RECOVERY_ROLLBACK_SCHEMA,
+        "selected_option": selected_option,
+        "active_policy_changed": False,
+        "policy_files_written": False,
+        "wrote_active_policy_files": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "rollback_action_type": "disable_openai_routing_narrow_canary",
+        "rollback_required_before_activation": True,
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _option(name: str, *, selected: str, allowed: bool, reason: str, next_action: str) -> dict[str, Any]:
+    return {
+        "schema": RECOVERY_OPTION_SCHEMA,
+        "option": name,
+        "selected": name == selected,
+        "allowed": allowed,
+        "review_only": True,
+        "reason": reason,
+        "next_action": next_action,
+        "active_policy_changed": False,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
+
+
+def _recovery_plan(cohort: dict[str, Any], *, omission_reason: str | None) -> dict[str, Any]:
+    counts = _cohort_counts(cohort)
+    reasons = set(_reason_codes(cohort))
+    requested, target = _safe_model_pair(cohort)
+    stale = _stale_evidence(cohort)
+    coverage = _coverage(cohort)
+    semantic_blocked = omission_reason == "semantic-quality-regression-observed" or "semantic-quality-regression-observed" in reasons
+    missing_coverage = counts["applied"] <= 0 or counts["holdout"] <= 0
+    safety_blocked = counts["safety_stop"] > 0 or "safety-stop-observed" in reasons
+    stale_blocked = bool(stale.get("stale"))
+    clean_for_review = not semantic_blocked and not missing_coverage and not safety_blocked and not stale_blocked
+    selected_option = "restage-review-only" if clean_for_review else "keep-blocked"
+    blocker_reason = omission_reason or ("none" if clean_for_review else "openai-routing-recovery-blocked")
+    blocker_status = "cleared" if clean_for_review else "active"
+    restage_reason = "blocker-cleared-fresh-applied-holdout-coverage" if clean_for_review else blocker_reason
+    return {
+        "schema": RECOVERY_PLAN_SCHEMA,
+        "fingerprint": _stable_id("openai-routing-recovery", _fingerprint(cohort), selected_option, blocker_reason),
+        "selected_option": selected_option,
+        "decision": "draft-narrower-canary" if clean_for_review else "keep-blocked",
+        "status": "review-only" if clean_for_review else "keep-blocked",
+        "next_action": "operator-review-narrower-openai-routing-canary" if clean_for_review else "keep-openai-routing-blocked",
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "provider": "openai",
+        "source_surface": cohort.get("source_surface"),
+        "endpoint": cohort.get("endpoint"),
+        "requested_model": requested,
+        "target_model": target,
+        "category": cohort.get("category"),
+        "workflow_phase": cohort.get("workflow_phase"),
+        "blocker_status": blocker_status,
+        "blocker_reason": blocker_reason,
+        "blocker_codes": sorted(reasons),
+        "coverage": coverage,
+        "stale_evidence": stale,
+        "rollback_no_write": _rollback_no_write(selected_option),
+        "options": [
+            _option(
+                "keep-blocked",
+                selected=selected_option,
+                allowed=True,
+                reason=blocker_reason,
+                next_action="keep-openai-routing-blocked",
+            ),
+            _option(
+                "retire-disabled-rule",
+                selected=selected_option,
+                allowed=semantic_blocked,
+                reason="manual-retirement-review-for-disabled-semantic-regression-rule" if semantic_blocked else "no-disabled-semantic-regression-rule",
+                next_action="operator-review-disabled-openai-routing-rule-retirement",
+            ),
+            _option(
+                "narrow-threshold",
+                selected=selected_option,
+                allowed=clean_for_review,
+                reason=restage_reason,
+                next_action="operator-review-narrow-openai-routing-threshold",
+            ),
+            _option(
+                "restage-review-only",
+                selected=selected_option,
+                allowed=clean_for_review,
+                reason=restage_reason,
+                next_action="operator-review-narrower-openai-routing-canary",
+            ),
+        ],
+        "privacy": PRIVACY,
+    }
+
+
 def _reason_codes(cohort: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     for key in ("reason_codes", "blocker_codes", "blockers"):
@@ -311,6 +484,10 @@ def _omission(cohort: dict[str, Any], reason: str, *, path: str | None = None) -
         "applied_count": counts["applied"],
         "holdout_count": counts["holdout"],
         "reason_codes": _reason_codes(cohort),
+        "coverage": _coverage(cohort),
+        "stale_evidence": _stale_evidence(cohort),
+        "rollback_no_write": _rollback_no_write("keep-blocked"),
+        "recovery_plan": _recovery_plan(cohort, omission_reason=reason),
         "privacy": PRIVACY,
     }
 
@@ -412,6 +589,10 @@ def _draft_for_cohort(cohort: dict[str, Any], *, canary_fraction: float, holdout
                 "operator-requested",
             ],
         },
+        "coverage": _coverage(cohort),
+        "stale_evidence": _stale_evidence(cohort),
+        "rollback_no_write": _rollback_no_write("restage-review-only"),
+        "recovery_plan": _recovery_plan(cohort, omission_reason=None),
         "privacy": PRIVACY,
     }
 
@@ -468,6 +649,11 @@ def build_openai_routing_narrow_canary_review(
         for key, value in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))
     ]
     regressed = [item for item in omitted if item.get("reason") == "semantic-quality-regression-observed"]
+    recovery_plan = drafts[0].get("recovery_plan") if drafts else None
+    if recovery_plan is None and regressed:
+        recovery_plan = regressed[0].get("recovery_plan")
+    if recovery_plan is None and omitted:
+        recovery_plan = omitted[0].get("recovery_plan")
     decision = "draft-narrower-canary" if drafts else "keep-blocked"
     if not drafts and regressed and len(regressed) == len(omitted):
         reason = "semantic-quality-regression-observed"
@@ -494,11 +680,14 @@ def build_openai_routing_narrow_canary_review(
             "canary_fraction": _bounded_fraction(canary_fraction, 0.05),
             "holdout_fraction": _bounded_fraction(holdout_fraction, 0.10),
             "top_draft_fingerprint": drafts[0]["fingerprint"] if drafts else None,
+            "recovery_selected_option": recovery_plan.get("selected_option") if isinstance(recovery_plan, dict) else None,
+            "recovery_blocker_status": recovery_plan.get("blocker_status") if isinstance(recovery_plan, dict) else None,
             "omission_reason_breakdown": omission_breakdown,
             "policy_files_written": False,
             "provider_calls_made": False,
             "managed_server_calls_made": False,
         },
+        "recovery_plan": recovery_plan,
         "drafts": drafts,
         "regressed_cohorts": regressed,
         "omitted": omitted,
