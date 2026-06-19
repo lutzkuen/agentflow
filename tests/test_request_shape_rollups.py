@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 import uuid
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from agentflow_proxy import cache as cache_module
 from agentflow_proxy import cli
 from agentflow_proxy.request_shape_rollups import (
     apply_request_shape_cache_replay_canary_action,
@@ -1302,6 +1304,158 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(skipped["privacy"]["cache_keys_included"])
         self.assertFalse(skipped["privacy"]["request_ids_included"])
         self.assertFalse(skipped["privacy"]["session_ids_included"])
+
+    def test_openai_tool_cache_dependency_capture_fixtures_feed_replay_evidence_without_apply(self) -> None:
+        old_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            try:
+                stable_body = {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": "Tool read pyproject.toml and returned deterministic local metadata.",
+                        }
+                    ]
+                }
+                cap_trimmed_body = {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": " ".join(f"pyproject.toml:{line}" for line in range(8)),
+                        }
+                    ]
+                }
+                no_path_body = {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": "Tool returned status with no local file references.",
+                        }
+                    ]
+                }
+                stable_meta = cache_module.attach_file_dependency_cache_meta(
+                    {"status": "skipped", "reason": "tools-disabled"},
+                    snapshots=cache_module.cache_file_dependency_snapshots(stable_body),
+                    audit=cache_module.cache_file_dependency_audit(stable_body),
+                    blocker_reasons=["tool-call-cache-disabled"],
+                )
+                cap_trimmed_audit = cache_module.cache_file_dependency_audit(cap_trimmed_body, max_paths=1)
+                cap_trimmed_meta = cache_module.attach_file_dependency_cache_meta(
+                    {"status": "skipped", "reason": "tools-disabled"},
+                    snapshots=cache_module.cache_file_dependency_snapshots(cap_trimmed_body, max_paths=1),
+                    audit=cap_trimmed_audit,
+                    blocker_reasons=["tool-call-cache-disabled"],
+                )
+                no_path_meta = cache_module.attach_file_dependency_cache_meta(
+                    {"status": "skipped", "reason": "tools-disabled"},
+                    snapshots=cache_module.cache_file_dependency_snapshots(no_path_body),
+                    audit=cache_module.cache_file_dependency_audit(no_path_body),
+                    blocker_reasons=["tool-call-cache-disabled"],
+                )
+            finally:
+                os.chdir(old_cwd)
+
+        stale_meta = {
+            "status": "skipped",
+            "reason": "tools-disabled",
+            "file_dependency_audit": self._dependency_audit(
+                reason="dependency-changed",
+                safe=False,
+                fingerprint_available=True,
+            ),
+            "file_dependency_fingerprint_available": True,
+            "file_dependency_evidence_available": True,
+            "safe_invalidation_evidence": False,
+        }
+        unsafe_meta = {
+            "status": "skipped",
+            "reason": "tools-disabled",
+            "file_dependency_audit": self._dependency_audit(
+                reason="unsafe-tool-calls-without-invalidation",
+                safe=False,
+                fingerprint_available=True,
+            ),
+            "file_dependency_fingerprint_available": True,
+            "file_dependency_evidence_available": True,
+            "safe_invalidation_evidence": False,
+        }
+        unknown_meta = {
+            "status": "skipped",
+            "reason": "tools-disabled",
+            "file_dependency_audit": self._dependency_audit(
+                reason=None,
+                safe=False,
+                fingerprint_available=True,
+            ),
+            "file_dependency_fingerprint_available": True,
+            "file_dependency_evidence_available": True,
+            "safe_invalidation_evidence": False,
+        }
+        shared = {
+            "provider": "openai",
+            "path": "/v1/responses",
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "requested_model": "gpt-5.4",
+            "routed_model": "gpt-5.4",
+            "requested_model_family": "gpt-5",
+            "routed_model_family": "gpt-5",
+            "category": "tool-light",
+            "workflow_phase": "tool-light",
+            "stream": 0,
+            "has_tools": True,
+            "cache_status": "skipped",
+            "cache_reason": "tools-disabled",
+            "cost": 0.04,
+            "baseline": 0.04,
+        }
+        for text_chars, cache_extra in (
+            (6_000, stable_meta),
+            (12_000, cap_trimmed_meta),
+            (18_000, stale_meta),
+            (24_000, unsafe_meta),
+            (30_000, unknown_meta),
+            (36_000, no_path_meta),
+        ):
+            self._log_call(**shared, text_chars=text_chars, cache_extra=cache_extra)
+
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="captured-dependencies")
+        tool_replay = report["cache_replayability_dry_run"]["tool_replay_evidence"]
+        rows_by_status = {row["file_dependency_status"]: row for row in tool_replay["cohorts"]}
+
+        self.assertEqual(tool_replay["schema"], "agentflow.request_shape_tool_cache_replay_evidence.v1")
+        self.assertEqual(tool_replay["summary"]["stable_dependency_evidence_rows"], 2)
+        self.assertEqual(tool_replay["summary"]["stale_dependency_evidence_rows"], 1)
+        self.assertEqual(tool_replay["summary"]["unsafe_dependency_evidence_rows"], 1)
+        self.assertEqual(tool_replay["summary"]["unknown_dependency_evidence_rows"], 1)
+        self.assertEqual(tool_replay["summary"]["missing_dependency_evidence_rows"], 1)
+        self.assertEqual(tool_replay["summary"]["cache_apply_action_count"], 0)
+        self.assertEqual(tool_replay["summary"]["cache_entries_written"], 0)
+        self.assertFalse(tool_replay["summary"]["policy_files_written"])
+        self.assertTrue(tool_replay["acceptance"]["distinguishes_stable_stale_unsafe_unknown_and_missing_dependency_evidence"])
+        self.assertTrue(tool_replay["acceptance"]["emits_no_cache_apply_actions"])
+        self.assertTrue(tool_replay["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
+        self.assertTrue(tool_replay["acceptance"]["unsafe_or_missing_dependency_keeps_tool_replay_blocked"])
+        self.assertFalse(any(row["tool_cache_replay_enabled"] for row in tool_replay["cohorts"]))
+        self.assertFalse(any(row["streaming_replay_enabled"] for row in tool_replay["cohorts"]))
+        self.assertTrue(rows_by_status["stable"]["local_dependency_fingerprint"]["fingerprint_available"])
+        stable_audits = [
+            row["local_dependency_fingerprint"]
+            for row in tool_replay["cohorts"]
+            if row["file_dependency_status"] == "stable"
+        ]
+        self.assertTrue(any(audit["candidate_path_count_bucket"] == "1" for audit in stable_audits))
+        self.assertEqual(rows_by_status["missing"]["dependency_evidence_decision"]["decision"], "missing-dependency-evidence")
+
+        rendered = json.dumps(tool_replay, sort_keys=True)
+        self.assertNotIn("pyproject.toml", rendered)
+        self.assertNotIn(str(tmp_path), rendered)
+        self.assertNotIn("raw-cache-key-must-not-leak", rendered)
+        self.assertFalse(tool_replay["privacy"]["file_paths_included"])
+        self.assertFalse(tool_replay["privacy"]["cache_keys_included"])
 
     def test_tool_cache_dependency_coverage_records_narrow_missing_reason_after_capture(self) -> None:
         audit = self._dependency_audit(safe=False, fingerprint_available=False)

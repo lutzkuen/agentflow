@@ -838,6 +838,40 @@ pattern_rules:
         self.assertEqual(audit["dependency_capture_reason"], "complete")
         self.assertTrue(audit["safe_invalidation_evidence"])
 
+    def test_tool_result_dependency_capture_records_stable_bare_file_names_without_paths(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+            (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            body = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": "Reviewed pyproject.toml and README.md; ignore example.com prose.",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            snapshots = cache_module.cache_file_dependency_snapshots(body)
+            audit = cache_module.cache_file_dependency_audit(body)
+
+        self.assertEqual(audit["snapshot_count"], 2)
+        self.assertEqual(len(snapshots), 2)
+        self.assertTrue(audit["safe_invalidation_evidence"])
+        self.assertTrue(audit["file_dependency_evidence_available"])
+        self.assertEqual(audit["candidate_path_count_bucket"], "2_5")
+        rendered = json.dumps(audit, sort_keys=True)
+        self.assertNotIn("pyproject.toml", rendered)
+        self.assertNotIn("README.md", rendered)
+        self.assertNotIn(str(tmp_path), rendered)
+
     def test_file_dependency_capture_ignores_prose_slash_fragments_around_stable_files(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

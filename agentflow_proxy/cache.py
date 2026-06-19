@@ -1456,13 +1456,14 @@ def _candidate_path_tokens(text: str) -> list[str]:
                 token = before.rstrip(_PATH_TRAILING_JUNK)
         if not token:
             continue
+        has_file_identity = _path_token_has_file_identity(token)
         path_like = (
             token.startswith(("/", "./", "../", "~/"))
             or _WINDOWS_DRIVE_RE.match(token) is not None
             or "/" in token
             or "\\" in token
         )
-        if path_like and not _obvious_non_path_fragment(token):
+        if (path_like or has_file_identity) and not _obvious_non_path_fragment(token):
             tokens.append(token)
     return tokens
 
