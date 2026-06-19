@@ -35,6 +35,7 @@ agentflow activate openai
 agentflow activate claude
 agentflow activate codex
 agentflow activate claude-vscode
+agentflow activate claude-desktop
 agentflow stats
 agentflow doctor
 ```
@@ -71,6 +72,7 @@ http://127.0.0.1:4002/agentflow/dashboard
 | Claude API apps | `agentflow activate claude` | AgentFlow activation profile for Anthropic-compatible traffic | `http://127.0.0.1:4000` | `agentflow run claude` |
 | Codex VS Code / CLI | `agentflow activate codex` | User-level `~/.codex/config.toml` `openai_base_url`; creates the OpenAI profile if needed | `http://127.0.0.1:4003/v1` | `agentflow run openai` |
 | Claude VS Code / Claude Code | `agentflow activate claude-vscode` | AgentFlow-managed non-secret env file with `ANTHROPIC_BASE_URL`; creates the Claude profile if needed | `http://127.0.0.1:4000` | `agentflow run claude` |
+| Claude Desktop on Linux | `agentflow activate claude-desktop` | User-level Claude Desktop `.desktop` launcher `Exec=` line with `ANTHROPIC_BASE_URL`; creates the Claude profile if needed | `http://127.0.0.1:4000` | `agentflow run claude` |
 | Codex app-server telemetry | No `activate` target | Experimental WebSocket relay for OAuth/subscription app-server telemetry | `ws://127.0.0.1:4013` | `agentflow-codex-app-proxy` |
 | GitHub Copilot | Unsupported | No base-url activation target | Not applicable | Not applicable |
 
@@ -259,6 +261,23 @@ code .
 If your extension does not inherit shell environment variables, configure the
 same variables in that extension's environment/wrapper. Keep secrets in your
 user environment, not in repository files.
+
+## Claude Desktop on Linux
+
+`agentflow activate claude-desktop` updates the Claude Desktop `.desktop`
+launcher so GUI launches inherit the local AgentFlow Anthropic base URL. It
+does not write `ANTHROPIC_API_KEY` or token values.
+
+```bash
+agentflow activate claude-desktop
+agentflow run claude
+```
+
+By default AgentFlow patches `~/.local/share/applications/claude-desktop.desktop`
+when present. If only `/usr/share/applications/claude-desktop.desktop` exists,
+copy it to the user applications directory or pass `--force` when you intend to
+patch the system-level file with suitable permissions. Use `--desktop-file PATH`
+for custom launcher locations.
 
 ## GitHub Copilot non-goal
 

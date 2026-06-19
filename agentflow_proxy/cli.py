@@ -65,6 +65,7 @@ from agentflow_proxy.cli_commands.onboarding import (
     _codex_openai_base_url_from_toml,
     _decode_toml_string,
     _doctor_activation_target,
+    _doctor_claude_desktop_target,
     _doctor_claude_vscode_target,
     _doctor_codex_target,
     _doctor_provider_target,

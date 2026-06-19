@@ -54,7 +54,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         output = stdout.getvalue()
         for expected in ("activate", "stats", "doctor", "run", "version"):
             self.assertIn(expected, output)
-        for target in ("openai", "claude", "codex", "claude-vscode"):
+        for target in ("openai", "claude", "codex", "claude-vscode", "claude-desktop"):
             self.assertIn(target, output)
         self.assertIn("127.0.0.1", output)
 
@@ -77,6 +77,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIs(cli.agentflow_cli, onboarding_cli.agentflow_cli)
         self.assertIs(cli._activation_stats_result, onboarding_cli._activation_stats_result)
         self.assertIs(cli._doctor_codex_target, onboarding_cli._doctor_codex_target)
+        self.assertIs(cli._doctor_claude_desktop_target, onboarding_cli._doctor_claude_desktop_target)
 
     def test_agentflow_cli_reexports_optimization_report_commands(self):
         moved_commands = [
@@ -173,6 +174,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "agentflow activate claude",
             "agentflow activate codex",
             "agentflow activate claude-vscode",
+            "agentflow activate claude-desktop",
             "agentflow stats",
             "agentflow doctor",
             "openai_base_url = \"http://127.0.0.1:4003/v1\"",
@@ -189,6 +191,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             config_dir = Path(tmp) / "agentflow"
             codex_config = Path(tmp) / "codex-config.toml"
+            desktop_file = Path(tmp) / "claude-desktop.desktop"
+            desktop_file.write_text("[Desktop Entry]\nName=Claude\nExec=/opt/claude-desktop/claude-desktop %U\n", encoding="utf-8")
             smoke_commands = [
                 ["activate", "openai", "--config-dir", str(config_dir), "--dry-run"],
                 ["activate", "claude", "--config-dir", str(config_dir), "--dry-run"],
@@ -202,6 +206,15 @@ class AgentflowActivationCliTests(unittest.TestCase):
                     "--dry-run",
                 ],
                 ["activate", "claude-vscode", "--config-dir", str(config_dir), "--dry-run"],
+                [
+                    "activate",
+                    "claude-desktop",
+                    "--config-dir",
+                    str(config_dir),
+                    "--desktop-file",
+                    str(desktop_file),
+                    "--dry-run",
+                ],
                 ["stats", "--config-dir", str(config_dir)],
                 ["stats", "--config-dir", str(config_dir), "--json"],
             ]
@@ -274,6 +287,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn("claude: not configured", output)
         self.assertIn("codex: not configured", output)
         self.assertIn("claude-vscode: not configured", output)
+        self.assertIn("claude-desktop: not configured", output)
 
     def test_agentflow_doctor_codex_not_configured(self):
         stdout = io.StringIO()
@@ -422,6 +436,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertFalse(status["targets"]["claude"]["configured"])
         self.assertFalse(status["targets"]["codex"]["configured"])
         self.assertFalse(status["targets"]["claude-vscode"]["configured"])
+        self.assertFalse(status["targets"]["claude-desktop"]["configured"])
 
     def test_activation_config_round_trips_with_atomic_write(self):
         with TemporaryDirectory() as tmp:
@@ -648,6 +663,218 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertFalse((Path(tmp) / "claude-vscode.env").exists())
             self.assertIn("AgentFlow target is not configured: claude", stderr.getvalue())
             self.assertIn("agentflow activate claude", stderr.getvalue())
+
+    def test_activate_claude_desktop_patches_exec_line_and_writes_backup(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            desktop_file = Path(tmp) / "claude-desktop.desktop"
+            desktop_file.write_text(
+                "[Desktop Entry]\nName=Claude\nExec=/opt/claude-desktop/claude-desktop %U\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(
+                [
+                    "activate",
+                    "claude-desktop",
+                    "--config-dir",
+                    str(config_dir),
+                    "--desktop-file",
+                    str(desktop_file),
+                ],
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                desktop_file.read_text(encoding="utf-8"),
+                "[Desktop Entry]\nName=Claude\nExec=env ANTHROPIC_BASE_URL=http://127.0.0.1:4000 /opt/claude-desktop/claude-desktop %U\n",
+            )
+            self.assertEqual(
+                desktop_file.with_name(desktop_file.name + ".agentflow.bak").read_text(encoding="utf-8"),
+                "[Desktop Entry]\nName=Claude\nExec=/opt/claude-desktop/claude-desktop %U\n",
+            )
+            config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(config["targets"].keys()), ["claude", "claude-desktop"])
+            profile = config["targets"]["claude-desktop"]
+            self.assertEqual(profile["depends_on"], "claude")
+            self.assertEqual(profile["local_base_url"], "http://127.0.0.1:4000")
+            self.assertEqual(profile["desktop_file_path"], str(desktop_file))
+            self.assertEqual(profile["safe_env"], {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000"})
+            output = stdout.getvalue()
+            self.assertIn("Configured AgentFlow target: claude-desktop", output)
+            self.assertIn(f"Claude Desktop file: {desktop_file}", output)
+            self.assertIn("Desktop file changed: true", output)
+            self.assertIn("Backup:", output)
+            self.assertIn("Run configured proxy: agentflow run claude", output)
+
+    def test_activate_claude_desktop_is_idempotent_and_updates_existing_env_exec(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            desktop_file = Path(tmp) / "claude-desktop.desktop"
+            desktop_file.write_text(
+                "[Desktop Entry]\nName=Claude\nExec=env FOO=bar ANTHROPIC_BASE_URL=http://old.example /opt/claude %U\n",
+                encoding="utf-8",
+            )
+
+            first_stdout = io.StringIO()
+            first = cli.agentflow_cli(
+                [
+                    "activate",
+                    "claude",
+                    "--config-dir",
+                    str(config_dir),
+                    "--local-base-url",
+                    "http://127.0.0.1:4999",
+                ],
+                stdout=io.StringIO(),
+            )
+            first_desktop = cli.agentflow_cli(
+                [
+                    "activate",
+                    "claude-desktop",
+                    "--config-dir",
+                    str(config_dir),
+                    "--desktop-file",
+                    str(desktop_file),
+                ],
+                stdout=first_stdout,
+            )
+            second_stdout = io.StringIO()
+            second = cli.agentflow_cli(
+                [
+                    "activate",
+                    "claude-desktop",
+                    "--config-dir",
+                    str(config_dir),
+                    "--desktop-file",
+                    str(desktop_file),
+                ],
+                stdout=second_stdout,
+            )
+
+            self.assertEqual(first, 0)
+            self.assertEqual(first_desktop, 0)
+            self.assertEqual(second, 0)
+            self.assertIn("Desktop file changed: true", first_stdout.getvalue())
+            self.assertIn("Desktop file changed: false", second_stdout.getvalue())
+            self.assertEqual(
+                desktop_file.read_text(encoding="utf-8"),
+                "[Desktop Entry]\nName=Claude\nExec=env FOO=bar ANTHROPIC_BASE_URL=http://127.0.0.1:4999 /opt/claude %U\n",
+            )
+
+    def test_activate_claude_desktop_dry_run_does_not_write_files(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            desktop_file = Path(tmp) / "claude-desktop.desktop"
+            original = "[Desktop Entry]\nName=Claude\nExec=/opt/claude %U\n"
+            desktop_file.write_text(original, encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(
+                [
+                    "activate",
+                    "claude-desktop",
+                    "--config-dir",
+                    str(config_dir),
+                    "--desktop-file",
+                    str(desktop_file),
+                    "--dry-run",
+                ],
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(desktop_file.read_text(encoding="utf-8"), original)
+            self.assertFalse((config_dir / "activation.json").exists())
+            self.assertFalse(desktop_file.with_name(desktop_file.name + ".agentflow.bak").exists())
+            self.assertIn("Dry run: would configure AgentFlow target: claude-desktop", stdout.getvalue())
+            self.assertIn("Desktop file changed: true", stdout.getvalue())
+
+    def test_activate_claude_desktop_missing_file_fails_actionably(self):
+        with TemporaryDirectory() as tmp:
+            stderr = io.StringIO()
+
+            code = cli.agentflow_cli(
+                [
+                    "activate",
+                    "claude-desktop",
+                    "--config-dir",
+                    str(Path(tmp) / "agentflow"),
+                    "--desktop-file",
+                    str(Path(tmp) / "missing.desktop"),
+                ],
+                stdout=io.StringIO(),
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 2)
+            self.assertIn("Claude Desktop .desktop file not found", stderr.getvalue())
+
+    def test_agentflow_stats_claude_desktop_shows_configured_path(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            desktop_file = Path(tmp) / "claude-desktop.desktop"
+            desktop_file.write_text("[Desktop Entry]\nExec=/opt/claude %U\n", encoding="utf-8")
+            cli.agentflow_cli(
+                [
+                    "activate",
+                    "claude-desktop",
+                    "--config-dir",
+                    str(config_dir),
+                    "--desktop-file",
+                    str(desktop_file),
+                ],
+                stdout=io.StringIO(),
+            )
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(["stats", "claude-desktop", "--config-dir", str(config_dir)], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            output = stdout.getvalue()
+            self.assertIn("claude-desktop: configured", output)
+            self.assertIn(f"desktop file: {desktop_file}", output)
+
+    def test_agentflow_doctor_claude_desktop_reports_healthy_stale_and_not_routed(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            desktop_file = Path(tmp) / "claude-desktop.desktop"
+            desktop_file.write_text("[Desktop Entry]\nExec=/opt/claude %U\n", encoding="utf-8")
+            cli.agentflow_cli(
+                [
+                    "activate",
+                    "claude-desktop",
+                    "--config-dir",
+                    str(config_dir),
+                    "--desktop-file",
+                    str(desktop_file),
+                ],
+                stdout=io.StringIO(),
+            )
+
+            healthy_stdout = io.StringIO()
+            healthy_code = cli.agentflow_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=healthy_stdout)
+            desktop_file.write_text("[Desktop Entry]\nExec=env ANTHROPIC_BASE_URL=http://127.0.0.1:4999 /opt/claude %U\n", encoding="utf-8")
+            stale_stdout = io.StringIO()
+            stale_code = cli.agentflow_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=stale_stdout)
+            desktop_file.write_text("[Desktop Entry]\nExec=/opt/claude %U\n", encoding="utf-8")
+            missing_stdout = io.StringIO()
+            missing_code = cli.agentflow_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=missing_stdout)
+
+            self.assertEqual(healthy_code, 0)
+            healthy = json.loads(healthy_stdout.getvalue())["targets"]["claude-desktop"]
+            self.assertEqual(healthy["status"], "healthy")
+            self.assertEqual(healthy["desktop_file_base_url"], "http://127.0.0.1:4000")
+            self.assertEqual(stale_code, 1)
+            stale = json.loads(stale_stdout.getvalue())["targets"]["claude-desktop"]
+            self.assertEqual(stale["status"], "stale base url")
+            self.assertIn("claude-desktop-base-url-mismatch", stale["reasons"])
+            self.assertEqual(missing_code, 1)
+            missing = json.loads(missing_stdout.getvalue())["targets"]["claude-desktop"]
+            self.assertEqual(missing["status"], "not routed via agentflow")
+            self.assertIn("claude-desktop-base-url-missing", missing["reasons"])
 
     def test_activate_dry_run_does_not_write_config(self):
         with TemporaryDirectory() as tmp:

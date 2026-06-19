@@ -29,7 +29,9 @@ DEFAULT_OPENAI_PORT = 4003
 DEFAULT_CLAUDE_PORT = 4000
 CODEX_CONFIG_RELATIVE_PATH = Path(".codex") / "config.toml"
 CLAUDE_VSCODE_ENV_FILENAME = "claude-vscode.env"
-ACTIVATION_TARGETS = ("openai", "claude", "codex", "claude-vscode")
+CLAUDE_DESKTOP_USER_DESKTOP_PATH = Path(".local") / "share" / "applications" / "claude-desktop.desktop"
+CLAUDE_DESKTOP_SYSTEM_DESKTOP_PATH = Path("/usr/share/applications/claude-desktop.desktop")
+ACTIVATION_TARGETS = ("openai", "claude", "codex", "claude-vscode", "claude-desktop")
 
 
 class ActivationError(ValueError):
@@ -59,6 +61,15 @@ def activation_config_path(config_dir: str | Path | None = None) -> Path:
 
 def default_codex_config_path() -> Path:
     return safe_home_dir() / CODEX_CONFIG_RELATIVE_PATH
+
+
+def default_claude_desktop_file_path() -> Path | None:
+    user_path = safe_home_dir() / CLAUDE_DESKTOP_USER_DESKTOP_PATH
+    if user_path.exists():
+        return user_path
+    if CLAUDE_DESKTOP_SYSTEM_DESKTOP_PATH.exists():
+        return CLAUDE_DESKTOP_SYSTEM_DESKTOP_PATH
+    return None
 
 
 def empty_config() -> dict[str, Any]:
@@ -141,6 +152,8 @@ def validate_activation_config(config: dict[str, Any]) -> list[dict[str, str]]:
             errors.append({"path": f"{target_path}.codex_config_path", "message": "must be a string"})
         if target_name == "claude-vscode" and not isinstance(profile.get("env_file_path"), str):
             errors.append({"path": f"{target_path}.env_file_path", "message": "must be a string"})
+        if target_name == "claude-desktop" and not isinstance(profile.get("desktop_file_path"), str):
+            errors.append({"path": f"{target_path}.desktop_file_path", "message": "must be a string"})
     return errors
 
 
@@ -199,7 +212,7 @@ def write_activation_config(config: dict[str, Any], config_dir: str | Path | Non
 
 def _config_file_paths_for_profile(profile: dict[str, Any], config_dir: str | Path | None = None) -> list[str]:
     paths = [str(activation_config_path(config_dir))]
-    for key in ("codex_config_path", "env_file_path"):
+    for key in ("codex_config_path", "env_file_path", "desktop_file_path"):
         value = profile.get(key)
         if isinstance(value, str) and value:
             paths.append(value)
@@ -236,7 +249,7 @@ def activation_status_from_config(
                     "last_activation_at": raw_profile.get("last_activation_at") or raw_profile.get("updated_at"),
                 }
             )
-            for key in ("codex_config_path", "env_file_path"):
+            for key in ("codex_config_path", "env_file_path", "desktop_file_path"):
                 if raw_profile.get(key):
                     status[key] = raw_profile.get(key)
         targets[name] = status
@@ -426,6 +439,28 @@ def claude_vscode_activation_profile(
     return profile
 
 
+def claude_desktop_activation_profile(
+    *,
+    claude_profile: dict[str, Any],
+    desktop_file_path: Path,
+) -> dict[str, Any]:
+    profile = {
+        "id": "claude-desktop",
+        "configured": True,
+        "provider": "anthropic",
+        "app": "claude-desktop",
+        "depends_on": "claude",
+        "local_base_url": str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL),
+        "desktop_file_path": str(desktop_file_path),
+        "safe_env": {
+            "ANTHROPIC_BASE_URL": str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL),
+        },
+        "last_activation_at": utc_now(),
+    }
+    profile["updated_at"] = profile["last_activation_at"]
+    return profile
+
+
 def apply_activation_profile(
     config: dict[str, Any],
     profile: dict[str, Any],
@@ -530,6 +565,67 @@ def _next_backup_path(path: Path) -> Path:
         index += 1
 
 
+def _desktop_backup_path(path: Path) -> Path:
+    return path.with_name(path.name + ".agentflow.bak")
+
+
+def _split_exec_value(value: str) -> list[str]:
+    try:
+        return shlex.split(value, posix=True)
+    except ValueError as exc:
+        raise ActivationError(f"Could not parse Claude Desktop Exec line: {exc}") from exc
+
+
+def _update_desktop_exec_value(value: str, local_base_url: str) -> tuple[str, bool]:
+    tokens = _split_exec_value(value)
+    if not tokens:
+        raise ActivationError("Claude Desktop Exec line is empty")
+    env_token = f"ANTHROPIC_BASE_URL={local_base_url}"
+    updated = list(tokens)
+    for index, token in enumerate(updated):
+        if token.startswith("ANTHROPIC_BASE_URL="):
+            if token == env_token:
+                return value, False
+            updated[index] = env_token
+            return shlex.join(updated), True
+    if updated[0] == "env":
+        updated.insert(1, env_token)
+    else:
+        updated = ["env", env_token, *updated]
+    return shlex.join(updated), True
+
+
+def update_claude_desktop_desktop_file(raw: str, local_base_url: str) -> tuple[str, bool]:
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.splitlines(keepends=True)
+    if raw and not raw.endswith(("\n", "\r")):
+        lines.append("")
+    for index, line in enumerate(lines):
+        line_ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        body = line[:-len(line_ending)] if line_ending else line
+        if not body.startswith("Exec="):
+            continue
+        updated_value, changed = _update_desktop_exec_value(body[len("Exec="):], local_base_url)
+        if not changed:
+            return raw, False
+        updated = list(lines)
+        updated[index] = f"Exec={updated_value}{line_ending or newline}"
+        return "".join(updated), True
+    raise ActivationError("Claude Desktop .desktop file does not contain an Exec= line")
+
+
+def claude_desktop_base_url_from_desktop_file(raw: str) -> str | None:
+    for line in raw.splitlines():
+        if not line.startswith("Exec="):
+            continue
+        tokens = _split_exec_value(line[len("Exec="):])
+        for token in tokens:
+            if token.startswith("ANTHROPIC_BASE_URL="):
+                return token.split("=", 1)[1]
+        return None
+    return None
+
+
 def _is_project_local_codex_config(path: Path, cwd: Path | None = None) -> bool:
     base = cwd or Path.cwd()
     try:
@@ -596,6 +692,85 @@ def activate_claude_vscode(
         "safe_env": dict(vscode_profile["safe_env"]),
         "routing_snippet": routing_snippet,
         "profile": vscode_profile,
+        "target_count": len(updated_config.get("targets") or {}),
+    }
+
+
+def activate_claude_desktop(
+    *,
+    config_dir: str | Path | None = None,
+    desktop_file_path: str | Path | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    config = load_activation_config(config_dir)
+    claude_profile, created_claude = _claude_profile_from_config(config, auto_configure=True)
+    local_base_url = str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL)
+
+    discovered = False
+    if desktop_file_path is not None:
+        path = Path(desktop_file_path).expanduser()
+    else:
+        found = default_claude_desktop_file_path()
+        if found is None:
+            raise ActivationError(
+                "Claude Desktop .desktop file not found. Expected "
+                f"{safe_home_dir() / CLAUDE_DESKTOP_USER_DESKTOP_PATH} or {CLAUDE_DESKTOP_SYSTEM_DESKTOP_PATH}; "
+                "pass --desktop-file PATH if Claude Desktop is installed elsewhere."
+            )
+        path = found
+        discovered = True
+
+    system_path = path.resolve(strict=False) == CLAUDE_DESKTOP_SYSTEM_DESKTOP_PATH.resolve(strict=False)
+    if not path.exists():
+        raise ActivationError(f"Claude Desktop .desktop file not found: {path}")
+    if system_path and not force:
+        raise ActivationError(
+            f"Claude Desktop launcher is system-level at {path}. Copy it to "
+            f"{safe_home_dir() / CLAUDE_DESKTOP_USER_DESKTOP_PATH}, or rerun with --force if you intend to patch "
+            "the system-level file and have write permission."
+        )
+    if system_path and force and not os.access(path, os.W_OK):
+        raise ActivationError(
+            f"Claude Desktop system launcher is not writeable: {path}. Rerun with suitable permissions, "
+            "copy it to the user applications directory, or patch it manually."
+        )
+
+    original = path.read_text(encoding="utf-8")
+    updated_desktop, desktop_changed = update_claude_desktop_desktop_file(original, local_base_url)
+    backup_path = _desktop_backup_path(path)
+
+    desktop_profile = claude_desktop_activation_profile(claude_profile=claude_profile, desktop_file_path=path)
+    updated_config = apply_activation_profile(config, claude_profile, config_dir=config_dir)
+    updated_config = apply_activation_profile(updated_config, desktop_profile, config_dir=config_dir)
+    config_path = activation_config_path(config_dir)
+
+    if not dry_run:
+        if desktop_changed:
+            if not backup_path.exists():
+                shutil.copy2(path, backup_path)
+            path.write_text(updated_desktop, encoding="utf-8")
+        config_path = write_activation_config(updated_config, config_dir)
+
+    return {
+        "schema": "agentflow.claude_desktop_activation_result.v1",
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "force": bool(force),
+        "target": "claude-desktop",
+        "configured": True,
+        "config_path": str(config_path),
+        "desktop_file_path": str(path),
+        "desktop_file_changed": desktop_changed,
+        "desktop_file_backup_path": str(backup_path) if desktop_changed or backup_path.exists() else None,
+        "desktop_file_discovered": discovered,
+        "desktop_file_system_level": system_path,
+        "local_base_url": local_base_url,
+        "depends_on": "claude",
+        "claude_target_created": created_claude,
+        "run_command": "agentflow run claude",
+        "safe_env": dict(desktop_profile["safe_env"]),
+        "profile": desktop_profile,
         "target_count": len(updated_config.get("targets") or {}),
     }
 

@@ -20,7 +20,7 @@ from agentflow_proxy.cli_common import (
 from agentflow_proxy.upstream_url import redact_url as _redact_url
 
 
-ONBOARDING_TARGETS = ("openai", "claude", "codex", "claude-vscode")
+ONBOARDING_TARGETS = ("openai", "claude", "codex", "claude-vscode", "claude-desktop")
 UNSUPPORTED_ONBOARDING_TARGETS = ("copilot",)
 RUN_TARGETS = ("openai", "claude")
 DEFAULT_STATS_URL = "http://127.0.0.1:4002/agentflow/stats"
@@ -45,6 +45,21 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
             "VS Code extensions usually inherit environment variables only from the VS Code process; "
             "restart VS Code from that terminal if it was opened from the desktop.\n"
         )
+        stdout.write("AgentFlow does not store or print ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or token values.\n")
+        return
+
+    if result["target"] == "claude-desktop":
+        prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
+        stdout.write(f"{prefix} AgentFlow target: claude-desktop\n")
+        stdout.write(f"Claude Desktop file: {result['desktop_file_path']}\n")
+        stdout.write(f"Desktop file changed: {str(result['desktop_file_changed']).lower()}\n")
+        if result.get("desktop_file_backup_path"):
+            stdout.write(f"Backup: {result['desktop_file_backup_path']}\n")
+        stdout.write(f"Depends on AgentFlow target: {result['depends_on']}\n")
+        if result.get("claude_target_created"):
+            stdout.write("Claude target was not configured; created the default Claude activation profile.\n")
+        stdout.write(f"Run configured proxy: {result['run_command']}\n")
+        stdout.write(f"Config file: {result['config_path']}\n")
         stdout.write("AgentFlow does not store or print ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or token values.\n")
         return
 
@@ -183,6 +198,27 @@ def agentflow_cli(
         "--no-auto-claude",
         action="store_true",
         help="Require an existing `agentflow activate claude` profile instead of creating the default one.",
+    )
+
+    activate_claude_desktop = activate_subparsers.add_parser(
+        "claude-desktop",
+        help="Configure the Linux Claude Desktop launcher to use AgentFlow Anthropic routing.",
+    )
+    activate_claude_desktop.add_argument(
+        "--desktop-file",
+        default=None,
+        help="Claude Desktop .desktop file path, default: user launcher then system launcher.",
+    )
+    activate_claude_desktop.add_argument(
+        "--config-dir",
+        default=argparse.SUPPRESS,
+        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+    )
+    activate_claude_desktop.add_argument("--dry-run", action="store_true", help="Show intended changes without writing config.")
+    activate_claude_desktop.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow patching the system-level Claude Desktop launcher if it is writeable.",
     )
 
     activate_codex = activate_subparsers.add_parser("codex", help="Configure Codex VS Code/Codex CLI OpenAI base URL.")
@@ -354,6 +390,20 @@ def agentflow_cli(
                 result = activation.activate_codex(
                     config_dir=args.config_dir,
                     codex_config_path=args.codex_config,
+                    dry_run=bool(args.dry_run),
+                    force=bool(args.force),
+                )
+            except activation.ActivationError as exc:
+                _write_activation_config_error(stderr, exc, command="activate")
+                return 2
+            _write_activation_summary(stdout, result)
+            return 0
+
+        if args.target == "claude-desktop":
+            try:
+                result = activation.activate_claude_desktop(
+                    config_dir=args.config_dir,
+                    desktop_file_path=args.desktop_file,
                     dry_run=bool(args.dry_run),
                     force=bool(args.force),
                 )
@@ -613,7 +663,7 @@ def _target_activation_base(
         "reasons": [],
     }
     if configured:
-        for key in ("codex_config_path", "env_file_path", "depends_on"):
+        for key in ("codex_config_path", "env_file_path", "desktop_file_path", "depends_on"):
             if profile.get(key):
                 result[key] = str(profile.get(key))
     else:
@@ -623,7 +673,7 @@ def _target_activation_base(
         upstream = openai_profile.get("upstream_base_url")
         if upstream:
             result["upstream_base_url"] = _redact_url(str(upstream))
-    if target == "claude-vscode" and configured and not result.get("upstream_base_url"):
+    if target in {"claude-vscode", "claude-desktop"} and configured and not result.get("upstream_base_url"):
         claude_profile = _profile_for_target(config, "claude")
         upstream = claude_profile.get("upstream_base_url")
         if upstream:
@@ -672,6 +722,8 @@ def _activation_doctor_result(
             checked = _doctor_codex_target(base, config)
         elif name == "claude-vscode":
             checked = _doctor_claude_vscode_target(base)
+        elif name == "claude-desktop":
+            checked = _doctor_claude_desktop_target(base)
         else:
             checked = base
             checked["ok"] = False
@@ -872,6 +924,52 @@ def _doctor_claude_vscode_target(base: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _doctor_claude_desktop_target(base: dict[str, Any]) -> dict[str, Any]:
+    from agentflow_proxy import activation
+
+    result = dict(base)
+    result["ok"] = False
+    if not result.get("configured"):
+        result["status"] = "not configured"
+        return result
+    expected = str(result.get("local_base_url") or "")
+    desktop_path_value = result.get("desktop_file_path")
+    if not desktop_path_value:
+        result["status"] = "not routed via agentflow"
+        result["reasons"].append("claude-desktop-file-path-missing")
+        return result
+    path = Path(str(desktop_path_value)).expanduser()
+    result["desktop_file_exists"] = path.exists()
+    if not path.exists():
+        result["status"] = "not routed via agentflow"
+        result["reasons"].append("claude-desktop-file-missing")
+        return result
+    try:
+        configured_base_url = activation.claude_desktop_base_url_from_desktop_file(path.read_text(encoding="utf-8"))
+    except activation.ActivationError as exc:
+        result["status"] = "unhealthy"
+        result["reasons"].append("claude-desktop-exec-parse-error")
+        result["config_error"] = str(exc)
+        return result
+    except OSError as exc:
+        result["status"] = "unhealthy"
+        result["reasons"].append("claude-desktop-file-unreadable")
+        result["config_error"] = type(exc).__name__
+        return result
+    result["desktop_file_base_url"] = _redact_url(configured_base_url) if configured_base_url else None
+    if not configured_base_url:
+        result["status"] = "not routed via agentflow"
+        result["reasons"].append("claude-desktop-base-url-missing")
+        return result
+    if configured_base_url != expected:
+        result["status"] = "stale base url"
+        result["reasons"].append("claude-desktop-base-url-mismatch")
+        return result
+    result["status"] = "healthy"
+    result["ok"] = True
+    return result
+
+
 def _write_activation_stats_summary(stdout: Any, result: dict[str, Any]) -> None:
     targets = result.get("targets") if isinstance(result.get("targets"), dict) else {}
     for name in _selected_activation_targets(result.get("target")):
@@ -884,6 +982,8 @@ def _write_activation_stats_summary(stdout: Any, result: dict[str, Any]) -> None
             parts.append(f"base url: {target['local_base_url']}")
         if target.get("upstream_base_url"):
             parts.append(f"upstream: {target['upstream_base_url']}")
+        if target.get("desktop_file_path"):
+            parts.append(f"desktop file: {target['desktop_file_path']}")
         stdout.write(", ".join(parts) + "\n")
 
 
@@ -901,6 +1001,8 @@ def _write_activation_doctor_summary(stdout: Any, result: dict[str, Any]) -> Non
             parts.append(f"upstream: {target['upstream_base_url']}")
         if target.get("running_upstream_base_url"):
             parts.append(f"running upstream: {target['running_upstream_base_url']}")
+        if target.get("desktop_file_path"):
+            parts.append(f"desktop file: {target['desktop_file_path']}")
         if target.get("reasons"):
             parts.append("reasons: " + ", ".join(str(reason) for reason in target["reasons"]))
         stdout.write(", ".join(parts) + "\n")
