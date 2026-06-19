@@ -136,6 +136,7 @@ agentflow-optimization-promotion-canaries-apply = "agentflow_proxy.cli:optimizat
 agentflow-optimization-promotion-impact = "agentflow_proxy.cli:optimization_promotion_impact_main"
 agentflow-orchestrator-research = "agentflow_proxy.cli:orchestrator_research_main"
 agentflow-evidence-to-activation-burndown = "agentflow_proxy.cli:evidence_to_activation_burndown_main"
+agentflow-activation-burndown = "agentflow_proxy.cli:activation_burndown_main"
 agentflow-dashboard = "agentflow_proxy.dashboard:main"
 
 [tool.setuptools]

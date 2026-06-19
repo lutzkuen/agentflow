@@ -9,6 +9,7 @@ import uuid
 
 from agentflow_proxy import cli
 from agentflow_proxy.orchestrator_research import (
+    build_activation_burndown_report,
     build_evidence_to_activation_burndown,
     build_evidence_to_activation_next_action_ledger,
     build_local_activation_next_action_queue,
@@ -2102,6 +2103,145 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("session-queue-secret", rendered)
         self.assertNotIn("cache-queue-secret", rendered)
         self.assertNotIn("/tmp/private-queue.py", rendered)
+
+    def test_activation_burndown_report_ranks_successors_after_keep_active_crunch(self):
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:crunch",
+                    "lever": "crunch",
+                    "local_action_family": "crunch",
+                    "state": "full-rollout-active",
+                    "current_status": "full-rollout",
+                    "next_action": "keep-active",
+                    "blocker_codes": ["repeated-context-crunch-full-rollout-active"],
+                    "sample_count": 2093,
+                    "applied_count": 107,
+                    "holdout_count": 40,
+                    "crunch_savings_usd": 25.818387,
+                    "projected_saved_usd": 25.818387,
+                    "target_local_rule_file": "crunch_rules.yaml",
+                    "target_local_policy_section": "crunch.rules",
+                    "duplicate_suppression": {
+                        "reason": "repeated-context-crunch-full-rollout-active",
+                        "suppresses_new_activation_issue": True,
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    },
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 2,
+                    "fingerprint": "activation:openai-routing",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "state": "keep-blocked",
+                    "current_status": "keep-blocked",
+                    "next_action": "review-openai-routing-canary-blockers",
+                    "blocker_codes": ["semantic-quality-regression-observed"],
+                    "sample_count": 365,
+                    "applied_count": 25,
+                    "holdout_count": 21,
+                    "savings_per_1000_calls_usd": 4.375,
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "requested_model": "gpt-5.4",
+                    "candidate_target_model": "gpt-5.4-mini",
+                    "target_local_rule_file": "routing_rules.yaml",
+                    "target_local_policy_section": "routing.rules",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 3,
+                    "fingerprint": "activation:openai-cache",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "state": "missing-evidence",
+                    "current_status": "blocked",
+                    "next_action": "collect-file-invalidation-evidence",
+                    "blocker_codes": [
+                        "invalidation-evidence-missing",
+                        "tools-present",
+                        "unsafe-tool-calls-without-invalidation",
+                    ],
+                    "sample_count": 249,
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "category": "tool-light",
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "emits_cache_apply_action": False,
+                    "policy_files_written": False,
+                    "request_id": "req-activation-burndown-secret",
+                    "session_id": "session-activation-burndown-secret",
+                    "cache_key": "cache-activation-burndown-secret",
+                    "file_path": "/tmp/private-activation-burndown.py",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 4,
+                    "fingerprint": "activation:managed",
+                    "lever": "managed-recommendation",
+                    "local_action_family": "crunch",
+                    "state": "ranked-evidence",
+                    "current_status": "projected",
+                    "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
+                    "blocker_codes": ["repeated-context-crunch-full-rollout-active"],
+                    "sample_count": 2093,
+                    "local_file_backed_representation": {
+                        "exists": True,
+                        "policy_section": "crunch",
+                        "rule_file": "crunch_rules.yaml",
+                    },
+                },
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        report = build_activation_burndown_report(
+            {
+                "schema": "agentflow.orchestrator_research_plan.v1",
+                "generated_at": NOW.isoformat(),
+                "evidence": {"stats_summary": {"evidence_to_activation_next_action_ledger": ledger}},
+            },
+            now=NOW,
+        )
+
+        self.assertEqual(report["schema"], "agentflow.activation_burndown.v1")
+        self.assertEqual(report["status"], "ranked")
+        self.assertGreaterEqual(report["summary"]["ranked_row_count"], 4)
+        self.assertEqual(report["rows"][0]["local_action_family"], "routing")
+        self.assertEqual(report["rows"][0]["provider_scope"], "openai")
+        self.assertEqual(report["rows"][1]["local_action_family"], "cache")
+        self.assertEqual(report["rows"][1]["provider_scope"], "openai")
+        crunch = next(row for row in report["rows"] if row["local_action_family"] == "crunch" and row["current_status"] == "full-rollout")
+        self.assertEqual(crunch["successor_status"], "keep-current-rule")
+        self.assertEqual(crunch["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(report["summary"]["top_selected_local_action_family"], "routing")
+        selected_families = [row["local_action_family"] for row in report["selected_successor_rows"]]
+        self.assertIn("routing", selected_families)
+        self.assertIn("cache", selected_families)
+        self.assertIn("semantic-quality-regression-observed", report["summary"]["unique_blocker_codes"])
+        self.assertIn("invalidation-evidence-missing", report["summary"]["unique_blocker_codes"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["provider_bodies_included"])
+        self.assertFalse(report["privacy"]["tool_payloads_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+        self.assertFalse(report["privacy"]["file_paths_included"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
+        self.assertFalse(report["privacy"]["policy_file_contents_included"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("req-activation-burndown-secret", rendered)
+        self.assertNotIn("session-activation-burndown-secret", rendered)
+        self.assertNotIn("cache-activation-burndown-secret", rendered)
+        self.assertNotIn("/tmp/private-activation-burndown.py", rendered)
 
     def test_repeated_activation_feedback_blockers_become_durable_ledger_entries(self):
         with TemporaryDirectory() as tmp:

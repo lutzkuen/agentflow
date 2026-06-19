@@ -12,6 +12,8 @@ from agentflow_proxy.pricing import estimate_cost, pricing_basis
 
 
 SCHEMA = "agentflow.orchestrator_research_plan.v1"
+ACTIVATION_BURNDOWN_SCHEMA = "agentflow.activation_burndown.v1"
+ACTIVATION_BURNDOWN_ROW_SCHEMA = "agentflow.activation_burndown_row.v1"
 EVIDENCE_TO_ACTIVATION_BURNDOWN_SCHEMA = "agentflow.evidence_to_activation_burndown.v1"
 EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger.v1"
 EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger_entry.v1"
@@ -5364,6 +5366,7 @@ def _successor_action_privacy() -> dict[str, Any]:
         "raw_prompts_included": False,
         "raw_messages_included": False,
         "raw_request_bodies_included": False,
+        "raw_response_bodies_included": False,
         "provider_bodies_included": False,
         "raw_provider_bodies_included": False,
         "raw_responses_included": False,
@@ -5479,6 +5482,19 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "duplicate_suppression_reason": sanitize_value(entry.get("duplicate_suppression_reason")),
         "privacy": _successor_action_privacy(),
     }
+    for key in (
+        "evidence_schema",
+        "source_surface",
+        "endpoint",
+        "category",
+        "workflow_phase",
+        "provider_family",
+        "requested_model",
+        "candidate_target_model",
+        "required_local_executor",
+    ):
+        if entry.get(key) is not None:
+            action[key] = sanitize_value(entry.get(key))
     for key in (
         "emits_cache_apply_action",
         "policy_files_written",
@@ -5812,6 +5828,224 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             "read_only": True,
         },
     }
+    return sanitize_value(result)
+
+
+def _activation_burndown_provider_scope(row: dict[str, Any]) -> str | None:
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in (
+            "provider_family",
+            "source_surface",
+            "endpoint",
+            "requested_model",
+            "candidate_target_model",
+            "required_local_executor",
+            "next_action",
+            "recommended_next_action",
+            "unblock_reason",
+            "evidence_schema",
+        )
+    ).lower()
+    for code in row.get("blocker_codes") or []:
+        text += f" {code}".lower()
+    if "openai" in text or "gpt-" in text:
+        return "openai"
+    if "anthropic" in text or "claude-" in text:
+        return "anthropic"
+    return None
+
+
+def _activation_burndown_action_bucket(row: dict[str, Any]) -> int:
+    family = str(row.get("local_action_family") or row.get("lever") or "").strip()
+    provider_scope = _activation_burndown_provider_scope(row)
+    status = str(row.get("successor_status") or "").strip()
+    current_status = str(row.get("current_status") or "").strip()
+    state = str(row.get("state") or "").strip()
+    if family in {"routing", "cache"} and provider_scope == "openai" and status in {"ready", "review", "review-only", "keep-blocked"}:
+        return 0
+    if status in {"ready", "review", "review-only", "keep-blocked"} and current_status not in {"full-rollout", "superseded"}:
+        return 1
+    if status in {"keep-current-rule", "suppress-duplicate"} or current_status == "full-rollout":
+        return 3
+    if current_status == "superseded" or state in {"superseded", "retired-no-repeat"}:
+        return 4
+    return 2
+
+
+def _activation_burndown_row_from_successor(action: dict[str, Any]) -> dict[str, Any]:
+    row = {
+        "schema": ACTIVATION_BURNDOWN_ROW_SCHEMA,
+        "rank": 0,
+        "source_schema": sanitize_value(action.get("schema")),
+        "source_rank": _to_int(action.get("rank")),
+        "source_queue_rank": _to_int(action.get("source_queue_rank")),
+        "source_ledger_rank": _to_int(action.get("source_ledger_rank")),
+        "fingerprint": sanitize_value(action.get("fingerprint")),
+        "source_fingerprint": sanitize_value(action.get("source_fingerprint")),
+        "lever": sanitize_value(action.get("lever") or "unknown"),
+        "local_action_family": sanitize_value(action.get("local_action_family") or action.get("lever") or "unknown"),
+        "provider_scope": _activation_burndown_provider_scope(action),
+        "current_state": sanitize_value(action.get("state") or "unknown"),
+        "current_status": sanitize_value(action.get("current_status") or "unknown"),
+        "successor_status": sanitize_value(action.get("successor_status") or "review"),
+        "next_action": sanitize_value(action.get("recommended_next_action") or "inspect-local-evidence"),
+        "blocker_codes": sanitize_value([str(item) for item in action.get("blocker_codes") or [] if str(item or "").strip()]),
+        "unblock_reason": sanitize_value(action.get("unblock_reason")),
+        "target_local_rule_file": sanitize_value(action.get("target_local_rule_file")),
+        "target_local_policy_section": sanitize_value(action.get("target_local_policy_section")),
+        "duplicate_suppression_status": sanitize_value(action.get("duplicate_suppression_status")),
+        "duplicate_suppression_reason": sanitize_value(action.get("duplicate_suppression_reason")),
+        "projected_savings_usd": round(_to_float(action.get("projected_savings_usd")), 8),
+        "realized_savings_usd": round(_to_float(action.get("realized_savings_usd")), 8),
+        "sample_count": _to_int(action.get("sample_count")),
+        "acceptance_metric": sanitize_value(action.get("acceptance_metric")),
+        "expected_savings_path": sanitize_value(action.get("expected_savings_path")),
+        "privacy": _successor_action_privacy(),
+    }
+    for key in (
+        "evidence_schema",
+        "source_surface",
+        "endpoint",
+        "category",
+        "workflow_phase",
+        "provider_family",
+        "requested_model",
+        "candidate_target_model",
+        "required_local_executor",
+    ):
+        if action.get(key) is not None:
+            row[key] = sanitize_value(action.get(key))
+    for key in (
+        "emits_cache_apply_action",
+        "policy_files_written",
+        "tool_cache_replay_enabled",
+        "streaming_replay_enabled",
+        "promotion_allowed",
+        "stage_allowed",
+        "missing_applied_coverage",
+        "missing_holdout_coverage",
+        "measured_full_rollout_activation",
+        "durable_action_ledger_entry",
+        "durable_outcome_ledger_entry",
+    ):
+        if action.get(key) is not None:
+            row[key] = bool(action.get(key))
+    preserved = {
+        "rank",
+        "source_rank",
+        "source_queue_rank",
+        "source_ledger_rank",
+        "projected_savings_usd",
+        "realized_savings_usd",
+        "sample_count",
+        "emits_cache_apply_action",
+        "policy_files_written",
+        "tool_cache_replay_enabled",
+        "streaming_replay_enabled",
+        "promotion_allowed",
+        "stage_allowed",
+        "missing_applied_coverage",
+        "missing_holdout_coverage",
+        "measured_full_rollout_activation",
+        "durable_action_ledger_entry",
+        "durable_outcome_ledger_entry",
+    }
+    return {key: value for key, value in row.items() if value not in (None, "", [], 0) or key in preserved}
+
+
+def _activation_burndown_selected(row: dict[str, Any]) -> bool:
+    if str(row.get("current_status") or "") in {"full-rollout", "superseded"}:
+        return False
+    if str(row.get("current_state") or "") in {"superseded", "retired-no-repeat"}:
+        return False
+    return str(row.get("successor_status") or "") in {"ready", "review", "review-only", "keep-blocked"}
+
+
+def build_activation_burndown_report(
+    plan: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build the unified local activation burndown report for successor work."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    evidence_report = build_evidence_to_activation_burndown(plan, now=now)
+    queue = evidence_report.get("next_action_queue") if isinstance(evidence_report.get("next_action_queue"), dict) else None
+    successor_actions = (
+        queue.get("successor_actions")
+        if isinstance(queue, dict) and isinstance(queue.get("successor_actions"), list)
+        else evidence_report.get("successor_actions")
+        if isinstance(evidence_report.get("successor_actions"), list)
+        else []
+    )
+    rows = [
+        _activation_burndown_row_from_successor(action)
+        for action in successor_actions
+        if isinstance(action, dict)
+    ]
+    rows.sort(
+        key=lambda row: (
+            _activation_burndown_action_bucket(row),
+            -_to_float(row.get("projected_savings_usd")),
+            -_to_float(row.get("realized_savings_usd")),
+            -_to_int(row.get("sample_count")),
+            str(row.get("local_action_family") or ""),
+            str(row.get("next_action") or ""),
+        )
+    )
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
+
+    selected_rows = [row for row in rows if _activation_burndown_selected(row)]
+    family_counts: Counter[str] = Counter(str(row.get("local_action_family") or "unknown") for row in rows)
+    status_counts: Counter[str] = Counter(str(row.get("successor_status") or "unknown") for row in rows)
+    current_status_counts: Counter[str] = Counter(str(row.get("current_status") or "unknown") for row in rows)
+    all_blockers = [code for row in rows for code in row.get("blocker_codes") or []]
+    top = rows[0] if rows else {}
+    top_selected = selected_rows[0] if selected_rows else {}
+    result = {
+        "schema": ACTIVATION_BURNDOWN_SCHEMA,
+        "generated_at": now.isoformat(),
+        "source_schema": sanitize_value(plan.get("schema")),
+        "source_generated_at": sanitize_value(plan.get("generated_at")),
+        "source_report_schema": evidence_report.get("schema"),
+        "status": "empty" if not rows else "ranked",
+        "summary": {
+            "ranked_row_count": len(rows),
+            "selected_successor_count": len(selected_rows),
+            "successor_action_count": len(successor_actions),
+            "non_duplicate_successor_action_count": len({
+                str(action.get("fingerprint"))
+                for action in successor_actions
+                if isinstance(action, dict) and action.get("fingerprint")
+            }),
+            "represented_local_action_families": sorted(family_counts),
+            "local_action_family_counts": [{"value": key, "count": count} for key, count in sorted(family_counts.items())],
+            "successor_status_counts": [{"value": key, "count": count} for key, count in sorted(status_counts.items())],
+            "current_status_counts": [{"value": key, "count": count} for key, count in sorted(current_status_counts.items())],
+            "top_local_action_family": top.get("local_action_family"),
+            "top_provider_scope": top.get("provider_scope"),
+            "top_current_status": top.get("current_status"),
+            "top_successor_status": top.get("successor_status"),
+            "top_next_action": top.get("next_action"),
+            "top_selected_local_action_family": top_selected.get("local_action_family"),
+            "top_selected_provider_scope": top_selected.get("provider_scope"),
+            "top_selected_next_action": top_selected.get("next_action"),
+            "top_selected_blocker_code": (top_selected.get("blocker_codes") or [None])[0],
+            "unique_blocker_codes": sorted({str(code) for code in all_blockers if str(code or "").strip()}),
+            "total_projected_savings_usd": round(sum(_to_float(row.get("projected_savings_usd")) for row in rows), 8),
+            "total_realized_savings_usd": round(sum(_to_float(row.get("realized_savings_usd")) for row in rows), 8),
+        },
+        "rows": rows,
+        "selected_successor_rows": selected_rows[:20],
+        "source_evidence_to_activation_summary": sanitize_value(evidence_report.get("summary") or {}),
+        "privacy": _successor_action_privacy() | {
+            "read_only": True,
+            "policy_files_written": False,
+        },
+    }
+    if isinstance(queue, dict):
+        result["next_action_queue_summary"] = sanitize_value(queue.get("summary") or {})
     return sanitize_value(result)
 
 
