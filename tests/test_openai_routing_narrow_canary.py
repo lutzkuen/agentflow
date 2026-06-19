@@ -244,6 +244,145 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         self.assertTrue(options["retire-disabled-rule"]["allowed"])
         self.assertFalse(options["restage-review-only"]["allowed"])
 
+    def test_research_plan_successor_keeps_blocked_with_preview_health_and_no_write(self) -> None:
+        health_gate = {
+            "schema": "agentflow.managed_activation_preview_health_gate.v1",
+            "status": "no-data-preview-health",
+            "reason": "managed-preview-health-no-data",
+            "next_action": "refresh-managed-activation-preview",
+            "passed": False,
+            "accepted_batch_count": 0,
+            "previewed_row_count": 0,
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+            },
+        }
+        report = {
+            "schema": "agentflow.orchestrator_research_plan.v1",
+            "evidence": {
+                "stats_summary": {
+                    "openai_routing_promotion_decision": {
+                        "schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                        "promotion_decision": {
+                            "schema": "agentflow.openai_routing_promotion_decision.v1",
+                            "decision": "keep-blocked",
+                            "matched_count": 345,
+                            "projected_savings_usd": 1.509375,
+                            "savings_per_1000_calls_usd": 4.375,
+                            "reason": "semantic-quality-regression-observed",
+                            "reason_codes": ["semantic-quality-regression-observed"],
+                            "target": {
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "provider": "openai",
+                                "requested_model": "gpt-5.4",
+                                "target_model": "gpt-5.4-mini",
+                                "category": "tool-light",
+                                "target_local_policy_section": "routing.rules",
+                                "target_local_rule_file": "routing_rules.yaml",
+                            },
+                            "lifecycle": {
+                                "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+                                "status": "matched",
+                                "applied_count": 27,
+                                "holdout_count": 23,
+                                "safety_stop_count": 0,
+                                "error_count": 0,
+                                "fallback_count": 0,
+                                "retry_count": 0,
+                                "skipped_count": 230,
+                                "unknown_count": 6,
+                            },
+                        },
+                    },
+                    "local_activation_next_action_queue": {
+                        "schema": "agentflow.local_activation_next_action_queue.v1",
+                        "successor_actions": [
+                            {
+                                "schema": "agentflow.local_activation_successor_action.v1",
+                                "fingerprint": "successor:a9729de3a6d5873b",
+                                "source_fingerprint": "activation:9ddae7127b2ccbaf",
+                                "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                                "local_action_family": "routing",
+                                "current_status": "keep-blocked",
+                                "successor_status": "keep-blocked",
+                                "blocker_codes": ["semantic-quality-regression-observed"],
+                                "applied_count": 27,
+                                "holdout_count": 23,
+                                "sample_count": 345,
+                                "projected_savings_usd": 1.509375,
+                                "savings_per_1000_calls_usd": 4.375,
+                                "preview_verified": False,
+                                "preview_verification_status": "no-data-preview-health",
+                                "preview_verification_decision": "keep-blocked",
+                                "recommended_next_action": "refresh-managed-activation-preview",
+                                "target_local_policy_section": "routing.rules",
+                                "target_local_rule_file": "routing_rules.yaml",
+                                "managed_preview_gate": {
+                                    "schema": "agentflow.preview_verified_activation_successor_gate.v1",
+                                    "status": "no-data-preview-health",
+                                    "reason": "managed-preview-health-no-data",
+                                    "verified": False,
+                                    "required": True,
+                                    "policy_files_written": False,
+                                    "provider_calls_made": False,
+                                    "managed_server_calls_made": False,
+                                    "health_gate": health_gate,
+                                },
+                                "privacy": {
+                                    "metadata_only": True,
+                                    "aggregate_only": True,
+                                    "raw_prompts_included": False,
+                                    "provider_bodies_included": False,
+                                    "request_ids_included": False,
+                                    "session_ids_included": False,
+                                },
+                            }
+                        ],
+                    },
+                },
+            },
+            "backlog_changes": {
+                "create_issues": [
+                    {
+                        "title": "Keep OpenAI routing recovery blocked",
+                        "body": "Generated GitHub issue prose is not provider request content.",
+                    }
+                ]
+            },
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        result = build_openai_routing_narrow_canary_review(report)
+
+        self.assertEqual(result["decision"], "keep-blocked")
+        self.assertEqual(result["reason"], "semantic-quality-regression-observed")
+        self.assertEqual(result["summary"]["managed_preview_health_status"], "no-data-preview-health")
+        self.assertEqual(result["summary"]["managed_preview_health_reason"], "managed-preview-health-no-data")
+        self.assertEqual(result["summary"]["draft_count"], 0)
+        self.assertFalse(result["summary"]["policy_files_written"])
+        self.assertFalse(result["provider_calls_made"])
+        omitted = result["omitted"][0]
+        self.assertEqual(omitted["reason"], "semantic-quality-regression-observed")
+        self.assertEqual(omitted["coverage"]["applied_count"], 27)
+        self.assertEqual(omitted["coverage"]["holdout_count"], 23)
+        self.assertEqual(omitted["coverage"]["safety_stop_count"], 0)
+        self.assertEqual(omitted["managed_preview_agreement"]["health_gate"]["status"], "no-data-preview-health")
+        self.assertEqual(omitted["managed_preview_agreement"]["health_gate"]["reason"], "managed-preview-health-no-data")
+        self.assertEqual(omitted["recovery_sizing"]["status"], "not-available")
+        self.assertEqual(omitted["recovery_sizing"]["reason"], "managed-preview-health-no-data")
+        self.assertFalse(omitted["rollback_no_write"]["policy_files_written"])
+        self.assertFalse(result["recovery_plan"]["rollback_no_write"]["policy_files_written"])
+        self.assertEqual(result["recovery_plan"]["target_local_rule_file"], "routing_rules.yaml")
+
     def test_semantic_regression_recovery_drafts_only_with_managed_preview_agreement(self) -> None:
         report = {
             "schema": "agentflow.openai_routing_semantic_regression_fixture.v1",
