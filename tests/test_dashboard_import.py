@@ -3944,6 +3944,240 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
 
+    def test_preview_gated_activation_issue_queue_endpoint_reads_bounded_sanitized_plan(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        plan_tmp = tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False)
+        store = Store(tmp.name)
+        plan_path = Path(plan_tmp.name)
+        actions = [
+            {
+                "schema": "agentflow.local_activation_successor_action.v1",
+                "fingerprint": "successor:ready-secret-action",
+                "source_fingerprint": "activation:ready-secret-fingerprint",
+                "local_action_family": "routing",
+                "successor_status": "ready",
+                "recommended_next_action": "draft-openai-routing-recovery-canary",
+                "issue_worthy_status": "ready",
+                "blocker_codes": ["preview-fixture"],
+                "expected_savings_path": "Move preview-agreed routing evidence into a recovery drill.",
+                "acceptance_metric": "Preview-agreed routing successor emits a ready issue.",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+                "raw_prompt": "raw activation prompt must not render",
+                "request_id": "req-preview-secret",
+                "session_id": "sess-preview-secret",
+                "cache_key": "cache-preview-secret",
+                "file_path": "/tmp/preview-secret-project/file.py",
+            },
+            {
+                "schema": "agentflow.local_activation_successor_action.v1",
+                "fingerprint": "successor:blocked-secret-action",
+                "source_fingerprint": "activation:blocked-secret-fingerprint",
+                "local_action_family": "cache",
+                "successor_status": "keep-blocked",
+                "recommended_next_action": "collect-file-invalidation-evidence",
+                "issue_worthy_status": "blocked",
+                "blocker_codes": ["invalidation-evidence-missing"],
+                "unblock_reason": "invalidation-evidence-missing",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            {
+                "schema": "agentflow.local_activation_successor_action.v1",
+                "fingerprint": "successor:stale-secret-action",
+                "source_fingerprint": "activation:stale-secret-fingerprint",
+                "local_action_family": "crunch",
+                "successor_status": "keep-blocked",
+                "recommended_next_action": "refresh-managed-activation-preview",
+                "issue_worthy_status": "blocked",
+                "blocker_codes": ["stale-preview"],
+                "unblock_reason": "stale-preview",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            {
+                "schema": "agentflow.local_activation_successor_action.v1",
+                "fingerprint": "successor:nodata-secret-action",
+                "source_fingerprint": "activation:nodata-secret-fingerprint",
+                "local_action_family": "activation-feedback",
+                "successor_status": "keep-blocked",
+                "recommended_next_action": "refresh-managed-activation-preview",
+                "issue_worthy_status": "blocked",
+                "blocker_codes": ["not-previewed"],
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            {
+                "schema": "agentflow.local_activation_successor_action.v1",
+                "fingerprint": "successor:suppressed-secret-action",
+                "source_fingerprint": "activation:suppressed-secret-fingerprint",
+                "local_action_family": "crunch",
+                "successor_status": "suppress-duplicate",
+                "recommended_next_action": "keep-current-rule-only",
+                "issue_worthy_status": "suppressed",
+                "blocker_codes": ["duplicate"],
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+        ]
+        decisions = [
+            {
+                "schema": "agentflow.local_activation_successor_decision.v1",
+                "source_fingerprint": "activation:ready-secret-fingerprint",
+                "successor_action_fingerprint": "successor:ready-secret-action",
+                "local_action_family": "routing",
+                "decision": "ready",
+                "recommended_next_action": "draft-openai-routing-recovery-canary",
+                "issue_worthy_status": "ready",
+                "preview_verified": True,
+                "preview_agreement_status": "agreed",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+                "request_id": "req-decision-secret",
+            },
+            {
+                "schema": "agentflow.local_activation_successor_decision.v1",
+                "source_fingerprint": "activation:blocked-secret-fingerprint",
+                "successor_action_fingerprint": "successor:blocked-secret-action",
+                "local_action_family": "cache",
+                "decision": "keep-blocked",
+                "recommended_next_action": "collect-file-invalidation-evidence",
+                "issue_worthy_status": "blocked",
+                "preview_verified": False,
+                "preview_agreement_status": "failed-closed",
+                "preview_omitted_reason": "managed-preview-rejected",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            {
+                "schema": "agentflow.local_activation_successor_decision.v1",
+                "source_fingerprint": "activation:stale-secret-fingerprint",
+                "successor_action_fingerprint": "successor:stale-secret-action",
+                "local_action_family": "crunch",
+                "decision": "review-stale-preview",
+                "recommended_next_action": "refresh-managed-activation-preview",
+                "issue_worthy_status": "blocked",
+                "preview_verified": False,
+                "preview_agreement_status": "stale-preview",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            {
+                "schema": "agentflow.local_activation_successor_decision.v1",
+                "source_fingerprint": "activation:nodata-secret-fingerprint",
+                "successor_action_fingerprint": "successor:nodata-secret-action",
+                "local_action_family": "activation-feedback",
+                "decision": "keep-blocked",
+                "recommended_next_action": "refresh-managed-activation-preview",
+                "issue_worthy_status": "blocked",
+                "preview_verified": False,
+                "preview_agreement_status": "not-previewed",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            {
+                "schema": "agentflow.local_activation_successor_decision.v1",
+                "source_fingerprint": "activation:suppressed-secret-fingerprint",
+                "successor_action_fingerprint": "successor:suppressed-secret-action",
+                "local_action_family": "crunch",
+                "decision": "suppress-duplicate",
+                "recommended_next_action": "keep-current-rule-only",
+                "issue_worthy_status": "suppressed",
+                "preview_verified": False,
+                "preview_agreement_status": "agreed",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+        ]
+        plan_payload = {
+            "schema": "agentflow.orchestrator_research_plan.v1",
+            "generated_at": "2026-06-19T18:30:00+00:00",
+            "evidence": {
+                "stats_summary": {
+                    "local_activation_next_action_queue": {
+                        "schema": "agentflow.local_activation_next_action_queue.v1",
+                        "status": "ranked",
+                        "source_schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                        "summary": {"successor_decision_count": 5},
+                        "entries": [],
+                        "successor_actions": actions,
+                        "successor_decisions": decisions,
+                        "privacy": {
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                            "raw_prompts_included": False,
+                            "provider_bodies_included": False,
+                            "absolute_paths_included": False,
+                            "request_ids_included": False,
+                            "session_ids_included": False,
+                            "cache_keys_included": False,
+                            "individual_candidate_ids_included": False,
+                        },
+                    }
+                }
+            },
+        }
+        try:
+            json.dump(plan_payload, plan_tmp)
+            plan_tmp.close()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path),
+                },
+                clear=False,
+            ):
+                app = create_dashboard_app(
+                    store_obj=lambda: store,
+                    default_db=tmp.name,
+                    upstream="https://anthropic.test",
+                    limiter_status=lambda: [],
+                    limiter_config={},
+                    full_stats_ttl_s=0,
+                )
+                client = TestClient(app)
+                response = client.get("/agentflow/stats/preview-gated-activation-issue-queue?limit=3")
+                dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "agentflow.dashboard_preview_gated_activation_issue_queue.v1")
+            self.assertEqual(payload["status"], "ranked")
+            self.assertEqual(payload["summary"]["successor_decision_count"], 5)
+            self.assertEqual(payload["summary"]["ready_count"], 1)
+            self.assertEqual(payload["summary"]["blocked_count"], 1)
+            self.assertEqual(payload["summary"]["stale_or_no_data_count"], 2)
+            self.assertEqual(payload["summary"]["suppressed_count"], 1)
+            self.assertGreaterEqual(payload["summary"]["issue_proposal_count"], 1)
+            self.assertEqual(len(payload["successor_decisions"]), 3)
+            self.assertTrue(payload["successor_decisions"][0]["preview_verified"])
+            self.assertEqual(payload["successor_decisions"][0]["issue_queue_status"], "ready")
+            self.assertIn("source_ref", payload["successor_decisions"][0])
+            self.assertIn("successor_action_ref", payload["successor_decisions"][0])
+            self.assertNotIn("source_fingerprint", payload["successor_decisions"][0])
+            self.assertFalse(payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(payload["privacy"]["provider_bodies_included"])
+            self.assertFalse(payload["privacy"]["absolute_paths_included"])
+            self.assertFalse(payload["privacy"]["request_ids_included"])
+            self.assertFalse(payload["privacy"]["session_ids_included"])
+            self.assertFalse(payload["privacy"]["cache_keys_included"])
+            self.assertIn("preview-gated-activation-issue-summary-tbody", dashboard.text)
+            self.assertIn("preview-gated-activation-issue-decisions-tbody", dashboard.text)
+            self.assertIn("preview-gated-activation-issue-proposals-tbody", dashboard.text)
+
+            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            self.assertNotIn(str(plan_path), rendered)
+            self.assertNotIn("raw activation prompt must not render", rendered)
+            self.assertNotIn("req-preview-secret", rendered)
+            self.assertNotIn("sess-preview-secret", rendered)
+            self.assertNotIn("cache-preview-secret", rendered)
+            self.assertNotIn("/tmp/preview-secret-project/file.py", rendered)
+            self.assertNotIn("activation:ready-secret-fingerprint", rendered)
+            self.assertNotIn("successor:ready-secret-action", rendered)
+            self.assertNotIn("req-decision-secret", rendered)
+        finally:
+            try:
+                plan_tmp.close()
+            except Exception:
+                pass
+            try:
+                plan_path.unlink()
+            except FileNotFoundError:
+                pass
+            store.conn.close()
+            tmp.close()
+
     def test_evidence_activation_plan_discovery_includes_ops_sibling_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

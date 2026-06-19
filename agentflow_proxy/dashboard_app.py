@@ -536,6 +536,14 @@ def create_dashboard_router(
             lambda: stats_views.stats_local_activation_next_action_queue(limit=limit, store_obj=_store(store_obj)),
         )
 
+    @router.get("/agentflow/stats/preview-gated-activation-issue-queue")
+    async def stats_preview_gated_activation_issue_queue(limit: int = 20) -> dict[str, Any]:
+        return await cached_expensive_stats(
+            "preview-gated-activation-issue-queue",
+            (int(limit),),
+            lambda: stats_views.stats_preview_gated_activation_issue_queue(limit=limit, store_obj=_store(store_obj)),
+        )
+
     @router.get("/agentflow/stats/post-promotion-deltas")
     async def stats_post_promotion_deltas(limit: int = 1000) -> dict[str, Any]:
         return await cached_expensive_stats(

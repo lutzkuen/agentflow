@@ -5,6 +5,7 @@ import hashlib
 import math
 import os
 import sqlite3
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 import ipaddress
 from pathlib import Path
@@ -20641,6 +20642,44 @@ def _empty_local_activation_queue_payload(
     }
 
 
+def _empty_preview_gated_activation_issue_queue_payload(
+    *,
+    status: str,
+    status_reason: str,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.dashboard_preview_gated_activation_issue_queue.v1",
+        "generated_at": utc_now(),
+        "status": status,
+        "status_reason": status_reason,
+        "queue_schema": None,
+        "queue_status": None,
+        "source_schema": None,
+        "source": source,
+        "summary": {
+            "successor_decision_count": 0,
+            "issue_proposal_count": 0,
+            "ready_count": 0,
+            "blocked_count": 0,
+            "stale_or_no_data_count": 0,
+            "suppressed_count": 0,
+            "decision_counts": [],
+            "issue_status_counts": [],
+            "preview_agreement_status_counts": [],
+            "issue_queue_status_counts": [],
+            "local_action_family_counts": [],
+            "top_reason_counts": [],
+            "top_ready_issue": None,
+            "top_blocked_issue": None,
+            "top_stale_or_no_data_issue": None,
+        },
+        "successor_decisions": [],
+        "issue_proposals": [],
+        "privacy": _local_activation_queue_privacy(),
+    }
+
+
 def _public_local_activation_queue_summary(summary: dict[str, Any], entry_count: int) -> dict[str, Any]:
     public = {
         key: _copy_policy(summary.get(key))
@@ -20670,6 +20709,215 @@ def _public_local_activation_queue_summary(summary: dict[str, Any], entry_count:
         if not isinstance(public.get(key), list):
             public[key] = []
     return public
+
+
+def _activation_public_ref(value: Any, *, prefix: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return public_id(text, prefix=prefix, fallback=f"{prefix}:unknown")
+
+
+def _activation_issue_queue_status(decision: dict[str, Any]) -> str:
+    decision_text = str(decision.get("decision") or "").strip()
+    issue_status = str(decision.get("issue_worthy_status") or "").strip()
+    preview_status = str(decision.get("preview_agreement_status") or "").strip()
+    preview_verified = bool(decision.get("preview_verified"))
+    if issue_status == "suppressed" or decision_text in {"keep-current-rule", "suppress-duplicate"}:
+        return "suppressed"
+    if not preview_verified and preview_status in {
+        "",
+        "not-previewed",
+        "missing-preview-decision",
+        "no-data-preview-health",
+        "stale-preview",
+        "stale-preview-health",
+        "incomplete-preview-health",
+    }:
+        return "stale/no-data"
+    if issue_status == "blocked" or decision_text in {"keep-blocked", "review-stale-preview"}:
+        return "blocked"
+    if preview_verified and issue_status in {"ready", "review"} and decision_text in {"ready", "review", "review-only"}:
+        return "ready"
+    return issue_status or decision_text or "unknown"
+
+
+def _activation_issue_queue_reason(decision: dict[str, Any]) -> str:
+    for key in (
+        "preview_omitted_reason",
+        "preview_no_op_reason",
+        "top_preview_omission_reason",
+        "preview_agreement_status",
+        "preview_verification_status",
+        "decision",
+    ):
+        text = str(decision.get(key) or "").strip()
+        if text:
+            return text
+    return "unknown"
+
+
+def _public_preview_gated_successor_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    public = {
+        "source_ref": _activation_public_ref(decision.get("source_fingerprint"), prefix="activation-ref"),
+        "successor_action_ref": _activation_public_ref(
+            decision.get("successor_action_fingerprint"),
+            prefix="successor-ref",
+        ),
+        "local_action_family": public_label(decision.get("local_action_family") or "unknown", "unknown"),
+        "decision": public_label(decision.get("decision") or "unknown", "unknown"),
+        "recommended_next_action": public_label(
+            decision.get("recommended_next_action") or "inspect-local-evidence",
+            "inspect-local-evidence",
+        ),
+        "issue_worthy_status": public_label(decision.get("issue_worthy_status") or "unknown", "unknown"),
+        "issue_queue_status": _activation_issue_queue_status(decision),
+        "preview_agreement_status": public_label(
+            decision.get("preview_agreement_status") or "not-previewed",
+            "not-previewed",
+        ),
+        "preview_verified": bool(decision.get("preview_verified")),
+        "preview_verification_status": public_label(decision.get("preview_verification_status") or "", ""),
+        "preview_verification_decision": public_label(decision.get("preview_verification_decision") or "", ""),
+        "preview_omitted_reason": public_label(decision.get("preview_omitted_reason") or "", ""),
+        "preview_no_op_reason": public_label(decision.get("preview_no_op_reason") or "", ""),
+        "top_preview_omission_reason": public_label(decision.get("top_preview_omission_reason") or "", ""),
+        "privacy": _local_activation_queue_privacy(
+            decision.get("privacy") if isinstance(decision.get("privacy"), dict) else {}
+        ),
+    }
+    return {key: value for key, value in public.items() if value not in (None, "", []) or key == "preview_verified"}
+
+
+def _proposal_status_label(labels: Any) -> str:
+    if not isinstance(labels, list):
+        return "status:unknown"
+    for label in labels:
+        text = str(label or "").strip()
+        if text.startswith("status:"):
+            return text
+    return "status:unknown"
+
+
+def _public_preview_gated_issue_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    labels = [public_label(label, "unknown") for label in proposal.get("labels") or [] if str(label or "").strip()]
+    public = {
+        "repo": public_label(proposal.get("repo") or "lutzkuen/agentflow", "lutzkuen/agentflow"),
+        "title": public_label(proposal.get("title") or "Untitled activation successor issue", "Untitled activation successor issue"),
+        "labels": labels,
+        "status_label": _proposal_status_label(labels),
+        "proposal_source": public_label(proposal.get("proposal_source") or "activation-successor", "activation-successor"),
+        "source_ref": _activation_public_ref(proposal.get("fingerprint"), prefix="activation-ref"),
+        "successor_action_ref": _activation_public_ref(
+            proposal.get("successor_action_fingerprint"),
+            prefix="successor-ref",
+        ),
+        "expected_savings_path": public_label(proposal.get("expected_savings_path") or "", ""),
+        "privacy": _local_activation_queue_privacy(
+            proposal.get("privacy") if isinstance(proposal.get("privacy"), dict) else {}
+        ),
+    }
+    return {key: value for key, value in public.items() if value not in (None, "", [])}
+
+
+def _top_issue(rows: list[dict[str, Any]], status: str) -> dict[str, Any] | None:
+    for row in rows:
+        if row.get("issue_queue_status") == status:
+            return {
+                "source_ref": row.get("source_ref"),
+                "local_action_family": row.get("local_action_family"),
+                "decision": row.get("decision"),
+                "recommended_next_action": row.get("recommended_next_action"),
+                "preview_agreement_status": row.get("preview_agreement_status"),
+                "reason": _activation_issue_queue_reason(row),
+            }
+    return None
+
+
+def _preview_gated_activation_issue_queue_payload(
+    *,
+    payload: dict[str, Any],
+    queue: dict[str, Any],
+    source: dict[str, Any],
+    limit: int,
+) -> dict[str, Any]:
+    try:
+        from agentflow_proxy.orchestrator_research import (
+            _proposals_from_activation_successor_decisions,
+            build_local_activation_successor_actions,
+            build_local_activation_successor_decisions,
+        )
+    except Exception:
+        return _empty_preview_gated_activation_issue_queue_payload(
+            status="builder-unavailable",
+            status_reason="activation successor builders could not be imported",
+            source={**source, "plan_generated_at": payload.get("generated_at")},
+        )
+
+    actions = queue.get("successor_actions")
+    if not isinstance(actions, list):
+        actions = build_local_activation_successor_actions(queue)
+    decisions = queue.get("successor_decisions")
+    if not isinstance(decisions, list):
+        decisions = build_local_activation_successor_decisions({"successor_actions": actions})
+    raw_decisions = [row for row in decisions if isinstance(row, dict)]
+    public_decisions = [_public_preview_gated_successor_decision(row) for row in raw_decisions]
+
+    stats_summary = {"local_activation_next_action_queue": {**queue, "successor_actions": actions, "successor_decisions": raw_decisions}}
+    derived_proposals = _proposals_from_activation_successor_decisions(stats_summary)
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    backlog_changes = payload.get("backlog_changes") if isinstance(payload.get("backlog_changes"), dict) else {}
+    extra_proposals = backlog_changes.get("create_issues") if isinstance(backlog_changes.get("create_issues"), list) else []
+    if not extra_proposals and isinstance(evidence.get("backlog_changes"), dict):
+        extra_proposals = evidence["backlog_changes"].get("create_issues") if isinstance(evidence["backlog_changes"].get("create_issues"), list) else []
+    seen_proposals: set[tuple[str, str]] = set()
+    public_proposals: list[dict[str, Any]] = []
+    for proposal in [*derived_proposals, *[row for row in extra_proposals if isinstance(row, dict)]]:
+        public = _public_preview_gated_issue_proposal(proposal)
+        key = (str(public.get("repo") or ""), str(public.get("title") or ""))
+        if key in seen_proposals:
+            continue
+        seen_proposals.add(key)
+        public_proposals.append(public)
+
+    status_counts = Counter(str(row.get("issue_queue_status") or "unknown") for row in public_decisions)
+    decision_counts = Counter(str(row.get("decision") or "unknown") for row in public_decisions)
+    issue_status_counts = Counter(str(row.get("issue_worthy_status") or "unknown") for row in public_decisions)
+    preview_counts = Counter(str(row.get("preview_agreement_status") or "not-previewed") for row in public_decisions)
+    family_counts = Counter(str(row.get("local_action_family") or "unknown") for row in public_decisions)
+    reason_counts = Counter(_activation_issue_queue_reason(row) for row in public_decisions)
+    capped = max(1, min(int(limit or 20), 50))
+    queue_privacy = queue.get("privacy") if isinstance(queue.get("privacy"), dict) else {}
+    return {
+        "schema": "agentflow.dashboard_preview_gated_activation_issue_queue.v1",
+        "generated_at": utc_now(),
+        "status": "ranked" if public_decisions else "empty",
+        "status_reason": "latest preview-gated activation issue queue loaded" if public_decisions else "latest queue has no successor decisions",
+        "queue_schema": queue.get("schema"),
+        "queue_status": queue.get("status"),
+        "source_schema": queue.get("source_schema"),
+        "source": {**source, "plan_generated_at": payload.get("generated_at")},
+        "summary": {
+            "successor_decision_count": len(public_decisions),
+            "issue_proposal_count": len(public_proposals),
+            "ready_count": status_counts.get("ready", 0),
+            "blocked_count": status_counts.get("blocked", 0),
+            "stale_or_no_data_count": status_counts.get("stale/no-data", 0),
+            "suppressed_count": status_counts.get("suppressed", 0),
+            "decision_counts": _breakdown_from_counts(dict(decision_counts)),
+            "issue_status_counts": _breakdown_from_counts(dict(issue_status_counts)),
+            "preview_agreement_status_counts": _breakdown_from_counts(dict(preview_counts)),
+            "issue_queue_status_counts": _breakdown_from_counts(dict(status_counts)),
+            "local_action_family_counts": _breakdown_from_counts(dict(family_counts)),
+            "top_reason_counts": _breakdown_from_counts(dict(reason_counts))[:10],
+            "top_ready_issue": _top_issue(public_decisions, "ready"),
+            "top_blocked_issue": _top_issue(public_decisions, "blocked"),
+            "top_stale_or_no_data_issue": _top_issue(public_decisions, "stale/no-data"),
+        },
+        "successor_decisions": public_decisions[:capped],
+        "issue_proposals": public_proposals[:capped],
+        "privacy": _local_activation_queue_privacy(queue_privacy),
+    }
 
 
 def _public_local_activation_queue_entry(
@@ -20844,6 +21092,61 @@ async def stats_local_activation_next_action_queue(limit: int = 20, store_obj: A
     }
 
 
+async def stats_preview_gated_activation_issue_queue(limit: int = 20, store_obj: Any | None = None) -> dict[str, Any]:
+    del store_obj
+    path = _evidence_to_activation_plan_path()
+    source: dict[str, Any] = {
+        "kind": "orchestrator-research-plan",
+        "configured": any(os.getenv(name) for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON")),
+        "path_class": _local_path_class(path),
+        "path_included": False,
+        "available": False,
+    }
+    try:
+        stat = path.stat()
+        source.update(
+            {
+                "available": True,
+                "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "size_bytes": stat.st_size,
+            }
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _empty_preview_gated_activation_issue_queue_payload(
+            status="unavailable",
+            status_reason="latest research plan artifact was not found",
+            source=source,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        source["available"] = bool(path.exists())
+        return _empty_preview_gated_activation_issue_queue_payload(
+            status="invalid-artifact",
+            status_reason=f"latest research plan artifact could not be read: {type(exc).__name__}",
+            source=source,
+        )
+    if not isinstance(payload, dict):
+        return _empty_preview_gated_activation_issue_queue_payload(
+            status="invalid-artifact",
+            status_reason="latest research plan artifact is not a JSON object",
+            source=source,
+        )
+
+    queue = _extract_local_activation_queue_from_plan(payload)
+    if not isinstance(queue, dict):
+        return _empty_preview_gated_activation_issue_queue_payload(
+            status="no-queue",
+            status_reason="latest research plan does not contain a local activation next-action queue",
+            source={**source, "plan_generated_at": payload.get("generated_at")},
+        )
+    return _preview_gated_activation_issue_queue_payload(
+        payload=payload,
+        queue=queue,
+        source=source,
+        limit=limit,
+    )
+
+
 def dashboard_html() -> str:
     return """<!doctype html>
 <html lang="en">
@@ -21005,6 +21308,37 @@ def dashboard_html() -> str:
       <th data-sort-type="number">Rank</th><th data-sort-type="text">Lever</th><th data-sort-type="text">Status</th><th data-sort-type="text">Next action</th><th data-sort-type="money">Savings</th><th data-sort-type="number">Samples</th><th data-sort-type="text">Unblock reason</th><th data-sort-type="text">Blockers</th><th data-sort-type="text">Policy target</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="local-activation-queue-entries-tbody"></tbody>
+  </table>
+  </div>
+</div>
+<div class="section">
+  <h2>Preview-gated issue queue</h2>
+  <table data-table-id="preview-gated-activation-issue-summary" data-filter-label="Filter preview-gated issue summary">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Ready</th><th data-sort-type="number">Blocked</th><th data-sort-type="number">Stale/no-data</th><th data-sort-type="number">Suppressed</th><th data-sort-type="number">Proposals</th><th data-sort-type="text">Top ready</th><th data-sort-type="text">Top blocked</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="preview-gated-activation-issue-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Preview successor decisions</h2>
+  <div class="table-wrap">
+  <table class="activity-table" data-table-id="preview-gated-activation-issue-decisions" data-filter-label="Filter preview-gated successor decisions">
+    <thead><tr>
+      <th data-sort-type="number">Rank</th><th data-sort-type="text">Queue status</th><th data-sort-type="text">Family</th><th data-sort-type="text">Decision</th><th data-sort-type="text">Preview</th><th data-sort-type="text">Next action</th><th data-sort-type="text">Reason</th><th data-sort-type="text">Refs</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="preview-gated-activation-issue-decisions-tbody"></tbody>
+  </table>
+  </div>
+</div>
+<div class="section">
+  <h2>Issue proposals</h2>
+  <div class="table-wrap">
+  <table class="activity-table" data-table-id="preview-gated-activation-issue-proposals" data-filter-label="Filter preview-gated issue proposals">
+    <thead><tr>
+      <th data-sort-type="number">Rank</th><th data-sort-type="text">Status</th><th data-sort-type="text">Title</th><th data-sort-type="text">Labels</th><th data-sort-type="text">Source</th><th data-sort-type="text">Savings path</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="preview-gated-activation-issue-proposals-tbody"></tbody>
   </table>
   </div>
 </div>
@@ -25231,6 +25565,55 @@ async function refreshLocalActivationQueue(){
     applyAllDataTables();
   }catch(e){}
 }
+function previewIssueReason(row){
+  return row.preview_omitted_reason||row.preview_no_op_reason||row.top_preview_omission_reason||row.preview_agreement_status||row.preview_verification_status||row.decision||'unknown';
+}
+async function refreshPreviewGatedActivationIssueQueue(){
+  try{
+    const r=await fetch('/agentflow/stats/preview-gated-activation-issue-queue?limit=20');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    const topReady=s.top_ready_issue||{};
+    const topBlocked=s.top_blocked_issue||s.top_stale_or_no_data_issue||{};
+    const readyText=[topReady.local_action_family,topReady.recommended_next_action].filter(Boolean).join(' · ')||'none';
+    const blockedText=[topBlocked.local_action_family,topBlocked.reason].filter(Boolean).join(' · ')||'none';
+    document.getElementById('preview-gated-activation-issue-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${evidenceActivationStatusBadge(d.status)}">${esc(d.status||'unknown')}</span><div class="sub">${esc(d.status_reason||'')}</div></td>
+      <td class="tokens">${(s.ready_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.blocked_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.stale_or_no_data_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.suppressed_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.issue_proposal_count||0).toLocaleString()}<div class="sub">decisions ${(s.successor_decision_count||0).toLocaleString()}</div></td>
+      <td class="model">${esc(readyText)}<div class="sub">${esc(topReady.preview_agreement_status||'')}</div></td>
+      <td class="model">${esc(blockedText)}<div class="sub">${esc(topBlocked.preview_agreement_status||'')}</div></td>
+      <td class="flags">${evidenceActivationPrivacyBadges(privacy)}</td>
+    </tr>`;
+    const rows=d.successor_decisions||[];
+    document.getElementById('preview-gated-activation-issue-decisions-tbody').innerHTML=rows.map((row,index)=>`<tr>
+      <td class="tokens">${index+1}</td>
+      <td><span class="badge ${evidenceActivationStatusBadge(row.issue_queue_status)}">${esc(row.issue_queue_status||'unknown')}</span><div class="sub">${esc(row.issue_worthy_status||'')}</div></td>
+      <td><span class="badge provider">${esc(row.local_action_family||'unknown')}</span></td>
+      <td><span class="badge ${row.preview_verified?'hit':'miss'}">${esc(row.decision||'unknown')}</span><div class="sub">${row.preview_verified?'preview verified':'preview not verified'}</div></td>
+      <td><span class="badge ${row.preview_agreement_status==='agreed'?'hit':row.preview_agreement_status&&row.preview_agreement_status.includes('stale')?'routed':'miss'}">${esc(row.preview_agreement_status||'not-previewed')}</span><div class="sub">${esc(row.preview_verification_status||row.preview_verification_decision||'')}</div></td>
+      <td class="model">${esc(row.recommended_next_action||'inspect-local-evidence')}</td>
+      <td class="flags">${esc(previewIssueReason(row))}</td>
+      <td class="model">${esc(row.source_ref||'—')}<div class="sub">${esc(row.successor_action_ref||'')}</div></td>
+      <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||{})}</td>
+    </tr>`).join('')||`<tr><td colspan="9" style="color:#8b949e">${esc(d.status_reason||'No preview-gated successor decisions available')}</td></tr>`;
+    const proposals=d.issue_proposals||[];
+    document.getElementById('preview-gated-activation-issue-proposals-tbody').innerHTML=proposals.map((row,index)=>`<tr>
+      <td class="tokens">${index+1}</td>
+      <td><span class="badge ${row.status_label==='status:ready'?'hit':row.status_label==='status:blocked'?'err':'miss'}">${esc(row.status_label||'status:unknown')}</span><div class="sub">${esc(row.proposal_source||'')}</div></td>
+      <td class="model">${esc(row.title||'Untitled activation successor issue')}<div class="sub">${esc(row.repo||'')}</div></td>
+      <td class="flags">${(row.labels||[]).slice(0,7).map(label=>`<span class="badge miss">${esc(label)}</span>`).join(' ')}</td>
+      <td class="model">${esc(row.source_ref||'—')}<div class="sub">${esc(row.successor_action_ref||'')}</div></td>
+      <td class="flags">${esc(row.expected_savings_path||'')}</td>
+      <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||{})}</td>
+    </tr>`).join('')||'<tr><td colspan="7" style="color:#8b949e">No preview-gated issue proposals available</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshEvidenceActivationNextActions(){
   try{
     const r=await fetch('/agentflow/stats/evidence-to-activation-next-actions?limit=20');
@@ -25968,7 +26351,7 @@ const tabRefreshers={
   openai:[refreshManagedOpenAIActivation,refreshOpenAIOptimizationReadiness,refreshOpenAICanaryReadiness,refreshOpenAIOldContextSummary,refreshOpenAIScoreboard],
   evalqueue:[refreshOptimizationPromotionActions,refreshOptimizationEvalQueue],
   coordinator:[refreshOptimizationCoordinator],
-  activationnext:[refreshLocalActivationQueue,refreshEvidenceActivationNextActions],
+  activationnext:[refreshLocalActivationQueue,refreshPreviewGatedActivationIssueQueue,refreshEvidenceActivationNextActions],
   promotionblockers:[refreshPromotionBlockerNextActions],
   managed:[refreshManaged],
   phaserouting:[refreshClaudeRoutingPromotionFunnel,refreshShadowRoutingPromotionReadiness,refreshOptimizationPromotionFunnel,refreshPhaseRouting],
