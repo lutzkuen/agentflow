@@ -605,6 +605,8 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
     )
     row["post_widening_status"] = post_status
     row["post_widening_next_action"] = post_next_action
+    if keep_active:
+        row["post_widening_outcome"] = "keep-active"
     row["post_widening_reason_codes"] = [
         public_label(item, "unknown")
         for item in (summary.get("post_widening_reason_codes") or [])
@@ -650,19 +652,19 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
         or summary.get("decision_age_hours")
     )
     row["keep_active_regression_gate"] = _full_rollout_crunch_keep_active_gate(
-        applied_count=row["applied_count"],
-        holdout_count=row["holdout_count"],
-        skipped_count=row["skipped_count"],
-        fallback_count=row["fallback_count"],
-        retry_count=row["retry_count"],
-        rollback_count=row["rollback_count"],
-        safety_stop_count=row["safety_stopped_count"],
+        applied_count=applied,
+        holdout_count=holdout,
+        skipped_count=skipped,
+        fallback_count=fallback_count,
+        retry_count=retry_count,
+        rollback_count=rollback_count,
+        safety_stop_count=safety_stop_count,
         error_rate_delta=row["error_rate_delta"],
         retry_rate_delta=row["retry_rate_delta"],
         fallback_rate_delta=row["fallback_rate_delta"],
         stale_evidence=stale_evidence,
         decision_age_hours=decision_age_hours,
-        full_rollout_active=full_rollout_active,
+        full_rollout_active=bool(full_rollout_active or keep_active),
         target_local_policy_section=target_policy_section,
         target_local_rule_file=target_rule_file,
     )
@@ -954,6 +956,21 @@ def _outcome_ledger_entry(row: dict[str, Any]) -> dict[str, Any] | None:
     target_rule_file = public_label(row.get("target_local_rule_file"), "")
     target_policy_section = public_label(row.get("target_local_policy_section"), "")
     source_decision_id = public_label(row.get("source_decision_id"), "")
+    coverage = row.get("coverage") if isinstance(row.get("coverage"), dict) else {}
+    if source_schema == CRUNCH_ACTIVATION_EVIDENCE_SCHEMA and coverage:
+        applied_count = _as_int(coverage.get("applied_count"))
+        holdout_count = _as_int(coverage.get("holdout_count"))
+        skipped_count = _as_int(coverage.get("skipped_count"))
+        fallback_count = _as_int(coverage.get("fallback_count"))
+        rollback_count = _as_int(coverage.get("rollback_count"))
+        safety_stop_count = _as_int(coverage.get("safety_stop_count"))
+    else:
+        applied_count = _as_int(row.get("applied_count"))
+        holdout_count = _as_int(row.get("holdout_count"))
+        skipped_count = _as_int(row.get("skipped_count"))
+        fallback_count = _as_int(row.get("fallback_count"))
+        rollback_count = _as_int(row.get("rollback_count"))
+        safety_stop_count = _as_int(row.get("safety_stopped_count"))
     fingerprint_material = {
         "local_action_family": local_action_family,
         "source_schema": source_schema,
@@ -975,12 +992,12 @@ def _outcome_ledger_entry(row: dict[str, Any]) -> dict[str, Any] | None:
         "graduation_decision": public_label(row.get("graduation_decision"), "unknown"),
         "outcome": outcome,
         "next_action": next_action,
-        "applied_count": _as_int(row.get("applied_count")),
-        "holdout_count": _as_int(row.get("holdout_count")),
-        "skipped_count": _as_int(row.get("skipped_count")),
-        "fallback_count": _as_int(row.get("fallback_count")),
-        "rollback_count": _as_int(row.get("rollback_count")),
-        "safety_stop_count": _as_int(row.get("safety_stopped_count")),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "skipped_count": skipped_count,
+        "fallback_count": fallback_count,
+        "rollback_count": rollback_count,
+        "safety_stop_count": safety_stop_count,
         "observed_saved_tokens": _as_int(row.get("observed_saved_tokens")),
         "observed_savings_usd": round(_as_float(row.get("observed_savings_usd")), 8),
         "projected_savings_usd": round(_as_float(row.get("projected_savings_usd")), 8),
@@ -993,7 +1010,7 @@ def _outcome_ledger_entry(row: dict[str, Any]) -> dict[str, Any] | None:
         "active_rule_source": public_label(row.get("active_rule_source"), "") or None,
         "active_rule_decision_id": public_label(row.get("active_rule_decision_id"), "") or None,
         "active_rule_source_evidence_schema": public_label(row.get("active_rule_source_evidence_schema"), "") or None,
-        "coverage": row.get("coverage") if isinstance(row.get("coverage"), dict) else None,
+        "coverage": coverage or None,
         "keep_active_regression_gate": row.get("keep_active_regression_gate") if isinstance(row.get("keep_active_regression_gate"), dict) else None,
         "duplicate_suppression": row.get("duplicate_suppression") if isinstance(row.get("duplicate_suppression"), dict) else None,
         "privacy": _privacy(),
@@ -1001,6 +1018,7 @@ def _outcome_ledger_entry(row: dict[str, Any]) -> dict[str, Any] | None:
     for key in (
         "post_widening_status",
         "post_widening_next_action",
+        "post_widening_outcome",
         "post_widening_reason_codes",
         "post_max_rollout_status",
         "post_max_rollout_decision",

@@ -369,6 +369,141 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         rendered = json.dumps(report, sort_keys=True)
         self.assertNotIn(str(Path(tmp).resolve()), rendered)
 
+    def test_summary_keeps_post_widening_crunch_active_at_max_rollout_with_coverage(self):
+        activation_evidence = {
+            "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+            "status": "active-rule-evidence-observed",
+            "decision": "widen",
+            "graduation_decision": "widen",
+            "decision_id": "request-shape-crunch-policy-decision:9c21d88a7c434d6f",
+            "next_action": "promote-full-repeated-context-crunch-rule",
+            "summary": {
+                "active_rule_count": 2,
+                "matching_active_rule_count": 1,
+                "widened_rule_count": 1,
+                "matching_widened_rule_count": 1,
+                "decision": "widen",
+                "graduation_decision": "widen",
+                "decision_id": "request-shape-crunch-policy-decision:9c21d88a7c434d6f",
+                "applied_count": 1,
+                "holdout_count": 1,
+                "skipped_count": 6,
+                "fallback_count": 0,
+                "retry_count": 0,
+                "safety_stop_count": 0,
+                "rollback_count": 0,
+                "error_rate_delta": 0.0,
+                "retry_rate_delta": 0.0,
+                "fallback_rate_delta": 0.0,
+                "safety_stop_state": "none",
+                "observed_saved_tokens": 34356,
+                "observed_saved_usd": 0.103068,
+                "policy_source": "local-manual",
+                "canary_fraction": 0.2,
+                "holdout_fraction": 0.1,
+                "max_rollout_fraction": 0.2,
+                "post_widening_status": "post-widening-active-at-max-rollout",
+                "post_widening_next_action": "keep-active",
+                "post_widening_reason_codes": [],
+                "post_max_rollout_status": "post-max-rollout-full-rollout-ready",
+                "post_max_rollout_decision": "promote-full",
+                "post_max_rollout_next_action": "promote-full-repeated-context-crunch-rule",
+                "post_max_rollout_reason_codes": ["max-rollout-cap-only"],
+                "post_max_rollout_promotion_allowed": True,
+                "target_local_rule_file": "crunch_rules.yaml",
+                "target_local_policy_section": "crunch.rules",
+            },
+            "rules": [
+                {
+                    "rank": 1,
+                    "rule_ref": "local-repeated-context-crunch-canary-f274203cb090",
+                    "policy_source": "local-manual",
+                    "decision": "widen",
+                    "decision_id": "request-shape-crunch-policy-decision:9c21d88a7c434d6f",
+                    "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                }
+            ],
+            "duplicate_suppression": {
+                "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                "fingerprint": "activation:post-widening-test",
+                "matching_local_policy": "crunch_rules",
+                "reason": "repeated-context-crunch-active-at-max-rollout",
+                "suppresses_generic_crunch_activation_issue": True,
+                "suppresses_new_activation_issue": True,
+                "target_local_policy_section": "crunch.rules",
+                "target_local_rule_file": "crunch_rules.yaml",
+                "metadata_only": True,
+                "aggregate_only": True,
+            },
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                for _ in range(3):
+                    _log_call(
+                        store,
+                        cost_est_usd=0.004,
+                        cost_baseline_usd=0.014,
+                        crunch_json=stable_json(
+                            {
+                                "changed": True,
+                                "reason": "unrelated-live-crunch-row",
+                                "saved_chars": 9000,
+                                "tokens_saved_est": 2250,
+                            }
+                        ),
+                    )
+                report = build_local_activation_outcome_summary(
+                    store,
+                    limit=20,
+                    config_dir=tmp,
+                    activation_reports=[activation_evidence],
+                )
+            finally:
+                store.conn.close()
+
+        crunch = {row["local_action_family"]: row for row in report["outcome_summaries"]}["crunch"]
+        self.assertEqual(crunch["post_widening_outcome"], "keep-active")
+        self.assertEqual(crunch["post_widening_status"], "post-widening-active-at-max-rollout")
+        self.assertEqual(crunch["post_widening_next_action"], "keep-active")
+        self.assertEqual(crunch["coverage"]["applied_count"], 1)
+        self.assertEqual(crunch["coverage"]["holdout_count"], 1)
+        self.assertEqual(crunch["coverage"]["skipped_count"], 6)
+        self.assertEqual(crunch["coverage"]["safety_stop_count"], 0)
+        self.assertEqual(crunch["coverage"]["rollback_count"], 0)
+        gate = crunch["keep_active_regression_gate"]
+        self.assertEqual(gate["state"], "keep-active")
+        self.assertTrue(gate["gate_passed"])
+        self.assertEqual(gate["deterministic_next_action"], "keep-active")
+        self.assertEqual(gate["reason_codes"], [])
+        self.assertEqual(gate["regression_counters"]["applied_count"], 1)
+        self.assertEqual(gate["regression_counters"]["holdout_count"], 1)
+        self.assertEqual(gate["regression_counters"]["skipped_count"], 6)
+        self.assertEqual(gate["regression_counters"]["safety_stop_count"], 0)
+        self.assertEqual(gate["regression_counters"]["rollback_count"], 0)
+        duplicate_suppression = crunch["duplicate_suppression"]
+        self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
+        self.assertEqual(duplicate_suppression["reason"], "repeated-context-crunch-active-at-max-rollout")
+
+        ledger_entry = report["outcome_ledger_entries"][0]
+        self.assertEqual(ledger_entry["post_widening_outcome"], "keep-active")
+        self.assertEqual(ledger_entry["applied_count"], 1)
+        self.assertEqual(ledger_entry["holdout_count"], 1)
+        self.assertEqual(ledger_entry["skipped_count"], 6)
+        self.assertEqual(ledger_entry["safety_stop_count"], 0)
+        self.assertEqual(ledger_entry["rollback_count"], 0)
+        self.assertEqual(ledger_entry["keep_active_regression_gate"]["state"], "keep-active")
+        self.assertTrue(ledger_entry["duplicate_suppression"]["suppresses_new_activation_issue"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn(str(Path(tmp).resolve()), rendered)
+
     def test_summary_exports_cache_replay_warmup_lifecycle_outcome(self):
         cache_evidence = {
             "schema": "agentflow.request_shape_cache_replay_evidence.v1",
