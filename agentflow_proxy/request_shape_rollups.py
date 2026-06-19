@@ -8957,6 +8957,70 @@ def _tool_cache_review_candidate_blocker(dependency_decision: str) -> tuple[str,
     return "dependency-evidence-unknown", "collect-file-invalidation-evidence"
 
 
+def _tool_cache_replay_proof(row: dict[str, Any]) -> dict[str, Any]:
+    cache_hit_count = _as_int(row.get("cache_hit_count"))
+    observed_hit_count = max(
+        _as_int(row.get("observed_hits")),
+        _as_int(row.get("exact_hit_count")),
+        _as_int(row.get("live_repeat_cache_hit_count")),
+    )
+    cache_status = public_label(row.get("cache_status"), "unknown")
+    live_repeat_confirmed = bool(row.get("live_repeat_confirmed")) or cache_hit_count > 0 or cache_status == "hit"
+    observed_hit_proof = bool(row.get("observed_hit_proof")) or observed_hit_count > 0
+    proof_available = live_repeat_confirmed or observed_hit_proof
+    if live_repeat_confirmed:
+        reason = "live-repeat-confirmed"
+    elif observed_hit_proof:
+        reason = "observed-hit-proof"
+    else:
+        reason = "missing-live-repeat-or-observed-hit-proof"
+    return {
+        "schema": "agentflow.request_shape_tool_cache_replay_proof.v1",
+        "proof_available": proof_available,
+        "reason": reason,
+        "live_repeat_confirmed": live_repeat_confirmed,
+        "observed_hit_proof": observed_hit_proof,
+        "live_repeat_cache_hit_count": cache_hit_count,
+        "observed_hit_count": observed_hit_count,
+        "requires_live_repeat_or_observed_hit_proof": True,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _replayability_privacy(),
+    }
+
+
+def _tool_cache_retired_no_repeat(row: dict[str, Any]) -> bool:
+    values: list[str] = []
+    for key in (
+        "current_status",
+        "state",
+        "reason",
+        "evidence_reason",
+        "promotion_decision",
+        "promotion_readiness",
+        "policy_decision",
+        "observed_hit_blocker",
+        "no_op_reason",
+    ):
+        value = row.get(key)
+        if value is not None:
+            values.append(public_label(value, "unknown"))
+    for key in ("blocker_codes", "reason_codes"):
+        value = row.get(key)
+        if isinstance(value, list):
+            values.extend(public_label(item, "unknown") for item in value)
+    return any(
+        value
+        in {
+            "retired-no-repeat",
+            "retire-staged-no-repeat",
+            "repeat-window-elapsed-no-live-repeat",
+            "synthetic-hit-recovery-proven-live-traffic-no-repeat-retired",
+        }
+        for value in values
+    )
+
+
 def _tool_cache_review_candidate_from_evidence_row(row: dict[str, Any]) -> dict[str, Any]:
     row_count = _as_int(row.get("row_count") or row.get("sample_count"))
     projected_hits = _as_int(row.get("projected_hits"))
@@ -8976,18 +9040,29 @@ def _tool_cache_review_candidate_from_evidence_row(row: dict[str, Any]) -> dict[
         dependency_decision_meta.get("decision"),
         "unknown-dependency-evidence",
     )
-    if dependency_decision == "stable-dependency-evidence":
-        candidate_status = "review-ready" if readiness_gate["stage_allowed"] else "review-only-gated"
-        blocker_reason = None if readiness_gate["stage_allowed"] else "replay-readiness-floor-not-met"
+    replay_proof = _tool_cache_replay_proof(row)
+    retired_no_repeat = _tool_cache_retired_no_repeat(row)
+    if retired_no_repeat:
+        candidate_status = "blocked"
+        candidate_decision = "no-op-retired-no-repeat"
+        blocker_reason = "retire-staged-no-repeat"
+        next_action = "keep-tool-cache-replay-retired-no-repeat"
+        stageable_after_review = False
+    elif dependency_decision == "stable-dependency-evidence":
+        proof_available = bool(replay_proof.get("proof_available"))
+        candidate_status = "review-ready" if proof_available else "review-only-gated"
+        candidate_decision = "review-only-candidate" if proof_available else "no-op-missing-live-repeat-proof"
+        blocker_reason = None if proof_available else "missing-live-repeat-or-observed-hit-proof"
         next_action = (
             "review-tool-cache-replay-candidate"
-            if readiness_gate["stage_allowed"]
-            else "wait-for-live-repeat-or-savings-floor"
+            if proof_available
+            else "wait-for-live-repeat-or-observed-hit-proof"
         )
-        stageable_after_review = bool(readiness_gate["stage_allowed"])
+        stageable_after_review = proof_available
     else:
         blocker_reason, next_action = _tool_cache_review_candidate_blocker(dependency_decision)
         candidate_status = "blocked"
+        candidate_decision = "blocked"
         stageable_after_review = False
 
     return {
@@ -9004,11 +9079,13 @@ def _tool_cache_review_candidate_from_evidence_row(row: dict[str, Any]) -> dict[
         "row_count": row_count,
         "review_only": True,
         "candidate_status": candidate_status,
-        "candidate_decision": "review-only-candidate" if dependency_decision == "stable-dependency-evidence" else "blocked",
+        "candidate_decision": candidate_decision,
         "stageable_after_review": stageable_after_review,
         "stage_allowed": False,
         "next_action": next_action,
         "blocker_reason": blocker_reason,
+        "no_op_reason": blocker_reason if candidate_decision.startswith("no-op") else None,
+        "retired_no_repeat": retired_no_repeat,
         "dependency_evidence_status": public_label(
             row.get("dependency_evidence_status") or row.get("file_dependency_status"),
             "missing",
@@ -9025,6 +9102,8 @@ def _tool_cache_review_candidate_from_evidence_row(row: dict[str, Any]) -> dict[
         "local_dependency_fingerprint": row.get("local_dependency_fingerprint")
         if isinstance(row.get("local_dependency_fingerprint"), dict)
         else _local_dependency_fingerprint_metadata(False),
+        "replay_proof": replay_proof,
+        "requires_live_repeat_or_observed_hit_proof": dependency_decision == "stable-dependency-evidence",
         "requires_live_repeat_or_savings_floor": dependency_decision == "stable-dependency-evidence",
         "requires_operator_review": True,
         "requires_explicit_later_promotion": True,
@@ -9137,11 +9216,32 @@ def _build_tool_cache_review_candidates(rows: list[dict[str, Any]], *, limit: in
                 and row.get("review_only") is True
                 for row in candidates
             ),
-            "requires_live_repeat_or_savings_floor": all(
-                isinstance(row.get("readiness_gate"), dict)
+            "requires_live_repeat_or_observed_hit_proof": all(
+                isinstance(row.get("replay_proof"), dict)
                 and (
                     row.get("candidate_status") != "review-ready"
-                    or bool(row.get("readiness_gate", {}).get("stage_allowed"))
+                    or bool(row.get("replay_proof", {}).get("proof_available"))
+                )
+                for row in candidates
+                if row.get("dependency_evidence_decision", {}).get("decision") == "stable-dependency-evidence"
+            ),
+            "stable_without_live_repeat_or_observed_hit_is_noop": all(
+                row.get("candidate_decision") == "no-op-missing-live-repeat-proof"
+                for row in candidates
+                if row.get("dependency_evidence_decision", {}).get("decision") == "stable-dependency-evidence"
+                and isinstance(row.get("replay_proof"), dict)
+                and not bool(row.get("replay_proof", {}).get("proof_available"))
+            ),
+            "retired_no_repeat_emits_noop": all(
+                row.get("candidate_decision") == "no-op-retired-no-repeat"
+                for row in candidates
+                if row.get("retired_no_repeat") is True
+            ),
+            "requires_live_repeat_or_savings_floor": all(
+                isinstance(row.get("replay_proof"), dict)
+                and (
+                    row.get("candidate_status") != "review-ready"
+                    or bool(row.get("replay_proof", {}).get("proof_available"))
                 )
                 for row in candidates
                 if row.get("dependency_evidence_decision", {}).get("decision") == "stable-dependency-evidence"
@@ -9269,6 +9369,21 @@ def build_request_shape_tool_cache_replay_evidence_report(
                 "projected_hits": _as_int(cohort.get("projected_hits")),
                 "projected_savings_usd": round(_as_float(cohort.get("projected_savings_usd")), 6),
                 "cache_hit_count": _as_int(cohort.get("cache_hit_count")),
+                "observed_hits": _as_int(cohort.get("observed_hits")),
+                "exact_hit_count": _as_int(cohort.get("exact_hit_count")),
+                "live_repeat_confirmed": bool(cohort.get("live_repeat_confirmed")),
+                "observed_hit_proof": bool(cohort.get("observed_hit_proof")),
+                "current_status": public_label(cohort.get("current_status"), "unknown"),
+                "state": public_label(cohort.get("state"), "unknown"),
+                "promotion_decision": public_label(cohort.get("promotion_decision"), "unknown"),
+                "promotion_readiness": public_label(cohort.get("promotion_readiness"), "unknown"),
+                "policy_decision": public_label(cohort.get("policy_decision"), "unknown"),
+                "observed_hit_blocker": public_label(cohort.get("observed_hit_blocker"), "unknown"),
+                "reason_codes": [
+                    public_label(item, "unknown")
+                    for item in cohort.get("reason_codes") or []
+                    if public_label(item, "unknown") != "unknown"
+                ],
                 "file_dependency_status": file_dependency_status,
                 "file_dependency_fingerprint_available": bool(cohort.get("file_dependency_fingerprint_available")),
                 "local_dependency_fingerprint": _local_dependency_fingerprint_metadata(
@@ -9422,6 +9537,15 @@ def build_request_shape_tool_cache_replay_evidence_report(
             ),
             "review_only_candidates_require_live_repeat_or_savings_floor": bool(
                 review_only_candidates.get("acceptance", {}).get("requires_live_repeat_or_savings_floor")
+            ),
+            "review_only_candidates_require_live_repeat_or_observed_hit_proof": bool(
+                review_only_candidates.get("acceptance", {}).get("requires_live_repeat_or_observed_hit_proof")
+            ),
+            "stable_without_live_repeat_or_observed_hit_is_noop": bool(
+                review_only_candidates.get("acceptance", {}).get("stable_without_live_repeat_or_observed_hit_is_noop")
+            ),
+            "retired_no_repeat_emits_noop": bool(
+                review_only_candidates.get("acceptance", {}).get("retired_no_repeat_emits_noop")
             ),
             "distinguishes_missing_stable_and_stale_dependency_evidence": bool(rows)
             and set(DEPENDENCY_EVIDENCE_CLASSES).issubset(
