@@ -8978,6 +8978,119 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(repeated_entry["fingerprint"], ledger_entries[0]["fingerprint"])
         self.assertEqual(repeated_entry["diagnostic_fingerprint"], ledger_entries[0]["diagnostic_fingerprint"])
 
+    def test_new_sanitized_activation_feedback_diagnostic_emits_bounded_successor_issue(self):
+        log_lines = [
+            (
+                "activation feedback blocked reason=activation-feedback-blocker-review "
+                "new-sanitized-evidence metadata_only=true aggregate_only=true "
+                "next_action=record-bounded-activation-feedback-successor "
+                "request_id=req-new-af-secret cache_key=cache-new-af-secret "
+                "session_id=session-new-af-secret tenant_id=tenant-new-af-secret "
+                "path=/tmp/private-activation-feedback.py"
+            ),
+            (
+                "activation feedback blocked reason=activation-feedback-blocker-review "
+                "bounded-successor-input metadata_only=true aggregate_only=true "
+                "next_action=record-bounded-activation-feedback-successor "
+                "request_id=req-new-af-secret-2 cache_key=cache-new-af-secret-2 "
+                "session_id=session-new-af-secret-2 tenant_id=tenant-new-af-secret-2 "
+                "path=/tmp/private-activation-feedback-2.py"
+            ),
+        ]
+
+        plan = build_research_plan(
+            issues=[],
+            log_sources=log_lines,
+            threshold=1,
+            now=NOW,
+        )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        diagnostic = next(item for item in diagnostics if item.get("reason") == "activation-feedback-blocker-review")
+        classification = diagnostic["activation_feedback_diagnostic_classification"]
+        self.assertEqual(classification["schema"], "agentflow.activation_feedback_diagnostic_classification.v1")
+        self.assertEqual(classification["status"], "new-sanitized-evidence")
+        self.assertEqual(classification["decision"], "emit-bounded-successor-input")
+        self.assertEqual(diagnostic["example"], "metadata-only activation-feedback diagnostic evidence")
+        self.assertTrue(classification["privacy"]["metadata_only"])
+        self.assertTrue(classification["privacy"]["aggregate_only"])
+        self.assertFalse(classification["privacy"]["request_ids_included"])
+        self.assertFalse(classification["privacy"]["session_ids_included"])
+        self.assertFalse(classification["privacy"]["cache_keys_included"])
+        self.assertFalse(classification["privacy"]["absolute_paths_included"])
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        entries = [
+            entry
+            for entry in ledger["entries"]
+            if entry.get("lever") == "activation-feedback"
+            and entry.get("diagnostic_class") == "activation-feedback-blocker-review"
+        ]
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["review_status"], "new-sanitized-evidence")
+        self.assertEqual(entry["issue_worthy_status"], "ready")
+        self.assertEqual(entry["diagnostic_evidence_status"], "new-sanitized-evidence")
+        self.assertEqual(entry["next_action"], "record-bounded-activation-feedback-successor")
+        self.assertEqual(entry["current_status"], "projected")
+        self.assertNotIn("keep_blocked_reason", entry)
+        self.assertEqual(
+            entry["diagnostic_fingerprint"],
+            "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
+        )
+        self.assertTrue(entry["privacy"]["metadata_only"])
+        self.assertFalse(entry["privacy"]["provider_bodies_included"])
+        self.assertFalse(entry["privacy"]["request_ids_included"])
+        self.assertFalse(entry["privacy"]["cache_keys_included"])
+
+        queue = plan["evidence"]["stats_summary"]["local_activation_next_action_queue"]
+        action = next(
+            item for item in queue["successor_actions"]
+            if item.get("local_action_family") == "activation-feedback"
+        )
+        self.assertEqual(action["review_status"], "new-sanitized-evidence")
+        self.assertEqual(
+            action["activation_feedback_diagnostic_classification"]["status"],
+            "new-sanitized-evidence",
+        )
+
+        proposals = [
+            item for item in plan["backlog_changes"]["create_issues"]
+            if item.get("proposal_source") == "bounded-activation-feedback-successor"
+        ]
+        self.assertEqual(len(proposals), 1)
+        proposal = proposals[0]
+        self.assertIn("status:ready", proposal["labels"])
+        self.assertEqual(proposal["fingerprint"], entry["fingerprint"])
+        self.assertIn("record-bounded-activation-feedback-successor", proposal["body"])
+        self.assertIn("metadata-only privacy flags", proposal["body"])
+        self.assertNotIn("Example excerpt:", proposal["body"])
+
+        repeated_plan = build_research_plan(
+            issues=[],
+            log_sources=log_lines,
+            threshold=1,
+            now=NOW,
+        )
+        repeated_entry = [
+            item for item in repeated_plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]["entries"]
+            if item.get("lever") == "activation-feedback"
+            and item.get("diagnostic_class") == "activation-feedback-blocker-review"
+        ][0]
+        self.assertEqual(repeated_entry["fingerprint"], entry["fingerprint"])
+        self.assertEqual(repeated_entry["diagnostic_fingerprint"], entry["diagnostic_fingerprint"])
+
+        rendered = json.dumps(plan, sort_keys=True)
+        for secret in (
+            "req-new-af-secret",
+            "cache-new-af-secret",
+            "session-new-af-secret",
+            "tenant-new-af-secret",
+            "/tmp/private-activation-feedback.py",
+            "/tmp/private-activation-feedback-2.py",
+        ):
+            self.assertNotIn(secret, rendered)
+
     def test_unclassified_canary_cohort_skip_is_reclassified(self):
         with TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "run.log"

@@ -158,6 +158,19 @@ _KNOWN_DIAGNOSTIC_TERMS = (
     "no-local-representation",
 )
 
+_ACTIVATION_FEEDBACK_NEW_SANITIZED_EVIDENCE_RE = re.compile(
+    r"(?:new[-_ ]sanitized[-_ ]evidence|sanitized[-_ ]activation[-_ ]feedback[-_ ]evidence|"
+    r"bounded[-_ ]successor[-_ ]input|metadata[-_ ]only[-_ ]activation[-_ ]feedback)",
+    re.IGNORECASE,
+)
+_ACTIVATION_FEEDBACK_HUMAN_REVIEW_REQUIRED_RE = re.compile(
+    r"(?:human[-_ ]review[-_ ]required|needs[-_ ]human[-_ ]review|manual[-_ ]review[-_ ]required)",
+    re.IGNORECASE,
+)
+_METADATA_ONLY_TRUE_RE = re.compile(r"metadata[-_ ]only\s*[:=]\s*(?:true|1|yes)", re.IGNORECASE)
+_AGGREGATE_ONLY_TRUE_RE = re.compile(r"aggregate[-_ ]only\s*[:=]\s*(?:true|1|yes)", re.IGNORECASE)
+_NEXT_ACTION_RE = re.compile(r"next[-_ ]action\s*[:=]\s*[\"']?([A-Za-z0-9_.:-]+)", re.IGNORECASE)
+
 
 def _is_safety_stop_signal_line(line: str) -> bool:
     lowered = line.lower()
@@ -166,6 +179,52 @@ def _is_safety_stop_signal_line(line: str) -> bool:
     if _SUCCESS_LINE_RE.search(line):
         return False
     return bool(_SAFETY_STOP_SIGNAL_RE.search(line))
+
+
+def _activation_feedback_diagnostic_metadata_from_line(line: str, reason: str) -> dict[str, Any] | None:
+    normalized_reason = _normal_diagnostic_token(reason)
+    if normalized_reason != "activation-feedback-blocker-review":
+        return None
+    if _ACTIVATION_FEEDBACK_HUMAN_REVIEW_REQUIRED_RE.search(line):
+        return {
+            "activation_feedback_diagnostic_classification": {
+                "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+                "status": "human-review-required",
+                "decision": "keep-blocked",
+                "reason": "human-review-required",
+                "privacy": _candidate_privacy(),
+            },
+            "review_status": "human-review-required",
+        }
+    if not _ACTIVATION_FEEDBACK_NEW_SANITIZED_EVIDENCE_RE.search(line):
+        return None
+
+    next_action_match = _NEXT_ACTION_RE.search(line)
+    next_action = (
+        _normal_diagnostic_token(next_action_match.group(1))
+        if next_action_match
+        else "review-new-sanitized-activation-feedback-evidence"
+    )
+    metadata_only = bool(_METADATA_ONLY_TRUE_RE.search(line))
+    aggregate_only = bool(_AGGREGATE_ONLY_TRUE_RE.search(line))
+    privacy = _candidate_privacy()
+    privacy["metadata_only"] = metadata_only or privacy["metadata_only"]
+    privacy["aggregate_only"] = aggregate_only or privacy["aggregate_only"]
+    classification = {
+        "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+        "status": "new-sanitized-evidence",
+        "decision": "emit-bounded-successor-input",
+        "reason": "new-sanitized-evidence",
+        "next_action": sanitize_value(next_action),
+        "privacy": privacy,
+    }
+    return {
+        "activation_feedback_diagnostic_classification": classification,
+        "diagnostic_evidence_status": "new-sanitized-evidence",
+        "review_status": "new-sanitized-evidence",
+        "next_action_override": next_action,
+        "example_override": "metadata-only activation-feedback diagnostic evidence",
+    }
 
 _PASS_DIAGNOSTIC_REASONS = {
     "pass",
@@ -503,6 +562,7 @@ def _load_log_text(log_sources: Iterable[str | Path]) -> list[dict[str, Any]]:
 def _diagnostics_from_logs(log_sources: Iterable[str | Path], *, limit: int = 10) -> list[dict[str, Any]]:
     counter: Counter[str] = Counter()
     examples: dict[str, str] = {}
+    metadata: dict[str, dict[str, Any]] = {}
     for loaded in _load_log_text(log_sources):
         for raw_line in loaded["text"].splitlines():
             line = redact_text(raw_line.strip())
@@ -512,11 +572,18 @@ def _diagnostics_from_logs(log_sources: Iterable[str | Path], *, limit: int = 10
             matched = False
             for match in _DIAGNOSTIC_RE.finditer(line):
                 reason = match.group(1).strip(" .'\",").lower().replace(" ", "-")
+                if reason.startswith("activation-feedback-blocker-review"):
+                    reason = "activation-feedback-blocker-review"
                 if reason:
                     if "safety-stop" in reason and not _is_safety_stop_signal_line(line):
                         continue
                     counter[reason] += 1
-                    examples.setdefault(reason, line[:240])
+                    line_metadata = _activation_feedback_diagnostic_metadata_from_line(line, reason)
+                    if line_metadata:
+                        metadata[reason] = {**metadata.get(reason, {}), **line_metadata}
+                        examples[reason] = str(line_metadata.get("example_override") or examples.get(reason) or line[:240])
+                    else:
+                        examples.setdefault(reason, line[:240])
                     matched = True
             for term in _KNOWN_DIAGNOSTIC_TERMS:
                 if term in lowered:
@@ -524,16 +591,24 @@ def _diagnostics_from_logs(log_sources: Iterable[str | Path], *, limit: int = 10
                     if reason == "safety-stop" and not _is_safety_stop_signal_line(line):
                         continue
                     counter[reason] += 1
-                    examples.setdefault(reason, line[:240])
+                    line_metadata = _activation_feedback_diagnostic_metadata_from_line(line, reason)
+                    if line_metadata:
+                        metadata[reason] = {**metadata.get(reason, {}), **line_metadata}
+                        examples[reason] = str(line_metadata.get("example_override") or examples.get(reason) or line[:240])
+                    else:
+                        examples.setdefault(reason, line[:240])
                     matched = True
             if not matched and ("skip" in lowered or "blocked" in lowered or "omitted" in lowered):
                 reason = "unclassified-skip-or-blocker"
                 counter[reason] += 1
                 examples.setdefault(reason, line[:240])
-    return [
-        {"reason": reason, "count": count, "example": examples.get(reason, "")}
-        for reason, count in counter.most_common(limit)
-    ]
+    diagnostics: list[dict[str, Any]] = []
+    for reason, count in counter.most_common(limit):
+        item = {"reason": reason, "count": count, "example": examples.get(reason, "")}
+        if reason in metadata:
+            item.update(sanitize_value({key: value for key, value in metadata[reason].items() if key != "example_override"}))
+        diagnostics.append(item)
+    return diagnostics
 
 
 def _diagnostic_taxonomy(reason: Any) -> dict[str, Any] | None:
@@ -1207,21 +1282,76 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
             }
         )
     elif diagnostic_class == "activation-feedback-blocker-review":
-        stage.update(
-            {
-                "lever": "activation-feedback",
-                "local_action_family": "activation-feedback",
-                "state": "keep-blocked",
-                "next_action": _ACTIVATION_FEEDBACK_BLOCKER_NEXT_ACTION,
-                "review_status": "resolved-to-keep-blocked",
-                "issue_worthy_status": "blocked",
-                "keep_blocked_reason": _ACTIVATION_FEEDBACK_BLOCKER_KEEP_BLOCKED_REASON,
-                "next_state": "keep-blocked",
-                "next_state_reason": _ACTIVATION_FEEDBACK_BLOCKER_KEEP_BLOCKED_REASON,
-                "needed_resolution": ["new_sanitized_evidence", "bounded_local_action_issue"],
-                "durable_action_ledger_entry": True,
-            }
+        classification = (
+            diagnostic.get("activation_feedback_diagnostic_classification")
+            if isinstance(diagnostic.get("activation_feedback_diagnostic_classification"), dict)
+            else {}
         )
+        classification_status = str(classification.get("status") or "").strip()
+        if classification_status == "new-sanitized-evidence":
+            next_action = str(
+                diagnostic.get("next_action_override")
+                or classification.get("next_action")
+                or "review-new-sanitized-activation-feedback-evidence"
+            ).strip()
+            stage.update(
+                {
+                    "lever": "activation-feedback",
+                    "local_action_family": "activation-feedback",
+                    "state": "ranked-evidence",
+                    "next_action": sanitize_value(next_action),
+                    "review_status": "new-sanitized-evidence",
+                    "issue_worthy_status": "ready" if count > 1 else "review",
+                    "next_state": "ranked-evidence",
+                    "next_state_reason": "new-sanitized-activation-feedback-evidence",
+                    "needed_resolution": ["bounded_local_action_issue"],
+                    "durable_action_ledger_entry": True,
+                    "policy_files_written": False,
+                    "managed_preview_required": False,
+                    "activation_feedback_diagnostic_classification": classification,
+                    "diagnostic_evidence_status": "new-sanitized-evidence",
+                }
+            )
+        elif classification_status == "human-review-required":
+            stage.update(
+                {
+                    "lever": "activation-feedback",
+                    "local_action_family": "activation-feedback",
+                    "state": "keep-blocked",
+                    "next_action": "review-activation-feedback-diagnostic-before-successor-issue",
+                    "review_status": "human-review-required",
+                    "issue_worthy_status": "blocked",
+                    "keep_blocked_reason": "activation-feedback-blocker-review-needs-human-review",
+                    "next_state": "keep-blocked",
+                    "next_state_reason": "activation-feedback-blocker-review-needs-human-review",
+                    "needed_resolution": ["human_review", "new_sanitized_evidence", "bounded_local_action_issue"],
+                    "durable_action_ledger_entry": True,
+                    "activation_feedback_diagnostic_classification": classification,
+                }
+            )
+        else:
+            stage.update(
+                {
+                    "lever": "activation-feedback",
+                    "local_action_family": "activation-feedback",
+                    "state": "keep-blocked",
+                    "next_action": _ACTIVATION_FEEDBACK_BLOCKER_NEXT_ACTION,
+                    "review_status": "resolved-to-keep-blocked",
+                    "issue_worthy_status": "blocked",
+                    "keep_blocked_reason": _ACTIVATION_FEEDBACK_BLOCKER_KEEP_BLOCKED_REASON,
+                    "next_state": "keep-blocked",
+                    "next_state_reason": _ACTIVATION_FEEDBACK_BLOCKER_KEEP_BLOCKED_REASON,
+                    "needed_resolution": ["new_sanitized_evidence", "bounded_local_action_issue"],
+                    "durable_action_ledger_entry": True,
+                    "activation_feedback_diagnostic_classification": {
+                        "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+                        "status": "already-resolved-keep-blocked",
+                        "decision": "keep-blocked",
+                        "reason": _ACTIVATION_FEEDBACK_BLOCKER_KEEP_BLOCKED_REASON,
+                        "privacy": _candidate_privacy(),
+                    },
+                }
+            )
 
     if lifecycle_context:
         action_family = str(lifecycle_context.get("action_family") or "").strip()
@@ -4982,6 +5112,8 @@ def build_evidence_to_activation_next_action_ledger(
             entry["verification_check"] = sanitize_value(stage.get("verification_check"))
         if stage.get("review_status"):
             entry["review_status"] = sanitize_value(stage.get("review_status"))
+        if stage.get("diagnostic_evidence_status"):
+            entry["diagnostic_evidence_status"] = sanitize_value(stage.get("diagnostic_evidence_status"))
         if stage.get("evidence_freshness_status"):
             entry["evidence_freshness_status"] = sanitize_value(stage.get("evidence_freshness_status"))
         if stage.get("evidence_age_hours") is not None:
@@ -5030,6 +5162,7 @@ def build_evidence_to_activation_next_action_ledger(
             "holdout_coverage",
             "missing_dependency_evidence_review",
             "activation_feedback_freshness_gate",
+            "activation_feedback_diagnostic_classification",
         ):
             if isinstance(stage.get(review_key), dict):
                 entry[review_key] = sanitize_value(stage.get(review_key))
@@ -6084,6 +6217,14 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "requested_model",
         "candidate_target_model",
         "required_local_executor",
+        "diagnostic_class",
+        "diagnostic_reason",
+        "diagnostic_fingerprint",
+        "diagnostic_evidence_status",
+        "review_status",
+        "keep_blocked_reason",
+        "next_state",
+        "next_state_reason",
     ):
         if entry.get(key) is not None:
             action[key] = sanitize_value(entry.get(key))
@@ -6146,6 +6287,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "coverage",
         "recovery_plan",
+        "activation_feedback_diagnostic_classification",
     ):
         if isinstance(entry.get(key), dict):
             action[key] = sanitize_value(entry.get(key))
@@ -6175,6 +6317,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "dependency_evidence_decision_breakdown",
         "evidence_state_breakdown",
         "next_action_breakdown",
+        "needed_resolution",
     ):
         if isinstance(entry.get(key), list):
             action[key] = sanitize_value(entry.get(key))
@@ -6800,6 +6943,89 @@ def _activation_successor_proposal_from_rows(
     }
 
 
+def _is_new_sanitized_activation_feedback_successor(action: dict[str, Any], decision: dict[str, Any]) -> bool:
+    family = str(action.get("local_action_family") or decision.get("local_action_family") or "").strip()
+    if family != "activation-feedback":
+        return False
+    classification = (
+        action.get("activation_feedback_diagnostic_classification")
+        if isinstance(action.get("activation_feedback_diagnostic_classification"), dict)
+        else {}
+    )
+    return str(classification.get("status") or action.get("diagnostic_evidence_status") or "").strip() == "new-sanitized-evidence"
+
+
+def _activation_feedback_diagnostic_proposal_from_rows(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "review-new-sanitized-activation-feedback-evidence")
+    source_fingerprint = str(decision.get("source_fingerprint") or action.get("source_fingerprint") or "").strip()
+    action_fingerprint = str(decision.get("successor_action_fingerprint") or action.get("fingerprint") or "").strip()
+    token = _activation_successor_title_token(action, decision)
+    title = f"Record bounded activation-feedback successor input for {next_action} ({token})"
+    classification = (
+        action.get("activation_feedback_diagnostic_classification")
+        if isinstance(action.get("activation_feedback_diagnostic_classification"), dict)
+        else {}
+    )
+    evidence = [
+        f"Source metadata: {LOCAL_ACTIVATION_SUCCESSOR_DECISION_SCHEMA}",
+        f"Fingerprint: {source_fingerprint}",
+        f"Successor action fingerprint: {action_fingerprint}",
+        f"Diagnostic class: {action.get('diagnostic_class')}",
+        f"Diagnostic fingerprint: {action.get('diagnostic_fingerprint')}",
+        f"Diagnostic classification: {classification.get('status')}",
+        f"Classification decision: {classification.get('decision')}",
+        f"Local action family: {action.get('local_action_family')}",
+        f"Decision: {decision.get('decision')}",
+        f"Issue worthy status: {decision.get('issue_worthy_status')}",
+        f"Recommended next action: {next_action}",
+        f"Needed resolution: {json.dumps(action.get('needed_resolution') or [])}",
+        f"Expected savings path: {action.get('expected_savings_path')}",
+        f"Acceptance metric: {action.get('acceptance_metric')}",
+        _activation_successor_privacy_evidence(action, decision),
+    ]
+    return {
+        "repo": "lutzkuen/agentflow",
+        "title": title,
+        "labels": _activation_successor_issue_labels(action, "status:ready"),
+        "proposal_source": "bounded-activation-feedback-successor",
+        "fingerprint": sanitize_value(source_fingerprint),
+        "successor_action_fingerprint": sanitize_value(action_fingerprint),
+        "expected_savings_path": sanitize_value(
+            action.get("expected_savings_path")
+            or "This converts sanitized activation-feedback diagnostics into a bounded local follow-up."
+        ),
+        "body": _issue_body(
+            title=title,
+            rationale=(
+                "A repeated activation-feedback diagnostic now carries new sanitized evidence. "
+                "This proposal records it as a bounded local successor input without copying raw log snippets."
+            ),
+            evidence=evidence,
+            implementation=[
+                "Start from the activation-feedback successor action in the research plan.",
+                f"Review the `{next_action}` follow-up using only metadata-only evidence.",
+                "Do not include raw prompts, provider payloads, request IDs, cache keys, session IDs, tenant IDs, file paths, or raw log excerpts.",
+                "Record the outcome back into the activation-feedback ledger as progressed, narrowed, or keep-blocked with a durable reason.",
+            ],
+            acceptance=[
+                str(action.get("acceptance_metric") or "The activation-feedback successor input is resolved with a durable metadata-only outcome."),
+                f"The next research plan reports source fingerprint {source_fingerprint} as progressed, suppressed, or blocked with a narrower reason.",
+                "The successor evidence keeps metadata-only privacy flags and does not include raw log snippets or raw provider/client identifiers.",
+            ],
+            savings_path=str(
+                action.get("expected_savings_path")
+                or "This removes repeated activation-feedback rediscovery from the backlog loop."
+            ),
+            sequencing=(
+                "Sequence before generic repeated-diagnostic proposals for activation-feedback so sanitized successor evidence is handled once."
+            ),
+        ),
+    }
+
+
 def _proposals_from_activation_successor_decisions(stats_summary: dict[str, Any]) -> list[dict[str, Any]]:
     queue = stats_summary.get("local_activation_next_action_queue")
     if not isinstance(queue, dict):
@@ -6835,6 +7061,10 @@ def _proposals_from_activation_successor_decisions(stats_summary: dict[str, Any]
         decision_text = str(decision.get("decision") or "").strip()
         issue_status = str(decision.get("issue_worthy_status") or "").strip()
         if issue_status == "suppressed" or decision_text in {"keep-current-rule", "suppress-duplicate"}:
+            continue
+        if _is_new_sanitized_activation_feedback_successor(action, decision):
+            if issue_status in {"ready", "review"} and decision_text in {"ready", "review", "review-only"}:
+                proposals.append(_activation_feedback_diagnostic_proposal_from_rows(action, decision))
             continue
         if _is_tool_cache_dependency_successor(action):
             if _is_missing_tool_cache_dependency_drill(action, decision):
@@ -7018,6 +7248,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "dependency_evidence_status",
         "emits_cache_apply_action",
         "evidence_state",
+        "diagnostic_evidence_status",
+        "review_status",
         "keep_blocked_reason",
         "needed_resolution",
         "next_state",
@@ -7059,6 +7291,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "policy_files_written",
         "durable_action_ledger_entry",
         "durable_outcome_ledger_entry",
+        "managed_preview_required",
         "full_rollout_outcome",
         "full_rollout_outcome_next_action",
         "full_rollout_successor_decision",
@@ -7088,6 +7321,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "keep_active_regression_gate",
         "full_rollout_activation_outcome",
         "activation_feedback_freshness_gate",
+        "activation_feedback_diagnostic_classification",
         "managed_preview_gate",
         "evidence_freshness",
         "coverage",
