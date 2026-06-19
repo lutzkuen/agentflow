@@ -31,6 +31,131 @@ if HAS_RUNTIME_DEPS:
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
 class DashboardImportTests(unittest.TestCase):
+    def _seed_managed_preview_outcomes(self, store: Store) -> None:
+        now_text = "2026-06-19T10:00:00+00:00"
+        for index in range(25):
+            if index == 1:
+                family = "routing"
+                classification = "review-only"
+                preview_generated_at = "2000-01-01T00:00:00+00:00"
+                stale = 0
+                missing = 0
+                failed = 0
+                disagrees = 0
+                omitted_reason = None
+                no_op_reason = None
+                reason_codes = ["managed-preview-stale-candidate"]
+            elif index == 2:
+                family = "cache"
+                classification = "missing-preview-decision"
+                preview_generated_at = "2099-01-01T00:00:00+00:00"
+                stale = 0
+                missing = 1
+                failed = 0
+                disagrees = 0
+                omitted_reason = None
+                no_op_reason = "missing-managed-preview"
+                reason_codes = ["missing-preview-decision"]
+            elif index == 3:
+                family = "routing"
+                classification = "failed-closed"
+                preview_generated_at = "2099-01-01T00:00:00+00:00"
+                stale = 0
+                missing = 0
+                failed = 1
+                disagrees = 0
+                omitted_reason = "managed-preview-provider-call-blocked"
+                no_op_reason = None
+                reason_codes = ["provider-call-blocked"]
+            elif index == 4:
+                family = "routing"
+                classification = "managed-local-disagreement"
+                preview_generated_at = "2099-01-01T00:00:00+00:00"
+                stale = 0
+                missing = 0
+                failed = 0
+                disagrees = 1
+                omitted_reason = None
+                no_op_reason = None
+                reason_codes = ["managed-preview-disagrees"]
+            else:
+                family = "crunch"
+                classification = "review-only"
+                preview_generated_at = "2099-01-01T00:00:00+00:00"
+                stale = 0
+                missing = 0
+                failed = 0
+                disagrees = 0
+                omitted_reason = None
+                no_op_reason = "full-rollout-policy-active"
+                reason_codes = ["managed-preview-agrees"]
+            outcome = {
+                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": f"managed-preview-outcome:test-{index}",
+                "handoff_ref": f"handoff-secret-{index}",
+                "preview_ref": f"preview-secret-{index}",
+                "preview_generated_at": preview_generated_at,
+                "local_action_family": family,
+                "evidence_schema": "agentflow.test_preview.v1",
+                "decision": "no-op" if classification != "missing-preview-decision" else "missing",
+                "decision_status": classification,
+                "classification": classification,
+                "next_action": "refresh-managed-activation-preview"
+                if classification in {"missing-preview-decision", "failed-closed"}
+                else "review-managed-activation-preview",
+                "omitted_reason": omitted_reason,
+                "no_op_reason": no_op_reason,
+                "reason_codes": reason_codes,
+                "review_only": True,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "stale": bool(stale),
+                "missing_preview_decision": bool(missing),
+                "failed_closed": bool(failed),
+                "disagrees_with_local_evidence": bool(disagrees),
+                "raw_prompt": "raw managed preview secret must not render",
+                "request_id": "req-managed-preview-secret",
+                "session_id": "sess-managed-preview-secret",
+                "cache_key": "cache-managed-preview-secret",
+                "file_path": "/tmp/secret-managed-preview.py",
+            }
+            store.conn.execute(
+                """
+                insert into managed_activation_preview_outcomes(
+                  fingerprint, created_at, updated_at, preview_generated_at, handoff_ref,
+                  preview_ref, local_action_family, evidence_schema, decision, classification,
+                  next_action, omitted_reason, no_op_reason, reason_codes_json, stale,
+                  missing_preview_decision, failed_closed, disagrees_with_local_evidence,
+                  preview_age_hours, outcome_json
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    outcome["outcome_fingerprint"],
+                    now_text,
+                    f"2026-06-19T10:{index:02d}:00+00:00",
+                    preview_generated_at,
+                    outcome["handoff_ref"],
+                    outcome["preview_ref"],
+                    family,
+                    outcome["evidence_schema"],
+                    outcome["decision"],
+                    classification,
+                    outcome["next_action"],
+                    omitted_reason,
+                    no_op_reason,
+                    stable_json(reason_codes),
+                    stale,
+                    missing,
+                    failed,
+                    disagrees,
+                    None,
+                    stable_json(outcome),
+                ),
+            )
+        store.conn.commit()
+
     def test_dashboard_import_does_not_import_provider_server(self):
         old_dashboard = sys.modules.pop("agentflow_proxy.dashboard", None)
         old_dashboard_app = sys.modules.pop("agentflow_proxy.dashboard_app", None)
@@ -3708,6 +3833,7 @@ class DashboardImportTests(unittest.TestCase):
             },
         }
         try:
+            self._seed_managed_preview_outcomes(store)
             json.dump(plan_payload, plan_tmp)
             plan_tmp.close()
             with patch.dict(
@@ -3747,6 +3873,32 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["lever"], "crunch")
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["target_local_rule_file"], "crunch_rules.yaml")
             self.assertIn("activation_burndown", full_payload["summary"])
+            coverage = payload["managed_preview_coverage"]
+            self.assertEqual(coverage["schema"], "agentflow.dashboard_managed_activation_preview_coverage.v1")
+            self.assertEqual(coverage["status"], "tracked")
+            self.assertEqual(coverage["preview_data_status"], "fresh")
+            self.assertEqual(coverage["lookback_limit"], 200)
+            self.assertEqual(coverage["sample_limit"], 20)
+            self.assertEqual(coverage["summary"]["stored_preview_outcome_count"], 25)
+            self.assertEqual(coverage["summary"]["sample_outcome_count"], 20)
+            self.assertEqual(len(coverage["sample_outcomes"]), 20)
+            self.assertGreaterEqual(coverage["summary"]["fresh_count"], 1)
+            self.assertGreaterEqual(coverage["summary"]["stale_count"], 1)
+            self.assertEqual(coverage["summary"]["missing_preview_decision_count"], 1)
+            self.assertEqual(coverage["summary"]["failed_closed_count"], 1)
+            self.assertEqual(coverage["summary"]["disagreement_count"], 1)
+            self.assertEqual(coverage["summary"]["omission_count"], 1)
+            self.assertFalse(coverage["privacy"]["raw_prompts_included"])
+            self.assertFalse(coverage["privacy"]["provider_bodies_included"])
+            self.assertFalse(coverage["privacy"]["request_ids_included"])
+            self.assertFalse(coverage["privacy"]["session_ids_included"])
+            self.assertFalse(coverage["privacy"]["tool_payloads_included"])
+            self.assertFalse(coverage["privacy"]["cache_keys_included"])
+            self.assertFalse(coverage["privacy"]["absolute_paths_included"])
+            self.assertEqual(payload["entries"][0]["managed_preview_coverage"]["preview_data_status"], "fresh")
+            self.assertGreaterEqual(payload["entries"][0]["managed_preview_coverage"]["stored_preview_outcome_count"], 1)
+            self.assertEqual(full_payload["activation_burndown"]["managed_preview_coverage"]["summary"]["stored_preview_outcome_count"], 25)
+            self.assertEqual(full_payload["managed_preview_coverage"]["summary"]["stored_preview_outcome_count"], 25)
             self.assertFalse(payload["source"]["path_included"])
             self.assertFalse(payload["privacy"]["raw_prompts_included"])
             self.assertFalse(payload["privacy"]["provider_bodies_included"])
@@ -3765,10 +3917,16 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("local-activation-queue-summary-tbody", dashboard.text)
             self.assertIn("local-activation-queue-entries-tbody", dashboard.text)
             self.assertIn("activation-burndown-tbody", dashboard.text)
+            self.assertIn("Managed preview", dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + json.dumps(full_payload, sort_keys=True) + dashboard.text
             self.assertNotIn(str(plan_path), rendered)
             self.assertNotIn("raw prompt must not render", rendered)
+            self.assertNotIn("raw managed preview secret must not render", rendered)
+            self.assertNotIn("req-managed-preview-secret", rendered)
+            self.assertNotIn("sess-managed-preview-secret", rendered)
+            self.assertNotIn("cache-managed-preview-secret", rendered)
+            self.assertNotIn("/tmp/secret-managed-preview.py", rendered)
             self.assertNotIn("req-queue-secret", rendered)
             self.assertNotIn("sess-queue-secret", rendered)
             self.assertNotIn("cache-queue-secret", rendered)

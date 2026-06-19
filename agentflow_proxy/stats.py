@@ -55,6 +55,8 @@ CODEX_APP_PROCESSING_MODE = str(CODEX_APP_PRICING_BASIS["processing_mode"])
 CODEX_APP_COST_KNOWN = bool(CODEX_APP_PRICING_BASIS["cost_known"])
 CODEX_APP_TELEMETRY_ONLY_REASON = "codex-app-telemetry-only"
 TOKEN_CHARS = 4
+MANAGED_PREVIEW_COVERAGE_LOOKBACK_LIMIT = 200
+MANAGED_PREVIEW_COVERAGE_SAMPLE_LIMIT = 20
 
 
 def _utc_today_start_iso() -> str:
@@ -18189,7 +18191,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     old_context_summary_opportunity = await stats_old_context_summary(store_obj)
     sqlite_maintenance = await stats_sqlite_maintenance(store_obj)
     active_crunch_rule_coverage = _active_crunch_rule_coverage()
-    activation_burndown = await stats_local_activation_next_action_queue(limit=5)
+    activation_burndown = await stats_local_activation_next_action_queue(limit=5, store_obj=store_obj)
 
     def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -18993,8 +18995,10 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "routing_experiment_promotion_reason_counts": routing_experiment_report_summary["promotion_reason_counts"],
             "routing_experiment_promotion_ready_candidates": routing_experiment_report_summary["promotion_ready_candidates"],
             "activation_burndown": activation_burndown.get("summary", {}),
+            "managed_preview_coverage": (activation_burndown.get("managed_preview_coverage") or {}).get("summary", {}),
         },
         "activation_burndown": activation_burndown,
+        "managed_preview_coverage": activation_burndown.get("managed_preview_coverage"),
         "recent": recent,
         "routing_breakdown": routing_breakdown,
         "category_breakdown": category_breakdown,
@@ -20302,11 +20306,290 @@ def _local_activation_queue_privacy(source_privacy: dict[str, Any] | None = None
     }
 
 
+def _managed_preview_coverage_privacy(*, managed_server_calls_made: bool = False) -> dict[str, bool]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "review_only": True,
+        "authoritative_for_active_policy": False,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "raw_response_bodies_included": False,
+        "provider_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "cache_keys_included": False,
+        "tool_payloads_included": False,
+        "file_paths_included": False,
+        "absolute_paths_included": False,
+        "individual_candidate_ids_included": False,
+        "policy_file_contents_included": False,
+        "provider_calls_made": False,
+        "policy_files_written": False,
+        "managed_server_calls_made": bool(managed_server_calls_made),
+        "dashboard_read_only": True,
+    }
+
+
+def _empty_managed_preview_coverage(*, status: str, status_reason: str) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.dashboard_managed_activation_preview_coverage.v1",
+        "generated_at": utc_now(),
+        "status": status,
+        "status_reason": status_reason,
+        "preview_data_status": status,
+        "lookback_limit": MANAGED_PREVIEW_COVERAGE_LOOKBACK_LIMIT,
+        "sample_limit": MANAGED_PREVIEW_COVERAGE_SAMPLE_LIMIT,
+        "summary": {
+            "stored_preview_outcome_count": 0,
+            "sample_outcome_count": 0,
+            "fresh_count": 0,
+            "stale_count": 0,
+            "missing_preview_decision_count": 0,
+            "omission_count": 0,
+            "failed_closed_count": 0,
+            "agreement_count": 0,
+            "disagreement_count": 0,
+            "latest_preview_age_hours": None,
+            "classification_counts": [],
+            "local_action_family_counts": [],
+        },
+        "family_coverage": [],
+        "sample_outcomes": [],
+        "privacy": _managed_preview_coverage_privacy(),
+    }
+
+
+def _managed_preview_reason(outcome: dict[str, Any]) -> str:
+    for key in ("omitted_reason", "no_op_reason"):
+        value = str(outcome.get(key) or "").strip()
+        if value:
+            return value
+    reason_codes = outcome.get("reason_codes")
+    if isinstance(reason_codes, list):
+        for value in reason_codes:
+            text = str(value or "").strip()
+            if text:
+                return text
+    return str(outcome.get("classification") or "unknown").strip() or "unknown"
+
+
+def _managed_preview_public_outcome(outcome: dict[str, Any]) -> dict[str, Any]:
+    public = {
+        "local_action_family": outcome.get("local_action_family") or "unknown",
+        "evidence_schema": outcome.get("evidence_schema"),
+        "classification": outcome.get("classification") or "unknown",
+        "decision": outcome.get("decision"),
+        "decision_status": outcome.get("decision_status"),
+        "next_action": outcome.get("next_action"),
+        "omitted_reason": outcome.get("omitted_reason"),
+        "no_op_reason": outcome.get("no_op_reason"),
+        "reason_codes": outcome.get("reason_codes") if isinstance(outcome.get("reason_codes"), list) else [],
+        "preview_age_hours": outcome.get("preview_age_hours"),
+        "stale": bool(outcome.get("stale")),
+        "missing_preview_decision": bool(outcome.get("missing_preview_decision")),
+        "failed_closed": bool(outcome.get("failed_closed")),
+        "disagrees_with_local_evidence": bool(outcome.get("disagrees_with_local_evidence")),
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_preview_policy_files_written": bool(outcome.get("managed_preview_policy_files_written")),
+        "managed_preview_provider_calls_made": bool(outcome.get("managed_preview_provider_calls_made")),
+        "privacy": _managed_preview_coverage_privacy(
+            managed_server_calls_made=bool(outcome.get("managed_server_calls_made"))
+        ),
+    }
+    return {key: _copy_policy(value) for key, value in public.items() if value not in (None, "", [])}
+
+
+def _managed_preview_family_row(
+    *,
+    family: str,
+    outcomes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    reason_counts: dict[str, int] = {}
+    classification_counts: dict[str, int] = {}
+    ages = []
+    for outcome in outcomes:
+        reason = _managed_preview_reason(outcome)
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        classification = str(outcome.get("classification") or "unknown")
+        classification_counts[classification] = classification_counts.get(classification, 0) + 1
+        if outcome.get("preview_age_hours") is not None:
+            ages.append(_as_float(outcome.get("preview_age_hours")))
+    agreement_count = sum(
+        1
+        for outcome in outcomes
+        if not bool(outcome.get("stale"))
+        and not bool(outcome.get("missing_preview_decision"))
+        and not bool(outcome.get("failed_closed"))
+        and not bool(outcome.get("disagrees_with_local_evidence"))
+    )
+    top_reason = _breakdown_from_counts(reason_counts)[0]["value"] if reason_counts else None
+    return {
+        "local_action_family": family,
+        "stored_preview_outcome_count": len(outcomes),
+        "fresh_count": agreement_count,
+        "stale_count": sum(1 for outcome in outcomes if outcome.get("stale")),
+        "missing_preview_decision_count": sum(1 for outcome in outcomes if outcome.get("missing_preview_decision")),
+        "omission_count": sum(1 for outcome in outcomes if outcome.get("omitted_reason")),
+        "failed_closed_count": sum(1 for outcome in outcomes if outcome.get("failed_closed")),
+        "agreement_count": agreement_count,
+        "disagreement_count": sum(1 for outcome in outcomes if outcome.get("disagrees_with_local_evidence")),
+        "latest_preview_age_hours": min(ages) if ages else None,
+        "top_omitted_or_blocker_reason": top_reason,
+        "reason_counts": _breakdown_from_counts(reason_counts)[:10],
+        "classification_counts": _breakdown_from_counts(classification_counts),
+    }
+
+
+def _managed_preview_data_status(outcomes: list[dict[str, Any]]) -> str:
+    if not outcomes:
+        return "missing"
+    fresh = [
+        outcome
+        for outcome in outcomes
+        if not bool(outcome.get("stale"))
+        and not bool(outcome.get("missing_preview_decision"))
+        and not bool(outcome.get("failed_closed"))
+    ]
+    if fresh:
+        return "fresh"
+    if any(bool(outcome.get("stale")) for outcome in outcomes):
+        return "stale"
+    return "missing"
+
+
+def _managed_preview_coverage_for_family(coverage: dict[str, Any] | None, family: str | None) -> dict[str, Any] | None:
+    if not isinstance(coverage, dict) or not family:
+        return None
+    for row in coverage.get("family_coverage") or []:
+        if isinstance(row, dict) and str(row.get("local_action_family") or "") == str(family):
+            return {
+                "schema": "agentflow.dashboard_managed_activation_preview_family_coverage.v1",
+                "status": coverage.get("status"),
+                "preview_data_status": coverage.get("preview_data_status"),
+                "stored_preview_outcome_count": row.get("stored_preview_outcome_count", 0),
+                "fresh_count": row.get("fresh_count", 0),
+                "stale_count": row.get("stale_count", 0),
+                "missing_preview_decision_count": row.get("missing_preview_decision_count", 0),
+                "omission_count": row.get("omission_count", 0),
+                "failed_closed_count": row.get("failed_closed_count", 0),
+                "agreement_count": row.get("agreement_count", 0),
+                "disagreement_count": row.get("disagreement_count", 0),
+                "latest_preview_age_hours": row.get("latest_preview_age_hours"),
+                "top_omitted_or_blocker_reason": row.get("top_omitted_or_blocker_reason"),
+            }
+    return {
+        "schema": "agentflow.dashboard_managed_activation_preview_family_coverage.v1",
+        "status": coverage.get("status"),
+        "preview_data_status": coverage.get("preview_data_status"),
+        "stored_preview_outcome_count": 0,
+        "fresh_count": 0,
+        "stale_count": 0,
+        "missing_preview_decision_count": 0,
+        "omission_count": 0,
+        "failed_closed_count": 0,
+        "agreement_count": 0,
+        "disagreement_count": 0,
+        "latest_preview_age_hours": None,
+        "top_omitted_or_blocker_reason": None,
+    }
+
+
+def _managed_activation_preview_coverage(store_obj: Any | None) -> dict[str, Any]:
+    if store_obj is None:
+        return _empty_managed_preview_coverage(
+            status="disabled",
+            status_reason="local store was not provided for managed preview coverage",
+        )
+    try:
+        from agentflow_proxy.managed_activation_preview_outcomes import (
+            DEFAULT_STALE_AFTER_HOURS,
+            build_managed_activation_preview_outcomes_report,
+        )
+
+        report = build_managed_activation_preview_outcomes_report(
+            store_obj,
+            limit=MANAGED_PREVIEW_COVERAGE_LOOKBACK_LIMIT,
+            stale_after_hours=DEFAULT_STALE_AFTER_HOURS,
+        )
+    except sqlite3.Error:
+        return _empty_managed_preview_coverage(
+            status="missing",
+            status_reason="managed preview outcome table is unavailable",
+        )
+    outcomes = [row for row in report.get("outcomes") or [] if isinstance(row, dict)]
+    if not outcomes:
+        return _empty_managed_preview_coverage(
+            status="missing",
+            status_reason="no managed preview outcome rows have been recorded",
+        )
+    classification_counts: dict[str, int] = {}
+    family_groups: dict[str, list[dict[str, Any]]] = {}
+    ages = []
+    for outcome in outcomes:
+        classification = str(outcome.get("classification") or "unknown")
+        classification_counts[classification] = classification_counts.get(classification, 0) + 1
+        family = str(outcome.get("local_action_family") or "unknown")
+        family_groups.setdefault(family, []).append(outcome)
+        if outcome.get("preview_age_hours") is not None:
+            ages.append(_as_float(outcome.get("preview_age_hours")))
+    agreement_count = sum(
+        1
+        for outcome in outcomes
+        if not bool(outcome.get("stale"))
+        and not bool(outcome.get("missing_preview_decision"))
+        and not bool(outcome.get("failed_closed"))
+        and not bool(outcome.get("disagrees_with_local_evidence"))
+    )
+    managed_calls_made = bool(report.get("managed_server_calls_made"))
+    preview_data_status = _managed_preview_data_status(outcomes)
+    return {
+        "schema": "agentflow.dashboard_managed_activation_preview_coverage.v1",
+        "generated_at": utc_now(),
+        "status": "tracked",
+        "status_reason": "bounded local managed preview outcomes loaded",
+        "preview_data_status": preview_data_status,
+        "lookback_limit": MANAGED_PREVIEW_COVERAGE_LOOKBACK_LIMIT,
+        "sample_limit": MANAGED_PREVIEW_COVERAGE_SAMPLE_LIMIT,
+        "summary": {
+            "stored_preview_outcome_count": len(outcomes),
+            "sample_outcome_count": min(len(outcomes), MANAGED_PREVIEW_COVERAGE_SAMPLE_LIMIT),
+            "fresh_count": agreement_count,
+            "stale_count": sum(1 for outcome in outcomes if outcome.get("stale")),
+            "missing_preview_decision_count": sum(1 for outcome in outcomes if outcome.get("missing_preview_decision")),
+            "omission_count": sum(1 for outcome in outcomes if outcome.get("omitted_reason")),
+            "failed_closed_count": sum(1 for outcome in outcomes if outcome.get("failed_closed")),
+            "agreement_count": agreement_count,
+            "disagreement_count": sum(1 for outcome in outcomes if outcome.get("disagrees_with_local_evidence")),
+            "latest_preview_age_hours": min(ages) if ages else None,
+            "classification_counts": _breakdown_from_counts(classification_counts),
+            "local_action_family_counts": _breakdown_from_counts({
+                family: len(rows) for family, rows in family_groups.items()
+            }),
+        },
+        "family_coverage": [
+            _managed_preview_family_row(family=family, outcomes=rows)
+            for family, rows in sorted(family_groups.items())
+        ],
+        "sample_outcomes": [
+            _managed_preview_public_outcome(outcome)
+            for outcome in outcomes[:MANAGED_PREVIEW_COVERAGE_SAMPLE_LIMIT]
+        ],
+        "source_report_schema": report.get("schema"),
+        "source_report_status": report.get("status"),
+        "privacy": _managed_preview_coverage_privacy(managed_server_calls_made=managed_calls_made),
+    }
+
+
 def _empty_local_activation_queue_payload(
     *,
     status: str,
     status_reason: str,
     source: dict[str, Any],
+    managed_preview_coverage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema": "agentflow.dashboard_local_activation_next_action_queue.v1",
@@ -20333,6 +20616,10 @@ def _empty_local_activation_queue_payload(
             "unblock_reason_counts": [],
         },
         "entries": [],
+        "managed_preview_coverage": managed_preview_coverage or _empty_managed_preview_coverage(
+            status="disabled",
+            status_reason="managed preview coverage was not requested",
+        ),
         "privacy": _local_activation_queue_privacy(),
     }
 
@@ -20368,7 +20655,11 @@ def _public_local_activation_queue_summary(summary: dict[str, Any], entry_count:
     return public
 
 
-def _public_local_activation_queue_entry(entry: dict[str, Any]) -> dict[str, Any]:
+def _public_local_activation_queue_entry(
+    entry: dict[str, Any],
+    *,
+    managed_preview_coverage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     allowed = {
         "rank",
         "ledger_rank",
@@ -20424,6 +20715,12 @@ def _public_local_activation_queue_entry(entry: dict[str, Any]) -> dict[str, Any
     if not isinstance(public.get("blocker_codes"), list):
         public["blocker_codes"] = []
     public["privacy"] = _local_activation_queue_privacy(entry.get("privacy") if isinstance(entry.get("privacy"), dict) else {})
+    family_coverage = _managed_preview_coverage_for_family(
+        managed_preview_coverage,
+        str(public.get("local_action_family") or entry.get("local_action_family") or ""),
+    )
+    if family_coverage is not None:
+        public["managed_preview_coverage"] = family_coverage
     return public
 
 
@@ -20451,7 +20748,8 @@ def _extract_local_activation_queue_from_plan(payload: dict[str, Any]) -> dict[s
         return None
 
 
-async def stats_local_activation_next_action_queue(limit: int = 20) -> dict[str, Any]:
+async def stats_local_activation_next_action_queue(limit: int = 20, store_obj: Any | None = None) -> dict[str, Any]:
+    managed_preview_coverage = _managed_activation_preview_coverage(store_obj)
     path = _evidence_to_activation_plan_path()
     source: dict[str, Any] = {
         "kind": "orchestrator-research-plan",
@@ -20475,6 +20773,7 @@ async def stats_local_activation_next_action_queue(limit: int = 20) -> dict[str,
             status="unavailable",
             status_reason="latest research plan artifact was not found",
             source=source,
+            managed_preview_coverage=managed_preview_coverage,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         source["available"] = bool(path.exists())
@@ -20482,12 +20781,14 @@ async def stats_local_activation_next_action_queue(limit: int = 20) -> dict[str,
             status="invalid-artifact",
             status_reason=f"latest research plan artifact could not be read: {type(exc).__name__}",
             source=source,
+            managed_preview_coverage=managed_preview_coverage,
         )
     if not isinstance(payload, dict):
         return _empty_local_activation_queue_payload(
             status="invalid-artifact",
             status_reason="latest research plan artifact is not a JSON object",
             source=source,
+            managed_preview_coverage=managed_preview_coverage,
         )
 
     queue = _extract_local_activation_queue_from_plan(payload)
@@ -20496,11 +20797,12 @@ async def stats_local_activation_next_action_queue(limit: int = 20) -> dict[str,
             status="no-queue",
             status_reason="latest research plan does not contain a local activation next-action queue",
             source={**source, "plan_generated_at": payload.get("generated_at")},
+            managed_preview_coverage=managed_preview_coverage,
         )
 
     capped = max(1, min(int(limit or 20), 50))
     entries = [
-        _public_local_activation_queue_entry(entry)
+        _public_local_activation_queue_entry(entry, managed_preview_coverage=managed_preview_coverage)
         for entry in queue.get("entries") or []
         if isinstance(entry, dict)
     ][:capped]
@@ -20520,6 +20822,7 @@ async def stats_local_activation_next_action_queue(limit: int = 20) -> dict[str,
         "source": {**source, "plan_generated_at": payload.get("generated_at")},
         "summary": summary,
         "entries": entries,
+        "managed_preview_coverage": managed_preview_coverage,
         "privacy": _local_activation_queue_privacy(queue_privacy),
     }
 
@@ -20800,7 +21103,7 @@ def dashboard_html() -> str:
   <div class="table-wrap">
   <table class="activity-table" data-table-id="activation-burndown" data-filter-label="Filter activation bottlenecks">
     <thead><tr>
-      <th data-sort-type="number">Rank</th><th data-sort-type="text">Lever</th><th data-sort-type="text">Status</th><th data-sort-type="text">Next action</th><th data-sort-type="money">Savings</th><th data-sort-type="number">Samples</th><th data-sort-type="text">Blocker</th><th data-sort-type="text">Policy target</th><th data-sort-type="text">Privacy</th>
+      <th data-sort-type="number">Rank</th><th data-sort-type="text">Lever</th><th data-sort-type="text">Status</th><th data-sort-type="text">Next action</th><th data-sort-type="money">Savings</th><th data-sort-type="number">Samples</th><th data-sort-type="text">Blocker</th><th data-sort-type="text">Policy target</th><th data-sort-type="text">Managed preview</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="activation-burndown-tbody"></tbody>
   </table>
@@ -24840,12 +25143,18 @@ function renderActivationBurndown(d){
   if(!target)return;
   const burndown=d.activation_burndown||{};
   const rows=burndown.entries||[];
+  const coverage=burndown.managed_preview_coverage||{};
+  const coverageSummary=coverage.summary||{};
   target.innerHTML=rows.map(row=>{
     const status=row.current_status||row.state||'unknown';
     const policy=[row.target_local_policy_section,row.target_local_rule_file].filter(Boolean).join(' / ')||'—';
     const savings=row.realized_savings_usd||row.projected_savings_usd||0;
     const savingsSub=row.realized_savings_usd?`projected ${fmt(row.projected_savings_usd||0,6)}`:'projected';
     const blocker=row.unblock_reason||(row.blocker_codes||[])[0]||'none';
+    const preview=row.managed_preview_coverage||{};
+    const previewStatus=preview.preview_data_status||coverage.preview_data_status||coverage.status||'missing';
+    const previewReason=preview.top_omitted_or_blocker_reason||coverageSummary.top_omitted_or_blocker_reason||'—';
+    const previewCounts=`fresh ${(preview.fresh_count||0).toLocaleString()} · stale ${(preview.stale_count||0).toLocaleString()} · missing ${(preview.missing_preview_decision_count||0).toLocaleString()} · disagree ${(preview.disagreement_count||0).toLocaleString()}`;
     return `<tr>
       <td class="tokens">${row.rank||0}</td>
       <td><span class="badge provider">${esc(row.lever||'unknown')}</span><div class="sub">${esc(row.local_action_family||'')}</div></td>
@@ -24855,9 +25164,10 @@ function renderActivationBurndown(d){
       <td class="tokens">${(row.sample_count||0).toLocaleString()}<div class="sub">applied ${(row.applied_count||0).toLocaleString()} · holdout ${(row.holdout_count||0).toLocaleString()} · safety ${(row.safety_stop_count||0).toLocaleString()}</div></td>
       <td class="flags"><span class="badge miss">${esc(blocker)}</span><div class="sub">${(row.blocker_codes||[]).slice(0,3).map(code=>esc(code)).join(', ')}</div></td>
       <td class="model">${esc(policy)}</td>
+      <td class="flags"><span class="badge ${previewStatus==='fresh'?'hit':previewStatus==='stale'?'routed':'miss'}">${esc(previewStatus)}</span><div class="sub">${esc(previewCounts)}</div><div class="sub">${esc(previewReason)}</div></td>
       <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||{})}</td>
     </tr>`;
-  }).join('')||`<tr><td colspan="9" style="color:#8b949e">${esc(burndown.status_reason||'No activation bottlenecks available')}</td></tr>`;
+  }).join('')||`<tr><td colspan="10" style="color:#8b949e">${esc(burndown.status_reason||'No activation bottlenecks available')}</td></tr>`;
 }
 async function refreshLocalActivationQueue(){
   try{

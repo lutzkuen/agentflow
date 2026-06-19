@@ -533,7 +533,7 @@ def create_dashboard_router(
         return await cached_expensive_stats(
             "local-activation-next-action-queue",
             (int(limit),),
-            lambda: stats_views.stats_local_activation_next_action_queue(limit=limit),
+            lambda: stats_views.stats_local_activation_next_action_queue(limit=limit, store_obj=_store(store_obj)),
         )
 
     @router.get("/agentflow/stats/post-promotion-deltas")
