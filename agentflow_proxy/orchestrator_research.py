@@ -6218,6 +6218,248 @@ def build_local_activation_successor_decisions(queue: dict[str, Any]) -> list[di
     return rows
 
 
+def _activation_successor_issue_labels(action: dict[str, Any], status_label: str) -> list[str]:
+    priority = "priority:p1" if status_label == "status:ready" else "priority:p2"
+    labels = _default_issue_labels(priority)
+    labels = [label for label in labels if not label.startswith("status:")]
+    labels.append(status_label)
+    family = str(action.get("local_action_family") or "").strip().replace("_", "-")
+    if family in {"routing", "cache", "crunch"}:
+        labels.append(family)
+    labels.append("privacy")
+    return list(dict.fromkeys(labels))
+
+
+def _activation_successor_title_token(action: dict[str, Any], decision: dict[str, Any]) -> str:
+    for value in (action.get("source_fingerprint"), decision.get("source_fingerprint")):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        suffix = re.sub(r"[^a-zA-Z0-9]+", "", text.rsplit(":", 1)[-1])
+        if suffix:
+            return f"evidence {suffix[:12]}"
+    return "current successor"
+
+
+def _activation_successor_blocker(action: dict[str, Any], decision: dict[str, Any]) -> str:
+    for value in (
+        decision.get("preview_omitted_reason"),
+        decision.get("top_preview_omission_reason"),
+        decision.get("preview_no_op_reason"),
+        action.get("unblock_reason"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return sanitize_value(text)
+    blockers = [str(item) for item in action.get("blocker_codes") or [] if str(item or "").strip()]
+    if blockers:
+        return sanitize_value(blockers[0])
+    status = str(decision.get("preview_agreement_status") or action.get("successor_status") or "").strip()
+    return sanitize_value(status or "successor-blocker")
+
+
+def _activation_successor_issue_title(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    status_label: str,
+) -> str:
+    family = str(action.get("local_action_family") or decision.get("local_action_family") or "optimization").strip()
+    family = family.replace("_", "-") or "optimization"
+    next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "").strip()
+    next_action = next_action.replace("_", "-") or "inspect-local-evidence"
+    token = _activation_successor_title_token(action, decision)
+    if status_label == "status:blocked":
+        blocker = _activation_successor_blocker(action, decision).replace("_", "-")
+        return f"Keep {family} activation successor blocked on {blocker} ({token})"
+    return f"Advance preview-verified {family} activation successor for {next_action} ({token})"
+
+
+def _activation_successor_privacy_evidence(action: dict[str, Any], decision: dict[str, Any]) -> str:
+    privacy = action.get("privacy") if isinstance(action.get("privacy"), dict) else {}
+    if not privacy and isinstance(decision.get("privacy"), dict):
+        privacy = decision["privacy"]
+    keys = (
+        "metadata_only",
+        "aggregate_only",
+        "raw_prompts_included",
+        "provider_bodies_included",
+        "absolute_paths_included",
+        "request_ids_included",
+        "session_ids_included",
+        "cache_keys_included",
+        "individual_candidate_ids_included",
+        "managed_server_calls_made",
+        "provider_calls_made",
+        "policy_file_contents_included",
+    )
+    parts = [f"{key}={bool(privacy.get(key))}" for key in keys if key in privacy]
+    return "Privacy flags: " + (", ".join(parts) if parts else "metadata_only=True, aggregate_only=True")
+
+
+def _activation_successor_has_concrete_blocker(action: dict[str, Any], decision: dict[str, Any]) -> bool:
+    if _activation_successor_blocker(action, decision) not in {"", "successor-blocker"}:
+        return True
+    gate = action.get("managed_preview_gate") if isinstance(action.get("managed_preview_gate"), dict) else {}
+    if str(gate.get("reason") or "").strip():
+        return True
+    if isinstance(action.get("unblock_criteria"), dict):
+        return True
+    return bool(action.get("needed_resolution") or action.get("blocker_codes"))
+
+
+def _activation_successor_proposal_from_rows(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    status_label: str,
+) -> dict[str, Any]:
+    title = _activation_successor_issue_title(action, decision, status_label=status_label)
+    family = str(action.get("local_action_family") or decision.get("local_action_family") or "optimization")
+    next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "inspect-local-evidence")
+    blocker_codes = [str(item) for item in action.get("blocker_codes") or [] if str(item or "").strip()]
+    gate = action.get("managed_preview_gate") if isinstance(action.get("managed_preview_gate"), dict) else {}
+    source_fingerprint = str(decision.get("source_fingerprint") or action.get("source_fingerprint") or "").strip()
+    action_fingerprint = str(decision.get("successor_action_fingerprint") or action.get("fingerprint") or "").strip()
+    status_text = "ready" if status_label == "status:ready" else "blocked"
+    evidence = [
+        f"Source metadata: {LOCAL_ACTIVATION_SUCCESSOR_DECISION_SCHEMA}",
+        f"Fingerprint: {source_fingerprint}",
+        f"Successor action fingerprint: {action_fingerprint}",
+        f"Local action family: {family}",
+        f"Decision: {decision.get('decision')}",
+        f"Issue worthy status: {decision.get('issue_worthy_status')}",
+        f"Preview verified: {decision.get('preview_verified')}",
+        f"Preview agreement status: {decision.get('preview_agreement_status')}",
+        f"Preview verification status: {decision.get('preview_verification_status')}",
+        f"Preview verification decision: {decision.get('preview_verification_decision')}",
+        f"Recommended next action: {next_action}",
+        f"Blocker codes: {json.dumps(blocker_codes)}",
+        f"Unblock reason: {action.get('unblock_reason')}",
+        f"Preview omitted reason: {decision.get('preview_omitted_reason')}",
+        f"Preview no-op reason: {decision.get('preview_no_op_reason')}",
+        f"Expected savings path: {action.get('expected_savings_path')}",
+        f"Acceptance metric: {action.get('acceptance_metric')}",
+        _activation_successor_privacy_evidence(action, decision),
+    ]
+    if isinstance(gate.get("health_gate"), dict):
+        health_gate = gate["health_gate"]
+        evidence.extend(
+            [
+                f"Preview health status: {health_gate.get('status')}",
+                f"Preview health reason: {health_gate.get('reason')}",
+                f"Preview health next action: {health_gate.get('next_action')}",
+            ]
+        )
+    if action.get("target_local_rule_file"):
+        evidence.append(f"Target local rule file: {action.get('target_local_rule_file')}")
+    if action.get("target_local_policy_section"):
+        evidence.append(f"Target local policy section: {action.get('target_local_policy_section')}")
+
+    return {
+        "repo": "lutzkuen/agentflow",
+        "title": title,
+        "labels": _activation_successor_issue_labels(action, status_label),
+        "proposal_source": "preview-verified-activation-successor",
+        "fingerprint": sanitize_value(source_fingerprint),
+        "successor_action_fingerprint": sanitize_value(action_fingerprint),
+        "expected_savings_path": sanitize_value(
+            action.get("expected_savings_path")
+            or "This converts activation successor evidence into a concrete local follow-up."
+        ),
+        "body": _issue_body(
+            title=title,
+            rationale=(
+                "The local activation successor queue contains a managed-preview-gated successor decision. "
+                f"This proposal turns the {status_text} successor into a GitHub-ready local follow-up "
+                "using only sanitized metadata."
+            ),
+            evidence=evidence,
+            implementation=[
+                "Start from the local_activation_successor_decision and matching successor action in the research plan.",
+                f"Implement or review the `{next_action}` follow-up for the `{family}` local action family.",
+                "Use local file-backed policy, dry-run, canary, rollback, or evidence modules only; do not call provider APIs or managed server APIs while generating the issue.",
+                "Keep policy writes disabled until the item-specific acceptance metric and preview/local gates allow it.",
+                "Record the outcome back into activation successor, preview, or burndown metadata so later research suppresses completed predecessors.",
+            ],
+            acceptance=[
+                str(action.get("acceptance_metric") or "The successor action is resolved with a measurable local metadata outcome."),
+                f"The next research plan reports source fingerprint {source_fingerprint} as progressed, suppressed, or blocked with a narrower reason.",
+                "The emitted issue includes labels, acceptance metric, expected savings path, sequencing notes, and metadata-only privacy flags.",
+                "Generated and follow-up evidence excludes raw prompts, provider bodies, absolute paths, request IDs, session IDs, cache keys, and individual candidate IDs.",
+            ],
+            savings_path=str(
+                action.get("expected_savings_path")
+                or "This converts the preview-verified activation loop into a self-refilling actionable backlog."
+            ),
+            sequencing=(
+                "Sequence after managed preview agreement is attached to successor decisions and before generic low-backlog research proposals for the same local action family."
+            ),
+        ),
+    }
+
+
+def _proposals_from_activation_successor_decisions(stats_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    queue = stats_summary.get("local_activation_next_action_queue")
+    if not isinstance(queue, dict):
+        return []
+    actions = queue.get("successor_actions")
+    if not isinstance(actions, list):
+        actions = build_local_activation_successor_actions(queue)
+    decisions = queue.get("successor_decisions")
+    if not isinstance(decisions, list):
+        decisions = build_local_activation_successor_decisions({"successor_actions": actions})
+    action_by_fingerprint = {
+        str(action.get("fingerprint")): action
+        for action in actions
+        if isinstance(action, dict) and str(action.get("fingerprint") or "").strip()
+    }
+    action_by_source = {
+        str(action.get("source_fingerprint")): action
+        for action in actions
+        if isinstance(action, dict) and str(action.get("source_fingerprint") or "").strip()
+    }
+    proposals: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        source = str(decision.get("source_fingerprint") or "").strip()
+        if not source or source in seen_sources:
+            continue
+        seen_sources.add(source)
+        action = action_by_fingerprint.get(str(decision.get("successor_action_fingerprint") or "")) or action_by_source.get(source)
+        if not isinstance(action, dict):
+            continue
+        decision_text = str(decision.get("decision") or "").strip()
+        issue_status = str(decision.get("issue_worthy_status") or "").strip()
+        if issue_status == "suppressed" or decision_text in {"keep-current-rule", "suppress-duplicate"}:
+            continue
+        preview_verified = bool(decision.get("preview_verified") or action.get("preview_verified"))
+        if preview_verified and issue_status in {"ready", "review"} and decision_text in {"ready", "review", "review-only"}:
+            proposals.append(
+                _activation_successor_proposal_from_rows(action, decision, status_label="status:ready")
+            )
+            continue
+        preview_status = str(decision.get("preview_agreement_status") or "").strip()
+        if (
+            preview_status
+            and preview_status != "not-previewed"
+            and decision_text in {"keep-blocked", "review-stale-preview"}
+            and _activation_successor_has_concrete_blocker(action, decision)
+        ):
+            proposals.append(
+                _activation_successor_proposal_from_rows(action, decision, status_label="status:blocked")
+            )
+    proposals.sort(
+        key=lambda proposal: (
+            _proposal_priority_score(_proposal_priority([str(label) for label in proposal.get("labels") or []])),
+            str(proposal.get("title") or ""),
+        )
+    )
+    return proposals
+
+
 def _preview_successor_summary(successor_actions: list[dict[str, Any]]) -> dict[str, Any]:
     family: dict[str, Counter[str]] = {}
     omitted_reasons: Counter[str] = Counter()
@@ -11317,10 +11559,16 @@ def _proposal_lever(proposal: dict[str, Any], candidate_by_title: dict[str, dict
     return "optimization"
 
 
-def _proposal_summary_source(title: str, candidate: dict[str, Any] | None) -> str:
+def _proposal_summary_source(title: str, candidate: dict[str, Any] | None, proposal: dict[str, Any] | None = None) -> str:
+    if isinstance(proposal, dict):
+        explicit = str(proposal.get("proposal_source") or "").strip()
+        if explicit:
+            return sanitize_value(explicit)
     if candidate is not None:
         return "ranked-optimization-candidate"
     title_l = title.lower()
+    if "activation successor" in title_l or "preview-verified successor" in title_l:
+        return "preview-verified-activation-successor"
     if "evidence-to-activation ledger" in title_l:
         return "evidence-to-activation-ledger"
     if "replay-ready cache cohort" in title_l or "cache replay" in title_l:
@@ -11332,6 +11580,7 @@ def _proposal_summary_source(title: str, candidate: dict[str, Any] | None) -> st
 
 def _proposal_source_score(source: str) -> int:
     return {
+        "preview-verified-activation-successor": 0,
         "evidence-to-activation-ledger": 0,
         "cache-replay-lifecycle": 1,
         "local-promotion-lifecycle": 1,
@@ -11374,7 +11623,7 @@ def _next_backlog_milestone(
         candidate = candidate_by_title.get(title)
         lever = _proposal_lever(proposal, candidate_by_title)
         priority = _proposal_priority(labels)
-        source = _proposal_summary_source(title, candidate)
+        source = _proposal_summary_source(title, candidate, proposal)
         dimension = _proposal_golden_path_readiness_dimension(proposal)
         issue_rows.append(
             {
@@ -11391,7 +11640,8 @@ def _next_backlog_milestone(
                 ),
                 "candidate_rank": _to_int(candidate.get("rank")) if candidate is not None else None,
                 "expected_savings_path": sanitize_value(
-                    (candidate or {}).get("estimated_savings_path")
+                    proposal.get("expected_savings_path")
+                    or (candidate or {}).get("estimated_savings_path")
                     or "Turn metadata-only local evidence into an implementation-ready follow-up."
                 ),
             }
@@ -12645,6 +12895,7 @@ def build_research_plan(
         openai_routing_proposal = _proposal_from_openai_routing_canary_feedback(summary)
         if openai_routing_proposal is not None:
             create_issues.append(openai_routing_proposal)
+        create_issues.extend(_proposals_from_activation_successor_decisions(summary))
         create_issues.extend(_proposals_from_optimization_candidates(optimization_candidates))
         repeated_actionable_diagnostics = [
             item for item in _actionable_diagnostics(candidate_diagnostics)

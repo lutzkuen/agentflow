@@ -2831,6 +2831,267 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw successor preview prompt must not leak", rendered)
         self.assertNotIn('"policy_files_written": true', rendered.lower())
 
+    def test_preview_verified_activation_successors_emit_github_ready_issue_proposals(self):
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:ready-routing",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "state": "review",
+                    "current_status": "review",
+                    "issue_worthy_status": "ready",
+                    "next_action": "draft-openai-routing-recovery-canary",
+                    "blocker_codes": ["semantic-quality-regression-observed"],
+                    "sample_count": 342,
+                    "applied_count": 26,
+                    "holdout_count": 22,
+                    "stage_allowed": True,
+                    "policy_files_written": False,
+                    "target_local_rule_file": "routing_rules.yaml",
+                    "target_local_policy_section": "routing.rules",
+                    "expected_savings_path": "Move preview-agreed routing evidence into a narrow local canary.",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 2,
+                    "fingerprint": "activation:cache-preview-blocked",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "state": "missing-evidence",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "collect-file-invalidation-evidence",
+                    "blocker_codes": ["invalidation-evidence-missing", "tools-present"],
+                    "sample_count": 113,
+                    "emits_cache_apply_action": False,
+                    "policy_files_written": False,
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "expected_savings_path": "Move tool-cache replay toward safe invalidation evidence.",
+                    "raw_prompt": "raw successor issue prompt must not leak",
+                    "request_id": "req-successor-issue-secret",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 3,
+                    "fingerprint": "activation:routing-keep-blocked",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "state": "keep-blocked",
+                    "current_status": "keep-blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "review-openai-routing-canary-blockers",
+                    "blocker_codes": ["semantic-quality-regression-observed"],
+                    "sample_count": 200,
+                    "applied_count": 20,
+                    "holdout_count": 20,
+                    "target_local_rule_file": "routing_rules.yaml",
+                    "target_local_policy_section": "routing.rules",
+                    "expected_savings_path": "Keep routing blocked until semantic regression clears.",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 4,
+                    "fingerprint": "activation:crunch-keep-active",
+                    "lever": "crunch",
+                    "local_action_family": "crunch",
+                    "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                    "state": "full-rollout-active",
+                    "current_status": "full-rollout",
+                    "issue_worthy_status": "review",
+                    "next_action": "keep-active",
+                    "blocker_codes": ["repeated-context-crunch-full-rollout-active"],
+                    "sample_count": 1883,
+                    "applied_count": 107,
+                    "holdout_count": 40,
+                    "duplicate_suppression": {
+                        "reason": "repeated-context-crunch-full-rollout-active",
+                        "suppresses_new_activation_issue": True,
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    },
+                    "target_local_rule_file": "crunch_rules.yaml",
+                    "target_local_policy_section": "crunch.rules",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 5,
+                    "fingerprint": "activation:closed-ready",
+                    "lever": "activation-feedback",
+                    "local_action_family": "activation-feedback",
+                    "evidence_schema": "agentflow.orchestrator_research_log_diagnostics.v1",
+                    "state": "review",
+                    "current_status": "review",
+                    "issue_worthy_status": "ready",
+                    "next_action": "classify-activation-feedback-blocker-for-local-action-ledger",
+                    "blocker_codes": ["activation-feedback-blocker-review"],
+                    "sample_count": 10,
+                    "stage_allowed": True,
+                    "expected_savings_path": "Convert repeated activation-feedback diagnostics into bounded local action.",
+                },
+            ],
+        }
+        outcomes = []
+        for source, family, schema, status, next_action, decision, reason_key, reason_value in [
+            (
+                "activation:ready-routing",
+                "routing",
+                "agentflow.openai_routing_promotion_decision_report.v1",
+                "review",
+                "draft-openai-routing-recovery-canary",
+                "review-only-recommendation",
+                "reason_codes",
+                ["managed-preview-would-draft-recovery"],
+            ),
+            (
+                "activation:routing-keep-blocked",
+                "routing",
+                "agentflow.openai_routing_promotion_decision_report.v1",
+                "keep-blocked",
+                "review-openai-routing-canary-blockers",
+                "keep-blocked",
+                "omitted_reason",
+                "semantic-quality-regression-observed",
+            ),
+            (
+                "activation:closed-ready",
+                "activation-feedback",
+                "agentflow.orchestrator_research_log_diagnostics.v1",
+                "review",
+                "classify-activation-feedback-blocker-for-local-action-ledger",
+                "review-only-recommendation",
+                "reason_codes",
+                ["managed-preview-would-classify-feedback"],
+            ),
+        ]:
+            outcome = {
+                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": f"managed-preview-outcome:{source}",
+                "source_fingerprint": source,
+                "preview_ref": f"preview:{source}",
+                "local_action_family": family,
+                "evidence_schema": schema,
+                "current_status": status,
+                "classification": "review-only",
+                "decision": decision,
+                "next_action": next_action,
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+            }
+            outcome[reason_key] = reason_value
+            outcomes.append(outcome)
+
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    701,
+                    "Closed activation successor predecessor",
+                    ["backlog", "status:ready", "core-feature"],
+                    state="CLOSED",
+                    closed="2026-06-11T08:20:00Z",
+                    body="Completed predecessor.\n\nFingerprint: activation:closed-ready\n",
+                )
+            ],
+            stats={
+                "calls": 1883,
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "status": "tracked",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": True,
+                    "summary": {
+                        "stored_preview_outcome_count": len(outcomes),
+                        "stale_count": 0,
+                        "missing_preview_decision_count": 0,
+                        "failed_closed_count": 0,
+                        "disagreement_count": 0,
+                    },
+                    "outcomes": outcomes,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "managed_activation_preview_health": {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": len(outcomes),
+                    "previewed_row_count": len(outcomes),
+                    "omitted_row_count": 1,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {
+                        "routing": 2,
+                        "activation-feedback": 1,
+                    },
+                    "omitted_counts_by_local_action_family": {"routing": 1},
+                    "top_omission_reasons": [
+                        {"reason_code": "semantic-quality-regression-observed", "count": 1}
+                    ],
+                    "top_rejection_reasons": [],
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        successor_proposals = [
+            item
+            for item in plan["backlog_changes"]["create_issues"]
+            if item.get("proposal_source") == "preview-verified-activation-successor"
+        ]
+        by_fingerprint = {item["fingerprint"]: item for item in successor_proposals}
+        self.assertIn("activation:ready-routing", by_fingerprint)
+        self.assertIn("activation:cache-preview-blocked", by_fingerprint)
+        self.assertIn("activation:routing-keep-blocked", by_fingerprint)
+        self.assertNotIn("activation:crunch-keep-active", by_fingerprint)
+        self.assertNotIn("activation:closed-ready", by_fingerprint)
+        self.assertEqual(by_fingerprint["activation:ready-routing"]["labels"][by_fingerprint["activation:ready-routing"]["labels"].index("status:ready")], "status:ready")
+        self.assertIn("routing", by_fingerprint["activation:ready-routing"]["labels"])
+        self.assertIn("status:blocked", by_fingerprint["activation:cache-preview-blocked"]["labels"])
+        self.assertIn("cache", by_fingerprint["activation:cache-preview-blocked"]["labels"])
+        self.assertIn("status:blocked", by_fingerprint["activation:routing-keep-blocked"]["labels"])
+        for proposal in successor_proposals:
+            self.assertIn("## Rationale", proposal["body"])
+            self.assertIn("## Implementation Approach", proposal["body"])
+            self.assertIn("## Acceptance Criteria", proposal["body"])
+            self.assertIn("## Expected Savings Path Or Bottleneck Removed", proposal["body"])
+            self.assertIn("## Labels", proposal["body"])
+            self.assertIn("Privacy flags:", proposal["body"])
+            self.assertIn("Acceptance metric:", proposal["body"])
+            self.assertIn("Expected savings path:", proposal["body"])
+
+        milestone_sources = {
+            item["title"]: item["source"]
+            for item in plan["evidence"]["next_backlog_milestone"]["issues"]
+        }
+        for proposal in successor_proposals:
+            self.assertEqual(milestone_sources[proposal["title"]], "preview-verified-activation-successor")
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertIn("activation:ready-routing", rendered)
+        self.assertIn("activation:cache-preview-blocked", rendered)
+        self.assertIn("activation:routing-keep-blocked", rendered)
+        self.assertNotIn("activation:crunch-keep-active", " ".join(item["fingerprint"] for item in successor_proposals))
+        self.assertNotIn("activation:closed-ready", " ".join(item["fingerprint"] for item in successor_proposals))
+        self.assertNotIn("raw successor issue prompt must not leak", rendered)
+        self.assertNotIn("req-successor-issue-secret", rendered)
+
     def test_activation_burndown_report_ranks_successors_after_keep_active_crunch(self):
         ledger = {
             "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
