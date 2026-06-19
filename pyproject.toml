@@ -69,6 +69,7 @@ agentflow-openai-cache-replay-report = "agentflow_proxy.cli:openai_cache_replay_
 agentflow-openai-cache-replay-blocker-outcomes = "agentflow_proxy.cli:openai_cache_replay_blocker_outcomes_main"
 agentflow-crunch-blocker-outcomes = "agentflow_proxy.cli:crunch_blocker_outcomes_main"
 agentflow-activation-safety-stop-burndown = "agentflow_proxy.cli:activation_safety_stop_burndown_main"
+agentflow-anthropic-routing-safety-stop-unblock-drill = "agentflow_proxy.cli:anthropic_routing_safety_stop_unblock_drill_main"
 agentflow-optimization-action-ledger = "agentflow_proxy.cli:optimization_action_ledger_main"
 agentflow-optimization-coordinator-dry-run = "agentflow_proxy.cli:optimization_coordinator_dry_run_main"
 agentflow-provider-tool-adoption-report = "agentflow_proxy.cli:provider_tool_adoption_report_main"

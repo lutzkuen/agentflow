@@ -118,6 +118,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     openai_cache_replay_blocker_outcomes_cli,
     crunch_blocker_outcomes_cli,
     activation_safety_stop_burndown_cli,
+    anthropic_routing_safety_stop_unblock_drill_cli,
     optimization_action_ledger_cli,
     optimization_coordinator_dry_run_cli,
     provider_tool_adoption_report_cli,
@@ -895,6 +896,10 @@ def crunch_blocker_outcomes_main() -> None:
 
 def activation_safety_stop_burndown_main() -> None:
     raise SystemExit(activation_safety_stop_burndown_cli())
+
+
+def anthropic_routing_safety_stop_unblock_drill_main() -> None:
+    raise SystemExit(anthropic_routing_safety_stop_unblock_drill_cli())
 
 
 def optimization_action_ledger_main() -> None:
