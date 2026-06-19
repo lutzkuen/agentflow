@@ -688,6 +688,193 @@ max_text_chars: 8000
         self.assertEqual(meta["user_visible_model"], "gpt-5.4")
         self.assertEqual(meta["shadow_model"], "gpt-5.4-mini")
 
+    def test_shadow_candidate_pass_through_selects_among_multiple_explicit_candidates(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+profile_id: multi-candidate-openai-shadow-v1
+mode: shadow_candidate_pass_through
+enabled: true
+sample_rate: 1.0
+daily_budget_usd: 10.0
+providers:
+  - openai
+source_surfaces:
+  - openai_responses
+routing_candidates:
+  - candidate_id: adjacent-gpt55-to-gpt54
+    requested_model: gpt-5.5
+    routed_model: gpt-5.4
+    provider: openai
+    source_surface: openai_responses
+    category: chat
+    sample_weight: 1
+  - candidate_id: aggressive-gpt55-to-mini
+    requested_model: gpt-5.5
+    routed_model: gpt-5-mini
+    provider: openai
+    source_surface: openai_responses
+    category: chat
+    sample_weight: 1
+categories:
+  - chat
+max_text_chars: 8000
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+
+            first = manual.routing_experiment_decision(
+                {"model": "gpt-5.5", "input": "short prompt"},
+                {
+                    "requested_model": "gpt-5.5",
+                    "routed_model": "gpt-5.5",
+                    "category": "chat",
+                    "text_chars": 1200,
+                },
+                stream=False,
+                provider="openai",
+                source_surface="openai_responses",
+                random_value=lambda: 0.0,
+            )
+            second = manual.routing_experiment_decision(
+                {"model": "gpt-5.5", "input": "short prompt"},
+                {
+                    "requested_model": "gpt-5.5",
+                    "routed_model": "gpt-5.5",
+                    "category": "chat",
+                    "text_chars": 1200,
+                },
+                stream=False,
+                provider="openai",
+                source_surface="openai_responses",
+                random_value=lambda: 0.0,
+            )
+
+        self.assertTrue(first["sampled"])
+        self.assertEqual(first["candidate_policy_shape"], "routing_candidates")
+        self.assertEqual(first["eligible_candidate_count"], 2)
+        self.assertEqual(
+            first["eligible_candidate_ids"],
+            ["adjacent-gpt55-to-gpt54", "aggressive-gpt55-to-mini"],
+        )
+        self.assertEqual(first["candidate_selector"], "weighted-metadata-hash")
+        self.assertEqual(first["candidate_id"], "aggressive-gpt55-to-mini")
+        self.assertEqual(first["routed_model"], "gpt-5-mini")
+        self.assertEqual(first["candidate_id"], second["candidate_id"])
+        self.assertEqual(first["candidate_selector_basis"]["provider"], "openai")
+        self.assertEqual(first["candidate_selector_basis"]["source_surface"], "openai_responses")
+        self.assertFalse(first["privacy"]["raw_prompts_included"])
+        self.assertFalse(first["privacy"]["request_ids_included"])
+        self.assertFalse(first["privacy"]["session_ids_included"])
+        self.assertFalse(first["privacy"]["file_paths_included"])
+        self.assertFalse(first["privacy"]["provider_bodies_included"])
+        self.assertFalse(first["privacy"]["tool_payloads_included"])
+        rendered = stable_json({
+            "selector_basis": first["candidate_selector_basis"],
+            "selected_candidate": first["selected_candidate"],
+            "privacy": first["privacy"],
+        })
+        self.assertNotIn("raw prompt", rendered)
+        self.assertNotIn("/tmp/", rendered)
+        self.assertNotIn("req-secret", rendered)
+        self.assertNotIn("session-secret", rendered)
+
+    def test_routing_candidates_filter_codex_and_generic_openai_gpt55_paths(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+profile_id: gpt55-pathway-matrix-shadow-v1
+mode: shadow_candidate_pass_through
+enabled: true
+sample_rate: 1.0
+daily_budget_usd: 10.0
+providers:
+  - openai
+source_surfaces:
+  - codex_turn
+  - openai_responses
+routing_candidates:
+  - candidate_id: codex-gpt55-to-gpt53-codex
+    requested_model: gpt-5.5
+    routed_model: gpt-5.3-codex
+    provider: openai
+    source_surface: codex_turn
+    app_family: codex
+    category: codex-turn
+    workflow_phase: tool-execution
+  - candidate_id: generic-gpt55-to-gpt54
+    requested_model: gpt-5.5
+    routed_model: gpt-5.4
+    provider: openai
+    source_surface: openai_responses
+    app_family: generic_openai
+    category: chat
+  - candidate_id: generic-gpt55-to-mini
+    requested_model: gpt-5.5
+    routed_model: gpt-5-mini
+    provider: openai
+    source_surface: openai_responses
+    app_family: generic_openai
+    category: short-completion
+categories:
+  - codex-turn
+  - chat
+  - short-completion
+workflow_phases: []
+max_text_chars: 8000
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+
+            codex = manual.routing_experiment_decision(
+                {"model": "gpt-5.5", "input": "edit files"},
+                {
+                    "requested_model": "gpt-5.5",
+                    "routed_model": "gpt-5.5",
+                    "category": "codex-turn",
+                    "workflow_phase": "tool-execution",
+                    "text_chars": 4000,
+                },
+                stream=False,
+                provider="openai",
+                source_surface="codex_turn",
+                random_value=lambda: 0.0,
+            )
+            generic = manual.routing_experiment_decision(
+                {"model": "gpt-5.5", "input": "hello"},
+                {
+                    "requested_model": "gpt-5.5",
+                    "routed_model": "gpt-5.5",
+                    "category": "chat",
+                    "workflow_phase": "summary",
+                    "text_chars": 1000,
+                },
+                stream=False,
+                provider="openai",
+                source_surface="openai_responses",
+                random_value=lambda: 0.0,
+            )
+
+        self.assertTrue(codex["sampled"])
+        self.assertEqual(codex["candidate_id"], "codex-gpt55-to-gpt53-codex")
+        self.assertEqual(codex["shadow_model"], "gpt-5.3-codex")
+        self.assertEqual(codex["eligible_candidate_count"], 1)
+        self.assertEqual(codex["candidate_selector_basis"]["app_family"], "codex")
+        self.assertTrue(generic["sampled"])
+        self.assertEqual(generic["candidate_id"], "generic-gpt55-to-gpt54")
+        self.assertEqual(generic["shadow_model"], "gpt-5.4")
+        self.assertEqual(generic["candidate_selector_basis"]["app_family"], "generic_openai")
+
     def test_shadow_candidate_pass_through_skips_unconfigured_anthropic_pair(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

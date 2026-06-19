@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import random
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -68,6 +69,32 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _as_non_negative_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_non_negative_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_candidate_id(value: Any, *, fallback: str) -> str:
+    public = _public_label(value, fallback=fallback)
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "-", public).strip("-")
+    if not cleaned or cleaned == "redacted-metadata-label":
+        return fallback
+    return cleaned[:96]
+
+
 def _default_experiment_policy() -> dict[str, Any]:
     return {
         "profile_id": "first-safe-openai-codex-claude-shadow-pass-through-v1",
@@ -88,6 +115,7 @@ def _default_experiment_policy() -> dict[str, Any]:
             {"requested_model": "gpt-5.4", "routed_model": "gpt-5.4-mini"},
             {"requested_model": "gpt-5.5", "routed_model": "gpt-5-mini"},
         ],
+        "routing_candidates": [],
         "workflow_phases": [],
         "categories": ["chat", "short-completion", "codex-turn"],
         "similarity_threshold": 0.86,
@@ -129,6 +157,70 @@ def _scope_rank(scope: str) -> int:
     }.get(scope, 0)
 
 
+def _candidate_id(candidate: dict[str, Any], index: int, *, shape: str) -> str:
+    explicit = (
+        candidate.get("candidate_id")
+        or candidate.get("policy_id")
+        or candidate.get("recommendation_id")
+        or candidate.get("id")
+    )
+    requested = str(candidate.get("requested_model") or "requested").strip() or "requested"
+    routed = str(candidate.get("routed_model") or "routed").strip() or "routed"
+    fallback = f"{shape}:{requested}->{routed}:{index + 1}"
+    return _safe_candidate_id(explicit, fallback=fallback)
+
+
+def _clean_routing_candidate(raw: dict[str, Any], index: int, *, shape: str) -> dict[str, Any] | None:
+    requested = str(raw.get("requested_model") or raw.get("requested") or "").strip()
+    routed = str(
+        raw.get("routed_model")
+        or raw.get("routed")
+        or raw.get("target_model")
+        or raw.get("candidate_target_model")
+        or ""
+    ).strip()
+    if not requested or not routed:
+        return None
+    candidate: dict[str, Any] = {
+        "candidate_id": _candidate_id(raw, index, shape=shape),
+        "requested_model": requested,
+        "routed_model": routed,
+        "policy_shape": shape,
+    }
+    for key in ("provider", "source_surface", "app_family", "category", "workflow_phase"):
+        if raw.get(key) not in (None, ""):
+            candidate[key] = str(raw[key])
+    if raw.get("stream") is not None:
+        candidate["stream"] = _as_bool(raw.get("stream"), False)
+    for key in ("min_text_chars", "max_text_chars", "min_input_tokens", "max_input_tokens"):
+        parsed = _as_non_negative_int(raw.get(key))
+        if parsed is not None:
+            candidate[key] = parsed
+    sample_weight = _as_non_negative_float(raw.get("sample_weight"))
+    if sample_weight is not None:
+        candidate["sample_weight"] = sample_weight
+    sample_rate = _as_non_negative_float(raw.get("sample_rate"))
+    if sample_rate is not None:
+        candidate["sample_rate"] = min(1.0, sample_rate)
+    label = _public_label(raw.get("label"), fallback="")
+    if label:
+        candidate["label"] = label
+    return candidate
+
+
+def _clean_routing_candidates(raw_candidates: Any, *, shape: str) -> list[dict[str, Any]]:
+    if not isinstance(raw_candidates, list):
+        return []
+    candidates: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_candidates):
+        if not isinstance(raw, dict):
+            continue
+        candidate = _clean_routing_candidate(raw, index, shape=shape)
+        if candidate is not None:
+            candidates.append(candidate)
+    return candidates
+
+
 def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
     if data.get("profile_id") not in (None, ""):
         policy["profile_id"] = str(data["profile_id"])
@@ -152,22 +244,17 @@ def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str
             policy[key] = [str(c) for c in values if c is not None]
     pairs = data.get("model_pairs")
     if isinstance(pairs, list):
-        clean_pairs: list[dict[str, str]] = []
-        for pair in pairs:
-            if not isinstance(pair, dict):
-                continue
-            requested = str(pair.get("requested_model") or pair.get("requested") or "").strip()
-            routed = str(pair.get("routed_model") or pair.get("routed") or "").strip()
-            if requested and routed:
-                clean_pairs.append({"requested_model": requested, "routed_model": routed})
-        policy["model_pairs"] = clean_pairs
+        policy["model_pairs"] = _clean_routing_candidates(pairs, shape="model_pairs")
     elif data.get("requested_model") is not None and data.get("routed_model") is not None:
         policy["model_pairs"] = [
-            {
-                "requested_model": str(data["requested_model"]),
-                "routed_model": str(data["routed_model"]),
-            }
+            _clean_routing_candidate(data, 0, shape="model_pairs")
         ]
+        policy["model_pairs"] = [item for item in policy["model_pairs"] if item is not None]
+    routing_candidates = data.get("routing_candidates")
+    if routing_candidates is None:
+        routing_candidates = data.get("candidates")
+    if isinstance(routing_candidates, list):
+        policy["routing_candidates"] = _clean_routing_candidates(routing_candidates, shape="routing_candidates")
     categories = data.get("categories")
     if isinstance(categories, list):
         policy["categories"] = [str(c) for c in categories if c is not None]
@@ -390,18 +477,295 @@ def _today_shadow_spend_usd(
 
 
 def _model_pair_allowed(requested: str, routed: str) -> bool:
-    pairs = ROUTING_EXPERIMENT_POLICY.get("model_pairs") or []
-    if not pairs:
+    candidates = _all_routing_candidates()
+    if not candidates:
         return True
-    for pair in pairs:
-        if not isinstance(pair, dict):
-            continue
-        if str(pair.get("requested_model") or "") == requested and str(pair.get("routed_model") or "") == routed:
+    for candidate in candidates:
+        if str(candidate.get("requested_model") or "") == requested and str(candidate.get("routed_model") or "") == routed:
             return True
     return False
 
 
-def _route_down_candidate_for_requested(requested: str) -> str | None:
+def _all_routing_candidates() -> list[dict[str, Any]]:
+    configured = [
+        dict(item)
+        for item in ROUTING_EXPERIMENT_POLICY.get("routing_candidates") or []
+        if isinstance(item, dict)
+    ]
+    if configured:
+        return configured
+    return [
+        dict(item)
+        for item in ROUTING_EXPERIMENT_POLICY.get("model_pairs") or []
+        if isinstance(item, dict)
+    ]
+
+
+def _input_tokens_from_routing(routing_meta: dict[str, Any], body: dict[str, Any]) -> int:
+    for source in (routing_meta, body):
+        for key in ("input_tokens_est", "input_tokens", "actual_input_tokens"):
+            value = source.get(key) if isinstance(source, dict) else None
+            parsed = _as_non_negative_int(value)
+            if parsed is not None:
+                return parsed
+    return 0
+
+
+def _candidate_matches(
+    candidate: dict[str, Any],
+    *,
+    requested: str,
+    provider: str,
+    source_surface: str,
+    app_family: str,
+    category: str,
+    workflow_phase: str,
+    stream: bool,
+    text_chars: int,
+    input_tokens: int,
+) -> bool:
+    if str(candidate.get("requested_model") or "") != requested:
+        return False
+    routed = str(candidate.get("routed_model") or "").strip()
+    if not routed or routed == requested:
+        return False
+    exact_fields = {
+        "provider": provider,
+        "source_surface": source_surface,
+        "app_family": app_family,
+        "category": category,
+        "workflow_phase": workflow_phase,
+    }
+    for key, actual in exact_fields.items():
+        expected = candidate.get(key)
+        if expected not in (None, "") and str(expected) != str(actual):
+            return False
+    if "stream" in candidate and bool(candidate.get("stream")) != bool(stream):
+        return False
+    min_text = _as_non_negative_int(candidate.get("min_text_chars"))
+    if min_text is not None and text_chars < min_text:
+        return False
+    max_text = _as_non_negative_int(candidate.get("max_text_chars"))
+    if max_text is not None and max_text > 0 and text_chars > max_text:
+        return False
+    min_tokens = _as_non_negative_int(candidate.get("min_input_tokens"))
+    if min_tokens is not None and input_tokens < min_tokens:
+        return False
+    max_tokens = _as_non_negative_int(candidate.get("max_input_tokens"))
+    if max_tokens is not None and max_tokens > 0 and input_tokens > max_tokens:
+        return False
+    return True
+
+
+def _eligible_routing_candidates(
+    *,
+    requested: str,
+    provider: str,
+    source_surface: str,
+    category: str,
+    workflow_phase: str,
+    stream: bool,
+    text_chars: int,
+    input_tokens: int,
+) -> list[dict[str, Any]]:
+    app_family = _app_family(provider, source_surface, requested)
+    return [
+        candidate
+        for candidate in _all_routing_candidates()
+        if _candidate_matches(
+            candidate,
+            requested=requested,
+            provider=provider,
+            source_surface=source_surface,
+            app_family=app_family,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=stream,
+            text_chars=text_chars,
+            input_tokens=input_tokens,
+        )
+    ]
+
+
+def _candidate_selector_basis(
+    *,
+    requested: str,
+    provider: str,
+    source_surface: str,
+    category: str,
+    workflow_phase: str,
+    stream: bool,
+    text_chars: int,
+    input_tokens: int,
+) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "source_surface": source_surface,
+        "app_family": _app_family(provider, source_surface, requested),
+        "requested_model": requested,
+        "category": category,
+        "workflow_phase": workflow_phase,
+        "stream": bool(stream),
+        "text_chars_bucket": _text_chars_bucket(text_chars),
+        "input_tokens_bucket": _text_chars_bucket(input_tokens * 4),
+    }
+
+
+def _select_weighted_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    selector_basis: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    if not candidates:
+        return None, "none"
+    if len(candidates) == 1:
+        return candidates[0], "single-eligible-candidate"
+    if all(str(item.get("policy_shape") or "") == "model_pairs" for item in candidates):
+        return candidates[0], "legacy-model-pairs-first-match"
+    weighted: list[tuple[dict[str, Any], float]] = []
+    for candidate in candidates:
+        weight = _as_non_negative_float(candidate.get("sample_weight"))
+        if weight is None:
+            weight = 1.0
+        if weight > 0:
+            weighted.append((candidate, weight))
+    if not weighted:
+        return None, "all-candidate-weights-zero"
+    total = sum(weight for _, weight in weighted)
+    digest = hashlib.sha256(stable_json(selector_basis).encode("utf-8")).hexdigest()
+    slot = (int(digest[:16], 16) / float(16**16)) * total
+    cumulative = 0.0
+    for candidate, weight in weighted:
+        cumulative += weight
+        if slot <= cumulative:
+            return candidate, "weighted-metadata-hash"
+    return weighted[-1][0], "weighted-metadata-hash"
+
+
+def _route_down_candidate_for_requested(
+    requested: str,
+    *,
+    provider: str = "",
+    source_surface: str = "",
+    category: str = "",
+    workflow_phase: str = "",
+    stream: bool = False,
+    text_chars: int = 0,
+    input_tokens: int = 0,
+) -> str | None:
+    eligible = _eligible_routing_candidates(
+        requested=requested,
+        provider=provider,
+        source_surface=source_surface,
+        category=category,
+        workflow_phase=workflow_phase,
+        stream=stream,
+        text_chars=text_chars,
+        input_tokens=input_tokens,
+    )
+    selector_basis = _candidate_selector_basis(
+        requested=requested,
+        provider=provider,
+        source_surface=source_surface,
+        category=category,
+        workflow_phase=workflow_phase,
+        stream=stream,
+        text_chars=text_chars,
+        input_tokens=input_tokens,
+    )
+    selected, _ = _select_weighted_candidate(eligible, selector_basis=selector_basis)
+    if selected is None:
+        return None
+    return str(selected.get("routed_model") or "").strip() or None
+
+
+def _applied_candidate_for_pair(
+    requested: str,
+    routed: str,
+    *,
+    provider: str,
+    source_surface: str,
+    category: str,
+    workflow_phase: str,
+    stream: bool,
+    text_chars: int,
+    input_tokens: int,
+) -> dict[str, Any] | None:
+    for candidate in _eligible_routing_candidates(
+        requested=requested,
+        provider=provider,
+        source_surface=source_surface,
+        category=category,
+        workflow_phase=workflow_phase,
+        stream=stream,
+        text_chars=text_chars,
+        input_tokens=input_tokens,
+    ):
+        if str(candidate.get("routed_model") or "") == routed:
+            return candidate
+    return None
+
+
+def _candidate_public_metadata(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(candidate, dict):
+        return None
+    public = {
+        "candidate_id": candidate.get("candidate_id"),
+        "requested_model": candidate.get("requested_model"),
+        "routed_model": candidate.get("routed_model"),
+        "policy_shape": candidate.get("policy_shape"),
+        "sample_weight": candidate.get("sample_weight", 1.0),
+    }
+    for key in ("provider", "source_surface", "app_family", "category", "workflow_phase", "stream", "sample_rate"):
+        if key in candidate:
+            public[key] = candidate[key]
+    return public
+
+
+def _route_down_candidate_selection(
+    requested: str,
+    *,
+    provider: str,
+    source_surface: str,
+    category: str,
+    workflow_phase: str,
+    stream: bool,
+    text_chars: int,
+    input_tokens: int,
+) -> dict[str, Any]:
+    eligible = _eligible_routing_candidates(
+        requested=requested,
+        provider=provider,
+        source_surface=source_surface,
+        category=category,
+        workflow_phase=workflow_phase,
+        stream=stream,
+        text_chars=text_chars,
+        input_tokens=input_tokens,
+    )
+    basis = _candidate_selector_basis(
+        requested=requested,
+        provider=provider,
+        source_surface=source_surface,
+        category=category,
+        workflow_phase=workflow_phase,
+        stream=stream,
+        text_chars=text_chars,
+        input_tokens=input_tokens,
+    )
+    selected, selector = _select_weighted_candidate(eligible, selector_basis=basis)
+    policy_shape = "routing_candidates" if ROUTING_EXPERIMENT_POLICY.get("routing_candidates") else "model_pairs"
+    return {
+        "selected": selected,
+        "eligible_candidate_count": len(eligible),
+        "eligible_candidate_ids": [candidate.get("candidate_id") for candidate in eligible],
+        "candidate_selector": selector,
+        "candidate_selector_basis": basis,
+        "candidate_policy_shape": policy_shape,
+    }
+
+
+def _legacy_route_down_candidate_for_requested(requested: str) -> str | None:
     for pair in ROUTING_EXPERIMENT_POLICY.get("model_pairs") or []:
         if not isinstance(pair, dict):
             continue
@@ -447,6 +811,7 @@ def routing_experiment_decision(
     category = str(routing_meta.get("category") or "")
     workflow_phase = str(routing_meta.get("workflow_phase") or "")
     text_chars = int(routing_meta.get("text_chars") or 0)
+    input_tokens = _input_tokens_from_routing(routing_meta, body)
     categories = set(str(c) for c in ROUTING_EXPERIMENT_POLICY.get("categories") or [])
     controls = _effective_experiment_controls(
         provider=provider,
@@ -504,11 +869,28 @@ def routing_experiment_decision(
         "category": category,
         "workflow_phase": workflow_phase,
         "text_chars": text_chars,
+        "input_tokens_est": input_tokens,
         "min_text_chars": int(controls["min_text_chars"]),
         "min_text_chars_scope": controls["min_text_chars_scope"],
         "max_text_chars": int(controls["max_text_chars"]),
         "max_text_chars_scope": controls["max_text_chars_scope"],
         "eligibility_overrides_applied": controls["applied_overrides"],
+        "candidate_id": None,
+        "selected_candidate": None,
+        "eligible_candidate_count": 0,
+        "eligible_candidate_ids": [],
+        "candidate_selector": "not-evaluated",
+        "candidate_policy_shape": "routing_candidates" if ROUTING_EXPERIMENT_POLICY.get("routing_candidates") else "model_pairs",
+        "candidate_selector_basis": _candidate_selector_basis(
+            requested=requested,
+            provider=provider,
+            source_surface=source_surface,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=stream,
+            text_chars=text_chars,
+            input_tokens=input_tokens,
+        ),
         "privacy": {
             "metadata_only": True,
             "raw_prompts_included": False,
@@ -516,6 +898,8 @@ def routing_experiment_decision(
             "request_ids_included": False,
             "session_ids_included": False,
             "file_paths_included": False,
+            "provider_bodies_included": False,
+            "tool_payloads_included": False,
         },
     }
     if not ROUTING_EXPERIMENT_ENABLED:
@@ -541,6 +925,7 @@ def routing_experiment_decision(
             meta["reason"] = "already-routed-down"
             return meta
         candidate = None
+        selected_candidate: dict[str, Any] | None = None
         force_shadow = False
         if provider == "openai" and openai_canary.get("status") == "applied":
             candidate = str(openai_canary.get("shadow_model") or openai_canary.get("target_model") or "").strip() or None
@@ -548,17 +933,43 @@ def routing_experiment_decision(
             meta["trigger"] = "openai-local-routing-canary"
             meta["canary_policy_id"] = openai_canary.get("policy_id")
             meta["canary_cohort"] = openai_canary.get("cohort")
+            if force_shadow:
+                meta["candidate_selector"] = "forced-openai-local-routing-canary"
         elif provider == "openai" and managed.get("selected_for_shadow_evaluation") is True:
             candidate = str(managed.get("shadow_model") or managed.get("would_route_model") or "").strip() or None
             force_shadow = candidate is not None
             meta["trigger"] = "managed-policy-routing-canary"
             meta["managed_policy_id"] = managed.get("policy_id")
             meta["canary_cohort"] = (managed.get("local_canary") or {}).get("cohort") if isinstance(managed.get("local_canary"), dict) else None
+            if force_shadow:
+                meta["candidate_selector"] = "forced-managed-policy-routing-canary"
         if candidate is None:
-            candidate = _route_down_candidate_for_requested(requested)
+            selection = _route_down_candidate_selection(
+                requested,
+                provider=provider,
+                source_surface=source_surface,
+                category=category,
+                workflow_phase=workflow_phase,
+                stream=stream,
+                text_chars=text_chars,
+                input_tokens=input_tokens,
+            )
+            selected_candidate = selection["selected"]
+            candidate = str((selected_candidate or {}).get("routed_model") or "").strip() or None
+            meta["eligible_candidate_count"] = selection["eligible_candidate_count"]
+            meta["eligible_candidate_ids"] = selection["eligible_candidate_ids"]
+            meta["candidate_selector"] = selection["candidate_selector"]
+            meta["candidate_selector_basis"] = selection["candidate_selector_basis"]
+            meta["candidate_policy_shape"] = selection["candidate_policy_shape"]
         if not candidate:
             meta["reason"] = "model-pair-not-enabled"
             return meta
+        if selected_candidate is not None:
+            meta["candidate_id"] = selected_candidate.get("candidate_id")
+            meta["selected_candidate"] = _candidate_public_metadata(selected_candidate)
+            if selected_candidate.get("sample_rate") is not None and not force_shadow:
+                meta["sample_rate"] = round(float(selected_candidate["sample_rate"]), 6)
+                meta["sample_rate_scope"] = "candidate"
         meta["routed_model"] = candidate
         meta["shadow_model"] = candidate
         meta["primary_model"] = requested
@@ -570,9 +981,40 @@ def routing_experiment_decision(
         if requested == routed:
             meta["reason"] = "not-routed-down"
             return meta
-        if not _model_pair_allowed(requested, routed):
+        applied_candidate = _applied_candidate_for_pair(
+            requested,
+            routed,
+            provider=provider,
+            source_surface=source_surface,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=stream,
+            text_chars=text_chars,
+            input_tokens=input_tokens,
+        )
+        if applied_candidate is None:
             meta["reason"] = "model-pair-not-enabled"
             return meta
+        selection = _route_down_candidate_selection(
+            requested,
+            provider=provider,
+            source_surface=source_surface,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=stream,
+            text_chars=text_chars,
+            input_tokens=input_tokens,
+        )
+        meta["eligible_candidate_count"] = selection["eligible_candidate_count"]
+        meta["eligible_candidate_ids"] = selection["eligible_candidate_ids"]
+        meta["candidate_selector"] = "applied-routed-pair-match"
+        meta["candidate_selector_basis"] = selection["candidate_selector_basis"]
+        meta["candidate_policy_shape"] = selection["candidate_policy_shape"]
+        meta["candidate_id"] = applied_candidate.get("candidate_id")
+        meta["selected_candidate"] = _candidate_public_metadata(applied_candidate)
+        if applied_candidate.get("sample_rate") is not None:
+            meta["sample_rate"] = round(float(applied_candidate["sample_rate"]), 6)
+            meta["sample_rate_scope"] = "candidate"
     else:
         meta["reason"] = "unsupported-mode"
         return meta
@@ -604,7 +1046,7 @@ def routing_experiment_decision(
     if budget_spent >= budget_limit and not force_shadow:
         meta["reason"] = "daily-budget-exhausted"
         return meta
-    sample_rate = float(controls["sample_rate"])
+    sample_rate = float(meta["sample_rate"])
     if sample_rate <= 0 and not force_shadow:
         meta["reason"] = "sample-rate-zero"
         return meta
@@ -707,7 +1149,7 @@ def _app_family(provider: Any, source_surface: Any, requested_model: Any) -> str
     model_l = str(requested_model or "").lower()
     if provider_l == "anthropic" or surface_l == "anthropic_messages":
         return "claude_code"
-    if provider_l == "openai" and "codex" in model_l:
+    if provider_l == "openai" and (surface_l == "codex_turn" or "codex" in model_l):
         return "codex"
     if provider_l == "openai":
         return "generic_openai"
@@ -821,6 +1263,10 @@ def routing_experiment_feedback_features(
         "shadow_model": shadow_model,
         "category": category,
         "workflow_phase": routing_meta.get("workflow_phase") or experiment_meta.get("workflow_phase"),
+        "candidate_id": experiment_meta.get("candidate_id"),
+        "eligible_candidate_count": experiment_meta.get("eligible_candidate_count"),
+        "candidate_selector": experiment_meta.get("candidate_selector"),
+        "candidate_policy_shape": experiment_meta.get("candidate_policy_shape"),
         "candidate_bucket": f"{category}:{requested_model}->{routed_model}",
         "text_chars_bucket": _text_chars_bucket(experiment_meta.get("text_chars") or routing_meta.get("text_chars")),
         "routing_reason": routing_meta.get("reason"),
@@ -899,6 +1345,10 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
             "candidate_bucket": (
                 f"{feedback_features.get('category') or 'unknown'}:{requested_family or 'unknown'}->{routed_family or 'unknown'}"
             ),
+            "candidate_id": feedback_features.get("candidate_id"),
+            "eligible_candidate_count": feedback_features.get("eligible_candidate_count"),
+            "candidate_selector": feedback_features.get("candidate_selector"),
+            "candidate_policy_shape": feedback_features.get("candidate_policy_shape"),
             "text_chars_bucket": feedback_features.get("text_chars_bucket"),
             "requested_model_family": requested_family,
             "routed_model_family": routed_family,
