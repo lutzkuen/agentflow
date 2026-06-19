@@ -49,39 +49,41 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         missing: bool = False,
         failed_closed: bool = False,
         disagreement: bool = False,
+        candidate_fingerprint: str | None = None,
     ) -> dict[str, object]:
+        outcome = {
+            "schema": "agentflow.managed_activation_preview_outcome.v1",
+            "handoff_ref": "managed-preview-handoff:routing",
+            "preview_ref": "managed-preview:openai-routing",
+            "local_action_family": "routing",
+            "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+            "decision": "review-only-recommendation",
+            "classification": classification,
+            "next_action": next_action,
+            "preview_age_hours": 2.0,
+            "stale": stale,
+            "missing_preview_decision": missing,
+            "failed_closed": failed_closed,
+            "disagrees_with_local_evidence": disagreement,
+            "review_only": True,
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+            },
+        }
+        if candidate_fingerprint is not None:
+            outcome["candidate_fingerprint"] = candidate_fingerprint
         return {
             "schema": "agentflow.managed_activation_preview_outcomes.v1",
             "status": "tracked",
-            "outcomes": [
-                {
-                    "schema": "agentflow.managed_activation_preview_outcome.v1",
-                    "handoff_ref": "managed-preview-handoff:routing",
-                    "preview_ref": "managed-preview:openai-routing",
-                    "local_action_family": "routing",
-                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
-                    "decision": "review-only-recommendation",
-                    "classification": classification,
-                    "next_action": next_action,
-                    "preview_age_hours": 2.0,
-                    "stale": stale,
-                    "missing_preview_decision": missing,
-                    "failed_closed": failed_closed,
-                    "disagrees_with_local_evidence": disagreement,
-                    "review_only": True,
-                    "policy_files_written": False,
-                    "provider_calls_made": False,
-                    "managed_server_calls_made": False,
-                    "privacy": {
-                        "metadata_only": True,
-                        "aggregate_only": True,
-                        "raw_prompts_included": False,
-                        "provider_bodies_included": False,
-                        "request_ids_included": False,
-                        "session_ids_included": False,
-                    },
-                }
-            ],
+            "outcomes": [outcome],
             "privacy": {
                 "metadata_only": True,
                 "aggregate_only": True,
@@ -92,18 +94,50 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
             },
         }
 
+    def _managed_health(self, *, stale: bool = False) -> dict[str, object]:
+        return {
+            "schema": "agentflow.managed_activation_preview_health.v1",
+            "status": "tracked",
+            "accepted_batch_count": 1,
+            "previewed_row_count": 1,
+            "latest_preview_age_hours": 80.0 if stale else 2.0,
+            "stale_after_hours": 72.0,
+            "stale": stale,
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+            },
+        }
+
+    def _semantic_recovery_action(self) -> dict[str, object]:
+        return {
+            "schema": "agentflow.openai_routing_semantic_regression_action.v1",
+            "observed": True,
+            "status": "classified",
+            "action_classification": "narrow-canary-shape",
+            "deterministic_next_action": "draft-narrow-openai-routing-canary-shape",
+            "reason_codes": ["semantic-quality-regression-observed"],
+        }
+
     def test_mixed_regressed_and_clean_cohorts_emit_one_review_only_narrower_canary(self) -> None:
         report = {
             "schema": "agentflow.openai_routing_semantic_regression_fixture.v1",
             "generated_at": utc_now(),
             "cohorts": [
-                self._cohort(
-                    category="tool-light",
-                    applied_count=25,
-                    holdout_count=21,
-                    reason_codes=["semantic-quality-regression-observed"],
-                    savings_per_1000=4.375,
-                ),
+                {
+                    **self._cohort(
+                        category="tool-light",
+                        applied_count=25,
+                        holdout_count=21,
+                        reason_codes=["semantic-quality-regression-observed"],
+                        savings_per_1000=4.375,
+                    ),
+                    "semantic_regression_action": self._semantic_recovery_action(),
+                },
                 self._cohort(
                     category="chat",
                     applied_count=12,
@@ -124,6 +158,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         result = build_openai_routing_narrow_canary_review(
             report,
             managed_preview_outcomes=self._managed_outcomes(),
+            managed_preview_health=self._managed_health(),
             canary_fraction=0.07,
             holdout_fraction=0.13,
         )
@@ -143,12 +178,12 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         self.assertTrue(draft["review_only"])
         self.assertFalse(draft["active_policy_changed"])
         self.assertFalse(draft["policy_files_written"])
-        self.assertEqual(draft["category"], "chat")
+        self.assertEqual(draft["category"], "tool-light")
         self.assertEqual(draft["requested_model"], "gpt-5.4")
         self.assertEqual(draft["target_model"], "gpt-5.4-mini")
         self.assertEqual(draft["canary_fraction"], 0.07)
         self.assertEqual(draft["holdout_fraction"], 0.13)
-        self.assertEqual(draft["proposed_rule_conditions"]["category"], "chat")
+        self.assertEqual(draft["proposed_rule_conditions"]["category"], "tool-light")
         self.assertEqual(draft["rollback_condition"]["rollback_action_type"], "disable_openai_routing_narrow_canary")
         self.assertFalse(draft["privacy"]["provider_calls_made"])
         self.assertFalse(draft["privacy"]["managed_server_calls_made"])
@@ -157,17 +192,17 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         self.assertEqual(draft["recovery_plan"]["blocker_status"], "cleared")
         self.assertTrue(draft["managed_preview_agreement"]["agreed"])
         self.assertEqual(draft["managed_preview_agreement"]["reason"], "local-managed-preview-agree")
-        self.assertEqual(draft["recovery_plan"]["coverage"]["applied_count"], 12)
-        self.assertEqual(draft["recovery_plan"]["coverage"]["holdout_count"], 14)
+        self.assertEqual(draft["managed_preview_agreement"]["health_gate"]["status"], "fresh-preview-health")
+        self.assertEqual(draft["recovery_plan"]["coverage"]["applied_count"], 25)
+        self.assertEqual(draft["recovery_plan"]["coverage"]["holdout_count"], 21)
         self.assertFalse(draft["recovery_plan"]["rollback_no_write"]["policy_files_written"])
         self.assertFalse(draft["recovery_plan"]["rollback_no_write"]["active_policy_changed"])
         self.assertEqual(result["recovery_plan"]["selected_option"], "restage-review-only")
         self.assertEqual(result["summary"]["recovery_selected_option"], "restage-review-only")
 
-        regressed = result["regressed_cohorts"][0]
-        self.assertEqual(regressed["reason"], "semantic-quality-regression-observed")
-        self.assertEqual(regressed["category"], "tool-light")
-        self.assertIn("semantic-quality-regression-observed", regressed["reason_codes"])
+        self.assertEqual(result["summary"]["regressed_cohort_count"], 1)
+        clean_omission = next(item for item in result["omitted"] if item["category"] == "chat")
+        self.assertEqual(clean_omission["reason"], "not-semantic-regression-row")
 
     def test_only_regressed_cohorts_keep_blocked_without_policy_writes(self) -> None:
         report = {
@@ -237,6 +272,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         result = build_openai_routing_narrow_canary_review(
             report,
             managed_preview_outcomes=self._managed_outcomes(next_action="draft-openai-routing-recovery-canary"),
+            managed_preview_health=self._managed_health(),
         )
 
         self.assertEqual(result["decision"], "draft-narrower-canary")
@@ -264,6 +300,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
                 holdout_count=21,
                 reason_codes=["semantic-quality-regression-observed"],
             ),
+            "candidate_fingerprint": "candidate:semantic-row",
             "semantic_regression_action": {
                 "schema": "agentflow.openai_routing_semantic_regression_action.v1",
                 "observed": True,
@@ -284,13 +321,19 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
                 "stale-managed-preview",
                 base_cohort,
                 self._managed_outcomes(stale=True, classification="stale-preview"),
-                "stale-managed-preview-outcome",
+                "managed-preview-health-stale",
             ),
             (
                 "missing-holdout",
                 {**base_cohort, "holdout_count": 0, "matched_count": 25},
                 self._managed_outcomes(),
                 "missing-holdout-coverage",
+            ),
+            (
+                "candidate-fingerprint-mismatch",
+                base_cohort,
+                self._managed_outcomes(candidate_fingerprint="candidate:other-row"),
+                "missing-managed-preview-outcome",
             ),
             (
                 "active-semantic-regression",
@@ -315,6 +358,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     managed_preview_outcomes=managed_outcomes,
+                    managed_preview_health=self._managed_health(stale=expected_reason == "managed-preview-health-stale"),
                 )
 
                 self.assertEqual(result["decision"], "keep-blocked")
@@ -329,7 +373,13 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
             "generated_at": utc_now(),
             "cohorts": [
                 {
-                    **self._cohort(category="tool-light", applied_count=25, holdout_count=21),
+                    **self._cohort(
+                        category="tool-light",
+                        applied_count=25,
+                        holdout_count=21,
+                        reason_codes=["semantic-quality-regression-observed"],
+                    ),
+                    "semantic_regression_action": self._semantic_recovery_action(),
                     "openai_canary_lifecycle_evidence": {
                         "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
                         "status": "matched",
@@ -354,6 +404,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         result = build_openai_routing_narrow_canary_review(
             report,
             managed_preview_outcomes=self._managed_outcomes(),
+            managed_preview_health=self._managed_health(),
         )
 
         self.assertEqual(result["decision"], "draft-narrower-canary")
@@ -377,12 +428,15 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
             "schema": "agentflow.openai_routing_semantic_regression_fixture.v1",
             "generated_at": utc_now(),
             "cohorts": [
-                self._cohort(
-                    category="tool-light",
-                    applied_count=25,
-                    holdout_count=21,
-                    reason_codes=["semantic-quality-regression-observed"],
-                ),
+                {
+                    **self._cohort(
+                        category="tool-light",
+                        applied_count=25,
+                        holdout_count=21,
+                        reason_codes=["semantic-quality-regression-observed"],
+                    ),
+                    "semantic_regression_action": self._semantic_recovery_action(),
+                },
                 self._cohort(category="chat", applied_count=8, holdout_count=9, savings_per_1000=3.0),
             ],
             "privacy": {"metadata_only": True, "aggregate_only": True},
@@ -396,6 +450,8 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
                 [
                     "-",
                     "--managed-preview-outcomes",
+                    str(managed_path),
+                    "--managed-preview-health",
                     str(managed_path),
                     "--canary-fraction",
                     "0.05",

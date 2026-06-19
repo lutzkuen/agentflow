@@ -16,6 +16,7 @@ RECOVERY_COVERAGE_SCHEMA = "agentflow.openai_routing_recovery_coverage.v1"
 RECOVERY_ROLLBACK_SCHEMA = "agentflow.openai_routing_recovery_rollback_no_write.v1"
 RECOVERY_STALE_EVIDENCE_SCHEMA = "agentflow.openai_routing_recovery_stale_evidence.v1"
 MANAGED_PREVIEW_AGREEMENT_SCHEMA = "agentflow.openai_routing_managed_preview_agreement.v1"
+MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "agentflow.openai_routing_managed_preview_health_gate.v1"
 PRIVACY = {
     "local_only": True,
     "metadata_only": True,
@@ -459,20 +460,175 @@ def _managed_preview_outcomes(report: dict[str, Any] | None) -> list[dict[str, A
     return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
-def _managed_preview_agreement(
+def _preview_age_hours(report: dict[str, Any]) -> float | None:
+    for key in ("latest_preview_age_hours", "preview_age_hours", "age_hours"):
+        if report.get(key) is not None:
+            return _as_float(report.get(key))
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    for key in ("latest_preview_age_hours", "preview_age_hours", "age_hours"):
+        if summary.get(key) is not None:
+            return _as_float(summary.get(key))
+    return None
+
+
+def _managed_preview_health_gate(
+    managed_preview_health: dict[str, Any] | None,
+    managed_preview_outcomes: dict[str, Any] | None,
+) -> dict[str, Any]:
+    report = managed_preview_health if isinstance(managed_preview_health, dict) else {}
+    if not report and isinstance(managed_preview_outcomes, dict):
+        report = managed_preview_outcomes
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    status_text = _string(report.get("status") or summary.get("status")).lower()
+    outcomes = _managed_preview_outcomes(managed_preview_outcomes)
+    stale_after_hours = _as_float(
+        report.get("stale_after_hours")
+        or summary.get("stale_after_hours")
+        or (managed_preview_outcomes or {}).get("stale_after_hours")
+        or 72.0,
+        72.0,
+    )
+    age_hours = _preview_age_hours(report)
+    stale = bool(report.get("stale") or summary.get("stale") or (age_hours is not None and age_hours > stale_after_hours))
+    accepted_batch_count = _as_int(
+        report.get("accepted_batch_count")
+        or summary.get("accepted_batch_count")
+        or (1 if status_text in {"tracked", "previewed", "ok"} else 0)
+    )
+    previewed_row_count = _as_int(
+        report.get("previewed_row_count")
+        or summary.get("previewed_row_count")
+        or summary.get("stored_preview_outcome_count")
+        or len(outcomes)
+    )
+    rejected_batch_count = _as_int(report.get("rejected_batch_count") or summary.get("rejected_batch_count"))
+    rejected_row_count = _as_int(report.get("rejected_row_count") or summary.get("rejected_row_count"))
+    validation_error_count = _as_int(report.get("validation_error_count") or summary.get("validation_error_count"))
+    if not report:
+        status = "missing-preview-health"
+        reason = "managed-preview-health-missing"
+        next_action = "refresh-managed-activation-preview"
+    elif status_text in {"blocked", "error", "unavailable"} or rejected_batch_count > 0 or rejected_row_count > 0 or validation_error_count > 0:
+        status = "rejected-preview-health"
+        reason = "managed-preview-health-rejected"
+        next_action = "review-managed-activation-preview-rejection"
+    elif stale:
+        status = "stale-preview-health"
+        reason = "managed-preview-health-stale"
+        next_action = "refresh-managed-activation-preview"
+    elif accepted_batch_count <= 0 or previewed_row_count <= 0:
+        status = "incomplete-preview-health"
+        reason = "managed-preview-health-incomplete"
+        next_action = "refresh-managed-activation-preview"
+    else:
+        status = "fresh-preview-health"
+        reason = "managed-preview-health-fresh"
+        next_action = "use-managed-preview-gate"
+    return {
+        "schema": MANAGED_PREVIEW_HEALTH_GATE_SCHEMA,
+        "status": status,
+        "passed": status == "fresh-preview-health",
+        "reason": reason,
+        "next_action": next_action,
+        "accepted_batch_count": accepted_batch_count,
+        "previewed_row_count": previewed_row_count,
+        "rejected_batch_count": rejected_batch_count,
+        "rejected_row_count": rejected_row_count,
+        "validation_error_count": validation_error_count,
+        "latest_preview_age_hours": age_hours,
+        "stale_after_hours": stale_after_hours,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": bool(report.get("managed_server_calls_made") or summary.get("managed_server_calls_made")),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _cohort_match_refs(cohort: dict[str, Any]) -> set[str]:
+    refs = {
+        _string(cohort.get("fingerprint")),
+        _string(cohort.get("source_fingerprint")),
+        _string(cohort.get("candidate_fingerprint")),
+        _string(cohort.get("target_candidate_id")),
+        _fingerprint(cohort),
+    }
+    candidate_set = cohort.get("candidate_set") if isinstance(cohort.get("candidate_set"), dict) else {}
+    refs.add(_string(candidate_set.get("candidate_fingerprint")))
+    return {ref for ref in refs if ref}
+
+
+def _outcome_match_score(cohort: dict[str, Any], outcome: dict[str, Any]) -> int:
+    if _string(outcome.get("local_action_family")).lower() != "routing":
+        return -1
+    if _string(outcome.get("evidence_schema")) != "agentflow.openai_routing_promotion_decision_report.v1":
+        return -1
+    cohort_refs = _cohort_match_refs(cohort)
+    outcome_candidate_refs = {
+        _string(outcome.get("candidate_fingerprint")),
+        _string(outcome.get("source_candidate_fingerprint")),
+    }
+    outcome_source_refs = {
+        _string(outcome.get("source_fingerprint")),
+        _string(outcome.get("source_activation_fingerprint")),
+        _string(outcome.get("activation_fingerprint")),
+        _string(outcome.get("local_activation_fingerprint")),
+    }
+    outcome_candidate_refs = {ref for ref in outcome_candidate_refs if ref}
+    outcome_source_refs = {ref for ref in outcome_source_refs if ref}
+    if outcome_candidate_refs and cohort_refs.isdisjoint(outcome_candidate_refs):
+        return -1
+    score = 10
+    if outcome_candidate_refs and not cohort_refs.isdisjoint(outcome_candidate_refs):
+        score += 30
+    elif outcome_source_refs and not cohort_refs.isdisjoint(outcome_source_refs):
+        score += 30
+    requested, target = _safe_model_pair(cohort)
+    cohort_values = {
+        "source_surface": _string(cohort.get("source_surface")),
+        "endpoint": _string(cohort.get("endpoint")),
+        "category": _string(cohort.get("category")),
+        "requested_model": requested,
+        "target_model": target,
+    }
+    for key in ("source_surface", "endpoint", "category", "requested_model", "target_model"):
+        outcome_value = _string(outcome.get(key))
+        cohort_value = cohort_values[key]
+        if outcome_value and cohort_value and outcome_value == cohort_value:
+            score += 1
+    return score
+
+
+def _managed_preview_outcome_for_cohort(
     cohort: dict[str, Any],
     managed_preview_outcomes: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    best: tuple[int, float, dict[str, Any]] | None = None
+    for row in _managed_preview_outcomes(managed_preview_outcomes):
+        score = _outcome_match_score(cohort, row)
+        if score < 0:
+            continue
+        age = _as_float(row.get("preview_age_hours"))
+        rank_key = (score, -age, row)
+        if best is None or rank_key[:2] > best[:2]:
+            best = rank_key
+    return best[2] if best else {}
+
+
+def _managed_preview_agreement(
+    cohort: dict[str, Any],
+    managed_preview_outcomes: dict[str, Any] | None,
+    managed_preview_health: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     local_next_action = _local_recovery_next_action(cohort)
     normalized_local = _normalized_recovery_action(local_next_action)
-    rows = [
-        row
-        for row in _managed_preview_outcomes(managed_preview_outcomes)
-        if _string(row.get("local_action_family")).lower() == "routing"
-        and _string(row.get("evidence_schema")) == "agentflow.openai_routing_promotion_decision_report.v1"
-    ]
-    selected = rows[0] if rows else {}
-    if not selected:
+    health_gate = _managed_preview_health_gate(managed_preview_health, managed_preview_outcomes)
+    selected = _managed_preview_outcome_for_cohort(cohort, managed_preview_outcomes)
+    if not health_gate["passed"]:
+        reason = str(health_gate["reason"])
+        normalized_managed = "blocked"
+        agreed = False
+    elif not selected:
         reason = "missing-managed-preview-outcome"
         normalized_managed = "missing"
         agreed = False
@@ -510,6 +666,7 @@ def _managed_preview_agreement(
         "managed_preview_age_hours": selected.get("preview_age_hours") if selected else None,
         "handoff_ref": selected.get("handoff_ref") if selected else None,
         "preview_ref": selected.get("preview_ref") if selected else None,
+        "health_gate": health_gate,
         "review_only": True,
         "policy_files_written": False,
         "provider_calls_made": False,
@@ -556,12 +713,15 @@ def _cohort_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
         "estimated_savings_per_1000_calls_usd": bucket.get("estimated_savings_per_1000_calls_usd"),
         "projected_savings_usd": bucket.get("projected_savings_usd"),
         "openai_canary_lifecycle_evidence": lifecycle,
+        "candidate_fingerprint": bucket.get("candidate_fingerprint"),
+        "candidate_set": bucket.get("candidate_set") if isinstance(bucket.get("candidate_set"), dict) else {},
     }
 
 
 def _cohort_from_promotion_decision(decision: dict[str, Any]) -> dict[str, Any]:
     target = decision.get("target") if isinstance(decision.get("target"), dict) else {}
     lifecycle = decision.get("lifecycle") if isinstance(decision.get("lifecycle"), dict) else {}
+    candidate_set = decision.get("candidate_set") if isinstance(decision.get("candidate_set"), dict) else {}
     return {
         "source_schema": "agentflow.openai_routing_promotion_decision.v1",
         "provider": "openai",
@@ -588,6 +748,8 @@ def _cohort_from_promotion_decision(decision: dict[str, Any]) -> dict[str, Any]:
         else {},
         "disabled_local_policy_rule": decision.get("disabled_local_policy_rule") if isinstance(decision.get("disabled_local_policy_rule"), dict) else {},
         "lifecycle": lifecycle,
+        "candidate_fingerprint": decision.get("candidate_fingerprint") or candidate_set.get("candidate_fingerprint"),
+        "candidate_set": candidate_set,
     }
 
 
@@ -673,16 +835,16 @@ def _omission_reason(cohort: dict[str, Any]) -> str | None:
         return "missing-holdout-coverage"
     if _stale_evidence(cohort).get("stale"):
         return "stale-openai-routing-evidence"
-    semantic = _semantic_recovery_classification(cohort)
-    if semantic["observed"]:
-        if semantic["classification"] == "narrower-canary":
-            return None
-        if semantic["classification"] == "rollback":
-            return "semantic-regression-rollback-required"
-        return "semantic-quality-regression-observed"
     if target.lower() == requested.lower():
         return "not-a-downgrade"
-    return None
+    semantic = _semantic_recovery_classification(cohort)
+    if not semantic["observed"]:
+        return "not-semantic-regression-row"
+    if semantic["classification"] == "narrower-canary":
+        return None
+    if semantic["classification"] == "rollback":
+        return "semantic-regression-rollback-required"
+    return "semantic-quality-regression-observed"
 
 
 def _draft_for_cohort(
@@ -777,6 +939,7 @@ def build_openai_routing_narrow_canary_review(
     report: dict[str, Any],
     *,
     managed_preview_outcomes: dict[str, Any] | None = None,
+    managed_preview_health: dict[str, Any] | None = None,
     canary_fraction: float = 0.05,
     holdout_fraction: float = 0.10,
     top_candidates: int = 1,
@@ -800,7 +963,7 @@ def build_openai_routing_narrow_canary_review(
         if reason is not None:
             omitted.append(_omission(cohort, reason, path=f"$.cohorts[{index}]"))
             continue
-        agreement = _managed_preview_agreement(cohort, managed_preview_outcomes)
+        agreement = _managed_preview_agreement(cohort, managed_preview_outcomes, managed_preview_health)
         managed_agreements.append(agreement)
         if not agreement["agreed"]:
             omitted_item = _omission(cohort, str(agreement["reason"]), path=f"$.cohorts[{index}]")
@@ -827,7 +990,7 @@ def build_openai_routing_narrow_canary_review(
             holdout_fraction=holdout_fraction,
             managed_preview_agreement=cohort.get("managed_preview_agreement")
             if isinstance(cohort.get("managed_preview_agreement"), dict)
-            else _managed_preview_agreement(cohort, managed_preview_outcomes),
+            else _managed_preview_agreement(cohort, managed_preview_outcomes, managed_preview_health),
         )
         for cohort in eligible[:limit]
     ]
@@ -842,6 +1005,7 @@ def build_openai_routing_narrow_canary_review(
         {"value": key, "count": value}
         for key, value in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))
     ]
+    semantic_regression_row_count = sum(1 for item in cohorts if _semantic_recovery_classification(item)["observed"])
     regressed = [item for item in omitted if item.get("reason") == "semantic-quality-regression-observed"]
     recovery_plan = drafts[0].get("recovery_plan") if drafts else None
     if recovery_plan is None and regressed:
@@ -870,7 +1034,8 @@ def build_openai_routing_narrow_canary_review(
             "eligible_clean_cohort_count": len(eligible),
             "draft_count": len(drafts),
             "omitted_count": len(omitted),
-            "regressed_cohort_count": len(regressed),
+            "regressed_cohort_count": semantic_regression_row_count,
+            "blocked_regressed_cohort_count": len(regressed),
             "managed_preview_agreement_count": sum(1 for item in managed_agreements if item.get("agreed")),
             "managed_preview_disagreement_count": sum(1 for item in managed_agreements if not item.get("agreed")),
             "managed_preview_required": True,

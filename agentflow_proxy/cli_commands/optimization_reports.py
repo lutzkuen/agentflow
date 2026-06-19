@@ -2424,6 +2424,10 @@ def openai_routing_narrow_canary_review_cli(
         ),
     )
     parser.add_argument(
+        "--managed-preview-health",
+        help="Managed activation preview health report JSON path. If omitted, freshness is inferred from preview outcomes metadata.",
+    )
+    parser.add_argument(
         "--db",
         default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
         help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
@@ -2450,6 +2454,11 @@ def openai_routing_narrow_canary_review_cli(
                 managed_preview_outcomes = build_managed_activation_preview_outcomes_report(store, limit=args.limit)
             finally:
                 store.conn.close()
+        managed_preview_health = (
+            _read_json_input(str(args.managed_preview_health), stdin=stdin)
+            if args.managed_preview_health
+            else None
+        )
     else:
         from agentflow_proxy.openai_routing_report import build_openai_routing_promotion_decision_report
         from agentflow_proxy.managed_activation_preview_outcomes import build_managed_activation_preview_outcomes_report
@@ -2462,6 +2471,11 @@ def openai_routing_narrow_canary_review_cli(
                 if args.managed_preview_outcomes
                 else build_managed_activation_preview_outcomes_report(store, limit=args.limit)
             )
+            managed_preview_health = (
+                _read_json_input(str(args.managed_preview_health), stdin=stdin)
+                if args.managed_preview_health
+                else None
+            )
         finally:
             store.conn.close()
 
@@ -2470,6 +2484,7 @@ def openai_routing_narrow_canary_review_cli(
     result = build_openai_routing_narrow_canary_review(
         report,
         managed_preview_outcomes=managed_preview_outcomes,
+        managed_preview_health=managed_preview_health,
         canary_fraction=args.canary_fraction,
         holdout_fraction=args.holdout_fraction,
         top_candidates=args.top_candidates,
