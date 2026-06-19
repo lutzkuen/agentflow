@@ -684,13 +684,21 @@ def local_activation_executor_cli(argv: Sequence[str] | None = None, *, stdout: 
         required=True,
         help="Path to an AgentFlow orchestrator research plan, activation queue, ledger, or burndown JSON.",
     )
+    parser.add_argument(
+        "--managed-handoff",
+        action="store_true",
+        help="Emit feature-only managed handoff rows for the local executor outcomes.",
+    )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     args = parser.parse_args(argv)
 
     stdout = stdout if stdout is not None else sys.stdout
     stderr = stderr if stderr is not None else sys.stderr
 
-    from agentflow_proxy.local_activation_executor import build_local_activation_executor_plan
+    from agentflow_proxy.local_activation_executor import (
+        build_local_activation_executor_managed_handoff,
+        build_local_activation_executor_plan,
+    )
     from agentflow_proxy.orchestrator_research import load_json_file, write_json
 
     try:
@@ -702,7 +710,11 @@ def local_activation_executor_cli(argv: Sequence[str] | None = None, *, stdout: 
         _write_json(stderr, {"ok": False, "error": {"type": "invalid_plan_json", "message": "plan JSON must be an object"}})
         return 1
 
-    report = build_local_activation_executor_plan(plan)
+    report = (
+        build_local_activation_executor_managed_handoff(plan)
+        if args.managed_handoff
+        else build_local_activation_executor_plan(plan)
+    )
     write_json(stdout, report, pretty=args.pretty)
     return 0
 

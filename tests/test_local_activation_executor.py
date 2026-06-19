@@ -6,7 +6,11 @@ from pathlib import Path
 import unittest
 
 from agentflow_proxy import cli
-from agentflow_proxy.local_activation_executor import build_local_activation_executor_plan
+from agentflow_proxy.local_activation_executor import (
+    build_local_activation_executor_managed_handoff,
+    build_local_activation_executor_plan,
+)
+from agentflow_proxy.managed_egress import managed_egress_violations
 
 
 NOW = datetime(2026, 6, 19, 5, 30, tzinfo=timezone.utc)
@@ -260,6 +264,67 @@ def _full_rollout_queue_plan(entry):
     }
 
 
+def _executor_handoff_fixture_plan():
+    plan = _full_rollout_queue_plan(_full_rollout_queue_entry())
+    plan["entries"].extend(
+        [
+            {
+                "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                "rank": 2,
+                "ledger_rank": 2,
+                "fingerprint": "activation:routing-blocked",
+                "lever": "routing",
+                "local_action_family": "routing",
+                "evidence_schema": "agentflow.activation_safety_stop_burndown.v1",
+                "current_status": "keep-blocked",
+                "state": "keep-blocked",
+                "successor_status": "keep-blocked",
+                "next_action": "keep-anthropic-routing-blocked-until-safety-stop-burndown",
+                "blocker_codes": ["anthropic-routing-safety-stop-local-canary-safety-stop-keep-blocked"],
+                "sample_count": 492,
+                "safety_stop_count": 492,
+                "source_surface": "anthropic_messages",
+                "endpoint": "/v1/messages",
+                "category": "tool-result",
+                "requested_model": "claude-sonnet-4-6",
+                "candidate_target_model": "claude-haiku-4-5-20251001",
+                "required_local_executor": "anthropic-routing-rules",
+                "target_local_policy_section": "routing.rules",
+                "target_local_rule_file": "routing_rules.yaml",
+                "session_id": "session-routing-secret",
+            },
+            {
+                "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                "rank": 3,
+                "ledger_rank": 3,
+                "fingerprint": "activation:cache-review",
+                "lever": "cache",
+                "local_action_family": "cache",
+                "evidence_schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+                "current_status": "review",
+                "state": "review",
+                "successor_status": "review-only",
+                "next_action": "review-cache-replay-canary-promotion-readiness",
+                "blocker_codes": [],
+                "sample_count": 102,
+                "applied_count": 30,
+                "holdout_count": 72,
+                "projected_savings_usd": 0.075373,
+                "realized_savings_usd": 0.0,
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "chat",
+                "target_local_policy_section": "cache.pattern_rules",
+                "target_local_rule_file": "cache_rules.yaml",
+                "cache_key": "cache-review-secret",
+                "file_path": "/tmp/private-cache-review.py",
+                "raw_prompt": "raw cache review prompt must not leak",
+            },
+        ]
+    )
+    return plan
+
+
 class LocalActivationExecutorTest(unittest.TestCase):
     def test_executor_plan_selects_one_safe_review_action(self):
         result = build_local_activation_executor_plan(_executor_fixture_plan(), now=NOW)
@@ -336,6 +401,83 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["schema"], "agentflow.local_activation_executor_plan.v1")
         self.assertEqual(result["summary"]["selected_action_count"], 1)
         self.assertEqual(result["selected_action"]["executor_next_action"], "review-openai-routing-canary-blockers")
+
+    def test_executor_managed_handoff_exports_feature_only_outcome_rows(self):
+        result = build_local_activation_executor_managed_handoff(
+            _executor_handoff_fixture_plan(),
+            now=NOW,
+        )
+
+        self.assertEqual(result["schema"], "agentflow.local_activation_managed_handoff.v1")
+        self.assertEqual(result["status"], "exported")
+        self.assertEqual(result["summary"]["handoff_row_count"], 3)
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+        self.assertFalse(result["policy_files_written"])
+        self.assertFalse(result["server_ingestion_required"])
+        self.assertTrue(result["feature_only"])
+        self.assertTrue(result["locally_executed"])
+        self.assertFalse(result["provider_forwarding"])
+        self.assertFalse(result["server_content_processing"])
+        self.assertFalse(result["managed_enforced"])
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(result["egress_guard"]["violation_count"], 0)
+        self.assertEqual(managed_egress_violations(result), [])
+
+        privacy = result["privacy"]
+        self.assertTrue(privacy["feature_only"])
+        self.assertTrue(privacy["metadata_only"])
+        self.assertTrue(privacy["aggregate_only"])
+        self.assertFalse(privacy["raw_prompts_included"])
+        self.assertFalse(privacy["provider_bodies_included"])
+        self.assertFalse(privacy["request_ids_included"])
+        self.assertFalse(privacy["session_ids_included"])
+        self.assertFalse(privacy["cache_keys_included"])
+        self.assertFalse(privacy["absolute_paths_included"])
+        self.assertFalse(privacy["policy_file_contents_included"])
+
+        by_family = {row["local_action_family"]: row for row in result["rows"]}
+        self.assertEqual(set(by_family), {"crunch", "routing", "cache"})
+        self.assertEqual(by_family["crunch"]["executor_action_class"], "keep-current-rule")
+        self.assertEqual(by_family["crunch"]["activation_outcome"], "keep-active")
+        self.assertEqual(by_family["crunch"]["coverage"]["applied_count"], 107)
+        self.assertEqual(by_family["crunch"]["coverage"]["holdout_count"], 40)
+        self.assertEqual(by_family["crunch"]["coverage"]["safety_stop_count"], 0)
+        self.assertEqual(by_family["crunch"]["coverage"]["rollback_count"], 0)
+        self.assertEqual(by_family["routing"]["executor_action_class"], "keep-blocked")
+        self.assertEqual(by_family["routing"]["executor_next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
+        self.assertEqual(by_family["routing"]["coverage"]["safety_stop_count"], 492)
+        self.assertEqual(by_family["cache"]["executor_action_class"], "review-only")
+        self.assertEqual(by_family["cache"]["executor_next_action"], "review-cache-replay-canary-promotion-readiness")
+        self.assertEqual(by_family["cache"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertTrue(by_family["cache"]["handoff_ref"].startswith("handoff:"))
+        self.assertNotIn("fingerprint", by_family["cache"])
+        self.assertNotIn("request_id", by_family["cache"])
+        self.assertNotIn("session_id", by_family["routing"])
+        self.assertNotIn("cache_key", by_family["cache"])
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("session-routing-secret", rendered)
+        self.assertNotIn("cache-review-secret", rendered)
+        self.assertNotIn("/tmp/private-cache-review.py", rendered)
+        self.assertNotIn("raw cache review prompt must not leak", rendered)
+
+    def test_local_activation_executor_cli_emits_managed_handoff(self):
+        with TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.json"
+            plan_path.write_text(json.dumps(_executor_handoff_fixture_plan()), encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.local_activation_executor_cli(
+                ["--plan-json", str(plan_path), "--managed-handoff", "--pretty"],
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["schema"], "agentflow.local_activation_managed_handoff.v1")
+        self.assertEqual(result["summary"]["handoff_row_count"], 3)
+        self.assertEqual(result["egress_guard"]["status"], "passed")
 
     def test_full_rollout_crunch_collapses_to_durable_keep_current_rule_outcome(self):
         result = build_local_activation_executor_plan(

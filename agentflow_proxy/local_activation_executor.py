@@ -9,12 +9,16 @@ from agentflow_proxy.orchestrator_research import (
     build_activation_burndown_report,
     sanitize_value,
 )
+from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.public_metadata import public_id
 
 
 SCHEMA = "agentflow.local_activation_executor_plan.v1"
 ENTRY_SCHEMA = "agentflow.local_activation_executor_plan_entry.v1"
 PRIVACY_SCHEMA = "agentflow.local_activation_executor_privacy.v1"
+HANDOFF_SCHEMA = "agentflow.local_activation_managed_handoff.v1"
+HANDOFF_ROW_SCHEMA = "agentflow.local_activation_managed_handoff_row.v1"
+HANDOFF_PRIVACY_SCHEMA = "agentflow.local_activation_managed_handoff_privacy.v1"
 
 SAFE_SELECTABLE_CLASSES = {"draft-local-policy", "review-only", "retire"}
 
@@ -59,6 +63,23 @@ def _privacy() -> dict[str, Any]:
         "managed_server_calls_made": False,
         "policy_files_written": False,
     }
+
+
+def _handoff_privacy() -> dict[str, Any]:
+    privacy = _privacy()
+    privacy.update(
+        {
+            "schema": HANDOFF_PRIVACY_SCHEMA,
+            "feature_only": True,
+            "locally_executed": True,
+            "content_free": True,
+            "provider_forwarding": False,
+            "server_content_processing": False,
+            "managed_enforced": False,
+            "server_ingestion_required": False,
+        }
+    )
+    return privacy
 
 
 def _input_to_burndown(source: dict[str, Any], *, now: datetime | None) -> dict[str, Any]:
@@ -433,3 +454,192 @@ def build_local_activation_executor_plan(
         "privacy": _privacy(),
     }
     return sanitize_value(result)
+
+
+def _handoff_ref(entry: dict[str, Any], *, prefix: str = "handoff") -> str:
+    material = {
+        "executor": entry.get("fingerprint"),
+        "source": entry.get("source_fingerprint"),
+        "family": entry.get("local_action_family"),
+        "action": entry.get("executor_action_class"),
+        "next_action": entry.get("executor_next_action"),
+        "target": entry.get("target_local_rule_file"),
+    }
+    return public_id(json.dumps(material, sort_keys=True), prefix=prefix) or f"{prefix}:unknown"
+
+
+def _public_ref(value: Any, *, prefix: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return public_id(text, prefix=prefix, fallback=None)
+
+
+def _handoff_row(entry: dict[str, Any]) -> dict[str, Any]:
+    coverage = {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "sample_count": _as_int(entry.get("sample_count")),
+        "applied_count": _as_int(entry.get("applied_count")),
+        "holdout_count": _as_int(entry.get("holdout_count")),
+        "skipped_count": _as_int(entry.get("skipped_count")),
+        "fallback_count": _as_int(entry.get("fallback_count")),
+        "retry_count": _as_int(entry.get("retry_count")),
+        "rollback_count": _as_int(entry.get("rollback_count")),
+        "safety_stop_count": _as_int(entry.get("safety_stop_count")),
+        "error_rate_delta": round(_as_float(entry.get("error_rate_delta")), 8),
+        "retry_rate_delta": round(_as_float(entry.get("retry_rate_delta")), 8),
+        "fallback_rate_delta": round(_as_float(entry.get("fallback_rate_delta")), 8),
+    }
+    savings = {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "projected_saved_tokens": _as_int(entry.get("projected_saved_tokens")),
+        "observed_saved_tokens": _as_int(entry.get("observed_saved_tokens")),
+        "projected_savings_usd": round(_as_float(entry.get("projected_savings_usd")), 8),
+        "realized_savings_usd": round(_as_float(entry.get("realized_savings_usd")), 8),
+        "observed_savings_usd": round(_as_float(entry.get("observed_savings_usd")), 8),
+    }
+    row = {
+        "schema": HANDOFF_ROW_SCHEMA,
+        "rank": _as_int(entry.get("rank")),
+        "handoff_ref": _handoff_ref(entry),
+        "source_executor_ref": _public_ref(entry.get("fingerprint"), prefix="executor-ref"),
+        "source_activation_ref": _public_ref(entry.get("source_fingerprint"), prefix="activation-ref"),
+        "source_successor_ref": _public_ref(entry.get("source_successor_fingerprint"), prefix="successor-ref"),
+        "managed_dependency": "optional",
+        "locally_executed": True,
+        "feature_only": True,
+        "server_content_processing": False,
+        "provider_forwarding": False,
+        "managed_enforced": False,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "local_action_family": sanitize_value(entry.get("local_action_family") or "unknown"),
+        "lever": sanitize_value(entry.get("lever") or entry.get("local_action_family") or "unknown"),
+        "executor_action_class": sanitize_value(entry.get("executor_action_class") or "review-only"),
+        "executor_status": sanitize_value(entry.get("executor_status") or "unknown"),
+        "executor_next_action": sanitize_value(entry.get("executor_next_action") or "inspect-local-evidence"),
+        "successor_status": sanitize_value(entry.get("successor_status") or "review"),
+        "current_status": sanitize_value(entry.get("current_status") or "unknown"),
+        "current_state": sanitize_value(entry.get("current_state") or "unknown"),
+        "activation_outcome": sanitize_value(entry.get("full_rollout_outcome")),
+        "activation_outcome_next_action": sanitize_value(entry.get("full_rollout_outcome_next_action")),
+        "successor_decision": sanitize_value(entry.get("full_rollout_successor_decision")),
+        "successor_next_action": sanitize_value(entry.get("full_rollout_successor_next_action")),
+        "successor_no_op_reason": sanitize_value(entry.get("full_rollout_successor_no_op_reason")),
+        "target_local_policy_section": sanitize_value(entry.get("target_local_policy_section")),
+        "target_local_rule_file": sanitize_value(entry.get("target_local_rule_file")),
+        "evidence_schema": sanitize_value(entry.get("evidence_schema")),
+        "source_surface": sanitize_value(entry.get("source_surface")),
+        "endpoint": sanitize_value(entry.get("endpoint")),
+        "category": sanitize_value(entry.get("category")),
+        "workflow_phase": sanitize_value(entry.get("workflow_phase")),
+        "requested_model": sanitize_value(entry.get("requested_model")),
+        "candidate_target_model": sanitize_value(entry.get("candidate_target_model")),
+        "required_local_executor": sanitize_value(entry.get("required_local_executor")),
+        "blocker_codes": sanitize_value(entry.get("blocker_codes") or []),
+        "reason_codes": sanitize_value(entry.get("reason_codes") or []),
+        "duplicate_suppression_status": sanitize_value(entry.get("duplicate_suppression_status")),
+        "duplicate_suppression_reason": sanitize_value(entry.get("duplicate_suppression_reason")),
+        "new_activation_issue_recommended": entry.get("new_activation_issue_recommended"),
+        "measured_full_rollout_activation": entry.get("measured_full_rollout_activation"),
+        "durable_outcome_ledger_entry": entry.get("durable_outcome_ledger_entry"),
+        "coverage": coverage,
+        "savings": savings,
+        "privacy": _handoff_privacy(),
+    }
+    preserved = {
+        "rank",
+        "policy_files_written",
+        "provider_calls_made",
+        "managed_server_calls_made",
+        "provider_forwarding",
+        "server_content_processing",
+        "managed_enforced",
+        "locally_executed",
+        "feature_only",
+        "coverage",
+        "savings",
+        "privacy",
+    }
+    return {key: value for key, value in row.items() if value not in (None, "", [], 0) or key in preserved}
+
+
+def build_local_activation_executor_managed_handoff(
+    source: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Export local executor outcomes as feature-only rows for optional managed previews."""
+    plan = source if source.get("schema") == SCHEMA else build_local_activation_executor_plan(source, now=now)
+    entries = [entry for entry in plan.get("entries") or [] if isinstance(entry, dict)]
+    rows = [_handoff_row(entry) for entry in entries]
+    class_counts = Counter(str(row.get("executor_action_class") or "unknown") for row in rows)
+    family_counts = Counter(str(row.get("local_action_family") or "unknown") for row in rows)
+    status_counts = Counter(str(row.get("successor_status") or "unknown") for row in rows)
+    privacy = _handoff_privacy()
+    result = {
+        "schema": HANDOFF_SCHEMA,
+        "generated_at": plan.get("generated_at") or (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(),
+        "status": "exported" if rows else "empty",
+        "source_schema": sanitize_value(plan.get("schema")),
+        "source_generated_at": sanitize_value(plan.get("generated_at")),
+        "managed_dependency": "optional",
+        "server_ingestion_required": False,
+        "locally_executed": True,
+        "feature_only": True,
+        "provider_forwarding": False,
+        "server_content_processing": False,
+        "managed_enforced": False,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "supported_local_action_families": ["routing", "crunch", "cache"],
+        "rows": rows,
+        "summary": {
+            "handoff_row_count": len(rows),
+            "local_action_family_count": len(family_counts),
+            "executor_action_class_counts": [
+                {"value": key, "count": count} for key, count in sorted(class_counts.items())
+            ],
+            "local_action_family_counts": [
+                {"value": key, "count": count} for key, count in sorted(family_counts.items())
+            ],
+            "successor_status_counts": [
+                {"value": key, "count": count} for key, count in sorted(status_counts.items())
+            ],
+            "projected_savings_usd": round(
+                sum(_as_float(row.get("savings", {}).get("projected_savings_usd")) for row in rows),
+                8,
+            ),
+            "realized_savings_usd": round(
+                sum(_as_float(row.get("savings", {}).get("realized_savings_usd")) for row in rows),
+                8,
+            ),
+            "observed_savings_usd": round(
+                sum(_as_float(row.get("savings", {}).get("observed_savings_usd")) for row in rows),
+                8,
+            ),
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "provider_forwarding": False,
+            "server_content_processing": False,
+            "managed_enforced": False,
+        },
+        "privacy": privacy,
+    }
+    result = sanitize_value(result)
+    violations = managed_egress_violations(result)
+    result["egress_guard"] = {
+        "schema": "agentflow.managed_egress_guard.v1",
+        "status": "passed" if not violations else "blocked",
+        "blocked": bool(violations),
+        "violation_count": len(violations),
+        "raw_values_logged": False,
+    }
+    if violations:
+        result["egress_guard"]["blocked_keys"] = sorted({item.get("key", "unknown") for item in violations})
+    return result
