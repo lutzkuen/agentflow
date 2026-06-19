@@ -170,7 +170,7 @@ class AnthropicRoutingUnblockDrillTests(unittest.TestCase):
         self.assertFalse(entry["criteria_passed"]["rollback_proof"])
         self.assertEqual(result["summary"]["stage_ready_count"], 0)
 
-    def test_cleared_fixture_is_stage_ready_but_still_review_only_and_no_promotion(self) -> None:
+    def test_cleared_fixture_is_recovery_ready_but_still_review_only_and_no_promotion(self) -> None:
         plan = _anthropic_routing_plan()
         lifecycle = plan["evidence"]["stats_summary"]["pass_through_routing_report"]["buckets"][0][
             "anthropic_canary_lifecycle_evidence"
@@ -190,7 +190,7 @@ class AnthropicRoutingUnblockDrillTests(unittest.TestCase):
         result = build_anthropic_routing_safety_stop_unblock_drill(plan)
 
         entry = result["entries"][0]
-        self.assertEqual(entry["status"], "unblock-review-ready")
+        self.assertEqual(entry["status"], "recovery-ready")
         self.assertTrue(entry["stage_allowed"])
         self.assertFalse(entry["promotion_allowed"])
         self.assertTrue(entry["review_only"])

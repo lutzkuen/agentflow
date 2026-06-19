@@ -162,7 +162,7 @@ def _drill_entry(row: dict[str, Any]) -> dict[str, Any] | None:
     safety_stop_count = _as_int(row.get("safety_stop_count"))
     all_criteria_passed = all(criteria.values())
     stage_allowed = safety_stop_count <= 0 and all_criteria_passed
-    drill_status = "unblock-review-ready" if stage_allowed else "keep-blocked"
+    drill_status = "recovery-ready" if stage_allowed else "keep-blocked"
     acceptance = {
         "schema": ACCEPTANCE_SCHEMA,
         "status": "met",
@@ -184,7 +184,7 @@ def _drill_entry(row: dict[str, Any]) -> dict[str, Any] | None:
         "source_schema": sanitize_value(row.get("source_schema") or row.get("evidence_schema")),
         "source_rank": _as_int(row.get("rank")),
         "status": drill_status,
-        "next_action": "operator-review-anthropic-routing-unblock-checklist" if stage_allowed else "keep-anthropic-routing-blocked-until-safety-stop-burndown",
+        "next_action": "mark-anthropic-routing-recovery-ready" if stage_allowed else "keep-anthropic-routing-blocked-until-safety-stop-burndown",
         "provider": "anthropic",
         "source_surface": sanitize_value(row.get("source_surface")),
         "endpoint": sanitize_value(row.get("endpoint")),
@@ -205,6 +205,9 @@ def _drill_entry(row: dict[str, Any]) -> dict[str, Any] | None:
         "criteria_passed": criteria,
         "criterion_results": sanitize_value((row.get("unblock_criteria") or {}).get("criterion_results") if isinstance(row.get("unblock_criteria"), dict) else {}),
         "needed_resolution": sanitize_value(row.get("needed_resolution") or []),
+        "evidence_freshness_status": sanitize_value(row.get("evidence_freshness_status")),
+        "evidence_age_hours": row.get("evidence_age_hours"),
+        "max_evidence_age_hours": row.get("max_evidence_age_hours"),
         "safety_stop_reason_review": _review_field(row, "safety_stop_reason_review"),
         "safer_threshold_or_executor_guard": _review_field(row, "safer_threshold_or_executor_guard"),
         "rollback_proof": _review_field(row, "rollback_proof"),
@@ -265,6 +268,7 @@ def build_anthropic_routing_safety_stop_unblock_drill(
         "summary": {
             "drill_entry_count": len(rows),
             "blocked_count": len(blocked),
+            "recovery_ready_count": len(stage_ready),
             "stage_ready_count": len(stage_ready),
             "promotion_allowed_count": 0,
             "safety_stop_count": sum(_as_int(row.get("safety_stop_count")) for row in rows),

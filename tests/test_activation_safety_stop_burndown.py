@@ -143,8 +143,15 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertEqual(group["coverage"]["applied_rate"], 0.0)
         self.assertEqual(group["coverage"]["holdout_rate"], 0.0)
         self.assertFalse(group["stale_evidence"]["stale"])
+        self.assertEqual(group["evidence_freshness_status"], "fresh")
+        self.assertEqual(group["evidence_freshness"]["status"], "fresh")
+        self.assertFalse(group["evidence_freshness"]["stale"])
         self.assertEqual(
             group["durable_blocked_reason"],
+            "anthropic-routing-safety-stop-local-canary-safety-stop-keep-blocked",
+        )
+        self.assertEqual(
+            group["keep_blocked_reason"],
             "anthropic-routing-safety-stop-local-canary-safety-stop-keep-blocked",
         )
         self.assertEqual(group["blocker_code"], "local-canary-safety-stop")
@@ -302,9 +309,9 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         report = build_activation_safety_stop_burndown(research_plan=plan)
 
         group = report["groups"][0]
-        self.assertEqual(group["next_state"], "unblock-ready")
-        self.assertEqual(group["status"], "unblock-ready")
-        self.assertEqual(group["burndown_status"], "unblock-ready")
+        self.assertEqual(group["next_state"], "recovery-ready")
+        self.assertEqual(group["status"], "recovery-ready")
+        self.assertEqual(group["burndown_status"], "recovery-ready")
         self.assertEqual(group["safety_stop_count"], 0)
         self.assertEqual(group["applied_count"], 8)
         self.assertEqual(group["holdout_count"], 7)
@@ -317,7 +324,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertTrue(group["applied_coverage"]["passed"])
         self.assertTrue(group["holdout_coverage"]["passed"])
         unblock = group["unblock_criteria"]
-        self.assertEqual(unblock["status"], "unblock-ready")
+        self.assertEqual(unblock["status"], "recovery-ready")
         self.assertTrue(unblock["safety_stop_count_zero"])
         self.assertTrue(unblock["applied_coverage_present"])
         self.assertTrue(unblock["holdout_coverage_present"])
@@ -330,15 +337,15 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertIsNotNone(queue)
         queue_row = queue["entries"][0]
         self.assertEqual(queue_row["local_action_family"], "routing")
-        self.assertEqual(queue_row["state"], "unblock-ready")
+        self.assertEqual(queue_row["state"], "recovery-ready")
         self.assertEqual(queue_row["current_status"], "staged")
-        self.assertEqual(queue_row["next_action"], "unblock-for-bounded-anthropic-routing-canary")
+        self.assertEqual(queue_row["next_action"], "mark-anthropic-routing-recovery-ready")
         self.assertEqual(queue_row["safety_stop_count"], 0)
         self.assertEqual(queue_row["applied_count"], 8)
         self.assertEqual(queue_row["holdout_count"], 7)
         self.assertTrue(queue_row["promotion_allowed"])
         self.assertTrue(queue_row["stage_allowed"])
-        self.assertEqual(queue_row["unblock_criteria"]["status"], "unblock-ready")
+        self.assertEqual(queue_row["unblock_criteria"]["status"], "recovery-ready")
         self.assertTrue(queue_row["safer_threshold_or_executor_guard"]["passed"])
         self.assertTrue(queue_row["rollback_proof"]["passed"])
         self.assertFalse(queue_row["duplicate_suppression"]["suppresses_new_activation_issue"])
@@ -384,6 +391,58 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertEqual(rollback["keep_disabled_action"], "do-not-stage-or-widen-until-unblock-criteria-pass")
         self.assertFalse(rollback["active_policy_changed"])
         self.assertFalse(rollback["wrote_active_policy_files"])
+
+    def test_anthropic_routing_stale_or_missing_coverage_refreshes_before_recovery_ready(self):
+        stale_plan = self._anthropic_routing_safety_stop_plan()
+        stale_lifecycle = stale_plan["evidence"]["stats_summary"]["pass_through_routing_report"]["buckets"][0][
+            "anthropic_canary_lifecycle_evidence"
+        ]
+        stale_lifecycle["cohort_counts"]["safety_stopped"] = 0
+        stale_lifecycle["cohort_counts"]["canary_applied"] = 8
+        stale_lifecycle["cohort_counts"]["canary_holdout"] = 7
+        stale_lifecycle["coverage"]["applied_rate"] = 0.533333
+        stale_lifecycle["coverage"]["holdout_rate"] = 0.466667
+        stale_lifecycle["blocker_codes"] = []
+        stale_lifecycle["blocker_reason_breakdown"] = []
+        stale_lifecycle["safety_stop_breakdown"] = []
+        stale_lifecycle["stale_evidence"] = {"stale": True, "age_hours": 73.25, "max_age_hours": 72.0}
+
+        stale_report = build_activation_safety_stop_burndown(research_plan=stale_plan)
+        stale_group = stale_report["groups"][0]
+        self.assertEqual(stale_group["next_state"], "keep-blocked")
+        self.assertEqual(stale_group["burndown_status"], "stale-evidence")
+        self.assertEqual(stale_group["next_action"], "refresh-anthropic-routing-safety-stop-burndown")
+        self.assertEqual(stale_group["evidence_freshness_status"], "stale")
+        self.assertEqual(stale_group["evidence_age_hours"], 73.25)
+        self.assertFalse(stale_group["promotion_allowed"])
+        self.assertFalse(stale_group["stage_allowed"])
+        self.assertTrue(stale_group["duplicate_suppression"]["suppresses_new_activation_issue"])
+
+        stale_queue = build_local_activation_next_action_queue(stale_report)
+        self.assertIsNotNone(stale_queue)
+        stale_queue_row = stale_queue["entries"][0]
+        self.assertEqual(stale_queue_row["current_status"], "keep-blocked")
+        self.assertEqual(stale_queue_row["evidence_freshness_status"], "stale")
+        self.assertTrue(stale_queue_row["duplicate_suppression"]["suppresses_new_activation_issue"])
+        self.assertFalse(stale_queue_row["active_policy_changed"])
+        self.assertFalse(stale_queue_row["wrote_active_policy_files"])
+
+        missing_plan = self._anthropic_routing_safety_stop_plan()
+        missing_lifecycle = missing_plan["evidence"]["stats_summary"]["pass_through_routing_report"]["buckets"][0][
+            "anthropic_canary_lifecycle_evidence"
+        ]
+        missing_lifecycle["cohort_counts"]["safety_stopped"] = 0
+        missing_lifecycle["blocker_codes"] = ["missing-applied-coverage", "missing-holdout-coverage"]
+        missing_lifecycle["safety_stop_breakdown"] = []
+
+        missing_report = build_activation_safety_stop_burndown(research_plan=missing_plan)
+        missing_group = missing_report["groups"][0]
+        self.assertEqual(missing_group["next_state"], "keep-blocked")
+        self.assertEqual(missing_group["burndown_status"], "missing-coverage")
+        self.assertEqual(missing_group["unblock_criteria"]["status"], "blocked")
+        self.assertFalse(missing_group["promotion_allowed"])
+        self.assertFalse(missing_group["stage_allowed"])
+        self.assertTrue(missing_group["duplicate_suppression"]["suppresses_new_activation_issue"])
 
     def test_lifecycle_safety_stop_groups_have_specific_next_action(self):
         result = {

@@ -1613,8 +1613,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(burndown["summary"]["anthropic_routing_safety_stop_count"], 0)
         self.assertIn("activation_safety_stop_burndown", plan["evidence"]["inspected_sources"])
         clean_group = burndown["groups"][0]
-        self.assertEqual(clean_group["next_state"], "unblock-ready")
-        self.assertEqual(clean_group["unblock_criteria"]["status"], "unblock-ready")
+        self.assertEqual(clean_group["next_state"], "recovery-ready")
+        self.assertEqual(clean_group["unblock_criteria"]["status"], "recovery-ready")
         self.assertTrue(clean_group["promotion_allowed"])
         self.assertTrue(clean_group["stage_allowed"])
         burndown_entries = [
@@ -1623,7 +1623,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             if row.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
         ]
         self.assertTrue(burndown_entries)
-        self.assertEqual(burndown_entries[0]["state"], "unblock-ready")
+        self.assertEqual(burndown_entries[0]["state"], "recovery-ready")
         self.assertEqual(burndown_entries[0]["current_status"], "staged")
         self.assertTrue(burndown_entries[0]["promotion_allowed"])
         self.assertTrue(burndown_entries[0]["stage_allowed"])

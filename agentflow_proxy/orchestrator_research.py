@@ -1327,7 +1327,7 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
     if not reason or count <= 0:
         return None
     next_state = str(group.get("next_state") or "keep-blocked").strip().replace("_", "-")
-    if next_state not in {"keep-blocked", "retry-later", "superseded", "unblock-ready"}:
+    if next_state not in {"keep-blocked", "retry-later", "superseded", "unblock-ready", "recovery-ready"}:
         next_state = "keep-blocked"
     needed = [str(item) for item in group.get("needed_resolution") or [] if str(item or "").strip()]
     action_family = str(group.get("action_family") or "activation-feedback").strip() or "activation-feedback"
@@ -1415,6 +1415,11 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
         stage["missing_holdout_coverage"] = bool(group.get("missing_holdout_coverage"))
     if group.get("burndown_status"):
         stage["burndown_status"] = group.get("burndown_status")
+    for freshness_key in ("evidence_freshness_status", "evidence_age_hours", "max_evidence_age_hours"):
+        if group.get(freshness_key) is not None:
+            stage[freshness_key] = group.get(freshness_key)
+    if isinstance(group.get("evidence_freshness"), dict):
+        stage["evidence_freshness"] = group.get("evidence_freshness")
     policy_ref = str(group.get("policy_ref") or "").strip()
     if policy_ref and policy_ref != "unknown":
         stage["policy_ref"] = policy_ref
@@ -4730,6 +4735,7 @@ def _loop_progress_state(state: str) -> bool:
     return state in {
         "activation-ready",
         "replay-ready",
+        "recovery-ready",
         "canary-staged",
         "measured-savings",
         "measured-active",
@@ -4744,7 +4750,7 @@ def _loop_progress_state(state: str) -> bool:
 def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
     state = str(stage.get("state") or "").strip().lower().replace("_", "-")
     blockers = [str(item).lower().replace("_", "-") for item in stage.get("blocker_codes") or []]
-    if state == "unblock-ready":
+    if state in {"unblock-ready", "recovery-ready"}:
         return "staged"
     if state == "retired-no-repeat":
         return "superseded"
@@ -6394,6 +6400,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "full_rollout_activation_outcome",
         "activation_feedback_freshness_gate",
         "managed_preview_gate",
+        "evidence_freshness",
     ):
         if isinstance(entry.get(review_key), dict):
             clean[review_key] = sanitize_value(entry.get(review_key))

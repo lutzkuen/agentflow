@@ -907,19 +907,19 @@ def _anthropic_routing_next_action(
         )
     if stale:
         return (
-            "refresh-anthropic-routing-lifecycle-evidence",
-            "retry-later",
-            "safety-stop-awaits-fresh-lifecycle-or-holdout-evidence",
+            "refresh-anthropic-routing-safety-stop-burndown",
+            "keep-blocked",
+            "safety-stop-burndown-stale-refresh-required",
         )
     if applied_count <= 0 or holdout_count <= 0 or {"missing-applied-coverage", "missing-holdout-coverage"} & blocker_set:
         return (
             "collect-anthropic-routing-applied-holdout-coverage",
-            "retry-later",
+            "keep-blocked",
             "missing-applied-or-holdout-coverage",
         )
     return (
-        "unblock-for-bounded-anthropic-routing-canary",
-        "unblock-ready",
+        "mark-anthropic-routing-recovery-ready",
+        "recovery-ready",
         "safety-stop-burndown-clean-with-applied-and-holdout-coverage",
     )
 
@@ -977,11 +977,11 @@ def _anthropic_routing_unblock_criteria(
         and rollback_proof_present
         and promotion_allowed
         and stage_allowed
-        and next_state == "unblock-ready"
+        and next_state == "recovery-ready"
     )
     return {
         "schema": "agentflow.anthropic_routing_safety_stop_unblock_criteria.v1",
-        "status": "unblock-ready" if ready else "blocked",
+        "status": "recovery-ready" if ready else "blocked",
         "safety_stop_count_zero": safety_stop_clear,
         "applied_coverage_present": applied_coverage_present,
         "holdout_coverage_present": holdout_coverage_present,
@@ -1160,6 +1160,50 @@ def _anthropic_routing_rollback_metadata() -> dict[str, Any]:
     }
 
 
+def _anthropic_routing_keep_blocked_reason(
+    *,
+    next_state: str,
+    safety_stop_active: bool,
+    stale: bool,
+    missing_applied: bool,
+    missing_holdout: bool,
+    durable: str,
+) -> str:
+    if next_state != "keep-blocked":
+        return "anthropic-routing-safety-stop-cleared"
+    if safety_stop_active:
+        return durable
+    if stale:
+        return "anthropic-routing-safety-stop-burndown-stale-keep-blocked"
+    if missing_applied or missing_holdout:
+        return "anthropic-routing-safety-stop-coverage-missing-keep-blocked"
+    return durable
+
+
+def _anthropic_routing_evidence_freshness(
+    *,
+    stale_evidence: dict[str, Any],
+    latest_observed_at: Any,
+) -> dict[str, Any]:
+    stale = bool(stale_evidence.get("stale"))
+    age_hours = stale_evidence.get("age_hours")
+    max_age_hours = stale_evidence.get("max_age_hours")
+    if not isinstance(age_hours, (int, float)):
+        age_hours = None
+    if not isinstance(max_age_hours, (int, float)):
+        max_age_hours = 72.0
+    return {
+        "schema": "agentflow.anthropic_routing_safety_stop_evidence_freshness.v1",
+        "status": "stale" if stale else "fresh",
+        "stale": stale,
+        "age_hours": age_hours,
+        "max_age_hours": max_age_hours,
+        "latest_observed_at": _safe_label(latest_observed_at, "unknown"),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
 def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, Any] | None:
     if str(bucket.get("provider") or "").strip().lower() != "anthropic":
         return None
@@ -1236,11 +1280,18 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
     if observed_count <= 0:
         observed_count = sum(_as_int(counts.get(key)) for key in ("canary_applied", "canary_holdout", "safety_stopped", "skipped", "bypassed_or_disabled", "unknown"))
     savings_per_1000 = _as_float(bucket.get("estimated_savings_per_1000_calls_usd"))
-    keep_blocked_reason = durable if next_state == "keep-blocked" else "anthropic-routing-safety-stop-cleared"
     missing_applied = applied_count <= 0 or "missing-applied-coverage" in blockers
     missing_holdout = holdout_count <= 0 or "missing-holdout-coverage" in blockers
-    promotion_allowed = next_state == "unblock-ready"
-    stage_allowed = next_state == "unblock-ready"
+    keep_blocked_reason = _anthropic_routing_keep_blocked_reason(
+        next_state=next_state,
+        safety_stop_active=safety_stop_count > 0 or "safety-stop-observed" in blockers,
+        stale=stale,
+        missing_applied=missing_applied,
+        missing_holdout=missing_holdout,
+        durable=durable,
+    )
+    promotion_allowed = next_state == "recovery-ready"
+    stage_allowed = next_state == "recovery-ready"
     rollback_metadata = _anthropic_routing_rollback_metadata()
     rollback_metadata["promotion_allowed"] = promotion_allowed
     rollback_metadata["stage_allowed"] = stage_allowed
@@ -1269,7 +1320,15 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
     }
     duplicate_suppression = {
         "schema": "agentflow.anthropic_routing_activation_issue_duplicate_suppression.v1",
-        "reason": "anthropic-routing-safety-stop-burndown-not-cleared",
+        "reason": (
+            "anthropic-routing-safety-stop-burndown-not-cleared"
+            if safety_stop_count > 0 or "safety-stop-observed" in blockers
+            else "anthropic-routing-safety-stop-burndown-stale"
+            if stale
+            else "anthropic-routing-safety-stop-coverage-missing"
+            if missing_applied or missing_holdout
+            else "anthropic-routing-safety-stop-burndown-not-cleared"
+        ),
         "fingerprint": public_id(json.dumps(suppression_material, sort_keys=True), prefix="activation"),
         "suppresses_new_activation_issue": next_state == "keep-blocked",
         "suppresses_ready_issue_until": "safety_stop_count_zero_and_applied_holdout_coverage_present",
@@ -1279,11 +1338,15 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "metadata_only": True,
         "aggregate_only": True,
     }
+    evidence_freshness = _anthropic_routing_evidence_freshness(
+        stale_evidence=stale_evidence,
+        latest_observed_at=lifecycle.get("latest_observed_at"),
+    )
     return {
         "source": "pass_through_routing_report",
         "source_schema": lifecycle.get("schema") or PASS_THROUGH_ROUTING_SCHEMA,
         "action_family": "routing",
-        "status": "unblock-ready" if next_state == "unblock-ready" else "blocked",
+        "status": "recovery-ready" if next_state == "recovery-ready" else "blocked",
         "blocker_code": primary_reason,
         "safety_stop_reason": primary_reason,
         "keep_blocked_reason": keep_blocked_reason,
@@ -1291,11 +1354,15 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "next_state": next_state,
         "next_state_reason": next_state_reason,
         "stale_status": "stale" if stale else "fresh",
+        "evidence_freshness_status": evidence_freshness["status"],
+        "evidence_age_hours": evidence_freshness["age_hours"],
+        "max_evidence_age_hours": evidence_freshness["max_age_hours"],
+        "evidence_freshness": evidence_freshness,
         "repeated_noop_status": "unknown",
         "file_backed_representation_status": "present",
         "needed_resolution": needed,
         "next_action": next_action,
-        "next_action_class": "continue-blocked" if next_state == "keep-blocked" else ("unblock-bounded-canary" if next_state == "unblock-ready" else "stage-safer-threshold"),
+        "next_action_class": "continue-blocked" if next_state == "keep-blocked" else ("recovery-ready" if next_state == "recovery-ready" else "stage-safer-threshold"),
         "provider": "anthropic",
         "source_surface": source_surface,
         "endpoint": endpoint,
@@ -1341,7 +1408,15 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "applied_coverage": guard_review_fields["applied_coverage"],
         "holdout_coverage": guard_review_fields["holdout_coverage"],
         "duplicate_suppression": duplicate_suppression,
-        "burndown_status": "safety-stop-active" if next_state == "keep-blocked" else next_state,
+        "burndown_status": (
+            "stale-evidence"
+            if stale and next_state == "keep-blocked"
+            else "missing-coverage"
+            if (missing_applied or missing_holdout) and next_state == "keep-blocked" and safety_stop_count <= 0
+            else "safety-stop-active"
+            if next_state == "keep-blocked"
+            else next_state
+        ),
         "promotion_allowed": promotion_allowed,
         "stage_allowed": stage_allowed,
         "unblock_criteria": _anthropic_routing_unblock_criteria(
@@ -1481,6 +1556,13 @@ def build_activation_safety_stop_burndown(
                 _as_int(group.get("safety_stop_count"))
                 for group in ranked
                 if group.get("source") == "pass_through_routing_report" and group.get("action_family") == "routing"
+            ),
+            "anthropic_routing_recovery_ready_count": sum(
+                1
+                for group in ranked
+                if group.get("source") == "pass_through_routing_report"
+                and group.get("action_family") == "routing"
+                and group.get("next_state") == "recovery-ready"
             ),
             "blocked_activation_count": sum(
                 1 for group in ranked if group.get("next_state") == "keep-blocked"
