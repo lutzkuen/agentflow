@@ -18189,6 +18189,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     old_context_summary_opportunity = await stats_old_context_summary(store_obj)
     sqlite_maintenance = await stats_sqlite_maintenance(store_obj)
     active_crunch_rule_coverage = _active_crunch_rule_coverage()
+    activation_burndown = await stats_local_activation_next_action_queue(limit=5)
 
     def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -18991,7 +18992,9 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "routing_experiment_promotion_verdict_counts": routing_experiment_report_summary["promotion_verdict_counts"],
             "routing_experiment_promotion_reason_counts": routing_experiment_report_summary["promotion_reason_counts"],
             "routing_experiment_promotion_ready_candidates": routing_experiment_report_summary["promotion_ready_candidates"],
+            "activation_burndown": activation_burndown.get("summary", {}),
         },
+        "activation_burndown": activation_burndown,
         "recent": recent,
         "routing_breakdown": routing_breakdown,
         "category_breakdown": category_breakdown,
@@ -20792,6 +20795,17 @@ def dashboard_html() -> str:
 </div>
 
 <div class="tab-panel active" id="tab-activity">
+<div class="section">
+  <h2>Activation bottlenecks</h2>
+  <div class="table-wrap">
+  <table class="activity-table" data-table-id="activation-burndown" data-filter-label="Filter activation bottlenecks">
+    <thead><tr>
+      <th data-sort-type="number">Rank</th><th data-sort-type="text">Lever</th><th data-sort-type="text">Status</th><th data-sort-type="text">Next action</th><th data-sort-type="money">Savings</th><th data-sort-type="number">Samples</th><th data-sort-type="text">Blocker</th><th data-sort-type="text">Policy target</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="activation-burndown-tbody"></tbody>
+  </table>
+  </div>
+</div>
 <div class="section">
   <h2>Recent calls</h2>
   <div class="table-wrap">
@@ -22722,6 +22736,7 @@ async function refresh(){
     document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??agentflowBuckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??agentflowBuckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??agentflowBuckets.exact_local_cache_usd??0,4);
     document.getElementById('c-health').textContent=(health.errors_today??health.errors??0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
+    renderActivationBurndown(d);
 
     document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
   }catch(e){
@@ -24819,6 +24834,30 @@ function evidenceActivationPrivacyBadges(privacy){
     privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>',
     privacy.absolute_paths_included?'<span class="badge err">absolute paths</span>':'<span class="badge hit">paths omitted</span>'
   ].join(' ');
+}
+function renderActivationBurndown(d){
+  const target=document.getElementById('activation-burndown-tbody');
+  if(!target)return;
+  const burndown=d.activation_burndown||{};
+  const rows=burndown.entries||[];
+  target.innerHTML=rows.map(row=>{
+    const status=row.current_status||row.state||'unknown';
+    const policy=[row.target_local_policy_section,row.target_local_rule_file].filter(Boolean).join(' / ')||'—';
+    const savings=row.realized_savings_usd||row.projected_savings_usd||0;
+    const savingsSub=row.realized_savings_usd?`projected ${fmt(row.projected_savings_usd||0,6)}`:'projected';
+    const blocker=row.unblock_reason||(row.blocker_codes||[])[0]||'none';
+    return `<tr>
+      <td class="tokens">${row.rank||0}</td>
+      <td><span class="badge provider">${esc(row.lever||'unknown')}</span><div class="sub">${esc(row.local_action_family||'')}</div></td>
+      <td><span class="badge ${evidenceActivationStatusBadge(status)}">${esc(status)}</span><div class="sub">${esc(row.state||'')}</div></td>
+      <td class="model">${esc(row.next_action||'inspect-local-evidence')}</td>
+      <td class="savings">${fmt(savings,6)}<div class="sub">${esc(savingsSub)}</div></td>
+      <td class="tokens">${(row.sample_count||0).toLocaleString()}<div class="sub">applied ${(row.applied_count||0).toLocaleString()} · holdout ${(row.holdout_count||0).toLocaleString()} · safety ${(row.safety_stop_count||0).toLocaleString()}</div></td>
+      <td class="flags"><span class="badge miss">${esc(blocker)}</span><div class="sub">${(row.blocker_codes||[]).slice(0,3).map(code=>esc(code)).join(', ')}</div></td>
+      <td class="model">${esc(policy)}</td>
+      <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||{})}</td>
+    </tr>`;
+  }).join('')||`<tr><td colspan="9" style="color:#8b949e">${esc(burndown.status_reason||'No activation bottlenecks available')}</td></tr>`;
 }
 async function refreshLocalActivationQueue(){
   try{
