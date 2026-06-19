@@ -3092,6 +3092,151 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw successor issue prompt must not leak", rendered)
         self.assertNotIn("req-successor-issue-secret", rendered)
 
+    def test_openai_routing_semantic_successor_issue_proposal_tracks_preview_state(self):
+        cases = [
+            ("fresh-agreed", False, False, "status:ready", "local-managed-preview-agree"),
+            ("stale-preview", True, False, "status:blocked", "stale-preview"),
+            ("managed-local-disagreement", False, True, "status:blocked", "managed-local-disagreement"),
+        ]
+        for name, stale, disagreed, expected_status, expected_reason in cases:
+            with self.subTest(name=name):
+                source = f"activation:openai-routing-{name}"
+                ledger = {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                    "status": "tracked",
+                    "entries": [
+                        {
+                            "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                            "rank": 1,
+                            "fingerprint": source,
+                            "lever": "routing",
+                            "local_action_family": "routing",
+                            "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                            "source_surface": "openai_responses",
+                            "endpoint": "responses",
+                            "category": "tool-light",
+                            "provider_family": "openai",
+                            "requested_model": "gpt-5.4",
+                            "candidate_target_model": "gpt-5.4-mini",
+                            "state": "review",
+                            "current_status": "review",
+                            "issue_worthy_status": "ready",
+                            "next_action": "draft-openai-routing-recovery-canary",
+                            "blocker_codes": ["semantic-quality-regression-observed"],
+                            "sample_count": 342,
+                            "matched_count": 342,
+                            "applied_count": 26,
+                            "holdout_count": 22,
+                            "safety_stop_count": 0,
+                            "rollback_count": 0,
+                            "stage_allowed": True,
+                            "policy_files_written": False,
+                            "canary_fraction": 0.05,
+                            "holdout_fraction": 0.10,
+                            "savings_per_1000_calls_usd": 4.375,
+                            "projected_savings_usd": 1.49625,
+                            "target_local_rule_file": "routing_rules.yaml",
+                            "target_local_policy_section": "routing.rules",
+                            "expected_savings_path": "Move OpenAI routing recovery evidence into a narrow review path.",
+                            "recovery_plan": {
+                                "schema": "agentflow.openai_routing_recovery_plan.v1",
+                                "selected_option": "restage-review-only",
+                                "blocker_status": "cleared" if not (stale or disagreed) else "active",
+                                "blocker_reason": "semantic-quality-regression-observed",
+                                "coverage": {"applied_count": 26, "holdout_count": 22},
+                                "target_local_rule_file": "routing_rules.yaml",
+                                "target_local_policy_section": "routing.rules",
+                                "rollback_no_write": {
+                                    "active_policy_changed": False,
+                                    "policy_files_written": False,
+                                    "provider_calls_made": False,
+                                },
+                            },
+                        }
+                    ],
+                }
+                outcome = {
+                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "outcome_fingerprint": f"managed-preview-outcome:{source}",
+                    "source_fingerprint": source,
+                    "preview_ref": f"preview:{source}",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "current_status": "review",
+                    "classification": "stale-preview" if stale else "review-only",
+                    "decision": "review-only-recommendation",
+                    "next_action": "draft-openai-routing-recovery-canary",
+                    "preview_age_hours": 80.0 if stale else 1.0,
+                    "stale_after_hours": 72.0,
+                    "stale": stale,
+                    "missing_preview_decision": False,
+                    "failed_closed": False,
+                    "disagrees_with_local_evidence": disagreed,
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": True,
+                    "reason_codes": ["managed-preview-would-draft-recovery"],
+                }
+
+                plan = build_research_plan(
+                    issues=[],
+                    stats={
+                        "calls": 1883,
+                        "evidence_to_activation_next_action_ledger": ledger,
+                        "managed_activation_preview_outcomes": {
+                            "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                            "status": "tracked",
+                            "managed_dependency": "optional",
+                            "managed_server_calls_made": True,
+                            "summary": {
+                                "stored_preview_outcome_count": 1,
+                                "stale_count": 1 if stale else 0,
+                                "missing_preview_decision_count": 0,
+                                "failed_closed_count": 0,
+                                "disagreement_count": 1 if disagreed else 0,
+                            },
+                            "outcomes": [outcome],
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        },
+                        "managed_activation_preview_health": {
+                            "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                            "status": "ready",
+                            "accepted_batch_count": 1,
+                            "rejected_batch_count": 0,
+                            "submitted_row_count": 1,
+                            "previewed_row_count": 1,
+                            "omitted_row_count": 0,
+                            "rejected_row_count": 0,
+                            "privacy_rejection_count": 0,
+                            "latest_preview_age_hours": 1.0,
+                            "previewed_counts_by_local_action_family": {"routing": 1},
+                            "top_omission_reasons": [],
+                            "top_rejection_reasons": [],
+                        },
+                    },
+                    threshold=3,
+                    now=NOW,
+                )
+
+                proposals = [
+                    item
+                    for item in plan["backlog_changes"]["create_issues"]
+                    if item.get("proposal_source") == "preview-verified-activation-successor"
+                    and item.get("fingerprint") == source
+                ]
+                self.assertEqual(len(proposals), 1)
+                proposal = proposals[0]
+                self.assertEqual(proposal["fingerprint"], source)
+                self.assertIn(expected_status, proposal["labels"])
+                self.assertIn("routing", proposal["labels"])
+                self.assertIn("semantic-quality-regression-observed", proposal["body"])
+                self.assertIn("Applied coverage count: 26", proposal["body"])
+                self.assertIn("Holdout coverage count: 22", proposal["body"])
+                self.assertIn("Recovery canary fraction: 0.05", proposal["body"])
+                self.assertIn("Recovery holdout fraction: 0.1", proposal["body"])
+                self.assertIn("do not write routing_rules.yaml", proposal["body"])
+                self.assertIn(expected_reason, proposal["body"])
+
     def test_activation_burndown_report_ranks_successors_after_keep_active_crunch(self):
         ledger = {
             "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",

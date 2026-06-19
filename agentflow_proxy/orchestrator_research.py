@@ -6104,6 +6104,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             action[key] = bool(entry.get(key))
     for key in (
         "applied_count",
+        "matched_count",
         "holdout_count",
         "skipped_count",
         "fallback_count",
@@ -6119,9 +6120,18 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "error_rate_delta",
         "retry_rate_delta",
         "fallback_rate_delta",
+        "canary_fraction",
+        "holdout_fraction",
+        "savings_per_1000_calls_usd",
     ):
         if entry.get(key) is not None:
             action[key] = round(_to_float(entry.get(key)), 8)
+    for key in (
+        "coverage",
+        "recovery_plan",
+    ):
+        if isinstance(entry.get(key), dict):
+            action[key] = sanitize_value(entry.get(key))
     for key in (
         "full_rollout_outcome",
         "full_rollout_outcome_next_action",
@@ -6308,12 +6318,182 @@ def _activation_successor_has_concrete_blocker(action: dict[str, Any], decision:
     return bool(action.get("needed_resolution") or action.get("blocker_codes"))
 
 
+def _is_openai_semantic_regression_routing_successor(action: dict[str, Any]) -> bool:
+    family = str(action.get("local_action_family") or action.get("lever") or "").strip()
+    blockers = {str(item) for item in action.get("blocker_codes") or [] if str(item or "").strip()}
+    evidence_schema = str(action.get("evidence_schema") or "")
+    source_surface = str(action.get("source_surface") or "")
+    provider_family = str(action.get("provider_family") or "")
+    return bool(
+        family == "routing"
+        and "semantic-quality-regression-observed" in blockers
+        and (
+            "openai_routing" in evidence_schema
+            or source_surface.startswith("openai")
+            or provider_family == "openai"
+            or str(action.get("target_local_rule_file") or "") == "routing_rules.yaml"
+        )
+    )
+
+
+def _activation_successor_preview_reason(action: dict[str, Any], decision: dict[str, Any]) -> str:
+    gate = action.get("managed_preview_gate") if isinstance(action.get("managed_preview_gate"), dict) else {}
+    for value in (
+        decision.get("preview_omitted_reason"),
+        decision.get("preview_no_op_reason"),
+        decision.get("top_preview_omission_reason"),
+        gate.get("omitted_reason"),
+        gate.get("no_op_reason"),
+        gate.get("reason"),
+        decision.get("preview_agreement_status"),
+        decision.get("preview_verification_status"),
+    ):
+        text = str(value or "").strip()
+        if text and text != "agreed":
+            return sanitize_value(text)
+    return "local-managed-preview-agree" if bool(decision.get("preview_verified")) else "preview-not-verified"
+
+
+def _openai_routing_recovery_issue_title(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    status_label: str,
+) -> str:
+    token = _activation_successor_title_token(action, decision)
+    if status_label == "status:ready":
+        return f"Review OpenAI routing recovery canary for semantic regression ({token})"
+    blocker = _activation_successor_preview_reason(action, decision).replace("_", "-")
+    return f"Keep OpenAI routing recovery blocked on {blocker} ({token})"
+
+
+def _count_text(value: Any) -> str:
+    count = _to_int(value)
+    return str(count) if count else "0"
+
+
+def _openai_routing_recovery_evidence(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    status_label: str,
+) -> list[str]:
+    recovery_plan = action.get("recovery_plan") if isinstance(action.get("recovery_plan"), dict) else {}
+    coverage = (
+        recovery_plan.get("coverage")
+        if isinstance(recovery_plan.get("coverage"), dict)
+        else action.get("coverage")
+        if isinstance(action.get("coverage"), dict)
+        else {}
+    )
+    gate = action.get("managed_preview_gate") if isinstance(action.get("managed_preview_gate"), dict) else {}
+    health_gate = gate.get("health_gate") if isinstance(gate.get("health_gate"), dict) else {}
+    preview_reason = _activation_successor_preview_reason(action, decision)
+    canary_fraction = action.get("canary_fraction") or recovery_plan.get("canary_fraction")
+    holdout_fraction = action.get("holdout_fraction") or recovery_plan.get("holdout_fraction")
+    blocker_status = recovery_plan.get("blocker_status") or action.get("current_status") or action.get("state")
+    source_fingerprint = str(decision.get("source_fingerprint") or action.get("source_fingerprint") or "").strip()
+    action_fingerprint = str(decision.get("successor_action_fingerprint") or action.get("fingerprint") or "").strip()
+    return [
+        f"Source metadata: {LOCAL_ACTIVATION_SUCCESSOR_DECISION_SCHEMA}",
+        f"Fingerprint: {source_fingerprint}",
+        f"Successor action fingerprint: {action_fingerprint}",
+        "Provider scope: openai",
+        "Local action family: routing",
+        "Semantic regression blocker: semantic-quality-regression-observed",
+        f"Blocker status: {blocker_status}",
+        f"Applied coverage count: {_count_text(coverage.get('applied_count') or action.get('applied_count'))}",
+        f"Holdout coverage count: {_count_text(coverage.get('holdout_count') or action.get('holdout_count'))}",
+        f"Matched/sample count: {_count_text(action.get('matched_count') or action.get('sample_count'))}",
+        f"Safety stop count: {_count_text(action.get('safety_stop_count'))}",
+        f"Rollback count: {_count_text(action.get('rollback_count'))}",
+        f"Preview verified: {decision.get('preview_verified')}",
+        f"Preview agreement status: {decision.get('preview_agreement_status')}",
+        f"Preview verification status: {decision.get('preview_verification_status')}",
+        f"Preview blocker reason: {preview_reason}",
+        f"Preview omitted reason: {decision.get('preview_omitted_reason')}",
+        f"Preview no-op reason: {decision.get('preview_no_op_reason')}",
+        f"Preview health status: {health_gate.get('status')}",
+        f"Preview health reason: {health_gate.get('reason')}",
+        f"Recovery selected option: {recovery_plan.get('selected_option')}",
+        f"Recovery canary fraction: {canary_fraction}",
+        f"Recovery holdout fraction: {holdout_fraction}",
+        f"Savings per 1000 calls USD: {action.get('savings_per_1000_calls_usd')}",
+        f"Projected savings USD: {action.get('projected_savings_usd')}",
+        f"Expected savings path: {action.get('expected_savings_path')}",
+        f"Acceptance metric: {action.get('acceptance_metric')}",
+        "No-policy-write gate: do not write routing_rules.yaml or routing.rules until semantic-quality-regression-observed clears and preview/local gates pass.",
+        f"Status label: {status_label}",
+        f"Recommended next action: {decision.get('recommended_next_action') or action.get('recommended_next_action')}",
+        _activation_successor_privacy_evidence(action, decision),
+    ]
+
+
+def _openai_routing_recovery_proposal_from_rows(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    status_label: str,
+) -> dict[str, Any]:
+    title = _openai_routing_recovery_issue_title(action, decision, status_label=status_label)
+    source_fingerprint = str(decision.get("source_fingerprint") or action.get("source_fingerprint") or "").strip()
+    action_fingerprint = str(decision.get("successor_action_fingerprint") or action.get("fingerprint") or "").strip()
+    preview_reason = _activation_successor_preview_reason(action, decision)
+    status_text = "ready" if status_label == "status:ready" else "blocked"
+    next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "review-openai-routing-canary-blockers")
+    return {
+        "repo": "lutzkuen/agentflow",
+        "title": title,
+        "labels": _activation_successor_issue_labels(action, status_label),
+        "proposal_source": "preview-verified-activation-successor",
+        "fingerprint": sanitize_value(source_fingerprint),
+        "successor_action_fingerprint": sanitize_value(action_fingerprint),
+        "expected_savings_path": sanitize_value(
+            action.get("expected_savings_path")
+            or "Moves OpenAI routing semantic-regression evidence into a narrow recovery-review path without unsafe local policy writes."
+        ),
+        "body": _issue_body(
+            title=title,
+            rationale=(
+                "The local activation queue has an OpenAI routing successor for "
+                "`semantic-quality-regression-observed`. This proposal turns it into a narrow "
+                f"{status_text} recovery review issue while preserving applied/holdout coverage, "
+                "managed preview status, and the no-policy-write gate."
+            ),
+            evidence=_openai_routing_recovery_evidence(action, decision, status_label=status_label),
+            implementation=[
+                "Start from the matching local_activation_successor_decision and successor action in the research plan.",
+                f"Use `{next_action}` and the OpenAI routing narrow-canary review path to inspect only the semantic-regression successor.",
+                "Preserve applied_count, holdout_count, semantic-quality-regression-observed status, preview reason, and recovery canary sizing in the resulting evidence.",
+                "Do not write routing_rules.yaml or change routing.rules until semantic-quality-regression-observed clears and the managed preview is fresh and agreed.",
+                "For stale, disagreed, rejected, or no-op previews, keep the issue blocked and include the exact preview blocker reason.",
+            ],
+            acceptance=[
+                "The emitted proposal has a stable fingerprint, labels include `routing`, and the status label is `status:ready` only when the managed preview is fresh and agrees.",
+                f"Blocked proposals include the preview blocker reason `{preview_reason}` and remain `status:blocked` until the preview/local gates pass.",
+                "The body states that no routing_rules.yaml write may happen until semantic-quality-regression-observed clears.",
+                str(action.get("acceptance_metric") or "A narrower routing canary or rollback review records coverage and no unsafe policy write."),
+                "Generated and follow-up evidence excludes raw prompts, provider bodies, absolute paths, request IDs, session IDs, cache keys, and individual candidate IDs.",
+            ],
+            savings_path=str(
+                action.get("expected_savings_path")
+                or "Moves the OpenAI routing opportunity from repeated blocked evidence into a precise recovery review path."
+            ),
+            sequencing=(
+                "Sequence after managed preview agreement is attached to successor decisions and before any local routing policy write."
+            ),
+        ),
+    }
+
+
 def _activation_successor_proposal_from_rows(
     action: dict[str, Any],
     decision: dict[str, Any],
     *,
     status_label: str,
 ) -> dict[str, Any]:
+    if _is_openai_semantic_regression_routing_successor(action):
+        return _openai_routing_recovery_proposal_from_rows(action, decision, status_label=status_label)
     title = _activation_successor_issue_title(action, decision, status_label=status_label)
     family = str(action.get("local_action_family") or decision.get("local_action_family") or "optimization")
     next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "inspect-local-evidence")
@@ -6565,6 +6745,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "unblock_reason": _queue_unblock_reason(entry),
         "blocker_codes": blocker_codes,
         "sample_count": _to_int(entry.get("sample_count")),
+        "matched_count": _to_int(entry.get("matched_count")),
         "applied_count": _to_int(entry.get("applied_count")),
         "holdout_count": _to_int(entry.get("holdout_count")),
         "fallback_count": _to_int(entry.get("fallback_count")),
@@ -6627,6 +6808,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "requested_model",
         "candidate_target_model",
         "required_local_executor",
+        "canary_fraction",
+        "holdout_fraction",
         "executor_compatible",
         "tool_cache_replay_enabled",
         "streaming_replay_enabled",
@@ -6682,6 +6865,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "activation_feedback_freshness_gate",
         "managed_preview_gate",
         "evidence_freshness",
+        "coverage",
+        "recovery_plan",
     ):
         if isinstance(entry.get(review_key), dict):
             clean[review_key] = sanitize_value(entry.get(review_key))
@@ -6697,6 +6882,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "rank",
         "ledger_rank",
         "sample_count",
+        "matched_count",
         "applied_count",
         "holdout_count",
         "fallback_count",
@@ -6705,6 +6891,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "realized_savings_usd",
         "projected_savings_usd",
         "savings_per_1000_calls_usd",
+        "canary_fraction",
+        "holdout_fraction",
         "affected_rows",
         "cache_apply_action_count",
         "cache_entries_written",
