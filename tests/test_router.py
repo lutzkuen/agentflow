@@ -605,6 +605,223 @@ rules: []
             finally:
                 importlib.reload(router_module)
 
+    def test_openai_canary_list_selects_one_of_multiple_eligible_candidates(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+openai_canaries:
+  - enabled: true
+    policy_id: test-openai-gpt55-to-gpt54
+    requested_model: gpt-5.5
+    target_model: gpt-5.4
+    eligible_categories: [chat, short-completion]
+    excluded_categories: []
+    canary_fraction: 1.0
+    holdout_fraction: 0.0
+    safety_stop:
+      enabled: false
+  - enabled: true
+    policy_id: test-openai-gpt55-to-gpt53
+    requested_model: gpt-5.5
+    target_model: gpt-5.3
+    eligible_categories: [chat, short-completion]
+    excluded_categories: []
+    canary_fraction: 1.0
+    holdout_fraction: 0.0
+    safety_stop:
+      enabled: false
+rules: []
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}, clear=False):
+                    manual_router = importlib.reload(router_module)
+
+                    routed_1, meta_1 = manual_router.route_openai_model({
+                        "model": "gpt-5.5",
+                        "input": "Summarize the outcome without tools.",
+                    })
+                    routed_2, meta_2 = manual_router.route_openai_model({
+                        "model": "gpt-5.5",
+                        "input": "Summarize the outcome without tools.",
+                    })
+
+                    self.assertEqual(routed_1, "gpt-5.5")
+                    self.assertEqual(routed_2, "gpt-5.5")
+                    canary = meta_1["openai_canary"]
+                    self.assertEqual(canary["status"], "applied")
+                    self.assertEqual(canary["eligible_canary_count"], 2)
+                    self.assertEqual(canary["runnable_canary_count"], 2)
+                    self.assertEqual(canary["candidate_policy_count"], 2)
+                    self.assertEqual(canary["selected_canary_policy_id"], canary["policy_id"])
+                    self.assertEqual(canary["canary_selection_basis"], "metadata-policy-selection")
+                    self.assertIn(canary["target_model"], {"gpt-5.4", "gpt-5.3"})
+                    self.assertEqual(meta_2["openai_canary"]["selected_canary_policy_id"], canary["selected_canary_policy_id"])
+                    serialized = stable_json(canary)
+                    self.assertNotIn("SECRET", serialized)
+                    self.assertNotIn("messages", serialized)
+                    self.assertNotIn("prompt", serialized)
+            finally:
+                importlib.reload(router_module)
+
+    def test_openai_canary_list_separates_codex_and_generic_candidates(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+openai_canaries:
+  - enabled: true
+    policy_id: codex-gpt55-to-gpt53-codex
+    requested_model: gpt-5.5
+    target_model: gpt-5.3-codex
+    app_family: codex
+    eligible_categories: [tool-light]
+    excluded_categories: []
+    allow_tools: true
+    canary_fraction: 1.0
+    holdout_fraction: 0.0
+    safety_stop:
+      enabled: false
+  - enabled: true
+    policy_id: generic-gpt55-to-gpt54
+    requested_model: gpt-5.5
+    target_model: gpt-5.4
+    app_family: generic_openai
+    eligible_categories: [tool-light]
+    excluded_categories: []
+    allow_tools: true
+    canary_fraction: 1.0
+    holdout_fraction: 0.0
+    safety_stop:
+      enabled: false
+rules: []
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}, clear=False):
+                    manual_router = importlib.reload(router_module)
+
+                    _, codex_meta = manual_router.route_openai_model({
+                        "model": "gpt-5.5",
+                        "_agentflow_app_family": "codex",
+                        "input": "Inspect tool output.",
+                        "tools": [{"type": "function", "name": "read_file"}],
+                    })
+                    _, generic_meta = manual_router.route_openai_model({
+                        "model": "gpt-5.5",
+                        "_agentflow_app_family": "generic_openai",
+                        "input": "Inspect tool output.",
+                        "tools": [{"type": "function", "name": "read_file"}],
+                    })
+
+                    self.assertEqual(codex_meta["openai_canary"]["policy_id"], "codex-gpt55-to-gpt53-codex")
+                    self.assertEqual(codex_meta["openai_canary"]["target_model"], "gpt-5.3-codex")
+                    self.assertEqual(codex_meta["openai_canary"]["eligible_canary_count"], 1)
+                    self.assertEqual(generic_meta["openai_canary"]["policy_id"], "generic-gpt55-to-gpt54")
+                    self.assertEqual(generic_meta["openai_canary"]["target_model"], "gpt-5.4")
+                    self.assertEqual(generic_meta["openai_canary"]["eligible_canary_count"], 1)
+            finally:
+                importlib.reload(router_module)
+
+    def test_openai_canary_safety_stop_is_per_policy_in_candidate_list(self):
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "calls.sqlite3"
+            store = Store(str(db_path))
+            try:
+                store.log_call(
+                    id="openai-canary-stopped-1",
+                    created_at=utc_now(),
+                    path="/v1/responses",
+                    requested_model="gpt-5.5",
+                    routed_model="gpt-5.5",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=500,
+                    latency_ms=1000,
+                    input_tokens_est=100,
+                    output_tokens_est=10,
+                    actual_input_tokens=100,
+                    actual_output_tokens=10,
+                    cost_est_usd=0.01,
+                    cost_baseline_usd=0.02,
+                    routing_json=stable_json({
+                        "openai_canary": {
+                            "policy_id": "stopped-policy",
+                            "status": "applied",
+                            "cohort": "canary_applied",
+                        }
+                    }),
+                    provider="openai",
+                    category="chat",
+                    retry_count=0,
+                )
+            finally:
+                store.conn.close()
+
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+openai_canaries:
+  - enabled: true
+    policy_id: stopped-policy
+    requested_model: gpt-5.5
+    target_model: gpt-5.4
+    eligible_categories: [chat, short-completion]
+    excluded_categories: []
+    canary_fraction: 1.0
+    holdout_fraction: 0.0
+    safety_stop:
+      enabled: true
+      min_samples: 1
+      max_error_rate: 0.0
+      max_retry_rate: 1.0
+      max_fallback_rate: 1.0
+  - enabled: true
+    policy_id: healthy-policy
+    requested_model: gpt-5.5
+    target_model: gpt-5.3
+    eligible_categories: [chat, short-completion]
+    excluded_categories: []
+    canary_fraction: 1.0
+    holdout_fraction: 0.0
+    safety_stop:
+      enabled: false
+rules: []
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "AGENTFLOW_ROUTING_RULES": str(rules_path),
+                        "AGENTFLOW_DATABASE_URL": f"sqlite:///{db_path}",
+                    },
+                    clear=False,
+                ):
+                    manual_router = importlib.reload(router_module)
+
+                    routed, meta = manual_router.route_openai_model({
+                        "model": "gpt-5.5",
+                        "input": "Summarize the safe candidate state.",
+                    })
+
+                    canary = meta["openai_canary"]
+                    self.assertEqual(routed, "gpt-5.5")
+                    self.assertEqual(canary["status"], "applied")
+                    self.assertEqual(canary["policy_id"], "healthy-policy")
+                    self.assertEqual(canary["selected_canary_policy_id"], "healthy-policy")
+                    self.assertEqual(canary["eligible_canary_count"], 2)
+                    self.assertEqual(canary["runnable_canary_count"], 1)
+                    stopped = [item for item in canary["canary_candidates"] if item["policy_id"] == "stopped-policy"][0]
+                    self.assertEqual(stopped["status"], "safety_stopped")
+                    self.assertTrue(stopped["safety_stop_tripped"])
+            finally:
+                importlib.reload(router_module)
+
     def test_small_non_tool_sonnet_routes_to_haiku_under_10000_chars(self):
         body = {
             "model": SONNET_DEFAULT,

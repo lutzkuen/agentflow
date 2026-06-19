@@ -94,8 +94,10 @@ phase_canary:
     max_latency_regression_ratio: 1.50
     limit: 500
 
-# Optional behavior-changing OpenAI routing canary. Disabled by default. When
-# enabled in a local manual policy, eligible OpenAI requests are
+# Optional behavior-changing OpenAI routing canary. A local manual policy may
+# define either this backward-compatible singleton `openai_canary:` section or
+# an `openai_canaries:` list with independent `policy_id`, target, filters, and
+# safety-stop settings per candidate. Eligible OpenAI requests are
 # deterministically assigned to applied, holdout, or not-selected cohorts from
 # metadata-only request features. The target model must stay inside the OpenAI
 # provider family.

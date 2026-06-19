@@ -329,9 +329,16 @@ def _default_openai_canary_policy() -> dict[str, Any]:
         "enabled": True,
         "policy_id": "local-openai-routing-canary-v1",
         "model_pattern": "gpt-5.4",
+        "requested_model": "",
         "target_model": "gpt-5.4-mini",
+        "source_surface": "openai_responses",
+        "endpoint": "responses",
+        "app_family": "generic_openai",
         "eligible_categories": ["chat", "short-completion", "tool-light"],
         "excluded_categories": ["tool-result", "tool-heavy", "code-gen", "long-context"],
+        "eligible_workflow_phases": [],
+        "excluded_workflow_phases": [],
+        "min_workflow_phase_confidence": "low",
         "allow_tools": True,
         "allow_stream": False,
         "min_text_chars": 0,
@@ -457,10 +464,24 @@ def _apply_openai_canary_yaml(policy: dict[str, Any], data: Any) -> dict[str, An
     if not isinstance(data, dict):
         return policy
     policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
-    for key in ("policy_id", "promotion_action_id", "target_candidate_id", "policy_source", "model_pattern", "target_model", "salt", "cohort_unit"):
+    for key in (
+        "policy_id",
+        "promotion_action_id",
+        "target_candidate_id",
+        "policy_source",
+        "model_pattern",
+        "requested_model",
+        "target_model",
+        "source_surface",
+        "endpoint",
+        "app_family",
+        "min_workflow_phase_confidence",
+        "salt",
+        "cohort_unit",
+    ):
         if data.get(key) not in (None, ""):
             policy[key] = str(data[key])
-    for key in ("eligible_categories", "excluded_categories"):
+    for key in ("eligible_categories", "excluded_categories", "eligible_workflow_phases", "excluded_workflow_phases"):
         if key in data:
             policy[key] = _string_list(data.get(key))
     for key in ("allow_tools", "allow_stream"):
@@ -493,6 +514,21 @@ def _apply_openai_canary_yaml(policy: dict[str, Any], data: Any) -> dict[str, An
     return policy
 
 
+def _openai_canaries_from_yaml(data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_canaries = data.get("openai_canaries")
+    if isinstance(raw_canaries, list):
+        canaries: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_canaries):
+            if not isinstance(raw, dict):
+                continue
+            policy = _apply_openai_canary_yaml(_default_openai_canary_policy(), raw)
+            if not policy.get("policy_id"):
+                policy["policy_id"] = f"local-openai-routing-canary-{index + 1}"
+            canaries.append(policy)
+        return canaries
+    return [_apply_openai_canary_yaml(_default_openai_canary_policy(), data.get("openai_canary"))]
+
+
 def _load_routing_yaml(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -522,7 +558,7 @@ def _rules_list(data: Any) -> list[dict[str, Any]]:
     return [rule for rule in rules if isinstance(rule, dict)]
 
 
-def _load_routing_rules() -> tuple[list[dict], dict[str, Any], dict[str, Any], str, str]:
+def _load_routing_rules() -> tuple[list[dict], dict[str, Any], list[dict[str, Any]], str, str]:
     defaults_path = Path(__file__).parent / "routing_rules.yaml"
     defaults = _load_routing_yaml(defaults_path) or {"rules": []}
     env_path = os.getenv("AGENTFLOW_ROUTING_RULES")
@@ -531,22 +567,23 @@ def _load_routing_rules() -> tuple[list[dict], dict[str, Any], dict[str, Any], s
         data = _load_routing_yaml(p)
         if data is not None:
             canary = _phase_canary_from_yaml(data, missing_enabled=False)
-            openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), data.get("openai_canary"))
-            return _rules_list(data), canary, openai_canary, "local-manual", str(p)
+            openai_canaries = _openai_canaries_from_yaml(data)
+            return _rules_list(data), canary, openai_canaries, "local-manual", str(p)
 
     local_path = agentflow_config_path("routing_rules.yaml")
     local = _load_routing_yaml(local_path)
     if local is not None:
         canary = _phase_canary_from_yaml(local, missing_enabled=False)
-        openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), local.get("openai_canary"))
-        return _rules_list(local) + _rules_list(defaults), canary, openai_canary, "local-manual", str(local_path)
+        openai_canaries = _openai_canaries_from_yaml(local)
+        return _rules_list(local) + _rules_list(defaults), canary, openai_canaries, "local-manual", str(local_path)
 
     canary = _phase_canary_from_yaml(defaults, missing_enabled=False)
-    openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), defaults.get("openai_canary"))
-    return _rules_list(defaults), canary, openai_canary, "local-default", str(defaults_path)
+    openai_canaries = _openai_canaries_from_yaml(defaults)
+    return _rules_list(defaults), canary, openai_canaries, "local-default", str(defaults_path)
 
 
-ROUTING_RULES, ROUTING_PHASE_CANARY, ROUTING_OPENAI_CANARY, ROUTING_RULES_SOURCE, ROUTING_RULES_PATH = _load_routing_rules()
+ROUTING_RULES, ROUTING_PHASE_CANARY, ROUTING_OPENAI_CANARIES, ROUTING_RULES_SOURCE, ROUTING_RULES_PATH = _load_routing_rules()
+ROUTING_OPENAI_CANARY = ROUTING_OPENAI_CANARIES[0] if ROUTING_OPENAI_CANARIES else _default_openai_canary_policy()
 ROUTING_RULES_LOADED_AT = utc_now()
 ROUTING_RULES_LOADED_FILE = policy_file_snapshot(ROUTING_RULES_PATH)
 
@@ -1134,6 +1171,7 @@ def _phase_canary_in_scope(*, requested: str, category: str, stream: bool) -> bo
 
 def _openai_canary_base_meta(
     *,
+    policy: dict[str, Any],
     requested: str,
     target_model: str,
     text_chars: int,
@@ -1141,6 +1179,11 @@ def _openai_canary_base_meta(
     tools: bool,
     stream: bool,
     category: str,
+    source_surface: str,
+    endpoint: str,
+    app_family: str,
+    workflow_phase: str,
+    workflow_phase_confidence: str,
     reason: str,
     status: str,
 ) -> dict[str, Any]:
@@ -1149,14 +1192,14 @@ def _openai_canary_base_meta(
     projected_savings = None
     if current_input_cost is not None and target_input_cost is not None:
         projected_savings = current_input_cost - target_input_cost
-    policy_id = str(ROUTING_OPENAI_CANARY.get("policy_id") or "local-openai-routing-canary-v1")
-    candidate_id = ROUTING_OPENAI_CANARY.get("target_candidate_id") or ROUTING_OPENAI_CANARY.get("promotion_action_id")
+    policy_id = str(policy.get("policy_id") or "local-openai-routing-canary-v1")
+    candidate_id = policy.get("target_candidate_id") or policy.get("promotion_action_id")
     return {
-        "enabled": bool(ROUTING_OPENAI_CANARY.get("enabled")),
+        "enabled": bool(policy.get("enabled")),
         "policy_id": policy_id,
         "rule_id": policy_id,
-        "promotion_action_id": ROUTING_OPENAI_CANARY.get("promotion_action_id"),
-        "target_candidate_id": ROUTING_OPENAI_CANARY.get("target_candidate_id"),
+        "promotion_action_id": policy.get("promotion_action_id"),
+        "target_candidate_id": policy.get("target_candidate_id"),
         "candidate_id": candidate_id,
         "status": status,
         "cohort": "none",
@@ -1165,8 +1208,11 @@ def _openai_canary_base_meta(
         "requested_model": requested,
         "target_model": target_model,
         "actual_forwarded_model": requested,
-        "source_surface": "openai_provider_request",
-        "app_family": "generic_openai",
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+        "app_family": app_family,
+        "workflow_phase": workflow_phase,
+        "workflow_phase_confidence": workflow_phase_confidence,
         "category": category,
         "text_chars": text_chars,
         "text_bucket": _text_bucket(text_chars),
@@ -1177,13 +1223,13 @@ def _openai_canary_base_meta(
         "projected_input_savings_usd": projected_savings,
         "has_tools": tools,
         "stream": stream,
-        "canary_fraction": float(ROUTING_OPENAI_CANARY.get("canary_fraction") or 0.0),
-        "holdout_fraction": float(ROUTING_OPENAI_CANARY.get("holdout_fraction") or 0.0),
-        "min_text_chars": _int_min(ROUTING_OPENAI_CANARY.get("min_text_chars"), 0, 0),
-        "max_text_chars": _int_min(ROUTING_OPENAI_CANARY.get("max_text_chars"), 8000, 0),
-        "min_input_tokens_est": _int_min(ROUTING_OPENAI_CANARY.get("min_input_tokens_est"), 0, 0),
-        "max_input_tokens_est": _int_min(ROUTING_OPENAI_CANARY.get("max_input_tokens_est"), 2000, 0),
-        "policy_source": ROUTING_OPENAI_CANARY.get("policy_source") or ROUTING_RULES_SOURCE,
+        "canary_fraction": float(policy.get("canary_fraction") or 0.0),
+        "holdout_fraction": float(policy.get("holdout_fraction") or 0.0),
+        "min_text_chars": _int_min(policy.get("min_text_chars"), 0, 0),
+        "max_text_chars": _int_min(policy.get("max_text_chars"), 8000, 0),
+        "min_input_tokens_est": _int_min(policy.get("min_input_tokens_est"), 0, 0),
+        "max_input_tokens_est": _int_min(policy.get("max_input_tokens_est"), 2000, 0),
+        "policy_source": policy.get("policy_source") or ROUTING_RULES_SOURCE,
     }
 
 
@@ -1371,6 +1417,165 @@ def _sequenced_canary_score(sequence_index: int, *, holdout_fraction: float, can
     return None
 
 
+def _openai_canary_candidate_summary(meta: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        "policy_id": meta.get("policy_id"),
+        "target_model": meta.get("target_model"),
+        "status": meta.get("status"),
+        "reason": meta.get("reason"),
+        "selection_score": meta.get("canary_selection_score"),
+        "safety_stop_status": (meta.get("safety_stop") or {}).get("status") if isinstance(meta.get("safety_stop"), dict) else None,
+        "safety_stop_tripped": bool((meta.get("safety_stop") or {}).get("tripped")) if isinstance(meta.get("safety_stop"), dict) else False,
+        "metadata_only": True,
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def _openai_canary_selection_payload(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_surface": meta.get("source_surface"),
+        "endpoint": meta.get("endpoint"),
+        "app_family": meta.get("app_family"),
+        "requested_model": meta.get("requested_model"),
+        "target_model": meta.get("target_model"),
+        "category": meta.get("category"),
+        "workflow_phase": meta.get("workflow_phase"),
+        "text_bucket": meta.get("text_bucket"),
+        "token_bucket": meta.get("token_bucket"),
+        "has_tools": bool(meta.get("has_tools")),
+        "stream": bool(meta.get("stream")),
+        "policy_id": meta.get("policy_id"),
+    }
+
+
+def _openai_canary_policy_preflight(
+    policy: dict[str, Any],
+    *,
+    requested: str,
+    text_chars: int,
+    input_tokens_est: int,
+    tools: bool,
+    stream: bool,
+    category: str,
+    source_surface: str,
+    endpoint: str,
+    app_family: str,
+    workflow_phase: str,
+    workflow_phase_confidence: str,
+) -> tuple[dict[str, Any], bool]:
+    target_model, target_error = _safe_openai_target_model(policy.get("target_model"))
+    target = target_model or str(policy.get("target_model") or "")
+    meta = _openai_canary_base_meta(
+        policy=policy,
+        requested=requested,
+        target_model=target,
+        text_chars=text_chars,
+        input_tokens_est=input_tokens_est,
+        tools=tools,
+        stream=stream,
+        category=category,
+        source_surface=source_surface,
+        endpoint=endpoint,
+        app_family=app_family,
+        workflow_phase=workflow_phase,
+        workflow_phase_confidence=workflow_phase_confidence,
+        reason="disabled",
+        status="disabled",
+    )
+    if not policy.get("enabled"):
+        return meta, False
+    if target_error:
+        meta.update({"status": "ineligible", "reason": target_error})
+        return meta, False
+
+    expected_source_surface = str(policy.get("source_surface") or "").lower()
+    if expected_source_surface and expected_source_surface != source_surface.lower():
+        meta.update({"status": "ineligible", "reason": "source-surface-not-enabled"})
+        return meta, False
+    expected_endpoint = str(policy.get("endpoint") or "").lower()
+    if expected_endpoint and expected_endpoint != endpoint.lower():
+        meta.update({"status": "ineligible", "reason": "endpoint-not-enabled"})
+        return meta, False
+    expected_app_family = str(policy.get("app_family") or "").lower()
+    if expected_app_family and expected_app_family != app_family.lower():
+        meta.update({"status": "ineligible", "reason": "app-family-not-enabled"})
+        return meta, False
+
+    requested_l = requested.lower()
+    requested_exact = str(policy.get("requested_model") or "").lower()
+    model_pattern = str(policy.get("model_pattern") or "").lower()
+    if requested_exact and requested_l != requested_exact:
+        meta.update({"status": "ineligible", "reason": "requested-model-not-enabled"})
+        return meta, False
+    if not requested_exact and model_pattern and model_pattern not in requested_l:
+        meta.update({"status": "ineligible", "reason": "requested-model-not-enabled"})
+        return meta, False
+    if target_model == requested:
+        meta.update({"status": "noop", "reason": "target-model-already-selected"})
+        return meta, False
+
+    if tools and not _as_bool(policy.get("allow_tools"), False):
+        meta.update({"status": "ineligible", "reason": "tool-request-not-enabled"})
+        return meta, False
+    if stream and not _as_bool(policy.get("allow_stream"), False):
+        meta.update({"status": "ineligible", "reason": "streaming-not-enabled"})
+        return meta, False
+
+    eligible_phases = set(_string_list(policy.get("eligible_workflow_phases")))
+    excluded_phases = set(_string_list(policy.get("excluded_workflow_phases")))
+    if workflow_phase in excluded_phases or (eligible_phases and workflow_phase not in eligible_phases):
+        meta.update({"status": "ineligible", "reason": "workflow-phase-not-enabled"})
+        return meta, False
+    min_confidence = str(policy.get("min_workflow_phase_confidence") or "low")
+    if _CONFIDENCE_ORDER.get(workflow_phase_confidence, 0) < _CONFIDENCE_ORDER.get(min_confidence, 0):
+        meta.update({"status": "ineligible", "reason": "workflow-phase-confidence-too-low"})
+        return meta, False
+
+    eligible_categories = set(_string_list(policy.get("eligible_categories")))
+    excluded_categories = set(_string_list(policy.get("excluded_categories")))
+    if category in excluded_categories or (eligible_categories and category not in eligible_categories):
+        meta.update({"status": "ineligible", "reason": "category-not-enabled"})
+        return meta, False
+
+    min_chars = _int_min(policy.get("min_text_chars"), 0, 0)
+    max_chars = _int_min(policy.get("max_text_chars"), 8000, 0)
+    if text_chars < min_chars:
+        meta.update({"status": "ineligible", "reason": "request-too-small"})
+        return meta, False
+    if max_chars > 0 and text_chars > max_chars:
+        meta.update({"status": "ineligible", "reason": "request-too-large"})
+        return meta, False
+
+    min_tokens = _int_min(policy.get("min_input_tokens_est"), 0, 0)
+    max_tokens = _int_min(policy.get("max_input_tokens_est"), 2000, 0)
+    if input_tokens_est < min_tokens:
+        meta.update({"status": "ineligible", "reason": "token-estimate-too-small"})
+        return meta, False
+    if max_tokens > 0 and input_tokens_est > max_tokens:
+        meta.update({"status": "ineligible", "reason": "token-estimate-too-large"})
+        return meta, False
+
+    safety = _openai_canary_safety_status(meta["policy_id"], policy.get("safety_stop") or {})
+    meta["safety_stop"] = safety
+    if safety.get("tripped"):
+        meta.update({"status": "safety_stopped", "reason": "safety-stop-tripped", "cohort": "bypassed_or_disabled"})
+        return meta, False
+
+    selection_payload = _openai_canary_selection_payload(meta)
+    selection_hash, selection_score = _cohort_score(
+        selection_payload,
+        "agentflow-openai-routing-canary-candidate-selection-v1",
+    )
+    meta.update({
+        "status": "eligible",
+        "reason": "eligible",
+        "canary_selection_hash": selection_hash,
+        "canary_selection_score": round(selection_score, 12),
+        "canary_selection_features": selection_payload,
+    })
+    return meta, True
+
+
 def openai_canary_decision(
     *,
     requested: str,
@@ -1379,88 +1584,88 @@ def openai_canary_decision(
     tools: bool,
     stream: bool,
     category: str,
+    source_surface: str = "openai_responses",
+    endpoint: str = "responses",
+    app_family: str = "generic_openai",
+    workflow_phase: str | None = None,
+    workflow_phase_confidence: str = "medium",
 ) -> tuple[str | None, dict[str, Any]]:
-    target_model, target_error = _safe_openai_target_model(ROUTING_OPENAI_CANARY.get("target_model"))
-    target = target_model or str(ROUTING_OPENAI_CANARY.get("target_model") or "")
-    meta = _openai_canary_base_meta(
-        requested=requested,
-        target_model=target,
-        text_chars=text_chars,
-        input_tokens_est=input_tokens_est,
-        tools=tools,
-        stream=stream,
-        category=category,
-        reason="disabled",
-        status="disabled",
+    workflow_phase = workflow_phase or category
+    policies = [policy for policy in ROUTING_OPENAI_CANARIES if isinstance(policy, dict)]
+    if not policies:
+        policies = [ROUTING_OPENAI_CANARY]
+
+    evaluated: list[dict[str, Any]] = []
+    runnable: list[dict[str, Any]] = []
+    filter_matched_count = 0
+    for policy in policies:
+        candidate_meta, candidate_runnable = _openai_canary_policy_preflight(
+            policy,
+            requested=requested,
+            text_chars=text_chars,
+            input_tokens_est=input_tokens_est,
+            tools=tools,
+            stream=stream,
+            category=category,
+            source_surface=source_surface,
+            endpoint=endpoint,
+            app_family=app_family,
+            workflow_phase=workflow_phase,
+            workflow_phase_confidence=workflow_phase_confidence,
+        )
+        evaluated.append(candidate_meta)
+        if candidate_runnable or candidate_meta.get("status") == "safety_stopped":
+            filter_matched_count += 1
+        if candidate_runnable:
+            runnable.append(candidate_meta)
+
+    candidate_summaries = [_openai_canary_candidate_summary(meta) for meta in evaluated]
+    common_selection_meta = {
+        "candidate_policy_count": len(policies),
+        "eligible_canary_count": filter_matched_count,
+        "runnable_canary_count": len(runnable),
+        "canary_selection_basis": "metadata-policy-selection",
+        "canary_candidates": candidate_summaries,
+    }
+
+    if not runnable:
+        selected = next(
+            (meta for meta in evaluated if meta.get("status") == "safety_stopped"),
+            evaluated[0] if evaluated else {},
+        )
+        selected.update(common_selection_meta)
+        selected["selected_canary_policy_id"] = None
+        return (requested if selected else None), selected
+
+    runnable.sort(key=lambda item: (float(item.get("canary_selection_score") or 1.0), str(item.get("policy_id") or "")))
+    meta = dict(runnable[0])
+    selected_policy = next(
+        (policy for policy in policies if str(policy.get("policy_id") or "") == str(meta.get("policy_id") or "")),
+        ROUTING_OPENAI_CANARY,
     )
-    if not ROUTING_OPENAI_CANARY.get("enabled"):
-        return None, meta
-    if target_error:
-        meta.update({"status": "ineligible", "reason": target_error})
-        return requested, meta
-
-    requested_l = requested.lower()
-    model_pattern = str(ROUTING_OPENAI_CANARY.get("model_pattern") or "").lower()
-    if model_pattern and model_pattern not in requested_l:
-        meta.update({"status": "ineligible", "reason": "requested-model-not-enabled"})
-        return requested, meta
-    if target_model == requested:
-        meta.update({"status": "noop", "reason": "target-model-already-selected"})
-        return requested, meta
-
-    if tools and not _as_bool(ROUTING_OPENAI_CANARY.get("allow_tools"), False):
-        meta.update({"status": "ineligible", "reason": "tool-request-not-enabled"})
-        return requested, meta
-    if stream and not _as_bool(ROUTING_OPENAI_CANARY.get("allow_stream"), False):
-        meta.update({"status": "ineligible", "reason": "streaming-not-enabled"})
-        return requested, meta
-
-    eligible_categories = set(_string_list(ROUTING_OPENAI_CANARY.get("eligible_categories")))
-    excluded_categories = set(_string_list(ROUTING_OPENAI_CANARY.get("excluded_categories")))
-    if category in excluded_categories or (eligible_categories and category not in eligible_categories):
-        meta.update({"status": "ineligible", "reason": "category-not-enabled"})
-        return requested, meta
-
-    min_chars = _int_min(ROUTING_OPENAI_CANARY.get("min_text_chars"), 0, 0)
-    max_chars = _int_min(ROUTING_OPENAI_CANARY.get("max_text_chars"), 8000, 0)
-    if text_chars < min_chars:
-        meta.update({"status": "ineligible", "reason": "request-too-small"})
-        return requested, meta
-    if max_chars > 0 and text_chars > max_chars:
-        meta.update({"status": "ineligible", "reason": "request-too-large"})
-        return requested, meta
-
-    min_tokens = _int_min(ROUTING_OPENAI_CANARY.get("min_input_tokens_est"), 0, 0)
-    max_tokens = _int_min(ROUTING_OPENAI_CANARY.get("max_input_tokens_est"), 2000, 0)
-    if input_tokens_est < min_tokens:
-        meta.update({"status": "ineligible", "reason": "token-estimate-too-small"})
-        return requested, meta
-    if max_tokens > 0 and input_tokens_est > max_tokens:
-        meta.update({"status": "ineligible", "reason": "token-estimate-too-large"})
-        return requested, meta
-
-    safety = _openai_canary_safety_status(meta["policy_id"], ROUTING_OPENAI_CANARY.get("safety_stop") or {})
-    meta["safety_stop"] = safety
-    if safety.get("tripped"):
-        meta.update({"status": "safety_stopped", "reason": "safety-stop-tripped", "cohort": "bypassed_or_disabled"})
-        return requested, meta
+    target_model, _ = _safe_openai_target_model(selected_policy.get("target_model"))
+    assert target_model is not None
+    meta.update(common_selection_meta)
+    meta["selected_canary_policy_id"] = meta.get("policy_id")
 
     cohort_payload = {
         "source_surface": meta["source_surface"],
+        "endpoint": meta["endpoint"],
         "app_family": meta["app_family"],
         "requested_model": requested,
         "target_model": target_model,
         "category": category,
+        "workflow_phase": workflow_phase,
         "text_bucket": meta["text_bucket"],
         "token_bucket": meta["token_bucket"],
         "has_tools": tools,
         "stream": stream,
         "policy_id": meta["policy_id"],
     }
-    cohort_hash, score = _cohort_score(cohort_payload, str(ROUTING_OPENAI_CANARY.get("salt") or ""))
-    holdout_fraction = float(ROUTING_OPENAI_CANARY.get("holdout_fraction") or 0.0)
-    canary_fraction = float(ROUTING_OPENAI_CANARY.get("canary_fraction") or 0.0)
-    cohort_unit = str(ROUTING_OPENAI_CANARY.get("cohort_unit") or "request_features")
+    cohort_hash, score = _cohort_score(cohort_payload, str(selected_policy.get("salt") or ""))
+    holdout_fraction = float(selected_policy.get("holdout_fraction") or 0.0)
+    canary_fraction = float(selected_policy.get("canary_fraction") or 0.0)
+    cohort_unit = str(selected_policy.get("cohort_unit") or "request_features")
     sequence_index: int | None = None
     sequenced_score = None
     if cohort_unit in {"request_features_sequence", "feature_sequence"}:
@@ -1905,7 +2110,14 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     input_tokens_est = _input_tokens_est(text_chars)
     source_surface = str(body.get("source_surface") or body.get("_agentflow_source_surface") or "openai_responses")
     endpoint = str(body.get("endpoint") or body.get("_agentflow_endpoint") or "responses")
-    openai_canary_enabled = bool(ROUTING_OPENAI_CANARY.get("enabled"))
+    app_family = str(body.get("app_family") or body.get("_agentflow_app_family") or "generic_openai")
+    workflow_phase = str(body.get("workflow_phase") or body.get("_agentflow_workflow_phase") or category)
+    workflow_phase_confidence = str(
+        body.get("workflow_phase_confidence")
+        or body.get("_agentflow_workflow_phase_confidence")
+        or "medium"
+    )
+    openai_canary_enabled = any(bool(policy.get("enabled")) for policy in ROUTING_OPENAI_CANARIES if isinstance(policy, dict))
     meta = {
         "enabled": bool(OPENAI_ROUTING_ENABLED or openai_canary_enabled),
         "requested_model": requested,
@@ -1996,6 +2208,11 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             tools=tools,
             stream=stream,
             category=category,
+            source_surface=source_surface,
+            endpoint=endpoint,
+            app_family=app_family,
+            workflow_phase=workflow_phase,
+            workflow_phase_confidence=workflow_phase_confidence,
         )
         routed = canary_routed or requested
         reason = "OpenAI canary selected shadow route; keep requested model"
