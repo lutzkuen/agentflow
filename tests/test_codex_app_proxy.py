@@ -3248,8 +3248,8 @@ summary_model_hint:
         }
 
         async def fake_shadow_executor(shadow_body, *, shadow_model):
-            self.assertEqual(shadow_model, "gpt-5-mini")
-            self.assertEqual(shadow_body["model"], "gpt-5-mini")
+            self.assertEqual(shadow_model, "gpt-5.3-codex")
+            self.assertEqual(shadow_body["model"], "gpt-5.3-codex")
             self.assertNotIn("threadId", shadow_body)
             self.assertNotIn("thread-active-model", json.dumps(shadow_body))
             return {
@@ -3330,10 +3330,11 @@ summary_model_hint:
         self.assertEqual(experiment["source_surface"], "codex_turn")
         self.assertEqual(experiment["mode"], "shadow_candidate_pass_through")
         self.assertEqual(experiment["requested_model"], "gpt-5.5")
-        self.assertEqual(experiment["routed_model"], "gpt-5-mini")
+        self.assertEqual(experiment["routed_model"], "gpt-5.3-codex")
         self.assertEqual(experiment["primary_model"], "gpt-5.5")
-        self.assertEqual(experiment["shadow_model"], "gpt-5-mini")
+        self.assertEqual(experiment["shadow_model"], "gpt-5.3-codex")
         self.assertEqual(experiment["user_visible_model"], "gpt-5.5")
+        self.assertEqual(experiment["candidate_id"], "codex-gpt55-to-gpt53-codex-unknown-phase")
         self.assertEqual(experiment["requested_model_source"], "derived-model-state")
         self.assertEqual(experiment["model_state"]["source_method"], "initialize")
         self.assertTrue(experiment["privacy"]["metadata_only"])
@@ -3343,9 +3344,9 @@ summary_model_hint:
         self.assertEqual(experiment_row["provider"], "openai")
         self.assertEqual(experiment_row["source_surface"], "codex_turn")
         self.assertEqual(experiment_row["requested_model"], "gpt-5.5")
-        self.assertEqual(experiment_row["routed_model"], "gpt-5-mini")
+        self.assertEqual(experiment_row["routed_model"], "gpt-5.3-codex")
         self.assertEqual(experiment_row["primary_model"], "gpt-5.5")
-        self.assertEqual(experiment_row["shadow_model"], "gpt-5-mini")
+        self.assertEqual(experiment_row["shadow_model"], "gpt-5.3-codex")
         self.assertEqual(json.loads(experiment_row["experiment_json"])["mode"], "shadow_candidate_pass_through")
 
     def test_codex_routing_experiment_request_too_large_skip_is_visible(self):

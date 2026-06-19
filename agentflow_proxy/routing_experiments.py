@@ -111,13 +111,159 @@ def _default_experiment_policy() -> dict[str, Any]:
         "model_pairs": [
             {"requested_model": "claude-sonnet-4-6", "routed_model": "claude-haiku-4-5-20251001"},
             {"requested_model": "claude-opus-4-5", "routed_model": "claude-sonnet-4-6"},
-            {"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"},
+            {"requested_model": "gpt-5.5", "routed_model": "gpt-5.4"},
             {"requested_model": "gpt-5.4", "routed_model": "gpt-5.4-mini"},
-            {"requested_model": "gpt-5.5", "routed_model": "gpt-5-mini"},
+            {"requested_model": "gpt-5.3-codex", "routed_model": "gpt-5-codex"},
+            {"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"},
+            {"requested_model": "gpt-5.3", "routed_model": "gpt-5-mini"},
+            {"requested_model": "gpt-5-mini", "routed_model": "gpt-5-nano"},
         ],
-        "routing_candidates": [],
+        "routing_candidates": [
+            {
+                "candidate_id": "anthropic-sonnet46-to-haiku45-short",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-haiku-4-5-20251001",
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "short-completion",
+                "max_text_chars": 8000,
+            },
+            {
+                "candidate_id": "anthropic-sonnet46-to-haiku45-tool-result-stream",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-haiku-4-5-20251001",
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "tool-result",
+                "stream": True,
+                "max_text_chars": 128000,
+                "sample_rate": 0.10,
+            },
+            {
+                "candidate_id": "anthropic-opus45-to-sonnet46-chat",
+                "requested_model": "claude-opus-4-5",
+                "routed_model": "claude-sonnet-4-6",
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "chat",
+                "max_text_chars": 8000,
+            },
+            {
+                "candidate_id": "codex-gpt55-to-gpt53-codex-summary",
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.3-codex",
+                "provider": "openai",
+                "source_surface": "codex_turn",
+                "app_family": "codex",
+                "category": "codex-turn",
+                "workflow_phase": "summary",
+                "max_text_chars": 8000,
+                "sample_weight": 4.0,
+            },
+            {
+                "candidate_id": "codex-gpt55-to-gpt53-codex-unknown-phase",
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.3-codex",
+                "provider": "openai",
+                "source_surface": "codex_turn",
+                "app_family": "codex",
+                "category": "codex-turn",
+                "workflow_phase": "unknown",
+                "max_text_chars": 8000,
+            },
+            {
+                "candidate_id": "codex-gpt53-codex-to-gpt5-codex-summary",
+                "requested_model": "gpt-5.3-codex",
+                "routed_model": "gpt-5-codex",
+                "provider": "openai",
+                "source_surface": "codex_turn",
+                "app_family": "codex",
+                "category": "codex-turn",
+                "workflow_phase": "summary",
+                "max_text_chars": 8000,
+            },
+            {
+                "candidate_id": "codex-gpt5-codex-to-mini-short-summary",
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-mini",
+                "provider": "openai",
+                "source_surface": "codex_turn",
+                "app_family": "codex",
+                "category": "codex-turn",
+                "workflow_phase": "summary",
+                "max_text_chars": 2000,
+                "sample_rate": 0.05,
+            },
+            {
+                "candidate_id": "generic-gpt55-to-gpt54-chat",
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.4",
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "app_family": "generic_openai",
+                "category": "chat",
+                "max_text_chars": 8000,
+                "sample_weight": 4.0,
+            },
+            {
+                "candidate_id": "generic-gpt55-to-mini-short-exploratory",
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5-mini",
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "app_family": "generic_openai",
+                "category": "short-completion",
+                "max_text_chars": 2000,
+                "sample_rate": 0.02,
+            },
+            {
+                "candidate_id": "generic-gpt54-to-gpt53-chat",
+                "requested_model": "gpt-5.4",
+                "routed_model": "gpt-5.3",
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "app_family": "generic_openai",
+                "category": "chat",
+                "max_text_chars": 8000,
+            },
+            {
+                "candidate_id": "generic-gpt54-to-gpt54-mini-tool-light",
+                "requested_model": "gpt-5.4",
+                "routed_model": "gpt-5.4-mini",
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "app_family": "generic_openai",
+                "category": "tool-light",
+                "max_text_chars": 8000,
+            },
+            {
+                "candidate_id": "generic-gpt53-to-mini-short",
+                "requested_model": "gpt-5.3",
+                "routed_model": "gpt-5-mini",
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "app_family": "generic_openai",
+                "category": "short-completion",
+                "max_text_chars": 4000,
+            },
+            {
+                "candidate_id": "generic-gpt5-mini-to-nano-summary",
+                "requested_model": "gpt-5-mini",
+                "routed_model": "gpt-5-nano",
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "app_family": "generic_openai",
+                "category": "short-completion",
+                "workflow_phase": "summary",
+                "max_text_chars": 1000,
+                "sample_rate": 0.02,
+            },
+        ],
         "workflow_phases": [],
-        "categories": ["chat", "short-completion", "codex-turn"],
+        "categories": ["chat", "short-completion", "tool-light", "tool-result", "tool-heavy", "codex-turn"],
         "similarity_threshold": 0.86,
         "min_samples_for_confidence": 20,
         "store_response_bodies": False,
@@ -245,6 +391,8 @@ def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str
     pairs = data.get("model_pairs")
     if isinstance(pairs, list):
         policy["model_pairs"] = _clean_routing_candidates(pairs, shape="model_pairs")
+        if "routing_candidates" not in data and "candidates" not in data:
+            policy["routing_candidates"] = []
     elif data.get("requested_model") is not None and data.get("routed_model") is not None:
         policy["model_pairs"] = [
             _clean_routing_candidate(data, 0, shape="model_pairs")
@@ -920,6 +1068,18 @@ def routing_experiment_decision(
     if not requested:
         meta["reason"] = "missing-requested-model"
         return meta
+    min_chars = int(controls["min_text_chars"])
+    max_chars = int(controls["max_text_chars"])
+    if text_chars < min_chars:
+        scope = str(controls["min_text_chars_scope"])
+        meta["skip_diagnostic"] = f"{scope}-min-text-chars-not-met"
+        meta["reason"] = "request-too-small" if scope == "global" else meta["skip_diagnostic"]
+        return meta
+    if max_chars > 0 and text_chars > max_chars:
+        scope = str(controls["max_text_chars_scope"])
+        meta["skip_diagnostic"] = f"{scope}-max-text-chars-exceeded"
+        meta["reason"] = "request-too-large" if scope == "global" else meta["skip_diagnostic"]
+        return meta
     if mode == "shadow_candidate_pass_through":
         if requested != routed:
             meta["reason"] = "already-routed-down"
@@ -1020,18 +1180,6 @@ def routing_experiment_decision(
         return meta
     if routing_meta.get("fallback_reason"):
         meta["reason"] = "fallback-used"
-        return meta
-    min_chars = int(controls["min_text_chars"])
-    max_chars = int(controls["max_text_chars"])
-    if text_chars < min_chars:
-        scope = str(controls["min_text_chars_scope"])
-        meta["skip_diagnostic"] = f"{scope}-min-text-chars-not-met"
-        meta["reason"] = "request-too-small" if scope == "global" else meta["skip_diagnostic"]
-        return meta
-    if max_chars > 0 and text_chars > max_chars:
-        scope = str(controls["max_text_chars_scope"])
-        meta["skip_diagnostic"] = f"{scope}-max-text-chars-exceeded"
-        meta["reason"] = "request-too-large" if scope == "global" else meta["skip_diagnostic"]
         return meta
     if categories and category not in categories:
         meta["reason"] = "category-not-enabled"

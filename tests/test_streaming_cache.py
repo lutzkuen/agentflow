@@ -203,6 +203,7 @@ class StreamingCacheTest(unittest.TestCase):
         "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
         "AGENTFLOW_POLICY_EVENTS",
         "AGENTFLOW_POLICY_EVENTS_LOG",
+        "AGENTFLOW_RECOMMENDATION_ENABLED",
     )
 
     def setUp(self):
@@ -632,8 +633,13 @@ class StreamingCacheTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body, b"".join(STREAM_FRAMES))
-        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
-        shadow_payload = FakeShadowStreamingClient.post_payloads[0]
+        shadow_posts = [
+            payload
+            for payload in FakeShadowStreamingClient.post_payloads
+            if isinstance(payload, dict) and payload.get("model") == "claude-haiku-4-5-20251001"
+        ]
+        self.assertEqual(len(shadow_posts), 1)
+        shadow_payload = shadow_posts[0]
         self.assertEqual(shadow_payload["model"], "claude-haiku-4-5-20251001")
         self.assertFalse(shadow_payload["stream"])
         self.assertNotIn("thinking", shadow_payload)
@@ -686,8 +692,13 @@ class StreamingCacheTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body, b"".join(STREAM_FRAMES))
-        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
-        shadow_payload = FakeShadowStreamingClient.post_payloads[0]
+        shadow_posts = [
+            payload
+            for payload in FakeShadowStreamingClient.post_payloads
+            if isinstance(payload, dict) and payload.get("model") == "claude-haiku-4-5-20251001"
+        ]
+        self.assertEqual(len(shadow_posts), 1)
+        shadow_payload = shadow_posts[0]
         self.assertEqual(shadow_payload["model"], "claude-haiku-4-5-20251001")
         self.assertFalse(shadow_payload["stream"])
         assistant_blocks = shadow_payload["messages"][0]["content"]
@@ -748,7 +759,12 @@ class StreamingCacheTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body, b"".join(STREAM_FRAMES))
-        self.assertEqual(FakeShadowStreamingClient.post_calls, 0)
+        shadow_posts = [
+            payload
+            for payload in FakeShadowStreamingClient.post_payloads
+            if isinstance(payload, dict) and payload.get("model") == "claude-haiku-4-5-20251001"
+        ]
+        self.assertEqual(shadow_posts, [])
         [call] = server.store.conn.execute("select routing_json from calls").fetchall()
         experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
         self.assertEqual(experiment_meta["reason"], "streaming-shadow-unsupported-shape")

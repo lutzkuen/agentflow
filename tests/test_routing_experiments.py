@@ -459,6 +459,7 @@ eligibility_overrides:
 
     def test_default_policy_samples_codex_turn_shadow_pass_through(self):
         self.assertIn("codex-turn", experiments.ROUTING_EXPERIMENT_POLICY["categories"])
+        self.assertGreaterEqual(len(experiments.ROUTING_EXPERIMENT_POLICY["routing_candidates"]), 5)
 
         meta = experiments.routing_experiment_decision(
             {"model": "gpt-5-codex", "input": "summarize the run"},
@@ -485,6 +486,132 @@ eligibility_overrides:
         self.assertEqual(meta["routed_model"], "gpt-5-mini")
         self.assertEqual(meta["source_surface"], "codex_turn")
         self.assertEqual(meta["reason"], "sampled-shadow-candidate-pass-through")
+        self.assertEqual(meta["candidate_policy_shape"], "routing_candidates")
+        self.assertEqual(meta["candidate_id"], "codex-gpt5-codex-to-mini-short-summary")
+        self.assertEqual(meta["sample_rate_scope"], "candidate")
+        self.assertEqual(meta["selected_candidate"]["app_family"], "codex")
+
+    def test_default_policy_includes_broader_openai_codex_pathway_matrix(self):
+        candidates = {
+            candidate["candidate_id"]: candidate
+            for candidate in experiments.ROUTING_EXPERIMENT_POLICY["routing_candidates"]
+        }
+
+        expected_ids = {
+            "codex-gpt55-to-gpt53-codex-summary",
+            "codex-gpt53-codex-to-gpt5-codex-summary",
+            "codex-gpt5-codex-to-mini-short-summary",
+            "generic-gpt55-to-gpt54-chat",
+            "generic-gpt55-to-mini-short-exploratory",
+            "generic-gpt54-to-gpt53-chat",
+            "generic-gpt54-to-gpt54-mini-tool-light",
+            "generic-gpt53-to-mini-short",
+            "generic-gpt5-mini-to-nano-summary",
+        }
+        self.assertTrue(expected_ids.issubset(candidates))
+        self.assertEqual(candidates["codex-gpt55-to-gpt53-codex-summary"]["routed_model"], "gpt-5.3-codex")
+        self.assertEqual(candidates["generic-gpt55-to-gpt54-chat"]["routed_model"], "gpt-5.4")
+        self.assertEqual(candidates["generic-gpt55-to-mini-short-exploratory"]["sample_rate"], 0.02)
+        self.assertFalse(experiments.ROUTING_EXPERIMENT_POLICY["store_response_bodies"])
+
+        codex = experiments.routing_experiment_decision(
+            {"model": "gpt-5.5", "input": "summarize this Codex turn"},
+            {
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.5",
+                "category": "codex-turn",
+                "workflow_phase": "summary",
+                "text_chars": 1200,
+            },
+            stream=False,
+            provider="openai",
+            source_surface="codex_turn",
+            random_value=lambda: 0.0,
+        )
+        generic = experiments.routing_experiment_decision(
+            {"model": "gpt-5.5", "input": "hello"},
+            {
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.5",
+                "category": "chat",
+                "workflow_phase": "summary",
+                "text_chars": 1200,
+            },
+            stream=False,
+            provider="openai",
+            source_surface="openai_responses",
+            random_value=lambda: 0.0,
+        )
+        aggressive = experiments.routing_experiment_decision(
+            {"model": "gpt-5.5", "input": "ok"},
+            {
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.5",
+                "category": "short-completion",
+                "workflow_phase": "summary",
+                "text_chars": 50,
+            },
+            stream=False,
+            provider="openai",
+            source_surface="openai_responses",
+            random_value=lambda: 0.0,
+        )
+
+        self.assertTrue(codex["sampled"])
+        self.assertEqual(codex["candidate_id"], "codex-gpt55-to-gpt53-codex-summary")
+        self.assertEqual(codex["shadow_model"], "gpt-5.3-codex")
+        self.assertEqual(codex["candidate_selector_basis"]["app_family"], "codex")
+        self.assertEqual(codex["selected_candidate"]["source_surface"], "codex_turn")
+
+        self.assertTrue(generic["sampled"])
+        self.assertEqual(generic["candidate_id"], "generic-gpt55-to-gpt54-chat")
+        self.assertEqual(generic["shadow_model"], "gpt-5.4")
+        self.assertEqual(generic["candidate_selector_basis"]["app_family"], "generic_openai")
+        self.assertEqual(generic["selected_candidate"]["source_surface"], "openai_responses")
+
+        self.assertTrue(aggressive["sampled"])
+        self.assertEqual(aggressive["candidate_id"], "generic-gpt55-to-mini-short-exploratory")
+        self.assertEqual(aggressive["shadow_model"], "gpt-5-mini")
+        self.assertEqual(aggressive["sample_rate"], 0.02)
+        self.assertEqual(aggressive["sample_rate_scope"], "candidate")
+
+    def test_default_policy_does_not_let_generic_openai_use_codex_only_candidates(self):
+        generic = experiments.routing_experiment_decision(
+            {"model": "gpt-5.5", "input": "generic request"},
+            {
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.5",
+                "category": "codex-turn",
+                "workflow_phase": "summary",
+                "text_chars": 1200,
+            },
+            stream=False,
+            provider="openai",
+            source_surface="openai_responses",
+            random_value=lambda: 0.0,
+        )
+        codex_wrong_phase = experiments.routing_experiment_decision(
+            {"model": "gpt-5.5", "input": "edit files"},
+            {
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.5",
+                "category": "codex-turn",
+                "workflow_phase": "tool-execution",
+                "text_chars": 1200,
+            },
+            stream=False,
+            provider="openai",
+            source_surface="codex_turn",
+            random_value=lambda: 0.0,
+        )
+
+        self.assertFalse(generic["sampled"])
+        self.assertEqual(generic["reason"], "model-pair-not-enabled")
+        self.assertEqual(generic["eligible_candidate_count"], 0)
+        self.assertEqual(generic["candidate_selector_basis"]["app_family"], "generic_openai")
+        self.assertFalse(codex_wrong_phase["sampled"])
+        self.assertEqual(codex_wrong_phase["reason"], "model-pair-not-enabled")
+        self.assertEqual(codex_wrong_phase["eligible_candidate_count"], 0)
 
     def test_config_policy_samples_routed_down_non_streaming_call(self):
         with TemporaryDirectory() as tmp:
