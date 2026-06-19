@@ -1,6 +1,6 @@
 import io
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from pathlib import Path
 import unittest
@@ -13,7 +13,12 @@ from agentflow_proxy.local_activation_executor import (
     build_local_activation_executor_managed_handoff,
     build_local_activation_executor_plan,
 )
+from agentflow_proxy.managed_activation_preview_outcomes import (
+    build_managed_activation_preview_outcomes_report,
+    persist_managed_activation_preview_outcomes,
+)
 from agentflow_proxy.managed_egress import managed_egress_violations
+from agentflow_proxy.store import Store
 
 
 NOW = datetime(2026, 6, 19, 5, 30, tzinfo=timezone.utc)
@@ -581,6 +586,124 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertNotIn('"raw_prompt":', rendered)
         self.assertNotIn("raw server value must not leak", rendered)
 
+    def test_managed_activation_preview_outcomes_persist_review_only_rows_idempotently(self):
+        request_payload = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
+        rows = request_payload["rows"]
+        response_payload = {
+            "schema": "agentflow.managed_activation_preview_response.v1",
+            "decisions": [
+                {
+                    "handoff_ref": rows[0]["handoff_ref"],
+                    "decision": "no-op",
+                    "no_op_reason": "full-rollout-policy-active",
+                    "review_only": True,
+                    "raw_prompt": "raw preview value must not leak",
+                },
+                {
+                    "handoff_ref": rows[1]["handoff_ref"],
+                    "decision": "review-only-recommendation",
+                    "recommended_next_action": "draft-openai-routing-recovery-canary",
+                    "reason_codes": ["managed-preview-would-draft-recovery"],
+                    "review_only": True,
+                },
+                {
+                    "handoff_ref": rows[2]["handoff_ref"],
+                    "decision": "keep-blocked",
+                    "recommended_next_action": "review-anthropic-safety-stop",
+                    "provider_calls_made": True,
+                    "review_only": True,
+                },
+            ],
+        }
+        preview_result = build_managed_activation_preview_result(
+            request_payload,
+            response_payload=response_payload,
+            fetch={"status": "ok", "status_code": 200, "managed_server_calls_made": True},
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            store = Store(str(Path(tmpdir) / "agentflow.sqlite3"))
+            try:
+                first = persist_managed_activation_preview_outcomes(store, preview_result, now=NOW)
+                second = persist_managed_activation_preview_outcomes(store, preview_result, now=NOW + timedelta(minutes=5))
+                stored_count = store.conn.execute("select count(*) as c from managed_activation_preview_outcomes").fetchone()["c"]
+                stale = build_managed_activation_preview_outcomes_report(
+                    store,
+                    now=NOW + timedelta(hours=80),
+                    stale_after_hours=72,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(first["schema"], "agentflow.managed_activation_preview_outcomes.v1")
+        self.assertEqual(first["import"]["imported_count"], 4)
+        self.assertEqual(first["import"]["created_count"], 4)
+        self.assertEqual(first["summary"]["stored_preview_outcome_count"], 4)
+        self.assertEqual(first["summary"]["missing_preview_decision_count"], 1)
+        self.assertEqual(first["summary"]["failed_closed_count"], 1)
+        self.assertEqual(first["summary"]["disagreement_count"], 1)
+        self.assertEqual(second["import"]["created_count"], 0)
+        self.assertEqual(second["import"]["updated_count"], 4)
+        self.assertEqual(stored_count, 4)
+        fingerprints = [row["outcome_fingerprint"] for row in first["outcomes"]]
+        self.assertEqual(len(fingerprints), len(set(fingerprints)))
+        classifications = {row["handoff_ref"]: row["classification"] for row in first["outcomes"]}
+        self.assertEqual(classifications[rows[1]["handoff_ref"]], "managed-local-disagreement")
+        self.assertEqual(classifications[rows[2]["handoff_ref"]], "failed-closed")
+        self.assertEqual(classifications[rows[3]["handoff_ref"]], "missing-preview-decision")
+        fresh = {row["handoff_ref"]: row for row in first["outcomes"]}
+        self.assertFalse(fresh[rows[0]["handoff_ref"]]["policy_files_written"])
+        self.assertFalse(fresh[rows[0]["handoff_ref"]]["provider_calls_made"])
+        stale_by_ref = {row["handoff_ref"]: row for row in stale["outcomes"]}
+        self.assertTrue(stale_by_ref[rows[0]["handoff_ref"]]["stale"])
+        self.assertEqual(stale_by_ref[rows[0]["handoff_ref"]]["classification"], "stale-preview")
+        self.assertEqual(stale_by_ref[rows[0]["handoff_ref"]]["next_action"], "refresh-managed-activation-preview")
+        rendered = json.dumps(first, sort_keys=True)
+        self.assertNotIn("raw preview value must not leak", rendered)
+        self.assertNotIn("req-routing-secret", rendered)
+        self.assertNotIn("session-anthropic-secret", rendered)
+        self.assertNotIn("cache-tool-secret", rendered)
+        self.assertNotIn("/tmp/private-tool-cache.py", rendered)
+        self.assertEqual(managed_egress_violations(first), [])
+
+    def test_managed_activation_preview_outcomes_cli_reports_stored_outcomes(self):
+        request_payload = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
+        preview_result = build_managed_activation_preview_result(
+            request_payload,
+            response_payload={
+                "schema": "agentflow.managed_activation_preview_response.v1",
+                "decisions": [
+                    {
+                        "handoff_ref": request_payload["rows"][0]["handoff_ref"],
+                        "decision": "no-op",
+                        "no_op_reason": "full-rollout-policy-active",
+                        "review_only": True,
+                    }
+                ],
+            },
+            fetch={"status": "ok", "status_code": 200, "managed_server_calls_made": True},
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                persist_managed_activation_preview_outcomes(store, preview_result, now=NOW)
+            finally:
+                store.conn.close()
+            stdout = io.StringIO()
+
+            code = cli.managed_activation_preview_outcomes_cli(["--db", db_path, "--pretty"], stdout=stdout)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["schema"], "agentflow.managed_activation_preview_outcomes.v1")
+        self.assertEqual(payload["summary"]["stored_preview_outcome_count"], 4)
+        self.assertEqual(payload["summary"]["missing_preview_decision_count"], 3)
+        self.assertFalse(payload["summary"]["policy_files_written"])
+        self.assertFalse(payload["summary"]["provider_calls_made"])
+        self.assertEqual(payload["egress_guard"]["status"], "passed")
+
     def test_managed_activation_preview_cli_skips_without_url(self):
         with TemporaryDirectory() as tmpdir:
             plan_path = Path(tmpdir) / "plan.json"
@@ -604,6 +727,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
     def test_managed_activation_preview_cli_posts_opt_in_payload(self):
         with TemporaryDirectory() as tmpdir:
             plan_path = Path(tmpdir) / "plan.json"
+            db_path = Path(tmpdir) / "agentflow.sqlite3"
             plan_path.write_text(json.dumps(_executor_handoff_fixture_plan()), encoding="utf-8")
             stdout = io.StringIO()
             response = Mock()
@@ -633,6 +757,9 @@ class LocalActivationExecutorTest(unittest.TestCase):
                         str(plan_path),
                         "--managed-preview-url",
                         "https://managed.example.test/v1/activation-preview",
+                        "--persist-outcomes",
+                        "--db",
+                        str(db_path),
                         "--pretty",
                     ],
                     stdout=stdout,
@@ -654,6 +781,8 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["summary"]["submitted_row_count"], 4)
         self.assertEqual(result["summary"]["preview_row_count"], 1)
         self.assertEqual(result["summary"]["omission_count"], 0)
+        self.assertEqual(result["stored_preview_outcomes"]["import"]["imported_count"], 4)
+        self.assertEqual(result["stored_preview_outcomes"]["summary"]["missing_preview_decision_count"], 3)
         self.assertEqual(result["egress_guard"]["status"], "passed")
         self.assertEqual(managed_egress_violations(result), [])
 

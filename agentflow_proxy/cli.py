@@ -719,6 +719,27 @@ def local_activation_executor_cli(argv: Sequence[str] | None = None, *, stdout: 
     return 0
 
 
+def _attach_managed_activation_preview_outcome_persistence(
+    result: dict[str, Any],
+    *,
+    db: str,
+    stale_after_hours: float,
+) -> dict[str, Any]:
+    from agentflow_proxy.managed_activation_preview_outcomes import (
+        persist_managed_activation_preview_outcomes,
+    )
+
+    store = _open_store_for_db(str(db))
+    try:
+        return persist_managed_activation_preview_outcomes(
+            store,
+            result,
+            stale_after_hours=float(stale_after_hours),
+        )
+    finally:
+        store.conn.close()
+
+
 def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
     parser = argparse.ArgumentParser(
         description="Opt in to a feature-only managed preview for local activation executor handoff rows"
@@ -748,6 +769,22 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
         "--allow-insecure-managed-url",
         action="store_true",
         help="Allow non-loopback HTTP managed preview URLs. HTTPS and loopback HTTP are allowed by default.",
+    )
+    parser.add_argument(
+        "--persist-outcomes",
+        action="store_true",
+        help="Persist sanitized managed preview decisions as review-only local outcomes.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path for --persist-outcomes.",
+    )
+    parser.add_argument(
+        "--preview-stale-after-hours",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_MANAGED_ACTIVATION_PREVIEW_STALE_AFTER_HOURS", "72")),
+        help="Classify persisted preview outcomes as stale after this many hours, default: 72.",
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     args = parser.parse_args(argv)
@@ -784,6 +821,12 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
                 "blocked_keys": sorted({item.get("key", "unknown") for item in violations}),
             },
         )
+        if args.persist_outcomes:
+            result["stored_preview_outcomes"] = _attach_managed_activation_preview_outcome_persistence(
+                result,
+                db=str(args.db),
+                stale_after_hours=float(args.preview_stale_after_hours),
+            )
         write_json(stdout, result, pretty=args.pretty)
         return 1
 
@@ -797,6 +840,12 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
                 "managed_server_calls_made": False,
             },
         )
+        if args.persist_outcomes:
+            result["stored_preview_outcomes"] = _attach_managed_activation_preview_outcome_persistence(
+                result,
+                db=str(args.db),
+                stale_after_hours=float(args.preview_stale_after_hours),
+            )
         write_json(stdout, result, pretty=args.pretty)
         return 0
 
@@ -810,6 +859,12 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
                 "managed_server_calls_made": False,
             },
         )
+        if args.persist_outcomes:
+            result["stored_preview_outcomes"] = _attach_managed_activation_preview_outcome_persistence(
+                result,
+                db=str(args.db),
+                stale_after_hours=float(args.preview_stale_after_hours),
+            )
         write_json(stdout, result, pretty=args.pretty)
         return 2
 
@@ -857,8 +912,59 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
         response_payload=response_payload,
         fetch=fetch,
     )
+    if args.persist_outcomes:
+        result["stored_preview_outcomes"] = _attach_managed_activation_preview_outcome_persistence(
+            result,
+            db=str(args.db),
+            stale_after_hours=float(args.preview_stale_after_hours),
+        )
     write_json(stdout, result, pretty=args.pretty)
     return 0 if fetch.get("status") == "ok" else 1
+
+
+def managed_activation_preview_outcomes_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Report review-only managed activation preview outcomes persisted in the local AgentFlow DB"
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=1000, help="Stored preview outcomes to inspect, default: 1000.")
+    parser.add_argument(
+        "--preview-stale-after-hours",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_MANAGED_ACTIVATION_PREVIEW_STALE_AFTER_HOURS", "72")),
+        help="Classify preview outcomes as stale after this many hours, default: 72.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.managed_activation_preview_outcomes import (
+        build_managed_activation_preview_outcomes_report,
+    )
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_managed_activation_preview_outcomes_report(
+            store,
+            limit=int(args.limit),
+            stale_after_hours=float(args.preview_stale_after_hours),
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if not bool((result.get("egress_guard") or {}).get("blocked")) else 1
 
 
 def proxy_main() -> None:
@@ -1326,6 +1432,10 @@ def local_activation_executor_main() -> None:
 
 def managed_activation_preview_main() -> None:
     raise SystemExit(managed_activation_preview_cli())
+
+
+def managed_activation_preview_outcomes_main() -> None:
+    raise SystemExit(managed_activation_preview_outcomes_cli())
 
 
 def post_promotion_priority_delta_review_main() -> None:

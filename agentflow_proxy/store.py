@@ -866,6 +866,30 @@ class SQLiteStore:
             )
             """)
             cur.execute("""
+            create table if not exists managed_activation_preview_outcomes (
+              fingerprint text primary key,
+              created_at text not null,
+              updated_at text not null,
+              preview_generated_at text,
+              handoff_ref text not null,
+              preview_ref text,
+              local_action_family text,
+              evidence_schema text,
+              decision text,
+              classification text,
+              next_action text,
+              omitted_reason text,
+              no_op_reason text,
+              reason_codes_json text not null,
+              stale integer not null default 0,
+              missing_preview_decision integer not null default 0,
+              failed_closed integer not null default 0,
+              disagrees_with_local_evidence integer not null default 0,
+              preview_age_hours real,
+              outcome_json text not null
+            )
+            """)
+            cur.execute("""
             create table if not exists agentflow_sqlite_maintenance_runs (
               id text primary key,
               created_at text not null,
@@ -925,6 +949,14 @@ class SQLiteStore:
             cur.execute("""
             create index if not exists idx_request_shape_rollups_recent
             on request_shape_rollups(generated_at, candidate_id)
+            """)
+            cur.execute("""
+            create index if not exists idx_managed_activation_preview_outcomes_updated
+            on managed_activation_preview_outcomes(updated_at)
+            """)
+            cur.execute("""
+            create index if not exists idx_managed_activation_preview_outcomes_family
+            on managed_activation_preview_outcomes(local_action_family, classification, updated_at)
             """)
             cur.execute("""
             create index if not exists idx_agentflow_sqlite_maintenance_runs_recent
@@ -2274,6 +2306,30 @@ class PostgresStore(SQLiteStore):
               metadata_json text not null
             )
             """,
+            """
+            create table if not exists managed_activation_preview_outcomes (
+              fingerprint text primary key,
+              created_at timestamptz not null,
+              updated_at timestamptz not null,
+              preview_generated_at timestamptz,
+              handoff_ref text not null,
+              preview_ref text,
+              local_action_family text,
+              evidence_schema text,
+              decision text,
+              classification text,
+              next_action text,
+              omitted_reason text,
+              no_op_reason text,
+              reason_codes_json text not null,
+              stale integer not null default 0,
+              missing_preview_decision integer not null default 0,
+              failed_closed integer not null default 0,
+              disagrees_with_local_evidence integer not null default 0,
+              preview_age_hours numeric,
+              outcome_json text not null
+            )
+            """,
         ):
             self.conn.execute(sql)
         for column in ("routing_json", "crunch_json", "cache_json", "event_window_json", "metadata_json"):
@@ -2333,6 +2389,14 @@ class PostgresStore(SQLiteStore):
         self.conn.execute("""
             create index if not exists idx_request_shape_rollups_recent
             on request_shape_rollups(generated_at, candidate_id)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_managed_activation_preview_outcomes_updated
+            on managed_activation_preview_outcomes(updated_at)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_managed_activation_preview_outcomes_family
+            on managed_activation_preview_outcomes(local_action_family, classification, updated_at)
         """)
 
     def set_cache(
