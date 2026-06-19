@@ -111,6 +111,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     openai_routing_report_cli,
     routing_coverage_report_cli,
     openai_routing_canary_stage_cli,
+    openai_routing_narrow_canary_review_cli,
     anthropic_routing_canary_stage_cli,
     openai_old_context_summary_report_cli,
     openai_cache_replay_report_cli,
@@ -836,6 +837,10 @@ def routing_coverage_report_main() -> None:
 
 def openai_routing_canary_stage_main() -> None:
     raise SystemExit(openai_routing_canary_stage_cli())
+
+
+def openai_routing_narrow_canary_review_main() -> None:
+    raise SystemExit(openai_routing_narrow_canary_review_cli())
 
 
 def anthropic_routing_canary_stage_main() -> None:

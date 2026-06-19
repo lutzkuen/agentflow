@@ -2404,6 +2404,59 @@ def openai_routing_canary_stage_cli(
     return 0 if result.get("ok") else 1
 
 
+def openai_routing_narrow_canary_review_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Review semantic-regressed OpenAI routing evidence and draft narrower canary candidates")
+    parser.add_argument(
+        "routing_report",
+        nargs="?",
+        help="OpenAI routing promotion/lifecycle report JSON path, or '-' for stdin. If omitted, a fresh promotion-decision report is built from local metadata.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=1000, help="Recent OpenAI provider calls to inspect when building a fresh report, default: 1000.")
+    parser.add_argument("--canary-fraction", type=float, default=0.05, help="Proposed review-only canary fraction, default: 0.05.")
+    parser.add_argument("--holdout-fraction", type=float, default=0.10, help="Proposed review-only holdout fraction, default: 0.10.")
+    parser.add_argument("--top-candidates", type=int, default=1, help="Maximum clean cohorts to draft, default: 1.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    if args.routing_report:
+        report = _read_json_input(str(args.routing_report), stdin=stdin)
+    else:
+        from agentflow_proxy.openai_routing_report import build_openai_routing_promotion_decision_report
+
+        store = _open_store_for_db(str(args.db))
+        try:
+            report = build_openai_routing_promotion_decision_report(store, limit=args.limit)
+        finally:
+            store.conn.close()
+
+    from agentflow_proxy.openai_routing_narrow_canary import build_openai_routing_narrow_canary_review
+
+    result = build_openai_routing_narrow_canary_review(
+        report,
+        canary_fraction=args.canary_fraction,
+        holdout_fraction=args.holdout_fraction,
+        top_candidates=args.top_candidates,
+    )
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if result.get("decision") != "error" else 2
+
+
 def openai_old_context_summary_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Measure OpenAI old-context summary opportunity and blockers from local metadata")
     parser.add_argument(
