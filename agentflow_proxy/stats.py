@@ -12403,6 +12403,7 @@ async def stats_openai_tool_cache_invalidation_burndown(
                 "safe_dependency_evidence_count": 0,
                 "stale_dependency_count": 0,
                 "unsafe_dependency_count": 0,
+                "unknown_dependency_count": 0,
                 "noop_count": 0,
                 "projected_hits": 0,
                 "projected_savings_usd": 0.0,
@@ -12422,6 +12423,8 @@ async def stats_openai_tool_cache_invalidation_burndown(
             row["stale_dependency_count"] += sample_count
         elif outcome == "unsafe-dependency":
             row["unsafe_dependency_count"] += sample_count
+        elif outcome == "unknown-dependency":
+            row["unknown_dependency_count"] += sample_count
         elif outcome == "noop":
             row["noop_count"] += sample_count
         row["reason_counts"][reason] = _as_int(row["reason_counts"].get(reason)) + sample_count
@@ -12447,6 +12450,7 @@ async def stats_openai_tool_cache_invalidation_burndown(
         key=lambda item: (
             _as_int(item.get("missing_dependency_evidence_count")),
             _as_int(item.get("unsafe_dependency_count")),
+            _as_int(item.get("unknown_dependency_count")),
             _as_int(item.get("stale_dependency_count")),
             _as_int(item.get("safe_dependency_evidence_count")),
             _as_float(item.get("projected_savings_usd")),
@@ -12480,6 +12484,7 @@ async def stats_openai_tool_cache_invalidation_burndown(
             "safe_dependency_evidence_count": _as_int(summary.get("replay_ready_count")),
             "stale_dependency_count": _as_int(summary.get("stale_dependency_count")),
             "unsafe_dependency_count": _as_int(summary.get("unsafe_dependency_count")),
+            "unknown_dependency_count": _as_int(summary.get("unknown_dependency_count")),
             "staged_canary_count": _as_int(summary.get("staged_canary_count")),
             "staged_canary_policy_status": summary.get("staged_canary_policy_status"),
             "applied_count": _as_int(summary.get("applied_count")),
@@ -12491,6 +12496,18 @@ async def stats_openai_tool_cache_invalidation_burndown(
             "observed_savings_usd": round(_as_float(summary.get("observed_savings_usd")), 8),
             "ranked_blocker_count": len(blocker_rows),
             "top_next_action": report.get("top_next_action"),
+            "dependency_evidence_classes": [
+                "stable-dependency-evidence",
+                "stale-dependency-evidence",
+                "unsafe-dependency-evidence",
+                "unknown-dependency-evidence",
+                "missing-dependency-evidence",
+            ],
+            "tool_cache_replay_enabled": False,
+            "streaming_replay_enabled": False,
+            "cache_apply_action_count": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
         },
         "blockers": blocker_rows,
         "reason_breakdown": _managed_breakdown(reason_counts),
@@ -21291,7 +21308,7 @@ def dashboard_html() -> str:
   <h2>OpenAI tool-cache invalidation burndown</h2>
   <table data-table-id="openai-tool-cache-invalidation-burndown" data-filter-label="Filter OpenAI tool-cache invalidation burndown">
     <thead><tr>
-      <th data-sort-type="text">Status</th><th data-sort-type="number">Missing evidence</th><th data-sort-type="number">Safe evidence</th><th data-sort-type="number">Stale dependency</th><th data-sort-type="number">Unsafe evidence</th><th data-sort-type="number">Staged canary</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Exact hits</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Next action</th><th data-sort-type="text">Privacy</th>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Missing evidence</th><th data-sort-type="number">Safe evidence</th><th data-sort-type="number">Stale dependency</th><th data-sort-type="number">Unsafe evidence</th><th data-sort-type="number">Unknown evidence</th><th data-sort-type="number">Staged canary</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Exact hits</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Next action</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="openai-tool-cache-invalidation-burndown-tbody"></tbody>
   </table>
@@ -21300,7 +21317,7 @@ def dashboard_html() -> str:
   <h2>OpenAI tool-cache blocker cohorts</h2>
   <table data-table-id="openai-tool-cache-invalidation-blockers" data-filter-label="Filter OpenAI tool-cache blocker cohorts">
     <thead><tr>
-      <th data-sort-type="number">Rank</th><th data-sort-type="text">Provider / surface</th><th data-sort-type="text">Endpoint</th><th data-sort-type="text">Category / phase</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Missing evidence</th><th data-sort-type="number">Safe evidence</th><th data-sort-type="number">Stale dependency</th><th data-sort-type="number">Unsafe evidence</th><th data-sort-type="number">Projected hits</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Next action</th>
+      <th data-sort-type="number">Rank</th><th data-sort-type="text">Provider / surface</th><th data-sort-type="text">Endpoint</th><th data-sort-type="text">Category / phase</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Missing evidence</th><th data-sort-type="number">Safe evidence</th><th data-sort-type="number">Stale dependency</th><th data-sort-type="number">Unsafe evidence</th><th data-sort-type="number">Unknown evidence</th><th data-sort-type="number">Projected hits</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Next action</th>
     </tr></thead>
     <tbody id="openai-tool-cache-invalidation-blockers-tbody"></tbody>
   </table>
@@ -23152,6 +23169,7 @@ async function refreshOpenAIToolCacheInvalidationBurndown(){
       <td class="tokens">${(s.safe_dependency_evidence_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.stale_dependency_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.unsafe_dependency_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.unknown_dependency_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.staged_canary_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.applied_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.holdout_count||0).toLocaleString()}</td>
@@ -23172,11 +23190,12 @@ async function refreshOpenAIToolCacheInvalidationBurndown(){
       <td class="tokens">${(row.safe_dependency_evidence_count||0).toLocaleString()}</td>
       <td class="tokens">${(row.stale_dependency_count||0).toLocaleString()}</td>
       <td class="tokens">${(row.unsafe_dependency_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.unknown_dependency_count||0).toLocaleString()}</td>
       <td class="tokens">${(row.projected_hits||0).toLocaleString()}</td>
       <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
       <td class="flags">${openaiCacheReplayReasonBadges(row.reason_breakdown)}</td>
       <td class="flags"><span class="badge provider">${esc(row.top_next_action||'none')}</span></td>
-    </tr>`).join('')||'<tr><td colspan="13" style="color:#8b949e">No OpenAI tool-cache invalidation blocker metadata recorded yet</td></tr>';
+    </tr>`).join('')||'<tr><td colspan="14" style="color:#8b949e">No OpenAI tool-cache invalidation blocker metadata recorded yet</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }

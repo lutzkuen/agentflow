@@ -54,6 +54,7 @@ OUTCOME_PRIORITY = {
     "replay-ready": 4,
     "stale-dependency": 3,
     "unsafe-dependency": 3,
+    "unknown-dependency": 2,
     "missing-invalidation": 2,
     "noop": 1,
 }
@@ -143,9 +144,11 @@ def _outcome_for_opportunity(candidate: dict[str, Any]) -> tuple[str, str]:
             return "replay-ready", "safe-invalidation-evidence-present"
         if dependency_status == "unsafe" or reasons & UNSAFE_DEPENDENCY_REASONS:
             return "unsafe-dependency", "unsafe-tool-calls-without-invalidation"
+        if dependency_status == "unknown":
+            return "unknown-dependency", "dependency-evidence-unknown"
         if dependency_status == "missing" or reasons & MISSING_INVALIDATION_REASONS:
             return "missing-invalidation", "invalidation-evidence-missing"
-        return "noop", "dependency-evidence-unknown"
+        return "unknown-dependency", "dependency-evidence-unknown"
     if reasons & STALE_DEPENDENCY_REASONS:
         return "stale-dependency", sorted(reasons & STALE_DEPENDENCY_REASONS)[0]
     if reasons & MISSING_INVALIDATION_REASONS:
@@ -181,6 +184,8 @@ def _top_next_action(outcome_counts: Counter[str], reason_counts: Counter[str]) 
         return "stage-local-cache-replay-canary"
     if outcome_counts.get("stale-dependency"):
         return "refresh-cache-replay-dependency-evidence"
+    if outcome_counts.get("unknown-dependency"):
+        return "collect-safe-invalidation-evidence"
     if outcome_counts.get("missing-invalidation"):
         return "collect-safe-invalidation-evidence"
     if outcome_counts.get("noop"):
@@ -196,6 +201,8 @@ def _next_action_for_outcome(outcome: str, reason: str) -> str:
     if outcome == "stale-dependency":
         return "refresh-cache-replay-dependency-evidence"
     if outcome == "unsafe-dependency":
+        return "collect-safe-invalidation-evidence"
+    if outcome == "unknown-dependency":
         return "collect-safe-invalidation-evidence"
     if outcome == "missing-invalidation":
         return "collect-safe-invalidation-evidence"
@@ -437,6 +444,7 @@ def build_openai_cache_replay_blocker_outcomes_report(
             "replay_ready_count": outcome_counts.get("replay-ready", 0),
             "stale_dependency_count": outcome_counts.get("stale-dependency", 0),
             "unsafe_dependency_count": outcome_counts.get("unsafe-dependency", 0),
+            "unknown_dependency_count": outcome_counts.get("unknown-dependency", 0),
             "missing_invalidation_count": outcome_counts.get("missing-invalidation", 0),
             "noop_count": outcome_counts.get("noop", 0),
             "staged_canary_count": 1 if staged_status == "staged-policy-can-run" else 0,
@@ -482,10 +490,25 @@ def build_openai_cache_replay_blocker_outcomes_report(
                 for row in cohorts
                 if row.get("outcome") == "unsafe-dependency"
             ),
+            "unknown_rows_collect_safe_invalidation_evidence": all(
+                row.get("next_action") == "collect-safe-invalidation-evidence"
+                for row in cohorts
+                if row.get("outcome") == "unknown-dependency"
+            ),
             "missing_rows_collect_safe_invalidation_evidence": all(
                 row.get("next_action") == "collect-safe-invalidation-evidence"
                 for row in cohorts
                 if row.get("outcome") == "missing-invalidation"
+            ),
+            "distinguishes_stable_stale_unsafe_unknown_and_missing_dependency_evidence": all(
+                outcome in {row.get("outcome") for row in cohorts}
+                for outcome in (
+                    "replay-ready",
+                    "stale-dependency",
+                    "unsafe-dependency",
+                    "unknown-dependency",
+                    "missing-invalidation",
+                )
             ),
             "no_policy_files_written": True,
             "metadata_only": True,

@@ -1618,6 +1618,24 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             cost=0.025,
             cost_baseline=0.025,
         )
+        self._log_openai_call(
+            endpoint="responses",
+            category="tool-light",
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="tools-disabled",
+            file_dependency_audit={
+                **self._audit(safe=False),
+                "file_dependency_evidence_available": True,
+                "safe_invalidation_evidence": False,
+                "invalidation_reason": None,
+                "paths": ["/tmp/openai-secret-unknown.py"],
+                "root_path": "/tmp",
+            },
+            cache_extra={"file_dependency_evidence_available": True},
+            cost=0.026,
+            cost_baseline=0.026,
+        )
 
         report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
         self.assertEqual(report["schema"], "agentflow.openai_cache_replay_readiness.v1")
@@ -1649,9 +1667,16 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertGreaterEqual(burndown["summary"]["safe_dependency_evidence_count"], 1)
         self.assertGreaterEqual(burndown["summary"]["stale_dependency_count"], 1)
         self.assertGreaterEqual(burndown["summary"]["unsafe_dependency_count"], 1)
+        self.assertGreaterEqual(burndown["summary"]["unknown_dependency_count"], 1)
         self.assertEqual(burndown["summary"]["applied_count"], 2)
         self.assertEqual(burndown["summary"]["holdout_count"], 2)
         self.assertEqual(burndown["summary"]["exact_hit_count"], 2)
+        self.assertFalse(burndown["summary"]["tool_cache_replay_enabled"])
+        self.assertFalse(burndown["summary"]["streaming_replay_enabled"])
+        self.assertEqual(burndown["summary"]["cache_apply_action_count"], 0)
+        self.assertEqual(burndown["summary"]["cache_entries_written"], 0)
+        self.assertFalse(burndown["summary"]["policy_files_written"])
+        self.assertIn("unknown-dependency-evidence", burndown["summary"]["dependency_evidence_classes"])
         self.assertFalse(burndown["privacy"]["raw_request_bodies_included"])
         self.assertFalse(burndown["privacy"]["file_paths_included"])
         self.assertFalse(burndown["privacy"]["cache_keys_included"])
@@ -1691,6 +1716,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         )
         self.assertGreaterEqual(burndown_response.json()["summary"]["missing_dependency_evidence_count"], 1)
         self.assertGreaterEqual(burndown_response.json()["summary"]["unsafe_dependency_count"], 1)
+        self.assertGreaterEqual(burndown_response.json()["summary"]["unknown_dependency_count"], 1)
+        self.assertEqual(burndown_response.json()["summary"]["cache_apply_action_count"], 0)
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn("/agentflow/stats/openai-cache-replay-readiness", dashboard.text)
         self.assertIn("/agentflow/stats/openai-tool-cache-invalidation-burndown", dashboard.text)
@@ -1727,6 +1754,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 "req-secret-must-not-leak",
                 "session-secret-must-not-leak",
                 "/tmp/openai-secret.py",
+                "/tmp/openai-secret-unknown.py",
                 "tool payload must not leak",
                 "raw-cache-key / request_id session secret",
                 "sha256:" + "c" * 64,
