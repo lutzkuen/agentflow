@@ -2238,7 +2238,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(routing["managed_preview_gate"]["managed_dependency"], "optional")
         cache = actions["cache"]
         self.assertFalse(cache["preview_verified"])
-        self.assertEqual(cache["successor_status"], "keep-blocked")
+        self.assertEqual(cache["successor_status"], "review-stale-preview")
         self.assertEqual(cache["preview_verification_status"], "stale-preview")
         self.assertEqual(cache["recommended_next_action"], "refresh-managed-activation-preview")
 
@@ -2469,6 +2469,239 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 self.assertNotIn("req-health-secret", rendered)
                 self.assertNotIn("raw health prompt must not leak", rendered)
                 self.assertNotIn('"policy_files_written": true', rendered.lower())
+
+    def test_preview_agreed_activation_outcomes_emit_successor_decisions(self):
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:crunch-keep",
+                    "lever": "crunch",
+                    "local_action_family": "crunch",
+                    "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                    "state": "full-rollout-active",
+                    "current_status": "full-rollout",
+                    "issue_worthy_status": "review",
+                    "next_action": "keep-active",
+                    "blocker_codes": ["repeated-context-crunch-full-rollout-active"],
+                    "sample_count": 1877,
+                    "applied_count": 107,
+                    "holdout_count": 40,
+                    "safety_stop_count": 0,
+                    "rollback_count": 0,
+                    "projected_saved_usd": 25.818387,
+                    "duplicate_suppression": {
+                        "reason": "repeated-context-crunch-full-rollout-active",
+                        "suppresses_new_activation_issue": True,
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    },
+                    "target_local_rule_file": "crunch_rules.yaml",
+                    "target_local_policy_section": "crunch.rules",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 2,
+                    "fingerprint": "activation:routing-semantic",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "state": "keep-blocked",
+                    "current_status": "keep-blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "review-openai-routing-canary-blockers",
+                    "blocker_codes": ["semantic-quality-regression-observed"],
+                    "sample_count": 342,
+                    "applied_count": 26,
+                    "holdout_count": 22,
+                    "target_local_rule_file": "routing_rules.yaml",
+                    "target_local_policy_section": "routing.rules",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 3,
+                    "fingerprint": "activation:tool-cache-missing",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "state": "missing-evidence",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "collect-file-invalidation-evidence",
+                    "blocker_codes": ["invalidation-evidence-missing", "tools-present"],
+                    "sample_count": 113,
+                    "emits_cache_apply_action": False,
+                    "policy_files_written": False,
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "request_id": "req-successor-secret",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 4,
+                    "fingerprint": "activation:cache-retired",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+                    "state": "retired-no-repeat",
+                    "current_status": "superseded",
+                    "issue_worthy_status": "ready",
+                    "next_action": "retire-cache-replay-canary-no-repeat",
+                    "blocker_codes": ["retire-staged-no-repeat", "repeat-window-elapsed-no-live-repeat"],
+                    "sample_count": 107,
+                    "applied_count": 31,
+                    "holdout_count": 76,
+                    "duplicate_suppression": {
+                        "reason": "synthetic-hit-recovery-proven-live-traffic-no-repeat-retired",
+                        "suppresses_new_cache_replay_stage_issue": True,
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    },
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                },
+            ],
+        }
+        outcomes = []
+        for source, family, schema, status, next_action, decision, reason_key, reason_value in [
+            (
+                "activation:crunch-keep",
+                "crunch",
+                "agentflow.crunch_savings_signal.v1",
+                "full-rollout",
+                "keep-active",
+                "keep-current-rule",
+                "no_op_reason",
+                "keep-current-rule-only",
+            ),
+            (
+                "activation:routing-semantic",
+                "routing",
+                "agentflow.openai_routing_promotion_decision_report.v1",
+                "keep-blocked",
+                "review-openai-routing-canary-blockers",
+                "keep-blocked",
+                "omitted_reason",
+                "semantic-quality-regression-observed",
+            ),
+            (
+                "activation:tool-cache-missing",
+                "cache",
+                "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "blocked",
+                "collect-file-invalidation-evidence",
+                "keep-blocked",
+                "omitted_reason",
+                "invalidation-evidence-missing",
+            ),
+            (
+                "activation:cache-retired",
+                "cache",
+                "agentflow.request_shape_cache_replay_policy_decision.v1",
+                "superseded",
+                "retire-cache-replay-canary-no-repeat",
+                "suppress-duplicate",
+                "no_op_reason",
+                "retire-staged-no-repeat",
+            ),
+        ]:
+            outcome = {
+                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": f"managed-preview-outcome:{source}",
+                "source_fingerprint": source,
+                "preview_ref": f"preview:{family}:{status}",
+                "local_action_family": family,
+                "evidence_schema": schema,
+                "current_status": status,
+                "classification": "review-only",
+                "decision": decision,
+                "next_action": next_action,
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "raw_prompt": "raw successor preview prompt must not leak",
+            }
+            outcome[reason_key] = reason_value
+            outcomes.append(outcome)
+
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "status": "tracked",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": True,
+                    "summary": {
+                        "stored_preview_outcome_count": 4,
+                        "stale_count": 0,
+                        "missing_preview_decision_count": 0,
+                        "failed_closed_count": 0,
+                        "disagreement_count": 0,
+                    },
+                    "outcomes": outcomes,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "managed_activation_preview_health": {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": 4,
+                    "previewed_row_count": 4,
+                    "omitted_row_count": 2,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {"crunch": 1, "routing": 1, "cache": 2},
+                    "omitted_counts_by_local_action_family": {"routing": 1, "cache": 1},
+                    "top_omission_reasons": [
+                        {"reason_code": "invalidation-evidence-missing", "count": 1},
+                        {"reason_code": "semantic-quality-regression-observed", "count": 1},
+                    ],
+                    "top_rejection_reasons": [],
+                },
+            }
+        )
+
+        decisions = queue["successor_decisions"]
+        self.assertEqual(queue["summary"]["successor_decision_count"], 4)
+        self.assertEqual(queue["summary"]["non_duplicate_successor_decision_count"], 4)
+        self.assertEqual(len({row["source_fingerprint"] for row in decisions}), 4)
+        by_source = {row["source_fingerprint"]: row for row in decisions}
+        self.assertEqual(by_source["activation:crunch-keep"]["decision"], "keep-current-rule")
+        self.assertEqual(by_source["activation:routing-semantic"]["decision"], "keep-blocked")
+        self.assertEqual(by_source["activation:tool-cache-missing"]["decision"], "keep-blocked")
+        self.assertEqual(by_source["activation:cache-retired"]["decision"], "suppress-duplicate")
+        self.assertEqual(by_source["activation:cache-retired"]["issue_worthy_status"], "suppressed")
+        self.assertEqual(by_source["activation:cache-retired"]["preview_no_op_reason"], "retire-staged-no-repeat")
+        self.assertEqual(
+            by_source["activation:tool-cache-missing"]["preview_omitted_reason"],
+            "invalidation-evidence-missing",
+        )
+        self.assertFalse(any(row["decision"] == "ready" for row in decisions if row["source_fingerprint"] == "activation:cache-retired"))
+        family_rows = {
+            row["local_action_family"]: row
+            for row in queue["summary"]["preview_agreement_by_local_action_family"]
+        }
+        self.assertEqual(family_rows["cache"]["agreed_count"], 2)
+        self.assertEqual(family_rows["crunch"]["agreed_count"], 1)
+        self.assertEqual(family_rows["routing"]["agreed_count"], 1)
+        self.assertEqual(queue["summary"]["preview_top_omitted_reasons"][0]["value"], "invalidation-evidence-missing")
+        self.assertTrue(all(row["privacy"]["metadata_only"] for row in decisions))
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("req-successor-secret", rendered)
+        self.assertNotIn("raw successor preview prompt must not leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
 
     def test_activation_burndown_report_ranks_successors_after_keep_active_crunch(self):
         ledger = {

@@ -20,6 +20,7 @@ EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_n
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "agentflow.local_activation_next_action_queue.v1"
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_next_action_queue_entry.v1"
 LOCAL_ACTIVATION_SUCCESSOR_ACTION_SCHEMA = "agentflow.local_activation_successor_action.v1"
+LOCAL_ACTIVATION_SUCCESSOR_DECISION_SCHEMA = "agentflow.local_activation_successor_decision.v1"
 PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA = "agentflow.preview_verified_activation_successor_gate.v1"
 MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "agentflow.managed_activation_preview_health_gate.v1"
 ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA = "agentflow.activation_feedback_evidence_freshness_gate.v1"
@@ -5760,6 +5761,26 @@ def _managed_preview_local_executor_gate(entry: dict[str, Any]) -> dict[str, Any
 
 def _managed_preview_outcome_match_score(entry: dict[str, Any], outcome: dict[str, Any]) -> int:
     score = 0
+    entry_source = str(entry.get("source_fingerprint") or entry.get("fingerprint") or "").strip()
+    outcome_source = str(
+        outcome.get("source_fingerprint")
+        or outcome.get("source_activation_fingerprint")
+        or outcome.get("activation_fingerprint")
+        or outcome.get("local_activation_fingerprint")
+        or ""
+    ).strip()
+    if entry_source and outcome_source:
+        if entry_source == outcome_source:
+            score += 25
+        else:
+            return -1
+    entry_successor = str(entry.get("source_successor_fingerprint") or "").strip()
+    outcome_successor = str(outcome.get("source_successor_fingerprint") or outcome.get("successor_fingerprint") or "").strip()
+    if entry_successor and outcome_successor:
+        if entry_successor == outcome_successor:
+            score += 12
+        else:
+            return -1
     entry_family = str(entry.get("local_action_family") or entry.get("lever") or "").strip()
     outcome_family = str(outcome.get("local_action_family") or "").strip()
     if entry_family and outcome_family and entry_family == outcome_family:
@@ -5825,6 +5846,9 @@ def _managed_preview_successor_gate(
     outcome = _managed_preview_outcome_for_entry(entry, managed_preview_outcomes)
     if outcome is None or health_blocks_required:
         status = str(health_gate.get("status") or "missing-preview") if health_blocks_required else "missing-preview"
+        decision = "keep-blocked" if required else "preview-optional"
+        if status == "stale-preview-health":
+            decision = "review-stale-preview"
         next_action = (
             health_gate.get("next_action")
             if health_blocks_required
@@ -5840,7 +5864,7 @@ def _managed_preview_successor_gate(
             "required": required,
             "status": status,
             "verified": False,
-            "decision": "keep-blocked" if required else "preview-optional",
+            "decision": decision,
             "next_action": sanitize_value(next_action if required else entry.get("next_action")),
             "local_executor_gate": local_gate,
             "health_gate": health_gate,
@@ -5907,6 +5931,7 @@ def _managed_preview_successor_gate(
             status = "unsafe-preview-side-effect"
         else:
             status = classification
+        decision = "review-stale-preview" if stale else decision
         reason = status
         next_action = outcome.get("next_action") or "refresh-managed-activation-preview"
     return {
@@ -5985,16 +6010,25 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         action["preview_verified"] = bool(preview_gate.get("verified"))
         action["preview_verification_status"] = sanitize_value(preview_gate.get("status"))
         action["preview_verification_decision"] = sanitize_value(preview_gate.get("decision"))
-        if preview_gate.get("required") and not preview_gate.get("verified"):
-            action["successor_status"] = "keep-blocked"
+        if preview_gate.get("decision") == "review-stale-preview":
+            action["successor_status"] = "review-stale-preview"
             action["recommended_next_action"] = sanitize_value(
                 preview_gate.get("next_action") or "refresh-managed-activation-preview"
             )
+        if preview_gate.get("required") and not preview_gate.get("verified"):
+            if preview_gate.get("decision") != "review-stale-preview":
+                action["successor_status"] = "keep-blocked"
+                action["recommended_next_action"] = sanitize_value(
+                    preview_gate.get("next_action") or "refresh-managed-activation-preview"
+                )
         elif preview_gate.get("verified") and preview_gate.get("decision") == "ready":
             action["successor_status"] = "ready"
             action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
         elif preview_gate.get("verified") and preview_gate.get("decision") == "keep-blocked":
             action["successor_status"] = "keep-blocked"
+        elif preview_gate.get("verified") and preview_gate.get("decision") in {"keep-current-rule", "suppress-duplicate"}:
+            action["successor_status"] = sanitize_value(preview_gate.get("decision"))
+            action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
     for key in (
         "evidence_schema",
         "source_surface",
@@ -6072,6 +6106,128 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             "preview_verification_status",
             "preview_verification_decision",
         }
+    }
+
+
+def _successor_decision_issue_status(action: dict[str, Any]) -> str:
+    decision = str(action.get("successor_status") or "").strip()
+    if decision == "ready":
+        return "ready"
+    if decision in {"keep-current-rule", "suppress-duplicate"}:
+        return "suppressed"
+    if decision in {"keep-blocked", "review-stale-preview"}:
+        return "blocked"
+    return "review"
+
+
+def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, Any]:
+    decision = str(action.get("successor_status") or "review").strip() or "review"
+    source_fingerprint = sanitize_value(action.get("source_fingerprint") or "")
+    material = {
+        "source_fingerprint": source_fingerprint,
+        "local_action_family": sanitize_value(action.get("local_action_family") or "unknown"),
+        "decision": decision,
+        "recommended_next_action": sanitize_value(action.get("recommended_next_action") or "inspect-local-evidence"),
+    }
+    gate = action.get("managed_preview_gate") if isinstance(action.get("managed_preview_gate"), dict) else {}
+    row = {
+        "schema": LOCAL_ACTIVATION_SUCCESSOR_DECISION_SCHEMA,
+        "fingerprint": public_id(json.dumps(material, sort_keys=True), prefix="successor-decision"),
+        "source_fingerprint": source_fingerprint,
+        "successor_action_fingerprint": sanitize_value(action.get("fingerprint")),
+        "local_action_family": sanitize_value(action.get("local_action_family") or "unknown"),
+        "decision": sanitize_value(decision),
+        "recommended_next_action": sanitize_value(action.get("recommended_next_action") or "inspect-local-evidence"),
+        "issue_worthy_status": _successor_decision_issue_status(action),
+        "preview_verified": bool(action.get("preview_verified")),
+        "preview_verification_status": sanitize_value(action.get("preview_verification_status")),
+        "preview_verification_decision": sanitize_value(action.get("preview_verification_decision")),
+        "preview_agreement_status": "agreed" if gate.get("verified") else sanitize_value(gate.get("status") or "not-previewed"),
+        "preview_omitted_reason": sanitize_value(gate.get("omitted_reason")) if gate else None,
+        "preview_no_op_reason": sanitize_value(gate.get("no_op_reason")) if gate else None,
+        "top_preview_omission_reason": sanitize_value((gate.get("health_gate") or {}).get("top_omission_reason")) if isinstance(gate.get("health_gate"), dict) else None,
+        "privacy": _successor_action_privacy(),
+    }
+    return {
+        key: value
+        for key, value in sanitize_value(row).items()
+        if value not in (None, "", [], 0) or key in {"preview_verified"}
+    }
+
+
+def build_local_activation_successor_decisions(queue: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = queue.get("successor_actions")
+    if not isinstance(actions, list):
+        actions = build_local_activation_successor_actions(queue)
+    rows: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        row = _local_activation_successor_decision(action)
+        source = str(row.get("source_fingerprint") or row.get("fingerprint") or "")
+        if not source or source in seen_sources:
+            continue
+        seen_sources.add(source)
+        rows.append(row)
+    return rows
+
+
+def _preview_successor_summary(successor_actions: list[dict[str, Any]]) -> dict[str, Any]:
+    family: dict[str, Counter[str]] = {}
+    omitted_reasons: Counter[str] = Counter()
+    no_op_reasons: Counter[str] = Counter()
+    for action in successor_actions:
+        if not isinstance(action, dict):
+            continue
+        family_name = str(action.get("local_action_family") or "unknown")
+        counts = family.setdefault(family_name, Counter())
+        gate = action.get("managed_preview_gate") if isinstance(action.get("managed_preview_gate"), dict) else {}
+        if gate.get("verified"):
+            counts["agreed"] += 1
+        elif gate:
+            status = str(gate.get("status") or "unknown")
+            if status in {"managed-local-disagreement", "failed-closed", "unsafe-preview-side-effect"}:
+                counts["disagreed"] += 1
+            elif status in {"stale-preview", "stale-preview-health"}:
+                counts["stale"] += 1
+            elif status in {"missing-preview", "missing-preview-decision", "no-data-preview-health"}:
+                counts["missing"] += 1
+            else:
+                counts["blocked"] += 1
+        else:
+            counts["not_previewed"] += 1
+        omitted = str(gate.get("omitted_reason") or "").strip()
+        no_op = str(gate.get("no_op_reason") or "").strip()
+        if omitted:
+            omitted_reasons[omitted] += 1
+            counts[f"omitted:{omitted}"] += 1
+        if no_op:
+            no_op_reasons[no_op] += 1
+            counts[f"no-op:{no_op}"] += 1
+    family_rows = []
+    for family_name, counts in sorted(family.items()):
+        family_rows.append(
+            {
+                "local_action_family": family_name,
+                "agreed_count": counts["agreed"],
+                "disagreed_count": counts["disagreed"],
+                "stale_count": counts["stale"],
+                "missing_count": counts["missing"],
+                "blocked_count": counts["blocked"],
+                "not_previewed_count": counts["not_previewed"],
+            }
+        )
+    return {
+        "preview_agreement_by_local_action_family": family_rows,
+        "preview_top_omitted_reasons": [
+            {"value": key, "count": count}
+            for key, count in sorted(omitted_reasons.items(), key=lambda item: (-item[1], item[0]))[:10]
+        ],
+        "preview_top_no_op_reasons": [
+            {"value": key, "count": count}
+            for key, count in sorted(no_op_reasons.items(), key=lambda item: (-item[1], item[0]))[:10]
+        ],
     }
 
 
@@ -6361,6 +6517,8 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
         for code in item.get("blocker_codes") or []:
             blocker_counts[str(code)] += 1
     successor_actions = build_local_activation_successor_actions({"entries": entries})
+    successor_decisions = build_local_activation_successor_decisions({"successor_actions": successor_actions})
+    preview_successor_summary = _preview_successor_summary(successor_actions)
     preview_gates = [
         entry.get("managed_preview_gate")
         for entry in entries
@@ -6380,11 +6538,16 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             "queued_action_count": len(entries),
             "successor_action_count": len(successor_actions),
             "non_duplicate_successor_action_count": len({str(action.get("fingerprint")) for action in successor_actions if action.get("fingerprint")}),
+            "successor_decision_count": len(successor_decisions),
+            "non_duplicate_successor_decision_count": len({str(row.get("source_fingerprint")) for row in successor_decisions if row.get("source_fingerprint")}),
             "preview_verified_successor_count": preview_verified_count,
             "preview_required_successor_count": preview_required_count,
             "preview_blocked_successor_count": preview_blocked_count,
             "preview_gate_status_counts": [{"value": key, "count": count} for key, count in sorted(preview_status_counts.items())],
             "preview_gate_decision_counts": [{"value": key, "count": count} for key, count in sorted(preview_decision_counts.items())],
+            "preview_agreement_by_local_action_family": preview_successor_summary["preview_agreement_by_local_action_family"],
+            "preview_top_omitted_reasons": preview_successor_summary["preview_top_omitted_reasons"],
+            "preview_top_no_op_reasons": preview_successor_summary["preview_top_no_op_reasons"],
             "top_lever": top.get("lever"),
             "top_state": top.get("state"),
             "top_current_status": top.get("current_status"),
@@ -6403,6 +6566,7 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
         },
         "entries": entries[:20],
         "successor_actions": successor_actions[:20],
+        "successor_decisions": successor_decisions[:20],
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -6609,7 +6773,7 @@ def _activation_burndown_selected(row: dict[str, Any]) -> bool:
         return False
     if str(row.get("current_state") or "") in {"superseded", "retired-no-repeat"}:
         return False
-    return str(row.get("successor_status") or "") in {"ready", "review", "review-only", "keep-blocked"}
+    return str(row.get("successor_status") or "") in {"ready", "review", "review-only", "keep-blocked", "review-stale-preview"}
 
 
 def build_activation_burndown_report(
@@ -8409,11 +8573,23 @@ def build_evidence_to_activation_burndown(
             successor_actions = build_local_activation_successor_actions(next_action_queue)
         if isinstance(successor_actions, list):
             result["successor_actions"] = successor_actions
+            successor_decisions = next_action_queue.get("successor_decisions")
+            if not isinstance(successor_decisions, list):
+                successor_decisions = build_local_activation_successor_decisions(
+                    {"successor_actions": successor_actions}
+                )
+            result["successor_decisions"] = successor_decisions
             result["summary"]["successor_action_count"] = len(successor_actions)
             result["summary"]["non_duplicate_successor_action_count"] = len({
                 str(action.get("fingerprint"))
                 for action in successor_actions
                 if isinstance(action, dict) and action.get("fingerprint")
+            })
+            result["summary"]["successor_decision_count"] = len(successor_decisions)
+            result["summary"]["non_duplicate_successor_decision_count"] = len({
+                str(row.get("source_fingerprint"))
+                for row in successor_decisions
+                if isinstance(row, dict) and row.get("source_fingerprint")
             })
             queue_summary = (
                 next_action_queue.get("summary")
@@ -8421,11 +8597,16 @@ def build_evidence_to_activation_burndown(
                 else {}
             )
             for key in (
+                "successor_decision_count",
+                "non_duplicate_successor_decision_count",
                 "preview_verified_successor_count",
                 "preview_required_successor_count",
                 "preview_blocked_successor_count",
                 "preview_gate_status_counts",
                 "preview_gate_decision_counts",
+                "preview_agreement_by_local_action_family",
+                "preview_top_omitted_reasons",
+                "preview_top_no_op_reasons",
             ):
                 if key in queue_summary:
                     result["summary"][key] = sanitize_value(queue_summary.get(key))
