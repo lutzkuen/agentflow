@@ -143,6 +143,7 @@ def _disagrees_with_local(request_row: dict[str, Any], decision: dict[str, Any])
 def _classification(
     *,
     fetch_status: str,
+    managed_server_calls_made: bool,
     stale: bool,
     missing: bool,
     failed_closed: bool,
@@ -150,6 +151,8 @@ def _classification(
 ) -> str:
     if failed_closed:
         return "failed-closed"
+    if fetch_status in {"skipped", "no-data"} or (missing and not managed_server_calls_made):
+        return "no-data-preview-health"
     if missing:
         return "missing-preview-decision"
     if stale:
@@ -167,7 +170,7 @@ def _next_action(
     request_row: dict[str, Any],
     decision: dict[str, Any],
 ) -> str:
-    if classification in {"missing-preview-decision", "stale-preview", "not-previewed"}:
+    if classification in {"no-data-preview-health", "missing-preview-decision", "stale-preview", "not-previewed"}:
         return "refresh-managed-activation-preview"
     if classification == "failed-closed":
         return "keep-local-policy-authoritative-review-managed-preview"
@@ -195,6 +198,8 @@ def _outcome_from_rows(
     age_hours = _hours_between(preview_time, now)
     fetch = preview_result.get("fetch") if isinstance(preview_result.get("fetch"), dict) else {}
     fetch_status = str(fetch.get("status") or preview_result.get("status") or "").strip() or "unknown"
+    fetch_reason = str(fetch.get("reason") or preview_result.get("reason") or "").strip()
+    managed_server_calls_made = bool(fetch.get("managed_server_calls_made"))
     missing = not bool(decision)
     stale = bool(age_hours is not None and age_hours > max(0.0, stale_after_hours))
     preview_policy_write = bool(decision.get("policy_files_written"))
@@ -209,6 +214,7 @@ def _outcome_from_rows(
     disagreement = _disagrees_with_local(request_row, decision)
     classification = _classification(
         fetch_status=fetch_status,
+        managed_server_calls_made=managed_server_calls_made,
         stale=stale,
         missing=missing,
         failed_closed=failed_closed,
@@ -243,6 +249,10 @@ def _outcome_from_rows(
         "decision": sanitize_value(decision.get("decision") or "missing"),
         "decision_status": sanitize_value(decision.get("status") or decision.get("decision") or "missing"),
         "classification": classification,
+        "preview_status": classification,
+        "preview_reason": sanitize_value(fetch_reason or classification),
+        "fetch_status": sanitize_value(fetch_status),
+        "fetch_reason": sanitize_value(fetch_reason),
         "next_action": _next_action(classification=classification, request_row=request_row, decision=decision),
         "omitted_reason": sanitize_value(decision.get("omitted_reason")),
         "no_op_reason": sanitize_value(decision.get("no_op_reason")),
@@ -256,15 +266,17 @@ def _outcome_from_rows(
         "managed_enforced": False,
         "policy_files_written": False,
         "provider_calls_made": False,
-        "managed_server_calls_made": bool(fetch.get("managed_server_calls_made")),
+        "managed_server_calls_made": managed_server_calls_made,
         "managed_preview_policy_files_written": preview_policy_write,
         "managed_preview_provider_calls_made": preview_provider_call,
         "managed_preview_enforced": preview_managed_enforced,
         "stale": stale,
-        "missing_preview_decision": missing,
+        "missing_preview_decision": classification == "missing-preview-decision",
+        "preview_decision_missing": missing,
+        "no_data_preview_health": classification == "no-data-preview-health",
         "failed_closed": failed_closed,
         "disagrees_with_local_evidence": disagreement,
-        "privacy": _privacy(managed_server_calls_made=bool(fetch.get("managed_server_calls_made"))),
+        "privacy": _privacy(managed_server_calls_made=managed_server_calls_made),
     }
     return {
         key: value
@@ -474,6 +486,9 @@ def build_managed_activation_preview_outcomes_report(
             "stale_after_hours": float(stale_after_hours),
             "stale_count": sum(1 for row in outcomes if row.get("stale")),
             "missing_preview_decision_count": sum(1 for row in outcomes if row.get("missing_preview_decision")),
+            "no_data_preview_health_count": sum(
+                1 for row in outcomes if row.get("classification") == "no-data-preview-health"
+            ),
             "failed_closed_count": sum(1 for row in outcomes if row.get("failed_closed")),
             "disagreement_count": sum(1 for row in outcomes if row.get("disagrees_with_local_evidence")),
             "policy_files_written": False,

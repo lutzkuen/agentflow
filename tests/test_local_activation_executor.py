@@ -724,6 +724,54 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["summary"]["omission_count"], 0)
         self.assertEqual(result["egress_guard"]["status"], "passed")
 
+    def test_managed_activation_preview_cli_persists_no_data_health_without_url(self):
+        with TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.json"
+            db_path = Path(tmpdir) / "agentflow.sqlite3"
+            plan_path.write_text(json.dumps(_executor_handoff_fixture_plan()), encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.managed_activation_preview_cli(
+                [
+                    "--plan-json",
+                    str(plan_path),
+                    "--persist-outcomes",
+                    "--db",
+                    str(db_path),
+                    "--pretty",
+                ],
+                stdout=stdout,
+            )
+
+        result = json.loads(stdout.getvalue())
+        stored = result["stored_preview_outcomes"]
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(stored["schema"], "agentflow.managed_activation_preview_outcomes.v1")
+        self.assertEqual(stored["import"]["imported_count"], 4)
+        self.assertEqual(stored["summary"]["stored_preview_outcome_count"], 4)
+        self.assertEqual(stored["summary"]["no_data_preview_health_count"], 4)
+        self.assertEqual(stored["summary"]["missing_preview_decision_count"], 0)
+        self.assertFalse(stored["summary"]["policy_files_written"])
+        self.assertFalse(stored["summary"]["provider_calls_made"])
+        self.assertFalse(stored["managed_server_calls_made"])
+        fingerprints = [row["outcome_fingerprint"] for row in stored["outcomes"]]
+        self.assertEqual(len(fingerprints), len(set(fingerprints)))
+        for row in stored["outcomes"]:
+            self.assertEqual(row["classification"], "no-data-preview-health")
+            self.assertEqual(row["preview_status"], "no-data-preview-health")
+            self.assertEqual(row["preview_reason"], "managed-preview-url-not-configured")
+            self.assertEqual(row["fetch_status"], "skipped")
+            self.assertEqual(row["next_action"], "refresh-managed-activation-preview")
+            self.assertTrue(row["local_action_family"])
+            self.assertTrue(row["handoff_ref"].startswith("handoff:"))
+            self.assertTrue(row["privacy"]["metadata_only"])
+            self.assertTrue(row["privacy"]["review_only"])
+            self.assertFalse(row["privacy"]["provider_calls_made"])
+            self.assertFalse(row["privacy"]["managed_server_calls_made"])
+            self.assertFalse(row["privacy"]["policy_files_written"])
+        self.assertEqual(managed_egress_violations(stored), [])
+
     def test_managed_activation_preview_cli_posts_opt_in_payload(self):
         with TemporaryDirectory() as tmpdir:
             plan_path = Path(tmpdir) / "plan.json"

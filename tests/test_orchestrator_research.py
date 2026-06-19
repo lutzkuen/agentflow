@@ -2598,6 +2598,89 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw preview fixture value must not leak", rendered)
         self.assertNotIn('"policy_files_written": true', rendered.lower())
 
+    def test_stored_no_data_preview_outcomes_keep_successor_blocked(self):
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:no-data-routing",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.routing.preview_fixture.v1",
+                    "state": "keep-blocked",
+                    "current_status": "keep-blocked",
+                    "issue_worthy_status": "ready",
+                    "next_action": "draft-openai-routing-recovery-canary",
+                    "sample_count": 10,
+                    "stage_allowed": True,
+                    "target_local_rule_file": "routing_rules.yaml",
+                    "target_local_policy_section": "routing.rules",
+                }
+            ],
+        }
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "status": "tracked",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": False,
+                    "summary": {
+                        "stored_preview_outcome_count": 1,
+                        "no_data_preview_health_count": 1,
+                        "missing_preview_decision_count": 0,
+                        "failed_closed_count": 0,
+                        "disagreement_count": 0,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                    },
+                    "outcomes": [
+                        {
+                            "schema": "agentflow.managed_activation_preview_outcome.v1",
+                            "outcome_fingerprint": "managed-preview-outcome:no-data-routing",
+                            "source_fingerprint": "activation:no-data-routing",
+                            "local_action_family": "routing",
+                            "evidence_schema": "agentflow.routing.preview_fixture.v1",
+                            "classification": "no-data-preview-health",
+                            "preview_status": "no-data-preview-health",
+                            "preview_reason": "managed-preview-url-not-configured",
+                            "decision": "missing",
+                            "next_action": "refresh-managed-activation-preview",
+                            "stale": False,
+                            "missing_preview_decision": False,
+                            "preview_decision_missing": True,
+                            "no_data_preview_health": True,
+                            "failed_closed": False,
+                            "disagrees_with_local_evidence": False,
+                            "policy_files_written": False,
+                            "provider_calls_made": False,
+                            "managed_server_calls_made": False,
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            }
+        )
+
+        action = queue["successor_actions"][0]
+        gate = action["managed_preview_gate"]
+
+        self.assertFalse(action["preview_verified"])
+        self.assertEqual(action["successor_status"], "keep-blocked")
+        self.assertEqual(action["recommended_next_action"], "refresh-managed-activation-preview")
+        self.assertEqual(gate["status"], "no-data-preview-health")
+        self.assertEqual(gate["decision"], "keep-blocked")
+        self.assertEqual(gate["reason"], "managed-preview-health-no-data")
+        self.assertEqual(gate["health_gate"]["status"], "no-data-preview-health")
+        self.assertEqual(gate["health_gate"]["stored_preview_outcome_count"], 1)
+        self.assertFalse(gate["policy_files_written"])
+        self.assertFalse(gate["provider_calls_made"])
+        self.assertFalse(gate["managed_server_calls_made"])
+
     def test_preview_agreed_activation_outcomes_emit_successor_decisions(self):
         ledger = {
             "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",

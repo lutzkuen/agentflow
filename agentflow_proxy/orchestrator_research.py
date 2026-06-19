@@ -5783,8 +5783,15 @@ def _managed_preview_health_gate(
         for row in family_outcomes
         if not bool(row.get("stale"))
         and not bool(row.get("missing_preview_decision"))
+        and not bool(row.get("no_data_preview_health"))
+        and str(row.get("classification") or "") != "no-data-preview-health"
         and not bool(row.get("failed_closed"))
         and not bool(row.get("disagrees_with_local_evidence"))
+    )
+    no_data_outcome_count = sum(
+        1
+        for row in family_outcomes
+        if bool(row.get("no_data_preview_health")) or str(row.get("classification") or "") == "no-data-preview-health"
     )
     family_previewed_count = _managed_preview_family_count(
         report,
@@ -5815,7 +5822,12 @@ def _managed_preview_health_gate(
         status = "rejected-preview-health"
         reason = top_rejection_reason or fetch_reason or "managed-preview-health-rejected"
         next_action = "review-managed-activation-preview-rejection"
-    elif not has_report or status_text in {"", "no-data", "skipped"} or (accepted_batch_count == 0 and previewed_row_count == 0 and stored_count == 0):
+    elif (
+        no_data_outcome_count > 0
+        or not has_report
+        or status_text in {"", "no-data", "skipped"}
+        or (accepted_batch_count == 0 and previewed_row_count == 0 and stored_count == 0)
+    ):
         status = "no-data-preview-health"
         reason = fetch_reason or "managed-preview-health-no-data"
         next_action = "refresh-managed-activation-preview"
