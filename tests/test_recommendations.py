@@ -408,6 +408,7 @@ class RecommendationTest(unittest.TestCase):
 
     def test_valid_noop_recommendation_records_received_without_changing_model(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.response = FakeResponse(body={
             "target_model": "claude-sonnet-4-6",
             "replacement_prompt": None,
@@ -482,6 +483,7 @@ class RecommendationTest(unittest.TestCase):
 
     def test_timeout_records_bounded_fallback_metadata(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         os.environ["AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"] = "0.1"
         FakeAsyncClient.error = httpx.TimeoutException("too slow")
 
@@ -495,6 +497,7 @@ class RecommendationTest(unittest.TestCase):
 
     def test_unreachable_records_fallback_metadata(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = httpx.ConnectError("connection refused")
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -506,6 +509,7 @@ class RecommendationTest(unittest.TestCase):
 
     def test_invalid_json_and_schema_record_fallback_metadata(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.response = FakeResponse(json_error=ValueError("not json"))
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -658,6 +662,7 @@ class RecommendationTest(unittest.TestCase):
     def test_policy_decision_fetch_fails_closed_on_timeout_and_schema_mismatch(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = httpx.TimeoutException("too slow")
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -695,9 +700,31 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(schema_meta["schema_error"], "schema-mismatch")
         self.assertEqual(schema_meta["fallback"], "local-policy")
 
+    def test_policy_decision_enabled_without_server_url_fails_closed_locally(self):
+        os.environ["AGENTFLOW_RECOMMENDATIONS_ENABLED"] = "1"
+        os.environ["AGENTFLOW_POLICY_DECISIONS_ENABLED"] = "1"
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_policy_decision({
+                "source_surface": "anthropic_messages",
+                "granularity": "provider_request",
+                "app_family": "claude_code",
+                "requested_model": "claude-sonnet-4-6",
+                "input_features": {},
+                "tool_features": {},
+                "replayability_level": "features_only",
+            }))
+
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "server-url-not-configured")
+        self.assertEqual(meta["fallback"], "local-policy")
+        self.assertFalse(meta["applied"])
+        self.assertIsNone(FakeAsyncClient.last_url)
+
     def test_policy_decision_normalizes_route_to_and_applies_after_local_gate(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.response = FakeResponse(body={
             "schema": "agentflow.policy_decision.v1",
             "policy_id": "feature-policy-decision:anthropic:route-to",
@@ -877,6 +904,7 @@ class RecommendationTest(unittest.TestCase):
 
     def test_server_failure_records_metadata_and_keeps_local_model(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = RuntimeError("server unavailable")
         routing_meta = {"routed_model": "claude-sonnet-4-6"}
 
@@ -1519,6 +1547,7 @@ class RecommendationTest(unittest.TestCase):
 
     def test_outcome_feedback_failure_is_non_fatal_metadata(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = RuntimeError("feedback unavailable")
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
