@@ -20,6 +20,7 @@ EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_n
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "agentflow.local_activation_next_action_queue.v1"
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_next_action_queue_entry.v1"
 LOCAL_ACTIVATION_SUCCESSOR_ACTION_SCHEMA = "agentflow.local_activation_successor_action.v1"
+PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA = "agentflow.preview_verified_activation_successor_gate.v1"
 ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA = "agentflow.activation_feedback_evidence_freshness_gate.v1"
 OPENAI_ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
 FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA = "agentflow.full_rollout_crunch_activation_measurement.v1"
@@ -1863,6 +1864,8 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
         "crunch_savings_signal",
         "request_shape_rollup_candidates",
         "managed_recommendation_health",
+        "managed_activation_preview_outcomes",
+        "managed_preview_outcomes",
         "local_activation_outcome_summary",
         "promotion_blocker_next_action_status",
         "post_promotion_priority_delta_status",
@@ -5457,6 +5460,243 @@ def _successor_action_status(entry: dict[str, Any]) -> str:
     return "review"
 
 
+def _managed_preview_outcomes_report(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    for key in (
+        "managed_activation_preview_outcomes",
+        "managed_preview_outcomes",
+        "managed_activation_preview_outcome_summary",
+    ):
+        value = stats_summary.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _managed_preview_successor_privacy(*, managed_server_calls_made: bool = False) -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "feature_only": True,
+        "review_only": True,
+        "authoritative_for_active_policy": False,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "raw_response_bodies_included": False,
+        "provider_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "tenant_ids_included": False,
+        "tool_payloads_included": False,
+        "cache_keys_included": False,
+        "file_paths_included": False,
+        "absolute_paths_included": False,
+        "individual_candidate_ids_included": False,
+        "policy_file_contents_included": False,
+        "provider_calls_made": False,
+        "policy_files_written": False,
+        "managed_server_calls_made": bool(managed_server_calls_made),
+        "current_run_managed_server_calls_made": False,
+    }
+
+
+def _managed_preview_required_for_successor(entry: dict[str, Any]) -> bool:
+    if entry.get("managed_preview_required") is not None:
+        return bool(entry.get("managed_preview_required"))
+    family = str(entry.get("local_action_family") or entry.get("lever") or "").strip()
+    current_status = str(entry.get("current_status") or "").strip()
+    duplicate_status = str(entry.get("duplicate_suppression_status") or "").strip()
+    if duplicate_status == "suppressed" or current_status in {"full-rollout", "superseded"}:
+        return False
+    return family in {"routing", "cache", "managed-recommendation", "activation-feedback"}
+
+
+def _managed_preview_local_executor_gate(entry: dict[str, Any]) -> dict[str, Any]:
+    action_status = _successor_action_status(entry)
+    policy_write_candidate = bool(
+        entry.get("promotion_allowed")
+        or entry.get("stage_allowed")
+        or action_status in {"ready", "review-only", "review"}
+    )
+    passed = bool(
+        entry.get("promotion_allowed")
+        or entry.get("stage_allowed")
+        or action_status in {"keep-current-rule", "suppress-duplicate", "keep-blocked"}
+    )
+    return {
+        "schema": "agentflow.preview_verified_successor_local_executor_gate.v1",
+        "passed": passed,
+        "policy_write_candidate": policy_write_candidate,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "reason": "local-executor-gate-passed" if passed else "local-executor-gate-not-passed",
+    }
+
+
+def _managed_preview_outcome_match_score(entry: dict[str, Any], outcome: dict[str, Any]) -> int:
+    score = 0
+    entry_family = str(entry.get("local_action_family") or entry.get("lever") or "").strip()
+    outcome_family = str(outcome.get("local_action_family") or "").strip()
+    if entry_family and outcome_family and entry_family == outcome_family:
+        score += 10
+    else:
+        return -1
+    entry_schema = str(entry.get("evidence_schema") or "").strip()
+    outcome_schema = str(outcome.get("evidence_schema") or "").strip()
+    if entry_schema and outcome_schema:
+        if entry_schema == outcome_schema:
+            score += 8
+        else:
+            return -1
+    current_status = str(entry.get("current_status") or "").strip()
+    outcome_status = str(outcome.get("current_status") or "").strip()
+    if current_status and outcome_status and current_status == outcome_status:
+        score += 2
+    entry_next = str(entry.get("next_action") or "").strip()
+    outcome_next = str(outcome.get("next_action") or "").strip()
+    if entry_next and outcome_next and entry_next == outcome_next:
+        score += 1
+    return score
+
+
+def _managed_preview_outcome_for_entry(
+    entry: dict[str, Any],
+    managed_preview_outcomes: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(managed_preview_outcomes, dict):
+        return None
+    outcomes = [row for row in managed_preview_outcomes.get("outcomes") or [] if isinstance(row, dict)]
+    best: tuple[int, float, dict[str, Any]] | None = None
+    for outcome in outcomes:
+        score = _managed_preview_outcome_match_score(entry, outcome)
+        if score < 0:
+            continue
+        age = _to_float(outcome.get("preview_age_hours"))
+        rank_key = (score, -age, outcome)
+        if best is None or rank_key[:2] > best[:2]:
+            best = rank_key
+    return best[2] if best else None
+
+
+def _managed_preview_successor_gate(
+    entry: dict[str, Any],
+    managed_preview_outcomes: dict[str, Any] | None,
+) -> dict[str, Any]:
+    required = _managed_preview_required_for_successor(entry)
+    local_gate = _managed_preview_local_executor_gate(entry)
+    report_summary = (
+        managed_preview_outcomes.get("summary")
+        if isinstance(managed_preview_outcomes, dict) and isinstance(managed_preview_outcomes.get("summary"), dict)
+        else {}
+    )
+    outcome = _managed_preview_outcome_for_entry(entry, managed_preview_outcomes)
+    if outcome is None:
+        status = "missing-preview"
+        return {
+            "schema": PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA,
+            "required": required,
+            "status": status,
+            "verified": False,
+            "decision": "keep-blocked" if required else "preview-optional",
+            "next_action": "refresh-managed-activation-preview" if required else sanitize_value(entry.get("next_action")),
+            "local_executor_gate": local_gate,
+            "managed_dependency": "optional",
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "stored_preview_outcome_count": _to_int(report_summary.get("stored_preview_outcome_count")),
+            "reason": "managed-preview-outcome-missing" if required else "managed-preview-optional",
+            "privacy": _managed_preview_successor_privacy(),
+        }
+
+    classification = str(outcome.get("classification") or "unknown").strip() or "unknown"
+    stale = bool(outcome.get("stale"))
+    missing = bool(outcome.get("missing_preview_decision"))
+    failed_closed = bool(outcome.get("failed_closed"))
+    disagreement = bool(outcome.get("disagrees_with_local_evidence"))
+    preview_policy_write = bool(
+        outcome.get("managed_preview_policy_files_written")
+        or outcome.get("policy_files_written")
+    )
+    preview_provider_call = bool(
+        outcome.get("managed_preview_provider_calls_made")
+        or outcome.get("provider_calls_made")
+    )
+    verified = bool(
+        classification == "review-only"
+        and not stale
+        and not missing
+        and not failed_closed
+        and not disagreement
+        and not preview_policy_write
+        and not preview_provider_call
+    )
+    action_status = _successor_action_status(entry)
+    if verified:
+        if action_status in {"keep-current-rule", "suppress-duplicate"}:
+            decision = action_status
+        elif local_gate["passed"] and str(entry.get("issue_worthy_status") or "") == "ready":
+            decision = "ready"
+        elif action_status == "keep-blocked":
+            decision = "keep-blocked"
+        elif local_gate["passed"]:
+            decision = "ready"
+        else:
+            decision = "review-only"
+        status = "preview-verified"
+        reason = "local-managed-preview-agree"
+        next_action = outcome.get("next_action") or entry.get("next_action")
+    else:
+        decision = "keep-blocked" if required else "review"
+        if failed_closed:
+            status = "failed-closed"
+        elif stale:
+            status = "stale-preview"
+        elif missing:
+            status = "missing-preview-decision"
+        elif disagreement:
+            status = "managed-local-disagreement"
+        elif preview_policy_write or preview_provider_call:
+            status = "unsafe-preview-side-effect"
+        else:
+            status = classification
+        reason = status
+        next_action = outcome.get("next_action") or "refresh-managed-activation-preview"
+    return {
+        "schema": PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA,
+        "required": required,
+        "status": status,
+        "verified": verified,
+        "decision": decision,
+        "next_action": sanitize_value(next_action),
+        "local_executor_gate": local_gate,
+        "managed_dependency": "optional",
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": bool(outcome.get("managed_server_calls_made")),
+        "stored_preview_outcome_count": _to_int(report_summary.get("stored_preview_outcome_count")),
+        "outcome_fingerprint": sanitize_value(outcome.get("outcome_fingerprint")),
+        "preview_ref": sanitize_value(outcome.get("preview_ref")),
+        "preview_age_hours": outcome.get("preview_age_hours"),
+        "stale_after_hours": outcome.get("stale_after_hours"),
+        "classification": classification,
+        "reason": reason,
+        "reason_codes": sanitize_value([str(item) for item in outcome.get("reason_codes") or [] if str(item or "").strip()]),
+        "omitted_reason": sanitize_value(outcome.get("omitted_reason")),
+        "no_op_reason": sanitize_value(outcome.get("no_op_reason")),
+        "stale": stale,
+        "missing_preview_decision": missing,
+        "failed_closed": failed_closed,
+        "disagrees_with_local_evidence": disagreement,
+        "review_only": True,
+        "authoritative_for_active_policy": False,
+        "privacy": _managed_preview_successor_privacy(
+            managed_server_calls_made=bool(outcome.get("managed_server_calls_made"))
+        ),
+    }
+
+
 def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
     fingerprint = sanitize_value(entry.get("fingerprint") or "")
     material = {
@@ -5492,6 +5732,22 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "duplicate_suppression_reason": sanitize_value(entry.get("duplicate_suppression_reason")),
         "privacy": _successor_action_privacy(),
     }
+    preview_gate = entry.get("managed_preview_gate") if isinstance(entry.get("managed_preview_gate"), dict) else None
+    if preview_gate is not None:
+        action["managed_preview_gate"] = sanitize_value(preview_gate)
+        action["preview_verified"] = bool(preview_gate.get("verified"))
+        action["preview_verification_status"] = sanitize_value(preview_gate.get("status"))
+        action["preview_verification_decision"] = sanitize_value(preview_gate.get("decision"))
+        if preview_gate.get("required") and not preview_gate.get("verified"):
+            action["successor_status"] = "keep-blocked"
+            action["recommended_next_action"] = sanitize_value(
+                preview_gate.get("next_action") or "refresh-managed-activation-preview"
+            )
+        elif preview_gate.get("verified") and preview_gate.get("decision") == "ready":
+            action["successor_status"] = "ready"
+            action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
+        elif preview_gate.get("verified") and preview_gate.get("decision") == "keep-blocked":
+            action["successor_status"] = "keep-blocked"
     for key in (
         "evidence_schema",
         "source_surface",
@@ -5558,7 +5814,17 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in action.items()
-        if value not in (None, "", [], 0) or key in {"rank", "source_queue_rank", "source_ledger_rank", "sample_count", "realized_savings_usd", "projected_savings_usd"}
+        if value not in (None, "", [], 0) or key in {
+            "rank",
+            "source_queue_rank",
+            "source_ledger_rank",
+            "sample_count",
+            "realized_savings_usd",
+            "projected_savings_usd",
+            "preview_verified",
+            "preview_verification_status",
+            "preview_verification_decision",
+        }
     }
 
 
@@ -5724,6 +5990,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "keep_active_regression_gate",
         "full_rollout_activation_outcome",
         "activation_feedback_freshness_gate",
+        "managed_preview_gate",
     ):
         if isinstance(entry.get(review_key), dict):
             clean[review_key] = sanitize_value(entry.get(review_key))
@@ -5813,6 +6080,10 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
     ]
     if not entries:
         return None
+    managed_preview_outcomes = _managed_preview_outcomes_report(stats_summary)
+    if isinstance(managed_preview_outcomes, dict):
+        for entry in entries:
+            entry["managed_preview_gate"] = _managed_preview_successor_gate(entry, managed_preview_outcomes)
     entries.sort(
         key=lambda item: (
             _queue_rank_bucket(item, _to_float(item.get("realized_savings_usd")), _to_float(item.get("projected_savings_usd"))),
@@ -5838,6 +6109,16 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
         for code in item.get("blocker_codes") or []:
             blocker_counts[str(code)] += 1
     successor_actions = build_local_activation_successor_actions({"entries": entries})
+    preview_gates = [
+        entry.get("managed_preview_gate")
+        for entry in entries
+        if isinstance(entry.get("managed_preview_gate"), dict)
+    ]
+    preview_verified_count = sum(1 for gate in preview_gates if gate.get("verified"))
+    preview_required_count = sum(1 for gate in preview_gates if gate.get("required"))
+    preview_blocked_count = sum(1 for gate in preview_gates if gate.get("required") and not gate.get("verified"))
+    preview_status_counts: Counter[str] = Counter(str(gate.get("status") or "unknown") for gate in preview_gates)
+    preview_decision_counts: Counter[str] = Counter(str(gate.get("decision") or "unknown") for gate in preview_gates)
 
     result = {
         "schema": LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA,
@@ -5847,6 +6128,11 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             "queued_action_count": len(entries),
             "successor_action_count": len(successor_actions),
             "non_duplicate_successor_action_count": len({str(action.get("fingerprint")) for action in successor_actions if action.get("fingerprint")}),
+            "preview_verified_successor_count": preview_verified_count,
+            "preview_required_successor_count": preview_required_count,
+            "preview_blocked_successor_count": preview_blocked_count,
+            "preview_gate_status_counts": [{"value": key, "count": count} for key, count in sorted(preview_status_counts.items())],
+            "preview_gate_decision_counts": [{"value": key, "count": count} for key, count in sorted(preview_decision_counts.items())],
             "top_lever": top.get("lever"),
             "top_state": top.get("state"),
             "top_current_status": top.get("current_status"),
@@ -5963,6 +6249,11 @@ def _activation_burndown_row_from_successor(action: dict[str, Any]) -> dict[str,
         "expected_savings_path": sanitize_value(action.get("expected_savings_path")),
         "privacy": _successor_action_privacy(),
     }
+    if isinstance(action.get("managed_preview_gate"), dict):
+        row["managed_preview_gate"] = sanitize_value(action.get("managed_preview_gate"))
+        row["preview_verified"] = bool(action.get("preview_verified"))
+        row["preview_verification_status"] = sanitize_value(action.get("preview_verification_status"))
+        row["preview_verification_decision"] = sanitize_value(action.get("preview_verification_decision"))
     for key in (
         "evidence_schema",
         "source_surface",
@@ -7872,6 +8163,20 @@ def build_evidence_to_activation_burndown(
                 for action in successor_actions
                 if isinstance(action, dict) and action.get("fingerprint")
             })
+            queue_summary = (
+                next_action_queue.get("summary")
+                if isinstance(next_action_queue.get("summary"), dict)
+                else {}
+            )
+            for key in (
+                "preview_verified_successor_count",
+                "preview_required_successor_count",
+                "preview_blocked_successor_count",
+                "preview_gate_status_counts",
+                "preview_gate_decision_counts",
+            ):
+                if key in queue_summary:
+                    result["summary"][key] = sanitize_value(queue_summary.get(key))
     return sanitize_value(result)
 
 

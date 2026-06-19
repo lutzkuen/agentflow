@@ -2111,6 +2111,158 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-queue-secret", rendered)
         self.assertNotIn("/tmp/private-queue.py", rendered)
 
+    def test_local_activation_successors_record_preview_verified_gates(self):
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:openai-routing-preview",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "state": "keep-blocked",
+                    "current_status": "review",
+                    "issue_worthy_status": "ready",
+                    "next_action": "draft-openai-routing-recovery-canary",
+                    "blocker_codes": ["semantic-quality-regression-observed"],
+                    "sample_count": 342,
+                    "applied_count": 26,
+                    "holdout_count": 22,
+                    "stage_allowed": True,
+                    "policy_files_written": False,
+                    "savings_per_1000_calls_usd": 4.375,
+                    "target_local_rule_file": "routing_rules.yaml",
+                    "target_local_policy_section": "routing.rules",
+                    "request_id": "req-preview-secret",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 2,
+                    "fingerprint": "activation:cache-preview",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "state": "missing-evidence",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "ready",
+                    "next_action": "collect-file-invalidation-evidence",
+                    "blocker_codes": ["invalidation-evidence-missing"],
+                    "sample_count": 113,
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "raw_prompt": "raw preview prompt must not leak",
+                },
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+        managed_preview_outcomes = {
+            "schema": "agentflow.managed_activation_preview_outcomes.v1",
+            "status": "tracked",
+            "managed_dependency": "optional",
+            "managed_server_calls_made": True,
+            "summary": {
+                "stored_preview_outcome_count": 2,
+                "stale_count": 1,
+                "missing_preview_decision_count": 0,
+                "failed_closed_count": 0,
+                "disagreement_count": 0,
+            },
+            "outcomes": [
+                {
+                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "outcome_fingerprint": "managed-preview-outcome:routing",
+                    "preview_ref": "preview:routing",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "classification": "review-only",
+                    "decision": "review-only-recommendation",
+                    "next_action": "draft-openai-routing-recovery-canary",
+                    "preview_age_hours": 1.25,
+                    "stale_after_hours": 72.0,
+                    "stale": False,
+                    "missing_preview_decision": False,
+                    "failed_closed": False,
+                    "disagrees_with_local_evidence": False,
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": True,
+                    "reason_codes": ["managed-preview-would-draft-recovery"],
+                    "request_id": "managed-req-secret",
+                    "raw_prompt": "raw managed preview prompt must not leak",
+                },
+                {
+                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "outcome_fingerprint": "managed-preview-outcome:cache",
+                    "preview_ref": "preview:cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "classification": "stale-preview",
+                    "decision": "keep-blocked",
+                    "next_action": "refresh-managed-activation-preview",
+                    "preview_age_hours": 80.0,
+                    "stale_after_hours": 72.0,
+                    "stale": True,
+                    "missing_preview_decision": False,
+                    "failed_closed": False,
+                    "disagrees_with_local_evidence": False,
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": True,
+                },
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": managed_preview_outcomes,
+            }
+        )
+
+        self.assertEqual(queue["summary"]["preview_verified_successor_count"], 1)
+        self.assertEqual(queue["summary"]["preview_required_successor_count"], 2)
+        self.assertEqual(queue["summary"]["preview_blocked_successor_count"], 1)
+        actions = {action["local_action_family"]: action for action in queue["successor_actions"]}
+        routing = actions["routing"]
+        self.assertTrue(routing["preview_verified"])
+        self.assertEqual(routing["successor_status"], "ready")
+        self.assertEqual(routing["preview_verification_decision"], "ready")
+        self.assertEqual(routing["managed_preview_gate"]["status"], "preview-verified")
+        self.assertTrue(routing["managed_preview_gate"]["local_executor_gate"]["passed"])
+        self.assertFalse(routing["managed_preview_gate"]["policy_files_written"])
+        self.assertFalse(routing["managed_preview_gate"]["provider_calls_made"])
+        self.assertEqual(routing["managed_preview_gate"]["managed_dependency"], "optional")
+        cache = actions["cache"]
+        self.assertFalse(cache["preview_verified"])
+        self.assertEqual(cache["successor_status"], "keep-blocked")
+        self.assertEqual(cache["preview_verification_status"], "stale-preview")
+        self.assertEqual(cache["recommended_next_action"], "refresh-managed-activation-preview")
+
+        report = build_evidence_to_activation_burndown(
+            {
+                "schema": "agentflow.orchestrator_research_plan.v1",
+                "evidence": {
+                    "stats_summary": {
+                        "evidence_to_activation_next_action_ledger": ledger,
+                        "managed_activation_preview_outcomes": managed_preview_outcomes,
+                    }
+                },
+            },
+            now=NOW,
+        )
+        self.assertEqual(report["summary"]["preview_verified_successor_count"], 1)
+        self.assertTrue(report["successor_actions"][0]["managed_preview_gate"]["privacy"]["metadata_only"])
+        rendered = json.dumps({"queue": queue, "report": report}, sort_keys=True)
+        self.assertNotIn("req-preview-secret", rendered)
+        self.assertNotIn("managed-req-secret", rendered)
+        self.assertNotIn("raw preview prompt must not leak", rendered)
+        self.assertNotIn("raw managed preview prompt must not leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+
     def test_activation_burndown_report_ranks_successors_after_keep_active_crunch(self):
         ledger = {
             "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
