@@ -141,6 +141,180 @@ class StoreBackendTest(unittest.TestCase):
             finally:
                 store.conn.close()
 
+    def test_log_call_defaults_routing_outcome_label_to_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                columns = {
+                    row["name"]
+                    for row in store.conn.execute("pragma table_info(calls)").fetchall()
+                }
+                self.assertIn("routing_outcome_label", columns)
+
+                store.log_call(
+                    id="label-default",
+                    created_at=utc_now(),
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=12,
+                    input_tokens_est=10,
+                    output_tokens_est=5,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.002,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"reason": "test"}),
+                    cache_json=stable_json({"status": "miss"}),
+                    session_id="session-label",
+                    category="chat",
+                )
+
+                row = store.conn.execute(
+                    "select routing_outcome_label from calls where id = ?",
+                    ("label-default",),
+                ).fetchone()
+                self.assertEqual(row["routing_outcome_label"], "unknown")
+            finally:
+                store.conn.close()
+
+    def test_finalize_outcome_labels_marks_clean_older_call_safe(self):
+        now = datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc)
+        older = (now - timedelta(seconds=120)).isoformat()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                store.log_call(
+                    id="safe-call",
+                    created_at=older,
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=12,
+                    input_tokens_est=10,
+                    output_tokens_est=5,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.002,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"reason": "test"}),
+                    cache_json=stable_json({"status": "miss"}),
+                    session_id="session-safe",
+                    category="chat",
+                )
+
+                result = store.finalize_outcome_labels(now=now.isoformat())
+                row = store.conn.execute(
+                    "select routing_outcome_label from calls where id = ?",
+                    ("safe-call",),
+                ).fetchone()
+
+                self.assertEqual(result["safe_count"], 1)
+                self.assertEqual(row["routing_outcome_label"], "safe")
+            finally:
+                store.conn.close()
+
+    def test_finalize_outcome_labels_marks_errors_fallbacks_and_retries_unsafe(self):
+        now = datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc)
+        base = now - timedelta(seconds=180)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                cases = [
+                    ("http-error", "session-error", 500, 0, {"reason": "test"}, 0),
+                    ("fallback", "session-fallback", 200, 0, {"fallback": True}, 5),
+                    ("own-retry", "session-own-retry", 200, 1, {"reason": "test"}, 10),
+                    ("followed-by-retry", "session-followed", 200, 0, {"reason": "test"}, 20),
+                    ("retry-sibling", "session-followed", 200, 1, {"reason": "test"}, 40),
+                ]
+                for call_id, session_id, status_code, retry_count, routing, offset in cases:
+                    store.log_call(
+                        id=call_id,
+                        created_at=(base + timedelta(seconds=offset)).isoformat(),
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-haiku-4-5-20251001",
+                        stream=0,
+                        cache_hit=0,
+                        status_code=status_code,
+                        latency_ms=12,
+                        input_tokens_est=10,
+                        output_tokens_est=5,
+                        cost_est_usd=0.001,
+                        cost_baseline_usd=0.002,
+                        crunch_json=stable_json({"changed": False}),
+                        routing_json=stable_json(routing),
+                        cache_json=stable_json({"status": "miss"}),
+                        session_id=session_id,
+                        category="chat",
+                        retry_count=retry_count,
+                    )
+
+                result = store.finalize_outcome_labels(now=now.isoformat())
+                labels = {
+                    row["id"]: row["routing_outcome_label"]
+                    for row in store.conn.execute(
+                        "select id, routing_outcome_label from calls"
+                    ).fetchall()
+                }
+
+                self.assertGreaterEqual(result["unsafe_count"], 4)
+                self.assertEqual(labels["http-error"], "unsafe")
+                self.assertEqual(labels["fallback"], "unsafe")
+                self.assertEqual(labels["own-retry"], "unsafe")
+                self.assertEqual(labels["followed-by-retry"], "unsafe")
+            finally:
+                store.conn.close()
+
+    def test_finalize_outcome_labels_keeps_recent_or_sessionless_calls_unknown(self):
+        now = datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                for call_id, created_at, session_id in (
+                    ("recent-call", now - timedelta(seconds=30), "session-recent"),
+                    ("sessionless-call", now - timedelta(seconds=120), None),
+                ):
+                    store.log_call(
+                        id=call_id,
+                        created_at=created_at.isoformat(),
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-haiku-4-5-20251001",
+                        stream=0,
+                        cache_hit=0,
+                        status_code=200,
+                        latency_ms=12,
+                        input_tokens_est=10,
+                        output_tokens_est=5,
+                        cost_est_usd=0.001,
+                        cost_baseline_usd=0.002,
+                        crunch_json=stable_json({"changed": False}),
+                        routing_json=stable_json({"reason": "test"}),
+                        cache_json=stable_json({"status": "miss"}),
+                        session_id=session_id,
+                        category="chat",
+                    )
+
+                result = store.finalize_outcome_labels(now=now.isoformat())
+                labels = {
+                    row["id"]: row["routing_outcome_label"]
+                    for row in store.conn.execute(
+                        "select id, routing_outcome_label from calls"
+                    ).fetchall()
+                }
+
+                self.assertEqual(result["safe_count"], 0)
+                self.assertEqual(result["unknown_count"], 1)
+                self.assertEqual(labels["recent-call"], "unknown")
+                self.assertEqual(labels["sessionless-call"], "unknown")
+            finally:
+                store.conn.close()
+
     def test_log_call_preserves_existing_managed_policy_decision_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "agentflow.sqlite3"))

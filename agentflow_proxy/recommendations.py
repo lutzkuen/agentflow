@@ -762,7 +762,9 @@ def build_optimization_unit(
             "thinking_history_stripped": routing_meta.get("thinking_history_stripped"),
             "stripped_params": routing_meta.get("stripped_params") or [],
         },
-        "outcome_features": {},
+        "outcome_features": {
+            "routing_outcome_label": str(routing_meta.get("routing_outcome_label") or "unknown"),
+        },
         "grouping_identifiers": _compact_grouping_identifiers({
             "session_id_hash": session_id,
         }),
@@ -2403,6 +2405,7 @@ def build_outcome_feedback(
             "managed_reason": routing_meta.get("managed_reason"),
             "fallback_reason": routing_meta.get("fallback_reason"),
         },
+        "routing_outcome_label": str(routing_meta.get("routing_outcome_label") or "unknown"),
         "crunch_saved_chars": crunch_meta.get("saved_chars"),
         "crunch_tokens_saved_est": crunch_meta.get("tokens_saved_est"),
         "pattern_decisions": pattern_decisions,

@@ -208,6 +208,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(pattern_features["token_bucket"], "lt_1k_tokens")
         self.assertEqual(pattern_features["workflow_phase"], "verification")
         self.assertEqual(FakeAsyncClient.last_json["input_features"]["workflow_phase"], "verification")
+        self.assertEqual(FakeAsyncClient.last_json["outcome_features"]["routing_outcome_label"], "unknown")
         self.assertEqual(
             FakeAsyncClient.last_json["input_features"]["prompt_difficulty_features"]["downgrade_risk"],
             "block",
@@ -257,6 +258,30 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(body["model"], "claude-haiku-4-5-20251001")
         self.assertEqual(routing_meta["final_policy_source"], "managed-recommended")
         self.assertEqual(routing_meta["managed_policy_id"], "policy-1")
+
+    def test_optimization_unit_can_include_finalized_routing_outcome_label(self):
+        unit = recommendations.build_optimization_unit(
+            provider="anthropic",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            routing_meta={
+                "reason": "test",
+                "text_chars": 1200,
+                "has_tools": False,
+                "category": "chat",
+                "routing_outcome_label": "safe",
+            },
+            crunch_meta={"changed": False},
+            cache_meta={"status": "miss", "reason": "exact-miss"},
+            category="chat",
+            stream=False,
+            input_tokens_est=300,
+            session_id="session-secret",
+        )
+
+        self.assertEqual(unit["outcome_features"]["routing_outcome_label"], "safe")
+        self._assert_no_sensitive_strings(unit)
 
     def test_anthropic_local_pattern_diagnostics_do_not_require_managed_server(self):
         raw_secret = "raw anthropic tool payload secret"

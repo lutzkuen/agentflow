@@ -177,6 +177,7 @@ _tier_backoff_until = _limiter.backoff_until
 
 store = Store(DEFAULT_DB)
 app = FastAPI(title=f"AgentFlow {PROVIDER.title()} Proxy", version="0.1.0")
+_routing_outcome_label_task: asyncio.Task[Any] | None = None
 
 
 def _provider_context() -> ProviderContext:
@@ -215,6 +216,28 @@ def _refresh_policy_module_bindings() -> None:
     OPUS_DEFAULT = router.OPUS_DEFAULT
 
 
+async def _finalize_routing_outcome_labels_once() -> None:
+    if not hasattr(store, "finalize_outcome_labels"):
+        return
+    try:
+        result = await asyncio.to_thread(store.finalize_outcome_labels)
+        if int(result.get("safe_count") or 0) or int(result.get("unsafe_count") or 0):
+            print(
+                "agentflow_routing_outcome_labels "
+                f"safe={result.get('safe_count')} unsafe={result.get('unsafe_count')} "
+                f"unknown={result.get('unknown_count')}",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"agentflow_routing_outcome_labels_error: {exc}", file=sys.stderr)
+
+
+async def _periodic_routing_outcome_label_finalizer(interval_seconds: int) -> None:
+    while True:
+        await asyncio.sleep(max(1, int(interval_seconds)))
+        await _finalize_routing_outcome_labels_once()
+
+
 app.include_router(
     create_dashboard_router(
         store_obj=lambda: store,
@@ -229,7 +252,17 @@ app.include_router(create_admin_router(after_reload=_refresh_policy_module_bindi
 
 @app.on_event("startup")
 async def _log_startup_session_spending_summary() -> None:
+    global _routing_outcome_label_task
     _log_recent_session_spending_summary("startup")
+    await _finalize_routing_outcome_labels_once()
+    try:
+        label_interval = int(os.getenv("AGENTFLOW_ROUTING_OUTCOME_LABEL_INTERVAL_SECONDS", "60"))
+    except ValueError:
+        label_interval = 60
+    if label_interval > 0 and _routing_outcome_label_task is None:
+        _routing_outcome_label_task = asyncio.create_task(
+            _periodic_routing_outcome_label_finalizer(label_interval)
+        )
     if os.getenv("AGENTFLOW_SQLITE_MAINTENANCE_ON_STARTUP", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
     try:
@@ -256,6 +289,10 @@ async def _log_startup_session_spending_summary() -> None:
 
 @app.on_event("shutdown")
 async def _log_shutdown_session_spending_summary() -> None:
+    global _routing_outcome_label_task
+    if _routing_outcome_label_task is not None:
+        _routing_outcome_label_task.cancel()
+        _routing_outcome_label_task = None
     _log_recent_session_spending_summary("shutdown")
 
 

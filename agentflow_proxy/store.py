@@ -670,6 +670,7 @@ class SQLiteStore:
             self._ensure_column("calls", "endpoint", "text")
             self._ensure_column("calls", "requested_model_family", "text")
             self._ensure_column("calls", "routed_model_family", "text")
+            self._ensure_column("calls", "routing_outcome_label", "text")
             cur.execute("""
             create table if not exists provider_tool_adoption_windows (
               id text primary key,
@@ -919,6 +920,10 @@ class SQLiteStore:
             on calls(created_at)
             """)
             cur.execute("""
+            create index if not exists idx_calls_routing_outcome_label
+            on calls(routing_outcome_label, created_at)
+            """)
+            cur.execute("""
             create index if not exists idx_provider_tool_adoption_pending
             on provider_tool_adoption_windows(status, correlation_digest, created_at)
             """)
@@ -1094,12 +1099,13 @@ class SQLiteStore:
             stream=kwargs.get("stream"),
             category=kwargs.get("category"),
         )
+        kwargs.setdefault("routing_outcome_label", "unknown")
         cols = [
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
             "cost_est_usd", "cost_baseline_usd", "crunch_json", "routing_json", "cache_json", "error", "request_json", "response_json", "session_id",
             "category", "cache_creation_input_tokens", "cache_read_input_tokens", "retry_count", "thinking_output_tokens", "provider",
-            "source_surface", "endpoint", "requested_model_family", "routed_model_family",
+            "source_surface", "endpoint", "requested_model_family", "routed_model_family", "routing_outcome_label",
         ]
         values = [kwargs.get(c, "anthropic") if c == "provider" else kwargs.get(c) for c in cols]
         with self._lock:
@@ -1108,6 +1114,104 @@ class SQLiteStore:
                 values,
             )
             self.conn.commit()
+
+    def _routing_meta_has_fallback(self, routing_json: Any) -> bool:
+        routing = _parse_json_object(routing_json)
+        if routing is None:
+            return False
+
+        def contains_fallback(value: Any) -> bool:
+            if isinstance(value, dict):
+                if value.get("fallback") is True:
+                    return True
+                reason = value.get("fallback_reason")
+                if isinstance(reason, str) and reason.strip():
+                    return True
+                return any(contains_fallback(item) for item in value.values())
+            if isinstance(value, list):
+                return any(contains_fallback(item) for item in value)
+            return False
+
+        return contains_fallback(routing)
+
+    def finalize_outcome_labels(
+        self,
+        *,
+        older_than_seconds: int = 90,
+        now: str | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        now_dt = _parse_utc_iso(now) or datetime.now(timezone.utc)
+        ttl_seconds = max(0, int(older_than_seconds or 0))
+        cutoff = (now_dt - timedelta(seconds=ttl_seconds)).isoformat()
+        capped = max(1, min(int(limit or 1), 10000))
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                select id, created_at, session_id, status_code, retry_count, routing_json
+                from calls
+                where routing_outcome_label = 'unknown'
+                  and created_at <= ?
+                order by created_at asc
+                limit ?
+                """,
+                (cutoff, capped),
+            ).fetchall()
+            counts = {"safe": 0, "unsafe": 0, "unknown": 0}
+            evaluated = 0
+            for row in rows:
+                session_id = row["session_id"]
+                created_at = _parse_utc_iso(row["created_at"])
+                if not session_id or created_at is None:
+                    counts["unknown"] += 1
+                    continue
+                evaluated += 1
+                unsafe = False
+                status_code = row["status_code"]
+                if status_code is not None and int(status_code) >= 400:
+                    unsafe = True
+                retry_count = row["retry_count"]
+                if retry_count is not None and int(retry_count) > 0:
+                    unsafe = True
+                if self._routing_meta_has_fallback(row["routing_json"]):
+                    unsafe = True
+                if not unsafe:
+                    deadline = (created_at + timedelta(seconds=ttl_seconds)).isoformat()
+                    sibling = self.conn.execute(
+                        """
+                        select id
+                        from calls
+                        where session_id = ?
+                          and id != ?
+                          and created_at >= ?
+                          and created_at <= ?
+                          and (
+                            coalesce(retry_count, 0) > 0
+                            or coalesce(status_code, 0) >= 400
+                          )
+                        order by created_at asc
+                        limit 1
+                        """,
+                        (session_id, row["id"], row["created_at"], deadline),
+                    ).fetchone()
+                    unsafe = sibling is not None
+                label = "unsafe" if unsafe else "safe"
+                self.conn.execute(
+                    "update calls set routing_outcome_label = ? where id = ?",
+                    (label, row["id"]),
+                )
+                counts[label] += 1
+            self.conn.commit()
+        return {
+            "schema": "agentflow.routing_outcome_label_finalization.v1",
+            "older_than_seconds": ttl_seconds,
+            "cutoff_at": cutoff,
+            "candidate_count": len(rows),
+            "evaluated_count": evaluated,
+            "safe_count": counts["safe"],
+            "unsafe_count": counts["unsafe"],
+            "unknown_count": counts["unknown"],
+        }
 
     def cache_pattern_observed_call_count(
         self,
@@ -2115,7 +2219,8 @@ class PostgresStore(SQLiteStore):
               source_surface text,
               endpoint text,
               requested_model_family text,
-              routed_model_family text
+              routed_model_family text,
+              routing_outcome_label text
             )
             """,
             """
@@ -2334,7 +2439,7 @@ class PostgresStore(SQLiteStore):
             self.conn.execute(sql)
         for column in ("routing_json", "crunch_json", "cache_json", "event_window_json", "metadata_json"):
             self.conn.execute(f"alter table codex_app_events add column if not exists {column} text")
-        for column in ("source_surface", "endpoint", "requested_model_family", "routed_model_family"):
+        for column in ("source_surface", "endpoint", "requested_model_family", "routed_model_family", "routing_outcome_label"):
             self.conn.execute(f"alter table calls add column if not exists {column} text")
         for column, definition in (
             ("provider", "text"),
@@ -2357,6 +2462,10 @@ class PostgresStore(SQLiteStore):
         self.conn.execute("""
             create index if not exists idx_calls_created_at
             on calls(created_at)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_calls_routing_outcome_label
+            on calls(routing_outcome_label, created_at)
         """)
         self.conn.execute("""
             create index if not exists idx_provider_tool_adoption_pending
