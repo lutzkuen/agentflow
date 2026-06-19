@@ -5520,6 +5520,41 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
     ):
         if entry.get(key) is not None:
             action[key] = bool(entry.get(key))
+    for key in (
+        "applied_count",
+        "holdout_count",
+        "skipped_count",
+        "fallback_count",
+        "retry_count",
+        "rollback_count",
+        "safety_stop_count",
+        "observed_saved_tokens",
+        "projected_saved_tokens",
+    ):
+        if entry.get(key) is not None:
+            action[key] = _to_int(entry.get(key))
+    for key in (
+        "error_rate_delta",
+        "retry_rate_delta",
+        "fallback_rate_delta",
+    ):
+        if entry.get(key) is not None:
+            action[key] = round(_to_float(entry.get(key)), 8)
+    for key in (
+        "full_rollout_outcome",
+        "full_rollout_outcome_next_action",
+        "full_rollout_successor_decision",
+        "full_rollout_successor_next_action",
+        "full_rollout_successor_no_op_reason",
+    ):
+        if entry.get(key) is not None:
+            action[key] = sanitize_value(entry.get(key))
+    for key in (
+        "full_rollout_activation_outcome",
+        "keep_active_regression_gate",
+    ):
+        if isinstance(entry.get(key), dict):
+            action[key] = sanitize_value(entry.get(key))
     return {
         key: value
         for key, value in action.items()
@@ -5956,6 +5991,41 @@ def _activation_burndown_row_from_successor(action: dict[str, Any]) -> dict[str,
     ):
         if action.get(key) is not None:
             row[key] = bool(action.get(key))
+    for key in (
+        "applied_count",
+        "holdout_count",
+        "skipped_count",
+        "fallback_count",
+        "retry_count",
+        "rollback_count",
+        "safety_stop_count",
+        "observed_saved_tokens",
+        "projected_saved_tokens",
+    ):
+        if action.get(key) is not None:
+            row[key] = _to_int(action.get(key))
+    for key in (
+        "error_rate_delta",
+        "retry_rate_delta",
+        "fallback_rate_delta",
+    ):
+        if action.get(key) is not None:
+            row[key] = round(_to_float(action.get(key)), 8)
+    for key in (
+        "full_rollout_outcome",
+        "full_rollout_outcome_next_action",
+        "full_rollout_successor_decision",
+        "full_rollout_successor_next_action",
+        "full_rollout_successor_no_op_reason",
+    ):
+        if action.get(key) is not None:
+            row[key] = sanitize_value(action.get(key))
+    for key in (
+        "full_rollout_activation_outcome",
+        "keep_active_regression_gate",
+    ):
+        if isinstance(action.get(key), dict):
+            row[key] = sanitize_value(action.get(key))
     preserved = {
         "rank",
         "source_rank",
@@ -5975,6 +6045,18 @@ def _activation_burndown_row_from_successor(action: dict[str, Any]) -> dict[str,
         "measured_full_rollout_activation",
         "durable_action_ledger_entry",
         "durable_outcome_ledger_entry",
+        "applied_count",
+        "holdout_count",
+        "skipped_count",
+        "fallback_count",
+        "retry_count",
+        "rollback_count",
+        "safety_stop_count",
+        "observed_saved_tokens",
+        "projected_saved_tokens",
+        "error_rate_delta",
+        "retry_rate_delta",
+        "fallback_rate_delta",
     }
     return {key: value for key, value in row.items() if value not in (None, "", [], 0) or key in preserved}
 
@@ -5997,8 +6079,8 @@ def build_activation_burndown_report(
     evidence_report = build_evidence_to_activation_burndown(plan, now=now)
     queue = evidence_report.get("next_action_queue") if isinstance(evidence_report.get("next_action_queue"), dict) else None
     successor_actions = (
-        queue.get("successor_actions")
-        if isinstance(queue, dict) and isinstance(queue.get("successor_actions"), list)
+        build_local_activation_successor_actions(queue)
+        if isinstance(queue, dict) and isinstance(queue.get("entries"), list)
         else evidence_report.get("successor_actions")
         if isinstance(evidence_report.get("successor_actions"), list)
         else []
