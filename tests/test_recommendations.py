@@ -7,10 +7,10 @@ from unittest.mock import patch
 
 import httpx
 
-from agentflow_proxy import recommendations
-from agentflow_proxy.crunch import crunch_body
-from agentflow_proxy.optimization import openai_features
-from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
+from tokenclaw import recommendations
+from tokenclaw.crunch import crunch_body
+from tokenclaw.optimization import openai_features
+from tokenclaw.prompt_features import prompt_difficulty_features_from_text
 
 
 class FakeResponse:
@@ -1183,7 +1183,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("payload_json", str(FakeAsyncClient.last_json))
 
     def test_phase_routing_outcome_event_is_metadata_only_and_queue_safe(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         outcome = recommendations.build_phase_routing_outcome_feedback(
             provider="anthropic",
@@ -1411,7 +1411,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(cache_holdout["pattern_hash"], pattern_hash)
 
     def test_pattern_policy_evidence_queues_metadata_only_outcomes(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
@@ -1586,7 +1586,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("cache-key-secret", str(meta))
 
     def test_queued_provider_outcome_feedback_disabled_does_not_enqueue(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
             store = Store(tmp.name)
@@ -1606,7 +1606,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(row["c"], 0)
 
     def test_queued_provider_outcome_feedback_records_retryable_sanitized_payload(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
@@ -1655,7 +1655,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertIn("pattern_decisions", row["payload_json"])
 
     def test_queued_provider_outcome_feedback_egress_guard_does_not_enqueue_raw_payload(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"

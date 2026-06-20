@@ -6,9 +6,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.openai_routing_narrow_canary import build_openai_routing_narrow_canary_review
-from agentflow_proxy.store import utc_now
+from tokenclaw import cli
+from tokenclaw.openai_routing_narrow_canary import build_openai_routing_narrow_canary_review
+from tokenclaw.store import utc_now
 
 
 class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):

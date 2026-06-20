@@ -11,10 +11,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agentflow_proxy import cli
-from agentflow_proxy.openai_old_context_summary_report import build_openai_old_context_summary_report
-from agentflow_proxy.stats import stats_openai_old_context_summary_report
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw.openai_old_context_summary_report import build_openai_old_context_summary_report
+from tokenclaw.stats import stats_openai_old_context_summary_report
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 class OpenAIOldContextSummaryReportTests(unittest.TestCase):

@@ -7,9 +7,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-import agentflow_proxy.crunch as crunch_module
-from agentflow_proxy.policy_events import recent_policy_events
-from agentflow_proxy.store import Store, stable_json
+import tokenclaw.crunch as crunch_module
+from tokenclaw.policy_events import recent_policy_events
+from tokenclaw.store import Store, stable_json
 
 
 def _thinking_body(
@@ -111,7 +111,7 @@ class CrunchRulesTest(unittest.TestCase):
 
             self.assertTrue(meta["enabled"])
             self.assertEqual(meta["policy_source"], "local-default")
-            self.assertTrue(meta["rule_path"].endswith("agentflow_proxy/crunch_rules.yaml"))
+            self.assertTrue(meta["rule_path"].endswith("tokenclaw/crunch_rules.yaml"))
 
     def test_near_duplicate_tool_result_blocks_replace_only_older_payloads(self):
         manual = importlib.reload(crunch_module)
@@ -247,7 +247,7 @@ class CrunchRulesTest(unittest.TestCase):
         self.assertEqual(thinking_meta["unique_local_thinking_block_fingerprint_count"], 1)
         self.assertTrue(thinking_meta["local_thinking_block_fingerprints_included"])
         self.assertEqual(thinking_meta["policy_source"], "local-default")
-        self.assertTrue(thinking_meta["rule_path"].endswith("agentflow_proxy/crunch_rules.yaml"))
+        self.assertTrue(thinking_meta["rule_path"].endswith("tokenclaw/crunch_rules.yaml"))
         self.assertFalse(thinking_meta["raw_thinking_text_included"])
         rendered = json.dumps(thinking_meta, sort_keys=True)
         self.assertNotIn("raw duplicate thinking secret", rendered)
@@ -1684,7 +1684,7 @@ repeated_provider_scaffolding:
             "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ python -m unittest tests.test_alpha",
             "Ran 4 tests in 0.12s",
             "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ git status --short",
-            " M agentflow_proxy/crunch.py",
+            " M tokenclaw/crunch.py",
             "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ python -m unittest tests.test_beta",
             "Ran 8 tests in 0.18s",
             "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ echo done",

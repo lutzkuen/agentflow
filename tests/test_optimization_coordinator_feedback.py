@@ -5,15 +5,15 @@ import json
 import tempfile
 import unittest
 
-from agentflow_proxy.managed_egress import assert_managed_egress_safe
-from agentflow_proxy.optimization import feedback
-from agentflow_proxy.optimization_coordinator_feedback import (
+from tokenclaw.managed_egress import assert_managed_egress_safe
+from tokenclaw.optimization import feedback
+from tokenclaw.optimization_coordinator_feedback import (
     FEEDBACK_SCHEMA,
     SOURCE_SURFACE,
     build_optimization_coordinator_lifecycle_feedback,
     queue_optimization_coordinator_lifecycle_feedback,
 )
-from agentflow_proxy.store import Store, stable_json, utc_now
+from tokenclaw.store import Store, stable_json, utc_now
 
 
 def _decision(*, selected_family: str = "routing", holdout: bool = False) -> dict[str, object]:

@@ -9,13 +9,13 @@ from unittest.mock import patch
 
 import yaml
 
-import agentflow_proxy.router as router_module
-from agentflow_proxy.admin import reload_policy_modules
-from agentflow_proxy import stats
-from agentflow_proxy import codex_turn_policy as codex_turn_policy_module
-from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, stage_policy_draft, utc_now
-from agentflow_proxy.policy_workbench import apply_validated_policy_draft, rollback_policy_apply
-from agentflow_proxy.policy_bundle import (
+import tokenclaw.router as router_module
+from tokenclaw.admin import reload_policy_modules
+from tokenclaw import stats
+from tokenclaw import codex_turn_policy as codex_turn_policy_module
+from tokenclaw.policy_files import policy_file_snapshot, policy_file_status, stage_policy_draft, utc_now
+from tokenclaw.policy_workbench import apply_validated_policy_draft, rollback_policy_apply
+from tokenclaw.policy_bundle import (
     MANAGED_POLICY_HMAC_SECRET_ENV,
     MANAGED_POLICY_VERIFICATION_SECRET_ENV,
     MANAGED_POLICY_VERIFICATION_SECRETS_ENV,
@@ -1342,7 +1342,7 @@ terminal_transcript_compaction:
         async def stale_reload():
             return {
                 "ok": True,
-                "reloaded_modules": ["agentflow_proxy.cache"],
+                "reloaded_modules": ["tokenclaw.cache"],
                 "policies": {
                     "cache": {
                         "file": {
@@ -1428,7 +1428,7 @@ terminal_transcript_compaction:
                     ))
                     self.assertTrue(stage["ok"])
 
-                    real_write = __import__("agentflow_proxy.policy_workbench", fromlist=["_atomic_write_policy_text"])._atomic_write_policy_text
+                    real_write = __import__("tokenclaw.policy_workbench", fromlist=["_atomic_write_policy_text"])._atomic_write_policy_text
                     writes = []
                     failed_cache_write = False
 
@@ -1440,7 +1440,7 @@ terminal_transcript_compaction:
                             raise OSError("cache write fixture failure")
                         return real_write(path, text)
 
-                    with patch("agentflow_proxy.policy_workbench._atomic_write_policy_text", side_effect=fail_second_write):
+                    with patch("tokenclaw.policy_workbench._atomic_write_policy_text", side_effect=fail_second_write):
                         result = asyncio.run(apply_validated_policy_draft(
                             "partial-write-failure",
                             workspace=workspace,

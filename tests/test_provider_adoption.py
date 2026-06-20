@@ -5,13 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentflow_proxy.provider_adoption import (
+from tokenclaw.provider_adoption import (
     build_provider_tool_adoption_report,
     capture_provider_tool_adoption,
     provider_tool_adoption_report_cli,
 )
-from agentflow_proxy.provider_adoption_gate import build_provider_adoption_gate
-from agentflow_proxy.store import Store
+from tokenclaw.provider_adoption_gate import build_provider_adoption_gate
+from tokenclaw.store import Store
 
 
 FORBIDDEN_ADOPTION_VALUES = (

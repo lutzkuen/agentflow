@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentflow_proxy import cli
-from agentflow_proxy.phase_routing_report import build_phase_routing_dry_run, build_phase_routing_report
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw import cli
+from tokenclaw.phase_routing_report import build_phase_routing_dry_run, build_phase_routing_report
+from tokenclaw.store import Store, stable_json
 
 
 class FailingManagedFeedbackClient:
@@ -402,7 +402,7 @@ rules:
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", FailingManagedFeedbackClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", FailingManagedFeedbackClient):
                     code = cli.phase_routing_report_cli(
                         [
                             "--db",

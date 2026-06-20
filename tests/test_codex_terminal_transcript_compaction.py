@@ -5,12 +5,12 @@ import json
 import sys
 import unittest
 
-from agentflow_proxy.codex_terminal_transcript_compaction import (
+from tokenclaw.codex_terminal_transcript_compaction import (
     FAMILY,
     SCHEMA,
     codex_terminal_transcript_compaction_decision,
 )
-from agentflow_proxy.store import stable_json
+from tokenclaw.store import stable_json
 
 
 def _terminal_block(lines: int = 80, chars_per_line: int = 60) -> str:
@@ -276,7 +276,7 @@ class TerminalTranscriptCompactionPolicyLoadTests(unittest.TestCase):
         try:
             env_backup = os.environ.copy()
             os.environ["AGENTFLOW_CODEX_APP_RULES"] = policy_path
-            import agentflow_proxy.codex_turn_policy as policy_mod
+            import tokenclaw.codex_turn_policy as policy_mod
             policy_mod = importlib.reload(policy_mod)
             terminal = policy_mod.CODEX_APP_POLICY.get("terminal_transcript_compaction")
             return terminal if isinstance(terminal, dict) else {}

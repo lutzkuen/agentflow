@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import yaml
 
-from agentflow_proxy.admin import reload_policy_modules
-from agentflow_proxy.post_promotion_policy_apply import apply_post_promotion_policy_drafts
+from tokenclaw.admin import reload_policy_modules
+from tokenclaw.post_promotion_policy_apply import apply_post_promotion_policy_drafts
 
 
 SENSITIVE_FIXTURES = (

@@ -6,10 +6,10 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.optimization import feedback
-from agentflow_proxy.store import Store
-from agentflow_proxy.terminal_compaction_feedback import (
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.optimization import feedback
+from tokenclaw.store import Store
+from tokenclaw.terminal_compaction_feedback import (
     FEEDBACK_SCHEMA,
     SOURCE_SURFACE,
     build_terminal_output_compaction_lifecycle_feedback,

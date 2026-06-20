@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from agentflow_proxy.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
+from tokenclaw.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
 
 
 class QualitySignalTest(unittest.TestCase):

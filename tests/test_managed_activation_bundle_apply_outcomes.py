@@ -15,16 +15,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_managed_activation_bundles import _bundle  # noqa: E402
 
-from agentflow_proxy.cli_commands import optimization_reports as optimization_reports_cli
-from agentflow_proxy.local_activation_outcomes import build_local_activation_outcome_summary
-from agentflow_proxy.managed_activation_apply import apply_staged_managed_activation_bundle
-from agentflow_proxy.managed_activation_bundle_apply_outcomes import (
+from tokenclaw.cli_commands import optimization_reports as optimization_reports_cli
+from tokenclaw.local_activation_outcomes import build_local_activation_outcome_summary
+from tokenclaw.managed_activation_apply import apply_staged_managed_activation_bundle
+from tokenclaw.managed_activation_bundle_apply_outcomes import (
     build_managed_activation_bundle_apply_outcomes,
 )
-from agentflow_proxy.managed_activation_bundles import stage_managed_activation_bundle_sync
-from agentflow_proxy.policy_events import recent_policy_events
-from agentflow_proxy.policy_workbench import rollback_policy_apply
-from agentflow_proxy.store import Store
+from tokenclaw.managed_activation_bundles import stage_managed_activation_bundle_sync
+from tokenclaw.policy_events import recent_policy_events
+from tokenclaw.policy_workbench import rollback_policy_apply
+from tokenclaw.store import Store
 
 
 async def _reload_state(config_dir: Path) -> dict[str, object]:

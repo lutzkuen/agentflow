@@ -4,11 +4,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.anthropic_routing_unblock_drill import (
+from tokenclaw import cli
+from tokenclaw.anthropic_routing_unblock_drill import (
     build_anthropic_routing_safety_stop_unblock_drill,
 )
-from agentflow_proxy.store import Store
+from tokenclaw.store import Store
 
 
 def _anthropic_routing_plan() -> dict:

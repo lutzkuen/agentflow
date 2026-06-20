@@ -5,7 +5,7 @@ import copy
 import json
 import unittest
 
-from agentflow_proxy.openai_old_context_summary import (
+from tokenclaw.openai_old_context_summary import (
     SUMMARY_MARKER,
     default_openai_old_context_summary_policy,
     maybe_apply_openai_old_context_summary,

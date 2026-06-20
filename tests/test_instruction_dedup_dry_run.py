@@ -7,9 +7,9 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.instruction_dedup_dry_run import build_instruction_dedup_dry_run
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw.instruction_dedup_dry_run import build_instruction_dedup_dry_run
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 FORBIDDEN_VALUES = (

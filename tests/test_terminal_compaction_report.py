@@ -4,9 +4,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.store import Store, stable_json
-from agentflow_proxy.terminal_compaction_report import build_terminal_output_compaction_opportunity_report
+from tokenclaw import cli
+from tokenclaw.store import Store, stable_json
+from tokenclaw.terminal_compaction_report import build_terminal_output_compaction_opportunity_report
 
 
 def _tool_result_body(secret: str) -> dict:

@@ -9,8 +9,8 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from agentflow_proxy import stats as stats_views
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import stats as stats_views
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 FORBIDDEN_VALUES = (

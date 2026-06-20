@@ -8,10 +8,10 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.repeated_scaffold_report import build_repeated_scaffold_opportunity_report
-from agentflow_proxy.stats import stats_repeated_scaffold_opportunity
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw.repeated_scaffold_report import build_repeated_scaffold_opportunity_report
+from tokenclaw.stats import stats_repeated_scaffold_opportunity
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 class RepeatedScaffoldReportTests(unittest.TestCase):

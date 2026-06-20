@@ -9,38 +9,38 @@ from unittest.mock import AsyncMock, patch
 
 import yaml
 
-from agentflow_proxy.activation_lifecycle_feedback import LIFECYCLE_SOURCE_SURFACE, build_activation_staged_lifecycle_feedback
-from agentflow_proxy import recommendations
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.optimization import feedback, openai_outcomes
-from agentflow_proxy.optimization_eval_plan import _add_common
-from agentflow_proxy.optimization_eval_queue import (
+from tokenclaw.activation_lifecycle_feedback import LIFECYCLE_SOURCE_SURFACE, build_activation_staged_lifecycle_feedback
+from tokenclaw import recommendations
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.optimization import feedback, openai_outcomes
+from tokenclaw.optimization_eval_plan import _add_common
+from tokenclaw.optimization_eval_queue import (
     backfill_promotion_eval_tasks,
     queue_promotion_recommendation_eval_tasks,
     run_optimization_eval_queue,
 )
-from agentflow_proxy.openai_canary_impact import build_openai_canary_impact_report
-from agentflow_proxy.optimization_promotion_canary import (
+from tokenclaw.openai_canary_impact import build_openai_canary_impact_report
+from tokenclaw.optimization_promotion_canary import (
     apply_optimization_promotion_canaries,
     evaluate_promotion_canary_safety_stop,
     promotion_canary_decision,
 )
-from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
-from agentflow_proxy.optimization_promotion_impact import measure_optimization_promotion_impact
-from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
-from agentflow_proxy.promotion_outcome_feedback import (
+from tokenclaw.optimization_promotion_actions import build_optimization_promotion_actions
+from tokenclaw.optimization_promotion_impact import measure_optimization_promotion_impact
+from tokenclaw.optimization_promotion_report import build_optimization_promotion_report
+from tokenclaw.promotion_outcome_feedback import (
     promotion_outcome_feedback_summary,
     record_promotion_outcome_feedback,
 )
-from agentflow_proxy.promotion_blocker_review import build_promotion_blocker_recommendation_review
-from agentflow_proxy.optimization_rollout_review import (
+from tokenclaw.promotion_blocker_review import build_promotion_blocker_recommendation_review
+from tokenclaw.optimization_rollout_review import (
     attach_optimization_rollout_provenance,
     review_optimization_rollout_actions,
 )
-from agentflow_proxy.cli import optimization_rollout_actions_apply_cli
-from agentflow_proxy.optimization_shadow_eval import run_optimization_shadow_eval
-from agentflow_proxy.stats import stats_optimization_promotion_funnel
-from agentflow_proxy.store import Store, stable_json, utc_now
+from tokenclaw.cli import optimization_rollout_actions_apply_cli
+from tokenclaw.optimization_shadow_eval import run_optimization_shadow_eval
+from tokenclaw.stats import stats_optimization_promotion_funnel
+from tokenclaw.store import Store, stable_json, utc_now
 
 
 class FakeFeedbackStore:
@@ -1731,13 +1731,13 @@ class OptimizationModuleTests(unittest.TestCase):
             store = Store(tmp.name)
             try:
                 with patch(
-                    "agentflow_proxy.optimization_eval_plan.build_optimization_eval_plan",
+                    "tokenclaw.optimization_eval_plan.build_optimization_eval_plan",
                     new=AsyncMock(return_value=plan),
                 ), patch(
-                    "agentflow_proxy.optimization_promotion_report.build_optimization_promotion_report",
+                    "tokenclaw.optimization_promotion_report.build_optimization_promotion_report",
                     return_value=promotion_report,
                 ), patch(
-                    "agentflow_proxy.policy_events.recent_policy_events",
+                    "tokenclaw.policy_events.recent_policy_events",
                     return_value={"events": []},
                 ):
                     result = asyncio.run(stats_optimization_promotion_funnel(store, limit=10))
@@ -3072,7 +3072,7 @@ class OptimizationModuleTests(unittest.TestCase):
             self.assertEqual(managed_egress_violations(outcome), [])
             return queued
 
-        with patch("agentflow_proxy.optimization.openai_outcomes.queue_outcome_feedback", fake_queue):
+        with patch("tokenclaw.optimization.openai_outcomes.queue_outcome_feedback", fake_queue):
             asyncio.run(
                 openai_outcomes.record_managed_outcome_feedback(
                     store=store,
@@ -3169,7 +3169,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
         }
 
     def test_ranks_widen_before_rollback_before_keep_blocked(self):
-        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+        from tokenclaw.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
 
         result = build_post_promotion_priority_delta_review(self._fixture(), limit=10)
 
@@ -3200,7 +3200,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
         self.assertIn("insufficient-evidence", omitted[0]["no_op_reasons"])
 
     def test_missing_holdout_only_widen_candidate_emits_holdout_evidence_successor(self):
-        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+        from tokenclaw.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
 
         fixture = self._fixture()
         widen = fixture["deltas"][0]
@@ -3246,7 +3246,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
         )
 
     def test_non_holdout_widen_blockers_keep_specific_reasons(self):
-        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+        from tokenclaw.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
 
         fixture = self._fixture()
         base = fixture["deltas"][0]
@@ -3270,7 +3270,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
         self.assertIn("unsupported-policy-section", by_id[unsupported["delta_id"]]["no_op_reasons"])
 
     def test_strips_raw_identifiers_from_output(self):
-        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+        from tokenclaw.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
 
         result = build_post_promotion_priority_delta_review(self._fixture(), limit=10)
         encoded = json.dumps(result, sort_keys=True)
@@ -3290,7 +3290,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
             self.assertNotIn(forbidden, encoded, msg=f"forbidden token found in output: {forbidden!r}")
 
     def test_empty_payload_returns_ok_no_candidates(self):
-        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+        from tokenclaw.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
 
         result = build_post_promotion_priority_delta_review({}, limit=10)
 
@@ -3302,7 +3302,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
         self.assertFalse(result["privacy"]["raw_prompts_included"])
 
     def test_schema_mismatch_adds_validation_warning(self):
-        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+        from tokenclaw.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
 
         result = build_post_promotion_priority_delta_review({"schema": "unknown.schema.v1", "deltas": []})
 
@@ -3310,7 +3310,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
         self.assertTrue(len(result["validation"]["warnings"]) > 0)
 
     def test_cli_reads_fixture_from_stdin_and_emits_report(self):
-        from agentflow_proxy.cli_commands.optimization_reports import post_promotion_priority_delta_review_cli
+        from tokenclaw.cli_commands.optimization_reports import post_promotion_priority_delta_review_cli
         import io
 
         stdin = io.StringIO(json.dumps(self._fixture()))
@@ -3327,7 +3327,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
         self.assertFalse(out["managed_server_calls_made"])
 
     def test_cli_no_managed_url_returns_empty_report(self):
-        from agentflow_proxy.cli_commands.optimization_reports import post_promotion_priority_delta_review_cli
+        from tokenclaw.cli_commands.optimization_reports import post_promotion_priority_delta_review_cli
         import io
 
         stdout = io.StringIO()
@@ -3413,12 +3413,12 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         return self._review_from_fixture(self._priority_fixture())
 
     def _review_from_fixture(self, fixture: dict) -> dict:
-        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+        from tokenclaw.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
 
         return build_post_promotion_priority_delta_review(fixture, limit=10)
 
     def test_priority_review_becomes_widen_rollback_and_noop_policy_drafts(self):
-        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+        from tokenclaw.post_promotion_policy_drafts import build_post_promotion_policy_drafts
 
         result = build_post_promotion_policy_drafts(self._review(), widen_fraction=0.05, holdout_fraction=0.10)
 
@@ -3468,7 +3468,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertTrue(noop["privacy"]["metadata_only"])
 
     def test_policy_draft_output_excludes_raw_identifiers(self):
-        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+        from tokenclaw.post_promotion_policy_drafts import build_post_promotion_policy_drafts
 
         review = self._review()
         result = build_post_promotion_policy_drafts(review)
@@ -3478,7 +3478,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
 
     def test_rejects_raw_fields_in_direct_priority_review_input(self):
-        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+        from tokenclaw.post_promotion_policy_drafts import build_post_promotion_policy_drafts
 
         review = self._review()
         review["candidates"][0]["prompt"] = "raw prompt must fail"
@@ -3490,7 +3490,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertEqual(result["summary"]["draft_count"], 0)
 
     def test_cli_reads_priority_review_from_stdin(self):
-        from agentflow_proxy.cli_commands.optimization_reports import post_promotion_policy_draft_dry_run_cli
+        from tokenclaw.cli_commands.optimization_reports import post_promotion_policy_draft_dry_run_cli
         import io
 
         stdin = io.StringIO(json.dumps(self._review()))
@@ -3506,7 +3506,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertEqual(out["summary"]["omitted_count"], 1)
 
     def test_cli_returns_nonzero_when_impact_gate_blocks_candidate(self):
-        from agentflow_proxy.cli_commands.optimization_reports import post_promotion_policy_draft_dry_run_cli
+        from tokenclaw.cli_commands.optimization_reports import post_promotion_policy_draft_dry_run_cli
         import io
 
         fixture = self._priority_fixture()
@@ -3526,7 +3526,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertEqual(out["summary"]["impact_gate_blocked_count"], 1)
 
     def test_rollback_without_preserved_prior_rule_fails_impact_gate(self):
-        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+        from tokenclaw.post_promotion_policy_drafts import build_post_promotion_policy_drafts
 
         fixture = self._priority_fixture()
         rollback = next(item for item in fixture["deltas"] if item["next_action"] == "rollback-local-policy")
@@ -3545,7 +3545,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertFalse(blocked["dry_run_impact_gate"]["preserved_previous_rule"])
 
     def test_collect_holdout_evidence_successor_is_not_treated_as_unsupported_policy_draft(self):
-        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+        from tokenclaw.post_promotion_policy_drafts import build_post_promotion_policy_drafts
 
         fixture = self._priority_fixture()
         widen = next(item for item in fixture["deltas"] if item["next_action"] == "widen-local-policy")
@@ -3564,7 +3564,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertNotEqual(holdout["reason"], "unsupported-next-action")
 
     def test_safety_stopped_candidate_remains_blocked_by_impact_gate(self):
-        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+        from tokenclaw.post_promotion_policy_drafts import build_post_promotion_policy_drafts
 
         fixture = self._priority_fixture()
         widen = next(item for item in fixture["deltas"] if item["next_action"] == "widen-local-policy")
@@ -3581,7 +3581,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertIn("safety-stop-active", blocked["dry_run_impact_gate"]["blocker_reasons"])
 
     def test_stale_evidence_candidate_is_blocked_by_impact_gate(self):
-        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+        from tokenclaw.post_promotion_policy_drafts import build_post_promotion_policy_drafts
 
         fixture = self._priority_fixture()
         widen = next(item for item in fixture["deltas"] if item["next_action"] == "widen-local-policy")
@@ -3597,7 +3597,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertIn("stale-evidence", blocked["dry_run_impact_gate"]["blocker_reasons"])
 
     def test_widen_without_holdout_coverage_becomes_holdout_evidence_follow_up(self):
-        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+        from tokenclaw.post_promotion_policy_drafts import build_post_promotion_policy_drafts
 
         fixture = self._priority_fixture()
         widen = next(item for item in fixture["deltas"] if item["next_action"] == "widen-local-policy")

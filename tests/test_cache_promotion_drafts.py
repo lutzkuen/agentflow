@@ -4,9 +4,9 @@ import io
 import json
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.cache_promotion_drafts import SCHEMA, dry_run_cache_promotion_drafts
-from agentflow_proxy.local_promotion_candidates import build_local_promotion_candidates_from_reports
+from tokenclaw import cli
+from tokenclaw.cache_promotion_drafts import SCHEMA, dry_run_cache_promotion_drafts
+from tokenclaw.local_promotion_candidates import build_local_promotion_candidates_from_reports
 
 
 RAW_SECRET = "raw-cache-promotion-secret"

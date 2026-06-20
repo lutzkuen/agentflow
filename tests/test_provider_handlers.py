@@ -1,14 +1,14 @@
 import sys
 import unittest
 
-from agentflow_proxy.provider_context import ProviderContext
+from tokenclaw.provider_context import ProviderContext
 
 
 class ProviderHandlerContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_dispatch_uses_explicit_context_callbacks(self):
-        old_server = sys.modules.pop("agentflow_proxy.server", None)
+        old_server = sys.modules.pop("tokenclaw.server", None)
         try:
-            from agentflow_proxy import provider_handlers
+            from tokenclaw import provider_handlers
 
             calls = []
 
@@ -67,10 +67,10 @@ class ProviderHandlerContextTests(unittest.IsolatedAsyncioTestCase):
                     ("websocket", "anthropic", "websocket"),
                 ],
             )
-            self.assertNotIn("agentflow_proxy.server", sys.modules)
+            self.assertNotIn("tokenclaw.server", sys.modules)
         finally:
             if old_server is not None:
-                sys.modules["agentflow_proxy.server"] = old_server
+                sys.modules["tokenclaw.server"] = old_server
 
 
 if __name__ == "__main__":

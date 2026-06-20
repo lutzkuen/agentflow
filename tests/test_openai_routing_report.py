@@ -8,10 +8,10 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.openai_routing_report import build_openai_routing_promotion_decision_report, build_openai_routing_report
-from agentflow_proxy.stats import stats_openai_routing_report
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw.openai_routing_report import build_openai_routing_promotion_decision_report, build_openai_routing_report
+from tokenclaw.stats import stats_openai_routing_report
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 class OpenAIRoutingReportTests(unittest.TestCase):
@@ -176,14 +176,14 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         }
 
     def _install_active_openai_tool_light_rule(self) -> None:
-        from agentflow_proxy import router as router_module
+        from tokenclaw import router as router_module
 
         previous = list(getattr(router_module, "ROUTING_RULES", []))
         router_module.ROUTING_RULES = [self._active_openai_tool_light_rule()]
         self.addCleanup(setattr, router_module, "ROUTING_RULES", previous)
 
     def _install_disabled_openai_tool_light_rule(self, reason: str = "semantic-quality-regression-observed") -> None:
-        from agentflow_proxy import router as router_module
+        from tokenclaw import router as router_module
 
         previous = list(getattr(router_module, "ROUTING_RULES", []))
         rule = self._active_openai_tool_light_rule()
@@ -980,7 +980,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertFalse(review["privacy"]["individual_candidate_ids_included"])
 
     def test_targeted_report_delegates_semantic_action_when_promotion_ready(self) -> None:
-        from agentflow_proxy import router as router_module
+        from tokenclaw import router as router_module
 
         previous = list(getattr(router_module, "ROUTING_RULES", []))
         router_module.ROUTING_RULES = []

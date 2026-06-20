@@ -18,11 +18,11 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from agentflow_proxy.cache import build_cache_replay_lifecycle_feedback
-from agentflow_proxy.dashboard_app import create_dashboard_app
-from agentflow_proxy.managed_egress import RAW_FEATURE_KEYS, assert_managed_egress_safe
-from agentflow_proxy.stats import stats_cache_replay_activation_health
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw.cache import build_cache_replay_lifecycle_feedback
+from tokenclaw.dashboard_app import create_dashboard_app
+from tokenclaw.managed_egress import RAW_FEATURE_KEYS, assert_managed_egress_safe
+from tokenclaw.stats import stats_cache_replay_activation_health
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 # ---------------------------------------------------------------------------

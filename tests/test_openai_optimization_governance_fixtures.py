@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import unittest
 
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.openai_optimization_governor import (
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.openai_optimization_governor import (
     attach_openai_optimization_governor,
     build_openai_optimization_governor,
     build_openai_optimization_lifecycle_event,

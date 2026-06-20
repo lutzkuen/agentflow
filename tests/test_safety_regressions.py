@@ -16,12 +16,12 @@ HAS_RUNTIME_DEPS = all(
 if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
-    from agentflow_proxy import crunch as crunch_module
-    from agentflow_proxy import managed_session_tier
-    from agentflow_proxy import routing_experiments
-    from agentflow_proxy import openai_proxy, server
-    from agentflow_proxy.limiter import TierBackoffActive
-    from agentflow_proxy.store import Store
+    from tokenclaw import crunch as crunch_module
+    from tokenclaw import managed_session_tier
+    from tokenclaw import routing_experiments
+    from tokenclaw import openai_proxy, server
+    from tokenclaw.limiter import TierBackoffActive
+    from tokenclaw.store import Store
 
 
 class FakeJsonResponse:
@@ -356,7 +356,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
                 [
                     sys.executable,
                     "-c",
-                    "from agentflow_proxy import server; print(int(server.LOG_BODIES))",
+                    "from tokenclaw import server; print(int(server.LOG_BODIES))",
                 ],
                 cwd=os.getcwd(),
                 env=env,

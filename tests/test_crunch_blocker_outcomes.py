@@ -7,9 +7,9 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.crunch_blocker_outcomes import build_crunch_blocker_outcomes_report
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw.crunch_blocker_outcomes import build_crunch_blocker_outcomes_report
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 _BLOCKER_REVIEW_SCHEMA = "agentflow.promotion_blocker_recommendation_review.v1"

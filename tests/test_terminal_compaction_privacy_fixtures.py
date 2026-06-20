@@ -6,15 +6,15 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-import agentflow_proxy.crunch as crunch_module
-from agentflow_proxy.store import Store, stable_json
-from agentflow_proxy.terminal_compaction_dry_run import (
+import tokenclaw.crunch as crunch_module
+from tokenclaw.store import Store, stable_json
+from tokenclaw.terminal_compaction_dry_run import (
     apply_terminal_output_compaction_plan,
     build_terminal_output_compaction_dry_run,
     plan_terminal_output_compaction,
 )
-from agentflow_proxy.terminal_compaction_impact import build_terminal_output_compaction_impact_report
-from agentflow_proxy.terminal_compaction_report import build_terminal_output_compaction_opportunity_report
+from tokenclaw.terminal_compaction_impact import build_terminal_output_compaction_impact_report
+from tokenclaw.terminal_compaction_report import build_terminal_output_compaction_opportunity_report
 
 
 RAW_STRINGS = (

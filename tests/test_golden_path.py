@@ -7,10 +7,10 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.golden_path import build_golden_path_summary
-from agentflow_proxy.local_savings_rule_drill import build_local_savings_rule_drill_summary
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw.golden_path import build_golden_path_summary
+from tokenclaw.local_savings_rule_drill import build_local_savings_rule_drill_summary
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 SECRET_PROMPT = "secret golden path prompt body"

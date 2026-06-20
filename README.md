@@ -455,7 +455,7 @@ Cache policy is loaded from the first existing path in this order:
 AGENTFLOW_CACHE_RULES
 config/cache_rules.yaml
 ~/.agentflow/cache_rules.yaml
-bundled agentflow_proxy/cache_rules.yaml
+bundled tokenclaw/cache_rules.yaml
 ```
 
 The bundled cache rules include a reviewed local rule for Claude Code

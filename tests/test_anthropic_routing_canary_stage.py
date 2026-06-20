@@ -2,8 +2,8 @@ import io
 import json
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.anthropic_routing_canary_stage import build_anthropic_routing_canary_stage_report
+from tokenclaw import cli
+from tokenclaw.anthropic_routing_canary_stage import build_anthropic_routing_canary_stage_report
 
 
 def _pass_through_report() -> dict:

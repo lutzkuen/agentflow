@@ -7,9 +7,9 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.optimization_coordinator_dry_run import build_optimization_coordinator_dry_run
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw.optimization_coordinator_dry_run import build_optimization_coordinator_dry_run
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 FORBIDDEN_VALUES = (

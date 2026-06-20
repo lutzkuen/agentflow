@@ -10,12 +10,12 @@ from unittest.mock import patch
 
 import yaml
 
-import agentflow_proxy.cache as cache_module
-from agentflow_proxy import cli
-from agentflow_proxy.managed_egress import ManagedEgressBlocked, RAW_FEATURE_KEYS, assert_managed_egress_safe
-from agentflow_proxy.policy_bundle import apply_policy_bundle, validate_policy_bundle
-from agentflow_proxy.policy_events import recent_policy_events
-from agentflow_proxy.store import Store, stable_json
+import tokenclaw.cache as cache_module
+from tokenclaw import cli
+from tokenclaw.managed_egress import ManagedEgressBlocked, RAW_FEATURE_KEYS, assert_managed_egress_safe
+from tokenclaw.policy_bundle import apply_policy_bundle, validate_policy_bundle
+from tokenclaw.policy_events import recent_policy_events
+from tokenclaw.store import Store, stable_json
 
 
 class CacheDecisionMetaTest(unittest.TestCase):
@@ -156,7 +156,7 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertIn("canary_holdout", cohorts)
 
     def test_openai_cache_replay_hit_recovery_smoke_demonstrates_second_hit(self):
-        from agentflow_proxy.cache_smoke import build_cache_replay_hit_recovery_smoke
+        from tokenclaw.cache_smoke import build_cache_replay_hit_recovery_smoke
 
         with TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "agentflow.sqlite3"))
@@ -204,7 +204,7 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertNotIn("agentflow-cache-replay-hit-recovery-smoke-session", rendered)
 
     def test_cache_smoke_diagnostic_includes_isolated_hit_recovery_without_mutating_store(self):
-        from agentflow_proxy.cache_smoke import build_cache_smoke_diagnostic
+        from tokenclaw.cache_smoke import build_cache_smoke_diagnostic
 
         with TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "agentflow.sqlite3"))
@@ -737,7 +737,7 @@ pattern_rules:
         disabled = importlib.reload(cache_module)
 
         snapshots = disabled.cache_file_dependency_snapshots({
-            "messages": [{"role": "user", "content": "Read agentflow_proxy/cache.py"}]
+            "messages": [{"role": "user", "content": "Read tokenclaw/cache.py"}]
         })
 
         self.assertEqual(snapshots, [])

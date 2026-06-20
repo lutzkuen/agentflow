@@ -11,18 +11,18 @@ from unittest.mock import patch
 
 import yaml
 
-from agentflow_proxy import cli
-from agentflow_proxy.managed_egress import assert_managed_egress_safe
-from agentflow_proxy.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
-from agentflow_proxy.openai_routing_canary_stage import (
+from tokenclaw import cli
+from tokenclaw.managed_egress import assert_managed_egress_safe
+from tokenclaw.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
+from tokenclaw.openai_routing_canary_stage import (
     apply_openai_routing_canary_draft,
     stage_openai_routing_canary_drafts,
 )
-from agentflow_proxy.openai_routing_report import build_openai_routing_report
-from agentflow_proxy.optimization import feedback
-from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
-from agentflow_proxy.promotion_blocker_review import build_promotion_blocker_recommendation_review
-from agentflow_proxy.store import SQLiteStore, stable_json
+from tokenclaw.openai_routing_report import build_openai_routing_report
+from tokenclaw.optimization import feedback
+from tokenclaw.policy_files import policy_file_snapshot, utc_now
+from tokenclaw.promotion_blocker_review import build_promotion_blocker_recommendation_review
+from tokenclaw.store import SQLiteStore, stable_json
 
 
 class OpenAIRoutingCanaryStageTests(unittest.TestCase):
@@ -113,7 +113,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
         workspace = Path(self.tmpdir.name) / "drafts"
         report = build_openai_routing_report(self.store, limit=50)
 
-        from agentflow_proxy import router
+        from tokenclaw import router
 
         with (
             patch.object(router, "ROUTING_RULES_PATH", str(active_path)),

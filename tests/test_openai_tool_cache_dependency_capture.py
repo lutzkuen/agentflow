@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from agentflow_proxy.openai_proxy import (
+from tokenclaw.openai_proxy import (
     _should_capture_openai_workspace_dependency_evidence,
     _should_collect_openai_file_dependency_evidence,
 )

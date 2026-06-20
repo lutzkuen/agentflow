@@ -3,11 +3,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from agentflow_proxy.openai_optimization_governor import (
+from tokenclaw.openai_optimization_governor import (
     attach_openai_optimization_governor,
     selected_openai_governor_family,
 )
-from agentflow_proxy.optimization_coordinator_enforcement import (
+from tokenclaw.optimization_coordinator_enforcement import (
     SUPPRESSION_REASON,
     enforce_optimization_coordinator,
 )
@@ -175,7 +175,7 @@ class OptimizationCoordinatorEnforcementTests(unittest.TestCase):
         crunch_meta = {}
         cache_meta = {}
         with patch(
-            "agentflow_proxy.optimization_coordinator_enforcement.build_optimization_coordinator",
+            "tokenclaw.optimization_coordinator_enforcement.build_optimization_coordinator",
             side_effect=RuntimeError("boom"),
         ):
             enforcement = enforce_optimization_coordinator(

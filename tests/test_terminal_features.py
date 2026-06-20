@@ -1,8 +1,8 @@
 import json
 import unittest
 
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.terminal_features import terminal_log_features_from_text
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.terminal_features import terminal_log_features_from_text
 
 
 class TerminalLogFeatureTests(unittest.TestCase):

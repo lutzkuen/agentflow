@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -12,12 +13,12 @@ from unittest.mock import patch
 import httpx
 import yaml
 
-from agentflow_proxy import activation
-from agentflow_proxy import cli
-from agentflow_proxy.cli_commands import onboarding as onboarding_cli
-from agentflow_proxy.cli_commands import optimization_reports as optimization_reports_cli
-from agentflow_proxy.cli_commands import policy_bundle as policy_bundle_cli
-from agentflow_proxy.cli_commands import policy_workbench as policy_workbench_cli
+from tokenclaw import activation
+from tokenclaw import cli
+from tokenclaw.cli_commands import onboarding as onboarding_cli
+from tokenclaw.cli_commands import optimization_reports as optimization_reports_cli
+from tokenclaw.cli_commands import policy_bundle as policy_bundle_cli
+from tokenclaw.cli_commands import policy_workbench as policy_workbench_cli
 
 
 class ManagedFeedbackFlushClient:
@@ -128,7 +129,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn("agentflow-repeated-scaffold-opportunity", checked)
 
     def test_optimization_reports_module_openai_routing_report_empty_db(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -146,7 +147,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["candidate_count"], 0)
 
     def test_onboarding_module_version_json_path(self):
-        from agentflow_proxy import __version__
+        from tokenclaw import __version__
 
         stdout = io.StringIO()
 
@@ -235,7 +236,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             )
             self.assertIn("--provider openai", run_stdout.getvalue())
 
-            with patch("agentflow_proxy.cli.httpx.get") as http_get:
+            with patch("tokenclaw.cli.httpx.get") as http_get:
                 http_get.return_value = httpx.Response(
                     200,
                     json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"},
@@ -254,7 +255,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn("unsupported: GitHub Copilot is not a base-url target", stderr.getvalue())
 
     def test_agentflow_version_command_prints_version(self):
-        from agentflow_proxy import __version__
+        from tokenclaw import __version__
 
         stdout = io.StringIO()
 
@@ -268,7 +269,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             stdout = io.StringIO()
             cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
 
-            with patch("agentflow_proxy.cli.httpx.get") as http_get:
+            with patch("tokenclaw.cli.httpx.get") as http_get:
                 code = cli.agentflow_cli(["stats", "--config-dir", tmp, "openai"], stdout=stdout)
 
         self.assertEqual(code, 0)
@@ -324,13 +325,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 name, value = stripped.split("=", 1)
                 scripts[name.strip()] = value.strip().strip('"')
 
-        self.assertEqual(scripts["agentflow"], "agentflow_proxy.cli:agentflow_main")
-        self.assertEqual(scripts["tokenclaw"], "agentflow_proxy.cli:agentflow_main")
-        self.assertEqual(scripts["tokenclaw-proxy"], "agentflow_proxy.cli:proxy_main")
-        self.assertEqual(scripts["tokenclaw-dashboard"], "agentflow_proxy.dashboard:main")
-        self.assertEqual(scripts["agentflow-proxy"], "agentflow_proxy.cli:proxy_main")
-        self.assertEqual(scripts["agentflow-claude-proxy"], "agentflow_proxy.cli:proxy_main")
-        self.assertEqual(scripts["agentflow-dashboard"], "agentflow_proxy.dashboard:main")
+        self.assertEqual(scripts["agentflow"], "tokenclaw.cli:agentflow_main")
+        self.assertEqual(scripts["tokenclaw"], "tokenclaw.cli:agentflow_main")
+        self.assertEqual(scripts["tokenclaw-proxy"], "tokenclaw.cli:proxy_main")
+        self.assertEqual(scripts["tokenclaw-dashboard"], "tokenclaw.dashboard:main")
+        self.assertEqual(scripts["agentflow-proxy"], "tokenclaw.cli:proxy_main")
+        self.assertEqual(scripts["agentflow-claude-proxy"], "tokenclaw.cli:proxy_main")
+        self.assertEqual(scripts["agentflow-dashboard"], "tokenclaw.dashboard:main")
         self.assertGreater(len(scripts), 80)
 
         for name, target in scripts.items():
@@ -340,14 +341,14 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 self.assertTrue(callable(getattr(module, attr_name)))
 
         cli_exceptions = {
-            "agentflow-dashboard": "agentflow_proxy.dashboard:main",
-            "tokenclaw-dashboard": "agentflow_proxy.dashboard:main",
+            "agentflow-dashboard": "tokenclaw.dashboard:main",
+            "tokenclaw-dashboard": "tokenclaw.dashboard:main",
         }
         for name, target in scripts.items():
             if name in cli_exceptions:
                 self.assertEqual(target, cli_exceptions[name])
             else:
-                self.assertTrue(target.startswith("agentflow_proxy.cli:"), f"{name} moved away from cli.py")
+                self.assertTrue(target.startswith("tokenclaw.cli:"), f"{name} moved away from cli.py")
 
     def test_pyproject_distribution_metadata_uses_tokenclaw_name(self):
         raw = Path("pyproject.toml").read_text(encoding="utf-8")
@@ -356,6 +357,14 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn('Homepage = "https://github.com/lutzkuen/tokenclaw"', raw)
         self.assertIn('Repository = "https://github.com/lutzkuen/tokenclaw"', raw)
         self.assertIn('Issues = "https://github.com/lutzkuen/tokenclaw/issues"', raw)
+
+    def test_agentflow_proxy_imports_remain_compatible(self):
+        from agentflow_proxy.server import app as legacy_app
+        from tokenclaw.server import app as renamed_app
+
+        self.assertIs(legacy_app, renamed_app)
+        self.assertIs(sys.modules["agentflow_proxy"], sys.modules["tokenclaw"])
+        self.assertIs(sys.modules["agentflow_proxy.server"], sys.modules["tokenclaw.server"])
 
     def test_activate_openai_writes_default_profile_idempotently(self):
         with TemporaryDirectory() as tmp:
@@ -503,7 +512,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
             stdout = io.StringIO()
 
-            with patch("agentflow_proxy.cli.httpx.get") as http_get:
+            with patch("tokenclaw.cli.httpx.get") as http_get:
                 code = cli.agentflow_cli(["stats", "--config-dir", tmp, "openai", "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
@@ -1016,7 +1025,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 stdout=io.StringIO(),
             )
 
-            with patch("agentflow_proxy.server.main") as server_main:
+            with patch("tokenclaw.server.main") as server_main:
                 code = cli.agentflow_cli(["run", "openai", "--config-dir", tmp], stdout=io.StringIO())
 
             self.assertEqual(code, 0)
@@ -1042,7 +1051,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             )
             stdout = io.StringIO()
 
-            with patch("agentflow_proxy.cli.httpx.get") as http_get:
+            with patch("tokenclaw.cli.httpx.get") as http_get:
                 http_get.return_value = httpx.Response(
                     200,
                     json={
@@ -1119,7 +1128,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
                 stdout = io.StringIO()
 
-                with patch("agentflow_proxy.cli.httpx.get", side_effect=[response_or_exc]):
+                with patch("tokenclaw.cli.httpx.get", side_effect=[response_or_exc]):
                     code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
 
                 self.assertEqual(code, expected_code)
@@ -1138,7 +1147,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
             stdout = io.StringIO()
 
-            with patch("agentflow_proxy.cli.httpx.get") as http_get:
+            with patch("tokenclaw.cli.httpx.get") as http_get:
                 http_get.return_value = httpx.Response(
                     200,
                     json={"ok": True, "provider": "anthropic", "upstream": "https://api.openai.com"},
@@ -1229,7 +1238,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 stdout=io.StringIO(),
             )
 
-            with patch("agentflow_proxy.server.main") as server_main:
+            with patch("tokenclaw.server.main") as server_main:
                 code = cli.agentflow_cli(["run", "claude", "--config-dir", tmp], stdout=io.StringIO())
 
             self.assertEqual(code, 0)
@@ -1521,7 +1530,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        with patch("agentflow_proxy.cli_commands.policy_bundle.httpx.post") as post:
+        with patch("tokenclaw.cli_commands.policy_bundle.httpx.post") as post:
             post.return_value = httpx.Response(200, json=payload)
             code = cli.policy_reload_cli(["--url", "http://127.0.0.1:4001/agentflow/admin/reload-policies"], stdout=stdout, stderr=stderr)
 
@@ -1534,7 +1543,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        with patch("agentflow_proxy.cli_commands.policy_bundle.httpx.post") as post:
+        with patch("tokenclaw.cli_commands.policy_bundle.httpx.post") as post:
             code = cli.policy_reload_cli(["--url", "http://192.168.1.20:4000/agentflow/admin/reload-policies"], stdout=stdout, stderr=stderr)
 
         self.assertEqual(code, 2)
@@ -1586,7 +1595,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        with patch("agentflow_proxy.cli_commands.policy_bundle.httpx.post") as post:
+        with patch("tokenclaw.cli_commands.policy_bundle.httpx.post") as post:
             post.return_value = httpx.Response(403, json={"ok": False, "error": {"type": "forbidden"}})
             code = cli.policy_reload_cli(["--url", "http://127.0.0.1:4000/agentflow/admin/reload-policies"], stdout=stdout, stderr=stderr)
 
@@ -1624,7 +1633,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(surface["managed_optimizer_required"])
 
     def test_codex_diagnose_cli_reads_local_metadata_only(self):
-        from agentflow_proxy.store import Store, stable_json, utc_now
+        from tokenclaw.store import Store, stable_json, utc_now
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -1736,7 +1745,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["raw_params_included"])
 
     def test_codex_canary_impact_cli_reports_rule_lifecycle_metadata_only(self):
-        from agentflow_proxy.store import Store, stable_json, utc_now
+        from tokenclaw.store import Store, stable_json, utc_now
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -1814,7 +1823,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["request_ids_included"])
 
     def test_routing_experiment_report_cli_reads_metadata_only_metrics(self):
-        from agentflow_proxy.store import Store, stable_json, utc_now
+        from tokenclaw.store import Store, stable_json, utc_now
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -1873,7 +1882,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("private cli cache prompt", json.dumps(payload).lower())
 
     def test_routing_experiment_report_cli_slices_post_fix_shadow_yield(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -2035,7 +2044,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_cache_replayability_report_cli_reads_local_metadata_only(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -2156,7 +2165,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["cache_keys_included"])
 
     def test_cache_replay_cohorts_rank_stable_dependency_plateau_without_raw_ids(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         def audit(reason=None, safe=True):
             return {
@@ -2349,8 +2358,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["pattern_hashes_included"])
 
     def test_cache_smoke_diagnostic_cli_explains_exact_cache_hits_and_skips(self):
-        from agentflow_proxy.cache import cache_key_for
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.cache import cache_key_for
+        from tokenclaw.store import Store, stable_json
 
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2511,8 +2520,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
 
     def test_zero_hit_cache_ladder_emits_ranked_issue_ready_action_candidates(self):
-        from agentflow_proxy import stats
-        from agentflow_proxy.store import stable_json
+        from tokenclaw import stats
+        from tokenclaw.store import stable_json
 
         def row(index, *, stream, reason, category, phase, has_tools=False, path="/v1/messages"):
             return {
@@ -2603,7 +2612,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["candidate_identifiers_included"])
 
     def test_cache_replay_dry_run_cli_reads_policy_without_mutating_cache(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         pattern_hash = "sha256:" + "a" * 64
         with TemporaryDirectory() as tmp:
@@ -2712,7 +2721,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["pattern_hashes_included"])
 
     def test_managed_pattern_rollups_cli_exports_metadata_only_cohorts(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         pattern_hash = "sha256:" + "9" * 64
         with TemporaryDirectory() as tmp:
@@ -2783,7 +2792,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("cli-session-secret", encoded)
 
     def test_managed_pattern_rollups_cli_exports_local_fingerprint_evidence(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         pattern_hash = "sha256:" + "7" * 64
         with TemporaryDirectory() as tmp:
@@ -2857,7 +2866,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("local-fingerprint-session-secret", encoded)
 
     def test_optimization_eval_plan_cli_exports_family_agnostic_metadata_only_plans(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         pattern_hash = "sha256:" + "8" * 64
         cache_pattern_hash = "sha256:" + "6" * 64
@@ -3053,7 +3062,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
 
     def test_optimization_shadow_eval_cli_scores_fixture_plan_metadata_only(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         plan = {
             "schema": "agentflow.optimization_eval_plan.v1",
@@ -3161,7 +3170,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_optimization_eval_queue_cli_builds_and_records_bounded_batch(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         async def fake_plan(_store, *, limit=500, min_samples=1):
             return {
@@ -3193,7 +3202,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             Store(db_path).conn.close()
             stdout = io.StringIO()
 
-            with patch("agentflow_proxy.optimization_eval_queue.build_optimization_eval_plan", fake_plan):
+            with patch("tokenclaw.optimization_eval_queue.build_optimization_eval_plan", fake_plan):
                 code = cli.optimization_eval_queue_cli(
                     ["--db", db_path, "--family", "phase_routing", "--limit", "1"],
                     stdout=stdout,
@@ -3216,7 +3225,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("raw queue cli prompt", stdout.getvalue())
 
     def test_optimization_eval_queue_cli_backfills_promotion_report_dry_run_and_apply(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         report = {
             "schema": "agentflow.optimization_promotion_report.v1",
@@ -3356,7 +3365,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
 
     def _log_promotion_eval_result(self, store, candidate_id: str, status: str, *, created_at: str = "2026-06-10T03:30:00+00:00") -> None:
-        from agentflow_proxy.store import stable_json
+        from tokenclaw.store import stable_json
 
         reason = "offline-fixture-passed" if status == "pass" else "output-similarity-below-threshold"
         store.log_optimization_eval_result(
@@ -3382,7 +3391,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         )
 
     def test_optimization_promotion_report_cli_scores_verdict_paths_metadata_only(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         plan = {
             "schema": "agentflow.optimization_eval_plan.v1",
@@ -3498,7 +3507,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["raw_session_ids_included"])
 
     def test_optimization_promotion_report_cli_reports_eval_failure_rollback(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         plan = {
             "schema": "agentflow.optimization_eval_plan.v1",
@@ -3722,7 +3731,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
 
     def test_optimization_eval_queue_cli_queues_promotion_blocker_review_recommendations(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         recommendations = {
             "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
@@ -3870,7 +3879,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(data["phase_canary"]["holdout_fraction"], 0.1)
 
     def test_optimization_promotion_canary_apply_queues_lifecycle_feedback_when_managed_disabled(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         bundle = {
             "schema": "agentflow.optimization_promotion_rollout_actions.v1",
@@ -3993,7 +4002,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.optimization_promotion_canary_apply_cli(
                         ["--config-dir", tmp, "--db", db_path, "--write", "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -4061,7 +4070,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.optimization_promotion_canary_apply_cli(
                         ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -4080,7 +4089,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn('"raw_prompt"', rendered)
 
     def test_optimization_promotion_impact_cli_reports_post_apply_canary_metadata(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         action = {
             "schema": "agentflow.optimization_promotion_rollout_action.v1",
@@ -4197,7 +4206,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["raw_prompts_included"])
 
     def test_optimization_promotion_impact_queues_lifecycle_feedback_with_next_step_summary(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         action = {
             "schema": "agentflow.optimization_promotion_rollout_action.v1",
@@ -4291,7 +4300,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.optimization_promotion_impact_cli(
                         ["--db", db_path, "--limit", "10", "--min-applied-samples", "1", "--min-holdout-samples", "1", "--max-evidence-age-hours", "999999", "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -4336,7 +4345,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(status_payload["privacy"]["payload_json_included"])
 
     def test_optimization_rollout_actions_review_cli_accepts_signed_bundle_and_logs_event(self):
-        from agentflow_proxy.optimization_rollout_review import attach_optimization_rollout_provenance
+        from tokenclaw.optimization_rollout_review import attach_optimization_rollout_provenance
 
         bundle = {
             "schema": "agentflow.optimization_rollout_actions.v1",
@@ -4491,7 +4500,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["wrote_local_policy_files"])
 
     def test_optimization_shadow_eval_cli_enforces_budget_cap_without_policy_mutation(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         plan = {
             "schema": "agentflow.optimization_eval_plan.v1",
@@ -4676,7 +4685,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertIn("impact_summary", payload)
 
     def test_policy_review_cli_simulates_routing_impact_from_test_db(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)
@@ -4770,7 +4779,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(impact["reason"], "db-not-found")
 
     def test_policy_review_cli_generates_high_risk_impact_warning(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)
@@ -4841,7 +4850,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         return proposed
 
     def _write_old_context_summary_dry_run_rows(self, db_path: str) -> None:
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         old_text = "raw-secret-old-context " + ("durable fact " * 260)
         eligible_body = {
@@ -4975,7 +4984,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
 
     def _write_tool_protocol_aware_old_context_rows(self, db_path: str) -> None:
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         mixed_body = {
             "model": "claude-sonnet-4-6",
@@ -5160,7 +5169,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.old_context_summary_dry_run_cli(
                         ["-", "--db", db_path, "--limit", "10"],
                         stdin=io.StringIO(json.dumps(proposed)),
@@ -5231,7 +5240,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
 
     def _write_old_context_summary_impact_rows(self, db_path: str) -> None:
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         store = Store(db_path)
         try:
@@ -5383,7 +5392,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         return dry_run
 
     def _write_old_context_summary_quality_gate_rows(self, db_path: str, *, scenario: str) -> None:
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         def meta_for(cohort: str, *, status_code: int = 200, retry_count: int = 0) -> dict:
             applied = cohort == "canary_applied"
@@ -5639,7 +5648,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.old_context_summary_impact_cli(
                         ["-", "--db", db_path, "--limit", "10"],
                         stdin=io.StringIO(json.dumps(dry_run)),
@@ -5669,8 +5678,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertTrue(output["managed_server_calls_made"])
 
     def test_old_context_summary_quality_gate_feedback_queues_and_flushes_metadata_only_verdict(self):
-        from agentflow_proxy import recommendations
-        from agentflow_proxy.store import Store
+        from tokenclaw import recommendations
+        from tokenclaw.store import Store
 
         dry_run = self._old_context_summary_quality_gate_dry_run()
         ManagedFeedbackFlushClient.calls = []
@@ -5689,7 +5698,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.old_context_summary_impact_cli(
                         ["-", "--db", db_path, "--limit", "10"],
                         stdin=io.StringIO(json.dumps(dry_run)),
@@ -5800,7 +5809,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.old_context_summary_quality_gate_cli(
                         ["-", "--db", db_path, "--limit", "10"],
                         stdin=io.StringIO(json.dumps(dry_run)),
@@ -5929,7 +5938,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         id_suffix: str = "",
         status_code: int = 200,
     ):
-        from agentflow_proxy.store import stable_json
+        from tokenclaw.store import stable_json
 
         applied = cohort == "canary_applied"
         meta = {
@@ -6025,7 +6034,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["actions"][0]["quality_gate"]["verdict"], "promote")
 
     def test_signed_old_context_summary_rollout_actions_apply_rolls_back_and_creates_backup(self):
-        from agentflow_proxy.old_context_summary_rollout_actions import attach_summary_rollout_action_provenance
+        from tokenclaw.old_context_summary_rollout_actions import attach_summary_rollout_action_provenance
 
         secret = "summary-rollout-secret"
         bundle = attach_summary_rollout_action_provenance(
@@ -6056,7 +6065,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(summary["canary"]["enabled"])
         self.assertEqual(summary["canary"]["fraction"], 0.0)
         self.assertEqual(summary["rollout_action"]["action_type"], "rollback")
-        from agentflow_proxy.policy_events import recent_policy_events
+        from tokenclaw.policy_events import recent_policy_events
 
         event = recent_policy_events(limit=1)["events"][0]
         self.assertEqual(event["action"], "old-context-summary-rollout-actions-apply")
@@ -6093,7 +6102,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(json.loads(stdout.getvalue())["review"]["actions"][0]["reason"], "unknown-rule")
 
     def test_old_context_summary_rollout_actions_dry_run_and_impact_are_metadata_only(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         bundle = self._summary_rollout_action_bundle(action_type="widen")
         with TemporaryDirectory() as tmp:
@@ -6279,8 +6288,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("managed raw prompt must not be accepted", rendered)
 
     def test_policy_impact_simulates_managed_pattern_bundle_without_mutation(self):
-        from agentflow_proxy.policy_bundle import simulate_policy_bundle_impact
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.policy_bundle import simulate_policy_bundle_impact
+        from tokenclaw.store import Store, stable_json
 
         crunch_hash = "sha256:" + ("a" * 64)
         cache_hash = "sha256:" + ("b" * 64)
@@ -6549,7 +6558,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         cli.policy_review_cli(["-"], stdin=io.StringIO(json.dumps(proposed)), stdout=stdout)
 
-        from agentflow_proxy.policy_events import recent_policy_events
+        from tokenclaw.policy_events import recent_policy_events
 
         events = recent_policy_events(limit=5)["events"]
         self.assertEqual(events[0]["action"], "review")
@@ -7258,7 +7267,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_rollout_actions_apply_cli(
                         ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -7327,7 +7336,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_rollout_actions_review_cli(
                         ["--config-dir", tmp, "--db", db_path, "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -7540,7 +7549,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_rollout_actions_apply_cli(
                         ["--config-dir", tmp, "--db", db_path, "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -7592,7 +7601,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_rollout_actions_apply_cli(
                         ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -7619,7 +7628,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(status_payload["privacy"]["payload_json_included"])
 
     def test_signed_managed_rollout_actions_apply_disables_rule_and_creates_backup(self):
-        from agentflow_proxy.rollout_actions import attach_rollout_action_provenance
+        from tokenclaw.rollout_actions import attach_rollout_action_provenance
 
         secret = "rollout-secret"
         bundle = attach_rollout_action_provenance(
@@ -7656,7 +7665,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(rule["rollout_action"]["action_type"], "rollback")
             self.assertEqual(rule["rollout_action"]["pattern_hash"], self._pattern_hash())
 
-        from agentflow_proxy.policy_events import recent_policy_events
+        from tokenclaw.policy_events import recent_policy_events
 
         event = recent_policy_events(limit=1)["events"][0]
         self.assertEqual(event["action"], "rollout-actions-apply")
@@ -7718,7 +7727,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         id_suffix: str = "",
         error: str | None = None,
     ):
-        from agentflow_proxy.store import stable_json
+        from tokenclaw.store import stable_json
 
         applied = cohort == "canary_applied"
         rule = {
@@ -7780,7 +7789,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         )
 
     def test_managed_rollout_actions_dry_run_reports_recent_traffic_impact(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         bundle = self._rollout_action_bundle(action_type="widen")
 
@@ -7893,8 +7902,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("codex-session-hidden", rendered)
 
     def test_managed_rollout_actions_impact_reports_post_apply_projection_deltas(self):
-        from agentflow_proxy.policy_events import recent_policy_events
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.policy_events import recent_policy_events
+        from tokenclaw.store import Store, stable_json
 
         bundle = self._rollout_action_bundle(action_type="widen")
 
@@ -8047,7 +8056,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(recent_policy_events(limit=1)["events"][0]["action"], "rollout-actions-impact")
 
     def test_managed_rollout_actions_impact_is_useful_before_post_apply_matches(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         bundle = self._rollout_action_bundle(action_type="widen")
 
@@ -8092,7 +8101,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["actions"][0]["actual"]["status_risk_buckets"], [])
 
     def test_managed_rollout_actions_dry_run_covers_hold_rollback_unknown_and_raw_rejection(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -8153,7 +8162,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with patch.dict(os.environ, {cli.POLICY_BUNDLE_RECOMMENDATION_URL_ENV: "", cli.MANAGED_POLICY_API_KEY_ENV: ""}, clear=False):
-            with patch("agentflow_proxy.cli.httpx.get") as get:
+            with patch("tokenclaw.cli.httpx.get") as get:
                 code = cli.policy_fetch_review_cli([], stdout=stdout, stderr=stderr)
 
         self.assertEqual(code, 2)
@@ -8172,7 +8181,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"AGENTFLOW_POLICY_CONFIG_DIR": tmp, cli.MANAGED_POLICY_API_KEY_ENV: ""}, clear=False):
-                with patch("agentflow_proxy.cli.httpx.get") as get:
+                with patch("tokenclaw.cli.httpx.get") as get:
                     get.return_value = httpx.Response(200, json=bundle)
                     code = cli.policy_fetch_review_cli(
                         [
@@ -8218,8 +8227,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(call.kwargs["params"]["limit"], 7)
 
     def test_policy_fetch_review_cli_fetches_signed_openai_review_bundle_with_capabilities(self):
-        from agentflow_proxy import __version__
-        from agentflow_proxy.policy_bundle import attach_policy_bundle_provenance
+        from tokenclaw import __version__
+        from tokenclaw.policy_bundle import attach_policy_bundle_provenance
 
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)
@@ -8383,7 +8392,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 cli.MANAGED_POLICY_API_KEY_ENV: "",
             }
             with patch.dict(os.environ, env, clear=False):
-                with patch("agentflow_proxy.cli.httpx.get") as get:
+                with patch("tokenclaw.cli.httpx.get") as get:
                     get.return_value = httpx.Response(200, json=signed)
                     code = cli.policy_fetch_review_cli(
                         [
@@ -8454,7 +8463,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertNotIn(forbidden, rendered_payload)
 
     def _openai_review_bundle_for_draft(self, *, mutate=None, expires_at: str | None = None, signed: bool = True):
-        from agentflow_proxy.policy_bundle import attach_policy_bundle_provenance
+        from tokenclaw.policy_bundle import attach_policy_bundle_provenance
 
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)
@@ -8737,7 +8746,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 self.assertFalse((Path(tmp) / "drafts").exists())
 
     def test_openai_optimization_draft_dry_run_projects_governor_conflicts_without_writes(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         def select_all_actions(bundle):
             selected = bundle["openai_optimization"]["selected_actions"][0]
@@ -8922,7 +8931,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(holdout["summary"]["applied_if_enabled_total"], 0)
 
     def test_openai_optimization_draft_dry_run_rejects_raw_like_staged_payload(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         bundle = self._openai_review_bundle_for_draft()
 
@@ -8960,8 +8969,8 @@ class PolicyReloadCliTests(unittest.TestCase):
     def test_openai_optimization_draft_apply_dry_run_write_and_rollback(self):
         import hashlib
 
-        from agentflow_proxy.policy_workbench import rollback_policy_apply
-        from agentflow_proxy.store import Store
+        from tokenclaw.policy_workbench import rollback_policy_apply
+        from tokenclaw.store import Store
 
         bundle = self._openai_review_bundle_for_draft()
 
@@ -9097,7 +9106,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(routing_path.read_text(encoding="utf-8"), before_routing)
 
     def test_openai_optimization_draft_apply_blocks_unsafe_staged_edits(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         cases = [
             (
@@ -9196,7 +9205,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 self.assertNotIn("secret", rendered)
 
     def test_openai_optimization_draft_apply_blocks_governor_conflicts(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         def select_all_actions(bundle):
             selected = bundle["openai_optimization"]["selected_actions"][0]
@@ -9303,7 +9312,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual((config_dir / "routing_rules.yaml").read_text(encoding="utf-8"), "rules: []\n")
 
     def test_codex_app_policy_dry_run_projects_synthetic_fixture_and_recent_rows_without_mutation(self):
-        from agentflow_proxy.store import Store, stable_json, utc_now
+        from tokenclaw.store import Store, stable_json, utc_now
 
         bundle = self._managed_policy_bundle()
         with TemporaryDirectory() as tmp:
@@ -9418,7 +9427,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             db_path = str(Path(tmp) / "agentflow.sqlite3")
             config_dir = Path(tmp) / "config"
             with patch.dict(os.environ, {"AGENTFLOW_POLICY_CONFIG_DIR": str(config_dir), cli.MANAGED_POLICY_API_KEY_ENV: ""}, clear=False):
-                with patch("agentflow_proxy.cli.httpx.get") as get:
+                with patch("tokenclaw.cli.httpx.get") as get:
                     get.return_value = httpx.Response(200, json=bundle)
                     code = cli.codex_app_policy_dry_run_cli(
                         [
@@ -9539,7 +9548,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 cli.MANAGED_POLICY_API_KEY_ENV: "",
             }
             with patch.dict(os.environ, env, clear=False):
-                with patch("agentflow_proxy.cli.httpx.get") as get:
+                with patch("tokenclaw.cli.httpx.get") as get:
                     get.return_value = httpx.Response(200, json=bundle)
                     code = cli.policy_fetch_review_cli(
                         [
@@ -9606,7 +9615,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 cli.MANAGED_POLICY_API_KEY_ENV: "",
             }
             with patch.dict(os.environ, env, clear=False):
-                with patch("agentflow_proxy.cli.httpx.get") as get:
+                with patch("tokenclaw.cli.httpx.get") as get:
                     get.return_value = httpx.Response(200, json=bundle)
                     code = cli.policy_fetch_review_cli(
                         [
@@ -9620,7 +9629,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                         stderr=stderr,
                     )
 
-                from agentflow_proxy.policy_events import recent_policy_events
+                from tokenclaw.policy_events import recent_policy_events
 
                 events = recent_policy_events(limit=5)["events"]
 
@@ -9648,7 +9657,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"AGENTFLOW_POLICY_CONFIG_DIR": tmp}, clear=False):
-                with patch("agentflow_proxy.cli.httpx.get") as get:
+                with patch("tokenclaw.cli.httpx.get") as get:
                     get.return_value = httpx.Response(200, json=self._managed_policy_bundle(invalid=True))
                     code = cli.policy_fetch_review_cli(
                         [
@@ -9675,7 +9684,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with patch.dict(os.environ, {cli.MANAGED_POLICY_API_KEY_ENV: secret}, clear=False):
-            with patch("agentflow_proxy.cli.httpx.get") as get:
+            with patch("tokenclaw.cli.httpx.get") as get:
                 get.return_value = httpx.Response(200, json=self._managed_policy_bundle())
                 code = cli.policy_fetch_review_cli(
                     [
@@ -9694,7 +9703,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         rendered = stdout.getvalue() + stderr.getvalue()
         self.assertNotIn(secret, rendered)
 
-        from agentflow_proxy.policy_events import recent_policy_events
+        from tokenclaw.policy_events import recent_policy_events
 
         event_text = json.dumps(recent_policy_events(limit=5)["events"])
         self.assertNotIn(secret, event_text)
@@ -9732,8 +9741,8 @@ class PolicyReloadCliTests(unittest.TestCase):
             workspace = Path(tmp) / "drafts"
             stdout = io.StringIO()
 
-            from agentflow_proxy import cache as cache_module
-            from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
+            from tokenclaw import cache as cache_module
+            from tokenclaw.policy_files import policy_file_snapshot, utc_now
 
             with (
                 patch.object(cache_module, "CACHE_RULES_PATH", str(active_path)),
@@ -9880,8 +9889,8 @@ class PolicyReloadCliTests(unittest.TestCase):
             workspace = Path(tmp) / "drafts"
             stdout = io.StringIO()
 
-            from agentflow_proxy import router
-            from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
+            from tokenclaw import router
+            from tokenclaw.policy_files import policy_file_snapshot, utc_now
 
             with (
                 patch.object(router, "ROUTING_RULES_PATH", str(active_path)),
@@ -10044,7 +10053,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertFalse((Path(tmp) / "drafts").exists())
 
     def test_policy_draft_validate_cli_combines_validation_dry_run_and_section_impacts(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)
@@ -10513,7 +10522,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             )
             cli.policy_rollback_cli(["--config-dir", tmp, "--section", "crunch"], stdout=io.StringIO())
 
-        from agentflow_proxy.policy_events import recent_policy_events
+        from tokenclaw.policy_events import recent_policy_events
 
         events = recent_policy_events(limit=5)["events"]
         event_text = json.dumps(events)
@@ -10541,7 +10550,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["old_context_summarization"]["status"], "rejected")
 
-        from agentflow_proxy.policy_events import recent_policy_events
+        from tokenclaw.policy_events import recent_policy_events
 
         event_text = json.dumps(recent_policy_events(limit=5)["events"])
         self.assertIn("candidate-old-context-summary", event_text)
@@ -10776,7 +10785,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
             cli.policy_rollback_cli(["--config-dir", tmp, "--section", "cache"], stdout=stdout)
 
-        from agentflow_proxy.policy_events import recent_policy_events
+        from tokenclaw.policy_events import recent_policy_events
 
         events = recent_policy_events(limit=5)["events"]
         self.assertEqual(events[0]["action"], "rollback")
@@ -10800,7 +10809,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
             cli.policy_diff_cli([str(before_path), str(after_path)], stdout=stdout)
 
-        from agentflow_proxy.policy_events import recent_policy_events
+        from tokenclaw.policy_events import recent_policy_events
 
         events = recent_policy_events(limit=5)["events"]
         self.assertEqual(events[0]["action"], "diff")
@@ -10818,7 +10827,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         ManagedFeedbackFlushClient.text = '{"ok":true}'
 
     def _enqueue_feedback(self, store, *, status="queued", attempts=0):
-        from agentflow_proxy.store import stable_json
+        from tokenclaw.store import stable_json
 
         store.enqueue_managed_outcome_feedback(
             id=f"queue-{status}-{attempts}",
@@ -10881,7 +10890,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         projected=0.0,
         feedback_extra=None,
     ):
-        from agentflow_proxy.store import stable_json
+        from tokenclaw.store import stable_json
 
         entry = {
             "schema": "agentflow.promotion_outcome_feedback_entry.v1",
@@ -10944,7 +10953,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         )
 
     def test_managed_feedback_status_cli_reports_metadata_only_queue_counts(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -10983,7 +10992,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         self.assertNotIn("raw codex response secret", rendered)
 
     def test_managed_feedback_flush_dry_run_does_not_claim_or_send(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -10994,7 +11003,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 store.conn.close()
 
             stdout = io.StringIO()
-            with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+            with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                 code = cli.managed_feedback_flush_cli(
                     ["--db", db_path, "--source-surface", "codex_turn", "--dry-run"],
                     stdout=stdout,
@@ -11017,8 +11026,8 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         self.assertFalse(payload["results"][0]["payload_included"])
 
     def test_managed_feedback_flush_sends_sanitized_payload_and_updates_queue(self):
-        from agentflow_proxy import stats as stats_views
-        from agentflow_proxy.store import Store
+        from tokenclaw import stats as stats_views
+        from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -11037,7 +11046,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(
                         ["--db", db_path, "--source-surface", "codex_turn", "--limit", "1"],
                         stdout=stdout,
@@ -11067,7 +11076,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         self.assertEqual(codex_stats["summary"]["managed_feedback_queue_sent"], payload["after"]["sent"])
 
     def test_managed_feedback_flush_records_retryable_error(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         ManagedFeedbackFlushClient.status_code = 503
         ManagedFeedbackFlushClient.text = "managed unavailable"
@@ -11090,7 +11099,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(["--db", db_path], stdout=stdout)
 
             store = Store(db_path)
@@ -11107,7 +11116,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         self.assertEqual(payload["flush"]["retryable_error"], 1)
 
     def test_managed_feedback_flush_posts_post_promotion_action_outcome_rollups(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -11148,7 +11157,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(
                         ["--db", db_path, "--post-promotion-action-outcomes", "--limit", "5"],
                         stdout=stdout,
@@ -11187,7 +11196,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         self.assertEqual(result["post_promotion_action_outcome_rollups"]["rollup_count"], 2)
 
     def test_post_promotion_action_outcome_rollups_reject_raw_stored_feedback_before_send(self):
-        from agentflow_proxy.store import Store
+        from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")
@@ -11215,7 +11224,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(
                         ["--db", db_path, "--post-promotion-action-outcomes", "--limit", "5"],
                         stdout=stdout,
@@ -11230,7 +11239,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         self.assertEqual(result["post_promotion_action_outcome_rollups"]["reason"], "privacy-blocked")
 
     def test_sqlite_maintenance_cli_reports_dry_run(self):
-        from agentflow_proxy.store import Store, stable_json
+        from tokenclaw.store import Store, stable_json
 
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")

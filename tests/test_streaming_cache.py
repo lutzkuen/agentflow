@@ -15,16 +15,16 @@ HAS_RUNTIME_DEPS = all(
 if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
-    import agentflow_proxy.cache as cache_module
-    import agentflow_proxy.anthropic_proxy as anthropic_proxy
-    import agentflow_proxy.router as router_module
-    import agentflow_proxy.routing_experiments as routing_experiments
-    from agentflow_proxy.crunch import crunch_body, estimate_tokens_from_text
-    from agentflow_proxy.managed_egress import assert_managed_egress_safe
-    from agentflow_proxy.recommendations import build_optimization_unit, pattern_feature_diagnostics
-    from agentflow_proxy.router import categorize_request, extract_text, route_model
-    from agentflow_proxy import server
-    from agentflow_proxy.store import Store
+    import tokenclaw.cache as cache_module
+    import tokenclaw.anthropic_proxy as anthropic_proxy
+    import tokenclaw.router as router_module
+    import tokenclaw.routing_experiments as routing_experiments
+    from tokenclaw.crunch import crunch_body, estimate_tokens_from_text
+    from tokenclaw.managed_egress import assert_managed_egress_safe
+    from tokenclaw.recommendations import build_optimization_unit, pattern_feature_diagnostics
+    from tokenclaw.router import categorize_request, extract_text, route_model
+    from tokenclaw import server
+    from tokenclaw.store import Store
 
 
 STREAM_FRAMES = [

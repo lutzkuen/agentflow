@@ -7,15 +7,15 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from agentflow_proxy import cli
-import agentflow_proxy.crunch as crunch_module
-from agentflow_proxy.managed_egress import RAW_FEATURE_KEYS
-from agentflow_proxy.recommendations import (
+from tokenclaw import cli
+import tokenclaw.crunch as crunch_module
+from tokenclaw.managed_egress import RAW_FEATURE_KEYS
+from tokenclaw.recommendations import (
     build_old_context_summary_outcome_event,
     build_old_context_summary_outcome_feedback,
     queue_policy_event_feedback,
 )
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw.store import Store, stable_json
 
 
 class OldContextSummaryFixtureTest(unittest.TestCase):

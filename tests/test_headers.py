@@ -3,7 +3,7 @@ import gzip
 import json
 import unittest
 
-from agentflow_proxy.headers import (
+from tokenclaw.headers import (
     ClientJsonRequestError,
     build_anthropic_forward_headers,
     build_anthropic_summary_headers,

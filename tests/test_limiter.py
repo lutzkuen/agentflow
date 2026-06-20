@@ -2,7 +2,7 @@ import asyncio
 import time
 import unittest
 
-from agentflow_proxy.limiter import TierBackoffActive, TierLimiter, model_tier, tier_backoff_headers, tier_backoff_payload
+from tokenclaw.limiter import TierBackoffActive, TierLimiter, model_tier, tier_backoff_headers, tier_backoff_payload
 
 
 class TierLimiterTests(unittest.TestCase):

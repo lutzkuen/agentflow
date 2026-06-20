@@ -5,8 +5,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-import agentflow_proxy.crunch as crunch_module
-from agentflow_proxy.store import Store, stable_json
+import tokenclaw.crunch as crunch_module
+from tokenclaw.store import Store, stable_json
 
 
 def _terminal_text(secret: str) -> str:
@@ -18,7 +18,7 @@ def _terminal_text(secret: str) -> str:
         '  File "/workspace/private/tests/test_private_terminal.py", line 42, in test_hidden',
         "AssertionError: expected ok",
         "exit code: 1",
-        "modified agentflow_proxy/terminal_compaction_dry_run.py",
+        "modified tokenclaw/terminal_compaction_dry_run.py",
     ]
     noisy = [
         f"2026-06-12T10:00:{second:02d}Z INFO pid=1234 compiling shard={second} secret={secret}"

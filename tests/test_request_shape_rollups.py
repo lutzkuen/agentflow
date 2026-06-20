@@ -10,9 +10,9 @@ from pathlib import Path
 
 import yaml
 
-from agentflow_proxy import cache as cache_module
-from agentflow_proxy import cli
-from agentflow_proxy.request_shape_rollups import (
+from tokenclaw import cache as cache_module
+from tokenclaw import cli
+from tokenclaw.request_shape_rollups import (
     apply_request_shape_cache_replay_canary_action,
     apply_request_shape_crunch_canary_action,
     apply_request_shape_crunch_canary_actions,
@@ -32,7 +32,7 @@ from agentflow_proxy.request_shape_rollups import (
     record_request_shape_crunch_policy_decision_ledger,
     request_shape_crunch_canary_lifecycle,
 )
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 class RequestShapeRollupTests(unittest.TestCase):
@@ -2288,7 +2288,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_packaged_cache_rules_stage_49_row_openai_replay_cohort(self) -> None:
-        rules_path = Path(__file__).parents[1] / "agentflow_proxy" / "cache_rules.yaml"
+        rules_path = Path(__file__).parents[1] / "tokenclaw" / "cache_rules.yaml"
         policy = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
         rules = policy["pattern_rules"]
         rule = next(
@@ -2346,7 +2346,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_packaged_cache_rules_stage_next_openai_replay_cohort(self) -> None:
-        rules_path = Path(__file__).parents[1] / "agentflow_proxy" / "cache_rules.yaml"
+        rules_path = Path(__file__).parents[1] / "tokenclaw" / "cache_rules.yaml"
         policy = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
         rules = policy["pattern_rules"]
         rule = next(
@@ -2406,7 +2406,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_packaged_cache_rules_stage_remaining_openai_replay_cohort(self) -> None:
-        rules_path = Path(__file__).parents[1] / "agentflow_proxy" / "cache_rules.yaml"
+        rules_path = Path(__file__).parents[1] / "tokenclaw" / "cache_rules.yaml"
         policy = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
         rules = policy["pattern_rules"]
         rule = next(

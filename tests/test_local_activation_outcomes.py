@@ -5,9 +5,9 @@ from tempfile import TemporaryDirectory
 import unittest
 import uuid
 
-from agentflow_proxy.cli_commands import optimization_reports as optimization_reports_cli
-from agentflow_proxy.local_activation_outcomes import build_local_activation_outcome_summary
-from agentflow_proxy.store import Store, stable_json, utc_now
+from tokenclaw.cli_commands import optimization_reports as optimization_reports_cli
+from tokenclaw.local_activation_outcomes import build_local_activation_outcome_summary
+from tokenclaw.store import Store, stable_json, utc_now
 
 
 def _log_call(store: Store, **overrides):

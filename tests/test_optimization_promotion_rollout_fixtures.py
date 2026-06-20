@@ -11,22 +11,22 @@ from unittest.mock import patch
 
 import yaml
 
-import agentflow_proxy.crunch as crunch_module
-from agentflow_proxy import cache as cache_module
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.optimization_promotion_actions import ACTION_SCHEMA, SCHEMA as PROMOTION_ACTIONS_SCHEMA, build_optimization_promotion_actions
-from agentflow_proxy.optimization_promotion_canary import (
+import tokenclaw.crunch as crunch_module
+from tokenclaw import cache as cache_module
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.optimization_promotion_actions import ACTION_SCHEMA, SCHEMA as PROMOTION_ACTIONS_SCHEMA, build_optimization_promotion_actions
+from tokenclaw.optimization_promotion_canary import (
     apply_optimization_promotion_canaries,
     evaluate_promotion_canary_safety_stop,
     promotion_canary_decision,
 )
-from agentflow_proxy.optimization_rollout_review import (
+from tokenclaw.optimization_rollout_review import (
     attach_optimization_rollout_provenance,
     review_optimization_rollout_actions,
     validate_optimization_rollout_bundle,
 )
-from agentflow_proxy.recommendations import queue_policy_event_feedback
-from agentflow_proxy.store import stable_json
+from tokenclaw.recommendations import queue_policy_event_feedback
+from tokenclaw.store import stable_json
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "optimization_promotion_rollout_contract_v1.json"

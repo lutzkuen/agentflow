@@ -4,10 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.session_phase_memory import build_session_phase_memory
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw import cli
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.session_phase_memory import build_session_phase_memory
+from tokenclaw.store import Store, stable_json
 
 FORBIDDEN_MEMORY_VALUES = (
     "SECRET_PHASE_PROMPT_BODY",

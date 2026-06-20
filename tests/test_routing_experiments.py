@@ -8,12 +8,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.managed_egress import assert_managed_egress_safe
-from agentflow_proxy.recommendations import queue_policy_event_feedback
-from agentflow_proxy.store import Store, stable_json, utc_now
-from agentflow_proxy import stats
-import agentflow_proxy.routing_experiments as experiments
+from tokenclaw import cli
+from tokenclaw.managed_egress import assert_managed_egress_safe
+from tokenclaw.recommendations import queue_policy_event_feedback
+from tokenclaw.store import Store, stable_json, utc_now
+from tokenclaw import stats
+import tokenclaw.routing_experiments as experiments
 
 
 class RoutingExperimentPolicyTest(unittest.TestCase):
@@ -1047,7 +1047,7 @@ max_text_chars: 8000
         self.assertEqual(meta["reason"], "model-pair-not-enabled")
 
     def test_budget_spend_blocks_after_cap_is_exhausted(self):
-        from agentflow_proxy.store import Store, stable_json, utc_now
+        from tokenclaw.store import Store, stable_json, utc_now
 
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

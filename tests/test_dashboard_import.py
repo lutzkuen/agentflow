@@ -23,10 +23,10 @@ if HAS_RUNTIME_DEPS:
     import httpx
     from fastapi.testclient import TestClient
 
-    from agentflow_proxy import stats as stats_views
-    import agentflow_proxy.dashboard_app as dashboard_app
-    from agentflow_proxy.dashboard_app import create_dashboard_app
-    from agentflow_proxy.store import Store, stable_json, utc_now
+    from tokenclaw import stats as stats_views
+    import tokenclaw.dashboard_app as dashboard_app
+    from tokenclaw.dashboard_app import create_dashboard_app
+    from tokenclaw.store import Store, stable_json, utc_now
 
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
@@ -157,26 +157,26 @@ class DashboardImportTests(unittest.TestCase):
         store.conn.commit()
 
     def test_dashboard_import_does_not_import_provider_server(self):
-        old_dashboard = sys.modules.pop("agentflow_proxy.dashboard", None)
-        old_dashboard_app = sys.modules.pop("agentflow_proxy.dashboard_app", None)
-        old_server = sys.modules.pop("agentflow_proxy.server", None)
-        old_provider_handlers = sys.modules.pop("agentflow_proxy.provider_handlers", None)
+        old_dashboard = sys.modules.pop("tokenclaw.dashboard", None)
+        old_dashboard_app = sys.modules.pop("tokenclaw.dashboard_app", None)
+        old_server = sys.modules.pop("tokenclaw.server", None)
+        old_provider_handlers = sys.modules.pop("tokenclaw.provider_handlers", None)
         try:
-            import agentflow_proxy.dashboard  # noqa: F401
+            import tokenclaw.dashboard  # noqa: F401
 
-            self.assertNotIn("agentflow_proxy.server", sys.modules)
-            self.assertNotIn("agentflow_proxy.provider_handlers", sys.modules)
+            self.assertNotIn("tokenclaw.server", sys.modules)
+            self.assertNotIn("tokenclaw.provider_handlers", sys.modules)
         finally:
-            sys.modules.pop("agentflow_proxy.dashboard", None)
-            sys.modules.pop("agentflow_proxy.dashboard_app", None)
+            sys.modules.pop("tokenclaw.dashboard", None)
+            sys.modules.pop("tokenclaw.dashboard_app", None)
             if old_dashboard is not None:
-                sys.modules["agentflow_proxy.dashboard"] = old_dashboard
+                sys.modules["tokenclaw.dashboard"] = old_dashboard
             if old_dashboard_app is not None:
-                sys.modules["agentflow_proxy.dashboard_app"] = old_dashboard_app
+                sys.modules["tokenclaw.dashboard_app"] = old_dashboard_app
             if old_server is not None:
-                sys.modules["agentflow_proxy.server"] = old_server
+                sys.modules["tokenclaw.server"] = old_server
             if old_provider_handlers is not None:
-                sys.modules["agentflow_proxy.provider_handlers"] = old_provider_handlers
+                sys.modules["tokenclaw.provider_handlers"] = old_provider_handlers
 
     def test_dashboard_app_uses_injected_store_and_preserves_routes(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
@@ -193,7 +193,7 @@ class DashboardImportTests(unittest.TestCase):
         os.environ["AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = str(Path(event_tmp.name) / "missing_post_promotion_outcome_flush_status.json")
         store = Store(tmp.name)
         try:
-            from agentflow_proxy.policy_events import log_policy_event
+            from tokenclaw.policy_events import log_policy_event
 
             log_policy_event("validate", ok=False, details={"source": "test", "error_count": 1})
             app = create_dashboard_app(
@@ -628,7 +628,7 @@ class DashboardImportTests(unittest.TestCase):
         os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = str(review_path)
         store = Store(tmp.name)
         try:
-            from agentflow_proxy.promotion_blocker_review import build_promotion_blocker_recommendation_review
+            from tokenclaw.promotion_blocker_review import build_promotion_blocker_recommendation_review
 
             payload = {
                 "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
@@ -774,8 +774,8 @@ class DashboardImportTests(unittest.TestCase):
         os.environ["AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = str(flush_path)
         store = Store(tmp.name)
         try:
-            from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
-            from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+            from tokenclaw.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+            from tokenclaw.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
 
             priority_payload = {
                 "schema": "agentflow.post_promotion_policy_priority_deltas.v1",
@@ -1295,7 +1295,7 @@ class DashboardImportTests(unittest.TestCase):
             ]),
             encoding="utf-8",
         )
-        from agentflow_proxy.policy_events import log_policy_event
+        from tokenclaw.policy_events import log_policy_event
 
         log_policy_event(
             "scaffold-rollout-actions-review",
@@ -1426,7 +1426,7 @@ class DashboardImportTests(unittest.TestCase):
         policy_tmp.flush()
         store = Store(tmp.name)
         try:
-            from agentflow_proxy import crunch
+            from tokenclaw import crunch
 
             terminal_text = "\n".join(
                 [
@@ -1563,8 +1563,8 @@ class DashboardImportTests(unittest.TestCase):
         policy_tmp.flush()
         store = Store(tmp.name)
         try:
-            from agentflow_proxy import crunch
-            from agentflow_proxy.terminal_compaction_feedback import FEEDBACK_SCHEMA, SOURCE_SURFACE
+            from tokenclaw import crunch
+            from tokenclaw.terminal_compaction_feedback import FEEDBACK_SCHEMA, SOURCE_SURFACE
 
             policy = {
                 "enabled": True,
@@ -1829,7 +1829,7 @@ class DashboardImportTests(unittest.TestCase):
         os.environ["AGENTFLOW_POLICY_DRAFT_DIR"] = draft_tmp.name
         store = Store(tmp.name)
         try:
-            from agentflow_proxy.policy_events import log_policy_event
+            from tokenclaw.policy_events import log_policy_event
 
             log_policy_event(
                 "fetch-review",
@@ -2157,8 +2157,8 @@ class DashboardImportTests(unittest.TestCase):
             tmp.close()
 
     def test_policy_workbench_readiness_reports_staged_drafts_events_and_privacy(self):
-        from agentflow_proxy import stats as stats_views
-        from agentflow_proxy.policy_events import log_policy_event
+        from tokenclaw import stats as stats_views
+        from tokenclaw.policy_events import log_policy_event
 
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         work_tmp = tempfile.TemporaryDirectory()
@@ -2244,7 +2244,7 @@ class DashboardImportTests(unittest.TestCase):
                     "status": "applied",
                     "changed_sections": ["cache"],
                     "backup_paths": [str(Path(work_tmp.name) / "cache_rules.yaml.bak-apply-123")],
-                    "reloaded_modules": ["agentflow_proxy.cache"],
+                    "reloaded_modules": ["tokenclaw.cache"],
                     "verification_ok": True,
                     "provider_calls_made": False,
                     "managed_server_calls_made": False,
@@ -2260,7 +2260,7 @@ class DashboardImportTests(unittest.TestCase):
                     "backup_id": "apply-123",
                     "status": "rolled_back",
                     "restored_sections": ["cache"],
-                    "reloaded_modules": ["agentflow_proxy.cache"],
+                    "reloaded_modules": ["tokenclaw.cache"],
                     "provider_calls_made": False,
                     "managed_server_calls_made": False,
                     "exit_code": 0,
@@ -2464,7 +2464,7 @@ class DashboardImportTests(unittest.TestCase):
                 full_stats_ttl_s=0,
             )
             client = TestClient(app)
-            with patch("agentflow_proxy.optimization_eval_plan.build_optimization_eval_plan", fake_build_optimization_eval_plan):
+            with patch("tokenclaw.optimization_eval_plan.build_optimization_eval_plan", fake_build_optimization_eval_plan):
                 response = client.get("/agentflow/stats/optimization-eval-queue?limit=50")
                 dashboard = client.get("/agentflow/dashboard")
 
@@ -2653,7 +2653,7 @@ class DashboardImportTests(unittest.TestCase):
             )
 
         try:
-            from agentflow_proxy.policy_events import log_policy_event
+            from tokenclaw.policy_events import log_policy_event
 
             store.log_optimization_eval_result(
                 id="promotion-widen-eval",
@@ -2756,7 +2756,7 @@ class DashboardImportTests(unittest.TestCase):
                 full_stats_ttl_s=0,
             )
             client = TestClient(app)
-            with patch("agentflow_proxy.optimization_eval_plan.build_optimization_eval_plan", fake_build_optimization_eval_plan):
+            with patch("tokenclaw.optimization_eval_plan.build_optimization_eval_plan", fake_build_optimization_eval_plan):
                 response = client.get("/agentflow/stats/optimization-promotion-funnel?limit=50")
                 action_response = client.get("/agentflow/stats/optimization-promotion-actions?limit=3")
                 dashboard = client.get("/agentflow/dashboard")
@@ -3247,7 +3247,7 @@ class DashboardImportTests(unittest.TestCase):
         os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
         store = Store(tmp.name)
         try:
-            from agentflow_proxy.policy_events import log_policy_event
+            from tokenclaw.policy_events import log_policy_event
 
             log_policy_event(
                 "rollout-actions-review",

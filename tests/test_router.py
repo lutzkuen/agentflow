@@ -5,11 +5,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-import agentflow_proxy.router as router_module
-from agentflow_proxy.anthropic_proxy import _record_routing_rate_limit_fallback
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.store import Store, stable_json, utc_now
-from agentflow_proxy.router import HAIKU_DEFAULT, SONNET_DEFAULT, classify_workflow_phase, route_model
+import tokenclaw.router as router_module
+from tokenclaw.anthropic_proxy import _record_routing_rate_limit_fallback
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.store import Store, stable_json, utc_now
+from tokenclaw.router import HAIKU_DEFAULT, SONNET_DEFAULT, classify_workflow_phase, route_model
 
 
 def _log_memory_call(

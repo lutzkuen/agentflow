@@ -7,19 +7,19 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from agentflow_proxy import cli
-from agentflow_proxy.local_activation_executor import (
+from tokenclaw import cli
+from tokenclaw.local_activation_executor import (
     build_managed_activation_preview_request,
     build_managed_activation_preview_result,
     build_local_activation_executor_managed_handoff,
     build_local_activation_executor_plan,
 )
-from agentflow_proxy.managed_activation_preview_outcomes import (
+from tokenclaw.managed_activation_preview_outcomes import (
     build_managed_activation_preview_outcomes_report,
     persist_managed_activation_preview_outcomes,
 )
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.store import Store, stable_json
 
 
 NOW = datetime(2026, 6, 19, 5, 30, tzinfo=timezone.utc)
@@ -1064,7 +1064,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
             response.json.side_effect = response_json
 
-            with patch("agentflow_proxy.cli.httpx.post", return_value=response) as post_mock:
+            with patch("tokenclaw.cli.httpx.post", return_value=response) as post_mock:
                 code = cli.managed_activation_preview_cli(
                     [
                         "--plan-json",
@@ -1148,7 +1148,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
                 }
                 return response
 
-            with patch("agentflow_proxy.cli.httpx.post", side_effect=fake_post) as post_mock:
+            with patch("tokenclaw.cli.httpx.post", side_effect=fake_post) as post_mock:
                 code = cli.managed_activation_preview_cli(
                     [
                         "--plan-json",

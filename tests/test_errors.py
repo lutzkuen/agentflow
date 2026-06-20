@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from agentflow_proxy.errors import upstream_error_text
+from tokenclaw.errors import upstream_error_text
 
 
 HAS_RUNTIME_DEPS = all(
@@ -17,8 +17,8 @@ if HAS_RUNTIME_DEPS:
     import httpx
     from fastapi.testclient import TestClient
 
-    from agentflow_proxy import anthropic_proxy, openai_proxy, server
-    from agentflow_proxy.store import Store
+    from tokenclaw import anthropic_proxy, openai_proxy, server
+    from tokenclaw.store import Store
 
 
 class UpstreamErrorTextTest(unittest.TestCase):
@@ -117,7 +117,7 @@ class PublicProxyErrorTest(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
         body = response.json()
         self.assertEqual(body["type"], "error")
-        self.assertEqual(body["error"]["type"], "agentflow_proxy_error")
+        self.assertEqual(body["error"]["type"], "tokenclaw_error")
         self.assertEqual(body["error"]["message"], "Internal proxy error")
         self.assertNotIn("agentflow-token", response.text)
         self.assertIn("agentflow-token", "\n".join(logs.output))
@@ -209,7 +209,7 @@ class PublicProxyErrorTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 500)
         body = response.json()
-        self.assertEqual(body["error"]["type"], "agentflow_proxy_error")
+        self.assertEqual(body["error"]["type"], "tokenclaw_error")
         self.assertEqual(body["error"]["message"], "Internal proxy error")
         self.assertNotIn("agentflow-token", response.text)
         [row] = server.store.conn.execute("select provider, status_code, error from calls").fetchall()
@@ -280,7 +280,7 @@ class PublicProxyErrorTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Internal proxy error", body)
-        self.assertIn("agentflow_proxy_error", body)
+        self.assertIn("tokenclaw_error", body)
         self.assertNotIn("agentflow-token", body)
         [row] = server.store.conn.execute("select status_code, error from calls").fetchall()
         self.assertEqual(row["status_code"], 500)
@@ -296,7 +296,7 @@ class PublicProxyErrorTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Internal proxy error", body)
-        self.assertIn("agentflow_proxy_error", body)
+        self.assertIn("tokenclaw_error", body)
         self.assertNotIn("agentflow-token", body)
         [row] = server.store.conn.execute("select provider, status_code, error from calls").fetchall()
         self.assertEqual(row["provider"], "openai")

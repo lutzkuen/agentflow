@@ -6,9 +6,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-import agentflow_proxy.crunch as crunch_module
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.pattern_modules import (
+import tokenclaw.crunch as crunch_module
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.pattern_modules import (
     CacheabilityPatternModule,
     DiffPatternModule,
     GeneratedArtifactPatternModule,

@@ -4,9 +4,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.store import Store, stable_json
-from agentflow_proxy.terminal_compaction_dry_run import (
+from tokenclaw import cli
+from tokenclaw.store import Store, stable_json
+from tokenclaw.terminal_compaction_dry_run import (
     apply_terminal_output_compaction_plan,
     build_terminal_output_compaction_dry_run,
     plan_terminal_output_compaction,
@@ -22,7 +22,7 @@ def _terminal_text(secret: str) -> str:
         '  File "/workspace/private/tests/test_secret_terminal.py", line 42, in test_hidden',
         "AssertionError: expected ok",
         "exit code: 1",
-        "modified agentflow_proxy/terminal_compaction_dry_run.py",
+        "modified tokenclaw/terminal_compaction_dry_run.py",
     ]
     noisy = [
         f"2026-06-12T10:00:{second:02d}Z INFO pid=1234 compiling shard={second} secret={secret}"
@@ -146,7 +146,7 @@ class TerminalOutputCompactionDryRunTests(unittest.TestCase):
         self.assertIn("Traceback (most recent call last):", planned_text)
         self.assertIn('File "/workspace/private/tests/test_secret_terminal.py", line 42', planned_text)
         self.assertIn("exit code: 1", planned_text)
-        self.assertIn("modified agentflow_proxy/terminal_compaction_dry_run.py", planned_text)
+        self.assertIn("modified tokenclaw/terminal_compaction_dry_run.py", planned_text)
         self.assertLess(len(rendered), len(stable_json(body)))
 
     def test_dry_run_report_is_metadata_only_and_ranks_plateaued_anthropic_plan(self):

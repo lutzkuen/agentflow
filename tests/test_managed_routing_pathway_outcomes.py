@@ -8,9 +8,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
-from agentflow_proxy import cli
-from agentflow_proxy.managed_routing_pathway_outcomes import build_local_routing_pathway_outcome_feedback
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw import cli
+from tokenclaw.managed_routing_pathway_outcomes import build_local_routing_pathway_outcome_feedback
+from tokenclaw.store import Store, stable_json
 
 
 class ManagedRoutingPathwayOutcomeFeedbackTests(unittest.TestCase):

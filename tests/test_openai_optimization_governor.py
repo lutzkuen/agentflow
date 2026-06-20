@@ -5,14 +5,14 @@ import json
 import unittest
 from unittest.mock import patch
 
-from agentflow_proxy.openai_optimization_governor import (
+from tokenclaw.openai_optimization_governor import (
     attach_openai_optimization_governor,
     build_openai_optimization_governor,
     build_openai_optimization_lifecycle_event,
     selected_openai_governor_family,
 )
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.optimization.openai_outcomes import record_managed_outcome_feedback
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.optimization.openai_outcomes import record_managed_outcome_feedback
 
 
 FORBIDDEN_VALUES = (

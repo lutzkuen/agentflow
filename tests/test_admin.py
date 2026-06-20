@@ -12,7 +12,7 @@ if HAS_RUNTIME_DEPS:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from agentflow_proxy.admin import create_admin_router
+    from tokenclaw.admin import create_admin_router
 
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
@@ -56,13 +56,13 @@ class AdminRouterTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["schema"], "agentflow.policy_reload.v1")
         self.assertEqual(callbacks, ["called"])
-        self.assertIn("agentflow_proxy.router", payload["reloaded_modules"])
+        self.assertIn("tokenclaw.router", payload["reloaded_modules"])
         self.assertEqual(payload["policies"]["schema"], "agentflow.policy_state.v1")
         self.assertIn("routing", payload["policies"])
         self.assertIn("crunch", payload["policies"])
         self.assertIn("cache", payload["policies"])
 
-        from agentflow_proxy.policy_events import recent_policy_events
+        from tokenclaw.policy_events import recent_policy_events
 
         events = recent_policy_events(limit=1)["events"]
         self.assertEqual(events[0]["action"], "reload")
@@ -139,7 +139,7 @@ class AdminRouterTests(unittest.TestCase):
         self.assertTrue(cache_section["reload_required_after_apply"])
         self.assertTrue((Path(workspace) / "admin-cache-draft" / "draft.json").exists())
 
-        from agentflow_proxy.policy_events import recent_policy_events
+        from tokenclaw.policy_events import recent_policy_events
 
         event_text = json.dumps(recent_policy_events(limit=1)["events"])
         self.assertIn("draft-stage", event_text)

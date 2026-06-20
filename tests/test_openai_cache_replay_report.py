@@ -14,28 +14,28 @@ from unittest.mock import patch
 import yaml
 from fastapi.testclient import TestClient
 
-from agentflow_proxy import cli
-from agentflow_proxy.cache_smoke import build_cache_smoke_diagnostic
-from agentflow_proxy.dashboard_app import create_dashboard_app
-from agentflow_proxy.openai_cache_replay_apply import build_openai_cache_replay_apply_plan
-from agentflow_proxy.openai_cache_replay_blocker_outcomes import build_openai_cache_replay_blocker_outcomes_report
-from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
-from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
-from agentflow_proxy.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
-from agentflow_proxy.openai_cache_replay_report import build_openai_cache_replay_report
-from agentflow_proxy.provider_adoption import capture_provider_tool_adoption
-from agentflow_proxy.stats import (
+from tokenclaw import cli
+from tokenclaw.cache_smoke import build_cache_smoke_diagnostic
+from tokenclaw.dashboard_app import create_dashboard_app
+from tokenclaw.openai_cache_replay_apply import build_openai_cache_replay_apply_plan
+from tokenclaw.openai_cache_replay_blocker_outcomes import build_openai_cache_replay_blocker_outcomes_report
+from tokenclaw.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
+from tokenclaw.openai_cache_replay_impact import build_openai_cache_replay_impact_report
+from tokenclaw.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
+from tokenclaw.openai_cache_replay_report import build_openai_cache_replay_report
+from tokenclaw.provider_adoption import capture_provider_tool_adoption
+from tokenclaw.stats import (
     stats_openai_cache_replay_impact,
     stats_openai_cache_replay_readiness,
     stats_openai_cache_replay_report,
     stats_openai_tool_cache_invalidation_burndown,
 )
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 def _reload_cache_module_for_test():
-    from agentflow_proxy import anthropic_proxy
-    from agentflow_proxy import cache as cache_module
+    from tokenclaw import anthropic_proxy
+    from tokenclaw import cache as cache_module
 
     reloaded = importlib.reload(cache_module)
     anthropic_proxy.cache_lookup_meta = reloaded.cache_lookup_meta
@@ -801,7 +801,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertNotIn("raw-cli-request-fingerprint", output.getvalue())
 
     def test_openai_dependency_evidence_distinguishes_stable_files_from_missing_files(self) -> None:
-        from agentflow_proxy import cache as cache_module
+        from tokenclaw import cache as cache_module
 
         old_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1230,8 +1230,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             }
 
         output = io.StringIO()
-        with patch("agentflow_proxy.recommendations.recommendations_enabled", return_value=True), patch(
-            "agentflow_proxy.recommendations.queue_policy_event_feedback",
+        with patch("tokenclaw.recommendations.recommendations_enabled", return_value=True), patch(
+            "tokenclaw.recommendations.queue_policy_event_feedback",
             fake_queue,
         ):
             exit_code = cli.openai_cache_replay_impact_cli(["--db", self.db_path, "--limit", "20"], stdout=output)
@@ -2002,7 +2002,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 created_at=f"2026-06-11T08:0{index}:00+00:00",
             )
 
-        from agentflow_proxy import cache as cache_module
+        from tokenclaw import cache as cache_module
 
         try:
             with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(policy_path)}):
@@ -2158,7 +2158,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(policy["pattern_rules"][0]["rollout"]["canary_fraction"], 0.8)
         self.assertEqual(policy["pattern_rules"][0]["action"]["scope"], "session")
 
-        from agentflow_proxy import cache as cache_module
+        from tokenclaw import cache as cache_module
 
         try:
             with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(policy_path)}):

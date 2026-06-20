@@ -7,8 +7,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.managed_routing_pathway_candidates import (
+from tokenclaw import cli
+from tokenclaw.managed_routing_pathway_candidates import (
     build_managed_routing_pathway_shadow_candidates,
 )
 

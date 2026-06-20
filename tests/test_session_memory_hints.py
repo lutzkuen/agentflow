@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.session_memory_hints import build_session_memory_optimization_hints
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.session_memory_hints import build_session_memory_optimization_hints
+from tokenclaw.store import Store, stable_json
 
 
 def _log_call(

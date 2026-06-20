@@ -12,12 +12,12 @@ from unittest.mock import patch
 
 import yaml
 
-from agentflow_proxy import cli
-import agentflow_proxy.router as router
-from agentflow_proxy.claude_canary_actions import apply_claude_canary_actions, build_claude_canary_actions
-from agentflow_proxy.claude_canary_impact import build_anthropic_routing_canary_lifecycle_report, build_claude_canary_impact_report
-from agentflow_proxy.routing_canary_promote import build_routing_canary_promotion_plan
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw import cli
+import tokenclaw.router as router
+from tokenclaw.claude_canary_actions import apply_claude_canary_actions, build_claude_canary_actions
+from tokenclaw.claude_canary_impact import build_anthropic_routing_canary_lifecycle_report, build_claude_canary_impact_report
+from tokenclaw.routing_canary_promote import build_routing_canary_promotion_plan
+from tokenclaw.store import Store, stable_json
 
 
 HAS_RUNTIME_DEPS = all(importlib.util.find_spec(module_name) is not None for module_name in ("fastapi", "httpx"))
@@ -25,8 +25,8 @@ HAS_RUNTIME_DEPS = all(importlib.util.find_spec(module_name) is not None for mod
 if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
-    from agentflow_proxy.dashboard_app import create_dashboard_app
-    import agentflow_proxy.stats as stats_views
+    from tokenclaw.dashboard_app import create_dashboard_app
+    import tokenclaw.stats as stats_views
 
 
 def _assert_privacy_clean(testcase: unittest.TestCase, payload: dict) -> None:
@@ -860,7 +860,7 @@ class ClaudeCanaryActionTests(unittest.TestCase):
             old_rules = os.environ.get("AGENTFLOW_ROUTING_RULES")
             os.environ["AGENTFLOW_ROUTING_RULES"] = str(routing_file)
             try:
-                import agentflow_proxy.router as router_module
+                import tokenclaw.router as router_module
 
                 manual_router = importlib.reload(router_module)
                 body = {
@@ -879,7 +879,7 @@ class ClaudeCanaryActionTests(unittest.TestCase):
                     os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
                 else:
                     os.environ["AGENTFLOW_ROUTING_RULES"] = old_rules
-                import agentflow_proxy.router as router_module
+                import tokenclaw.router as router_module
 
                 importlib.reload(router_module)
 

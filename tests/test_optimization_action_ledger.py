@@ -7,12 +7,12 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.optimization_action_ledger import (
+from tokenclaw import cli
+from tokenclaw.optimization_action_ledger import (
     build_optimization_action_ledger,
     build_optimization_action_ledger_report,
 )
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 FORBIDDEN_VALUES = (

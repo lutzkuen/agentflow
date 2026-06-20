@@ -8,10 +8,10 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.routing_coverage import build_routing_coverage_report
-from agentflow_proxy.stats import stats_routing_coverage_report
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw.routing_coverage import build_routing_coverage_report
+from tokenclaw.stats import stats_routing_coverage_report
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 class RoutingCoverageReportTests(unittest.TestCase):

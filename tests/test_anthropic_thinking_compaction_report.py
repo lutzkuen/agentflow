@@ -6,11 +6,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.anthropic_thinking_compaction_report import (
+from tokenclaw import cli
+from tokenclaw.anthropic_thinking_compaction_report import (
     build_anthropic_thinking_compaction_opportunity_report,
 )
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw.store import Store, stable_json
 
 
 def _thinking_tool_result_body(secret: str) -> dict:

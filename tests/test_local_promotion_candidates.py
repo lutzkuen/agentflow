@@ -6,12 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.local_promotion_candidates import (
+from tokenclaw import cli
+from tokenclaw.local_promotion_candidates import (
     SCHEMA,
     build_local_promotion_candidates_from_reports,
 )
-from agentflow_proxy.store import SQLiteStore
+from tokenclaw.store import SQLiteStore
 
 
 def _source_reports() -> dict:

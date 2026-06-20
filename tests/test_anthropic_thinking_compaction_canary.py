@@ -7,9 +7,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-import agentflow_proxy.crunch as crunch_module
-from agentflow_proxy.optimization_action_ledger import build_optimization_action_ledger
-from agentflow_proxy.store import Store, stable_json
+import tokenclaw.crunch as crunch_module
+from tokenclaw.optimization_action_ledger import build_optimization_action_ledger
+from tokenclaw.store import Store, stable_json
 
 
 def _thinking(secret: str, suffix: str = "") -> str:

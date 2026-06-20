@@ -9,8 +9,8 @@ from unittest.mock import patch
 import httpx
 import yaml
 
-from agentflow_proxy import cli
-from agentflow_proxy.openai_cache_replay_rollout_actions import (
+from tokenclaw import cli
+from tokenclaw.openai_cache_replay_rollout_actions import (
     attach_openai_cache_replay_rollout_provenance,
 )
 
@@ -341,7 +341,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
             db_path = str(Path(tmp) / "agentflow.sqlite3")
             signed = self._signed(self._bundle())
             out = io.StringIO()
-            with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+            with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
                 code = cli.managed_rollout_actions_apply_cli(
                     ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
                     stdin=io.StringIO(json.dumps(signed)),

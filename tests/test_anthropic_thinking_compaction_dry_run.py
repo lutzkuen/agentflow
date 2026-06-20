@@ -7,11 +7,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.anthropic_thinking_compaction_dry_run import (
+from tokenclaw import cli
+from tokenclaw.anthropic_thinking_compaction_dry_run import (
     build_anthropic_thinking_compaction_dry_run,
 )
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw.store import Store, stable_json
 
 
 def _thinking_text(secret: str, marker: str = "alpha beta gamma delta epsilon") -> str:

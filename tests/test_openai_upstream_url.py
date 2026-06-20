@@ -1,6 +1,6 @@
 import unittest
 
-from agentflow_proxy.upstream_url import (
+from tokenclaw.upstream_url import (
     UpstreamUrlError,
     join_openai_upstream_url,
     normalize_openai_upstream_base_url,

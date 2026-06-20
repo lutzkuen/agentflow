@@ -4,9 +4,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.store import Store, stable_json
-from agentflow_proxy.terminal_compaction_impact import build_terminal_output_compaction_impact_report
+from tokenclaw import cli
+from tokenclaw.store import Store, stable_json
+from tokenclaw.terminal_compaction_impact import build_terminal_output_compaction_impact_report
 
 
 def _terminal_meta(

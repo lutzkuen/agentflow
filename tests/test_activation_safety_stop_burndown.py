@@ -4,15 +4,15 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from agentflow_proxy import cli
-from agentflow_proxy.activation_lifecycle_feedback import (
+from tokenclaw import cli
+from tokenclaw.activation_lifecycle_feedback import (
     LIFECYCLE_SOURCE_SURFACE,
     activation_safety_stop_burndown_report,
     build_activation_safety_stop_burndown,
     build_activation_staged_lifecycle_feedback,
 )
-from agentflow_proxy.orchestrator_research import build_local_activation_next_action_queue
-from agentflow_proxy.store import Store, stable_json, utc_now
+from tokenclaw.orchestrator_research import build_local_activation_next_action_queue
+from tokenclaw.store import Store, stable_json, utc_now
 
 
 class ActivationSafetyStopBurndownTests(unittest.TestCase):

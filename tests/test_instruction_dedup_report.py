@@ -8,10 +8,10 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.instruction_dedup_report import build_instruction_dedup_opportunity_report
-from agentflow_proxy.stats import stats_instruction_dedup_opportunity
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw.instruction_dedup_report import build_instruction_dedup_opportunity_report
+from tokenclaw.stats import stats_instruction_dedup_opportunity
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 class InstructionDedupReportTests(unittest.TestCase):

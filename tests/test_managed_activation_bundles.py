@@ -9,10 +9,10 @@ from tempfile import TemporaryDirectory
 
 import yaml
 
-from agentflow_proxy import cli
-from agentflow_proxy.managed_activation_apply import apply_staged_managed_activation_bundle
-from agentflow_proxy.managed_activation_bundles import stage_managed_activation_bundle_sync
-from agentflow_proxy.policy_workbench import rollback_policy_apply
+from tokenclaw import cli
+from tokenclaw.managed_activation_apply import apply_staged_managed_activation_bundle
+from tokenclaw.managed_activation_bundles import stage_managed_activation_bundle_sync
+from tokenclaw.policy_workbench import rollback_policy_apply
 
 
 def _action(family: str, order: int, *, apply_after: list[str] | None = None) -> dict[str, object]:

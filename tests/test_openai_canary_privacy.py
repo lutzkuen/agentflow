@@ -11,14 +11,14 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from agentflow_proxy import cli
-from agentflow_proxy import router as router_module
-from agentflow_proxy.openai_canary_impact import build_openai_canary_impact_report
-from agentflow_proxy.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
-from agentflow_proxy.openai_routing_report import build_openai_routing_report
-from agentflow_proxy.optimization.openai_outcomes import record_managed_outcome_feedback
-from agentflow_proxy.stats import stats_openai_canary_readiness
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw import router as router_module
+from tokenclaw.openai_canary_impact import build_openai_canary_impact_report
+from tokenclaw.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
+from tokenclaw.openai_routing_report import build_openai_routing_report
+from tokenclaw.optimization.openai_outcomes import record_managed_outcome_feedback
+from tokenclaw.stats import stats_openai_canary_readiness
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 FORBIDDEN_VALUES = (

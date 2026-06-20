@@ -8,14 +8,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.optimization import openai_features
-from agentflow_proxy.optimization import openai_pipeline
-from agentflow_proxy import router as router_module
-from agentflow_proxy import cache as cache_module
-from agentflow_proxy.openai_routing_report import build_openai_routing_report
-import agentflow_proxy.routing_experiments as routing_experiments_module
-from agentflow_proxy.store import stable_json
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.optimization import openai_features
+from tokenclaw.optimization import openai_pipeline
+from tokenclaw import router as router_module
+from tokenclaw import cache as cache_module
+from tokenclaw.openai_routing_report import build_openai_routing_report
+import tokenclaw.routing_experiments as routing_experiments_module
+from tokenclaw.store import stable_json
 
 
 HAS_RUNTIME_DEPS = all(
@@ -26,8 +26,8 @@ HAS_RUNTIME_DEPS = all(
 if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
-    from agentflow_proxy import openai_proxy, server
-    from agentflow_proxy.store import Store
+    from tokenclaw import openai_proxy, server
+    from tokenclaw.store import Store
 
 
 class FakeJsonResponse:
@@ -1421,7 +1421,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         }):
             with patch.object(openai_proxy, "crunch_body", fake_crunch):
                 with patch(
-                    "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                    "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                     side_effect=fake_fetch,
                 ):
                     with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -1444,7 +1444,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "1"}, clear=False):
             with patch(
-                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                 side_effect=AssertionError("observe-only must not fetch managed recommendations"),
             ):
                 with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -1495,7 +1495,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "AGENTFLOW_POLICY_DECISION_ENABLED": "1",
         }):
             with patch(
-                "agentflow_proxy.optimization.openai_recommendations.fetch_policy_decision",
+                "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
                 side_effect=fake_policy_decision,
             ):
                 with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -1549,7 +1549,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION": "1",
         }):
             with patch(
-                "agentflow_proxy.optimization.openai_recommendations.fetch_policy_decision",
+                "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
                 side_effect=fake_policy_decision,
             ):
                 with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -1608,7 +1608,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION": "0",
         }):
             with patch(
-                "agentflow_proxy.optimization.openai_recommendations.fetch_policy_decision",
+                "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
                 side_effect=fake_policy_decision,
             ):
                 with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -1648,7 +1648,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "dry-run"}):
             with patch(
-                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                 return_value=recommendation,
             ):
                 with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -1692,7 +1692,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }):
             with patch(
-                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                 return_value=recommendation,
             ):
                 with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -1738,7 +1738,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }):
             with patch(
-                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                 return_value=recommendation,
             ):
                 with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -1796,7 +1796,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }):
             with patch(
-                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                 return_value=recommendation,
             ):
                 with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -1923,7 +1923,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }):
             with patch(
-                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                 return_value=recommendation,
             ):
                 with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -1974,7 +1974,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }):
             with patch(
-                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                 return_value=recommendation,
             ):
                 with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
@@ -2048,7 +2048,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
                 }):
                     with patch(
-                        "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                        "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                         return_value=recommendation,
                     ):
                         with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):

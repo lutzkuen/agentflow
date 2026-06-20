@@ -13,8 +13,8 @@ if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
     from starlette.datastructures import Headers
 
-    from agentflow_proxy import openai_proxy, server
-    from agentflow_proxy.provider_context import ProviderContext
+    from tokenclaw import openai_proxy, server
+    from tokenclaw.provider_context import ProviderContext
 
 
 class DummyRequest:

@@ -10,18 +10,18 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from agentflow_proxy import cli
-from agentflow_proxy.instruction_dedup_feedback import (
+from tokenclaw import cli
+from tokenclaw.instruction_dedup_feedback import (
     FEEDBACK_SCHEMA,
     SOURCE_SURFACE,
     build_instruction_dedup_lifecycle_feedback,
     queue_instruction_dedup_lifecycle_feedback,
 )
-from agentflow_proxy.instruction_dedup_impact import build_instruction_dedup_impact_report
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.optimization import feedback
-from agentflow_proxy.stats import stats_instruction_dedup_impact
-from agentflow_proxy.store import Store, stable_json, utc_now
+from tokenclaw.instruction_dedup_impact import build_instruction_dedup_impact_report
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.optimization import feedback
+from tokenclaw.stats import stats_instruction_dedup_impact
+from tokenclaw.store import Store, stable_json, utc_now
 
 
 FORBIDDEN_VALUES = (

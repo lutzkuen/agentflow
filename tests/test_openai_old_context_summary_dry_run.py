@@ -9,9 +9,9 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from agentflow_proxy import cli
-from agentflow_proxy.openai_old_context_summary_dry_run import build_openai_old_context_summary_dry_run
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw import cli
+from tokenclaw.openai_old_context_summary_dry_run import build_openai_old_context_summary_dry_run
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 class OpenAIOldContextSummaryDryRunTests(unittest.TestCase):

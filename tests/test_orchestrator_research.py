@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from agentflow_proxy import cli
-from agentflow_proxy.orchestrator_research import (
+from tokenclaw import cli
+from tokenclaw.orchestrator_research import (
     build_activation_burndown_report,
     build_evidence_to_activation_burndown,
     build_evidence_to_activation_next_action_ledger,
@@ -17,7 +17,7 @@ from agentflow_proxy.orchestrator_research import (
     _dedupe_create_issue_proposals_with_metadata,
     _full_rollout_crunch_post_rollout_cohort_ranking,
 )
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 NOW = datetime(2026, 6, 11, 8, 40, tzinfo=timezone.utc)
@@ -9613,8 +9613,8 @@ class OrchestratorResearchCliTests(unittest.TestCase):
             calls.append(cmd)
             return cli.subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
 
-        with patch("agentflow_proxy.cli.shutil.which", return_value="/usr/bin/gh"), patch(
-            "agentflow_proxy.cli.subprocess.run",
+        with patch("tokenclaw.cli.shutil.which", return_value="/usr/bin/gh"), patch(
+            "tokenclaw.cli.subprocess.run",
             side_effect=fake_run,
         ):
             enriched = cli._attach_recent_closed_github_issues_for_research(
@@ -9681,11 +9681,11 @@ class OrchestratorResearchCliTests(unittest.TestCase):
             queue = build_local_activation_next_action_queue(
                 {"evidence_to_activation_next_action_ledger": ledger}
             )
-            from agentflow_proxy.local_activation_executor import (
+            from tokenclaw.local_activation_executor import (
                 build_managed_activation_preview_request,
                 build_managed_activation_preview_result,
             )
-            from agentflow_proxy.managed_activation_preview_outcomes import (
+            from tokenclaw.managed_activation_preview_outcomes import (
                 persist_managed_activation_preview_outcomes,
             )
 
@@ -9899,7 +9899,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
                         routed_model_family="gpt-5",
                     )
 
-                from agentflow_proxy.request_shape_rollups import (
+                from tokenclaw.request_shape_rollups import (
                     apply_request_shape_cache_replay_canary_action,
                     build_request_shape_cache_replay_canary_stage_report,
                 )
@@ -10178,7 +10178,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         self.assertNotIn("req-secret-dup2", rendered)
 
     def test_diagnostic_fingerprint_is_stable(self):
-        from agentflow_proxy.orchestrator_research import _diagnostic_fingerprint
+        from tokenclaw.orchestrator_research import _diagnostic_fingerprint
         self.assertEqual(
             _diagnostic_fingerprint("safety-stop"),
             _diagnostic_fingerprint("safety-stop"),

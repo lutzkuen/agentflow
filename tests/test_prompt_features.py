@@ -1,8 +1,8 @@
 import json
 import unittest
 
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.prompt_features import prompt_difficulty_features_from_text
 
 
 class PromptDifficultyFeatureTests(unittest.TestCase):

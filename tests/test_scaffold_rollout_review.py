@@ -12,15 +12,15 @@ from unittest.mock import patch
 
 import yaml
 
-from agentflow_proxy import cli
-from agentflow_proxy.optimization_rollout_review import attach_optimization_rollout_provenance
-from agentflow_proxy.scaffold_rollout_review import (
+from tokenclaw import cli
+from tokenclaw.optimization_rollout_review import attach_optimization_rollout_provenance
+from tokenclaw.scaffold_rollout_review import (
     SCAFFOLD_CANARY_POLICY_FILE,
     SCAFFOLD_LOCAL_CRUNCH_RULES_FILE,
     apply_scaffold_rollout_actions,
     review_scaffold_rollout_actions,
 )
-from agentflow_proxy.store import stable_json
+from tokenclaw.store import stable_json
 
 
 class ScaffoldRolloutReviewTests(unittest.TestCase):
@@ -514,7 +514,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
             self.assertTrue(applied["ok"])
             overlay_path = str(Path(tmp) / SCAFFOLD_CANARY_POLICY_FILE)
             with patch.dict(os.environ, {"AGENTFLOW_SCAFFOLD_CANARY_POLICY": overlay_path}):
-                import agentflow_proxy.crunch as crunch
+                import tokenclaw.crunch as crunch
 
                 reloaded = importlib.reload(crunch)
                 repeated = "Provider message scaffold " + ("stable framing " * 800)
@@ -532,7 +532,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
                 }
                 changed, meta = reloaded.crunch_body(body)
 
-            import agentflow_proxy.crunch as crunch
+            import tokenclaw.crunch as crunch
 
             importlib.reload(crunch)
 

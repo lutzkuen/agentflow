@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from agentflow_proxy import cli
-from agentflow_proxy.codex_terminal_compaction_report import build_codex_terminal_transcript_opportunity_report
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw import cli
+from tokenclaw.codex_terminal_compaction_report import build_codex_terminal_transcript_opportunity_report
+from tokenclaw.store import Store, stable_json
 
 
 class CodexTerminalTranscriptOpportunityTests(unittest.TestCase):

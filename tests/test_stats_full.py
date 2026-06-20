@@ -18,10 +18,10 @@ HAS_RUNTIME_DEPS = all(
 if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
-    from agentflow_proxy import server, stats as stats_views
-    from agentflow_proxy.dashboard_app import create_dashboard_app
-    from agentflow_proxy import routing_experiments
-    from agentflow_proxy.store import Store, stable_json, utc_now
+    from tokenclaw import server, stats as stats_views
+    from tokenclaw.dashboard_app import create_dashboard_app
+    from tokenclaw import routing_experiments
+    from tokenclaw.store import Store, stable_json, utc_now
 
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
@@ -1092,7 +1092,7 @@ request_shape_repeated_context_canaries:
             },
             clear=False,
         ):
-            from agentflow_proxy.policy_events import log_policy_event
+            from tokenclaw.policy_events import log_policy_event
 
             log_policy_event(
                 "fetch-review",
@@ -1394,7 +1394,7 @@ request_shape_repeated_context_canaries:
         self.assertIn("openai-scoreboard-candidates-tbody", html.text)
         self.assertIn("Claude recommendation traffic state", html.text)
 
-        from agentflow_proxy import cli
+        from tokenclaw import cli
 
         output = io.StringIO()
         exit_code = cli.openai_scoreboard_cli(["--db", self.tmp.name, "--limit", "10"], stdout=output)
@@ -1405,7 +1405,7 @@ request_shape_repeated_context_canaries:
         self.assertNotIn("hidden-session", output.getvalue())
 
     def test_openai_optimization_readiness_reports_conflicts_without_raw_content(self):
-        from agentflow_proxy.openai_optimization_governor import attach_openai_optimization_governor
+        from tokenclaw.openai_optimization_governor import attach_openai_optimization_governor
 
         routing = {
             "provider": "openai",
@@ -1640,7 +1640,7 @@ request_shape_repeated_context_canaries:
             baseline=0.003,
         )
 
-        from agentflow_proxy import router
+        from tokenclaw import router
 
         with patch.dict(
             router.ROUTING_OPENAI_CANARY,
@@ -1759,7 +1759,7 @@ request_shape_repeated_context_canaries:
             {"AGENTFLOW_POLICY_EVENTS_LOG": os.path.join(tmp, "policy_events.jsonl")},
             clear=False,
         ):
-            from agentflow_proxy.policy_events import log_policy_event
+            from tokenclaw.policy_events import log_policy_event
 
             log_policy_event(
                 "fetch-review",
@@ -5920,7 +5920,7 @@ request_shape_repeated_context_canaries:
         self.assertEqual(payload["groups"][0]["cache_reason"], "unknown")
 
     def test_cache_replayability_reports_session_memory_dry_run_proposals_metadata_only(self):
-        from agentflow_proxy.session_memory_hints import build_session_memory_optimization_hints
+        from tokenclaw.session_memory_hints import build_session_memory_optimization_hints
 
         def log_plateau_call(suffix, *, session_id, cache_json=None, text_chars=40_000, cost=0.02):
             server.store.log_call(
@@ -6320,7 +6320,7 @@ request_shape_repeated_context_canaries:
             self.assertNotIn("private replay prompt", html)
 
     def test_cache_replay_readiness_endpoint_and_dashboard_show_blockers_without_raw_data(self):
-        from agentflow_proxy import cache as cache_module
+        from tokenclaw import cache as cache_module
 
         base_rule = {
             "rule_id": "static-chat-cache",
@@ -9603,7 +9603,7 @@ request_shape_repeated_context_canaries:
         )
         client = TestClient(app)
 
-        with patch("agentflow_proxy.dashboard_app.stats_views.stats_provider_adoption_health", side_effect=fake_provider_adoption_health):
+        with patch("tokenclaw.dashboard_app.stats_views.stats_provider_adoption_health", side_effect=fake_provider_adoption_health):
             first = client.get("/agentflow/stats/provider-adoption-health?limit=20")
             second = client.get("/agentflow/stats/provider-adoption-health?limit=20")
             different_query = client.get("/agentflow/stats/provider-adoption-health?limit=21")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from agentflow_proxy.optimization_coordinator import build_optimization_coordinator
+from tokenclaw.optimization_coordinator import build_optimization_coordinator
 
 
 FORBIDDEN_VALUES = (

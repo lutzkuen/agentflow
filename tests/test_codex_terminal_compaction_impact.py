@@ -9,18 +9,18 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from agentflow_proxy import cli
-from agentflow_proxy.codex_terminal_compaction_feedback import (
+from tokenclaw import cli
+from tokenclaw.codex_terminal_compaction_feedback import (
     FEEDBACK_SCHEMA,
     SOURCE_SURFACE,
     build_codex_terminal_transcript_lifecycle_feedback,
     queue_codex_terminal_transcript_lifecycle_feedback,
 )
-from agentflow_proxy.codex_terminal_compaction_impact import build_codex_terminal_transcript_compaction_impact_report
-from agentflow_proxy.codex_terminal_transcript_compaction import FAMILY, SCHEMA as CANARY_SCHEMA
-from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.optimization import feedback
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw.codex_terminal_compaction_impact import build_codex_terminal_transcript_compaction_impact_report
+from tokenclaw.codex_terminal_transcript_compaction import FAMILY, SCHEMA as CANARY_SCHEMA
+from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.optimization import feedback
+from tokenclaw.store import Store, stable_json
 
 
 RAW_REQUEST_ID = "raw-codex-terminal-request-id-must-not-leak"

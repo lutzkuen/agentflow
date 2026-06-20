@@ -8,10 +8,10 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from agentflow_proxy import cli
-from agentflow_proxy.anthropic_thinking_compaction_impact import build_anthropic_thinking_compaction_impact_report
-from agentflow_proxy.dashboard_app import create_dashboard_app
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw import cli
+from tokenclaw.anthropic_thinking_compaction_impact import build_anthropic_thinking_compaction_impact_report
+from tokenclaw.dashboard_app import create_dashboard_app
+from tokenclaw.store import Store, stable_json
 
 
 RAW_SECRET = "raw-thinking-impact-secret"

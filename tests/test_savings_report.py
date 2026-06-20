@@ -17,16 +17,16 @@ import unittest
 import uuid
 from pathlib import Path
 
-from agentflow_proxy import cli
-from agentflow_proxy.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
-from agentflow_proxy.savings_report import (
+from tokenclaw import cli
+from tokenclaw.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
+from tokenclaw.savings_report import (
     OPPORTUNITY_FAMILY_ACTIVATION,
     OPPORTUNITY_FAMILY_CACHE_REPLAY,
     OPPORTUNITY_FAMILY_MODEL_ROUTING,
     SAVINGS_BUCKET_UNKNOWN,
     build_savings_report,
 )
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 _SECRET_SESSION = "secret-savings-session-id"

@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from agentflow_proxy import cli
-from agentflow_proxy.codex_terminal_compaction_dry_run import build_codex_terminal_transcript_compaction_dry_run
-from agentflow_proxy.store import Store, stable_json
+from tokenclaw import cli
+from tokenclaw.codex_terminal_compaction_dry_run import build_codex_terminal_transcript_compaction_dry_run
+from tokenclaw.store import Store, stable_json
 
 
 RAW_REQUEST_ID = "raw-terminal-request-id-must-not-leak"

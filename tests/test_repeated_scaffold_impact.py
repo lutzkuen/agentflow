@@ -12,17 +12,17 @@ from unittest.mock import patch
 
 import httpx
 
-from agentflow_proxy import cli
-from agentflow_proxy.managed_egress import ManagedEgressBlocked, assert_managed_egress_safe
-from agentflow_proxy.repeated_scaffold_feedback import (
+from tokenclaw import cli
+from tokenclaw.managed_egress import ManagedEgressBlocked, assert_managed_egress_safe
+from tokenclaw.repeated_scaffold_feedback import (
     FEEDBACK_SCHEMA,
     SOURCE_SURFACE as REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
     build_repeated_scaffold_lifecycle_feedback,
     build_repeated_scaffold_lifecycle_feedback_status,
 )
-from agentflow_proxy.repeated_scaffold_activation import build_repeated_scaffold_activation_report
-from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
-from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
+from tokenclaw.repeated_scaffold_activation import build_repeated_scaffold_activation_report
+from tokenclaw.repeated_scaffold_impact import build_repeated_scaffold_impact_report
+from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
 class RepeatedScaffoldFeedbackClient:
@@ -680,7 +680,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         )
 
         output = io.StringIO()
-        with patch("agentflow_proxy.recommendations.httpx.AsyncClient", RepeatedScaffoldFeedbackClient):
+        with patch("tokenclaw.recommendations.httpx.AsyncClient", RepeatedScaffoldFeedbackClient):
             exit_code = cli.repeated_scaffold_impact_cli(
                 ["--db", self.db_path, "--limit", "20", "--flush-feedback", "--feedback-limit", "10"],
                 stdout=output,
@@ -735,7 +735,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         self._log_call(cohort="canary_holdout", tokens_saved=0)
 
         output = io.StringIO()
-        with patch("agentflow_proxy.recommendations.httpx.AsyncClient", RepeatedScaffoldFeedbackClient):
+        with patch("tokenclaw.recommendations.httpx.AsyncClient", RepeatedScaffoldFeedbackClient):
             exit_code = cli.repeated_scaffold_impact_cli(
                 ["--db", self.db_path, "--limit", "20", "--feedback-dry-run"],
                 stdout=output,
