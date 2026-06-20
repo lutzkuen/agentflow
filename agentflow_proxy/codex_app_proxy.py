@@ -100,6 +100,7 @@ CODEX_APP_SHADOW_OPENAI_UPSTREAM = os.getenv(
     os.getenv("AGENTFLOW_OPENAI_UPSTREAM", "https://api.openai.com"),
 )
 CODEX_APP_SHADOW_TIMEOUT_SECONDS = float(os.getenv("AGENTFLOW_CODEX_APP_SHADOW_TIMEOUT_SECONDS", "60"))
+DEFAULT_CODEX_APP_SHADOW_RELAY_URL = "ws://127.0.0.1:4013"
 CODEX_APP_RULES = [
     rule for rule in (CODEX_APP_POLICY.get("rules") or [])
     if isinstance(rule, dict)
@@ -118,6 +119,7 @@ app = FastAPI(title="AgentFlow Codex App-Server Proxy", version="0.1.0")
 
 _INTERNAL_REPLAY_FRAME_KEY = "_agentflow_replay_frame"
 _INTERNAL_CACHE_KEY = "_agentflow_cache_key"
+_AGENTFLOW_SHADOW_REPLAY_KEY = "_agentflow_shadow_replay"
 _CODEX_SUMMARY_PHASE_RE = re.compile(
     r"\b(summarize|summarise|summary|recap|wrap[- ]?up|final answer|final response|status update|handoff)\b",
     re.IGNORECASE,
@@ -436,8 +438,30 @@ def _rate_limit_metadata(method: str | None, params: Any) -> dict[str, Any] | No
     }
 
 
+def _shadow_replay_signal_metadata(method: str | None, params: Any) -> dict[str, Any] | None:
+    if method != "turn/start" or not isinstance(params, dict) or not params.get(_AGENTFLOW_SHADOW_REPLAY_KEY):
+        return None
+    return {
+        "schema": "agentflow.codex_app_shadow_replay_event.v1",
+        "kind": "shadow_replay",
+        "shadow_replay": True,
+        "optimization_passthrough": True,
+        "reason": "shadow-replay-passthrough",
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "thread_ids_included": False,
+            "file_paths_included": False,
+            "credentials_included": False,
+        },
+    }
+
+
 def _codex_app_signal_metadata(method: str | None, params: Any) -> dict[str, Any] | None:
-    return _token_usage_metadata(method, params) or _rate_limit_metadata(method, params)
+    return _shadow_replay_signal_metadata(method, params) or _token_usage_metadata(method, params) or _rate_limit_metadata(method, params)
 
 
 def _thread_id(params: Any) -> Optional[str]:
@@ -736,6 +760,30 @@ def _not_applied_metadata(reason: str, *, enabled: bool = CODEX_APP_OPTIMIZE) ->
             eligible=False,
         ),
     }
+
+
+def _shadow_replay_passthrough_metadata() -> dict[str, dict[str, Any]]:
+    metadata = _not_applied_metadata("shadow-replay-passthrough")
+    for meta in metadata.values():
+        meta["shadow_replay"] = True
+        meta["optimization_passthrough"] = True
+    metadata["routing"].update({
+        "status": "not-applied",
+        "applied": False,
+        "reason": "shadow-replay-passthrough",
+    })
+    metadata["crunch"].update({
+        "status": "not-applied",
+        "applied": False,
+        "reason": "shadow-replay-passthrough",
+    })
+    metadata["cache"].update({
+        "status": "skipped",
+        "eligible": False,
+        "reason": "shadow-replay-passthrough",
+        "outcome_bucket": "shadow_replay",
+    })
+    return metadata
 
 
 def _attach_codex_local_pattern_features(
@@ -1464,6 +1512,14 @@ def _codex_shadow_api_key() -> str | None:
     return str(value).strip() if value else None
 
 
+def _codex_shadow_relay_url() -> str | None:
+    value = os.getenv("AGENTFLOW_CODEX_APP_SHADOW_RELAY_URL")
+    if value is None:
+        value = DEFAULT_CODEX_APP_SHADOW_RELAY_URL
+    value = str(value).strip()
+    return value or None
+
+
 def _codex_shadow_preflight(
     params: dict[str, Any],
     *,
@@ -1504,6 +1560,15 @@ def _codex_shadow_preflight(
             "credentials_included": False,
         },
     }
+    api_key_configured = bool(_codex_shadow_api_key())
+    relay_url_configured = bool(_codex_shadow_relay_url())
+    meta.update({
+        "execution_transport": "openai_api" if api_key_configured else ("app_server_relay" if relay_url_configured else None),
+        "relay_mode": bool(not api_key_configured and relay_url_configured),
+        "relay_url_configured": relay_url_configured,
+        "relay_url_included": False,
+        "api_key_configured": api_key_configured,
+    })
     phase_classification = _codex_stateless_shadow_phase_classification(params) if text else {
         "workflow_phase": "unknown",
         "workflow_phase_reason": "empty-input",
@@ -1524,8 +1589,8 @@ def _codex_shadow_preflight(
         if skip_reason == "unknown-param-shape":
             meta["unknown_keys"] = sorted(str(key) for key in params if str(key) not in CODEX_SAFE_TURN_PARAM_KEYS)[:8]
         return None, meta
-    if not _codex_shadow_api_key():
-        meta["reason"] = "shadow-openai-api-key-missing"
+    if not api_key_configured and not relay_url_configured:
+        meta["reason"] = "shadow-no-execution-path"
         return None, meta
 
     body: dict[str, Any] = {
@@ -1548,7 +1613,7 @@ def _codex_shadow_preflight(
         "status": "executable",
         "reason": f"{phase_classification['shadow_replay_shape']}-replay",
         "request_shape": {
-            "endpoint": "/v1/responses",
+            "endpoint": "/v1/responses" if api_key_configured else "turn/start",
             "input_kind": "text",
             "store": False,
             "thread_state_included": False,
@@ -1556,6 +1621,7 @@ def _codex_shadow_preflight(
             "max_output_tokens_included": "max_output_tokens" in body,
             "workflow_phase": phase_classification["workflow_phase"],
             "workflow_phase_reason": phase_classification["workflow_phase_reason"],
+            "shadow_replay_marker_injected": not api_key_configured,
         },
     })
     return body, meta
@@ -1570,20 +1636,12 @@ def _openai_usage_tokens(body: dict[str, Any]) -> tuple[int | None, int | None, 
     return input_tokens, output_tokens, cached_tokens
 
 
-async def _execute_codex_stateless_shadow_request(
+async def _execute_codex_openai_shadow_request(
     shadow_body: dict[str, Any],
     *,
     shadow_model: str,
+    api_key: str,
 ) -> dict[str, Any]:
-    api_key = _codex_shadow_api_key()
-    if not api_key:
-        return {
-            "status_code": None,
-            "response_body": None,
-            "latency_ms": 0,
-            "cost_est_usd": None,
-            "error": "shadow-openai-api-key-missing",
-        }
     started = time.time()
     try:
         async with httpx.AsyncClient(timeout=CODEX_APP_SHADOW_TIMEOUT_SECONDS) as client:
@@ -1632,6 +1690,149 @@ async def _execute_codex_stateless_shadow_request(
             "cost_est_usd": None,
             "error": repr(exc),
         }
+
+
+def _codex_shadow_response_body_from_result(result: Any) -> dict[str, Any]:
+    body = _codex_result_comparison_body(result)
+    text = response_output_text(body)
+    if not text:
+        text = _codex_result_output_text(result)
+    if text:
+        return {"output_text": text}
+    return body if isinstance(body, dict) else {}
+
+
+async def _execute_codex_relay_shadow_request(
+    shadow_body: dict[str, Any],
+    *,
+    shadow_model: str,
+    relay_url: str,
+) -> dict[str, Any]:
+    started = time.time()
+    request_id = str(uuid.uuid4())
+    params = {
+        **copy.deepcopy(shadow_body),
+        "model": shadow_model,
+        _AGENTFLOW_SHADOW_REPLAY_KEY: True,
+    }
+    message = json.dumps({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "turn/start",
+        "params": params,
+    }, separators=(",", ":"), ensure_ascii=False)
+    try:
+        async with websockets.connect(
+            relay_url,
+            max_size=CODEX_APP_WEBSOCKET_MAX_SIZE,
+            open_timeout=CODEX_APP_SHADOW_TIMEOUT_SECONDS,
+        ) as relay:
+            await asyncio.wait_for(relay.send(message), timeout=CODEX_APP_SHADOW_TIMEOUT_SECONDS)
+            deadline = time.monotonic() + CODEX_APP_SHADOW_TIMEOUT_SECONDS
+            collected_output_parts: list[str] = []
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("codex relay shadow timed out")
+                raw = await asyncio.wait_for(relay.recv(), timeout=remaining)
+                received = _jsonrpc_message(raw)
+                if not isinstance(received, dict):
+                    continue
+                latency_ms = int((time.time() - started) * 1000)
+                error = received.get("error")
+                if isinstance(error, dict):
+                    message_text = error.get("message") if isinstance(error.get("message"), str) else None
+                    return {
+                        "status_code": 500,
+                        "response_body": None,
+                        "latency_ms": latency_ms,
+                        "cost_est_usd": None,
+                        "error": message_text or "shadow-relay-error",
+                    }
+                method = str(received.get("method") or "")
+                notification_body = received.get("params") if "params" in received else received.get("result")
+                if method:
+                    output_text = _codex_result_output_text(notification_body)
+                    if output_text:
+                        collected_output_parts.append(output_text)
+                    if method in {"turn/error", "turn/failed"}:
+                        return {
+                            "status_code": 500,
+                            "response_body": None,
+                            "latency_ms": latency_ms,
+                            "cost_est_usd": None,
+                            "error": "shadow-relay-error",
+                        }
+                    if method not in {"turn/done", "turn/completed", "turn/complete"}:
+                        continue
+                    response_body = (
+                        {"output_text": "\n".join(collected_output_parts)}
+                        if collected_output_parts
+                        else _codex_shadow_response_body_from_result(notification_body)
+                    )
+                elif received.get("id") == request_id:
+                    response_body = _codex_shadow_response_body_from_result(received.get("result"))
+                else:
+                    continue
+                shadow_in = max(0, _input_text_chars(shadow_body.get("input")) // TOKEN_CHARS)
+                shadow_out = max(0, len(response_output_text(response_body)) // TOKEN_CHARS)
+                raw_cost = estimate_cost(
+                    shadow_model,
+                    shadow_in,
+                    shadow_out,
+                    provider="openai",
+                    processing_mode=codex_app_processing_mode(),
+                )
+                return {
+                    "status_code": 200,
+                    "response_body": response_body,
+                    "latency_ms": latency_ms,
+                    "cost_est_usd": float(raw_cost) if raw_cost is not None else None,
+                    "error": None,
+                }
+    except Exception as exc:
+        return {
+            "status_code": None,
+            "response_body": None,
+            "latency_ms": int((time.time() - started) * 1000),
+            "cost_est_usd": None,
+            "error": repr(exc),
+        }
+
+
+async def _execute_codex_stateless_shadow_request(
+    shadow_body: dict[str, Any],
+    *,
+    shadow_model: str,
+) -> dict[str, Any]:
+    api_key = _codex_shadow_api_key()
+    if api_key:
+        result = await _execute_codex_openai_shadow_request(
+            shadow_body,
+            shadow_model=shadow_model,
+            api_key=api_key,
+        )
+        result["execution_transport"] = "openai_api"
+        return result
+
+    relay_url = _codex_shadow_relay_url()
+    if relay_url:
+        result = await _execute_codex_relay_shadow_request(
+            shadow_body,
+            shadow_model=shadow_model,
+            relay_url=relay_url,
+        )
+        result["execution_transport"] = "app_server_relay"
+        return result
+
+    return {
+        "status_code": None,
+        "response_body": None,
+        "latency_ms": 0,
+        "cost_est_usd": None,
+        "error": "shadow-no-execution-path",
+        "execution_transport": None,
+    }
 
 
 def _deterministic_sampling(params: dict[str, Any]) -> tuple[bool, str | None]:
@@ -2752,6 +2953,9 @@ async def _attach_codex_managed_recommendation(
     raw: str | bytes,
     optimization_metadata: dict[str, dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
+    routing_meta = (optimization_metadata or {}).get("routing") if isinstance(optimization_metadata, dict) else None
+    if isinstance(routing_meta, dict) and routing_meta.get("shadow_replay"):
+        return None
     local = _attach_codex_local_pattern_features(raw, optimization_metadata)
     if local is None:
         return None
@@ -3233,6 +3437,9 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
     if not isinstance(params, dict):
         return raw, _not_applied_metadata("params-not-object")
 
+    if params.get(_AGENTFLOW_SHADOW_REPLAY_KEY):
+        return raw, _shadow_replay_passthrough_metadata()
+
     if CODEX_APP_RULES:
         return _optimize_client_message_with_rules(raw, msg, params)
 
@@ -3435,6 +3642,9 @@ def _attach_codex_routing_experiment_pending(
     session_id: str | None = None,
     model_states: dict[str, dict[str, Any]] | None = None,
 ) -> None:
+    routing_meta = (optimization_metadata or {}).get("routing") if isinstance(optimization_metadata, dict) else None
+    if isinstance(routing_meta, dict) and routing_meta.get("shadow_replay"):
+        return
     msg = _jsonrpc_message(raw)
     if not isinstance(msg, dict):
         return
@@ -3645,6 +3855,7 @@ async def _maybe_run_codex_routing_experiment(
     shadow_cost_est_usd: float | None = None
     shadow_error: str | None = None
     shadow_limitation: str | None = None
+    shadow_execution_transport = str(shadow_preflight.get("execution_transport") or "") or None
     shadow_blocker_status = str(shadow_preflight.get("status") or "unavailable")
     if primary_status_code != 200:
         shadow_limitation = "primary-turn-not-successful"
@@ -3664,6 +3875,8 @@ async def _maybe_run_codex_routing_experiment(
         shadow_latency_ms = shadow_result.get("latency_ms")
         shadow_cost_est_usd = shadow_result.get("cost_est_usd")
         shadow_error = shadow_result.get("error")
+        if shadow_result.get("execution_transport"):
+            shadow_execution_transport = str(shadow_result.get("execution_transport"))
 
     comparison = compare_response_outputs(
         primary_response_body if primary_status_code == 200 else {},
@@ -3708,6 +3921,7 @@ async def _maybe_run_codex_routing_experiment(
         "shadow_model": shadow_model,
         "primary_status_code": primary_status_code,
         "shadow_status_code": shadow_status_code,
+        "shadow_execution_transport": shadow_execution_transport,
         "primary_output_chars": comparison["primary_output_chars"],
         "shadow_output_chars": comparison["shadow_output_chars"],
         "primary_output_sha256": comparison["primary_output_sha256"],

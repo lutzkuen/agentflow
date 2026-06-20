@@ -2936,6 +2936,171 @@ summary_model_hint:
         self.assertTrue(payload["outcome"]["compared"])
         self.assertEqual(routing["routing_experiment"]["managed_feedback"]["status"], "queued")
 
+    def test_codex_shadow_preflight_uses_relay_when_api_key_missing(self):
+        params = {
+            "model": "gpt-5-codex",
+            "input": [{"type": "text", "text": "Summarize the final outcome."}],
+            "temperature": 0,
+            "threadId": "thread-should-not-replay",
+            "cwd": "/private/workspace",
+        }
+
+        with (
+            patch.object(codex_app_proxy, "_codex_shadow_api_key", return_value=None),
+            patch.object(codex_app_proxy, "_codex_shadow_relay_url", return_value="ws://127.0.0.1:4013"),
+        ):
+            body, meta = codex_app_proxy._codex_shadow_preflight(params, shadow_model="gpt-5-mini")
+
+        self.assertIsNotNone(body)
+        self.assertEqual(body["model"], "gpt-5-mini")
+        self.assertEqual(body["input"], "Summarize the final outcome.")
+        self.assertFalse(body["store"])
+        self.assertNotIn("threadId", body)
+        self.assertNotIn("cwd", body)
+        self.assertEqual(meta["status"], "executable")
+        self.assertEqual(meta["execution_transport"], "app_server_relay")
+        self.assertTrue(meta["relay_mode"])
+        self.assertTrue(meta["relay_url_configured"])
+        self.assertFalse(meta["relay_url_included"])
+        self.assertFalse(meta["api_key_configured"])
+        self.assertEqual(meta["request_shape"]["endpoint"], "turn/start")
+        self.assertTrue(meta["request_shape"]["shadow_replay_marker_injected"])
+
+    def test_codex_shadow_preflight_empty_relay_and_no_api_key_blocks_execution(self):
+        params = {
+            "model": "gpt-5-codex",
+            "input": "Summarize the final outcome.",
+            "temperature": 0,
+        }
+
+        with (
+            patch.object(codex_app_proxy, "_codex_shadow_api_key", return_value=None),
+            patch.object(codex_app_proxy, "_codex_shadow_relay_url", return_value=None),
+        ):
+            body, meta = codex_app_proxy._codex_shadow_preflight(params, shadow_model="gpt-5-mini")
+
+        self.assertIsNone(body)
+        self.assertEqual(meta["status"], "unavailable")
+        self.assertEqual(meta["reason"], "shadow-no-execution-path")
+        self.assertIsNone(meta["execution_transport"])
+        self.assertFalse(meta["relay_mode"])
+
+    def test_codex_shadow_executor_prefers_api_key_over_relay(self):
+        async def fake_openai_executor(shadow_body, *, shadow_model, api_key):
+            self.assertEqual(api_key, "shadow-key")
+            return {
+                "status_code": 200,
+                "response_body": {"output_text": "api shadow"},
+                "latency_ms": 4,
+                "cost_est_usd": 0.00001,
+                "error": None,
+            }
+
+        async def run_fixture():
+            with (
+                patch.object(codex_app_proxy, "_codex_shadow_api_key", return_value="shadow-key"),
+                patch.object(codex_app_proxy, "_codex_shadow_relay_url", return_value="ws://relay"),
+                patch.object(codex_app_proxy, "_execute_codex_openai_shadow_request", side_effect=fake_openai_executor),
+                patch.object(codex_app_proxy, "_execute_codex_relay_shadow_request") as relay_executor,
+            ):
+                result = await codex_app_proxy._execute_codex_stateless_shadow_request(
+                    {"model": "gpt-5-mini", "input": "Summarize.", "store": False},
+                    shadow_model="gpt-5-mini",
+                )
+                return result, relay_executor.called
+
+        result, relay_called = asyncio.run(run_fixture())
+
+        self.assertEqual(result["status_code"], 200)
+        self.assertEqual(result["execution_transport"], "openai_api")
+        self.assertFalse(relay_called)
+
+    def test_codex_relay_shadow_executor_marks_shadow_replay_turn(self):
+        sent_messages = []
+
+        class FakeRelay:
+            async def send(self, message):
+                sent_messages.append(json.loads(message))
+
+            async def recv(self):
+                return json.dumps({
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {"message": "Relay shadow response."},
+                })
+
+        class FakeConnect:
+            def __init__(self, url, **kwargs):
+                self.url = url
+                self.kwargs = kwargs
+
+            async def __aenter__(self):
+                return FakeRelay()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        async def run_fixture():
+            with patch.object(
+                codex_app_proxy.websockets,
+                "connect",
+                side_effect=lambda url, **kwargs: FakeConnect(url, **kwargs),
+            ):
+                return await codex_app_proxy._execute_codex_relay_shadow_request(
+                    {"model": "gpt-5-mini", "input": "Summarize.", "store": False},
+                    shadow_model="gpt-5-mini",
+                    relay_url="ws://relay",
+                )
+
+        result = asyncio.run(run_fixture())
+
+        self.assertEqual(result["status_code"], 200)
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["response_body"]["output_text"], "Relay shadow response.")
+        [sent] = sent_messages
+        self.assertEqual(sent["method"], "turn/start")
+        self.assertEqual(sent["params"]["model"], "gpt-5-mini")
+        self.assertFalse(sent["params"]["store"])
+        self.assertTrue(sent["params"]["_agentflow_shadow_replay"])
+        self.assertNotIn("threadId", sent["params"])
+
+    def test_codex_shadow_replay_passthrough_records_metadata_without_optimization(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "shadow-replay-turn",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5-mini",
+                "input": "Summarize.",
+                "_agentflow_shadow_replay": True,
+            },
+        }
+        raw = json.dumps(message)
+        capture = CapturingStore()
+
+        with patch.object(codex_app_proxy, "store", capture):
+            forwarded, metadata = codex_app_proxy._optimize_client_message(raw)
+            codex_app_proxy._record_message(
+                forwarded,
+                direction="client_to_server",
+                session_id="shadow-replay-session",
+                request_started={},
+                optimization_metadata=metadata,
+            )
+
+        self.assertEqual(forwarded, raw)
+        self.assertTrue(metadata["routing"]["shadow_replay"])
+        self.assertEqual(metadata["routing"]["reason"], "shadow-replay-passthrough")
+        self.assertTrue(metadata["crunch"]["shadow_replay"])
+        self.assertTrue(metadata["cache"]["shadow_replay"])
+        [event] = capture.events
+        self.assertEqual(event["method"], "turn/start")
+        routing = json.loads(event["routing_json"])
+        self.assertTrue(routing["shadow_replay"])
+        shadow_meta = json.loads(event["metadata_json"])
+        self.assertEqual(shadow_meta["kind"], "shadow_replay")
+        self.assertTrue(shadow_meta["shadow_replay"])
+
     def test_codex_routing_experiment_stateful_turn_is_unavailable_not_shadow_error(self):
         message = {
             "jsonrpc": "2.0",
