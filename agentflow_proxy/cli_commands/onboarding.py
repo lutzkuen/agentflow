@@ -34,6 +34,11 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
         stdout.write(f"Upstream Anthropic base URL used by AgentFlow: {_redact_url(result['upstream_base_url'])}\n")
         stdout.write(f"AgentFlow-managed non-secret env file: {result['env_file_path']}\n")
         stdout.write(f"Env file changed: {str(result['env_file_changed']).lower()}\n")
+        stdout.write(f"Shell profile: {result.get('shell_profile_path') or 'skipped'}\n")
+        stdout.write(f"Shell profile changed: {str(result.get('shell_profile_changed')).lower()}\n")
+        if result.get("dry_run") and result.get("shell_profile_append"):
+            stdout.write("Shell profile append:\n")
+            stdout.write(result["shell_profile_append"])
         stdout.write(f"Depends on AgentFlow target: {result['depends_on']}\n")
         if result.get("claude_target_created"):
             stdout.write("Claude target was not configured; created the default Claude activation profile.\n")
@@ -198,6 +203,11 @@ def agentflow_cli(
         "--no-auto-claude",
         action="store_true",
         help="Require an existing `agentflow activate claude` profile instead of creating the default one.",
+    )
+    activate_claude_vscode.add_argument(
+        "--no-shell-profile",
+        action="store_true",
+        help="Skip adding the Claude Code env file source line to your shell profile.",
     )
 
     activate_claude_desktop = activate_subparsers.add_parser(
@@ -378,6 +388,7 @@ def agentflow_cli(
                     config_dir=args.config_dir,
                     dry_run=bool(args.dry_run),
                     auto_configure_claude=not bool(args.no_auto_claude),
+                    shell_profile=not bool(args.no_shell_profile),
                 )
             except activation.ActivationError as exc:
                 _write_activation_config_error(stderr, exc, command="activate")
@@ -663,7 +674,7 @@ def _target_activation_base(
         "reasons": [],
     }
     if configured:
-        for key in ("codex_config_path", "env_file_path", "desktop_file_path", "depends_on"):
+        for key in ("codex_config_path", "env_file_path", "desktop_file_path", "shell_profile_path", "depends_on"):
             if profile.get(key):
                 result[key] = str(profile.get(key))
     else:
@@ -918,7 +929,7 @@ def _doctor_claude_vscode_target(base: dict[str, Any]) -> dict[str, Any]:
         result["reasons"].append("current-shell-routed")
     else:
         result["status"] = "configured"
-        result["reasons"].append("current-shell-env-missing")
+        result["reasons"].append("shell-env-missing")
     result["reasons"].append("vscode-runtime-env-uncertain")
     result["ok"] = True
     return result

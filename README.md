@@ -241,19 +241,26 @@ provider/auth settings as machine-local.
 ## Claude VS Code and Claude Code
 
 `agentflow activate claude-vscode` writes an AgentFlow-managed non-secret env file
-for the Claude base URL and prints a shell snippet. It does not write
-`ANTHROPIC_API_KEY` or token values.
+for the Claude base URL and adds a `source ~/.agentflow/claude-vscode.env` line to
+your shell profile (`~/.zshrc`, `~/.bashrc`, or `~/.profile`). It does not write
+`ANTHROPIC_API_KEY` or token values. Use `--no-shell-profile` if you manage shell
+startup files yourself.
 
 ```bash
 agentflow activate claude-vscode
 agentflow run claude
 ```
 
-Launch VS Code from a shell that has your Claude credentials and the printed
-AgentFlow routing variables:
+The managed env file contains the local Claude proxy base URL:
+
+```text
+ANTHROPIC_BASE_URL=http://127.0.0.1:4000
+```
+
+Open a new terminal, or source your shell profile, then launch VS Code or Claude
+Code from a shell that has your Claude credentials:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:4000
 export ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_API_KEY"
 code .
 ```

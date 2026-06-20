@@ -32,6 +32,7 @@ CLAUDE_VSCODE_ENV_FILENAME = "claude-vscode.env"
 CLAUDE_DESKTOP_USER_DESKTOP_PATH = Path(".local") / "share" / "applications" / "claude-desktop.desktop"
 CLAUDE_DESKTOP_SYSTEM_DESKTOP_PATH = Path("/usr/share/applications/claude-desktop.desktop")
 ACTIVATION_TARGETS = ("openai", "claude", "codex", "claude-vscode", "claude-desktop")
+SHELL_PROFILE_CANDIDATES = (".zshrc", ".bashrc", ".profile")
 
 
 class ActivationError(ValueError):
@@ -639,6 +640,15 @@ def claude_vscode_env_path(config_dir: str | Path | None = None) -> Path:
     return base / CLAUDE_VSCODE_ENV_FILENAME
 
 
+def default_shell_profile_path() -> Path:
+    home = safe_home_dir()
+    for name in SHELL_PROFILE_CANDIDATES:
+        path = home / name
+        if path.exists():
+            return path
+    return home / ".profile"
+
+
 def _claude_vscode_env_contents(local_base_url: str) -> str:
     return (
         "# AgentFlow-managed non-secret routing values for Claude in VS Code.\n"
@@ -647,11 +657,72 @@ def _claude_vscode_env_contents(local_base_url: str) -> str:
     )
 
 
+def _shell_profile_source_line(env_path: Path) -> str:
+    try:
+        display_path = env_path.expanduser().resolve(strict=False)
+    except OSError:
+        display_path = env_path.expanduser()
+    return f"source {shlex.quote(str(display_path))}"
+
+
+def _shell_profile_source_variants(env_path: Path) -> set[str]:
+    variants = {_shell_profile_source_line(env_path)}
+    home = safe_home_dir()
+    try:
+        relative = env_path.expanduser().resolve(strict=False).relative_to(home.expanduser().resolve(strict=False))
+    except (OSError, ValueError):
+        relative = None
+    if relative is not None:
+        tilde_path = "~/" + relative.as_posix()
+        variants.add(f"source {tilde_path}")
+        variants.add(f". {tilde_path}")
+    variants.add(f"source {shlex.quote(str(env_path.expanduser()))}")
+    variants.add(f". {shlex.quote(str(env_path.expanduser()))}")
+    return variants
+
+
+def _normalized_shell_source_path(value: str) -> Path:
+    expanded = os.path.expandvars(value)
+    if expanded == "~":
+        path = safe_home_dir()
+    elif expanded.startswith("~/"):
+        path = safe_home_dir() / expanded[2:]
+    else:
+        path = Path(expanded).expanduser()
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path
+
+
+def _shell_profile_sources_env(profile_contents: str, env_path: Path) -> bool:
+    wanted = _shell_profile_source_variants(env_path)
+    wanted_path = _normalized_shell_source_path(str(env_path))
+    for raw_line in profile_contents.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line in wanted:
+            return True
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            continue
+        if len(tokens) >= 2 and tokens[0] in {"source", "."} and _normalized_shell_source_path(tokens[1]) == wanted_path:
+            return True
+    return False
+
+
+def _shell_profile_append_block(env_path: Path) -> str:
+    return f"# AgentFlow\n{_shell_profile_source_line(env_path)}\n"
+
+
 def activate_claude_vscode(
     *,
     config_dir: str | Path | None = None,
     dry_run: bool = False,
     auto_configure_claude: bool = True,
+    shell_profile: bool = True,
 ) -> dict[str, Any]:
     config = load_activation_config(config_dir)
     claude_profile, created_claude = _claude_profile_from_config(config, auto_configure=auto_configure_claude)
@@ -661,8 +732,15 @@ def activate_claude_vscode(
     env_contents = _claude_vscode_env_contents(local_base_url)
     existing_env = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     env_changed = existing_env != env_contents
+    shell_profile_path = default_shell_profile_path()
+    existing_shell_profile = shell_profile_path.read_text(encoding="utf-8") if shell_profile_path.exists() else ""
+    shell_profile_has_source = _shell_profile_sources_env(existing_shell_profile, env_path)
+    shell_profile_append = _shell_profile_append_block(env_path)
+    shell_profile_changed = bool(shell_profile and not shell_profile_has_source)
 
     vscode_profile = claude_vscode_activation_profile(claude_profile=claude_profile, env_file_path=env_path)
+    if shell_profile:
+        vscode_profile["shell_profile_path"] = str(shell_profile_path)
     updated_config = apply_activation_profile(config, claude_profile, config_dir=config_dir)
     updated_config = apply_activation_profile(updated_config, vscode_profile, config_dir=config_dir)
     config_path = activation_config_path(config_dir)
@@ -671,6 +749,10 @@ def activate_claude_vscode(
         if env_changed:
             env_path.parent.mkdir(parents=True, exist_ok=True)
             env_path.write_text(env_contents, encoding="utf-8")
+        if shell_profile_changed:
+            shell_profile_path.parent.mkdir(parents=True, exist_ok=True)
+            prefix = "" if not existing_shell_profile or existing_shell_profile.endswith("\n") else "\n"
+            shell_profile_path.write_text(existing_shell_profile + prefix + shell_profile_append, encoding="utf-8")
         config_path = write_activation_config(updated_config, config_dir)
 
     shell_exports = [f"export ANTHROPIC_BASE_URL={shlex.quote(local_base_url)}"]
@@ -684,6 +766,10 @@ def activate_claude_vscode(
         "config_path": str(config_path),
         "env_file_path": str(env_path),
         "env_file_changed": env_changed,
+        "shell_profile_enabled": bool(shell_profile),
+        "shell_profile_path": str(shell_profile_path) if shell_profile else None,
+        "shell_profile_changed": shell_profile_changed,
+        "shell_profile_append": shell_profile_append if shell_profile_changed else "",
         "local_base_url": local_base_url,
         "upstream_base_url": upstream_base_url,
         "depends_on": "claude",

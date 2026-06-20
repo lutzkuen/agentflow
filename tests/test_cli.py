@@ -547,7 +547,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=stdout)
+            code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             config_path = Path(tmp) / "activation.json"
@@ -568,15 +568,58 @@ class AgentflowActivationCliTests(unittest.TestCase):
             output = stdout.getvalue()
             self.assertIn("Claude VS Code local AgentFlow base URL: http://127.0.0.1:4000", output)
             self.assertIn("Upstream Anthropic base URL used by AgentFlow: https://api.anthropic.com", output)
+            self.assertIn("Shell profile: skipped", output)
+            self.assertIn("Shell profile changed: false", output)
             self.assertIn("Claude target was not configured; created the default Claude activation profile.", output)
             self.assertIn("export ANTHROPIC_BASE_URL=http://127.0.0.1:4000\ncode .", output)
             self.assertIn("VS Code extensions usually inherit environment variables only from the VS Code process", output)
 
+    def test_activate_claude_vscode_appends_shell_profile_source_line(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            config_dir = home / ".agentflow"
+            home.mkdir()
+            bashrc = home / ".bashrc"
+            bashrc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                code = cli.agentflow_cli(["activate", "claude-code", "--config-dir", str(config_dir)], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            env_path = config_dir / "claude-vscode.env"
+            self.assertIn("# AgentFlow\n", bashrc.read_text(encoding="utf-8"))
+            self.assertIn(f"source {env_path}\n", bashrc.read_text(encoding="utf-8"))
+            config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["targets"]["claude-vscode"]["shell_profile_path"], str(bashrc))
+            output = stdout.getvalue()
+            self.assertIn(f"Shell profile: {bashrc}", output)
+            self.assertIn("Shell profile changed: true", output)
+
+    def test_activate_claude_vscode_shell_profile_is_idempotent(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            config_dir = home / ".agentflow"
+            home.mkdir()
+            profile = home / ".zshrc"
+            env_path = config_dir / "claude-vscode.env"
+            profile.write_text(f"source {env_path}\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                first = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=io.StringIO())
+                second_stdout = io.StringIO()
+                second = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=second_stdout)
+
+            self.assertEqual(first, 0)
+            self.assertEqual(second, 0)
+            self.assertEqual(profile.read_text(encoding="utf-8").count(str(env_path)), 1)
+            self.assertIn("Shell profile changed: false", second_stdout.getvalue())
+
     def test_activate_claude_vscode_is_idempotent(self):
         with TemporaryDirectory() as tmp:
-            first = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=io.StringIO())
+            first = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
             second_stdout = io.StringIO()
-            second = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=second_stdout)
+            second = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=second_stdout)
 
             self.assertEqual(first, 0)
             self.assertEqual(second, 0)
@@ -592,7 +635,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             )
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=stdout)
+            code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
@@ -605,7 +648,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["activate", "claude-code", "--config-dir", tmp], stdout=stdout)
+            code = cli.agentflow_cli(["activate", "claude-code", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
@@ -616,13 +659,39 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--dry-run"], stdout=stdout)
+            home = Path(tmp) / "home"
+            home.mkdir()
+            profile = home / ".profile"
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--dry-run"], stdout=stdout)
 
             self.assertEqual(code, 0)
             self.assertFalse((Path(tmp) / "activation.json").exists())
             self.assertFalse((Path(tmp) / "claude-vscode.env").exists())
+            self.assertFalse(profile.exists())
             self.assertIn("Dry run: would configure AgentFlow target: claude-vscode", stdout.getvalue())
             self.assertIn("Env file changed: true", stdout.getvalue())
+            self.assertIn(f"Shell profile: {profile}", stdout.getvalue())
+            self.assertIn("Shell profile changed: true", stdout.getvalue())
+            self.assertIn("Shell profile append:\n# AgentFlow\nsource ", stdout.getvalue())
+
+    def test_activate_claude_vscode_no_shell_profile_skips_profile_injection(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            bashrc = home / ".bashrc"
+            bashrc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(bashrc.read_text(encoding="utf-8"), "export PATH=/usr/bin\n")
+            config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
+            self.assertNotIn("shell_profile_path", config["targets"]["claude-vscode"])
+            self.assertIn("Shell profile: skipped", stdout.getvalue())
+            self.assertIn("Shell profile changed: false", stdout.getvalue())
 
     def test_activate_claude_vscode_does_not_persist_secret_env_vars(self):
         with TemporaryDirectory() as tmp:
@@ -635,7 +704,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=stdout)
+                code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             activation_raw = (Path(tmp) / "activation.json").read_text(encoding="utf-8")
@@ -1114,7 +1183,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_agentflow_doctor_claude_vscode_reports_environment_uncertainty(self):
         with TemporaryDirectory() as tmp:
-            cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=io.StringIO())
+            cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
             stdout = io.StringIO()
 
             with patch.dict(os.environ, {}, clear=True):
@@ -1124,12 +1193,12 @@ class AgentflowActivationCliTests(unittest.TestCase):
         target = json.loads(stdout.getvalue())["targets"]["claude-vscode"]
         self.assertEqual(target["status"], "configured")
         self.assertEqual(target["env_file_base_url"], "http://127.0.0.1:4000")
-        self.assertIn("current-shell-env-missing", target["reasons"])
+        self.assertIn("shell-env-missing", target["reasons"])
         self.assertIn("vscode-runtime-env-uncertain", target["reasons"])
 
     def test_agentflow_doctor_claude_vscode_detects_shell_base_url_mismatch(self):
         with TemporaryDirectory() as tmp:
-            cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=io.StringIO())
+            cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
             stdout = io.StringIO()
 
             with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}, clear=True):
