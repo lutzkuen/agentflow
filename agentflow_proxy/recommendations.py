@@ -812,6 +812,14 @@ def build_codex_turn_optimization_unit(
     prompt_difficulty_features: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     model_state, model_field, requested_model, routed_model = _codex_model_state(routing_meta)
+    candidate_target_model = (
+        routing_meta.get("candidate_target_model")
+        or routing_meta.get("shadow_model")
+        or routing_meta.get("managed_route_candidate_model")
+        or routed_model
+    )
+    if not isinstance(candidate_target_model, str) or not candidate_target_model:
+        candidate_target_model = routed_model
     input_tokens_est = max(1, int(input_text_chars / TOKEN_CHARS)) if input_text_chars else 0
     workflow_phase_value = workflow_phase or routing_meta.get("workflow_phase") or "unknown"
     replayability_level = str(cache_meta.get("replayability_level") or "features_only")
@@ -820,7 +828,7 @@ def build_codex_turn_optimization_unit(
         granularity="agent_turn",
         app_family="codex",
         requested_model=requested_model,
-        candidate_target_model=routed_model,
+        candidate_target_model=candidate_target_model,
         category=routing_meta.get("category") or "codex_turn",
         workflow_phase=workflow_phase_value,
         text_chars=input_text_chars,
@@ -848,7 +856,7 @@ def build_codex_turn_optimization_unit(
         "granularity": "agent_turn",
         "app_family": "codex",
         "requested_model": requested_model,
-        "candidate_target_model": routed_model,
+        "candidate_target_model": candidate_target_model,
         "input_features": {
             "jsonrpc_method": method,
             "request_id_present": bool(request_id_present),
@@ -863,6 +871,7 @@ def build_codex_turn_optimization_unit(
             "workflow_phase_reason": workflow_phase_reason or routing_meta.get("workflow_phase_reason"),
             "model_field_state": model_state,
             "model_field_name": model_field,
+            "candidate_target_model": candidate_target_model,
             "local_routed_model": routed_model,
             "local_routing_reason": routing_meta.get("reason"),
             "local_routing_policy_source": routing_meta.get("policy_source"),

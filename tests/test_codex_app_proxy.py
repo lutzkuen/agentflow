@@ -719,6 +719,112 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(metadata["routing"]["status"], "skipped")
         self.assertIn("thinking request", metadata["routing"]["reason"])
 
+    def test_codex_phase_model_candidate_prefers_gpt53_codex_for_safe_summary(self):
+        secret = "secret summary prompt must stay private"
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-codex-candidate",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-codex-candidate",
+                "model": "gpt-5.5",
+                "input": [{"type": "text", "text": f"Summarize the completed work. {secret}"}],
+                "temperature": 0,
+            },
+        }
+
+        with (
+            patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT", False),
+            patch.object(codex_app_proxy, "CODEX_APP_RULES", []),
+        ):
+            forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+
+        forwarded_obj = json.loads(forwarded)
+        routing = metadata["routing"]
+        self.assertEqual(forwarded_obj["params"]["model"], "gpt-5.5")
+        self.assertEqual(routing["status"], "candidate-selected")
+        self.assertFalse(routing["applied"])
+        self.assertTrue(routing["shadow_only"])
+        self.assertEqual(routing["requested_model"], "gpt-5.5")
+        self.assertEqual(routing["routed_model"], "gpt-5.5")
+        self.assertEqual(routing["candidate_target_model"], "gpt-5.3-codex")
+        self.assertEqual(routing["candidate_family"], "codex-specialized-summary")
+        self.assertEqual(routing["workflow_phase"], "summary")
+        self.assertEqual(routing["shape_preflight_status"], "safe")
+        self.assertEqual(routing["codex_routing_candidate"]["candidate_target_model"], "gpt-5.3-codex")
+        rendered = json.dumps(routing)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("thread-codex-candidate", rendered)
+        self.assertFalse(routing["codex_routing_candidate"]["privacy"]["raw_prompts_included"])
+        self.assertFalse(routing["codex_routing_candidate"]["privacy"]["thread_ids_included"])
+
+    def test_codex_phase_model_candidate_blocks_unsafe_summary_shapes(self):
+        cases = [
+            ("file-affecting-text", "Summarize this and write to a file."),
+            ("file-path-reference", "Summarize ./private/worktree/path for the run log."),
+            ("stale-risk-reference", "Summarize the latest result for today."),
+        ]
+
+        with (
+            patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT", False),
+            patch.object(codex_app_proxy, "CODEX_APP_RULES", []),
+        ):
+            for expected_reason, input_text in cases:
+                message = {
+                    "jsonrpc": "2.0",
+                    "id": f"turn-{expected_reason}",
+                    "method": "turn/start",
+                    "params": {
+                        "model": "gpt-5.5",
+                        "input": [{"type": "text", "text": input_text}],
+                        "temperature": 0,
+                    },
+                }
+                forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+                forwarded_obj = json.loads(forwarded)
+                routing = metadata["routing"]
+
+                self.assertEqual(forwarded_obj["params"]["model"], "gpt-5.5")
+                self.assertEqual(routing["status"], "skipped")
+                self.assertFalse(routing["applied"])
+                self.assertIsNone(routing["candidate_target_model"])
+                self.assertEqual(routing["reason"], expected_reason)
+                self.assertIn(expected_reason, routing["reason_codes"])
+                self.assertEqual(routing["codex_routing_candidate"]["status"], "blocked")
+
+    def test_codex_optimization_unit_uses_shadow_candidate_target_model(self):
+        raw_secret = "secret candidate prompt"
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-codex-unit",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-codex-unit",
+                "model": "gpt-5.5",
+                "input": [{"type": "text", "text": f"Summarize the completed work. {raw_secret}"}],
+                "temperature": 0,
+            },
+        }
+
+        with (
+            patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT", False),
+            patch.object(codex_app_proxy, "CODEX_APP_RULES", []),
+        ):
+            forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+            attached = codex_app_proxy._attach_codex_local_pattern_features(forwarded, metadata)
+
+        unit = attached["unit"]
+        self.assertEqual(unit["requested_model"], "gpt-5.5")
+        self.assertEqual(unit["candidate_target_model"], "gpt-5.3-codex")
+        self.assertEqual(unit["input_features"]["local_routed_model"], "gpt-5.5")
+        self.assertEqual(unit["input_features"]["candidate_target_model"], "gpt-5.3-codex")
+        self.assertEqual(unit["input_features"]["workflow_phase"], "summary")
+        self.assertTrue(unit["privacy_summary"]["metadata_only"])
+        self.assertFalse(unit["privacy_summary"]["raw_body_storage"])
+        rendered = json.dumps(unit)
+        self.assertNotIn(raw_secret, rendered)
+        self.assertNotIn("thread-codex-unit", rendered)
+
     def test_summary_model_hint_canary_routes_safe_summary_turn(self):
         message = {
             "jsonrpc": "2.0",

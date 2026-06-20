@@ -153,6 +153,15 @@ _CODEX_SHADOW_OMIT_ONLY_PARAM_KEYS = (
 )
 _CODEX_SHADOW_KNOWN_PARAM_KEYS = set(CODEX_SAFE_TURN_PARAM_KEYS) | set(_CODEX_SHADOW_OMIT_ONLY_PARAM_KEYS)
 _codex_app_session_alert_windows: dict[tuple[str, str, str], int] = {}
+_CODEX_PHASE_MODEL_CANDIDATES = (
+    {
+        "requested_model": "gpt-5.5",
+        "candidate_target_model": "gpt-5.3-codex",
+        "candidate_family": "codex-specialized-summary",
+        "eligible_workflow_phases": {"summary"},
+        "reason": "safe-codex-summary-shadow-candidate",
+    },
+)
 
 
 def _json_obj(raw: Any) -> dict[str, Any]:
@@ -929,6 +938,72 @@ def _codex_exact_cache_canary_sample(params: dict[str, Any], *, requested_model:
     }
 
 
+def _codex_phase_model_candidate(
+    params: dict[str, Any],
+    *,
+    requested_model: str,
+) -> dict[str, Any] | None:
+    requested_l = requested_model.strip().lower()
+    candidate = next(
+        (
+            item for item in _CODEX_PHASE_MODEL_CANDIDATES
+            if requested_l == str(item.get("requested_model") or "").lower()
+        ),
+        None,
+    )
+    if candidate is None:
+        return None
+
+    text_chars = _input_text_chars(params.get("input"))
+    phase = _codex_stateless_shadow_phase_classification(params) if text_chars else {
+        "workflow_phase": "unknown",
+        "workflow_phase_reason": "empty-input",
+        "shadow_replay_shape": "none",
+        "shadow_supported": False,
+    }
+    workflow_phase = str(phase.get("workflow_phase") or "unknown")
+    skip_reason = _codex_stateless_shadow_skip_reason(params)
+    eligible_phases = set(candidate.get("eligible_workflow_phases") or set())
+    reason_codes: list[str] = []
+    if skip_reason:
+        reason_codes.append(skip_reason)
+    if eligible_phases and workflow_phase not in eligible_phases:
+        reason_codes.append("workflow-phase-not-enabled")
+
+    selected = not reason_codes
+    target_model = str(candidate.get("candidate_target_model") or "").strip()
+    return {
+        "schema": "agentflow.codex_app_routing_candidate.v1",
+        "status": "selected" if selected else "blocked",
+        "selected": bool(selected),
+        "requested_model": requested_model,
+        "candidate_target_model": target_model,
+        "target_model": target_model,
+        "candidate_family": str(candidate.get("candidate_family") or "codex-specialized-model"),
+        "workflow_phase": workflow_phase,
+        "workflow_phase_reason": phase.get("workflow_phase_reason"),
+        "shape_preflight_status": "safe" if selected else _codex_shadow_preflight_status_for_reason(reason_codes[0]),
+        "shadow_replay_shape": phase.get("shadow_replay_shape"),
+        "replayability_level": "stateless-shadow",
+        "input_size_bucket": _codex_input_size_bucket(text_chars),
+        "text_only_input": _is_text_only_input(params.get("input")),
+        "reason": str(candidate.get("reason") or "codex-phase-model-shadow-candidate") if selected else reason_codes[0],
+        "reason_codes": reason_codes or ["safe-codex-summary-shadow-candidate"],
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
+        "app_family": "codex",
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_commands_included": False,
+            "raw_transcripts_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "thread_ids_included": False,
+            "file_paths_included": False,
+        },
+    }
+
+
 def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     model_field, requested_model = _model_field(params)
     if not requested_model:
@@ -949,6 +1024,34 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
                 "eligible": False,
                 "skip_reason": "codex-turn-start-model-field-absent",
             },
+        })
+        return params, meta
+
+    phase_candidate = _codex_phase_model_candidate(params, requested_model=requested_model)
+    if phase_candidate is not None:
+        selected = bool(phase_candidate.get("selected"))
+        target_model = str(phase_candidate.get("candidate_target_model") or "")
+        meta = _policy_decision(
+            "routing",
+            "candidate-selected" if selected else "skipped",
+            str(phase_candidate.get("reason") or "codex-phase-model-candidate"),
+        )
+        meta.update({
+            "model_field": model_field,
+            "requested_model": requested_model,
+            "routed_model": requested_model,
+            "candidate_target_model": target_model if selected else None,
+            "target_model": target_model if selected else None,
+            "shadow_model": target_model if selected else None,
+            "candidate_family": phase_candidate.get("candidate_family"),
+            "workflow_phase": phase_candidate.get("workflow_phase"),
+            "workflow_phase_reason": phase_candidate.get("workflow_phase_reason"),
+            "shape_preflight_status": phase_candidate.get("shape_preflight_status"),
+            "reason_codes": phase_candidate.get("reason_codes") or [],
+            "codex_routing_candidate": phase_candidate,
+            "applied": False,
+            "shadow_only": bool(selected),
+            "live_promotion_required": bool(selected),
         })
         return params, meta
 
@@ -1090,12 +1193,33 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
 
     route_body = copy.deepcopy(params)
     route_body["model"] = requested_model
+    route_body["_agentflow_app_family"] = "codex"
+    route_body["_agentflow_source_surface"] = CODEX_APP_SOURCE_SURFACE
+    route_body["_agentflow_endpoint"] = "app_server"
+    phase = _codex_stateless_shadow_phase_classification(params) if _is_text_only_input(params.get("input")) else {
+        "workflow_phase": "unknown",
+        "workflow_phase_reason": "non-text-input",
+    }
+    route_body["_agentflow_workflow_phase"] = str(phase.get("workflow_phase") or "unknown")
+    route_body["_agentflow_workflow_phase_confidence"] = "medium"
     routed_model, routing_meta = route_model(route_body)
     routing_meta = dict(routing_meta)
+    openai_canary = routing_meta.get("openai_canary") if isinstance(routing_meta.get("openai_canary"), dict) else {}
+    candidate_target_model = (
+        openai_canary.get("shadow_model")
+        or openai_canary.get("target_model")
+        or routing_meta.get("candidate_target_model")
+    )
+    if candidate_target_model and candidate_target_model != requested_model:
+        routing_meta["candidate_target_model"] = str(candidate_target_model)
+        routing_meta.setdefault("shadow_model", str(candidate_target_model))
+        routing_meta.setdefault("candidate_family", "openai-canary")
     routing_meta.update({
         "surface": CODEX_APP_SOURCE_SURFACE,
         "decision_type": "routing",
-        "status": "applied" if routed_model != requested_model else "skipped",
+        "status": "applied" if routed_model != requested_model else (
+            "candidate-selected" if candidate_target_model and openai_canary.get("status") == "applied" else "skipped"
+        ),
         "applied": routed_model != requested_model,
         "model_field": model_field,
     })
@@ -3113,7 +3237,7 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
 
     if _contains_action_hint(params):
         metadata = _not_applied_metadata("action-like-params")
-        if CODEX_APP_SUMMARY_MODEL_HINT:
+        if _model_field(params)[1]:
             _params, metadata["routing"] = _codex_route_params(params)
         _attach_codex_local_pattern_features(raw, metadata)
         return raw, metadata
