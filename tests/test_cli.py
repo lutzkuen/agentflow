@@ -45,11 +45,11 @@ class ManagedFeedbackFlushClient:
 
 
 class AgentflowActivationCliTests(unittest.TestCase):
-    def test_public_agentflow_help_lists_onboarding_commands_and_targets(self):
+    def test_public_tokenclaw_help_lists_onboarding_commands_and_targets(self):
         stdout = io.StringIO()
 
         with patch("sys.stdout", stdout), self.assertRaises(SystemExit) as raised:
-            cli.agentflow_cli(["--help"])
+            cli.tokenclaw_cli(["--help"])
 
         self.assertEqual(raised.exception.code, 0)
         output = stdout.getvalue()
@@ -58,8 +58,10 @@ class AgentflowActivationCliTests(unittest.TestCase):
         for target in ("openai", "claude", "codex", "claude-vscode", "claude-desktop"):
             self.assertIn(target, output)
         self.assertIn("127.0.0.1", output)
+        self.assertIn("TokenClaw local proxy onboarding", output)
+        self.assertIn("TOKENCLAW_CONFIG_DIR or ~/.tokenclaw", output)
 
-    def test_public_agentflow_subcommand_help_works(self):
+    def test_public_tokenclaw_subcommand_help_works(self):
         commands = [
             ("activate", "--help"),
             ("stats", "--help"),
@@ -70,12 +72,22 @@ class AgentflowActivationCliTests(unittest.TestCase):
             with self.subTest(command=command):
                 stdout = io.StringIO()
                 with patch("sys.stdout", stdout), self.assertRaises(SystemExit) as raised:
-                    cli.agentflow_cli(list(command))
+                    cli.tokenclaw_cli(list(command))
                 self.assertEqual(raised.exception.code, 0)
                 self.assertIn("usage:", stdout.getvalue())
 
+    def test_legacy_agentflow_main_prints_deprecation_notice(self):
+        stderr = io.StringIO()
+
+        with patch("tokenclaw.cli.tokenclaw_cli", return_value=0), patch("sys.stderr", stderr), self.assertRaises(SystemExit) as raised:
+            cli.agentflow_main()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(stderr.getvalue(), "agentflow is deprecated; use tokenclaw instead.\n")
+
     def test_agentflow_cli_reexports_onboarding_command_group(self):
         self.assertIs(cli.agentflow_cli, onboarding_cli.agentflow_cli)
+        self.assertIs(cli.tokenclaw_cli, onboarding_cli.tokenclaw_cli)
         self.assertIs(cli._activation_stats_result, onboarding_cli._activation_stats_result)
         self.assertIs(cli._doctor_codex_target, onboarding_cli._doctor_codex_target)
         self.assertIs(cli._doctor_claude_desktop_target, onboarding_cli._doctor_claude_desktop_target)
@@ -151,7 +163,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
         stdout = io.StringIO()
 
-        code = onboarding_cli.agentflow_cli(["version", "--json"], stdout=stdout)
+        code = onboarding_cli.tokenclaw_cli(["version", "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
         self.assertEqual(
@@ -161,7 +173,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 "ok": True,
                 "version": __version__,
                 "package": "tokenclaw",
-                "command": "agentflow",
+                "command": "tokenclaw",
             },
         )
 
@@ -169,18 +181,18 @@ class AgentflowActivationCliTests(unittest.TestCase):
         readme = Path("README.md").read_text(encoding="utf-8")
 
         self.assertLess(readme.index("## Quick start"), readme.index("## Manual proxy fallback"))
-        self.assertLess(readme.index("agentflow activate openai"), readme.index("agentflow-proxy --provider"))
+        self.assertLess(readme.index("tokenclaw activate openai"), readme.index("tokenclaw-proxy --provider"))
         for expected in (
-            "agentflow activate openai",
-            "agentflow activate claude",
-            "agentflow activate codex",
-            "agentflow activate claude-vscode",
-            "agentflow activate claude-desktop",
-            "agentflow stats",
-            "agentflow doctor",
+            "tokenclaw activate openai",
+            "tokenclaw activate claude",
+            "tokenclaw activate codex",
+            "tokenclaw activate claude-vscode",
+            "tokenclaw activate claude-desktop",
+            "tokenclaw stats",
+            "tokenclaw doctor",
             "openai_base_url = \"http://127.0.0.1:4003/v1\"",
             "ANTHROPIC_BASE_URL=http://127.0.0.1:4000",
-            "agentflow_server",
+            "tokenclaw_server",
             "not a provider proxy",
             "GitHub Copilot non-goal",
             "unsupported: GitHub Copilot is not a base-url target",
@@ -188,6 +200,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "tokenclaw --help",
         ):
             self.assertIn(expected, readme)
+        self.assertNotIn("agentflow", readme)
         self.assertNotIn("sk-", readme)
 
     def test_readme_onboarding_commands_smoke_without_credentials(self):
@@ -326,12 +339,14 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 scripts[name.strip()] = value.strip().strip('"')
 
         self.assertEqual(scripts["agentflow"], "tokenclaw.cli:agentflow_main")
-        self.assertEqual(scripts["tokenclaw"], "tokenclaw.cli:agentflow_main")
+        self.assertEqual(scripts["tokenclaw"], "tokenclaw.cli:tokenclaw_main")
         self.assertEqual(scripts["tokenclaw-proxy"], "tokenclaw.cli:proxy_main")
         self.assertEqual(scripts["tokenclaw-dashboard"], "tokenclaw.dashboard:main")
         self.assertEqual(scripts["agentflow-proxy"], "tokenclaw.cli:proxy_main")
         self.assertEqual(scripts["agentflow-claude-proxy"], "tokenclaw.cli:proxy_main")
         self.assertEqual(scripts["agentflow-dashboard"], "tokenclaw.dashboard:main")
+        self.assertEqual(scripts["tokenclaw-openai-routing-report"], "tokenclaw.cli:openai_routing_report_main")
+        self.assertEqual(scripts["tokenclaw-optimization-eval-plan"], "tokenclaw.cli:optimization_eval_plan_main")
         self.assertGreater(len(scripts), 80)
 
         for name, target in scripts.items():
@@ -390,7 +405,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertIn("openai", profile["command_profile"]["argv"])
             self.assertIn("Local base URL for clients: http://127.0.0.1:4003/v1", stdout_one.getvalue())
             self.assertIn("Upstream provider base URL: https://api.openai.com", stdout_one.getvalue())
-            self.assertIn("Run configured proxy: agentflow run openai", stdout_one.getvalue())
+            self.assertIn("Run configured proxy: tokenclaw run openai", stdout_one.getvalue())
 
     def test_activate_openai_custom_upstream_preserves_local_base_url(self):
         upstream = "https://example-resource.openai.azure.com/openai/deployments/my-deployment?api-version=2024-10-21"
@@ -479,7 +494,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp], stdout=io.StringIO(), stderr=stderr)
 
         self.assertEqual(code, 1)
-        self.assertIn("Invalid AgentFlow activation config", stderr.getvalue())
+        self.assertIn("Invalid TokenClaw activation config", stderr.getvalue())
         self.assertIn("$.schema", stderr.getvalue())
 
     def test_doctor_json_reports_invalid_activation_config_schema(self):
@@ -562,7 +577,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(profile["upstream_base_url"], "https://api.anthropic.com")
             self.assertIn("Local base URL for clients: http://127.0.0.1:4000", stdout_one.getvalue())
             self.assertIn("Upstream provider base URL: https://api.anthropic.com", stdout_one.getvalue())
-            self.assertIn("Run configured proxy: agentflow run claude", stdout_one.getvalue())
+            self.assertIn("Run configured proxy: tokenclaw run claude", stdout_one.getvalue())
 
     def test_activate_claude_vscode_writes_env_file_and_default_claude_dependency(self):
         with TemporaryDirectory() as tmp:
@@ -582,13 +597,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(config["targets"]["claude-vscode"]["safe_env"], {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000"})
             self.assertEqual(
                 env_path.read_text(encoding="utf-8"),
-                "# AgentFlow-managed non-secret routing values for Claude in VS Code.\n"
+                "# TokenClaw-managed non-secret routing values for Claude in VS Code.\n"
                 "# Keep Claude API keys in your shell or OS secret manager, not in this file.\n"
                 "ANTHROPIC_BASE_URL=http://127.0.0.1:4000\n",
             )
             output = stdout.getvalue()
-            self.assertIn("Claude VS Code local AgentFlow base URL: http://127.0.0.1:4000", output)
-            self.assertIn("Upstream Anthropic base URL used by AgentFlow: https://api.anthropic.com", output)
+            self.assertIn("Claude VS Code local TokenClaw base URL: http://127.0.0.1:4000", output)
+            self.assertIn("Upstream Anthropic base URL used by TokenClaw: https://api.anthropic.com", output)
             self.assertIn("Shell profile: skipped", output)
             self.assertIn("Shell profile changed: false", output)
             self.assertIn("Claude target was not configured; created the default Claude activation profile.", output)
@@ -609,7 +624,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             env_path = config_dir / "claude-vscode.env"
-            self.assertIn("# AgentFlow\n", bashrc.read_text(encoding="utf-8"))
+            self.assertIn("# TokenClaw\n", bashrc.read_text(encoding="utf-8"))
             self.assertIn(f"source {env_path}\n", bashrc.read_text(encoding="utf-8"))
             config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
             self.assertEqual(config["targets"]["claude-vscode"]["shell_profile_path"], str(bashrc))
@@ -662,8 +677,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
             config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
             self.assertEqual(config["targets"]["claude-vscode"]["local_base_url"], "http://127.0.0.1:4998")
             self.assertEqual((Path(tmp) / "claude-vscode.env").read_text(encoding="utf-8").splitlines()[-1], "ANTHROPIC_BASE_URL=http://127.0.0.1:4998")
-            self.assertIn("Claude VS Code local AgentFlow base URL: http://127.0.0.1:4998", stdout.getvalue())
-            self.assertIn("Upstream Anthropic base URL used by AgentFlow: https://api.anthropic.com", stdout.getvalue())
+            self.assertIn("Claude VS Code local TokenClaw base URL: http://127.0.0.1:4998", stdout.getvalue())
+            self.assertIn("Upstream Anthropic base URL used by TokenClaw: https://api.anthropic.com", stdout.getvalue())
 
     def test_activate_claude_vscode_alias_claude_code(self):
         with TemporaryDirectory() as tmp:
@@ -674,7 +689,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
             self.assertIn("claude-vscode", config["targets"])
-            self.assertIn("Configured AgentFlow target: claude-vscode", stdout.getvalue())
+            self.assertIn("Configured TokenClaw target: claude-vscode", stdout.getvalue())
 
     def test_activate_claude_vscode_dry_run_does_not_write_files(self):
         with TemporaryDirectory() as tmp:
@@ -690,11 +705,11 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertFalse((Path(tmp) / "activation.json").exists())
             self.assertFalse((Path(tmp) / "claude-vscode.env").exists())
             self.assertFalse(profile.exists())
-            self.assertIn("Dry run: would configure AgentFlow target: claude-vscode", stdout.getvalue())
+            self.assertIn("Dry run: would configure TokenClaw target: claude-vscode", stdout.getvalue())
             self.assertIn("Env file changed: true", stdout.getvalue())
             self.assertIn(f"Shell profile: {profile}", stdout.getvalue())
             self.assertIn("Shell profile changed: true", stdout.getvalue())
-            self.assertIn("Shell profile append:\n# AgentFlow\nsource ", stdout.getvalue())
+            self.assertIn("Shell profile append:\n# TokenClaw\nsource ", stdout.getvalue())
 
     def test_activate_claude_vscode_no_shell_profile_skips_profile_injection(self):
         with TemporaryDirectory() as tmp:
@@ -752,8 +767,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertFalse((Path(tmp) / "activation.json").exists())
             self.assertFalse((Path(tmp) / "claude-vscode.env").exists())
-            self.assertIn("AgentFlow target is not configured: claude", stderr.getvalue())
-            self.assertIn("agentflow activate claude", stderr.getvalue())
+            self.assertIn("TokenClaw target is not configured: claude", stderr.getvalue())
+            self.assertIn("tokenclaw activate claude", stderr.getvalue())
 
     def test_activate_claude_desktop_patches_exec_line_and_writes_backup(self):
         with TemporaryDirectory() as tmp:
@@ -794,11 +809,11 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(profile["desktop_file_path"], str(desktop_file))
             self.assertEqual(profile["safe_env"], {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000"})
             output = stdout.getvalue()
-            self.assertIn("Configured AgentFlow target: claude-desktop", output)
+            self.assertIn("Configured TokenClaw target: claude-desktop", output)
             self.assertIn(f"Claude Desktop file: {desktop_file}", output)
             self.assertIn("Desktop file changed: true", output)
             self.assertIn("Backup:", output)
-            self.assertIn("Run configured proxy: agentflow run claude", output)
+            self.assertIn("Run configured proxy: tokenclaw run claude", output)
 
     def test_activate_claude_desktop_is_idempotent_and_updates_existing_env_exec(self):
         with TemporaryDirectory() as tmp:
@@ -880,7 +895,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(desktop_file.read_text(encoding="utf-8"), original)
             self.assertFalse((config_dir / "activation.json").exists())
             self.assertFalse(desktop_file.with_name(desktop_file.name + ".agentflow.bak").exists())
-            self.assertIn("Dry run: would configure AgentFlow target: claude-desktop", stdout.getvalue())
+            self.assertIn("Dry run: would configure TokenClaw target: claude-desktop", stdout.getvalue())
             self.assertIn("Desktop file changed: true", stdout.getvalue())
 
     def test_activate_claude_desktop_missing_file_fails_actionably(self):
@@ -964,7 +979,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertIn("claude-desktop-base-url-mismatch", stale["reasons"])
             self.assertEqual(missing_code, 1)
             missing = json.loads(missing_stdout.getvalue())["targets"]["claude-desktop"]
-            self.assertEqual(missing["status"], "not routed via agentflow")
+            self.assertEqual(missing["status"], "not routed via tokenclaw")
             self.assertIn("claude-desktop-base-url-missing", missing["reasons"])
 
     def test_activate_dry_run_does_not_write_config(self):
@@ -975,7 +990,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertFalse((Path(tmp) / "activation.json").exists())
-            self.assertIn("Dry run: would configure AgentFlow target: openai", stdout.getvalue())
+            self.assertIn("Dry run: would configure TokenClaw target: openai", stdout.getvalue())
 
     def test_top_level_config_dir_is_preserved(self):
         with TemporaryDirectory() as tmp:
@@ -1177,11 +1192,11 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
         self.assertEqual(missing_code, 1)
         missing = json.loads(missing_stdout.getvalue())["targets"]["codex"]
-        self.assertEqual(missing["status"], "not routed via agentflow")
+        self.assertEqual(missing["status"], "not routed via tokenclaw")
         self.assertIn("codex-config-missing", missing["reasons"])
         self.assertEqual(stale_code, 1)
         stale = json.loads(stale_stdout.getvalue())["targets"]["codex"]
-        self.assertEqual(stale["status"], "not routed via agentflow")
+        self.assertEqual(stale["status"], "not routed via tokenclaw")
         self.assertEqual(stale["codex_openai_base_url"], "https://api.openai.com/v1")
         self.assertIn("codex-openai-base-url-mismatch", stale["reasons"])
 
@@ -1227,7 +1242,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         target = json.loads(stdout.getvalue())["targets"]["claude-vscode"]
-        self.assertEqual(target["status"], "not routed via agentflow")
+        self.assertEqual(target["status"], "not routed via tokenclaw")
         self.assertIn("current-shell-anthropic-base-url-mismatch", target["reasons"])
 
     def test_agentflow_run_translates_claude_profile_to_proxy_flags(self):
@@ -7388,10 +7403,10 @@ class PolicyReloadCliTests(unittest.TestCase):
     def test_managed_rollout_actions_accept_family_specific_safe_actions(self):
         specs = [
             ("crunch", "tool_results", "b", {"type": "shorten", "head_chars": 900, "tail_chars": 700, "max_replacement_chars": 2200, "preserve_tool_protocol": True}),
-            ("crunch", "diffs", "c", {"type": "shorten", "head_chars": 1200, "tail_chars": 800, "max_replacement_chars": 2600, "marker": "[AgentFlow: diff headers and hunks preserved]", "preserve_diff_headers": True, "preserve_hunk_boundaries": True}),
-            ("crunch", "generated_artifacts", "d", {"type": "shorten", "head_chars": 800, "tail_chars": 800, "max_replacement_chars": 2200, "marker": "[AgentFlow: generated artifact marker preserved]", "exactness_preserving_marker": True}),
-            ("crunch", "tabular_data", "e", {"type": "shorten", "head_chars": 800, "tail_chars": 800, "max_replacement_chars": 2200, "marker": "[AgentFlow: tabular sample preserved]"}),
-            ("crunch", "terminal_logs", "f", {"type": "shorten", "head_chars": 800, "tail_chars": 800, "max_replacement_chars": 2200, "marker": "[AgentFlow: terminal log errors preserved]"}),
+            ("crunch", "diffs", "c", {"type": "shorten", "head_chars": 1200, "tail_chars": 800, "max_replacement_chars": 2600, "marker": "[TokenClaw: diff headers and hunks preserved]", "preserve_diff_headers": True, "preserve_hunk_boundaries": True}),
+            ("crunch", "generated_artifacts", "d", {"type": "shorten", "head_chars": 800, "tail_chars": 800, "max_replacement_chars": 2200, "marker": "[TokenClaw: generated artifact marker preserved]", "exactness_preserving_marker": True}),
+            ("crunch", "tabular_data", "e", {"type": "shorten", "head_chars": 800, "tail_chars": 800, "max_replacement_chars": 2200, "marker": "[TokenClaw: tabular sample preserved]"}),
+            ("crunch", "terminal_logs", "f", {"type": "shorten", "head_chars": 800, "tail_chars": 800, "max_replacement_chars": 2200, "marker": "[TokenClaw: terminal log errors preserved]"}),
             ("cache", "cacheability", "1", {"type": "exact_cache", "allow_tool_calls": False, "safe_invalidation": False}),
         ]
         actions = []
@@ -7490,7 +7505,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 "crunch",
                 "tabular_data",
                 "5",
-                {"type": "shorten", "head_chars": 100, "tail_chars": 100, "max_replacement_chars": 500, "marker": "[AgentFlow: table sample]"},
+                {"type": "shorten", "head_chars": 100, "tail_chars": 100, "max_replacement_chars": 500, "marker": "[TokenClaw: table sample]"},
                 "aggressive",
                 None,
             ),
@@ -7498,7 +7513,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 "crunch",
                 "cacheability",
                 "6",
-                {"type": "shorten", "head_chars": 100, "tail_chars": 100, "max_replacement_chars": 500, "marker": "[AgentFlow: cacheability]"},
+                {"type": "shorten", "head_chars": 100, "tail_chars": 100, "max_replacement_chars": 500, "marker": "[TokenClaw: cacheability]"},
                 "conservative",
                 None,
             ),

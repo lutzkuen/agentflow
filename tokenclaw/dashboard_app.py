@@ -151,6 +151,10 @@ def create_dashboard_router(
     async def stats() -> dict[str, Any]:
         return await stats_views.stats(_store(store_obj), default_db)
 
+    @router.get("/tokenclaw/stats")
+    async def tokenclaw_stats() -> dict[str, Any]:
+        return await stats()
+
     @router.get("/agentflow/stats/activity")
     async def stats_activity(limit: int = 100) -> dict[str, Any]:
         return await stats_views.stats_activity(_store(store_obj), limit=limit)
@@ -190,6 +194,10 @@ def create_dashboard_router(
         if stale is not None:
             return stale
         return await task
+
+    @router.get("/tokenclaw/stats/full")
+    async def tokenclaw_stats_full() -> dict[str, Any]:
+        return await stats_full()
 
     @router.get("/agentflow/stats/usage")
     async def stats_usage() -> dict[str, Any]:
@@ -590,6 +598,10 @@ def create_dashboard_router(
     async def dashboard() -> str:
         return stats_views.dashboard_html()
 
+    @router.get("/tokenclaw/dashboard", response_class=HTMLResponse)
+    async def tokenclaw_dashboard() -> str:
+        return await dashboard()
+
     return router
 
 
@@ -618,7 +630,7 @@ def create_dashboard_app(
 
     @app.get("/")
     async def root() -> RedirectResponse:
-        return RedirectResponse("/agentflow/dashboard")
+        return RedirectResponse("/tokenclaw/dashboard")
 
     app.include_router(
         create_dashboard_router(

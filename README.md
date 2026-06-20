@@ -1,11 +1,11 @@
-# AgentFlow
+# TokenClaw
 
-AgentFlow is a **local proxy for token savings and telemetry on LLM traffic**.
+TokenClaw is a **local proxy for token savings and telemetry on LLM traffic**.
 
-Run it on localhost, point OpenAI-compatible or Anthropic-compatible clients at it, and keep using your normal provider credentials. AgentFlow forwards the real provider call, records local usage metadata, and shows cost and traffic behavior in a read-only dashboard.
+Run it on localhost, point OpenAI-compatible or Anthropic-compatible clients at it, and keep using your normal provider credentials. TokenClaw forwards the real provider call, records local usage metadata, and shows cost and traffic behavior in a read-only dashboard.
 It will apply crunching, caching and routing to decrease your token spend while preserving quality.
 
-By default, AgentFlow does **not** store raw prompts or responses.
+By default, TokenClaw does **not** store raw prompts or responses.
 
 ## Quick start
 
@@ -20,8 +20,8 @@ pip install tokenclaw
 Until the public package name is migrated, install from this repository:
 
 ```bash
-git clone https://github.com/lutzkuen/agentflow.git
-cd agentflow
+git clone https://github.com/lutzkuen/tokenclaw.git
+cd tokenclaw
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -31,14 +31,13 @@ Then use the public onboarding command:
 
 ```bash
 tokenclaw --help
-agentflow --help
-agentflow activate openai
-agentflow activate claude
-agentflow activate codex
-agentflow activate claude-vscode
-agentflow activate claude-desktop
-agentflow stats
-agentflow doctor
+tokenclaw activate openai
+tokenclaw activate claude
+tokenclaw activate codex
+tokenclaw activate claude-vscode
+tokenclaw activate claude-desktop
+tokenclaw stats
+tokenclaw doctor
 ```
 
 Activation writes local routing/config files only. It does not store or print API keys.
@@ -48,52 +47,52 @@ uses them.
 Start the configured proxies in separate terminals:
 
 ```bash
-agentflow run openai
-agentflow run claude
+tokenclaw run openai
+tokenclaw run claude
 ```
 
 Use `--dry-run` to inspect the command without starting a server:
 
 ```bash
-agentflow run openai --dry-run
-agentflow run claude --dry-run
+tokenclaw run openai --dry-run
+tokenclaw run claude --dry-run
 ```
 
 Open the read-only dashboard when a proxy or dashboard process is running:
 
 ```text
-http://127.0.0.1:4002/agentflow/dashboard
+http://127.0.0.1:4002/tokenclaw/dashboard
 ```
 
 ## What activation changes
 
 | Target | Command | What it changes | Local client URL | Runtime |
 | --- | --- | --- | --- | --- |
-| OpenAI API apps | `agentflow activate openai` | AgentFlow activation profile for OpenAI-compatible traffic | `http://127.0.0.1:4003/v1` | `agentflow run openai` |
-| Claude API apps | `agentflow activate claude` | AgentFlow activation profile for Anthropic-compatible traffic | `http://127.0.0.1:4000` | `agentflow run claude` |
-| Codex VS Code / CLI | `agentflow activate codex` | User-level `~/.codex/config.toml` `openai_base_url`; creates the OpenAI profile if needed | `http://127.0.0.1:4003/v1` | `agentflow run openai` |
-| Claude VS Code / Claude Code | `agentflow activate claude-vscode` | AgentFlow-managed non-secret env file with `ANTHROPIC_BASE_URL`; creates the Claude profile if needed | `http://127.0.0.1:4000` | `agentflow run claude` |
-| Claude Desktop on Linux | `agentflow activate claude-desktop` | User-level Claude Desktop `.desktop` launcher `Exec=` line with `ANTHROPIC_BASE_URL`; creates the Claude profile if needed | `http://127.0.0.1:4000` | `agentflow run claude` |
+| OpenAI API apps | `tokenclaw activate openai` | TokenClaw activation profile for OpenAI-compatible traffic | `http://127.0.0.1:4003/v1` | `tokenclaw run openai` |
+| Claude API apps | `tokenclaw activate claude` | TokenClaw activation profile for Anthropic-compatible traffic | `http://127.0.0.1:4000` | `tokenclaw run claude` |
+| Codex VS Code / CLI | `tokenclaw activate codex` | User-level `~/.codex/config.toml` `openai_base_url`; creates the OpenAI profile if needed | `http://127.0.0.1:4003/v1` | `tokenclaw run openai` |
+| Claude VS Code / Claude Code | `tokenclaw activate claude-vscode` | TokenClaw-managed non-secret env file with `ANTHROPIC_BASE_URL`; creates the Claude profile if needed | `http://127.0.0.1:4000` | `tokenclaw run claude` |
+| Claude Desktop on Linux | `tokenclaw activate claude-desktop` | User-level Claude Desktop `.desktop` launcher `Exec=` line with `ANTHROPIC_BASE_URL`; creates the Claude profile if needed | `http://127.0.0.1:4000` | `tokenclaw run claude` |
 | GitHub Copilot | Unsupported | No base-url activation target | Not applicable | Not applicable |
 
-The OpenAI and Anthropic proxies run as separate provider modes. Run two AgentFlow
+The OpenAI and Anthropic proxies run as separate provider modes. Run two TokenClaw
 processes if you want both at the same time.
 
 ## Interpret stats and doctor
 
 ```bash
-agentflow stats
+tokenclaw stats
 ```
 
-`agentflow stats` reads the local activation config and reports which targets are
+`tokenclaw stats` reads the local activation config and reports which targets are
 configured, the local base URL each client should use, and the redacted upstream
-provider URL AgentFlow will forward to. It does not contact provider APIs.
+provider URL TokenClaw will forward to. It does not contact provider APIs.
 
 ```bash
-agentflow doctor
+tokenclaw doctor
 ```
 
-`agentflow doctor` checks configured targets without printing secrets. For provider
+`tokenclaw doctor` checks configured targets without printing secrets. For provider
 targets it checks the loopback health endpoint and detects common stale-config
 states such as a running proxy pointed at a different upstream. For VS Code targets
 it checks the local config files and reports when runtime environment inheritance
@@ -102,8 +101,8 @@ cannot be proven from the current shell.
 Use JSON output for scripts:
 
 ```bash
-agentflow stats --json
-agentflow doctor --json
+tokenclaw stats --json
+tokenclaw doctor --json
 ```
 
 ## OpenAI API apps
@@ -111,8 +110,8 @@ agentflow doctor --json
 Configure the local OpenAI target:
 
 ```bash
-agentflow activate openai
-agentflow run openai
+tokenclaw activate openai
+tokenclaw run openai
 ```
 
 Change the OpenAI base URL in your app to:
@@ -150,23 +149,23 @@ curl http://127.0.0.1:4003/v1/responses \
 ```
 
 For a custom OpenAI-compatible provider, keep the client base URL pointed at
-AgentFlow and configure the upstream provider URL separately:
+TokenClaw and configure the upstream provider URL separately:
 
 ```bash
-agentflow activate openai \
+tokenclaw activate openai \
   --openai-base-url 'https://resource.openai.azure.com/openai/deployments/my-deployment?api-version=2024-10-21' \
   --openai-auth-mode proxy
 
-agentflow run openai
+tokenclaw run openai
 ```
 
 In that example:
 
-- `http://127.0.0.1:4003/v1` is the local AgentFlow base URL your OpenAI SDK or tool uses.
-- `https://resource.openai.azure.com/openai/deployments/my-deployment?...` is the upstream provider base URL AgentFlow forwards to.
-- `--openai-auth-mode proxy` uses credentials from the AgentFlow process environment. `--openai-auth-mode client` forwards each client's `Authorization` header instead.
+- `http://127.0.0.1:4003/v1` is the local TokenClaw base URL your OpenAI SDK or tool uses.
+- `https://resource.openai.azure.com/openai/deployments/my-deployment?...` is the upstream provider base URL TokenClaw forwards to.
+- `--openai-auth-mode proxy` uses credentials from the TokenClaw process environment. `--openai-auth-mode client` forwards each client's `Authorization` header instead.
 
-AgentFlow preserves upstream path and query components such as Azure `api-version`,
+TokenClaw preserves upstream path and query components such as Azure `api-version`,
 avoids duplicate `/v1` route segments, and redacts userinfo or sensitive query
 values in CLI and health output.
 
@@ -175,8 +174,8 @@ values in CLI and health output.
 Configure the local Claude target:
 
 ```bash
-agentflow activate claude
-agentflow run claude
+tokenclaw activate claude
+tokenclaw run claude
 ```
 
 Change the Anthropic base URL to:
@@ -207,12 +206,12 @@ curl http://127.0.0.1:4000/v1/messages \
 
 ## Codex VS Code and CLI
 
-`agentflow activate codex` configures Codex through the user-level Codex
+`tokenclaw activate codex` configures Codex through the user-level Codex
 `openai_base_url` setting:
 
 ```bash
-agentflow activate codex
-agentflow run openai
+tokenclaw activate codex
+tokenclaw run openai
 ```
 
 This writes or updates:
@@ -240,15 +239,15 @@ provider/auth settings as machine-local.
 
 ## Claude VS Code and Claude Code
 
-`agentflow activate claude-vscode` writes an AgentFlow-managed non-secret env file
-for the Claude base URL and adds a `source ~/.agentflow/claude-vscode.env` line to
+`tokenclaw activate claude-vscode` writes a TokenClaw-managed non-secret env file
+for the Claude base URL and adds a `source ~/.tokenclaw/claude-vscode.env` line to
 your shell profile (`~/.zshrc`, `~/.bashrc`, or `~/.profile`). It does not write
 `ANTHROPIC_API_KEY` or token values. Use `--no-shell-profile` if you manage shell
 startup files yourself.
 
 ```bash
-agentflow activate claude-vscode
-agentflow run claude
+tokenclaw activate claude-vscode
+tokenclaw run claude
 ```
 
 The managed env file contains the local Claude proxy base URL:
@@ -271,16 +270,16 @@ user environment, not in repository files.
 
 ## Claude Desktop on Linux
 
-`agentflow activate claude-desktop` updates the Claude Desktop `.desktop`
-launcher so GUI launches inherit the local AgentFlow Anthropic base URL. It
+`tokenclaw activate claude-desktop` updates the Claude Desktop `.desktop`
+launcher so GUI launches inherit the local TokenClaw Anthropic base URL. It
 does not write `ANTHROPIC_API_KEY` or token values.
 
 ```bash
-agentflow activate claude-desktop
-agentflow run claude
+tokenclaw activate claude-desktop
+tokenclaw run claude
 ```
 
-By default AgentFlow patches `~/.local/share/applications/claude-desktop.desktop`
+By default TokenClaw patches `~/.local/share/applications/claude-desktop.desktop`
 when present. If only `/usr/share/applications/claude-desktop.desktop` exists,
 copy it to the user applications directory or pass `--force` when you intend to
 patch the system-level file with suitable permissions. Use `--desktop-file PATH`
@@ -288,24 +287,24 @@ for custom launcher locations.
 
 ## GitHub Copilot non-goal
 
-GitHub Copilot is not currently a normal AgentFlow base-url activation target.
-The AgentFlow base-url path works for clients/tools that let the user set an
+GitHub Copilot is not currently a normal TokenClaw base-url activation target.
+The TokenClaw base-url path works for clients/tools that let the user set an
 OpenAI-compatible or Anthropic-compatible provider base URL. Copilot is mediated
 through GitHub/Copilot product integrations, accounts, policy, and extension
 behavior. Future Copilot support should be designed as a separate integration,
-not as `agentflow activate copilot` silently editing an assumed provider URL.
+not as `tokenclaw activate copilot` silently editing an assumed provider URL.
 
 ```bash
-agentflow activate copilot
+tokenclaw activate copilot
 # unsupported: GitHub Copilot is not a base-url target; see README.md
 ```
 
 ## How does it work?
 
-AgentFlow sits between tools such as Codex, Claude Code, VS Code extensions, or your own API app and the provider API.
+TokenClaw sits between tools such as Codex, Claude Code, VS Code extensions, or your own API app and the provider API.
 
 ```text
-your app / IDE plugin -> AgentFlow on localhost -> OpenAI or Anthropic
+your app / IDE plugin -> TokenClaw on localhost -> OpenAI or Anthropic
 ```
 
 It currently supports:
@@ -315,7 +314,7 @@ It currently supports:
 | Anthropic / Claude-compatible | `POST /v1/messages` |
 | OpenAI-compatible | `POST /v1/responses`, `POST /v1/chat/completions`, WebSocket `/v1/responses`, plus files/uploads passthrough |
 
-AgentFlow gives you local visibility into coding-agent traffic:
+TokenClaw gives you local visibility into coding-agent traffic:
 
 - estimated tokens, spend, savings, and recent activity
 - which app, session, provider, and model generated calls
@@ -326,23 +325,23 @@ It is meant for answering "where did the tokens and cost go?" without sending pr
 
 ## Manual proxy fallback
 
-The packaged install name is `tokenclaw`. The `agentflow` onboarding command
-and specialist scripts such as `agentflow-proxy` remain available for backward
+The packaged install name is `tokenclaw`. The `tokenclaw` onboarding command
+and specialist scripts such as `tokenclaw-proxy` remain available for backward
 compatibility during the rename.
 
 Run the Anthropic-compatible proxy directly:
 
 ```bash
-agentflow-proxy --provider anthropic --host 127.0.0.1 --port 4000
+tokenclaw-proxy --provider anthropic --host 127.0.0.1 --port 4000
 ```
 
 Run the OpenAI-compatible proxy directly:
 
 ```bash
-agentflow-proxy --provider openai --openai-auth-mode proxy --host 127.0.0.1 --port 4003
+tokenclaw-proxy --provider openai --openai-auth-mode proxy --host 127.0.0.1 --port 4003
 ```
 
-`--openai-auth-mode proxy` means AgentFlow uses `AGENTFLOW_OPENAI_API_KEY` or
+`--openai-auth-mode proxy` means TokenClaw uses `AGENTFLOW_OPENAI_API_KEY` or
 `OPENAI_API_KEY` from the proxy environment when forwarding upstream. Use
 `--openai-auth-mode client` if you want each client request's `Authorization`
 header to be forwarded.
@@ -355,9 +354,9 @@ python -m unittest discover -s tests
 
 ## Managed control plane boundary
 
-`agentflow_server` is the future managed control plane for metadata-only policy
+`tokenclaw_server` is the future managed control plane for metadata-only policy
 recommendations. It is not a provider proxy and should not receive or forward
-raw provider request bodies. Local AgentFlow still owns provider forwarding,
+raw provider request bodies. Local TokenClaw still owns provider forwarding,
 request mutation, cache lookup/storage, local rule files, rollback, and the
 read-only dashboard.
 
@@ -366,20 +365,20 @@ read-only dashboard.
 When a proxy is running, open the dashboard from that proxy:
 
 ```text
-http://127.0.0.1:4000/agentflow/dashboard
-http://127.0.0.1:4003/agentflow/dashboard
+http://127.0.0.1:4000/tokenclaw/dashboard
+http://127.0.0.1:4003/tokenclaw/dashboard
 ```
 
 Or run a dashboard-only process that reads the same local database:
 
 ```bash
-agentflow-dashboard --host 127.0.0.1 --port 4002
+tokenclaw-dashboard --host 127.0.0.1 --port 4002
 ```
 
 Then open:
 
 ```text
-http://127.0.0.1:4002/agentflow/dashboard
+http://127.0.0.1:4002/tokenclaw/dashboard
 ```
 
 The dashboard tells you:
@@ -394,19 +393,19 @@ The dashboard tells you:
 
 ## Codex traffic
 
-Codex API-key traffic uses the OpenAI-compatible local proxy through `agentflow activate codex`.
+Codex API-key traffic uses the OpenAI-compatible local proxy through `tokenclaw activate codex`.
 For OAuth/subscription unattended worker runs, use direct Codex execution (`AGENTFLOW_CODEX_TRANSPORT=exec`).
 The previous experimental Codex app-server relay on ports 4013 and 4014 has been retired.
 
 Inspect recent Codex/OpenAI-compatible traffic through normal stats and dashboard commands:
 
 ```bash
-agentflow stats
+tokenclaw stats
 ```
 
 ## Defaults and privacy
 
-- Local database: `~/.agentflow/agentflow.sqlite3`
+- Local database: `~/.tokenclaw/tokenclaw.sqlite3`
 - Prompt/response body logging: off by default
 - Enable raw body logging only for local debugging:
 
@@ -415,15 +414,15 @@ export AGENTFLOW_LOG_BODIES=1
 ```
 
 - Keep proxy ports on `127.0.0.1` unless you add your own network/auth boundary.
-- AgentFlow is not an authentication gateway.
+- TokenClaw is not an authentication gateway.
 - Cost and token numbers are estimates unless the upstream provider returns exact usage.
-- If AgentFlow is unsure about routing, crunching, or caching, it forwards the request unchanged and records why.
+- If TokenClaw is unsure about routing, crunching, or caching, it forwards the request unchanged and records why.
 
 ## Common configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `AGENTFLOW_DB` | `~/.agentflow/agentflow.sqlite3` | Local SQLite metadata DB |
+| `AGENTFLOW_DB` | `~/.tokenclaw/tokenclaw.sqlite3` | Local SQLite metadata DB |
 | `AGENTFLOW_DATABASE_URL` | unset | Use Postgres instead of SQLite |
 | `AGENTFLOW_CACHE` | `1` | Enable exact local cache where safe |
 | `AGENTFLOW_CACHE_TOOL_CALLS` | `0` | Cache tool-call requests only if you accept the risk |
@@ -454,7 +453,7 @@ Cache policy is loaded from the first existing path in this order:
 ```text
 AGENTFLOW_CACHE_RULES
 config/cache_rules.yaml
-~/.agentflow/cache_rules.yaml
+~/.tokenclaw/cache_rules.yaml
 bundled tokenclaw/cache_rules.yaml
 ```
 
@@ -466,7 +465,7 @@ calls warm the rule; the fifth matching call is allowed to store the streamed
 response, and later identical session-scoped calls can replay it.
 
 If you maintain your own `config/cache_rules.yaml` or
-`~/.agentflow/cache_rules.yaml`, include an equivalent pattern rule:
+`~/.tokenclaw/cache_rules.yaml`, include an equivalent pattern rule:
 
 ```yaml
 pattern_rules:
@@ -487,7 +486,7 @@ pattern_rules:
       user_specific_hint: false
       exact_cache_candidate_hint: true
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: canary-only
       canary_enabled: true
       canary_fraction: 1.0
@@ -512,7 +511,7 @@ List them with:
 python - <<'PY'
 import importlib.metadata as md
 for ep in md.entry_points(group="console_scripts"):
-    if ep.name.startswith("agentflow-"):
+    if ep.name.startswith("tokenclaw-"):
         print(ep.name)
 PY
 ```

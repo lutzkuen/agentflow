@@ -24,23 +24,23 @@ from tokenclaw.upstream_url import redact_url as _redact_url
 ONBOARDING_TARGETS = ("openai", "claude", "codex", "claude-vscode", "claude-desktop")
 UNSUPPORTED_ONBOARDING_TARGETS = ("copilot",)
 RUN_TARGETS = ("openai", "claude")
-DEFAULT_STATS_URL = "http://127.0.0.1:4002/agentflow/stats"
+DEFAULT_STATS_URL = "http://127.0.0.1:4002/tokenclaw/stats"
 
 
-def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
+def _write_activation_summary(stdout: Any, result: dict[str, Any], *, brand: str = "TokenClaw") -> None:
     if result["target"] == "claude-vscode":
         prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
-        stdout.write(f"{prefix} AgentFlow target: claude-vscode\n")
-        stdout.write(f"Claude VS Code local AgentFlow base URL: {result['local_base_url']}\n")
-        stdout.write(f"Upstream Anthropic base URL used by AgentFlow: {_redact_url(result['upstream_base_url'])}\n")
-        stdout.write(f"AgentFlow-managed non-secret env file: {result['env_file_path']}\n")
+        stdout.write(f"{prefix} {brand} target: claude-vscode\n")
+        stdout.write(f"Claude VS Code local {brand} base URL: {result['local_base_url']}\n")
+        stdout.write(f"Upstream Anthropic base URL used by {brand}: {_redact_url(result['upstream_base_url'])}\n")
+        stdout.write(f"{brand}-managed non-secret env file: {result['env_file_path']}\n")
         stdout.write(f"Env file changed: {str(result['env_file_changed']).lower()}\n")
         stdout.write(f"Shell profile: {result.get('shell_profile_path') or 'skipped'}\n")
         stdout.write(f"Shell profile changed: {str(result.get('shell_profile_changed')).lower()}\n")
         if result.get("dry_run") and result.get("shell_profile_append"):
             stdout.write("Shell profile append:\n")
             stdout.write(result["shell_profile_append"])
-        stdout.write(f"Depends on AgentFlow target: {result['depends_on']}\n")
+        stdout.write(f"Depends on {brand} target: {result['depends_on']}\n")
         if result.get("claude_target_created"):
             stdout.write("Claude target was not configured; created the default Claude activation profile.\n")
         stdout.write("Routing snippet for a terminal that already has your Claude API key:\n")
@@ -51,33 +51,33 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
             "VS Code extensions usually inherit environment variables only from the VS Code process; "
             "restart VS Code from that terminal if it was opened from the desktop.\n"
         )
-        stdout.write("AgentFlow does not store or print ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or token values.\n")
+        stdout.write(f"{brand} does not store or print ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or token values.\n")
         return
 
     if result["target"] == "claude-desktop":
         prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
-        stdout.write(f"{prefix} AgentFlow target: claude-desktop\n")
+        stdout.write(f"{prefix} {brand} target: claude-desktop\n")
         stdout.write(f"Claude Desktop file: {result['desktop_file_path']}\n")
         stdout.write(f"Desktop file changed: {str(result['desktop_file_changed']).lower()}\n")
         if result.get("desktop_file_backup_path"):
             stdout.write(f"Backup: {result['desktop_file_backup_path']}\n")
-        stdout.write(f"Depends on AgentFlow target: {result['depends_on']}\n")
+        stdout.write(f"Depends on {brand} target: {result['depends_on']}\n")
         if result.get("claude_target_created"):
             stdout.write("Claude target was not configured; created the default Claude activation profile.\n")
         stdout.write(f"Run configured proxy: {result['run_command']}\n")
         stdout.write(f"Config file: {result['config_path']}\n")
-        stdout.write("AgentFlow does not store or print ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or token values.\n")
+        stdout.write(f"{brand} does not store or print ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or token values.\n")
         return
 
     if result["target"] == "codex":
         prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
-        stdout.write(f"{prefix} AgentFlow target: codex\n")
+        stdout.write(f"{prefix} {brand} target: codex\n")
         stdout.write(f"Codex OpenAI base URL: {result['local_base_url']}\n")
         stdout.write(f"Codex config file: {result['codex_config_path']}\n")
         stdout.write(f"Codex config changed: {str(result['codex_config_changed']).lower()}\n")
         if result.get("codex_config_backup_path"):
             stdout.write(f"Backup file: {result['codex_config_backup_path']}\n")
-        stdout.write(f"Depends on AgentFlow target: {result['depends_on']}\n")
+        stdout.write(f"Depends on {brand} target: {result['depends_on']}\n")
         if result.get("openai_target_created"):
             stdout.write("OpenAI target was not configured; created the default OpenAI activation profile.\n")
         stdout.write(f"Run configured proxy: {result['run_command']}\n")
@@ -86,7 +86,7 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
         return
 
     prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
-    stdout.write(f"{prefix} AgentFlow target: {result['target']}\n")
+    stdout.write(f"{prefix} {brand} target: {result['target']}\n")
     stdout.write(f"Local base URL for clients: {result['local_base_url']}\n")
     stdout.write(f"Health URL: {result['health_url']}\n")
     stdout.write(f"Upstream provider base URL: {_redact_url(result['upstream_base_url'])}\n")
@@ -101,31 +101,35 @@ def _write_activation_config_error(stderr: Any, exc: Exception, *, command: str)
     if command == "activate":
         stderr.write(
             "Activation did not overwrite this file automatically. Move it aside, fix the JSON, "
-            "or pass --config-dir to write an isolated AgentFlow config.\n"
+            "or pass --config-dir to write an isolated TokenClaw config.\n"
         )
 
 
-def agentflow_cli(
+def _onboarding_cli(
     argv: Sequence[str] | None = None,
     *,
     stdout: Any = None,
     stderr: Any = None,
+    command_name: str = "tokenclaw",
+    brand: str = "TokenClaw",
 ) -> int:
     from tokenclaw import activation
     from tokenclaw import __version__
 
     stdout = stdout if stdout is not None else sys.stdout
     stderr = stderr if stderr is not None else sys.stderr
+    config_help = f"Local {brand} config directory, default: TOKENCLAW_CONFIG_DIR or ~/.tokenclaw."
 
     config_parent = argparse.ArgumentParser(add_help=False)
     config_parent.add_argument(
         "--config-dir",
         default=argparse.SUPPRESS,
-        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+        help=config_help,
     )
 
     parser = argparse.ArgumentParser(
-        description="AgentFlow local proxy onboarding and runtime commands",
+        prog=command_name,
+        description=f"{brand} local proxy onboarding and runtime commands",
         epilog=(
             "Onboarding targets: "
             + ", ".join(ONBOARDING_TARGETS)
@@ -134,25 +138,25 @@ def agentflow_cli(
             + ". Defaults bind provider proxies to 127.0.0.1."
         ),
     )
-    parser.add_argument("--version", action="version", version=f"agentflow {__version__}")
+    parser.add_argument("--version", action="version", version=f"{command_name} {__version__}")
     parser.add_argument(
         "--config-dir",
         default=None,
-        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+        help=config_help,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     activate_parser = subparsers.add_parser(
         "activate",
         parents=[config_parent],
-        help="Configure a local client/API target to use AgentFlow.",
+        help=f"Configure a local client/API target to use {brand}.",
     )
     activate_subparsers = activate_parser.add_subparsers(dest="target", required=True)
     activate_openai = activate_subparsers.add_parser("openai", help="Configure OpenAI-compatible API traffic.")
     activate_openai.add_argument(
         "--openai-base-url",
         default=None,
-        help="Upstream OpenAI-compatible provider base URL. The local client URL stays on AgentFlow.",
+        help=f"Upstream OpenAI-compatible provider base URL. The local client URL stays on {brand}.",
     )
     activate_openai.add_argument(
         "--openai-auth-mode",
@@ -163,7 +167,7 @@ def agentflow_cli(
     activate_openai.add_argument(
         "--config-dir",
         default=argparse.SUPPRESS,
-        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+        help=config_help,
     )
     activate_openai.add_argument("--local-base-url", default=None, help=argparse.SUPPRESS)
     activate_openai.add_argument("--health-url", default=None, help=argparse.SUPPRESS)
@@ -183,7 +187,7 @@ def agentflow_cli(
     activate_claude.add_argument(
         "--config-dir",
         default=argparse.SUPPRESS,
-        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+        help=config_help,
     )
     activate_claude.add_argument("--local-base-url", default=None, help=argparse.SUPPRESS)
     activate_claude.add_argument("--health-url", default=None, help=argparse.SUPPRESS)
@@ -192,18 +196,18 @@ def agentflow_cli(
     activate_claude_vscode = activate_subparsers.add_parser(
         "claude-vscode",
         aliases=["claude-code"],
-        help="Configure Claude/Claude Code in VS Code to inherit AgentFlow Anthropic routing.",
+        help=f"Configure Claude/Claude Code in VS Code to inherit {brand} Anthropic routing.",
     )
     activate_claude_vscode.add_argument(
         "--config-dir",
         default=argparse.SUPPRESS,
-        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+        help=config_help,
     )
     activate_claude_vscode.add_argument("--dry-run", action="store_true", help="Show intended changes without writing config.")
     activate_claude_vscode.add_argument(
         "--no-auto-claude",
         action="store_true",
-        help="Require an existing `agentflow activate claude` profile instead of creating the default one.",
+        help=f"Require an existing `{command_name} activate claude` profile instead of creating the default one.",
     )
     activate_claude_vscode.add_argument(
         "--no-shell-profile",
@@ -213,7 +217,7 @@ def agentflow_cli(
 
     activate_claude_desktop = activate_subparsers.add_parser(
         "claude-desktop",
-        help="Configure the Linux Claude Desktop launcher to use AgentFlow Anthropic routing.",
+        help=f"Configure the Linux Claude Desktop launcher to use {brand} Anthropic routing.",
     )
     activate_claude_desktop.add_argument(
         "--desktop-file",
@@ -223,7 +227,7 @@ def agentflow_cli(
     activate_claude_desktop.add_argument(
         "--config-dir",
         default=argparse.SUPPRESS,
-        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+        help=config_help,
     )
     activate_claude_desktop.add_argument("--dry-run", action="store_true", help="Show intended changes without writing config.")
     activate_claude_desktop.add_argument(
@@ -241,7 +245,7 @@ def agentflow_cli(
     activate_codex.add_argument(
         "--config-dir",
         default=argparse.SUPPRESS,
-        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+        help=config_help,
     )
     activate_codex.add_argument("--dry-run", action="store_true", help="Show intended changes without writing config.")
     activate_codex.add_argument(
@@ -262,7 +266,7 @@ def agentflow_cli(
     run_parser = subparsers.add_parser(
         "run",
         parents=[config_parent],
-        help="Run a configured AgentFlow proxy target.",
+        help=f"Run a configured {brand} proxy target.",
     )
     run_parser.add_argument("target", choices=RUN_TARGETS)
     run_parser.add_argument(
@@ -275,7 +279,7 @@ def agentflow_cli(
     doctor_parser = subparsers.add_parser(
         "doctor",
         parents=[config_parent],
-        help="Check a configured AgentFlow target without exposing secrets.",
+        help=f"Check a configured {brand} target without exposing secrets.",
     )
     doctor_parser.add_argument("target", nargs="?", choices=ONBOARDING_TARGETS)
     doctor_parser.add_argument("--timeout", type=float, default=5.0, help="Health request timeout in seconds.")
@@ -284,7 +288,7 @@ def agentflow_cli(
     stats_parser = subparsers.add_parser(
         "stats",
         parents=[config_parent],
-        help="Show configured AgentFlow activation targets.",
+        help=f"Show configured {brand} activation targets.",
     )
     stats_parser.add_argument(
         "target",
@@ -303,7 +307,7 @@ def agentflow_cli(
     savings_parser = subparsers.add_parser(
         "savings",
         parents=[config_parent],
-        help="Show savings opportunity report for configured AgentFlow targets.",
+        help=f"Show savings opportunity report for configured {brand} targets.",
     )
     savings_subparsers = savings_parser.add_subparsers(dest="savings_command", required=True)
     savings_report_parser = savings_subparsers.add_parser(
@@ -313,7 +317,7 @@ def agentflow_cli(
     savings_report_parser.add_argument(
         "--db",
         default=None,
-        help="Local AgentFlow SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
+        help="Local TokenClaw SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
     )
     savings_report_parser.add_argument(
         "--limit",
@@ -325,12 +329,12 @@ def agentflow_cli(
     savings_report_parser.add_argument(
         "--config-dir",
         default=argparse.SUPPRESS,
-        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+        help=config_help,
     )
 
     demo_parser = subparsers.add_parser(
         "demo",
-        help="Run deterministic no-provider AgentFlow demos.",
+        help=f"Run deterministic no-provider {brand} demos.",
     )
     demo_subparsers = demo_parser.add_subparsers(dest="demo_command", required=True)
     golden_path_parser = demo_subparsers.add_parser(
@@ -340,7 +344,7 @@ def agentflow_cli(
     golden_path_parser.add_argument(
         "--db",
         default=None,
-        help="Optional local AgentFlow SQLite path to include live OpenAI/Codex metadata evidence.",
+        help=f"Optional local {brand} SQLite path to include live OpenAI/Codex metadata evidence.",
     )
     golden_path_parser.add_argument(
         "--limit",
@@ -356,7 +360,7 @@ def agentflow_cli(
     savings_demo_parser.add_argument(
         "--db",
         default=None,
-        help="Optional local AgentFlow SQLite path to include live OpenAI/Codex metadata evidence.",
+        help=f"Optional local {brand} SQLite path to include live OpenAI/Codex metadata evidence.",
     )
     savings_demo_parser.add_argument(
         "--limit",
@@ -371,7 +375,7 @@ def agentflow_cli(
     )
     rule_drill_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
-    version_parser = subparsers.add_parser("version", help="Print the AgentFlow CLI version.")
+    version_parser = subparsers.add_parser("version", help=f"Print the {brand} CLI version.")
     version_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     args = parser.parse_args(argv)
@@ -394,7 +398,7 @@ def agentflow_cli(
             except activation.ActivationError as exc:
                 _write_activation_config_error(stderr, exc, command="activate")
                 return 2
-            _write_activation_summary(stdout, result)
+            _write_activation_summary(stdout, result, brand=brand)
             return 0
 
         if args.target == "codex":
@@ -408,7 +412,7 @@ def agentflow_cli(
             except activation.ActivationError as exc:
                 _write_activation_config_error(stderr, exc, command="activate")
                 return 2
-            _write_activation_summary(stdout, result)
+            _write_activation_summary(stdout, result, brand=brand)
             return 0
 
         if args.target == "claude-desktop":
@@ -422,7 +426,7 @@ def agentflow_cli(
             except activation.ActivationError as exc:
                 _write_activation_config_error(stderr, exc, command="activate")
                 return 2
-            _write_activation_summary(stdout, result)
+            _write_activation_summary(stdout, result, brand=brand)
             return 0
 
         if args.target == "claude" and args.anthropic_base_url and args.claude_base_url:
@@ -455,7 +459,7 @@ def agentflow_cli(
             config_path=config_path,
             dry_run=bool(args.dry_run),
         )
-        _write_activation_summary(stdout, result)
+        _write_activation_summary(stdout, result, brand=brand)
         return 0
 
     if args.command == "run":
@@ -467,7 +471,7 @@ def agentflow_cli(
         try:
             proxy_args = activation.proxy_args_for_target(config, args.target)
         except KeyError:
-            stderr.write(f"AgentFlow target is not configured: {args.target}. Run `agentflow activate {args.target}` first.\n")
+            stderr.write(f"{brand} target is not configured: {args.target}. Run `{command_name} activate {args.target}` first.\n")
             return 1
         profile = config["targets"][args.target]
         if args.dry_run:
@@ -553,7 +557,7 @@ def agentflow_cli(
                 _write_json(stdout, result)
             else:
                 stdout.write(
-                    "AgentFlow local savings rule drill: "
+                    f"{brand} local savings rule drill: "
                     f"{result.get('status')} "
                     f"{result.get('rule_family')} "
                     f"applied={str(bool(result.get('applied'))).lower()} "
@@ -587,12 +591,12 @@ def agentflow_cli(
         if args.json:
             _write_json(stdout, result)
         else:
-            heading = "AgentFlow savings demo" if args.demo_command == "savings" else "AgentFlow golden path"
+            heading = f"{brand} savings demo" if args.demo_command == "savings" else f"{brand} golden path"
             stdout.write(
                 f"{heading}: "
                 f"{result.get('decision_status')} "
                 f"{result.get('local_action_family')} "
-                f"agentflow_saved=${float(result.get('estimated_agentflow_savings_usd') or 0.0):.6f} "
+                f"tokenclaw_saved=${float(result.get('estimated_agentflow_savings_usd') or 0.0):.6f} "
                 f"provider_prompt_cache_discount=${float(result.get('provider_prompt_cache_discount_usd') or 0.0):.6f} "
                 f"managed_server_required={str(bool(result.get('managed_server_required'))).lower()}\n"
             )
@@ -604,16 +608,34 @@ def agentflow_cli(
             "ok": True,
             "version": __version__,
             "package": "tokenclaw",
-            "command": "agentflow",
+                "command": command_name,
         }
         if args.json:
             _write_json(stdout, result)
         else:
-            stdout.write(f"agentflow {__version__}\n")
+            stdout.write(f"{command_name} {__version__}\n")
         return 0
 
     parser.error("unknown command")
     return 2
+
+
+def tokenclaw_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    return _onboarding_cli(argv, stdout=stdout, stderr=stderr, command_name="tokenclaw", brand="TokenClaw")
+
+
+def agentflow_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    return _onboarding_cli(argv, stdout=stdout, stderr=stderr, command_name="agentflow", brand="TokenClaw")
 
 
 _CODEX_OPENAI_BASE_URL_RE = re.compile(r'^(\s*openai_base_url\s*=\s*)(".*?"|\'.*?\'|[^#\n]*?)(\s+#.*)?(\r?\n)?$')
@@ -850,12 +872,12 @@ def _doctor_codex_target(base: dict[str, Any], config: dict[str, Any]) -> dict[s
     expected = str(result.get("local_base_url") or "")
     path_value = result.get("codex_config_path")
     if not path_value:
-        result["status"] = "not routed via agentflow"
+        result["status"] = "not routed via tokenclaw"
         result["reasons"].append("codex-config-path-missing")
         return result
     path = Path(str(path_value)).expanduser()
     if not path.exists():
-        result["status"] = "not routed via agentflow"
+        result["status"] = "not routed via tokenclaw"
         result["reasons"].append("codex-config-missing")
         return result
     try:
@@ -867,11 +889,11 @@ def _doctor_codex_target(base: dict[str, Any], config: dict[str, Any]) -> dict[s
         return result
     result["codex_openai_base_url"] = _redact_url(configured_base_url) if configured_base_url else None
     if not configured_base_url:
-        result["status"] = "not routed via agentflow"
+        result["status"] = "not routed via tokenclaw"
         result["reasons"].append("codex-openai-base-url-missing")
         return result
     if configured_base_url != expected:
-        result["status"] = "not routed via agentflow"
+        result["status"] = "not routed via tokenclaw"
         result["reasons"].append("codex-openai-base-url-mismatch")
         return result
     openai_profile = _profile_for_target(config, "openai")
@@ -914,14 +936,14 @@ def _doctor_claude_vscode_target(base: dict[str, Any]) -> dict[str, Any]:
     else:
         result["env_file_exists"] = False
     if env_file_base_url != expected:
-        result["status"] = "not routed via agentflow" if not env_file_base_url else "stale base url"
+        result["status"] = "not routed via tokenclaw" if not env_file_base_url else "stale base url"
         result["reasons"].append("claude-vscode-env-file-missing" if not env_file_base_url else "claude-vscode-env-file-mismatch")
         return result
 
     current_shell_base_url = os.environ.get("ANTHROPIC_BASE_URL")
     result["current_shell_base_url"] = _redact_url(current_shell_base_url) if current_shell_base_url else None
     if current_shell_base_url and current_shell_base_url != expected:
-        result["status"] = "not routed via agentflow"
+        result["status"] = "not routed via tokenclaw"
         result["reasons"].append("current-shell-anthropic-base-url-mismatch")
         result["reasons"].append("vscode-runtime-env-uncertain")
         return result
@@ -947,13 +969,13 @@ def _doctor_claude_desktop_target(base: dict[str, Any]) -> dict[str, Any]:
     expected = str(result.get("local_base_url") or "")
     desktop_path_value = result.get("desktop_file_path")
     if not desktop_path_value:
-        result["status"] = "not routed via agentflow"
+        result["status"] = "not routed via tokenclaw"
         result["reasons"].append("claude-desktop-file-path-missing")
         return result
     path = Path(str(desktop_path_value)).expanduser()
     result["desktop_file_exists"] = path.exists()
     if not path.exists():
-        result["status"] = "not routed via agentflow"
+        result["status"] = "not routed via tokenclaw"
         result["reasons"].append("claude-desktop-file-missing")
         return result
     try:
@@ -970,7 +992,7 @@ def _doctor_claude_desktop_target(base: dict[str, Any]) -> dict[str, Any]:
         return result
     result["desktop_file_base_url"] = _redact_url(configured_base_url) if configured_base_url else None
     if not configured_base_url:
-        result["status"] = "not routed via agentflow"
+        result["status"] = "not routed via tokenclaw"
         result["reasons"].append("claude-desktop-base-url-missing")
         return result
     if configured_base_url != expected:
@@ -1023,7 +1045,7 @@ def _write_activation_doctor_summary(stdout: Any, result: dict[str, Any]) -> Non
 def _write_savings_report_summary(stdout: Any, result: dict[str, Any]) -> None:
     opportunities = result.get("opportunities") if isinstance(result.get("opportunities"), list) else []
     count = len(opportunities)
-    stdout.write(f"AgentFlow savings report: {count} opportunit{'y' if count == 1 else 'ies'}\n")
+    stdout.write(f"TokenClaw savings report: {count} opportunit{'y' if count == 1 else 'ies'}\n")
     for opp in opportunities:
         if not isinstance(opp, dict):
             continue
@@ -1050,7 +1072,7 @@ def _fetch_agentflow_stats(*, url: str = DEFAULT_STATS_URL, timeout: float = 5.0
     if not _is_loopback_url(url):
         result["issues"].append({
             "code": "non-loopback-url",
-            "message": "agentflow stats only reads loopback URLs by default.",
+            "message": "tokenclaw stats only reads loopback URLs by default.",
         })
         return result
     try:
@@ -1058,23 +1080,23 @@ def _fetch_agentflow_stats(*, url: str = DEFAULT_STATS_URL, timeout: float = 5.0
     except Exception as exc:
         result["issues"].append({
             "code": "stats-unreachable",
-            "message": f"Could not reach AgentFlow stats URL: {type(exc).__name__}",
+            "message": f"Could not reach TokenClaw stats URL: {type(exc).__name__}",
         })
         return result
     result["status_code"] = response.status_code
     if response.status_code >= 400:
         result["issues"].append({
             "code": "stats-error",
-            "message": f"AgentFlow stats returned HTTP {response.status_code}.",
+            "message": f"TokenClaw stats returned HTTP {response.status_code}.",
         })
         return result
     try:
         payload = response.json()
     except ValueError:
-        result["issues"].append({"code": "stats-invalid-json", "message": "AgentFlow stats did not return JSON."})
+        result["issues"].append({"code": "stats-invalid-json", "message": "TokenClaw stats did not return JSON."})
         return result
     if not isinstance(payload, dict):
-        result["issues"].append({"code": "stats-invalid-payload", "message": "AgentFlow stats payload is not an object."})
+        result["issues"].append({"code": "stats-invalid-payload", "message": "TokenClaw stats payload is not an object."})
         return result
     result["ok"] = True
     result["stats"] = payload
@@ -1083,7 +1105,7 @@ def _fetch_agentflow_stats(*, url: str = DEFAULT_STATS_URL, timeout: float = 5.0
 
 def _write_stats_summary(stdout: Any, result: dict[str, Any]) -> None:
     stats = result.get("stats") if isinstance(result.get("stats"), dict) else {}
-    stdout.write("AgentFlow stats status=ok\n")
+    stdout.write("TokenClaw stats status=ok\n")
     stdout.write(f"Stats URL: {result.get('url')}\n")
     if result.get("target"):
         stdout.write(f"Target: {result.get('target')}\n")
@@ -1123,20 +1145,20 @@ def _doctor_activation_target(profile: dict[str, Any], *, timeout: float = 5.0) 
     except Exception as exc:
         result["issues"].append({
             "code": "health-unreachable",
-            "message": f"Could not reach AgentFlow health URL: {type(exc).__name__}",
+            "message": f"Could not reach TokenClaw health URL: {type(exc).__name__}",
         })
         return result
     result["health_status_code"] = response.status_code
     if response.status_code >= 400:
         result["issues"].append({
             "code": "health-error",
-            "message": f"AgentFlow health returned HTTP {response.status_code}.",
+            "message": f"TokenClaw health returned HTTP {response.status_code}.",
         })
         return result
     try:
         health = response.json()
     except ValueError:
-        result["issues"].append({"code": "health-invalid-json", "message": "AgentFlow health did not return JSON."})
+        result["issues"].append({"code": "health-invalid-json", "message": "TokenClaw health did not return JSON."})
         return result
     health_provider = str(health.get("provider") or "")
     health_upstream = _redact_url(str(health.get("upstream") or ""))
@@ -1159,14 +1181,14 @@ def _doctor_activation_target(profile: dict[str, Any], *, timeout: float = 5.0) 
             "running_upstream": health_upstream,
         })
     if not health.get("ok"):
-        result["issues"].append({"code": "health-not-ok", "message": "AgentFlow health reports ok=false."})
+        result["issues"].append({"code": "health-not-ok", "message": "TokenClaw health reports ok=false."})
     result["ok"] = not result["issues"]
     return result
 
 
 def _write_doctor_summary(stdout: Any, result: dict[str, Any]) -> None:
     status = "ok" if result["ok"] else "issue"
-    stdout.write(f"AgentFlow doctor target={result['target']} status={status}\n")
+    stdout.write(f"TokenClaw doctor target={result['target']} status={status}\n")
     stdout.write(f"Local base URL for clients: {result.get('local_base_url')}\n")
     stdout.write(f"Health URL: {result.get('health_url')}\n")
     stdout.write(f"Configured upstream: {result.get('configured_upstream')}\n")

@@ -45,7 +45,7 @@ class ActivationConfigError(ActivationError):
         self.path = path
         self.errors = errors or [{"path": "$", "message": message}]
         location = f" at {path}" if path is not None else ""
-        super().__init__(f"Invalid AgentFlow activation config{location}: {message}")
+        super().__init__(f"Invalid TokenClaw activation config{location}: {message}")
 
 
 def utc_now() -> str:
@@ -324,7 +324,7 @@ def proxy_args_for_target(config: dict[str, Any], target: str) -> list[str]:
 
 
 def shell_command_for_profile(profile: dict[str, Any], *, redact: bool = False) -> str:
-    return " ".join(["agentflow-proxy", *[shlex.quote(arg) for arg in _profile_command_args(profile, redact=redact)]])
+    return " ".join(["tokenclaw-proxy", *[shlex.quote(arg) for arg in _profile_command_args(profile, redact=redact)]])
 
 
 def activation_profile(
@@ -372,7 +372,7 @@ def activation_profile(
     profile["last_activation_at"] = activated_at
     profile["updated_at"] = activated_at
     profile["command_profile"] = {
-        "entrypoint": "agentflow-proxy",
+        "entrypoint": "tokenclaw-proxy",
         "argv": _profile_command_args(profile),
     }
     return profile
@@ -397,8 +397,8 @@ def _claude_profile_from_config(
         return existing, False
     if not auto_configure:
         raise ActivationError(
-            "AgentFlow target is not configured: claude. Run `agentflow activate claude` first, "
-            "or rerun `agentflow activate claude-vscode` without `--no-auto-claude` to create "
+            "TokenClaw target is not configured: claude. Run `tokenclaw activate claude` first, "
+            "or rerun `tokenclaw activate claude-vscode` without `--no-auto-claude` to create "
             "the default Claude target."
         )
     return activation_profile("claude"), True
@@ -503,7 +503,7 @@ def activation_result(
         "health_url": profile["health_url"],
         "upstream_base_url": profile["upstream_base_url"],
         "upstream_base_url_redacted": redact_url(str(profile["upstream_base_url"])),
-        "run_command": f"agentflow run {profile['id']}",
+        "run_command": f"tokenclaw run {profile['id']}",
         "proxy_command": shell_command_for_profile(profile, redact=True),
         "profile": profile,
         "target_count": len(config.get("targets") or {}),
@@ -654,7 +654,7 @@ def default_shell_profile_path() -> Path:
 
 def _claude_vscode_env_contents(local_base_url: str) -> str:
     return (
-        "# AgentFlow-managed non-secret routing values for Claude in VS Code.\n"
+        "# TokenClaw-managed non-secret routing values for Claude in VS Code.\n"
         "# Keep Claude API keys in your shell or OS secret manager, not in this file.\n"
         f"ANTHROPIC_BASE_URL={local_base_url}\n"
     )
@@ -717,7 +717,7 @@ def _shell_profile_sources_env(profile_contents: str, env_path: Path) -> bool:
 
 
 def _shell_profile_append_block(env_path: Path) -> str:
-    return f"# AgentFlow\n{_shell_profile_source_line(env_path)}\n"
+    return f"# TokenClaw\n{_shell_profile_source_line(env_path)}\n"
 
 
 def activate_claude_vscode(
@@ -777,7 +777,7 @@ def activate_claude_vscode(
         "upstream_base_url": upstream_base_url,
         "depends_on": "claude",
         "claude_target_created": created_claude,
-        "run_command": "agentflow run claude",
+        "run_command": "tokenclaw run claude",
         "safe_env": dict(vscode_profile["safe_env"]),
         "routing_snippet": routing_snippet,
         "profile": vscode_profile,
@@ -857,7 +857,7 @@ def activate_claude_desktop(
         "local_base_url": local_base_url,
         "depends_on": "claude",
         "claude_target_created": created_claude,
-        "run_command": "agentflow run claude",
+        "run_command": "tokenclaw run claude",
         "safe_env": dict(desktop_profile["safe_env"]),
         "profile": desktop_profile,
         "target_count": len(updated_config.get("targets") or {}),
@@ -914,7 +914,7 @@ def activate_codex(
         "local_base_url": local_base_url,
         "depends_on": "openai",
         "openai_target_created": created_openai,
-        "run_command": "agentflow run openai",
+        "run_command": "tokenclaw run openai",
         "profile": codex_profile,
         "target_count": len(updated_config.get("targets") or {}),
     }

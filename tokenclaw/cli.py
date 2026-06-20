@@ -87,6 +87,7 @@ from tokenclaw.cli_commands.onboarding import (
     _write_savings_report_summary,
     _write_stats_summary,
     agentflow_cli,
+    tokenclaw_cli,
 )
 
 from tokenclaw.cli_commands.optimization_reports import (
@@ -1418,8 +1419,13 @@ def proxy_main() -> None:
     main()
 
 
+def tokenclaw_main() -> None:
+    raise SystemExit(tokenclaw_cli())
+
+
 def agentflow_main() -> None:
-    raise SystemExit(agentflow_cli())
+    sys.stderr.write("agentflow is deprecated; use tokenclaw instead.\n")
+    raise SystemExit(tokenclaw_cli())
 
 
 def policy_reload_main() -> None:

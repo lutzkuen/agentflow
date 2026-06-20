@@ -22,7 +22,7 @@ def default_db_path() -> str:
 
 
 def default_stats_url() -> str:
-    return env("TOKENCLAW_STATS_URL", "http://127.0.0.1:4002/agentflow/stats")
+    return env("TOKENCLAW_STATS_URL", "http://127.0.0.1:4002/tokenclaw/stats")
 
 
 def default_loopback_url(
