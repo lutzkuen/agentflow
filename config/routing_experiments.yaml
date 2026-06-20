@@ -135,6 +135,15 @@ routing_candidates:
     app_family: generic_openai
     category: chat
     max_text_chars: 8000
+  - candidate_id: generic-gpt54-to-gpt53-codex-tool-light
+    label: Generic OpenAI gpt-5.4 to gpt-5.3-codex tool-light evidence
+    requested_model: gpt-5.4
+    routed_model: gpt-5.3-codex
+    provider: openai
+    source_surface: openai_responses
+    app_family: generic_openai
+    category: tool-light
+    max_text_chars: 8000
   - candidate_id: generic-gpt54-to-gpt54-mini-tool-light
     label: Generic OpenAI gpt-5.4 to gpt-5.4-mini tool-light evidence
     requested_model: gpt-5.4
@@ -144,6 +153,24 @@ routing_candidates:
     app_family: generic_openai
     category: tool-light
     max_text_chars: 8000
+  - candidate_id: generic-gpt54mini-to-gpt53-chat
+    label: Generic OpenAI gpt-5.4-mini to gpt-5.3 chat evidence
+    requested_model: gpt-5.4-mini
+    routed_model: gpt-5.3
+    provider: openai
+    source_surface: openai_responses
+    app_family: generic_openai
+    category: chat
+    max_text_chars: 8000
+  - candidate_id: generic-gpt54mini-to-mini-short
+    label: Generic OpenAI gpt-5.4-mini to gpt-5-mini short-completion evidence
+    requested_model: gpt-5.4-mini
+    routed_model: gpt-5-mini
+    provider: openai
+    source_surface: openai_responses
+    app_family: generic_openai
+    category: short-completion
+    max_text_chars: 4000
   - candidate_id: generic-gpt53-to-mini-short
     label: Generic OpenAI gpt-5.3 to mini short evidence
     requested_model: gpt-5.3
