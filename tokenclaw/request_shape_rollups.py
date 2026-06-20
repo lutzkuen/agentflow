@@ -6788,6 +6788,7 @@ def build_request_shape_cache_replay_evidence_report(
     reference_time = latest_observed or (min(staged_times) if staged_times else None)
     age_hours = round((now - reference_time).total_seconds() / 3600.0, 3) if reference_time else None
     stale = bool(age_hours is not None and age_hours > max_age_hours)
+    durable_outcome: dict[str, Any] | None = None
     if not policy_exists:
         status = "no-canary-policy"
         reason = "cache-canary-policy-missing"
@@ -6797,9 +6798,28 @@ def build_request_shape_cache_replay_evidence_report(
         reason = "request-shape-cache-replay-canary-missing"
         next_action = "stage-cache-replay-canary"
     elif observed_rows == 0:
-        status = "staged-no-traffic"
-        reason = "missing-observed-cache-replay-traffic"
-        next_action = "collect-cache-replay-canary-traffic"
+        if stale:
+            status = "staged-stale-no-traffic"
+            reason = "stale-cache-replay-evidence"
+            next_action = "rollback-cache-replay-rule"
+            durable_outcome = {
+                "schema": "agentflow.request_shape_cache_replay_durable_outcome.v1",
+                "decision": "rollback",
+                "reason": reason,
+                "next_action": next_action,
+                "source_canary_policy_file": "cache_canary_policy.yaml",
+                "target_local_rule_file": "cache_rules.yaml",
+                "policy_files_written": False,
+                "cache_entries_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "metadata_only": True,
+                "aggregate_only": True,
+            }
+        else:
+            status = "staged-no-traffic"
+            reason = "missing-observed-cache-replay-traffic"
+            next_action = "collect-cache-replay-canary-traffic"
     elif shape_bypass_count > 0 and observed_rows == shape_bypass_count:
         # All observed rows match the cohort shape but have no canary metadata,
         # meaning the canary rule is staged but not yet active in the proxy.
@@ -6891,6 +6911,7 @@ def build_request_shape_cache_replay_evidence_report(
         "miss_reason_breakdown": applied_miss_blocker_breakdown,
         "applied_miss_blocker_breakdown": applied_miss_blocker_breakdown,
         "warmup_analysis": warmup_analysis,
+        "durable_outcome": durable_outcome,
         "stale_evidence": {
             "max_age_hours": float(max_age_hours),
             "latest_observed_at": latest_observed.isoformat() if latest_observed else None,
@@ -6910,6 +6931,7 @@ def build_request_shape_cache_replay_evidence_report(
             "reports_repeat_window_metadata": isinstance(warmup_analysis.get("repeat_window"), dict),
             "distinguishes_first_seen_warmup_from_ineffective_replay": True,
             "reports_stale_evidence_metadata": True,
+            "reports_durable_rollback_or_retirement_reason": durable_outcome is not None,
             "aggregate_only": True,
         },
         "privacy": _cache_replay_evidence_privacy(),

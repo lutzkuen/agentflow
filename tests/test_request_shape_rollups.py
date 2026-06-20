@@ -2877,6 +2877,79 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertNotIn("local-openai-cache-replay-canary", rendered)
         self.assertNotIn("request-shape-cache-replay:", rendered)
 
+    def test_cache_replay_evidence_reports_stale_no_traffic_as_durable_rollback(self) -> None:
+        for cost in (0.01, 0.03, 0.02):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
+        report = build_request_shape_cache_replay_canary_stage_report(
+            self.store,
+            limit=20,
+            run_id="2026-06-15-cache-replay-evidence-stale-no-traffic",
+            rollout_fraction=0.05,
+            holdout_fraction=0.20,
+            mark_handled_cache_replay_cohorts=False,
+        )
+        policy_path = Path(self.tmpdir.name) / "config" / "cache_canary_policy.yaml"
+        apply_request_shape_cache_replay_canary_action(report["top_stage_action"], rules_path=policy_path)
+        written = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+        written["pattern_rules"][0]["staged_at"] = "2000-01-01T00:00:00+00:00"
+        written["pattern_rules"][0]["graduation"]["staged_at"] = "2000-01-01T00:00:00+00:00"
+        policy_path.write_text(yaml.safe_dump(written), encoding="utf-8")
+        empty_store = SQLiteStore(str(Path(self.tmpdir.name) / "stale-empty.sqlite3"))
+        try:
+            evidence = build_request_shape_cache_replay_evidence_report(
+                empty_store,
+                rules_path=policy_path,
+                limit=20,
+                max_age_hours=72.0,
+            )
+        finally:
+            empty_store.conn.close()
+
+        self.assertEqual(evidence["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(evidence["status"], "staged-stale-no-traffic")
+        self.assertNotEqual(evidence["status"], "staged-no-traffic")
+        self.assertEqual(evidence["reason"], "stale-cache-replay-evidence")
+        self.assertEqual(evidence["next_action"], "rollback-cache-replay-rule")
+        self.assertTrue(evidence["stale_evidence"]["stale"])
+        self.assertEqual(evidence["stale_evidence"]["reason"], "evidence-older-than-max-age")
+        self.assertEqual(evidence["summary"]["observed_row_count"], 0)
+        self.assertEqual(evidence["summary"]["applied_count"], 0)
+        self.assertEqual(evidence["summary"]["holdout_count"], 0)
+        durable = evidence["durable_outcome"]
+        self.assertEqual(durable["schema"], "agentflow.request_shape_cache_replay_durable_outcome.v1")
+        self.assertEqual(durable["decision"], "rollback")
+        self.assertEqual(durable["reason"], "stale-cache-replay-evidence")
+        self.assertEqual(durable["next_action"], "rollback-cache-replay-rule")
+        self.assertFalse(durable["policy_files_written"])
+        self.assertFalse(durable["cache_entries_written"])
+        self.assertTrue(durable["metadata_only"])
+        self.assertTrue(durable["aggregate_only"])
+        self.assertTrue(evidence["acceptance"]["reports_durable_rollback_or_retirement_reason"])
+        self.assertTrue(evidence["privacy"]["metadata_only"])
+        self.assertTrue(evidence["privacy"]["aggregate_only"])
+        rendered = json.dumps(evidence, sort_keys=True)
+        self.assertNotIn(str(policy_path), rendered)
+        self.assertNotIn("local-openai-cache-replay-canary", rendered)
+        self.assertNotIn("request-shape-cache-replay:", rendered)
+
     def test_cache_replay_evidence_reports_observed_applied_holdout_and_blockers(self) -> None:
         for cost in (0.01, 0.03, 0.02):
             self._log_call(
