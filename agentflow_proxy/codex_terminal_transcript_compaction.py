@@ -4,7 +4,7 @@ import copy
 import hashlib
 from typing import Any
 
-from agentflow_proxy.codex_app_policy import (
+from agentflow_proxy.codex_turn_policy import (
     CODEX_ACTION_KEY_HINTS,
     CODEX_ACTION_VALUE_HINTS,
     CODEX_TEXT_INPUT_TYPES,
@@ -325,7 +325,7 @@ def codex_terminal_transcript_compaction_decision(
     coordinator_ledger: dict[str, Any] | None = None,
     before_chars: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    from agentflow_proxy.codex_app_policy import CODEX_APP_POLICY  # late-bind for reload safety
+    from agentflow_proxy.codex_turn_policy import CODEX_APP_POLICY  # late-bind for reload safety
     effective_policy = policy if policy is not None else (CODEX_APP_POLICY.get("terminal_transcript_compaction") or {})
 
     _before_chars = before_chars if before_chars is not None else len(stable_json(params))

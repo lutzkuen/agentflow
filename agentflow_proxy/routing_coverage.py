@@ -66,7 +66,7 @@ def _surface_state(rows: list[dict[str, Any]], codex_app_event_count: int) -> di
     surfaces = {
         "openai_api": _empty_surface("openai_api", "OpenAI-compatible API apps"),
         "codex_vscode_or_cli": _empty_surface("codex_vscode_or_cli", "Codex VS Code / CLI through OpenAI-compatible proxy"),
-        "codex_app_server_telemetry": _empty_surface("codex_app_server_telemetry", "Codex app-server telemetry relay"),
+        "codex_app_server_telemetry": _empty_surface("codex_app_server_telemetry", "Codex turn telemetry"),
         "anthropic_api": _empty_surface("anthropic_api", "Anthropic-compatible API apps"),
         "claude_vscode_or_claude_code": _empty_surface("claude_vscode_or_claude_code", "Claude VS Code / Claude Code"),
         "unsupported_or_unknown": _empty_surface("unsupported_or_unknown", "Unsupported or unknown surface"),
@@ -236,10 +236,10 @@ def _report_rows(surfaces: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             holdout_available=False,
             outcome_feedback_available=False,
             top_blocker_reason="telemetry-only-no-provider-request-mutation",
-            next_action="keep-codex-app-server-routing-telemetry-only",
+            next_action="keep-codex-turn-routing-telemetry-only",
             telemetry_only=True,
             explanation=(
-                "The Codex app-server relay sees telemetry events, not provider requests that the local "
+                "The Codex turn telemetry surface records events, not provider requests that the local "
                 "proxy can safely mutate, so it can inform policy but cannot execute routing."
             ),
         ),

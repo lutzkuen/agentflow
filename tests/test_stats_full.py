@@ -441,7 +441,6 @@ request_shape_repeated_context_canaries:
             {
                 "AGENTFLOW_CODEX_APP_OPTIMIZE": "1",
                 "AGENTFLOW_CODEX_APP_CACHE": "0",
-                "AGENTFLOW_CODEX_APP_UPSTREAM": "ws://127.0.0.1:4999",
             },
             clear=False,
         ):
@@ -455,7 +454,6 @@ request_shape_repeated_context_canaries:
         self.assertFalse(surface["cache"]["enabled"])
         self.assertFalse(surface["cache"]["exact_cache"]["enabled"])
         self.assertEqual(surface["cache"]["disabled_reason"], "AGENTFLOW_CODEX_APP_CACHE is not 1")
-        self.assertEqual(surface["cache"]["exact_cache"]["upstream"], "ws://127.0.0.1:4999")
         self.assertIn("input", surface["safe_turn_params"]["allowed_keys"])
         self.assertEqual(surface["action_like_skip_behavior"]["reason"], "action-like-params")
         self.assertEqual(surface["routing"]["policy_source"], result["routing"]["policy_source"])
@@ -485,8 +483,8 @@ request_shape_repeated_context_canaries:
         self.assertTrue(surface["cache"]["enabled"])
         self.assertTrue(surface["cache"]["exact_cache"]["enabled"])
         self.assertEqual(surface["cache"]["exact_cache"]["namespace"], "codex-test")
-        self.assertEqual(surface["cache"]["exact_cache"]["provider"], "codex-app")
-        self.assertEqual(surface["cache"]["exact_cache"]["cache_url"], "codex-app://turn/start")
+        self.assertEqual(surface["cache"]["exact_cache"]["provider"], "codex-turn")
+        self.assertEqual(surface["cache"]["exact_cache"]["cache_url"], "codex-turn://turn/start")
         self.assertEqual(surface["cache"]["exact_cache"]["replayability_level"], "local-exact-response")
 
     def test_codex_canary_impact_reports_rule_candidate_counts_and_privacy(self):
@@ -9409,10 +9407,10 @@ request_shape_repeated_context_canaries:
         self.assertIn("raw commands omitted", html)
         self.assertIn("raw transcripts omitted", html)
 
-    def test_dashboard_policy_panel_renders_codex_app_surface_state(self):
+    def test_dashboard_policy_panel_renders_codex_turn_surface_state(self):
         html = stats_views.dashboard_html()
 
-        self.assertIn("Codex app-server", html)
+        self.assertIn("Codex turn telemetry", html)
         self.assertIn("Codex exact cache off", html)
         self.assertIn("safe keys", html)
         self.assertIn("action-like skip on", html)
@@ -9461,7 +9459,7 @@ request_shape_repeated_context_canaries:
         self.assertNotIn("Provider cache discount", html)
         self.assertNotIn("Old-context summaries", html)
         self.assertNotIn("Thinking cost today", html)
-        self.assertIn("Codex app-server", html)
+        self.assertIn("Codex turn telemetry", html)
 
     def test_dashboard_exposes_error_breakdown_tables(self):
         html = stats_views.dashboard_html()

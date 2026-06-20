@@ -12,7 +12,7 @@ import yaml
 import agentflow_proxy.router as router_module
 from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
-from agentflow_proxy import codex_app_policy as codex_app_policy_module
+from agentflow_proxy import codex_turn_policy as codex_turn_policy_module
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, stage_policy_draft, utc_now
 from agentflow_proxy.policy_workbench import apply_validated_policy_draft, rollback_policy_apply
 from agentflow_proxy.policy_bundle import (
@@ -842,7 +842,7 @@ crunch:
                     },
                     clear=False,
                 ):
-                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(codex_turn_policy_module)
                     importlib.reload(stats)
                     bundle = asyncio.run(build_policy_bundle())
 
@@ -985,10 +985,10 @@ terminal_transcript_compaction:
                     encoding="utf-8",
                 )
                 with patch.dict(os.environ, {"AGENTFLOW_CODEX_APP_RULES": str(rules_path), "HOME": tmp}, clear=False):
-                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(codex_turn_policy_module)
                     importlib.reload(stats)
                     bundle = asyncio.run(build_policy_bundle())
-                    effective = codex_app_policy_module.codex_terminal_transcript_compaction_effective_policy()
+                    effective = codex_turn_policy_module.codex_terminal_transcript_compaction_effective_policy()
 
                 validation = validate_policy_bundle(bundle)
                 codex_policy = bundle["policies"]["codex_app"]

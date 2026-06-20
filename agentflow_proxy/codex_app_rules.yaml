@@ -1,4 +1,4 @@
-# Local Codex app-server optimization rules.
+# Local Codex turn metadata optimization rules.
 #
 # Defaults are conservative: optimization metadata is enabled, but summary-turn
 # model hints and exact response replay remain off until a local manual policy

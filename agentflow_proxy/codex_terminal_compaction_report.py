@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Any
 
-from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE
+from agentflow_proxy.codex_turn_policy import CODEX_APP_SOURCE_SURFACE
 from agentflow_proxy.crunch import TOKEN_CHARS
 from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
 from agentflow_proxy.store import utc_now

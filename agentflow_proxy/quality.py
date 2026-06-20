@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE
+from agentflow_proxy.codex_turn_policy import CODEX_APP_SOURCE_SURFACE
 
 
 QUALITY_SIGNAL_SCHEMA = "agentflow.quality_signals.v1"

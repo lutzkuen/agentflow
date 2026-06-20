@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE
+from agentflow_proxy.codex_turn_policy import CODEX_APP_SOURCE_SURFACE
 from agentflow_proxy.managed_egress import (
     LIFECYCLE_METADATA_COMMAND_SCHEMAS,
     RAW_FEATURE_KEYS,

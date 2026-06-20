@@ -4261,7 +4261,7 @@ def _crunch_codex_repeated_sections(
 
 
 def crunch_codex_turn_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Codex app-server specific deterministic crunching for text-only turn/start input.
+    """Codex turn specific deterministic crunching for text-only turn/start input.
 
     This operates only on input text blocks. It avoids tool/action payloads by being called
     after the Codex proxy's action-shape guard and preserves the newest input tail.

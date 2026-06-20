@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Any
 
-from agentflow_proxy.codex_app_policy import (
+from agentflow_proxy.codex_turn_policy import (
     CODEX_APP_POLICY,
     CODEX_APP_SOURCE_SURFACE,
     CODEX_TERMINAL_TRANSCRIPT_COMPACTION_CONDITION_KEYS,

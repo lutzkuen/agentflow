@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import json
 import sys
-import types
 import unittest
 
 from agentflow_proxy.codex_terminal_transcript_compaction import (
@@ -254,8 +253,8 @@ class TerminalTranscriptCompactionDecisionTests(unittest.TestCase):
             self.assertIn("AgentFlow:", new_params["input"]["text"])
 
 
-class TerminalTranscriptCompactionProxyIntegrationTests(unittest.TestCase):
-    """Test that the proxy's _optimize_client_message respects the terminal compaction policy."""
+class TerminalTranscriptCompactionPolicyLoadTests(unittest.TestCase):
+    """Test that loaded Codex-turn terminal compaction policy can drive the compactor directly."""
 
     def _build_turn_start(self, input_text: str, model: str = "gpt-5") -> str:
         return json.dumps({
@@ -269,22 +268,18 @@ class TerminalTranscriptCompactionProxyIntegrationTests(unittest.TestCase):
             },
         })
 
-    def _reload_proxy_with_policy(self, policy_yaml: str) -> types.ModuleType:
+    def _load_terminal_policy(self, policy_yaml: str) -> dict:
         import tempfile, os
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(policy_yaml)
             policy_path = f.name
         try:
             env_backup = os.environ.copy()
-            os.environ["AGENTFLOW_CODEX_APP_RULES_PATH"] = policy_path
-            os.environ["AGENTFLOW_CODEX_APP_CACHE"] = "0"
-            import agentflow_proxy.codex_app_policy as policy_mod
-            importlib.reload(policy_mod)
-            import agentflow_proxy.codex_terminal_transcript_compaction as compaction_mod
-            importlib.reload(compaction_mod)
-            import agentflow_proxy.codex_app_proxy as proxy_mod
-            importlib.reload(proxy_mod)
-            return proxy_mod
+            os.environ["AGENTFLOW_CODEX_APP_RULES"] = policy_path
+            import agentflow_proxy.codex_turn_policy as policy_mod
+            policy_mod = importlib.reload(policy_mod)
+            terminal = policy_mod.CODEX_APP_POLICY.get("terminal_transcript_compaction")
+            return terminal if isinstance(terminal, dict) else {}
         finally:
             os.unlink(policy_path)
             os.environ.clear()
@@ -292,10 +287,9 @@ class TerminalTranscriptCompactionProxyIntegrationTests(unittest.TestCase):
 
     def test_disabled_default_policy_does_not_mutate(self):
         block = _terminal_block(lines=120)
-        raw = self._build_turn_start(block)
-        import agentflow_proxy.codex_app_proxy as proxy_mod
-        out, meta = proxy_mod._optimize_client_message(raw)
-        # Default policy has enabled: false — no compaction
+        params = json.loads(self._build_turn_start(block))["params"]
+        _, meta = codex_terminal_transcript_compaction_decision(params)
+        # Default policy has enabled: false - no compaction.
         tc_meta = meta.get(FAMILY)
         if tc_meta is not None:
             self.assertFalse(tc_meta.get("applied"))
@@ -322,12 +316,12 @@ terminal_transcript_compaction:
     canary_salt: proxy-test-salt
     canary_unit: source_hash
 """
-        proxy_mod = self._reload_proxy_with_policy(policy_yaml)
-        out, meta = proxy_mod._optimize_client_message(raw)
+        policy = self._load_terminal_policy(policy_yaml)
+        params = json.loads(raw)["params"]
+        new_params, meta = codex_terminal_transcript_compaction_decision(params, policy=policy)
         tc_meta = meta.get(FAMILY)
         if tc_meta and tc_meta.get("applied"):
-            out_msg = json.loads(out)
-            self.assertIn("AgentFlow:", out_msg["params"]["input"])
+            self.assertIn("AgentFlow:", new_params["input"])
             self.assertGreater(tc_meta["saved_chars"], 0)
             self.assertFalse(tc_meta["raw_text_included"])
             self.assertFalse(tc_meta["raw_commands_included"])

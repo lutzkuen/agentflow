@@ -15,7 +15,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import yaml
 
 from agentflow_proxy.cache_smoke import build_cache_smoke_diagnostic
-from agentflow_proxy.codex_app_policy import (
+from agentflow_proxy.codex_turn_policy import (
     CODEX_APP_SOURCE_SURFACE,
     canonical_source_surface,
     codex_app_bundle_policy_state,
@@ -24574,10 +24574,10 @@ async function refreshPolicies(){
       const codexRules=codexPolicy.rules||[];
       const codexApp=(codexPolicy.application||{});
       rows.push({
-        name:'Codex app-server',
+        name:'Codex turn telemetry',
         enabled:codexPolicy.enabled??codexRuntime.enabled,
         source:codexPolicy.policy_source||codexRuntime.policy_source,
-        path:codexExact.namespace?('namespace '+codexExact.namespace):codexExact.upstream,
+        path:codexExact.namespace?('namespace '+codexExact.namespace):'telemetry only',
         settings:compactSettings([
           codexRuntime.reload_required?'reload required':'loaded',
           codexPolicy.review_only?'review only':'',
@@ -24587,7 +24587,6 @@ async function refreshPolicies(){
           'actions '+((codexPolicy.supported_actions||[]).length),
           codexRuntime.optimization&&codexRuntime.optimization.enabled?'optimization on':'optimization off',
           codexCache.enabled?'Codex exact cache on':'Codex exact cache off',
-          codexExact.upstream?('upstream '+codexExact.upstream):'',
           'safe keys '+(codexSafe.allowed_key_count??0),
           codexSkip.enabled?'action-like skip on':'action-like skip off'
         ])

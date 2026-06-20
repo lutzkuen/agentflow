@@ -335,8 +335,6 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 self.assertTrue(callable(getattr(module, attr_name)))
 
         cli_exceptions = {
-            "agentflow-codex-app-proxy": "agentflow_proxy.codex_app_proxy:main",
-            "agentflow-codex-app-client": "agentflow_proxy.codex_app_client:main",
             "agentflow-dashboard": "agentflow_proxy.dashboard:main",
         }
         for name, target in scripts.items():

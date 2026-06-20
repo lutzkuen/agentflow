@@ -11,7 +11,6 @@ from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_statu
 from agentflow_proxy.public_metadata import public_id, public_label, public_path_state
 
 
-DEFAULT_CODEX_APP_UPSTREAM = "ws://127.0.0.1:4014"
 CODEX_TURN_SOURCE_SURFACE = "codex_turn"
 LEGACY_CODEX_APP_SOURCE_SURFACE = "codex_app_turn"
 CODEX_APP_SOURCE_SURFACE = CODEX_TURN_SOURCE_SURFACE
@@ -939,10 +938,6 @@ def codex_app_cache_canary() -> dict[str, Any]:
     }
 
 
-def codex_app_upstream() -> str:
-    return os.getenv("AGENTFLOW_CODEX_APP_UPSTREAM", DEFAULT_CODEX_APP_UPSTREAM)
-
-
 def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dict[str, Any]:
     inherited_sections = {}
     reload_required_sections: list[str] = []
@@ -969,7 +964,6 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
     summary_model_hint_target = codex_app_summary_model_hint_target()
     summary_model_hint_canary = codex_app_summary_model_hint_canary()
     terminal_compaction = codex_terminal_transcript_compaction_effective_policy()
-    upstream = codex_app_upstream()
     namespace = codex_app_cache_namespace()
     file_state = policy_file_status(
         CODEX_APP_RULES_PATH,
@@ -980,7 +974,7 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
     policy_source = CODEX_APP_POLICY_SOURCE
     return {
         "surface": CODEX_APP_SOURCE_SURFACE,
-        "name": "Codex app-server",
+        "name": "Codex turn telemetry",
         "enabled": optimize_enabled,
         "policy_source": policy_source,
         "rule_path": CODEX_APP_RULES_PATH,
@@ -1017,10 +1011,9 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
                 "namespace": namespace,
                 "ttl_seconds": cache_ttl_seconds,
                 "canary": cache_canary,
-                "provider": "codex-app",
-                "upstream": upstream,
+                "provider": "codex-turn",
                 "request_basis": "jsonrpc turn/start frame with request id removed",
-                "cache_url": "codex-app://turn/start",
+                "cache_url": "codex-turn://turn/start",
                 "replayability_level": "local-exact-response",
             },
             "disabled_reason": None if cache_enabled else "AGENTFLOW_CODEX_APP_CACHE is not 1",
@@ -1044,7 +1037,7 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
         "reload_required": bool(reload_required_sections) or reload_required,
         "reload_required_sections": reload_required_sections + (["codex_app"] if reload_required else []),
         "managed_optimizer_required": False,
-        "note": "Codex app-server local optimization is controlled by reviewable local policy; managed optimizer use remains opt-in.",
+        "note": "Codex turn metadata policy is controlled by reviewable local policy; managed optimizer use remains opt-in.",
     }
 
 

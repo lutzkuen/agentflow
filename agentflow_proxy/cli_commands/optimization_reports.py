@@ -2053,7 +2053,7 @@ def _attach_phase_routing_lifecycle_feedback(result: dict[str, Any], *, command:
 
 
 def codex_diagnose_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
-    parser = argparse.ArgumentParser(description="Report Codex app-server routing, crunching, and cache effectiveness from local metadata")
+    parser = argparse.ArgumentParser(description="Report Codex turn routing, crunching, and cache effectiveness from local metadata")
     parser.add_argument(
         "--db",
         default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),

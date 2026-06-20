@@ -1692,7 +1692,7 @@ repeated_provider_scaffolding:
 #         canary_salt: sha256:...
 #         canary_unit: request_fingerprint
 codex_repeated_scaffolding:
-  # Codex app-server turn/start only. Text-only input blocks may contain large
+  # Codex turn/start telemetry only. Text-only input blocks may contain large
   # repeated context scaffolding that is not represented as provider messages.
   # This deterministic pass replaces exact repeated sections and shortens older
   # input blocks with bounded head/tail retention. The newest input block tail

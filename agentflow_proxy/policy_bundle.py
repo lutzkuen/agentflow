@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 
 from agentflow_proxy import __version__
-from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE, canonical_source_surface
+from agentflow_proxy.codex_turn_policy import CODEX_APP_SOURCE_SURFACE, canonical_source_surface
 from agentflow_proxy.paths import default_db_path
 from agentflow_proxy.pattern_rollout import pattern_canary_decision
 from agentflow_proxy.public_metadata import public_label
@@ -2726,10 +2726,10 @@ def _codex_app_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> di
         "surface": canonical_source_surface(policy.get("surface", CODEX_APP_SOURCE_SURFACE)),
         "rule_count": len(rules),
         "applied_to_provider_routing": False,
-        "applied_to_codex_app_proxy": False,
+        "applied_to_codex_turn_policy": False,
         "metadata_only": True,
         "raw_bodies_read": False,
-        "note": "Codex app turn-level recommendations are reviewed in local bundles but are not applied to provider routing rules.",
+        "note": "Codex turn-level recommendations are reviewed in local bundles but are not applied to provider routing rules.",
     }
 
 
@@ -2878,12 +2878,12 @@ def codex_app_policy_review_summary(policy: Any) -> dict[str, Any]:
             "status": "not-applied" if review_only else (application.get("status") or "applied-locally"),
             "reason": application.get("reason")
             or (
-                "Codex app recommendations are review-only until a future explicit local action exists."
+                "Codex turn recommendations are review-only until a future explicit local action exists."
                 if review_only
-                else "Safe Codex app actions are represented as local policy file writes."
+                else "Safe Codex turn actions are represented as local policy file writes."
             ),
             "applied_to_provider_routing": False,
-            "applied_to_codex_app_proxy": not review_only,
+            "applied_to_codex_turn_policy": not review_only,
             "writes_local_policy_files": not review_only,
         },
         "pass_through_reasons": sorted(set(pass_through_reasons)),
