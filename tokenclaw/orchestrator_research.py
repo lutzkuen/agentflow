@@ -4547,7 +4547,7 @@ def _request_shape_candidate_row(row: dict[str, Any], *, source_schema: Any, ran
     readiness = _request_shape_readiness_state(row, next_action)
     local_action_family = _request_shape_local_action_family(classes, blockers, next_action, row.get("local_action_family"))
     blocker_reason = _request_shape_blocker_reason(row, blockers, next_action)
-    return {
+    result = {
         "schema": sanitize_value(row.get("schema")),
         "rank": rank,
         "source_schema": sanitize_value(source_schema),
@@ -4599,12 +4599,129 @@ def _request_shape_candidate_row(row: dict[str, Any], *, source_schema: Any, ran
             - retry_count * 0.5
         ),
     }
+    for key in ("fingerprint", "source_fingerprint", "source_queue_rank", "source_ledger_rank", "no_source_traffic_reason"):
+        if row.get(key):
+            result[key] = sanitize_value(row.get(key))
+    return result
+
+
+def _request_shape_successor_gap_rows(stats: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return bounded metadata-only rows for request-shape successor evidence gaps."""
+    sources: list[dict[str, Any]] = []
+    queue = stats.get("local_activation_next_action_queue")
+    if isinstance(queue, dict):
+        for key in ("successor_actions", "entries"):
+            values = queue.get(key)
+            if isinstance(values, list):
+                sources.extend(row for row in values if isinstance(row, dict))
+    ledger = stats.get("evidence_to_activation_next_action_ledger")
+    if isinstance(ledger, dict) and isinstance(ledger.get("entries"), list):
+        sources.extend(row for row in ledger.get("entries") if isinstance(row, dict))
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in sources:
+        family = str(source.get("local_action_family") or "").strip()
+        next_action = str(source.get("next_action") or source.get("recommended_next_action") or "").strip()
+        lever = str(source.get("lever") or "").strip()
+        blockers = {str(item) for item in source.get("blocker_codes") or [] if str(item or "").strip()}
+        source_fingerprint = str(source.get("source_fingerprint") or source.get("fingerprint") or "").strip()
+        if not source_fingerprint or source_fingerprint in seen:
+            continue
+        if lever != "request-shape-rollups" and family != "cohort-ranking":
+            continue
+        if next_action != "emit-request-shape-rollups":
+            continue
+        if "ranked_request_shape_rollup" not in blockers:
+            continue
+        seen.add(source_fingerprint)
+        fingerprint = public_id(
+            json.dumps(
+                {
+                    "source_fingerprint": source_fingerprint,
+                    "next_action": "emit-request-shape-rollups",
+                    "reason": "no-source-traffic-for-request-shape-rollups",
+                },
+                sort_keys=True,
+            ),
+            prefix="request-shape-gap",
+        )
+        rows.append(
+            {
+                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                "fingerprint": fingerprint,
+                "source_fingerprint": sanitize_value(source_fingerprint),
+                "source_queue_rank": _to_int(source.get("rank")),
+                "source_ledger_rank": _to_int(source.get("ledger_rank") or source.get("rank")),
+                "provider_family": "unknown",
+                "source_surface": "activation-successor",
+                "endpoint": "request-shape-rollups",
+                "requested_model_family": "unknown",
+                "routed_model_family": "unknown",
+                "category": "activation-successor-gap",
+                "workflow_phase": "evidence-gap",
+                "stream": False,
+                "has_tools": False,
+                "text_bucket": "unknown",
+                "token_bucket": "unknown",
+                "cache_status": "unknown",
+                "routing_status": "unknown",
+                "row_count": 0,
+                "sample_count": _to_int(source.get("sample_count")),
+                "projected_hits": _to_int(source.get("projected_hits")),
+                "projected_saved_tokens": _to_int(source.get("projected_saved_tokens")),
+                "projected_savings_usd": round(_to_float(source.get("projected_savings_usd") or source.get("projected_saved_usd")), 8),
+                "observed_savings_usd": 0.0,
+                "candidate_work_classes": ["request_shape_rollup_evidence_gap"],
+                "candidate_families": ["activation_successor_gap"],
+                "blocker_codes": ["no-source-traffic-for-request-shape-rollups"],
+                "readiness_state": "blocked",
+                "local_action_family": "cohort-ranking",
+                "actionability_reason": "no-source-traffic-for-request-shape-rollups",
+                "no_source_traffic_reason": "no-source-traffic-for-request-shape-rollups",
+                "next_action": "emit-request-shape-rollups",
+                "privacy": _candidate_privacy(),
+            }
+        )
+    return rows
 
 
 def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
     calls = _to_int(stats.get("today_calls") or stats.get("calls"))
     report = _request_shape_report(stats)
     if report is None:
+        gap_rows = _request_shape_successor_gap_rows(stats)
+        if gap_rows:
+            ranked = [
+                _request_shape_candidate_row(row, source_schema="agentflow.request_shape_follow_up_candidates.v1", rank=index)
+                for index, row in enumerate(gap_rows, start=1)
+            ]
+            top = ranked[0]
+            return {
+                "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                "status": "evidence-gap-ranked",
+                "source_schema": "agentflow.request_shape_follow_up_candidates.v1",
+                "summary": {
+                    "calls": calls,
+                    "rows_considered": 0,
+                    "rollup_count": len(ranked),
+                    "ranked_candidate_count": len(ranked),
+                    "top_next_action": "emit-request-shape-rollups",
+                    "top_local_action_family": "cohort-ranking",
+                    "top_readiness_state": "blocked",
+                    "no_source_traffic_reason": "no-source-traffic-for-request-shape-rollups",
+                    "class_breakdown": [{"value": "request_shape_rollup_evidence_gap", "count": len(ranked)}],
+                    "blocker_breakdown": [{"value": "no-source-traffic-for-request-shape-rollups", "count": len(ranked)}],
+                    "local_action_family_breakdown": [{"value": "cohort-ranking", "count": len(ranked)}],
+                    "readiness_breakdown": [{"value": "blocked", "count": len(ranked)}],
+                    "next_action_breakdown": [{"value": "emit-request-shape-rollups", "count": len(ranked)}],
+                },
+                "top_candidate": top,
+                "candidates": ranked,
+                "local_action_cohorts": ranked,
+                "missing_measurements": [],
+                "privacy": _candidate_privacy(),
+            }
         if calls <= 0:
             return None
         return {
@@ -4640,6 +4757,11 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
         _request_shape_candidate_row(row, source_schema=source_schema, rank=index)
         for index, row in enumerate(rollups, start=1)
     ]
+    if not ranked:
+        ranked = [
+            _request_shape_candidate_row(row, source_schema=source_schema, rank=index)
+            for index, row in enumerate(_request_shape_successor_gap_rows(stats), start=1)
+        ]
     ranked.sort(key=lambda item: (_to_float(item.get("_score")), _to_int(item.get("row_count"))), reverse=True)
     class_counts: Counter[str] = Counter()
     blocker_counts: Counter[str] = Counter()
@@ -4675,7 +4797,11 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
     replay_summary = replay_dry_run.get("summary") if isinstance(replay_dry_run, dict) and isinstance(replay_dry_run.get("summary"), dict) else {}
     replay_cohorts = replay_dry_run.get("cohorts") if isinstance(replay_dry_run, dict) and isinstance(replay_dry_run.get("cohorts"), list) else []
     crunch_policy_decision = report.get("crunch_policy_decision") if isinstance(report.get("crunch_policy_decision"), dict) else None
-    status = "candidates-ranked" if clean_ranked else "no-request-shape-candidates"
+    evidence_gap_ranked = bool(clean_ranked) and all(
+        str(row.get("no_source_traffic_reason") or "") == "no-source-traffic-for-request-shape-rollups"
+        for row in clean_ranked
+    )
+    status = "evidence-gap-ranked" if evidence_gap_ranked else "candidates-ranked" if clean_ranked else "no-request-shape-candidates"
     result = {
         "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
         "status": status,
@@ -4683,7 +4809,9 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
         "summary": {
             "calls": calls,
             "rows_considered": _to_int(report_summary.get("rows_considered") or report_summary.get("scanned_rows")),
-            "rollup_count": _to_int(report_summary.get("rollup_count") or len(rollups)),
+            "rollup_count": max(_to_int(report_summary.get("rollup_count") or len(rollups)), len(clean_ranked))
+            if evidence_gap_ranked
+            else _to_int(report_summary.get("rollup_count") or len(rollups)),
             "ranked_candidate_count": len(clean_ranked),
             "top_next_action": sanitize_value(follow_up_summary.get("top_next_action"))
             if follow_up_summary
@@ -4720,11 +4848,29 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
                 {"value": key, "count": value}
                 for key, value in sorted(next_action_counts.items(), key=lambda item: (-item[1], item[0]))
             ],
+            "no_source_traffic_reason": sanitize_value(
+                follow_up_summary.get("no_source_traffic_reason")
+                if follow_up_summary
+                else clean_ranked[0].get("no_source_traffic_reason")
+                if evidence_gap_ranked
+                else None
+            ),
         },
         "top_candidate": clean_ranked[0] if clean_ranked else None,
         "candidates": clean_ranked,
         "local_action_cohorts": clean_ranked,
-        "missing_measurements": [] if clean_ranked else ["ranked_request_shape_rollup"],
+        "missing_measurements": []
+        if clean_ranked
+        else [
+            str(item)
+            for item in (
+                follow_up_report.get("missing_measurements")
+                if isinstance(follow_up_report, dict)
+                else []
+            )
+            if str(item or "").strip()
+        ]
+        or ["ranked_request_shape_rollup"],
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,

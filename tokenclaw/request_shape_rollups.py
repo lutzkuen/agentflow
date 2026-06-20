@@ -10969,9 +10969,18 @@ def build_request_shape_follow_up_candidates(
         item.pop("_score", None)
         clean.append(item)
 
-    status = "candidates-ranked" if clean else "no-request-shape-follow-up-candidates"
+    no_source_traffic_reason = None
+    if not clean and not rollups:
+        no_source_traffic_reason = "no-source-traffic-for-request-shape-rollups"
+    status = (
+        "candidates-ranked"
+        if clean
+        else "no-source-traffic"
+        if no_source_traffic_reason
+        else "no-request-shape-follow-up-candidates"
+    )
     top = clean[0] if clean else None
-    missing = [] if clean else ["request_shape_follow_up_candidates"]
+    missing = [] if clean else [no_source_traffic_reason or "request_shape_follow_up_candidates"]
     return {
         "schema": FOLLOW_UP_CANDIDATES_SCHEMA,
         "status": status,
@@ -10979,9 +10988,10 @@ def build_request_shape_follow_up_candidates(
             "rows_considered": sum(_as_int(row.get("row_count") or row.get("count")) for row in rollups if isinstance(row, dict)),
             "rollup_count": len([row for row in rollups if isinstance(row, dict)]),
             "ranked_candidate_count": len(clean),
-            "top_next_action": top.get("next_action") if top else None,
-            "top_local_action_family": top.get("local_action_family") if top else None,
-            "top_readiness_state": top.get("readiness_state") if top else None,
+            "top_next_action": top.get("next_action") if top else "emit-request-shape-rollups" if no_source_traffic_reason else None,
+            "top_local_action_family": top.get("local_action_family") if top else "cohort-ranking" if no_source_traffic_reason else None,
+            "top_readiness_state": top.get("readiness_state") if top else "blocked" if no_source_traffic_reason else None,
+            "no_source_traffic_reason": no_source_traffic_reason,
             "activation_ready_count": sum(1 for item in clean if item.get("readiness_state") == "activation-ready"),
             "class_breakdown": _breakdown(class_counts),
             "blocker_breakdown": _breakdown(blocker_counts),

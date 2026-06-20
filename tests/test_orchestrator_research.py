@@ -7953,6 +7953,109 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-secret-should-redact", rendered)
         self.assertNotIn("session-secret-should-redact", rendered)
 
+    def test_request_shape_successor_gap_emits_narrow_no_source_rollup(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 0,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 0, "rollup_count": 0},
+                    "follow_up_candidates": {
+                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "status": "no-source-traffic",
+                        "summary": {
+                            "rows_considered": 0,
+                            "rollup_count": 0,
+                            "ranked_candidate_count": 0,
+                            "top_next_action": "emit-request-shape-rollups",
+                            "top_local_action_family": "cohort-ranking",
+                            "top_readiness_state": "blocked",
+                            "no_source_traffic_reason": "no-source-traffic-for-request-shape-rollups",
+                        },
+                        "candidates": [],
+                        "blocker_cohorts": [],
+                        "missing_measurements": ["no-source-traffic-for-request-shape-rollups"],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "local_activation_next_action_queue": {
+                    "schema": "agentflow.local_activation_next_action_queue.v1",
+                    "successor_actions": [
+                        {
+                            "schema": "agentflow.local_activation_successor_action.v1",
+                            "fingerprint": "successor:b0b263d5e08fab75",
+                            "source_fingerprint": "activation:916550da3307b6a3",
+                            "source_ledger_rank": 1,
+                            "lever": "request-shape-rollups",
+                            "local_action_family": "cohort-ranking",
+                            "state": "missing-evidence",
+                            "successor_status": "keep-blocked",
+                            "next_action": "emit-request-shape-rollups",
+                            "recommended_next_action": "emit-request-shape-rollups",
+                            "blocker_codes": ["ranked_request_shape_rollup"],
+                            "sample_count": 0,
+                            "projected_savings_usd": 0.0,
+                            "privacy": {
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                                "raw_prompts_included": False,
+                                "provider_bodies_included": False,
+                                "request_ids_included": False,
+                                "session_ids_included": False,
+                                "cache_keys_included": False,
+                                "individual_candidate_ids_included": False,
+                            },
+                        }
+                    ],
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        signal = stats_summary["request_shape_rollup_candidates"]
+        self.assertEqual(signal["schema"], "agentflow.request_shape_rollup_candidate_signal.v1")
+        self.assertEqual(signal["status"], "evidence-gap-ranked")
+        self.assertEqual(signal["source_schema"], "agentflow.request_shape_follow_up_candidates.v1")
+        self.assertEqual(signal["summary"]["rollup_count"], 1)
+        self.assertEqual(signal["summary"]["ranked_candidate_count"], 1)
+        self.assertEqual(
+            signal["summary"]["no_source_traffic_reason"],
+            "no-source-traffic-for-request-shape-rollups",
+        )
+        self.assertEqual(signal["missing_measurements"], [])
+        top = signal["top_candidate"]
+        self.assertEqual(top["source_fingerprint"], "activation:916550da3307b6a3")
+        self.assertEqual(top["local_action_family"], "cohort-ranking")
+        self.assertEqual(top["next_action"], "emit-request-shape-rollups")
+        self.assertEqual(top["readiness_state"], "blocked")
+        self.assertEqual(top["blocker_codes"], ["no-source-traffic-for-request-shape-rollups"])
+        self.assertTrue(signal["privacy"]["metadata_only"])
+        self.assertTrue(signal["privacy"]["aggregate_only"])
+        self.assertFalse(signal["privacy"]["raw_prompts_included"])
+        self.assertFalse(signal["privacy"]["request_ids_included"])
+
+        ledger_entry = next(
+            item
+            for item in stats_summary["evidence_to_activation_next_action_ledger"]["entries"]
+            if item["lever"] == "request-shape-rollups"
+        )
+        self.assertEqual(ledger_entry["fingerprint"], "activation:916550da3307b6a3")
+        self.assertEqual(ledger_entry["current_status"], "blocked")
+        self.assertEqual(ledger_entry["blocker_codes"], ["no-source-traffic-for-request-shape-rollups"])
+        self.assertEqual(ledger_entry["next_action"], "emit-request-shape-rollups")
+
+        queue_entry = next(
+            item
+            for item in stats_summary["local_activation_next_action_queue"]["entries"]
+            if item["lever"] == "request-shape-rollups"
+        )
+        self.assertEqual(queue_entry["fingerprint"], "activation:916550da3307b6a3")
+        self.assertEqual(queue_entry["unblock_reason"], "no-source-traffic-for-request-shape-rollups")
+
     def test_request_shape_replayability_dry_run_names_cache_blocker_before_zero_hit(self):
         plan = build_research_plan(
             issues=[],

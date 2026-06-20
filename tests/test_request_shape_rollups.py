@@ -27,6 +27,7 @@ from tokenclaw.request_shape_rollups import (
     build_request_shape_crunch_policy_decision_ledger,
     build_request_shape_crunch_policy_decision_report,
     build_request_shape_crunch_canary_stage_report,
+    build_request_shape_follow_up_candidates,
     build_request_shape_rollups_report,
     build_request_shape_tool_cache_replay_evidence_report,
     record_request_shape_crunch_policy_decision_ledger,
@@ -44,6 +45,25 @@ class RequestShapeRollupTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.store.conn.close()
         self.tmpdir.cleanup()
+
+    def test_follow_up_candidates_reports_explicit_no_source_traffic_reason(self):
+        report = build_request_shape_follow_up_candidates([], limit=10)
+
+        self.assertEqual(report["schema"], "agentflow.request_shape_follow_up_candidates.v1")
+        self.assertEqual(report["status"], "no-source-traffic")
+        self.assertEqual(report["summary"]["rollup_count"], 0)
+        self.assertEqual(report["summary"]["top_next_action"], "emit-request-shape-rollups")
+        self.assertEqual(report["summary"]["top_local_action_family"], "cohort-ranking")
+        self.assertEqual(report["summary"]["top_readiness_state"], "blocked")
+        self.assertEqual(
+            report["summary"]["no_source_traffic_reason"],
+            "no-source-traffic-for-request-shape-rollups",
+        )
+        self.assertEqual(report["missing_measurements"], ["no-source-traffic-for-request-shape-rollups"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
 
     def _cache_replay_hit_recovery_smoke(self) -> dict[str, object]:
         return {
