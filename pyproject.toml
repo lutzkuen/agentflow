@@ -142,6 +142,7 @@ agentflow-activation-burndown = "agentflow_proxy.cli:activation_burndown_main"
 agentflow-local-activation-executor = "agentflow_proxy.cli:local_activation_executor_main"
 agentflow-managed-activation-preview = "agentflow_proxy.cli:managed_activation_preview_main"
 agentflow-managed-activation-preview-outcomes = "agentflow_proxy.cli:managed_activation_preview_outcomes_main"
+agentflow-managed-routing-pathway-candidates = "agentflow_proxy.cli:managed_routing_pathway_candidates_main"
 agentflow-dashboard = "agentflow_proxy.dashboard:main"
 
 [tool.setuptools]

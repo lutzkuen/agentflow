@@ -999,6 +999,60 @@ def managed_activation_preview_outcomes_cli(
     return 0 if not bool((result.get("egress_guard") or {}).get("blocked")) else 1
 
 
+def managed_routing_pathway_candidates_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Convert managed routing_pathway_matrix rows into review-only local shadow routing candidates"
+    )
+    parser.add_argument(
+        "--decision-json",
+        required=True,
+        help="Path to a managed policy decision or routing_pathway_matrix JSON file.",
+    )
+    parser.add_argument(
+        "--preview-stale-after-hours",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_MANAGED_ROUTING_PATHWAY_STALE_AFTER_HOURS", "72")),
+        help="Classify pathway matrix rows as stale after this many hours, default: 72.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    from agentflow_proxy.managed_routing_pathway_candidates import (
+        build_managed_routing_pathway_shadow_candidates,
+    )
+    from agentflow_proxy.orchestrator_research import load_json_file, write_json
+
+    try:
+        source = load_json_file(args.decision_json)
+    except (OSError, ValueError, TypeError) as exc:
+        _write_json(stderr, {"ok": False, "error": {"type": exc.__class__.__name__, "message": str(exc)}})
+        return 1
+    if not isinstance(source, dict):
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "error": {"type": "invalid_decision_json", "message": "decision JSON must be an object"},
+            },
+        )
+        return 1
+
+    result = build_managed_routing_pathway_shadow_candidates(
+        source,
+        stale_after_hours=float(args.preview_stale_after_hours),
+    )
+    write_json(stdout, result, pretty=args.pretty)
+    return 0 if not bool((result.get("egress_guard") or {}).get("blocked")) else 1
+
+
 def proxy_main() -> None:
     # The provider proxy forwards real API credentials and request bodies upstream.
     # Keep installed CLI defaults localhost-only unless the user explicitly opts in
@@ -1468,6 +1522,10 @@ def managed_activation_preview_main() -> None:
 
 def managed_activation_preview_outcomes_main() -> None:
     raise SystemExit(managed_activation_preview_outcomes_cli())
+
+
+def managed_routing_pathway_candidates_main() -> None:
+    raise SystemExit(managed_routing_pathway_candidates_cli())
 
 
 def post_promotion_priority_delta_review_main() -> None:
