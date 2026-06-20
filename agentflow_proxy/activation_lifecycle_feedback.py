@@ -1160,6 +1160,54 @@ def _anthropic_routing_rollback_metadata() -> dict[str, Any]:
     }
 
 
+def _anthropic_routing_burndown_refresh_proof(
+    *,
+    safety_stop_count: int,
+    applied_count: int,
+    holdout_count: int,
+    evidence_freshness: dict[str, Any],
+    guard_review_fields: dict[str, dict[str, Any]],
+    rollback_metadata: dict[str, Any],
+    promotion_allowed: bool,
+    stage_allowed: bool,
+    next_state: str,
+) -> dict[str, Any]:
+    proof_fields = {
+        "safety_stop_count": safety_stop_count >= 0,
+        "applied_coverage": isinstance(guard_review_fields.get("applied_coverage"), dict),
+        "holdout_coverage": isinstance(guard_review_fields.get("holdout_coverage"), dict),
+        "rollback_proof": isinstance(guard_review_fields.get("rollback_proof"), dict),
+        "executor_guard": isinstance(guard_review_fields.get("safer_threshold_or_executor_guard"), dict),
+        "evidence_age": isinstance(evidence_freshness.get("age_hours"), (int, float, type(None)))
+        and evidence_freshness.get("max_age_hours") is not None,
+        "policy_write_status": rollback_metadata.get("active_policy_changed") is not None
+        and rollback_metadata.get("wrote_active_policy_files") is not None,
+    }
+    all_fields_recorded = all(proof_fields.values())
+    blocked = safety_stop_count > 0 or not promotion_allowed or not stage_allowed or next_state != "recovery-ready"
+    return {
+        "schema": "agentflow.anthropic_routing_safety_stop_burndown_refresh_proof.v1",
+        "status": "blocked" if blocked else "recovery-ready",
+        "all_required_fields_recorded": all_fields_recorded,
+        "required_field_results": proof_fields,
+        "safety_stop_count": safety_stop_count,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "evidence_freshness_status": evidence_freshness.get("status"),
+        "evidence_age_hours": evidence_freshness.get("age_hours"),
+        "max_evidence_age_hours": evidence_freshness.get("max_age_hours"),
+        "active_policy_changed": bool(rollback_metadata.get("active_policy_changed")),
+        "wrote_active_policy_files": bool(rollback_metadata.get("wrote_active_policy_files")),
+        "promotion_allowed": promotion_allowed,
+        "stage_allowed": stage_allowed,
+        "keeps_policy_blocked": blocked,
+        "target_local_policy_section": "routing.rules",
+        "target_local_rule_file": "routing_rules.yaml",
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
 def _anthropic_routing_keep_blocked_reason(
     *,
     next_state: str,
@@ -1342,6 +1390,17 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         stale_evidence=stale_evidence,
         latest_observed_at=lifecycle.get("latest_observed_at"),
     )
+    burndown_refresh_proof = _anthropic_routing_burndown_refresh_proof(
+        safety_stop_count=safety_stop_count,
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        evidence_freshness=evidence_freshness,
+        guard_review_fields=guard_review_fields,
+        rollback_metadata=rollback_metadata,
+        promotion_allowed=promotion_allowed,
+        stage_allowed=stage_allowed,
+        next_state=next_state,
+    )
     return {
         "source": "pass_through_routing_report",
         "source_schema": lifecycle.get("schema") or PASS_THROUGH_ROUTING_SCHEMA,
@@ -1407,6 +1466,7 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "rollback_metadata": rollback_metadata,
         "applied_coverage": guard_review_fields["applied_coverage"],
         "holdout_coverage": guard_review_fields["holdout_coverage"],
+        "burndown_refresh_proof": burndown_refresh_proof,
         "duplicate_suppression": duplicate_suppression,
         "burndown_status": (
             "stale-evidence"
@@ -1533,6 +1593,16 @@ def build_activation_safety_stop_burndown(
 
     next_actions = sorted({str(group.get("next_action")) for group in ranked if group.get("next_action")})
     top = ranked[0] if ranked else {}
+    anthropic_routing_groups = [
+        group
+        for group in ranked
+        if group.get("source") == "pass_through_routing_report" and group.get("action_family") == "routing"
+    ]
+    anthropic_routing_refresh_proofs = [
+        group.get("burndown_refresh_proof")
+        for group in anthropic_routing_groups
+        if isinstance(group.get("burndown_refresh_proof"), dict)
+    ]
     return {
         "schema": SAFETY_STOP_BURNDOWN_SCHEMA,
         "generated_at": utc_now(),
@@ -1554,15 +1624,27 @@ def build_activation_safety_stop_burndown(
             "next_actions": next_actions,
             "anthropic_routing_safety_stop_count": sum(
                 _as_int(group.get("safety_stop_count"))
-                for group in ranked
-                if group.get("source") == "pass_through_routing_report" and group.get("action_family") == "routing"
+                for group in anthropic_routing_groups
             ),
             "anthropic_routing_recovery_ready_count": sum(
                 1
-                for group in ranked
-                if group.get("source") == "pass_through_routing_report"
-                and group.get("action_family") == "routing"
-                and group.get("next_state") == "recovery-ready"
+                for group in anthropic_routing_groups
+                if group.get("next_state") == "recovery-ready"
+            ),
+            "anthropic_routing_refresh_proof_count": len(anthropic_routing_refresh_proofs),
+            "anthropic_routing_refresh_proof_fields_recorded": all(
+                bool(proof.get("all_required_fields_recorded"))
+                for proof in anthropic_routing_refresh_proofs
+            )
+            if anthropic_routing_refresh_proofs
+            else False,
+            "anthropic_routing_policy_files_written": any(
+                bool(proof.get("wrote_active_policy_files"))
+                for proof in anthropic_routing_refresh_proofs
+            ),
+            "anthropic_routing_active_policy_changed": any(
+                bool(proof.get("active_policy_changed"))
+                for proof in anthropic_routing_refresh_proofs
             ),
             "blocked_activation_count": sum(
                 1 for group in ranked if group.get("next_state") == "keep-blocked"
