@@ -1053,6 +1053,75 @@ def managed_routing_pathway_candidates_cli(
     return 0 if not bool((result.get("egress_guard") or {}).get("blocked")) else 1
 
 
+def managed_routing_pathway_outcomes_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Record metadata-only local outcome feedback for routing pathway matrix candidates"
+    )
+    parser.add_argument(
+        "--decision-json",
+        required=True,
+        help="Path to a managed policy decision, routing_pathway_matrix, or pathway candidate JSON file.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv(
+            "AGENTFLOW_DATABASE_URL",
+            os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        ),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=1000, help="Local evidence rows to inspect, default: 1000.")
+    parser.add_argument(
+        "--preview-stale-after-hours",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_MANAGED_ROUTING_PATHWAY_STALE_AFTER_HOURS", "72")),
+        help="Classify pathway matrix rows as stale after this many hours, default: 72.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    from agentflow_proxy.managed_routing_pathway_outcomes import (
+        build_local_routing_pathway_outcome_feedback,
+    )
+    from agentflow_proxy.orchestrator_research import load_json_file, write_json
+
+    try:
+        source = load_json_file(args.decision_json)
+    except (OSError, ValueError, TypeError) as exc:
+        _write_json(stderr, {"ok": False, "error": {"type": exc.__class__.__name__, "message": str(exc)}})
+        return 1
+    if not isinstance(source, dict):
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "error": {"type": "invalid_decision_json", "message": "decision JSON must be an object"},
+            },
+        )
+        return 1
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_local_routing_pathway_outcome_feedback(
+            store,
+            source,
+            limit=int(args.limit),
+            stale_after_hours=float(args.preview_stale_after_hours),
+        )
+    finally:
+        store.conn.close()
+    write_json(stdout, result, pretty=args.pretty)
+    return 0 if not bool((result.get("egress_guard") or {}).get("blocked")) else 1
+
+
 def proxy_main() -> None:
     # The provider proxy forwards real API credentials and request bodies upstream.
     # Keep installed CLI defaults localhost-only unless the user explicitly opts in
@@ -1526,6 +1595,10 @@ def managed_activation_preview_outcomes_main() -> None:
 
 def managed_routing_pathway_candidates_main() -> None:
     raise SystemExit(managed_routing_pathway_candidates_cli())
+
+
+def managed_routing_pathway_outcomes_main() -> None:
+    raise SystemExit(managed_routing_pathway_outcomes_cli())
 
 
 def post_promotion_priority_delta_review_main() -> None:
