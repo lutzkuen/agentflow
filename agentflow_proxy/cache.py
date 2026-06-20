@@ -1598,11 +1598,13 @@ def cache_file_dependency_snapshots(
     *,
     root: str | Path | None = None,
     max_paths: int | None = None,
+    capture_candidates: bool | None = None,
 ) -> list[dict[str, Any]]:
     if not CACHE_FILE_WATCH_ENABLED:
         return []
     snapshots, _audit = _cache_file_dependency_scan(body, root=root, max_paths=max_paths)
-    if not snapshots and CACHE_FILE_WATCH_CAPTURE_CANDIDATES:
+    capture_workspace = CACHE_FILE_WATCH_CAPTURE_CANDIDATES if capture_candidates is None else bool(capture_candidates)
+    if not snapshots and capture_workspace:
         snapshots = _cache_workspace_scan(root=root, max_paths=max_paths)
     return snapshots
 
@@ -1689,6 +1691,7 @@ def cache_file_dependency_audit(
     raw_candidate_count: int | None = None,
     max_paths: int | None = None,
     root: str | Path | None = None,
+    capture_candidates: bool | None = None,
 ) -> dict[str, Any]:
     watch_enabled = CACHE_FILE_WATCH_ENABLED if enabled is None else bool(enabled)
     expanded_root = _expand_path_or_none(root if root is not None else CACHE_FILE_WATCH_ROOT)
@@ -1699,7 +1702,12 @@ def cache_file_dependency_audit(
             snapshots = []
         else:
             body_snapshots, body_audit = _cache_file_dependency_scan(body, root=watch_root, max_paths=limit)
-            if body_snapshots or not CACHE_FILE_WATCH_CAPTURE_CANDIDATES:
+            capture_workspace = (
+                CACHE_FILE_WATCH_CAPTURE_CANDIDATES
+                if capture_candidates is None
+                else bool(capture_candidates)
+            )
+            if body_snapshots or not capture_workspace:
                 return body_audit
             # Body scan found no paths; fall back to workspace snapshot when capture_candidates is on
             snapshots = _cache_workspace_scan(root=watch_root, max_paths=limit)

@@ -170,6 +170,23 @@ def _should_collect_openai_file_dependency_evidence(
     return False
 
 
+def _should_capture_openai_workspace_dependency_evidence(
+    *,
+    can_cache: bool,
+    has_tool_blocks: bool,
+    category: str | None,
+    stream: bool,
+) -> bool:
+    """Use bounded workspace snapshots only for review-only tool-cache evidence."""
+    if can_cache and not has_tool_blocks and not stream:
+        return False
+    if has_tool_blocks:
+        return True
+    if stream and category in {"tool-light", "tool-result", "tool-heavy"}:
+        return True
+    return category in {"tool-light", "tool-result", "tool-heavy"}
+
+
 def provider_disabled_response(context: ProviderContext, expected: str) -> JSONResponse:
     return JSONResponse(
         {
@@ -888,11 +905,23 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                         category=category,
                         stream=True,
                     ):
-                        stream_file_deps = cache_file_dependency_snapshots(crunched)
+                        capture_workspace_dependencies = _should_capture_openai_workspace_dependency_evidence(
+                            can_cache=False,
+                            has_tool_blocks=stream_has_tool_blocks,
+                            category=category,
+                            stream=True,
+                        )
+                        stream_file_deps = cache_file_dependency_snapshots(
+                            crunched,
+                            capture_candidates=capture_workspace_dependencies,
+                        )
                         attach_file_dependency_cache_meta(
                             stream_cache_meta,
                             snapshots=stream_file_deps,
-                            audit=cache_file_dependency_audit(crunched),
+                            audit=cache_file_dependency_audit(
+                                crunched,
+                                capture_candidates=capture_workspace_dependencies,
+                            ),
                             blocker_reasons=_openai_cache_replay_blockers(
                                 cache_meta=stream_cache_meta,
                                 has_tool_blocks=stream_has_tool_blocks,
@@ -1047,12 +1076,32 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             category=category,
             stream=False,
         )
-        file_deps = cache_file_dependency_snapshots(crunched) if inspect_cache_dependencies else []
+        capture_workspace_dependencies = (
+            _should_capture_openai_workspace_dependency_evidence(
+                can_cache=can_cache,
+                has_tool_blocks=has_tool_blocks,
+                category=category,
+                stream=False,
+            )
+            if inspect_cache_dependencies
+            else False
+        )
+        file_deps = (
+            cache_file_dependency_snapshots(
+                crunched,
+                capture_candidates=capture_workspace_dependencies,
+            )
+            if inspect_cache_dependencies
+            else []
+        )
         if inspect_cache_dependencies:
             attach_file_dependency_cache_meta(
                 cache_meta,
                 snapshots=file_deps,
-                audit=cache_file_dependency_audit(crunched),
+                audit=cache_file_dependency_audit(
+                    crunched,
+                    capture_candidates=capture_workspace_dependencies,
+                ),
                 blocker_reasons=_openai_cache_replay_blockers(
                     cache_meta=cache_meta,
                     has_tool_blocks=has_tool_blocks,

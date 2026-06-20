@@ -290,9 +290,10 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn("claude-desktop: not configured", output)
 
     def test_agentflow_doctor_codex_not_configured(self):
-        stdout = io.StringIO()
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
 
-        code = cli.agentflow_cli(["doctor", "codex"], stdout=stdout)
+            code = cli.agentflow_cli(["doctor", "codex", "--config-dir", tmp], stdout=stdout)
 
         self.assertEqual(code, 1)
         self.assertIn("codex: not configured", stdout.getvalue())

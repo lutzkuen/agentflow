@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from agentflow_proxy.openai_proxy import _should_collect_openai_file_dependency_evidence
+from agentflow_proxy.openai_proxy import (
+    _should_capture_openai_workspace_dependency_evidence,
+    _should_collect_openai_file_dependency_evidence,
+)
 
 
 class OpenAIToolCacheDependencyCaptureTests(unittest.TestCase):
@@ -56,6 +59,44 @@ class OpenAIToolCacheDependencyCaptureTests(unittest.TestCase):
                 can_cache=True,
                 has_tool_blocks=False,
                 selected_before_cache=None,
+                category="chat",
+                stream=False,
+            )
+        )
+
+    def test_workspace_capture_is_review_only_for_tool_cache_evidence(self) -> None:
+        self.assertTrue(
+            _should_capture_openai_workspace_dependency_evidence(
+                can_cache=False,
+                has_tool_blocks=True,
+                category="tool-light",
+                stream=False,
+            )
+        )
+        self.assertTrue(
+            _should_capture_openai_workspace_dependency_evidence(
+                can_cache=False,
+                has_tool_blocks=False,
+                category="tool-result",
+                stream=True,
+            )
+        )
+
+    def test_workspace_capture_does_not_change_cacheable_plain_chat(self) -> None:
+        self.assertFalse(
+            _should_capture_openai_workspace_dependency_evidence(
+                can_cache=True,
+                has_tool_blocks=False,
+                category="chat",
+                stream=False,
+            )
+        )
+
+    def test_workspace_capture_ignores_non_tool_non_stream_shapes(self) -> None:
+        self.assertFalse(
+            _should_capture_openai_workspace_dependency_evidence(
+                can_cache=False,
+                has_tool_blocks=False,
                 category="chat",
                 stream=False,
             )

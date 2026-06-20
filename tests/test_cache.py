@@ -1853,6 +1853,69 @@ file_watch:
             self.assertFalse(audit["paths_included"])
             self.assertNotIn(tmp, json.dumps(audit))
 
+    def test_capture_candidates_override_collects_workspace_evidence_without_policy_reload(self):
+        """OpenAI review-only evidence can snapshot workspace files while default policy stays off."""
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+            os.chdir(tmp_path)
+
+            body = {
+                "messages": [
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "exit code 0"}]},
+                ]
+            }
+            default_audit = cache_module.cache_file_dependency_audit(body)
+            snapshots = cache_module.cache_file_dependency_snapshots(body, capture_candidates=True)
+            audit = cache_module.cache_file_dependency_audit(body, capture_candidates=True)
+
+        self.assertEqual(default_audit["snapshot_count"], 0)
+        self.assertEqual(default_audit["invalidation_reason"], "file-dependency-missing")
+        self.assertGreater(len(snapshots), 0)
+        self.assertGreater(audit["snapshot_count"], 0)
+        self.assertIsNone(audit["invalidation_reason"])
+        self.assertTrue(audit["safe_invalidation_evidence"])
+        self.assertTrue(audit["file_dependency_evidence_available"])
+        self.assertFalse(audit["paths_included"])
+        rendered = json.dumps(audit, sort_keys=True)
+        self.assertNotIn(str(tmp_path), rendered)
+        self.assertNotIn("main.py", rendered)
+
+    def test_capture_candidates_override_fails_closed_for_explicit_deleted_paths(self):
+        """Workspace fallback must not hide explicit missing path evidence."""
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "src").mkdir()
+            (tmp_path / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            os.chdir(tmp_path)
+
+            body = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": "cat ./src/main.py ./src/deleted.py",
+                            }
+                        ],
+                    }
+                ],
+            }
+            snapshots = cache_module.cache_file_dependency_snapshots(body, capture_candidates=True)
+            audit = cache_module.cache_file_dependency_audit(body, capture_candidates=True)
+
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(audit["snapshot_count"], 2)
+        self.assertEqual(audit["invalidation_reason"], "dependency-missing")
+        self.assertFalse(audit["safe_invalidation_evidence"])
+        self.assertFalse(audit["file_dependency_evidence_available"])
+        self.assertFalse(audit["paths_included"])
+        rendered = json.dumps(audit, sort_keys=True)
+        self.assertNotIn(str(tmp_path), rendered)
+        self.assertNotIn("deleted.py", rendered)
+
     def test_capture_candidates_dry_run_fixture_shows_transition_to_evidence_present(self):
         """Dry-run fixture: tool-result candidate moves from file-dependency-missing to evidence present."""
         with TemporaryDirectory() as tmp:
