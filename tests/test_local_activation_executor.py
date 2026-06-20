@@ -849,6 +849,79 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertNotIn("/tmp/private-tool-cache.py", rendered)
         self.assertEqual(managed_egress_violations(first), [])
 
+    def test_managed_activation_preview_outcomes_normalize_server_classifications(self):
+        request_payload = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
+        rows = request_payload["rows"]
+        response_payload = {
+            "schema": "agentflow.managed_activation_preview_response.v1",
+            "status": "previewed",
+            "decisions": [
+                {
+                    "handoff_ref": rows[0]["handoff_ref"],
+                    "fingerprint": "managed-preview:cache-accepted",
+                    "classification": "accepted",
+                    "decision": "accepted",
+                    "status": "accepted",
+                    "recommended_next_action": rows[0]["executor_next_action"],
+                    "agreement_status": "agreed",
+                    "agrees_with_local_next_action": True,
+                    "reason_codes": ["managed-preview-accepted"],
+                    "review_only": True,
+                },
+                {
+                    "handoff_ref": rows[1]["handoff_ref"],
+                    "fingerprint": "managed-preview:routing-needs-local-evidence",
+                    "classification": "needs-local-evidence",
+                    "decision": "keep-blocked",
+                    "status": "needs-local-evidence",
+                    "recommended_next_action": "collect-local-evidence-before-activation",
+                    "agreement_status": "needs-local-evidence",
+                    "omitted_reason": "local-evidence-required",
+                    "reason_codes": ["missing-applied-coverage"],
+                    "review_only": True,
+                },
+                {
+                    "handoff_ref": rows[3]["handoff_ref"],
+                    "fingerprint": "managed-preview:crunch-omitted",
+                    "classification": "omitted",
+                    "decision": "no-op",
+                    "status": "omitted",
+                    "recommended_next_action": "keep-current-local-decision",
+                    "agreement_status": "omitted",
+                    "no_op_reason": "full-rollout-policy-active",
+                    "reason_codes": ["current-rule-active"],
+                    "review_only": True,
+                },
+            ],
+        }
+        preview_result = build_managed_activation_preview_result(
+            request_payload,
+            response_payload=response_payload,
+            fetch={"status": "ok", "status_code": 200, "managed_server_calls_made": True},
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            store = Store(str(Path(tmpdir) / "agentflow.sqlite3"))
+            try:
+                report = persist_managed_activation_preview_outcomes(store, preview_result, now=NOW)
+            finally:
+                store.conn.close()
+
+        by_ref = {row["handoff_ref"]: row for row in report["outcomes"]}
+        self.assertEqual(by_ref[rows[0]["handoff_ref"]]["managed_preview_classification"], "accepted")
+        self.assertEqual(by_ref[rows[0]["handoff_ref"]]["classification"], "review-only")
+        self.assertEqual(by_ref[rows[1]["handoff_ref"]]["managed_preview_classification"], "needs-local-evidence")
+        self.assertEqual(by_ref[rows[1]["handoff_ref"]]["classification"], "preview-omitted")
+        self.assertEqual(by_ref[rows[3]["handoff_ref"]]["managed_preview_classification"], "omitted")
+        self.assertEqual(by_ref[rows[3]["handoff_ref"]]["classification"], "preview-omitted")
+        self.assertEqual(report["summary"]["no_data_preview_health_count"], 0)
+        self.assertEqual(report["summary"]["failed_closed_count"], 0)
+        self.assertFalse(report["summary"]["policy_files_written"])
+        self.assertFalse(report["summary"]["provider_calls_made"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertEqual(managed_egress_violations(report), [])
+
     def test_managed_activation_preview_outcomes_cli_reports_stored_outcomes(self):
         request_payload = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
         preview_result = build_managed_activation_preview_result(

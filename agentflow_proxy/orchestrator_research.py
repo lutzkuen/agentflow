@@ -6010,6 +6010,32 @@ def _managed_preview_outcome_for_entry(
     return best[2] if best else None
 
 
+def _managed_preview_classification_agrees(classification: str) -> bool:
+    return classification in {"review-only", "accepted", "preview-agreed"}
+
+
+def _managed_preview_public_outcome_status(gate: dict[str, Any]) -> str:
+    if gate.get("verified"):
+        return "preview-agreed"
+    status = str(gate.get("status") or "not-previewed").strip()
+    if status in {"managed-local-disagreement", "failed-closed", "unsafe-preview-side-effect", "rejected"}:
+        return "preview-disagreed"
+    if status in {"stale-preview", "stale-preview-health"}:
+        return "preview-stale"
+    if status in {"preview-omitted", "omitted", "needs-local-evidence"}:
+        return "preview-omitted"
+    if status in {
+        "missing-preview",
+        "missing-preview-decision",
+        "no-data-preview-health",
+        "incomplete-preview-health",
+        "privacy-rejected-preview-health",
+        "rejected-preview-health",
+    }:
+        return "preview-missing"
+    return "preview-missing"
+
+
 def _managed_preview_successor_gate(
     entry: dict[str, Any],
     managed_preview_outcomes: dict[str, Any] | None,
@@ -6079,7 +6105,7 @@ def _managed_preview_successor_gate(
         or outcome.get("provider_calls_made")
     )
     verified = bool(
-        classification == "review-only"
+        _managed_preview_classification_agrees(classification)
         and not stale
         and not missing
         and not failed_closed
@@ -6115,6 +6141,8 @@ def _managed_preview_successor_gate(
             status = "managed-local-disagreement"
         elif preview_policy_write or preview_provider_call:
             status = "unsafe-preview-side-effect"
+        elif classification in {"preview-omitted", "omitted", "needs-local-evidence"}:
+            status = "preview-omitted"
         else:
             status = classification
         decision = "review-stale-preview" if stale else decision
@@ -6143,6 +6171,10 @@ def _managed_preview_successor_gate(
         "preview_age_hours": outcome.get("preview_age_hours"),
         "stale_after_hours": outcome.get("stale_after_hours"),
         "classification": classification,
+        "managed_preview_classification": sanitize_value(outcome.get("managed_preview_classification")),
+        "preview_outcome_status": _managed_preview_public_outcome_status(
+            {"verified": verified, "status": status}
+        ),
         "reason": reason,
         "reason_codes": sanitize_value([str(item) for item in outcome.get("reason_codes") or [] if str(item or "").strip()]),
         "omitted_reason": sanitize_value(outcome.get("omitted_reason")),
@@ -6398,6 +6430,7 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
         "preview_verification_status": sanitize_value(action.get("preview_verification_status")),
         "preview_verification_decision": sanitize_value(action.get("preview_verification_decision")),
         "preview_agreement_status": "agreed" if gate.get("verified") else sanitize_value(gate.get("status") or "not-previewed"),
+        "preview_outcome_status": _managed_preview_public_outcome_status(gate),
         "preview_omitted_reason": sanitize_value(gate.get("omitted_reason")) if gate else None,
         "preview_no_op_reason": sanitize_value(gate.get("no_op_reason")) if gate else None,
         "top_preview_omission_reason": sanitize_value((gate.get("health_gate") or {}).get("top_omission_reason")) if isinstance(gate.get("health_gate"), dict) else None,
@@ -7121,7 +7154,10 @@ def _preview_successor_summary(successor_actions: list[dict[str, Any]]) -> dict[
             counts["agreed"] += 1
         elif gate:
             status = str(gate.get("status") or "unknown")
-            if status in {"managed-local-disagreement", "failed-closed", "unsafe-preview-side-effect"}:
+            outcome_status = _managed_preview_public_outcome_status(gate)
+            if outcome_status == "preview-omitted":
+                counts["omitted"] += 1
+            elif status in {"managed-local-disagreement", "failed-closed", "unsafe-preview-side-effect"}:
                 counts["disagreed"] += 1
             elif status in {"stale-preview", "stale-preview-health"}:
                 counts["stale"] += 1
@@ -7146,6 +7182,7 @@ def _preview_successor_summary(successor_actions: list[dict[str, Any]]) -> dict[
                 "local_action_family": family_name,
                 "agreed_count": counts["agreed"],
                 "disagreed_count": counts["disagreed"],
+                "omitted_count": counts["omitted"],
                 "stale_count": counts["stale"],
                 "missing_count": counts["missing"],
                 "blocked_count": counts["blocked"],

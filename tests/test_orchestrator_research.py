@@ -2598,6 +2598,215 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw preview fixture value must not leak", rendered)
         self.assertNotIn('"policy_files_written": true', rendered.lower())
 
+    def test_server_style_preview_outcomes_feed_successor_queue(self):
+        rows = [
+            (
+                "activation:preview-routing",
+                "routing",
+                "agentflow.openai_routing_promotion_decision_report.v1",
+                "review",
+                "ready",
+                "widen",
+                ["preview-accepted"],
+            ),
+            (
+                "activation:preview-cache",
+                "cache",
+                "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "missing-evidence",
+                "blocked",
+                "collect-file-invalidation-evidence",
+                ["invalidation-evidence-missing"],
+            ),
+            (
+                "activation:preview-feedback",
+                "activation-feedback",
+                "agentflow.activation_safety_stop_burndown.v1",
+                "keep-blocked",
+                "blocked",
+                "refresh-managed-activation-preview",
+                ["safety-stop"],
+            ),
+        ]
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": index,
+                    "fingerprint": source,
+                    "lever": family,
+                    "local_action_family": family,
+                    "evidence_schema": evidence_schema,
+                    "state": current_status,
+                    "current_status": current_status,
+                    "issue_worthy_status": issue_status,
+                    "next_action": next_action,
+                    "blocker_codes": blockers,
+                    "sample_count": 10,
+                    "stage_allowed": issue_status == "ready",
+                    "target_local_rule_file": f"{family}_rules.yaml",
+                    "target_local_policy_section": f"{family}.rules",
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                }
+                for index, (
+                    source,
+                    family,
+                    evidence_schema,
+                    current_status,
+                    issue_status,
+                    next_action,
+                    blockers,
+                ) in enumerate(rows, start=1)
+            ],
+        }
+        outcomes = [
+            {
+                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": "managed-preview-outcome:routing",
+                "source_fingerprint": "activation:preview-routing",
+                "preview_ref": "preview:routing",
+                "local_action_family": "routing",
+                "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                "classification": "review-only",
+                "managed_preview_classification": "accepted",
+                "decision": "accepted",
+                "next_action": "widen",
+                "agreement_status": "agreed",
+                "agrees_with_local_next_action": True,
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            {
+                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": "managed-preview-outcome:cache",
+                "source_fingerprint": "activation:preview-cache",
+                "preview_ref": "preview:cache",
+                "local_action_family": "cache",
+                "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "classification": "preview-omitted",
+                "managed_preview_classification": "needs-local-evidence",
+                "decision": "keep-blocked",
+                "next_action": "collect-local-evidence-before-activation",
+                "omitted_reason": "local-evidence-required",
+                "reason_codes": ["invalidation-evidence-missing"],
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            {
+                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": "managed-preview-outcome:feedback",
+                "source_fingerprint": "activation:preview-feedback",
+                "preview_ref": "preview:feedback",
+                "local_action_family": "activation-feedback",
+                "evidence_schema": "agentflow.activation_safety_stop_burndown.v1",
+                "classification": "preview-omitted",
+                "managed_preview_classification": "needs-local-evidence",
+                "decision": "keep-blocked",
+                "next_action": "collect-local-evidence-before-activation",
+                "omitted_reason": "local-evidence-required",
+                "reason_codes": ["safety-stop"],
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+        ]
+
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "status": "tracked",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": True,
+                    "summary": {
+                        "stored_preview_outcome_count": len(outcomes),
+                        "stale_count": 0,
+                        "missing_preview_decision_count": 0,
+                        "no_data_preview_health_count": 0,
+                        "failed_closed_count": 0,
+                        "disagreement_count": 0,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                    },
+                    "outcomes": outcomes,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "managed_activation_preview_health": {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": len(outcomes),
+                    "previewed_row_count": len(outcomes),
+                    "omitted_row_count": 2,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {
+                        "routing": 1,
+                        "cache": 1,
+                        "activation-feedback": 1,
+                    },
+                    "top_omission_reasons": [{"reason_code": "local-evidence-required", "count": 2}],
+                    "top_rejection_reasons": [],
+                },
+            }
+        )
+
+        decisions = {row["source_fingerprint"]: row for row in queue["successor_decisions"]}
+        self.assertEqual(decisions["activation:preview-routing"]["preview_agreement_status"], "agreed")
+        self.assertEqual(decisions["activation:preview-routing"]["preview_outcome_status"], "preview-agreed")
+        self.assertTrue(decisions["activation:preview-routing"]["preview_verified"])
+        self.assertEqual(decisions["activation:preview-routing"]["decision"], "ready")
+        for source in ("activation:preview-cache", "activation:preview-feedback"):
+            with self.subTest(source=source):
+                self.assertEqual(decisions[source]["preview_agreement_status"], "preview-omitted")
+                self.assertEqual(decisions[source]["preview_outcome_status"], "preview-omitted")
+                self.assertFalse(decisions[source]["preview_verified"])
+                self.assertEqual(decisions[source]["issue_worthy_status"], "blocked")
+                self.assertNotEqual(decisions[source]["preview_agreement_status"], "no-data-preview-health")
+        family_rows = {
+            row["local_action_family"]: row
+            for row in queue["summary"]["preview_agreement_by_local_action_family"]
+        }
+        self.assertEqual(family_rows["routing"]["agreed_count"], 1)
+        self.assertEqual(family_rows["routing"]["missing_count"], 0)
+        self.assertEqual(family_rows["cache"]["omitted_count"], 1)
+        self.assertEqual(family_rows["cache"]["missing_count"], 0)
+        self.assertEqual(family_rows["activation-feedback"]["omitted_count"], 1)
+        self.assertEqual(family_rows["activation-feedback"]["missing_count"], 0)
+        self.assertEqual(queue["summary"]["preview_verified_successor_count"], 1)
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("no-data-preview-health", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertNotIn('"provider_calls_made": true', rendered.lower())
+
     def test_stored_no_data_preview_outcomes_keep_successor_blocked(self):
         ledger = {
             "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",

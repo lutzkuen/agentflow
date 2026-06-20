@@ -116,7 +116,16 @@ def _matching_decisions(preview_result: dict[str, Any]) -> dict[str, dict[str, A
 
 
 def _decision_text(decision: dict[str, Any]) -> str:
-    return str(decision.get("decision") or decision.get("status") or "").strip().lower()
+    return str(
+        decision.get("decision")
+        or decision.get("status")
+        or decision.get("classification")
+        or ""
+    ).strip().lower()
+
+
+def _managed_classification_text(decision: dict[str, Any]) -> str:
+    return str(decision.get("classification") or decision.get("status") or "").strip().lower()
 
 
 def _disagrees_with_local(request_row: dict[str, Any], decision: dict[str, Any]) -> bool:
@@ -142,6 +151,7 @@ def _disagrees_with_local(request_row: dict[str, Any], decision: dict[str, Any])
 
 def _classification(
     *,
+    decision_classification: str,
     fetch_status: str,
     managed_server_calls_made: bool,
     stale: bool,
@@ -159,6 +169,10 @@ def _classification(
         return "stale-preview"
     if disagreement:
         return "managed-local-disagreement"
+    if decision_classification == "rejected":
+        return "failed-closed"
+    if decision_classification in {"omitted", "needs-local-evidence"}:
+        return "preview-omitted"
     if fetch_status == "skipped":
         return "not-previewed"
     return "review-only"
@@ -205,6 +219,7 @@ def _outcome_from_rows(
     preview_policy_write = bool(decision.get("policy_files_written"))
     preview_provider_call = bool(decision.get("provider_calls_made"))
     preview_managed_enforced = bool(decision.get("managed_enforced"))
+    decision_classification = _managed_classification_text(decision)
     failed_closed = bool(
         fetch_status in {"blocked", "error"}
         or preview_policy_write
@@ -213,6 +228,7 @@ def _outcome_from_rows(
     )
     disagreement = _disagrees_with_local(request_row, decision)
     classification = _classification(
+        decision_classification=decision_classification,
         fetch_status=fetch_status,
         managed_server_calls_made=managed_server_calls_made,
         stale=stale,
@@ -248,6 +264,9 @@ def _outcome_from_rows(
         "current_status": sanitize_value(request_row.get("current_status")),
         "decision": sanitize_value(decision.get("decision") or "missing"),
         "decision_status": sanitize_value(decision.get("status") or decision.get("decision") or "missing"),
+        "managed_preview_classification": sanitize_value(decision_classification),
+        "agreement_status": sanitize_value(decision.get("agreement_status")),
+        "agrees_with_local_next_action": bool(decision.get("agrees_with_local_next_action")),
         "classification": classification,
         "preview_status": classification,
         "preview_reason": sanitize_value(fetch_reason or classification),
