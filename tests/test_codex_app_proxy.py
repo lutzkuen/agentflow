@@ -708,7 +708,7 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
             "method": "turn/start",
             "params": {
                 "model": "claude-sonnet-4-6",
-                "effort": "high",
+                "thinking": {"type": "enabled", "budget_tokens": 2048},
                 "input": [{"type": "text", "text": "short answer please"}],
             },
         }
@@ -718,6 +718,36 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(forwarded_obj["params"]["model"], "claude-sonnet-4-6")
         self.assertEqual(metadata["routing"]["status"], "skipped")
         self.assertIn("thinking request", metadata["routing"]["reason"])
+
+    def test_codex_effort_param_does_not_trigger_thinking_gate_for_routing(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-codex-effort-route",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-codex-effort-route",
+                "model": "gpt-5.5",
+                "effort": "high",
+                "input": [{"type": "text", "text": "Handle this Codex turn without treating effort as Anthropic thinking."}],
+            },
+        }
+
+        with (
+            patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT", False),
+            patch.object(codex_app_proxy, "CODEX_APP_RULES", []),
+            patch.object(codex_app_proxy, "_CODEX_PHASE_MODEL_CANDIDATES", ()),
+        ):
+            forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+
+        forwarded_obj = json.loads(forwarded)
+        routing = metadata["routing"]
+        self.assertEqual(forwarded_obj["params"]["model"], "gpt-5.5")
+        self.assertEqual(forwarded_obj["params"]["effort"], "high")
+        self.assertEqual(routing["requested_model"], "gpt-5.5")
+        self.assertEqual(routing["status"], "skipped")
+        self.assertNotIn("thinking request", routing["reason"])
+        self.assertEqual(routing["thinking_gate"]["status"], "clear")
+        self.assertFalse(routing["thinking_gate"]["top_level_thinking"])
 
     def test_codex_phase_model_candidate_prefers_gpt53_codex_for_safe_summary(self):
         secret = "secret summary prompt must stay private"

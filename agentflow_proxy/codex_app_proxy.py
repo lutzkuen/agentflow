@@ -1193,6 +1193,7 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
 
     route_body = copy.deepcopy(params)
     route_body["model"] = requested_model
+    route_body.pop("effort", None)
     route_body["_agentflow_app_family"] = "codex"
     route_body["_agentflow_source_surface"] = CODEX_APP_SOURCE_SURFACE
     route_body["_agentflow_endpoint"] = "app_server"

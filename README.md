@@ -400,6 +400,7 @@ printf 'Reply with exactly: ok\n' | agentflow-codex-app-client --url ws://127.0.
 ```
 
 This path focuses on telemetry. It records redacted JSON-RPC method names and size-derived metadata, not raw prompts by default.
+Shadow canary execution for Codex app-server routing requires an OpenAI API key in the proxy environment. Set `AGENTFLOW_CODEX_APP_SHADOW_OPENAI_API_KEY`, `AGENTFLOW_OPENAI_API_KEY`, or `OPENAI_API_KEY`; without one, shadow routing remains metadata-only.
 
 Inspect recent Codex telemetry:
 
