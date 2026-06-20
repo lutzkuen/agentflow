@@ -1938,7 +1938,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(routing["managed_recommendation"]["apply_reason"], "privacy-not-metadata-only")
         self.assertEqual(crunch["policy_source"], "local-default")
 
-    def test_openai_enhanced_crunch_hint_falls_back_without_local_provider(self):
+    def test_openai_enhanced_crunch_hint_uses_configured_local_provider(self):
         request_body = {
             "model": "gpt-5-codex",
             "messages": [
@@ -1986,9 +1986,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         crunch = json.loads(row["crunch_json"])
         action = routing["managed_local_actions"]["crunch"]
 
-        self.assertEqual(action["status"], "fallback-not-configured")
-        self.assertEqual(action["old_context_summarization"]["state"], "fallback-not-configured")
-        self.assertEqual(action["enhanced_crunch"]["state"], "fallback-not-configured")
+        self.assertEqual(action["status"], "configured")
+        self.assertEqual(action["old_context_summarization"]["state"], "configured")
+        self.assertEqual(action["enhanced_crunch"]["state"], "configured")
         self.assertEqual(crunch["policy_source"], "local-default")
         self.assertNotIn("SECRET_ENHANCED_CRUNCH", row["routing_json"])
 

@@ -30,7 +30,7 @@ old_context_summarization:
   # savings are recorded in crunch_json.old_context_summarization and dashboard
   # stats. The summary cache is used when available but exact request caching is
   # not required for eligibility.
-  enabled: false
+  enabled: true
   rule_id: local-old-context-summarization
   model: claude-haiku-4-5-20251001
   placement: system
@@ -47,9 +47,9 @@ old_context_summarization:
   block_tool_protocol: true
   block_thinking: true
   canary:
-    enabled: false
-    fraction: 1.0
-    salt: ""
+    enabled: true
+    fraction: 0.25
+    salt: "local-old-context-summary-v1"
     unit: source_hash
   safety_stop:
     enabled: true

@@ -2587,7 +2587,13 @@ def _crunch_impact(
     old_context_dry_run: dict[str, Any] | None = None
 
     old_context = policy.get("old_context_summarization") if isinstance(policy.get("old_context_summarization"), dict) else {}
-    review_dry_run_policy = policy if _enabled(old_context.get("enabled")) else _old_context_summary_review_dry_run_policy(policy)
+    managed_old_context_rule, _managed_old_context_meta = _managed_old_context_summary_local_rule(policy)
+    if managed_old_context_rule is not None:
+        review_dry_run_policy = {**policy, "old_context_summarization": managed_old_context_rule}
+    elif _enabled(old_context.get("enabled")):
+        review_dry_run_policy = policy
+    else:
+        review_dry_run_policy = _old_context_summary_review_dry_run_policy(policy)
     if review_dry_run_policy is not None:
         dry_run_old_context = (
             review_dry_run_policy.get("old_context_summarization")
@@ -2607,8 +2613,9 @@ def _crunch_impact(
             "$.policies.crunch.old_context_summarization.enabled",
             "old-context summarization changes request context; review matched error/retry rate before applying",
         )
-        warnings.append(warning)
-        feature["warnings"] = [warning]
+        if _old_context_summary_policy_present(dry_run_old_context, policy):
+            warnings.append(warning)
+            feature["warnings"] = [warning]
         features.append(feature)
         if db_path:
             from agentflow_proxy.old_context_summary_dry_run import dry_run_old_context_summary
@@ -3165,14 +3172,17 @@ def pattern_policy_review_summary(policy: Any, *, section: str) -> dict[str, Any
 def _old_context_summary_policy_present(summary: dict[str, Any], policy: dict[str, Any]) -> bool:
     if not summary:
         return False
-    if _enabled(summary.get("enabled")):
-        return True
     if str(summary.get("policy_source") or "").startswith("managed-"):
         return True
     for key in (
         "candidate_id",
+        "policy_id",
+        "recommendation_id",
+        "candidate_family",
         "source_model",
         "summary_model",
+        "action",
+        "recommended_action",
         "net_savings_evidence",
         "quality_evidence",
         "blocker_reason_codes",
@@ -3237,7 +3247,20 @@ def _summary_conditions(candidate: dict[str, Any], fallback: dict[str, Any]) -> 
         candidate.get("buckets"),
     )
     if conditions:
-        return _safe_pattern_value(conditions) or {}
+        safe = _safe_pattern_value(conditions) or {}
+        for key in (
+            "min_request_chars",
+            "min_summarized_chars",
+            "max_turns",
+            "keep_recent_turns",
+            "max_source_chars",
+            "excluded_categories",
+            "block_tool_protocol",
+            "block_thinking",
+        ):
+            if key in conditions and conditions[key] not in (None, "", [], {}):
+                safe[key] = _safe_pattern_value(conditions[key])
+        return safe
     return {
         key: fallback[key]
         for key in (
@@ -3666,7 +3689,7 @@ def policy_bundle_safety_warnings(bundle: Any) -> list[dict[str, str]]:
 
     crunch = _section_policy(bundle, "crunch")
     old_context = crunch.get("old_context_summarization") if isinstance(crunch.get("old_context_summarization"), dict) else {}
-    if _enabled(old_context.get("enabled")):
+    if _enabled(old_context.get("enabled")) and _old_context_summary_policy_present(old_context, crunch):
         _add_warning(
             warnings,
             "old-context-summarization-enabled",

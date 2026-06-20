@@ -31,7 +31,10 @@ class OldContextSummaryFixtureTest(unittest.TestCase):
         "AGENTFLOW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS",
         "AGENTFLOW_HAIKU_SUMMARY_MAX_SOURCE_CHARS",
         "AGENTFLOW_MANAGED_RECOMMENDATIONS",
+        "AGENTFLOW_RECOMMENDATION_ENABLED",
+        "AGENTFLOW_RECOMMENDATIONS_ENABLED",
         "AGENTFLOW_RECOMMENDATION_SERVER_URL",
+        "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
         "AGENTFLOW_MANAGED_API_KEY",
         "AGENTFLOW_OLD_CONTEXT_SUMMARY_FIXTURE_REAL_MODEL",
         "AGENTFLOW_OLD_CONTEXT_SUMMARY_FIXTURE_URL",
@@ -438,7 +441,8 @@ old_context_summarization:
             self._assert_feedback_metadata_only(feedback, raw_forbidden)
 
         os.chdir(self.home.name)
-        default_manual = importlib.reload(crunch_module)
+        with patch.dict(os.environ, {"AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT": "0"}):
+            default_manual = importlib.reload(crunch_module)
         managed_profile = {
             "policy_source": "managed-recommended",
             "old_context_summarization": {

@@ -6509,6 +6509,9 @@ class PolicyReloadCliTests(unittest.TestCase):
         proposed["policies"]["cache"]["exact_cache"]["cache_tool_calls"] = True
         proposed["policies"]["cache"]["semantic_cache"]["enabled"] = True
         proposed["policies"]["crunch"]["old_context_summarization"]["enabled"] = True
+        proposed["policies"]["crunch"]["old_context_summarization"]["candidate_id"] = "risky-old-context-summary"
+        proposed["policies"]["crunch"]["old_context_summarization"]["policy_source"] = "managed-recommended"
+        proposed["policies"]["crunch"]["old_context_summarization"]["quality_evidence"] = {"holdout_success_count": 1}
         proposed["policies"]["routing"]["policy_source"] = "managed-enforced"
         stdout = io.StringIO()
 

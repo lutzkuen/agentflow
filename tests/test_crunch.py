@@ -541,7 +541,8 @@ old_context_summarization:
             self.assertNotIn("4811", rendered)
 
     def test_managed_enhanced_summary_hint_falls_back_without_local_provider(self):
-        manual = importlib.reload(crunch_module)
+        with patch.dict(os.environ, {"AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT": "0"}):
+            manual = importlib.reload(crunch_module)
         body = {
             "model": "claude-sonnet-4-6",
             "messages": [
@@ -1690,12 +1691,35 @@ thinking_deduplication:
             self.assertEqual(meta["thinking_near_duplicate_blocks_removed"], 0)
             self.assertEqual(crunched["messages"][0]["content"][0]["type"], "thinking")
 
-    def test_old_context_summarization_is_disabled_by_default(self):
+    def test_old_context_summarization_defaults_to_canary_policy(self):
         manual = importlib.reload(crunch_module)
         plan, meta = manual.old_context_summary_plan(
             {"messages": [{"role": "user", "content": "old text " * 10000}]},
             exact_cache_enabled=True,
         )
+
+        self.assertIsNone(plan)
+        self.assertTrue(meta["enabled"])
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "not-enough-old-turns")
+        self.assertEqual(meta["model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(meta["max_summary_cost_usd"], 0.02)
+        self.assertEqual(meta["keep_recent_turns"], 4)
+        self.assertTrue(meta["block_thinking"])
+        self.assertTrue(meta["canary"]["enabled"])
+        self.assertEqual(meta["canary"]["fraction"], 0.25)
+        self.assertEqual(meta["canary"]["holdout_fraction"], 0.75)
+        self.assertEqual(meta["canary"]["salt"], "local-old-context-summary-v1")
+        self.assertEqual(meta["canary"]["unit"], "source_hash")
+        self.assertTrue(meta["safety_stop"]["enabled"])
+
+    def test_old_context_summarization_legacy_env_can_disable_canary_policy(self):
+        with patch.dict(os.environ, {"AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT": "0"}):
+            manual = importlib.reload(crunch_module)
+            plan, meta = manual.old_context_summary_plan(
+                {"messages": [{"role": "user", "content": "old text " * 10000}]},
+                exact_cache_enabled=True,
+            )
 
         self.assertIsNone(plan)
         self.assertFalse(meta["enabled"])
