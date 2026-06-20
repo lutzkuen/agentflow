@@ -10,3 +10,7 @@ runs/
 logs/
 *.log
 .DS_Store
+
+dist/
+build/
+*.egg-info/

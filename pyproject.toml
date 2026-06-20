@@ -1,7 +1,7 @@
 [project]
-name = "agentflow-proxy"
+name = "tokenclaw"
 version = "0.1.0"
-description = "Local provider-specific proxy for Claude and Codex with caching, crunching, routing, and logging."
+description = "Local proxy for token savings on LLM traffic: crunching, routing, caching, and telemetry."
 license = { text = "Apache-2.0" }
 classifiers = [
   "License :: OSI Approved :: Apache Software License",
@@ -20,6 +20,8 @@ dependencies = [
 ]
 
 [project.scripts]
+tokenclaw = "agentflow_proxy.cli:agentflow_main"
+tokenclaw-proxy = "agentflow_proxy.cli:proxy_main"
 agentflow = "agentflow_proxy.cli:agentflow_main"
 agentflow-proxy = "agentflow_proxy.cli:proxy_main"
 agentflow-claude-proxy = "agentflow_proxy.cli:proxy_main"
