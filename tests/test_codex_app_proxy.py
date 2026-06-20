@@ -778,7 +778,7 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(routing["requested_model"], "gpt-5.5")
         self.assertEqual(routing["routed_model"], "gpt-5.5")
         self.assertEqual(routing["candidate_target_model"], "gpt-5.3-codex")
-        self.assertEqual(routing["candidate_family"], "codex-specialized-summary")
+        self.assertEqual(routing["candidate_family"], "codex-specialized-stateless")
         self.assertEqual(routing["workflow_phase"], "summary")
         self.assertEqual(routing["shape_preflight_status"], "safe")
         self.assertEqual(routing["codex_routing_candidate"]["candidate_target_model"], "gpt-5.3-codex")

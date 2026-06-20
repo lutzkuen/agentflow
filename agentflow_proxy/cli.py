@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -21,6 +22,7 @@ from agentflow_proxy.cli_common import (
     redact_secret as _redact_secret,
     write_json as _write_json,
 )
+from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.upstream_url import redact_url as _redact_url
 
 from agentflow_proxy.cli_commands.policy_bundle import (
@@ -772,6 +774,251 @@ def _attach_managed_activation_preview_outcome_persistence(
         store.conn.close()
 
 
+def _managed_routing_pathway_outcomes_url(
+    *,
+    explicit_url: str,
+    managed_preview_url: str,
+) -> str:
+    url = str(explicit_url or "").strip()
+    if url:
+        return url
+    preview_url = str(managed_preview_url or "").strip()
+    if not preview_url:
+        return ""
+    parts = urlsplit(preview_url)
+    if not parts.scheme or not parts.netloc:
+        return ""
+    path = parts.path or ""
+    if "/v1/" in path:
+        prefix = path.split("/v1/", 1)[0]
+        next_path = f"{prefix}/v1/managed-routing-pathway-outcomes"
+    else:
+        base = path.rsplit("/", 1)[0] if "/" in path.rstrip("/") else ""
+        next_path = f"{base}/managed-routing-pathway-outcomes"
+    return urlunsplit((parts.scheme, parts.netloc, next_path, "", ""))
+
+
+def _routing_pathway_outcome_batch_result(
+    *,
+    status: str,
+    reason: str,
+    outcome_count: int = 0,
+    url: str | None = None,
+    managed_server_calls_made: bool = False,
+    status_code: int | None = None,
+    latency_ms: int | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "schema": "agentflow.routing_pathway_outcome_batch_preflight.v1",
+        "status": status,
+        "reason": reason,
+        "outcome_count": int(outcome_count),
+        "submitted_outcome_count": int(outcome_count) if status == "submitted" else 0,
+        "managed_dependency": "optional",
+        "review_only": True,
+        "feature_only": True,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "provider_calls_made": False,
+        "policy_files_written": False,
+        "managed_server_calls_made": bool(managed_server_calls_made),
+        "privacy": {
+            "schema": "agentflow.routing_pathway_outcome_batch_preflight_privacy.v1",
+            "feature_only": True,
+            "metadata_only": True,
+            "aggregate_only": True,
+            "review_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_response_bodies_included": False,
+            "provider_bodies_included": False,
+            "raw_provider_bodies_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "tenant_ids_included": False,
+            "file_paths_included": False,
+            "absolute_paths_included": False,
+            "individual_candidate_ids_included": False,
+            "policy_file_contents_included": False,
+            "provider_calls_made": False,
+            "policy_files_written": False,
+            "managed_server_calls_made": bool(managed_server_calls_made),
+        },
+    }
+    if url:
+        result["url"] = _redact_url(url)
+    if status_code is not None:
+        result["status_code"] = int(status_code)
+    if latency_ms is not None:
+        result["latency_ms"] = int(latency_ms)
+    if error:
+        result["error"] = str(error)[:500]
+    return result
+
+
+def _managed_routing_pathway_outcome_ingest_payload(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.managed_routing_pathway_outcomes.v1",
+        "generated_at": report.get("generated_at"),
+        "status": report.get("status") or "tracked",
+        "read_only": True,
+        "review_only": True,
+        "managed_dependency": "optional",
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "policy_files_written": False,
+        "source_schema": report.get("schema"),
+        "summary": report.get("summary") or {},
+        "outcomes": report.get("outcomes") or [],
+        "privacy": report.get("privacy") or {},
+        "egress_guard": report.get("egress_guard") or {},
+    }
+
+
+def _submit_routing_pathway_outcome_batch(
+    *,
+    source_json: str,
+    db: str,
+    limit: int,
+    stale_after_hours: float,
+    managed_preview_url: str,
+    managed_routing_pathway_outcomes_url: str,
+    allow_insecure_managed_url: bool,
+    headers: dict[str, str],
+    timeout: float,
+) -> dict[str, Any]:
+    source_path = str(source_json or "").strip()
+    if not source_path:
+        return _routing_pathway_outcome_batch_result(
+            status="skipped",
+            reason="routing-pathway-outcome-batch-input-not-configured",
+        )
+
+    from agentflow_proxy.managed_routing_pathway_outcomes import (
+        build_local_routing_pathway_outcome_feedback,
+    )
+    from agentflow_proxy.orchestrator_research import load_json_file
+
+    try:
+        source = load_json_file(source_path)
+    except (OSError, ValueError, TypeError) as exc:
+        return _routing_pathway_outcome_batch_result(
+            status="error",
+            reason="routing-pathway-outcome-batch-input-read-failed",
+            error=f"{exc.__class__.__name__}: {exc}",
+        )
+    if not isinstance(source, dict):
+        return _routing_pathway_outcome_batch_result(
+            status="error",
+            reason="routing-pathway-outcome-batch-input-not-object",
+        )
+
+    store = _open_store_for_db(str(db))
+    try:
+        report = build_local_routing_pathway_outcome_feedback(
+            store,
+            source,
+            limit=int(limit),
+            stale_after_hours=float(stale_after_hours),
+        )
+    finally:
+        store.conn.close()
+
+    outcome_count = len([row for row in report.get("outcomes") or [] if isinstance(row, dict)])
+    if bool((report.get("egress_guard") or {}).get("blocked")):
+        return _routing_pathway_outcome_batch_result(
+            status="blocked",
+            reason="unsafe-routing-pathway-outcome-batch",
+            outcome_count=outcome_count,
+        )
+    if outcome_count <= 0:
+        return _routing_pathway_outcome_batch_result(
+            status="no-data",
+            reason="routing-pathway-outcome-batch-empty",
+            outcome_count=0,
+        )
+
+    url = _managed_routing_pathway_outcomes_url(
+        explicit_url=managed_routing_pathway_outcomes_url,
+        managed_preview_url=managed_preview_url,
+    )
+    if not url:
+        return _routing_pathway_outcome_batch_result(
+            status="skipped",
+            reason="managed-routing-pathway-outcomes-url-not-configured",
+            outcome_count=outcome_count,
+        )
+    if url.startswith("http://") and not _is_loopback_url(url) and not allow_insecure_managed_url:
+        return _routing_pathway_outcome_batch_result(
+            status="blocked",
+            reason="insecure-managed-routing-pathway-outcomes-url",
+            outcome_count=outcome_count,
+            url=url,
+        )
+
+    payload = _managed_routing_pathway_outcome_ingest_payload(report)
+    violations = managed_egress_violations(payload)
+    if violations:
+        return _routing_pathway_outcome_batch_result(
+            status="blocked",
+            reason="unsafe-routing-pathway-outcome-batch",
+            outcome_count=outcome_count,
+            url=url,
+            error=f"egress_violation_count={len(violations)}",
+        )
+
+    started = time.time()
+    try:
+        response = httpx.post(url, json=payload, headers=headers, timeout=float(timeout))
+        latency_ms = int((time.time() - started) * 1000)
+        if response.status_code >= 400:
+            return _routing_pathway_outcome_batch_result(
+                status="error",
+                reason="managed-routing-pathway-outcomes-server-error",
+                outcome_count=outcome_count,
+                url=url,
+                managed_server_calls_made=True,
+                status_code=response.status_code,
+                latency_ms=latency_ms,
+                error=response.text,
+            )
+        return _routing_pathway_outcome_batch_result(
+            status="submitted",
+            reason="managed-routing-pathway-outcome-batch-submitted",
+            outcome_count=outcome_count,
+            url=url,
+            managed_server_calls_made=True,
+            status_code=response.status_code,
+            latency_ms=latency_ms,
+        )
+    except httpx.HTTPError as exc:
+        return _routing_pathway_outcome_batch_result(
+            status="error",
+            reason=exc.__class__.__name__,
+            outcome_count=outcome_count,
+            url=url,
+            error=str(exc),
+        )
+
+
+def _attach_routing_pathway_outcome_batch(
+    result: dict[str, Any],
+    batch: dict[str, Any],
+) -> dict[str, Any]:
+    result["routing_pathway_outcome_batch"] = batch
+    summary = result.setdefault("summary", {})
+    if isinstance(summary, dict):
+        summary["routing_pathway_outcome_batch_status"] = batch.get("status")
+        summary["routing_pathway_outcome_batch_reason"] = batch.get("reason")
+        summary["routing_pathway_outcome_batch_outcome_count"] = int(batch.get("outcome_count") or 0)
+        summary["routing_pathway_outcome_batch_submitted_count"] = int(batch.get("submitted_outcome_count") or 0)
+    return result
+
+
 def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
     parser = argparse.ArgumentParser(
         description="Opt in to a feature-only managed preview for local activation executor handoff rows"
@@ -808,6 +1055,28 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
         help="Persist sanitized managed preview decisions as review-only local outcomes.",
     )
     parser.add_argument(
+        "--routing-pathway-outcomes-json",
+        default=os.getenv("AGENTFLOW_ROUTING_PATHWAY_OUTCOMES_JSON", ""),
+        help=(
+            "Optional managed policy decision, routing_pathway_matrix, or pathway candidate JSON "
+            "used to submit local routing pathway outcome feedback before the activation preview."
+        ),
+    )
+    parser.add_argument(
+        "--managed-routing-pathway-outcomes-url",
+        default=os.getenv("AGENTFLOW_MANAGED_ROUTING_PATHWAY_OUTCOMES_URL", ""),
+        help=(
+            "Managed routing pathway outcome ingest endpoint. If omitted, it is derived from "
+            "--managed-preview-url when possible."
+        ),
+    )
+    parser.add_argument(
+        "--routing-pathway-outcome-limit",
+        type=int,
+        default=int(os.getenv("AGENTFLOW_ROUTING_PATHWAY_OUTCOME_LIMIT", "1000")),
+        help="Local routing pathway evidence rows to inspect before preview, default: 1000.",
+    )
+    parser.add_argument(
         "--db",
         default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
         help="AgentFlow database URL or SQLite path for --persist-outcomes.",
@@ -841,6 +1110,10 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
         return 1
 
     request_payload = build_managed_activation_preview_request(plan)
+    routing_pathway_batch = _routing_pathway_outcome_batch_result(
+        status="skipped",
+        reason="routing-pathway-outcome-batch-input-not-configured",
+    )
     violations = managed_egress_violations(request_payload)
     if violations:
         result = build_managed_activation_preview_result(
@@ -853,6 +1126,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
                 "blocked_keys": sorted({item.get("key", "unknown") for item in violations}),
             },
         )
+        _attach_routing_pathway_outcome_batch(result, routing_pathway_batch)
         if args.persist_outcomes:
             result["stored_preview_outcomes"] = _attach_managed_activation_preview_outcome_persistence(
                 result,
@@ -872,6 +1146,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
                 "managed_server_calls_made": False,
             },
         )
+        _attach_routing_pathway_outcome_batch(result, routing_pathway_batch)
         if args.persist_outcomes:
             result["stored_preview_outcomes"] = _attach_managed_activation_preview_outcome_persistence(
                 result,
@@ -891,6 +1166,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
                 "managed_server_calls_made": False,
             },
         )
+        _attach_routing_pathway_outcome_batch(result, routing_pathway_batch)
         if args.persist_outcomes:
             result["stored_preview_outcomes"] = _attach_managed_activation_preview_outcome_persistence(
                 result,
@@ -904,6 +1180,18 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
     token = os.getenv(str(args.api_key_env or ""))
     if token:
         headers["authorization"] = f"Bearer {token}"
+
+    routing_pathway_batch = _submit_routing_pathway_outcome_batch(
+        source_json=str(args.routing_pathway_outcomes_json),
+        db=str(args.db),
+        limit=int(args.routing_pathway_outcome_limit),
+        stale_after_hours=float(args.preview_stale_after_hours),
+        managed_preview_url=url,
+        managed_routing_pathway_outcomes_url=str(args.managed_routing_pathway_outcomes_url),
+        allow_insecure_managed_url=bool(args.allow_insecure_managed_url),
+        headers=headers,
+        timeout=float(args.timeout),
+    )
 
     started = time.time()
     response_payload: Any | None = None
@@ -944,6 +1232,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
         response_payload=response_payload,
         fetch=fetch,
     )
+    _attach_routing_pathway_outcome_batch(result, routing_pathway_batch)
     if args.persist_outcomes:
         result["stored_preview_outcomes"] = _attach_managed_activation_preview_outcome_persistence(
             result,

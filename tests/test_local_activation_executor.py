@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
+from uuid import uuid4
 
 from agentflow_proxy import cli
 from agentflow_proxy.local_activation_executor import (
@@ -18,10 +19,88 @@ from agentflow_proxy.managed_activation_preview_outcomes import (
     persist_managed_activation_preview_outcomes,
 )
 from agentflow_proxy.managed_egress import managed_egress_violations
-from agentflow_proxy.store import Store
+from agentflow_proxy.store import Store, stable_json
 
 
 NOW = datetime(2026, 6, 19, 5, 30, tzinfo=timezone.utc)
+
+
+def _routing_pathway_source():
+    return {
+        "schema": "agentflow.policy_decision.v1",
+        "generated_at": "2026-06-20T08:00:00+00:00",
+        "routing_pathway_matrix": {
+            "schema": "agentflow.routing_pathway_matrix.v1",
+            "generated_at": "2026-06-20T08:00:00+00:00",
+            "pathways": [
+                {
+                    "schema": "agentflow.routing_pathway_matrix_entry.v1",
+                    "rank": 1,
+                    "pathway_id": "pathway-openai-tool-light",
+                    "source_surface": "openai_responses",
+                    "app_family": "generic_openai",
+                    "category": "tool-light",
+                    "workflow_phase": "tool-execution",
+                    "requested_model": "gpt-5.4",
+                    "requested_model_family": "gpt-5",
+                    "target_model": "gpt-5.4-mini",
+                    "target_model_family": "gpt-5-mini",
+                    "text_bucket": "2k_8k_chars",
+                    "token_bucket": "2k_8k_tokens",
+                    "suggested_next_action": "canary",
+                    "activation_recommendation": True,
+                }
+            ],
+        },
+    }
+
+
+def _log_openai_pathway_canary_call(store, *, cohort: str, created_at: str) -> None:
+    status = "applied" if cohort == "canary_applied" else "holdout"
+    routed_model = "gpt-5.4-mini" if cohort == "canary_applied" else "gpt-5.4"
+    store.log_call(
+        id=str(uuid4()),
+        created_at=created_at,
+        path="/v1/responses",
+        provider="openai",
+        source_surface="openai_responses",
+        endpoint="responses",
+        requested_model="gpt-5.4",
+        routed_model=routed_model,
+        requested_model_family="gpt-5",
+        routed_model_family="gpt-5-mini",
+        stream=0,
+        cache_hit=0,
+        status_code=200,
+        latency_ms=100,
+        input_tokens_est=1200,
+        output_tokens_est=200,
+        actual_input_tokens=1200,
+        actual_output_tokens=200,
+        cost_est_usd=0.001,
+        cost_baseline_usd=0.002,
+        category="tool-light",
+        retry_count=0,
+        routing_json=stable_json(
+            {
+                "requested_model": "gpt-5.4",
+                "routed_model": routed_model,
+                "source_surface": "openai_responses",
+                "category": "tool-light",
+                "workflow_phase": "tool-execution",
+                "openai_canary": {
+                    "status": status,
+                    "cohort": cohort,
+                    "reason": cohort,
+                    "requested_model": "gpt-5.4",
+                    "target_model": "gpt-5.4-mini",
+                    "category": "tool-light",
+                    "source_surface": "openai_responses",
+                },
+            }
+        ),
+        cache_json=stable_json({"status": "miss"}),
+    )
 
 
 def _executor_fixture_plan():
@@ -722,6 +801,12 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["summary"]["submitted_row_count"], 4)
         self.assertEqual(result["summary"]["preview_row_count"], 0)
         self.assertEqual(result["summary"]["omission_count"], 0)
+        self.assertEqual(result["routing_pathway_outcome_batch"]["status"], "skipped")
+        self.assertEqual(
+            result["routing_pathway_outcome_batch"]["reason"],
+            "routing-pathway-outcome-batch-input-not-configured",
+        )
+        self.assertEqual(result["summary"]["routing_pathway_outcome_batch_outcome_count"], 0)
         self.assertEqual(result["egress_guard"]["status"], "passed")
 
     def test_managed_activation_preview_cli_persists_no_data_health_without_url(self):
@@ -770,6 +855,10 @@ class LocalActivationExecutorTest(unittest.TestCase):
             self.assertFalse(row["privacy"]["provider_calls_made"])
             self.assertFalse(row["privacy"]["managed_server_calls_made"])
             self.assertFalse(row["privacy"]["policy_files_written"])
+        self.assertEqual(
+            result["routing_pathway_outcome_batch"]["reason"],
+            "routing-pathway-outcome-batch-input-not-configured",
+        )
         self.assertEqual(managed_egress_violations(stored), [])
 
     def test_managed_activation_preview_cli_posts_opt_in_payload(self):
@@ -832,6 +921,103 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["stored_preview_outcomes"]["import"]["imported_count"], 4)
         self.assertEqual(result["stored_preview_outcomes"]["summary"]["missing_preview_decision_count"], 3)
         self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
+
+    def test_managed_activation_preview_cli_submits_pathway_outcomes_before_preview(self):
+        with TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.json"
+            pathway_path = Path(tmpdir) / "pathway.json"
+            db_path = Path(tmpdir) / "agentflow.sqlite3"
+            plan_path.write_text(json.dumps(_executor_handoff_fixture_plan()), encoding="utf-8")
+            pathway_path.write_text(json.dumps(_routing_pathway_source()), encoding="utf-8")
+            store = Store(str(db_path))
+            try:
+                _log_openai_pathway_canary_call(
+                    store,
+                    cohort="canary_applied",
+                    created_at="2026-06-20T08:01:00+00:00",
+                )
+                _log_openai_pathway_canary_call(
+                    store,
+                    cohort="canary_holdout",
+                    created_at="2026-06-20T08:02:00+00:00",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+
+            def fake_post(url, *, json, headers, timeout):
+                response = Mock()
+                response.status_code = 200
+                response.text = "{}"
+                if url.endswith("/v1/managed-routing-pathway-outcomes"):
+                    response.json.return_value = {
+                        "schema": "agentflow.managed_routing_pathway_outcomes_stored.v1",
+                        "accepted": True,
+                        "accepted_count": len(json["outcomes"]),
+                    }
+                    return response
+                response.json.return_value = {
+                    "schema": "agentflow.managed_activation_preview_response.v1",
+                    "decisions": [
+                        {
+                            "handoff_ref": json["rows"][0]["handoff_ref"],
+                            "decision": "no-op",
+                            "no_op_reason": "full-rollout-policy-active",
+                            "review_only": True,
+                        }
+                    ],
+                }
+                return response
+
+            with patch("agentflow_proxy.cli.httpx.post", side_effect=fake_post) as post_mock:
+                code = cli.managed_activation_preview_cli(
+                    [
+                        "--plan-json",
+                        str(plan_path),
+                        "--managed-preview-url",
+                        "https://managed.example.test/v1/local-activation-outcome-policy-decision-previews",
+                        "--routing-pathway-outcomes-json",
+                        str(pathway_path),
+                        "--persist-outcomes",
+                        "--db",
+                        str(db_path),
+                        "--pretty",
+                    ],
+                    stdout=stdout,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(post_mock.call_count, 2)
+        outcome_call = post_mock.call_args_list[0]
+        preview_call = post_mock.call_args_list[1]
+        self.assertEqual(
+            outcome_call.args[0],
+            "https://managed.example.test/v1/managed-routing-pathway-outcomes",
+        )
+        self.assertEqual(
+            preview_call.args[0],
+            "https://managed.example.test/v1/local-activation-outcome-policy-decision-previews",
+        )
+        outcome_payload = outcome_call.kwargs["json"]
+        self.assertEqual(outcome_payload["schema"], "agentflow.managed_routing_pathway_outcomes.v1")
+        self.assertEqual(outcome_payload["summary"]["outcome_count"], 1)
+        self.assertEqual(outcome_payload["summary"]["applied_count"], 1)
+        self.assertEqual(outcome_payload["summary"]["holdout_count"], 1)
+        self.assertFalse(outcome_payload["provider_calls_made"])
+        self.assertFalse(outcome_payload["policy_files_written"])
+        self.assertEqual(managed_egress_violations(outcome_payload), [])
+
+        result = json.loads(stdout.getvalue())
+        batch = result["routing_pathway_outcome_batch"]
+        self.assertEqual(batch["status"], "submitted")
+        self.assertEqual(batch["reason"], "managed-routing-pathway-outcome-batch-submitted")
+        self.assertEqual(batch["outcome_count"], 1)
+        self.assertEqual(batch["submitted_outcome_count"], 1)
+        self.assertTrue(batch["managed_server_calls_made"])
+        self.assertEqual(result["summary"]["routing_pathway_outcome_batch_status"], "submitted")
+        self.assertEqual(result["stored_preview_outcomes"]["summary"]["stored_preview_outcome_count"], 4)
         self.assertEqual(managed_egress_violations(result), [])
 
     def test_full_rollout_crunch_collapses_to_durable_keep_current_rule_outcome(self):
