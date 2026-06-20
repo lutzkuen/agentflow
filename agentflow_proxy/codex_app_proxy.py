@@ -159,9 +159,9 @@ _CODEX_PHASE_MODEL_CANDIDATES = (
     {
         "requested_model": "gpt-5.5",
         "candidate_target_model": "gpt-5.3-codex",
-        "candidate_family": "codex-specialized-summary",
-        "eligible_workflow_phases": {"summary"},
-        "reason": "safe-codex-summary-shadow-candidate",
+        "candidate_family": "codex-specialized-stateless",
+        "eligible_workflow_phases": {"summary", "stateless_text"},
+        "reason": "safe-codex-stateless-shadow-candidate",
     },
 )
 
