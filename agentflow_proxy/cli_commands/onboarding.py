@@ -602,7 +602,7 @@ def agentflow_cli(
             "schema": "agentflow.version.v1",
             "ok": True,
             "version": __version__,
-            "package": "agentflow-proxy",
+            "package": "tokenclaw",
             "command": "agentflow",
         }
         if args.json:

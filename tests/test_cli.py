@@ -159,7 +159,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 "schema": "agentflow.version.v1",
                 "ok": True,
                 "version": __version__,
-                "package": "agentflow-proxy",
+                "package": "tokenclaw",
                 "command": "agentflow",
             },
         )
@@ -183,6 +183,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "not a provider proxy",
             "GitHub Copilot non-goal",
             "unsupported: GitHub Copilot is not a base-url target",
+            "pip install tokenclaw",
+            "tokenclaw --help",
         ):
             self.assertIn(expected, readme)
         self.assertNotIn("sk-", readme)
@@ -323,6 +325,9 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 scripts[name.strip()] = value.strip().strip('"')
 
         self.assertEqual(scripts["agentflow"], "agentflow_proxy.cli:agentflow_main")
+        self.assertEqual(scripts["tokenclaw"], "agentflow_proxy.cli:agentflow_main")
+        self.assertEqual(scripts["tokenclaw-proxy"], "agentflow_proxy.cli:proxy_main")
+        self.assertEqual(scripts["tokenclaw-dashboard"], "agentflow_proxy.dashboard:main")
         self.assertEqual(scripts["agentflow-proxy"], "agentflow_proxy.cli:proxy_main")
         self.assertEqual(scripts["agentflow-claude-proxy"], "agentflow_proxy.cli:proxy_main")
         self.assertEqual(scripts["agentflow-dashboard"], "agentflow_proxy.dashboard:main")
@@ -336,12 +341,21 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
         cli_exceptions = {
             "agentflow-dashboard": "agentflow_proxy.dashboard:main",
+            "tokenclaw-dashboard": "agentflow_proxy.dashboard:main",
         }
         for name, target in scripts.items():
             if name in cli_exceptions:
                 self.assertEqual(target, cli_exceptions[name])
             else:
                 self.assertTrue(target.startswith("agentflow_proxy.cli:"), f"{name} moved away from cli.py")
+
+    def test_pyproject_distribution_metadata_uses_tokenclaw_name(self):
+        raw = Path("pyproject.toml").read_text(encoding="utf-8")
+
+        self.assertIn('name = "tokenclaw"', raw)
+        self.assertIn('Homepage = "https://github.com/lutzkuen/tokenclaw"', raw)
+        self.assertIn('Repository = "https://github.com/lutzkuen/tokenclaw"', raw)
+        self.assertIn('Issues = "https://github.com/lutzkuen/tokenclaw/issues"', raw)
 
     def test_activate_openai_writes_default_profile_idempotently(self):
         with TemporaryDirectory() as tmp:

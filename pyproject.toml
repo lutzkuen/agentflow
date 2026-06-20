@@ -19,9 +19,15 @@ dependencies = [
   "psycopg[binary,pool]>=3.2",
 ]
 
+[project.urls]
+Homepage = "https://github.com/lutzkuen/tokenclaw"
+Repository = "https://github.com/lutzkuen/tokenclaw"
+Issues = "https://github.com/lutzkuen/tokenclaw/issues"
+
 [project.scripts]
 tokenclaw = "agentflow_proxy.cli:agentflow_main"
 tokenclaw-proxy = "agentflow_proxy.cli:proxy_main"
+tokenclaw-dashboard = "agentflow_proxy.dashboard:main"
 agentflow = "agentflow_proxy.cli:agentflow_main"
 agentflow-proxy = "agentflow_proxy.cli:proxy_main"
 agentflow-claude-proxy = "agentflow_proxy.cli:proxy_main"

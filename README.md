@@ -14,7 +14,7 @@ Requires Python 3.10+.
 The target packaged install is:
 
 ```bash
-pip install agentflow
+pip install tokenclaw
 ```
 
 Until the public package name is migrated, install from this repository:
@@ -30,6 +30,7 @@ pip install -e .
 Then use the public onboarding command:
 
 ```bash
+tokenclaw --help
 agentflow --help
 agentflow activate openai
 agentflow activate claude
@@ -325,10 +326,9 @@ It is meant for answering "where did the tokens and cost go?" without sending pr
 
 ## Manual proxy fallback
 
-The public onboarding command is `agentflow`. The Python distribution is still
-published from this repository as `agentflow-proxy`; reserving or migrating the
-PyPI package name to `agentflow` is a release task. Existing specialist scripts
-such as `agentflow-proxy` remain available for compatibility.
+The packaged install name is `tokenclaw`. The `agentflow` onboarding command
+and specialist scripts such as `agentflow-proxy` remain available for backward
+compatibility during the rename.
 
 Run the Anthropic-compatible proxy directly:
 
