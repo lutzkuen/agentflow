@@ -113,6 +113,93 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
             },
         }
 
+    def _pathway_outcome(
+        self,
+        *,
+        candidate_fingerprint: str,
+        source_surface: str,
+        app_family: str,
+        requested_model: str,
+        target_model: str,
+        category: str,
+        applied_count: int,
+        holdout_count: int,
+        savings_per_1000: float,
+    ) -> dict[str, object]:
+        return {
+            "schema": "agentflow.local_routing_pathway_outcome_feedback_row.v1",
+            "status": "ready",
+            "provider": "openai",
+            "source_surface": source_surface,
+            "app_family": app_family,
+            "endpoint": "responses",
+            "requested_model": requested_model,
+            "target_model": target_model,
+            "category": category,
+            "workflow_phase": "stateless_text",
+            "matched_count": applied_count + holdout_count,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "safety_stop_count": 0,
+            "error_count": 0,
+            "fallback_count": 0,
+            "retry_count": 0,
+            "blocker_status": "applied-and-holdout-coverage-present",
+            "recommended_next_action": "stage-narrow-routing-canary",
+            "candidate_fingerprint": candidate_fingerprint,
+            "savings_per_1000_calls_usd": savings_per_1000,
+            "projected_savings_usd": round((savings_per_1000 * (applied_count + holdout_count)) / 1000.0, 6),
+            "semantic_quality": {
+                "gate_passed": True,
+                "reason_codes": [],
+            },
+        }
+
+    def _managed_pathway_outcomes(self, *candidate_fingerprints: str) -> dict[str, object]:
+        return {
+            "schema": "agentflow.managed_activation_preview_outcomes.v1",
+            "status": "tracked",
+            "outcomes": [
+                {
+                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "handoff_ref": f"managed-preview-handoff:{candidate_fingerprint}",
+                    "preview_ref": f"managed-preview:{candidate_fingerprint}",
+                    "local_action_family": "routing",
+                    "evidence_schema": "agentflow.local_routing_pathway_outcome_feedback_row.v1",
+                    "decision": "review-only-recommendation",
+                    "classification": "review-only",
+                    "next_action": "stage-narrow-routing-canary",
+                    "candidate_fingerprint": candidate_fingerprint,
+                    "preview_age_hours": 2.0,
+                    "stale": False,
+                    "missing_preview_decision": False,
+                    "failed_closed": False,
+                    "disagrees_with_local_evidence": False,
+                    "review_only": True,
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "provider_bodies_included": False,
+                        "request_ids_included": False,
+                        "session_ids_included": False,
+                    },
+                }
+                for candidate_fingerprint in candidate_fingerprints
+            ],
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+            },
+        }
+
     def _semantic_recovery_action(self) -> dict[str, object]:
         return {
             "schema": "agentflow.openai_routing_semantic_regression_action.v1",
@@ -430,6 +517,93 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         self.assertFalse(draft["policy_files_written"])
         self.assertFalse(draft["rollback_no_write"]["policy_files_written"])
         self.assertEqual(result["recovery_plan"]["selected_option"], "restage-review-only")
+
+    def test_pathway_feedback_drafts_preview_agreed_openai_and_codex_canaries_without_policy_writes(self) -> None:
+        report = {
+            "schema": "agentflow.local_routing_pathway_outcome_feedback.v1",
+            "generated_at": utc_now(),
+            "outcomes": [
+                self._pathway_outcome(
+                    candidate_fingerprint="routing-pathway-candidate:openai-tool-light",
+                    source_surface="openai_responses",
+                    app_family="generic_openai",
+                    requested_model="gpt-5.4",
+                    target_model="gpt-5.4-mini",
+                    category="tool-light",
+                    applied_count=29,
+                    holdout_count=26,
+                    savings_per_1000=4.375,
+                ),
+                self._pathway_outcome(
+                    candidate_fingerprint="routing-pathway-candidate:codex-stateless",
+                    source_surface="codex_turn",
+                    app_family="codex",
+                    requested_model="gpt-5-codex",
+                    target_model="gpt-5.4-mini",
+                    category="stateless_text",
+                    applied_count=17,
+                    holdout_count=15,
+                    savings_per_1000=3.25,
+                ),
+            ],
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+            },
+        }
+        managed_health = {
+            **self._managed_health(),
+            "previewed_row_count": 2,
+        }
+
+        result = build_openai_routing_narrow_canary_review(
+            report,
+            managed_preview_outcomes=self._managed_pathway_outcomes(
+                "routing-pathway-candidate:openai-tool-light",
+                "routing-pathway-candidate:codex-stateless",
+            ),
+            managed_preview_health=managed_health,
+            top_candidates=2,
+        )
+
+        self.assertEqual(result["decision"], "draft-narrower-canary")
+        self.assertEqual(result["status"], "review-only")
+        self.assertEqual(result["summary"]["draft_count"], 2)
+        self.assertEqual(result["summary"]["managed_preview_agreement_count"], 2)
+        self.assertFalse(result["wrote_active_policy_files"])
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+
+        drafts_by_surface = {draft["source_surface"]: draft for draft in result["drafts"]}
+        openai_draft = drafts_by_surface["openai_responses"]
+        self.assertEqual(openai_draft["target_local_policy_section"], "routing.rules")
+        self.assertEqual(openai_draft["target_local_rule_file"], "routing_rules.yaml")
+        self.assertIn("proposed_openai_canary", openai_draft)
+        self.assertEqual(openai_draft["coverage"]["applied_count"], 29)
+        self.assertEqual(openai_draft["coverage"]["holdout_count"], 26)
+        self.assertTrue(openai_draft["managed_preview_agreement"]["agreed"])
+
+        codex_draft = drafts_by_surface["codex_turn"]
+        self.assertEqual(codex_draft["app_family"], "codex")
+        self.assertEqual(codex_draft["target_local_policy_section"], "codex_app.summary_model_hint")
+        self.assertEqual(codex_draft["target_local_rule_file"], "codex_app_rules.yaml")
+        self.assertEqual(codex_draft["rollback_condition"]["rollback_action_type"], "disable_codex_app_routing_narrow_canary")
+        self.assertEqual(codex_draft["rollback_no_write"]["target_local_rule_file"], "codex_app_rules.yaml")
+        self.assertEqual(codex_draft["recovery_plan"]["target_model"], "gpt-5.4-mini")
+        self.assertEqual(codex_draft["recovery_plan"]["target_local_policy_section"], "codex_app.summary_model_hint")
+        self.assertIn("proposed_codex_app_canary", codex_draft)
+        self.assertEqual(codex_draft["proposed_codex_app_canary"]["section"], "summary_model_hint")
+        self.assertEqual(codex_draft["proposed_codex_app_canary"]["cohort_unit"], "turn")
+        self.assertEqual(codex_draft["coverage"]["applied_count"], 17)
+        self.assertEqual(codex_draft["coverage"]["holdout_count"], 15)
+        self.assertTrue(codex_draft["managed_preview_agreement"]["agreed"])
+        self.assertFalse(codex_draft["privacy"]["raw_prompts_included"])
+        self.assertFalse(codex_draft["privacy"]["provider_calls_made"])
+        self.assertFalse(codex_draft["privacy"]["managed_server_calls_made"])
 
     def test_semantic_recovery_noops_when_preview_disagrees_stale_or_coverage_missing(self) -> None:
         base_cohort = {

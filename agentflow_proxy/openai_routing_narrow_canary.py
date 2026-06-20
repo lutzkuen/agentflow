@@ -18,6 +18,14 @@ RECOVERY_STALE_EVIDENCE_SCHEMA = "agentflow.openai_routing_recovery_stale_eviden
 MANAGED_PREVIEW_AGREEMENT_SCHEMA = "agentflow.openai_routing_managed_preview_agreement.v1"
 MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "agentflow.openai_routing_managed_preview_health_gate.v1"
 RECOVERY_SIZING_SCHEMA = "agentflow.openai_routing_recovery_sizing.v1"
+PATHWAY_OUTCOME_SCHEMA = "agentflow.local_routing_pathway_outcome_feedback.v1"
+PATHWAY_OUTCOME_ROW_SCHEMA = "agentflow.local_routing_pathway_outcome_feedback_row.v1"
+ROUTING_PREVIEW_EVIDENCE_SCHEMAS = {
+    "agentflow.openai_routing_promotion_decision_report.v1",
+    "agentflow.pass_through_routing_activation_candidates.v1",
+    PATHWAY_OUTCOME_SCHEMA,
+    PATHWAY_OUTCOME_ROW_SCHEMA,
+}
 PRIVACY = {
     "local_only": True,
     "metadata_only": True,
@@ -165,6 +173,30 @@ def _safe_model_pair(cohort: dict[str, Any]) -> tuple[str, str]:
     return requested, target
 
 
+def _is_codex_surface(cohort: dict[str, Any]) -> bool:
+    surface = _string(cohort.get("source_surface")).lower()
+    app_family = _string(cohort.get("app_family")).lower()
+    return surface in {"codex_turn", "codex_app_turn"} or app_family == "codex"
+
+
+def _policy_target(cohort: dict[str, Any]) -> dict[str, str]:
+    if _is_codex_surface(cohort):
+        return {
+            "policy_section": "codex_app.summary_model_hint",
+            "rule_file": "codex_app_rules.yaml",
+            "rollback_action_type": "disable_codex_app_routing_narrow_canary",
+            "policy_id_prefix": "local-codex-routing-narrow-canary-",
+            "fingerprint_prefix": "codex-routing-narrow-canary",
+        }
+    return {
+        "policy_section": "routing.rules",
+        "rule_file": "routing_rules.yaml",
+        "rollback_action_type": "disable_openai_routing_narrow_canary",
+        "policy_id_prefix": "local-openai-routing-narrow-canary-",
+        "fingerprint_prefix": "openai-routing-narrow-canary",
+    }
+
+
 def _cohort_counts(cohort: dict[str, Any]) -> dict[str, int]:
     lifecycle = cohort.get("openai_canary_lifecycle_evidence")
     if not isinstance(lifecycle, dict):
@@ -263,7 +295,8 @@ def _coverage(cohort: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _rollback_no_write(selected_option: str) -> dict[str, Any]:
+def _rollback_no_write(selected_option: str, cohort: dict[str, Any] | None = None) -> dict[str, Any]:
+    target = _policy_target(cohort or {})
     return {
         "schema": RECOVERY_ROLLBACK_SCHEMA,
         "selected_option": selected_option,
@@ -272,10 +305,10 @@ def _rollback_no_write(selected_option: str) -> dict[str, Any]:
         "wrote_active_policy_files": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
-        "rollback_action_type": "disable_openai_routing_narrow_canary",
+        "rollback_action_type": target["rollback_action_type"],
         "rollback_required_before_activation": True,
-        "target_local_policy_section": "routing.rules",
-        "target_local_rule_file": "routing_rules.yaml",
+        "target_local_policy_section": target["policy_section"],
+        "target_local_rule_file": target["rule_file"],
         "metadata_only": True,
         "aggregate_only": True,
     }
@@ -300,7 +333,7 @@ def _option(name: str, *, selected: str, allowed: bool, reason: str, next_action
 def _recovery_plan(cohort: dict[str, Any], *, omission_reason: str | None) -> dict[str, Any]:
     counts = _cohort_counts(cohort)
     reasons = set(_reason_codes(cohort))
-    requested, target = _safe_model_pair(cohort)
+    requested, target_model = _safe_model_pair(cohort)
     stale = _stale_evidence(cohort)
     coverage = _coverage(cohort)
     semantic = _semantic_recovery_classification(cohort)
@@ -325,6 +358,7 @@ def _recovery_plan(cohort: dict[str, Any], *, omission_reason: str | None) -> di
     blocker_reason = omission_reason or ("none" if clean_for_review else "openai-routing-recovery-blocked")
     blocker_status = "cleared" if clean_for_review else "active"
     restage_reason = "blocker-cleared-fresh-applied-holdout-coverage" if clean_for_review else blocker_reason
+    policy_target = _policy_target(cohort)
     return {
         "schema": RECOVERY_PLAN_SCHEMA,
         "fingerprint": _stable_id("openai-routing-recovery", _fingerprint(cohort), selected_option, blocker_reason),
@@ -332,13 +366,14 @@ def _recovery_plan(cohort: dict[str, Any], *, omission_reason: str | None) -> di
         "decision": "draft-narrower-canary" if clean_for_review else "keep-blocked",
         "status": "review-only" if clean_for_review else "keep-blocked",
         "next_action": "operator-review-narrower-openai-routing-canary" if clean_for_review else "keep-openai-routing-blocked",
-        "target_local_policy_section": "routing.rules",
-        "target_local_rule_file": "routing_rules.yaml",
+        "target_local_policy_section": policy_target["policy_section"],
+        "target_local_rule_file": policy_target["rule_file"],
         "provider": "openai",
         "source_surface": cohort.get("source_surface"),
+        "app_family": cohort.get("app_family"),
         "endpoint": cohort.get("endpoint"),
         "requested_model": requested,
-        "target_model": target,
+        "target_model": target_model,
         "category": cohort.get("category"),
         "workflow_phase": cohort.get("workflow_phase"),
         "blocker_status": blocker_status,
@@ -347,7 +382,7 @@ def _recovery_plan(cohort: dict[str, Any], *, omission_reason: str | None) -> di
         "semantic_regression_recovery": semantic,
         "coverage": coverage,
         "stale_evidence": stale,
-        "rollback_no_write": _rollback_no_write(selected_option),
+        "rollback_no_write": _rollback_no_write(selected_option, cohort),
         "options": [
             _option(
                 "keep-blocked",
@@ -428,10 +463,13 @@ def _semantic_recovery_classification(cohort: dict[str, Any]) -> dict[str, Any]:
 def _normalized_recovery_action(action: Any) -> str:
     text = _string(action).lower()
     if text in {
+        "draft-codex-routing-recovery-canary",
         "draft-openai-routing-recovery-canary",
         "draft-narrow-openai-routing-canary-shape",
         "draft-narrower-openai-routing-canary",
+        "stage-narrow-routing-canary",
         "narrow-openai-routing-canary-shape",
+        "operator-review-codex-routing-canary",
         "operator-review-narrower-openai-routing-canary",
         "operator-review-narrow-openai-routing-threshold",
     }:
@@ -451,6 +489,8 @@ def _local_recovery_next_action(cohort: dict[str, Any]) -> str:
         return str(semantic["next_action"])
     if semantic["classification"] == "keep-blocked":
         return str(semantic["next_action"])
+    if _is_codex_surface(cohort):
+        return "draft-codex-routing-recovery-canary"
     return "draft-openai-routing-recovery-canary"
 
 
@@ -574,7 +614,8 @@ def _cohort_match_refs(cohort: dict[str, Any]) -> set[str]:
 def _outcome_match_score(cohort: dict[str, Any], outcome: dict[str, Any]) -> int:
     if _string(outcome.get("local_action_family")).lower() != "routing":
         return -1
-    if _string(outcome.get("evidence_schema")) != "agentflow.openai_routing_promotion_decision_report.v1":
+    evidence_schema = _string(outcome.get("evidence_schema"))
+    if evidence_schema and evidence_schema not in ROUTING_PREVIEW_EVIDENCE_SCHEMAS:
         return -1
     cohort_refs = _cohort_match_refs(cohort)
     outcome_candidate_refs = {
@@ -769,6 +810,41 @@ def _cohort_from_promotion_decision(decision: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _cohort_from_pathway_outcome(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_schema": row.get("schema") or PATHWAY_OUTCOME_ROW_SCHEMA,
+        "provider": row.get("provider") or "openai",
+        "source_surface": row.get("source_surface"),
+        "app_family": row.get("app_family"),
+        "endpoint": row.get("endpoint"),
+        "requested_model": row.get("requested_model"),
+        "target_model": row.get("target_model") or row.get("candidate_target_model"),
+        "requested_model_family": row.get("requested_model_family"),
+        "target_model_family": row.get("target_model_family"),
+        "category": row.get("category"),
+        "workflow_phase": row.get("workflow_phase"),
+        "matched_count": row.get("matched_count") or row.get("sample_count"),
+        "applied_count": row.get("applied_count"),
+        "holdout_count": row.get("holdout_count"),
+        "safety_stop_count": row.get("safety_stop_count"),
+        "skipped_count": row.get("skipped_count"),
+        "unknown_count": row.get("unknown_count"),
+        "error_count": row.get("error_count"),
+        "fallback_count": row.get("fallback_count"),
+        "retry_count": row.get("retry_count"),
+        "reason_codes": _string_list(row.get("blocker_status")) + _string_list(row.get("reason_codes")),
+        "estimated_savings_per_1000_calls_usd": row.get("savings_per_1000_calls_usd") or row.get("estimated_savings_per_1000_calls_usd"),
+        "projected_savings_usd": row.get("projected_savings_usd"),
+        "semantic_quality": row.get("semantic_quality") if isinstance(row.get("semantic_quality"), dict) else {},
+        "status": row.get("status"),
+        "blocker_status": row.get("blocker_status"),
+        "recommended_next_action": row.get("recommended_next_action"),
+        "candidate_suggested_next_action": row.get("candidate_suggested_next_action"),
+        "candidate_fingerprint": row.get("candidate_fingerprint"),
+        "coverage": row.get("coverage") if isinstance(row.get("coverage"), dict) else {},
+    }
+
+
 def _successor_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
     queue = report.get("local_activation_next_action_queue")
     if not isinstance(queue, dict):
@@ -811,6 +887,11 @@ def _enrich_cohort_with_successor(cohort: dict[str, Any], action: dict[str, Any]
 
 
 def _cohorts_from_stats_summary(report: dict[str, Any]) -> list[dict[str, Any]]:
+    pathway = report.get("local_routing_pathway_outcome_feedback")
+    if isinstance(pathway, dict):
+        cohorts = _cohorts_from_report(pathway)
+        if cohorts:
+            return cohorts
     promotion_report = report.get("openai_routing_promotion_decision")
     cohorts: list[dict[str, Any]] = []
     if isinstance(promotion_report, dict):
@@ -832,6 +913,8 @@ def _cohorts_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:
         return _cohorts_from_stats_summary(report)
     if isinstance(report.get("cohorts"), list):
         return [item for item in report["cohorts"] if isinstance(item, dict)]
+    if report.get("schema") == PATHWAY_OUTCOME_SCHEMA and isinstance(report.get("outcomes"), list):
+        return [_cohort_from_pathway_outcome(item) for item in report["outcomes"] if isinstance(item, dict)]
     if isinstance(report.get("decisions"), list):
         return [_cohort_from_promotion_decision(item) for item in report["decisions"] if isinstance(item, dict)]
     if isinstance(report.get("promotion_decision"), dict):
@@ -851,9 +934,11 @@ def _cohorts_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _fingerprint(cohort: dict[str, Any]) -> str:
     requested, target = _safe_model_pair(cohort)
+    prefix = _policy_target(cohort)["fingerprint_prefix"]
     return _stable_id(
-        "openai-routing-narrow-canary",
+        prefix,
         cohort.get("source_surface"),
+        cohort.get("app_family"),
         cohort.get("endpoint"),
         requested,
         target,
@@ -865,6 +950,7 @@ def _fingerprint(cohort: dict[str, Any]) -> str:
 def _omission(cohort: dict[str, Any], reason: str, *, path: str | None = None) -> dict[str, Any]:
     counts = _cohort_counts(cohort)
     requested, target = _safe_model_pair(cohort)
+    policy_target = _policy_target(cohort)
     return {
         "schema": OMISSION_SCHEMA,
         "status": "omitted",
@@ -873,6 +959,7 @@ def _omission(cohort: dict[str, Any], reason: str, *, path: str | None = None) -
         "fingerprint": _fingerprint(cohort),
         "provider": "openai",
         "source_surface": cohort.get("source_surface"),
+        "app_family": cohort.get("app_family"),
         "endpoint": cohort.get("endpoint"),
         "requested_model": requested,
         "target_model": target,
@@ -884,10 +971,12 @@ def _omission(cohort: dict[str, Any], reason: str, *, path: str | None = None) -
         "reason_codes": _reason_codes(cohort),
         "coverage": _coverage(cohort),
         "stale_evidence": _stale_evidence(cohort),
-        "rollback_no_write": _rollback_no_write("keep-blocked"),
+        "rollback_no_write": _rollback_no_write("keep-blocked", cohort),
         "recovery_plan": _recovery_plan(cohort, omission_reason=reason),
         "recovery_sizing": _recovery_sizing(None, None, reason=reason),
         "semantic_regression_recovery": _semantic_recovery_classification(cohort),
+        "target_local_policy_section": policy_target["policy_section"],
+        "target_local_rule_file": policy_target["rule_file"],
         "privacy": PRIVACY,
     }
 
@@ -918,7 +1007,15 @@ def _omission_reason(cohort: dict[str, Any]) -> str | None:
     counts = _cohort_counts(cohort)
     if provider and provider != "openai":
         return "unsupported-provider"
-    if source_surface and source_surface not in {"openai", "openai_responses", "openai_chat", "openai_chat_completions", "unknown"}:
+    if source_surface and source_surface not in {
+        "openai",
+        "openai_responses",
+        "openai_chat",
+        "openai_chat_completions",
+        "codex_turn",
+        "codex_app_turn",
+        "unknown",
+    }:
         return "unsupported-source-surface"
     if not requested or not target:
         return "missing-model-pair"
@@ -933,6 +1030,13 @@ def _omission_reason(cohort: dict[str, Any]) -> str | None:
     if target.lower() == requested.lower():
         return "not-a-downgrade"
     semantic = _semantic_recovery_classification(cohort)
+    pathway_ready = (
+        _string(cohort.get("status")).lower() in {"ready", "review-only", "preview-agreed"}
+        or _string(cohort.get("blocker_status")).lower() == "applied-and-holdout-coverage-present"
+        or _normalized_recovery_action(cohort.get("recommended_next_action")) == "draft-recovery-canary"
+    )
+    if pathway_ready and not semantic["observed"]:
+        return None
     if not semantic["observed"]:
         return "not-semantic-regression-row"
     if semantic["classification"] == "narrower-canary":
@@ -956,10 +1060,26 @@ def _draft_for_cohort(
     source_surface = _string(cohort.get("source_surface") or "openai_responses")
     fingerprint = _fingerprint(cohort)
     allow_tools = category == "tool-light"
-    policy_id = fingerprint.replace("openai-routing-narrow-canary:", "local-openai-routing-narrow-canary-")
+    policy_target = _policy_target(cohort)
+    policy_id = fingerprint.replace(f"{policy_target['fingerprint_prefix']}:", policy_target["policy_id_prefix"])
     bounded_canary = _bounded_fraction(canary_fraction, 0.05)
     bounded_holdout = _bounded_fraction(holdout_fraction, 0.10)
-    return {
+    generic_canary = {
+        "enabled": False,
+        "review_only": True,
+        "policy_id": policy_id,
+        "policy_source": "local-manual",
+        "model_pattern": requested,
+        "target_model": target,
+        "eligible_categories": [category],
+        "allow_tools": allow_tools,
+        "allow_stream": False,
+        "canary_fraction": bounded_canary,
+        "holdout_fraction": bounded_holdout,
+        "cohort_unit": "session" if not _is_codex_surface(cohort) else "turn",
+        "salt": _stable_id("routing-narrow-canary-salt", fingerprint),
+    }
+    draft = {
         "schema": DRAFT_SCHEMA,
         "status": "review-only",
         "review_only": True,
@@ -967,10 +1087,11 @@ def _draft_for_cohort(
         "policy_files_written": False,
         "fingerprint": fingerprint,
         "policy_id": policy_id,
-        "target_local_policy_section": "routing.rules",
-        "target_local_rule_file": "routing_rules.yaml",
+        "target_local_policy_section": policy_target["policy_section"],
+        "target_local_rule_file": policy_target["rule_file"],
         "provider": "openai",
         "source_surface": source_surface,
+        "app_family": cohort.get("app_family"),
         "endpoint": endpoint,
         "requested_model": requested,
         "target_model": target,
@@ -986,30 +1107,17 @@ def _draft_for_cohort(
         "proposed_rule_conditions": {
             "provider": "openai",
             "source_surface": source_surface,
+            "app_family": cohort.get("app_family"),
             "endpoint": endpoint,
             "model_pattern": requested,
             "category": category,
             "has_tools": allow_tools,
             "stream": False,
         },
-        "proposed_openai_canary": {
-            "enabled": False,
-            "review_only": True,
-            "policy_id": policy_id,
-            "policy_source": "local-manual",
-            "model_pattern": requested,
-            "target_model": target,
-            "eligible_categories": [category],
-            "allow_tools": allow_tools,
-            "allow_stream": False,
-            "canary_fraction": bounded_canary,
-            "holdout_fraction": bounded_holdout,
-            "cohort_unit": "session",
-            "salt": _stable_id("openai-routing-narrow-canary-salt", fingerprint),
-        },
+        "proposed_routing_canary": generic_canary,
         "rollback_condition": {
             "schema": "agentflow.openai_routing_narrow_canary_rollback_condition.v1",
-            "rollback_action_type": "disable_openai_routing_narrow_canary",
+            "rollback_action_type": policy_target["rollback_action_type"],
             "rollback_canary_fraction": 0.0,
             "rollback_holdout_fraction": 0.0,
             "reason_codes": [
@@ -1022,13 +1130,25 @@ def _draft_for_cohort(
         },
         "coverage": _coverage(cohort),
         "stale_evidence": _stale_evidence(cohort),
-        "rollback_no_write": _rollback_no_write("restage-review-only"),
+        "rollback_no_write": _rollback_no_write("restage-review-only", cohort),
         "recovery_plan": _recovery_plan(cohort, omission_reason=None),
         "recovery_sizing": _recovery_sizing(bounded_canary, bounded_holdout, reason="review-only-sizing-available"),
         "semantic_regression_recovery": _semantic_recovery_classification(cohort),
         "managed_preview_agreement": managed_preview_agreement,
         "privacy": PRIVACY,
     }
+    if _is_codex_surface(cohort):
+        draft["proposed_codex_app_canary"] = {
+            **generic_canary,
+            "section": "summary_model_hint",
+            "target_local_policy_section": policy_target["policy_section"],
+            "target_local_rule_file": policy_target["rule_file"],
+            "source_surface": source_surface,
+            "app_family": cohort.get("app_family") or "codex",
+        }
+    else:
+        draft["proposed_openai_canary"] = generic_canary
+    return draft
 
 
 def _normalized_review_report(report: dict[str, Any]) -> dict[str, Any]:
@@ -1038,6 +1158,9 @@ def _normalized_review_report(report: dict[str, Any]) -> dict[str, Any]:
             "source_report_schema": source_schema,
             "openai_routing_promotion_decision": stats.get("openai_routing_promotion_decision")
             if isinstance(stats.get("openai_routing_promotion_decision"), dict)
+            else {},
+            "local_routing_pathway_outcome_feedback": stats.get("local_routing_pathway_outcome_feedback")
+            if isinstance(stats.get("local_routing_pathway_outcome_feedback"), dict)
             else {},
             "local_activation_next_action_queue": stats.get("local_activation_next_action_queue")
             if isinstance(stats.get("local_activation_next_action_queue"), dict)
