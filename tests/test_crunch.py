@@ -113,6 +113,115 @@ class CrunchRulesTest(unittest.TestCase):
             self.assertEqual(meta["policy_source"], "local-default")
             self.assertTrue(meta["rule_path"].endswith("agentflow_proxy/crunch_rules.yaml"))
 
+    def test_near_duplicate_tool_result_blocks_replace_only_older_payloads(self):
+        manual = importlib.reload(crunch_module)
+
+        def payload(line_offset: int, *, edit: bool = False) -> str:
+            lines = []
+            for index in range(260):
+                value = "edited-private-value" if edit and index == 120 else "stable-private-value"
+                lines.append(
+                    f"{index + line_offset}: /workspace/private/app.py "
+                    f"function_{index} returns {value} with repeated context"
+                )
+            return "\n".join(lines)
+
+        older_payload = payload(1)
+        newer_payload = payload(21, edit=True)
+        body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "old-tool-id",
+                            "content": older_payload,
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": [{"type": "text", "text": "old response"}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "new-tool-id",
+                            "content": newer_payload,
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "recent-tool-use", "name": "Read"}]},
+                {"role": "user", "content": "recent instruction"},
+            ],
+        }
+
+        crunched, meta = manual.crunch_body(
+            body,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+        )
+
+        older_block = crunched["messages"][0]["content"][0]
+        newer_block = crunched["messages"][2]["content"][0]
+        self.assertEqual(older_block["type"], "tool_result")
+        self.assertEqual(older_block["tool_use_id"], "old-tool-id")
+        self.assertIn("repeated tool output omitted", older_block["content"])
+        self.assertIn("similar to turn 3", older_block["content"])
+        self.assertEqual(newer_block["content"], newer_payload)
+        self.assertEqual(crunched["messages"][3]["content"][0]["type"], "tool_use")
+        self.assertEqual(meta["near_duplicate_tool_blocks_removed"], 1)
+        self.assertEqual(meta["near_duplicate_tool_block_count"], 1)
+        self.assertGreater(meta["near_duplicate_tool_blocks_saved_chars"], 5000)
+        tool_meta = meta["near_duplicate_tool_blocks"]
+        self.assertEqual(tool_meta["status"], "applied")
+        self.assertEqual(tool_meta["safety_stop"]["status"], "passed")
+        self.assertFalse(tool_meta["tool_use_blocks_touched"])
+        applied = [row for row in meta["applied_rules"] if row["rule_id"] == "near_duplicate_block_omission"]
+        self.assertTrue(applied)
+        self.assertGreaterEqual(applied[0]["saved_chars"], meta["near_duplicate_tool_blocks_saved_chars"])
+        rendered = json.dumps(tool_meta, sort_keys=True)
+        self.assertNotIn("stable-private-value", rendered)
+        self.assertNotIn("/workspace/private", rendered)
+        self.assertNotIn("old-tool-id", rendered)
+
+    def test_near_duplicate_tool_result_blocks_preserve_recent_turns(self):
+        manual = importlib.reload(crunch_module)
+        payload = "\n".join(f"{index}: repeated recent tool output row value" for index in range(400))
+        body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "recent-a", "content": payload}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "recent-b", "content": payload}
+                    ],
+                },
+            ],
+        }
+
+        crunched, meta = manual.crunch_body(
+            body,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+        )
+
+        self.assertEqual(crunched["messages"][0]["content"][0]["content"], payload)
+        self.assertEqual(crunched["messages"][1]["content"][0]["content"], payload)
+        self.assertEqual(meta["near_duplicate_tool_blocks_removed"], 0)
+        self.assertEqual(meta["near_duplicate_tool_blocks"]["status"], "skipped")
+        self.assertEqual(meta["near_duplicate_tool_blocks"]["reason"], "no-near-duplicate-tool-results")
+        self.assertEqual(meta["near_duplicate_tool_blocks"]["recent_turns_preserved"], 2)
+
     def test_anthropic_thinking_metadata_records_duplicate_local_hashes_privately(self):
         manual = importlib.reload(crunch_module)
         secret = "raw duplicate thinking secret /workspace/private/plan.py "

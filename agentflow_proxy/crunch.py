@@ -2169,6 +2169,168 @@ def _jaccard(a: frozenset, b: frozenset) -> float:
     return len(a & b) / union
 
 
+TOOL_RESULT_DEDUP_SCHEMA = "agentflow.near_duplicate_tool_result_dedup.v1"
+TOOL_RESULT_DEDUP_SAFETY_SCHEMA = "agentflow.near_duplicate_tool_result_safety_stop.v1"
+TOOL_RESULT_DEDUP_MIN_CHARS = 2000
+TOOL_RESULT_DEDUP_SIMILARITY_THRESHOLD = 0.95
+TOOL_RESULT_DEDUP_KEEP_RECENT_TURNS = 2
+
+
+def _tool_result_dedup_base_meta(status: str, reason: str) -> dict[str, Any]:
+    return {
+        "schema": TOOL_RESULT_DEDUP_SCHEMA,
+        "enabled": _crunch_rule_allowed("near_duplicate_block_omission"),
+        "status": status,
+        "reason": reason,
+        "near_duplicate_tool_blocks_removed": 0,
+        "near_duplicate_tool_block_count": 0,
+        "saved_chars": 0,
+        "tokens_saved_est": 0,
+        "min_chars": TOOL_RESULT_DEDUP_MIN_CHARS,
+        "similarity_threshold": TOOL_RESULT_DEDUP_SIMILARITY_THRESHOLD,
+        "keep_recent_turns": TOOL_RESULT_DEDUP_KEEP_RECENT_TURNS,
+        "recent_turns_preserved": TOOL_RESULT_DEDUP_KEEP_RECENT_TURNS,
+        "tool_use_blocks_touched": False,
+        "policy_source": CRUNCH_POLICY_SOURCE,
+        "rule_path": CRUNCH_RULES_PATH,
+        "safety_stop": {
+            "schema": TOOL_RESULT_DEDUP_SAFETY_SCHEMA,
+            "status": "passed" if status != "blocked" else "blocked",
+            "reason": reason,
+            "latest_turns_preserved": TOOL_RESULT_DEDUP_KEEP_RECENT_TURNS,
+            "tool_use_blocks_touched": False,
+            "only_tool_result_payloads_touched": True,
+            "threshold_required": True,
+        },
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_tool_payloads_included": False,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+        },
+    }
+
+
+def _tool_result_text_parts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            parts.extend(_tool_result_text_parts(item))
+        return parts
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key in ("text", "content"):
+            if key in value:
+                parts.extend(_tool_result_text_parts(value[key]))
+        return parts
+    return []
+
+
+def _normalize_tool_result_for_dedup(text: str) -> str:
+    lines: list[str] = []
+    for raw_line in normalize_text(text).splitlines():
+        line = raw_line.strip()
+        line = re.sub(r"(^|\s)([^:\s]{1,180}):\d+(?::\d+)?:", r"\1\2:", line)
+        line = re.sub(r"^\d+\s*(?:[|:]\s*|\s+)", "", line)
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _set_tool_result_placeholder(block: dict[str, Any], placeholder: str) -> None:
+    block["content"] = placeholder
+
+
+def _dedupe_near_duplicate_tool_results(
+    body: dict[str, Any],
+    *,
+    threshold_chars: int,
+    before_chars: int,
+    policy_source: str,
+) -> tuple[int, int, dict[str, Any]]:
+    meta = _tool_result_dedup_base_meta("skipped", "not-evaluated")
+    meta["policy_source"] = policy_source
+    if before_chars <= threshold_chars:
+        meta["reason"] = "below-threshold"
+        meta["safety_stop"]["reason"] = "below-threshold"
+        return 0, 0, meta
+    if not _crunch_rule_allowed("near_duplicate_block_omission"):
+        meta["status"] = "skipped"
+        meta["reason"] = "rule-not-allowed"
+        meta["enabled"] = False
+        meta["safety_stop"]["reason"] = "rule-not-allowed"
+        return 0, 0, meta
+
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        meta["status"] = "skipped"
+        meta["reason"] = "no-message-list"
+        meta["safety_stop"]["reason"] = "no-message-list"
+        return 0, 0, meta
+
+    newest_seen: list[tuple[frozenset, int]] = []
+    removed = 0
+    saved_chars = 0
+    recent_start = max(0, len(messages) - TOOL_RESULT_DEDUP_KEEP_RECENT_TURNS)
+
+    for msg_idx in range(len(messages) - 1, -1, -1):
+        message = messages[msg_idx]
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        eligible_for_replacement = msg_idx < recent_start
+        for block in reversed(content):
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            text = "\n".join(_tool_result_text_parts(block.get("content")))
+            if len(text) < TOOL_RESULT_DEDUP_MIN_CHARS:
+                continue
+            normalized = _normalize_tool_result_for_dedup(text)
+            shingles = _shingles(normalized)
+            if not shingles:
+                continue
+            matched_turn = None
+            if eligible_for_replacement:
+                for newer_shingles, newer_msg_idx in newest_seen:
+                    if _jaccard(shingles, newer_shingles) >= TOOL_RESULT_DEDUP_SIMILARITY_THRESHOLD:
+                        matched_turn = newer_msg_idx + 1
+                        break
+            if matched_turn is not None:
+                before_block_chars = len(stable_json(block))
+                placeholder = (
+                    f"[AgentFlow: repeated tool output omitted; similar to turn {matched_turn}; "
+                    f"original_chars={len(text)}]"
+                )
+                _set_tool_result_placeholder(block, placeholder)
+                saved_chars += max(0, before_block_chars - len(stable_json(block)))
+                removed += 1
+                continue
+            newest_seen.append((shingles, msg_idx))
+
+    if removed:
+        meta["status"] = "applied"
+        meta["reason"] = "near-duplicate-tool-output-omitted"
+        meta["near_duplicate_tool_blocks_removed"] = removed
+        meta["near_duplicate_tool_block_count"] = removed
+        meta["saved_chars"] = saved_chars
+        meta["tokens_saved_est"] = saved_chars // TOKEN_CHARS
+        meta["safety_stop"]["status"] = "passed"
+        meta["safety_stop"]["reason"] = "bounded-older-tool-result-only"
+    else:
+        meta["status"] = "skipped"
+        meta["reason"] = "no-near-duplicate-tool-results"
+        meta["safety_stop"]["reason"] = "no-near-duplicate-tool-results"
+    return removed, saved_chars, meta
+
+
 def _extract_text_for_category(obj: Any) -> str:
     parts: list[str] = []
     if isinstance(obj, str):
@@ -6982,6 +7144,14 @@ def crunch_body(
         managed_profile=managed_profile,
     )
     _pattern_saved_chars, pattern_rules_meta = _apply_pattern_rules(new_body, store_obj=store_obj)
+    near_duplicate_tool_blocks_removed, near_duplicate_tool_blocks_saved_chars, near_duplicate_tool_blocks_meta = (
+        _dedupe_near_duplicate_tool_results(
+            new_body,
+            threshold_chars=threshold_chars,
+            before_chars=before,
+            policy_source=policy_source,
+        )
+    )
     seen: dict[str, int] = {}
     seen_shingles: list[tuple[frozenset, int]] = []
     replacements = 0
@@ -7113,8 +7283,9 @@ def crunch_body(
     )
     add_applied(
         "near_duplicate_block_omission",
-        "near-duplicate-text-block-omitted",
-        near_replacements,
+        "near-duplicate-block-omitted",
+        near_replacements + near_duplicate_tool_blocks_removed,
+        near_duplicate_tool_blocks_saved_chars,
     )
     add_applied(
         "old_text_collapse",
@@ -7191,6 +7362,10 @@ def crunch_body(
         "crunch_ratio": round((before - after) / before, 4) if before > 0 else 0,
         "duplicate_blocks_replaced": replacements,
         "near_duplicate_blocks_replaced": near_replacements,
+        "near_duplicate_tool_blocks_removed": near_duplicate_tool_blocks_removed,
+        "near_duplicate_tool_block_count": near_duplicate_tool_blocks_removed,
+        "near_duplicate_tool_blocks_saved_chars": near_duplicate_tool_blocks_saved_chars,
+        "near_duplicate_tool_blocks": near_duplicate_tool_blocks_meta,
         "thinking_near_duplicate_blocks_removed": thinking_near_replacements,
         "long_blocks_shortened": shortened,
         "terminal_log_boilerplate_simplified": terminal_log_meta["simplified_line_count"],
