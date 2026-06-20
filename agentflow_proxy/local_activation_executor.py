@@ -24,6 +24,8 @@ PREVIEW_RESULT_SCHEMA = "agentflow.managed_activation_preview_result.v1"
 PREVIEW_DECISION_SCHEMA = "agentflow.managed_activation_preview_decision.v1"
 
 SAFE_SELECTABLE_CLASSES = {"draft-local-policy", "review-only", "retire"}
+SUPPORTED_PREVIEW_LOCAL_ACTION_FAMILIES = ["routing", "crunch", "cache", "activation-feedback"]
+PREVIEW_REQUIRED_LOCAL_ACTION_FAMILIES = {"routing", "cache", "activation-feedback"}
 
 
 def _as_int(value: Any) -> int:
@@ -124,6 +126,36 @@ def _nested_dict(row: dict[str, Any], *keys: str) -> dict[str, Any]:
         if isinstance(value, dict):
             return value
     return {}
+
+
+def _managed_preview_gate(row: dict[str, Any]) -> dict[str, Any]:
+    return _nested_dict(row, "managed_preview_gate")
+
+
+def _managed_preview_required(row: dict[str, Any]) -> bool:
+    if row.get("managed_preview_required") is not None:
+        return bool(row.get("managed_preview_required"))
+    gate = _managed_preview_gate(row)
+    if gate.get("required") is not None:
+        return bool(gate.get("required"))
+    family = str(row.get("local_action_family") or row.get("lever") or "").strip()
+    current_status = str(row.get("current_status") or "").strip()
+    duplicate_status = str(row.get("duplicate_suppression_status") or "").strip()
+    if duplicate_status == "suppressed" or current_status in {"full-rollout", "superseded"}:
+        return False
+    return family in PREVIEW_REQUIRED_LOCAL_ACTION_FAMILIES
+
+
+def _preview_status(row: dict[str, Any], gate: dict[str, Any]) -> str:
+    return str(
+        row.get("preview_verification_status")
+        or gate.get("status")
+        or ("preview-required" if _managed_preview_required(row) else "preview-optional")
+    ).strip()
+
+
+def _preview_decision_value(row: dict[str, Any], gate: dict[str, Any]) -> str:
+    return str(row.get("preview_verification_decision") or gate.get("decision") or "").strip()
 
 
 def _full_rollout_outcome(row: dict[str, Any]) -> dict[str, Any]:
@@ -321,6 +353,14 @@ def _executor_entry(row: dict[str, Any]) -> dict[str, Any]:
         "managed_server_calls_made": False,
         "privacy": _privacy(),
     }
+    gate = _managed_preview_gate(row)
+    managed_preview_required = _managed_preview_required(row)
+    entry["managed_preview_required"] = managed_preview_required
+    entry["preview_verified"] = bool(row.get("preview_verified") or gate.get("verified"))
+    entry["preview_verification_status"] = sanitize_value(_preview_status(row, gate))
+    entry["preview_verification_decision"] = sanitize_value(_preview_decision_value(row, gate))
+    if gate:
+        entry["managed_preview_gate"] = sanitize_value(gate)
     for key in (
         "evidence_schema",
         "source_surface",
@@ -361,6 +401,8 @@ def _executor_entry(row: dict[str, Any]) -> dict[str, Any]:
         "policy_files_written",
         "provider_calls_made",
         "managed_server_calls_made",
+        "managed_preview_required",
+        "preview_verified",
     }
     return {key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in preserved}
 
@@ -519,6 +561,10 @@ def _handoff_row(entry: dict[str, Any]) -> dict[str, Any]:
         "policy_files_written": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
+        "managed_preview_required": bool(entry.get("managed_preview_required")),
+        "preview_verified": bool(entry.get("preview_verified")),
+        "preview_verification_status": sanitize_value(entry.get("preview_verification_status")),
+        "preview_verification_decision": sanitize_value(entry.get("preview_verification_decision")),
         "local_action_family": sanitize_value(entry.get("local_action_family") or "unknown"),
         "lever": sanitize_value(entry.get("lever") or entry.get("local_action_family") or "unknown"),
         "executor_action_class": sanitize_value(entry.get("executor_action_class") or "review-only"),
@@ -553,11 +599,15 @@ def _handoff_row(entry: dict[str, Any]) -> dict[str, Any]:
         "savings": savings,
         "privacy": _handoff_privacy(),
     }
+    if isinstance(entry.get("managed_preview_gate"), dict):
+        row["managed_preview_gate"] = sanitize_value(entry.get("managed_preview_gate"))
     preserved = {
         "rank",
         "policy_files_written",
         "provider_calls_made",
         "managed_server_calls_made",
+        "managed_preview_required",
+        "preview_verified",
         "provider_forwarding",
         "server_content_processing",
         "managed_enforced",
@@ -582,6 +632,8 @@ def build_local_activation_executor_managed_handoff(
     class_counts = Counter(str(row.get("executor_action_class") or "unknown") for row in rows)
     family_counts = Counter(str(row.get("local_action_family") or "unknown") for row in rows)
     status_counts = Counter(str(row.get("successor_status") or "unknown") for row in rows)
+    preview_required_rows = [row for row in rows if bool(row.get("managed_preview_required"))]
+    preview_required_family_counts = Counter(str(row.get("local_action_family") or "unknown") for row in preview_required_rows)
     privacy = _handoff_privacy()
     result = {
         "schema": HANDOFF_SCHEMA,
@@ -599,16 +651,20 @@ def build_local_activation_executor_managed_handoff(
         "policy_files_written": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
-        "supported_local_action_families": ["routing", "crunch", "cache"],
+        "supported_local_action_families": SUPPORTED_PREVIEW_LOCAL_ACTION_FAMILIES,
         "rows": rows,
         "summary": {
             "handoff_row_count": len(rows),
+            "preview_required_row_count": len(preview_required_rows),
             "local_action_family_count": len(family_counts),
             "executor_action_class_counts": [
                 {"value": key, "count": count} for key, count in sorted(class_counts.items())
             ],
             "local_action_family_counts": [
                 {"value": key, "count": count} for key, count in sorted(family_counts.items())
+            ],
+            "preview_required_local_action_family_counts": [
+                {"value": key, "count": count} for key, count in sorted(preview_required_family_counts.items())
             ],
             "successor_status_counts": [
                 {"value": key, "count": count} for key, count in sorted(status_counts.items())
@@ -660,6 +716,9 @@ def build_managed_activation_preview_request(
         else build_local_activation_executor_managed_handoff(source, now=now)
     )
     rows = [row for row in handoff.get("rows") or [] if isinstance(row, dict)]
+    family_counts = Counter(str(row.get("local_action_family") or "unknown") for row in rows)
+    preview_required_rows = [row for row in rows if bool(row.get("managed_preview_required"))]
+    preview_required_family_counts = Counter(str(row.get("local_action_family") or "unknown") for row in preview_required_rows)
     result = {
         "schema": PREVIEW_REQUEST_SCHEMA,
         "generated_at": handoff.get("generated_at")
@@ -678,10 +737,19 @@ def build_managed_activation_preview_request(
         "source_handoff_schema": sanitize_value(handoff.get("schema")),
         "source_handoff_status": sanitize_value(handoff.get("status")),
         "source_handoff_summary": sanitize_value(handoff.get("summary") or {}),
-        "supported_local_action_families": sanitize_value(handoff.get("supported_local_action_families") or []),
+        "supported_local_action_families": sanitize_value(
+            handoff.get("supported_local_action_families") or SUPPORTED_PREVIEW_LOCAL_ACTION_FAMILIES
+        ),
         "rows": rows,
         "summary": {
             "handoff_row_count": len(rows),
+            "preview_required_row_count": len(preview_required_rows),
+            "local_action_family_counts": [
+                {"value": key, "count": count} for key, count in sorted(family_counts.items())
+            ],
+            "preview_required_local_action_family_counts": [
+                {"value": key, "count": count} for key, count in sorted(preview_required_family_counts.items())
+            ],
             "policy_files_written": False,
             "provider_calls_made": False,
             "managed_server_calls_made": False,

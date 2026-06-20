@@ -436,6 +436,77 @@ def _executor_handoff_fixture_plan():
     return plan
 
 
+def _preview_required_successor_queue_plan():
+    gate = {
+        "schema": "agentflow.preview_verified_activation_successor_gate.v1",
+        "required": True,
+        "status": "no-data-preview-health",
+        "verified": False,
+        "decision": "keep-blocked",
+        "next_action": "refresh-managed-activation-preview",
+        "reason": "managed-preview-health-no-data",
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": {"metadata_only": True, "aggregate_only": True, "review_only": True},
+    }
+    common = {
+        "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+        "current_status": "keep-blocked",
+        "state": "keep-blocked",
+        "successor_status": "keep-blocked",
+        "next_action": "refresh-managed-activation-preview",
+        "sample_count": 10,
+        "managed_preview_required": True,
+        "managed_preview_gate": gate,
+        "privacy": {"metadata_only": True, "aggregate_only": True},
+    }
+    return {
+        "schema": "agentflow.local_activation_next_action_queue.v1",
+        "status": "ranked",
+        "entries": [
+            {
+                **common,
+                "rank": 1,
+                "fingerprint": "activation:preview-routing",
+                "lever": "routing",
+                "local_action_family": "routing",
+                "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                "blocker_codes": ["semantic-quality-regression-observed"],
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "tool-light",
+                "requested_model": "gpt-5.4",
+                "candidate_target_model": "gpt-5.4-mini",
+            },
+            {
+                **common,
+                "rank": 2,
+                "fingerprint": "activation:preview-cache",
+                "lever": "cache",
+                "local_action_family": "cache",
+                "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "blocker_codes": ["invalidation-evidence-missing"],
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "tool-light",
+            },
+            {
+                **common,
+                "rank": 3,
+                "fingerprint": "activation:preview-feedback",
+                "lever": "activation-feedback",
+                "local_action_family": "activation-feedback",
+                "evidence_schema": "agentflow.orchestrator_research_log_diagnostics.v1",
+                "blocker_codes": ["safety-stop"],
+                "diagnostic_class": "safety-stop",
+                "diagnostic_reason": "safety-stop",
+            },
+        ],
+        "privacy": {"metadata_only": True, "aggregate_only": True},
+    }
+
+
 class LocalActivationExecutorTest(unittest.TestCase):
     def test_executor_plan_selects_one_safe_review_action(self):
         result = build_local_activation_executor_plan(_executor_fixture_plan(), now=NOW)
@@ -605,11 +676,44 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
         self.assertEqual(result["schema"], "agentflow.managed_activation_preview_request.v1")
         self.assertEqual(result["summary"]["handoff_row_count"], 4)
+        self.assertIn("activation-feedback", result["supported_local_action_families"])
         self.assertFalse(result["provider_calls_made"])
         self.assertFalse(result["managed_server_calls_made"])
         self.assertFalse(result["policy_files_written"])
         self.assertTrue(result["feature_only"])
         self.assertTrue(result["locally_executed"])
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
+
+    def test_managed_activation_preview_request_marks_preview_required_successors(self):
+        result = build_managed_activation_preview_request(_preview_required_successor_queue_plan(), now=NOW)
+
+        self.assertEqual(result["schema"], "agentflow.managed_activation_preview_request.v1")
+        self.assertEqual(result["summary"]["handoff_row_count"], 3)
+        self.assertEqual(result["summary"]["preview_required_row_count"], 3)
+        required_counts = {
+            item["value"]: item["count"]
+            for item in result["summary"]["preview_required_local_action_family_counts"]
+        }
+        self.assertEqual(required_counts["routing"], 1)
+        self.assertEqual(required_counts["cache"], 1)
+        self.assertEqual(required_counts["activation-feedback"], 1)
+        self.assertFalse(result["managed_server_calls_made"])
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["policy_files_written"])
+        for row in result["rows"]:
+            self.assertTrue(row["managed_preview_required"])
+            self.assertFalse(row["preview_verified"])
+            self.assertEqual(row["preview_verification_status"], "no-data-preview-health")
+            self.assertEqual(row["preview_verification_decision"], "keep-blocked")
+            self.assertEqual(row["executor_next_action"], "refresh-managed-activation-preview")
+            self.assertTrue(row["handoff_ref"].startswith("handoff:"))
+            self.assertTrue(str(row["source_activation_ref"]).startswith(("activation:", "activation-ref:")))
+            self.assertTrue(str(row["source_successor_ref"]).startswith(("successor:", "successor-ref:")))
+            self.assertTrue(row["privacy"]["metadata_only"])
+            self.assertFalse(row["privacy"]["provider_calls_made"])
+            self.assertFalse(row["privacy"]["managed_server_calls_made"])
+            self.assertFalse(row["privacy"]["policy_files_written"])
         self.assertEqual(result["egress_guard"]["status"], "passed")
         self.assertEqual(managed_egress_violations(result), [])
 
