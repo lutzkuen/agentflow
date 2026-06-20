@@ -302,6 +302,27 @@ def _base_blockers(row: dict[str, Any], basis: dict[str, Any], body: dict[str, A
     return blockers
 
 
+def _source_thinking_diagnosis(meta: dict[str, Any]) -> dict[str, Any]:
+    diagnosis = meta.get("diagnosis") if isinstance(meta.get("diagnosis"), dict) else {}
+    fallback = (
+        diagnosis.get("old_context_summarization_fallback")
+        if isinstance(diagnosis.get("old_context_summarization_fallback"), dict)
+        else {}
+    )
+    return {
+        "schema": public_label(diagnosis.get("schema"), "unknown"),
+        "status": public_label(diagnosis.get("status"), "unknown"),
+        "reason": public_label(diagnosis.get("reason"), "unknown"),
+        "recommended_strategy": public_label(diagnosis.get("recommended_strategy"), "unknown"),
+        "route_crunch_mismatch_explained": bool(diagnosis.get("route_crunch_mismatch_explained")),
+        "old_context_summarization_fallback": {
+            "recommended": bool(fallback.get("recommended")),
+            "reason": public_label(fallback.get("reason"), "unknown"),
+            "policy_enabled": bool(fallback.get("policy_enabled")),
+        },
+    }
+
+
 def _source_thinking_metadata(row: dict[str, Any]) -> dict[str, Any]:
     crunch = _json_obj(row.get("crunch_json"))
     meta = crunch.get("anthropic_thinking_history") if isinstance(crunch.get("anthropic_thinking_history"), dict) else {}
@@ -321,6 +342,11 @@ def _source_thinking_metadata(row: dict[str, Any]) -> dict[str, Any]:
         "body_available": bool(meta.get("body_available")),
         "thinking_block_count": _as_int(meta.get("thinking_block_count")),
         "redacted_thinking_block_count": _as_int(meta.get("redacted_thinking_block_count")),
+        "top_level_thinking_active": bool(meta.get("top_level_thinking_active")),
+        "thinking_signal_kind": public_label(meta.get("thinking_signal_kind"), "unknown"),
+        "history_block_absence_reason": public_label(meta.get("history_block_absence_reason"), "none"),
+        "route_crunch_mismatch_explained": bool(meta.get("route_crunch_mismatch_explained")),
+        "diagnosis": _source_thinking_diagnosis(meta),
         "thinking_history_size_bucket": public_label(meta.get("thinking_history_size_bucket"), "unknown"),
         "thinking_block_count_bucket": public_label(meta.get("thinking_block_count_bucket"), "unknown"),
         "unique_local_thinking_block_fingerprint_count": _as_int(meta.get("unique_local_thinking_block_fingerprint_count")),

@@ -2711,6 +2711,23 @@ def build_anthropic_thinking_history_metadata(
         "unique_local_thinking_block_fingerprint_count": 0,
         "exact_duplicate_thinking_block_count": 0,
         "near_duplicate_thinking_block_count": 0,
+        "thinking_signal_kind": "none",
+        "history_block_absence_reason": None,
+        "route_crunch_mismatch_explained": False,
+        "diagnosis": {
+            "schema": "agentflow.anthropic_thinking_history_diagnosis.v1",
+            "status": "not-evaluated",
+            "reason": "not-evaluated",
+            "thinking_signal_kind": "none",
+            "route_crunch_mismatch_explained": False,
+            "recommended_strategy": "inspect-history-blocks",
+            "old_context_summarization_fallback": {
+                "recommended": False,
+                "reason": "not-needed",
+                "policy_enabled": bool(OLD_CONTEXT_SUMMARY_ENABLED),
+                "rule_id": str(OLD_CONTEXT_SUMMARY_RULE_ID),
+            },
+        },
         "assistant_message_count": 0,
         "assistant_message_with_thinking_count": 0,
         "missing_assistant_text_fallback_count": 0,
@@ -2843,11 +2860,48 @@ def build_anthropic_thinking_history_metadata(
     meta["block_size_bucket_breakdown"] = _thinking_public_breakdown(size_buckets, label="bucket")
     meta["assistant_age_bucket_breakdown"] = _thinking_public_breakdown(age_buckets, label="bucket")
 
-    if int(meta["thinking_block_count"]) <= 0:
+    thinking_block_count = int(meta["thinking_block_count"])
+    if thinking_block_count > 0:
+        meta["thinking_signal_kind"] = "top-level-and-history-blocks" if top_level_active else "history-blocks"
+        meta["diagnosis"].update({
+            "status": "history-blocks-present",
+            "reason": "assistant-thinking-history-blocks-detected",
+            "thinking_signal_kind": meta["thinking_signal_kind"],
+            "recommended_strategy": "anthropic_thinking_history_compaction",
+        })
+    elif top_level_active:
+        meta["thinking_signal_kind"] = "top-level-only"
+        meta["history_block_absence_reason"] = "top-level-thinking-parameter-without-message-history-blocks"
+        meta["route_crunch_mismatch_explained"] = True
+        meta["diagnosis"].update({
+            "status": "diagnosed",
+            "reason": "top-level-thinking-parameter-without-message-history-blocks",
+            "thinking_signal_kind": "top-level-only",
+            "route_crunch_mismatch_explained": True,
+            "recommended_strategy": "old_context_summarization",
+            "old_context_summarization_fallback": {
+                "recommended": True,
+                "reason": "no-assistant-thinking-history-blocks-available-to-compact",
+                "policy_enabled": bool(OLD_CONTEXT_SUMMARY_ENABLED),
+                "rule_id": str(OLD_CONTEXT_SUMMARY_RULE_ID),
+            },
+        })
+    else:
+        meta["diagnosis"].update({
+            "status": "no-thinking-signal",
+            "reason": "no-top-level-or-history-thinking-signal",
+            "thinking_signal_kind": "none",
+            "recommended_strategy": "none",
+        })
+
+    if thinking_block_count <= 0:
         blockers.add("no-thinking-history-blocks")
     if blockers:
         meta["status"] = "blocked"
-        meta["reason"] = sorted(blockers)[0]
+        if top_level_active and thinking_block_count <= 0:
+            meta["reason"] = "top-level-thinking-without-history-blocks"
+        else:
+            meta["reason"] = sorted(blockers)[0]
     else:
         meta["status"] = "ready"
         meta["reason"] = "ready-for-thinking-compaction-planning"

@@ -131,6 +131,8 @@ class CrunchRulesTest(unittest.TestCase):
         self.assertEqual(thinking_meta["status"], "ready")
         self.assertEqual(thinking_meta["reason"], "ready-for-thinking-compaction-planning")
         self.assertEqual(thinking_meta["thinking_block_count"], 2)
+        self.assertEqual(thinking_meta["thinking_signal_kind"], "history-blocks")
+        self.assertEqual(thinking_meta["diagnosis"]["recommended_strategy"], "anthropic_thinking_history_compaction")
         self.assertEqual(thinking_meta["exact_duplicate_thinking_block_count"], 1)
         self.assertEqual(thinking_meta["near_duplicate_thinking_block_count"], 0)
         self.assertEqual(thinking_meta["unique_local_thinking_block_fingerprint_count"], 1)
@@ -183,7 +185,75 @@ class CrunchRulesTest(unittest.TestCase):
         thinking_meta = meta["anthropic_thinking_history"]
         self.assertEqual(thinking_meta["status"], "blocked")
         self.assertTrue(thinking_meta["top_level_thinking_active"])
+        self.assertEqual(thinking_meta["thinking_signal_kind"], "top-level-and-history-blocks")
         self.assertIn("active-top-level-thinking-request", thinking_meta["blockers"])
+
+    def test_anthropic_thinking_metadata_diagnoses_top_level_only_thinking(self):
+        manual = importlib.reload(crunch_module)
+        body = {
+            "model": "claude-sonnet-4-6",
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+            "messages": [
+                {"role": "user", "content": "please continue"},
+                {"role": "assistant", "content": [{"type": "text", "text": "visible assistant text"}]},
+            ],
+        }
+
+        _crunched, meta = manual.crunch_body(
+            body,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+        )
+
+        thinking_meta = meta["anthropic_thinking_history"]
+        self.assertEqual(thinking_meta["status"], "blocked")
+        self.assertEqual(thinking_meta["reason"], "top-level-thinking-without-history-blocks")
+        self.assertTrue(thinking_meta["top_level_thinking_active"])
+        self.assertEqual(thinking_meta["thinking_block_count"], 0)
+        self.assertEqual(thinking_meta["thinking_signal_kind"], "top-level-only")
+        self.assertEqual(
+            thinking_meta["history_block_absence_reason"],
+            "top-level-thinking-parameter-without-message-history-blocks",
+        )
+        self.assertTrue(thinking_meta["route_crunch_mismatch_explained"])
+        diagnosis = thinking_meta["diagnosis"]
+        self.assertEqual(diagnosis["status"], "diagnosed")
+        self.assertEqual(diagnosis["recommended_strategy"], "old_context_summarization")
+        self.assertTrue(diagnosis["old_context_summarization_fallback"]["recommended"])
+        rendered = json.dumps(thinking_meta, sort_keys=True)
+        self.assertNotIn("visible assistant text", rendered)
+
+    def test_anthropic_thinking_metadata_counts_redacted_blocks_without_text(self):
+        manual = importlib.reload(crunch_module)
+        body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "redacted_thinking", "data": "raw-redacted-thinking-secret"},
+                        {"type": "text", "text": "bounded assistant fallback"},
+                    ],
+                }
+            ],
+        }
+
+        _crunched, meta = manual.crunch_body(
+            body,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+        )
+
+        thinking_meta = meta["anthropic_thinking_history"]
+        self.assertEqual(thinking_meta["status"], "blocked")
+        self.assertEqual(thinking_meta["thinking_block_count"], 1)
+        self.assertEqual(thinking_meta["redacted_thinking_block_count"], 1)
+        self.assertEqual(thinking_meta["thinking_signal_kind"], "history-blocks")
+        self.assertIn("redacted-thinking-block", thinking_meta["blockers"])
+        rendered = json.dumps(thinking_meta, sort_keys=True)
+        self.assertNotIn("raw-redacted-thinking-secret", rendered)
 
     def test_anthropic_thinking_metadata_blocks_adjacent_tool_use_dependency_privately(self):
         manual = importlib.reload(crunch_module)
