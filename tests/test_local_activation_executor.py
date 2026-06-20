@@ -17,6 +17,7 @@ from tokenclaw.local_activation_executor import (
 from tokenclaw.managed_activation_preview_outcomes import (
     build_managed_activation_preview_outcomes_report,
     persist_managed_activation_preview_outcomes,
+    persist_unavailable_managed_activation_preview_outcomes,
 )
 from tokenclaw.managed_egress import managed_egress_violations
 from tokenclaw.store import Store, stable_json
@@ -1037,6 +1038,53 @@ class LocalActivationExecutorTest(unittest.TestCase):
             "routing-pathway-outcome-batch-input-not-configured",
         )
         self.assertEqual(managed_egress_violations(stored), [])
+
+    def test_unavailable_preview_refresh_persists_successor_queue_health_rows(self):
+        with TemporaryDirectory() as tmpdir:
+            store = Store(str(Path(tmpdir) / "agentflow.sqlite3"))
+            try:
+                first = persist_unavailable_managed_activation_preview_outcomes(
+                    store,
+                    _preview_required_successor_queue_plan(),
+                    now=NOW,
+                    reason="managed-preview-refresh-not-configured",
+                )
+                second = persist_unavailable_managed_activation_preview_outcomes(
+                    store,
+                    _preview_required_successor_queue_plan(),
+                    now=NOW + timedelta(minutes=10),
+                    reason="managed-preview-refresh-not-configured",
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(first["schema"], "agentflow.managed_activation_preview_outcomes.v1")
+        self.assertEqual(first["refresh"]["schema"], "agentflow.managed_activation_preview_refresh_status.v1")
+        self.assertEqual(first["refresh"]["status"], "unavailable")
+        self.assertEqual(first["refresh"]["reason"], "managed-preview-refresh-not-configured")
+        self.assertEqual(first["refresh"]["submitted_row_count"], 3)
+        self.assertEqual(first["summary"]["stored_preview_outcome_count"], 3)
+        self.assertEqual(first["summary"]["no_data_preview_health_count"], 3)
+        self.assertEqual(first["import"]["created_count"], 3)
+        self.assertEqual(second["import"]["created_count"], 0)
+        self.assertEqual(second["import"]["updated_count"], 3)
+        fingerprints = [row["outcome_fingerprint"] for row in first["outcomes"]]
+        self.assertEqual(len(fingerprints), len(set(fingerprints)))
+        families = {row["local_action_family"] for row in first["outcomes"]}
+        self.assertEqual(families, {"activation-feedback", "cache", "routing"})
+        for row in first["outcomes"]:
+            self.assertEqual(row["classification"], "no-data-preview-health")
+            self.assertEqual(row["preview_status"], "no-data-preview-health")
+            self.assertEqual(row["preview_reason"], "managed-preview-refresh-not-configured")
+            self.assertEqual(row["next_action"], "refresh-managed-activation-preview")
+            self.assertTrue(row["privacy"]["metadata_only"])
+            self.assertTrue(row["privacy"]["aggregate_only"])
+            self.assertTrue(row["privacy"]["review_only"])
+            self.assertFalse(row["privacy"]["managed_server_calls_made"])
+            self.assertFalse(row["privacy"]["provider_calls_made"])
+            self.assertFalse(row["privacy"]["policy_files_written"])
+        self.assertFalse(first["managed_server_calls_made"])
+        self.assertEqual(managed_egress_violations(first), [])
 
     def test_managed_activation_preview_cli_posts_opt_in_payload(self):
         with TemporaryDirectory() as tmpdir:

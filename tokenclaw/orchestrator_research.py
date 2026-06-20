@@ -2013,6 +2013,12 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
         value = stats.get(key)
         if isinstance(value, dict):
             summary[key] = value
+    precomputed_queue = stats.get("local_activation_next_action_queue")
+    if (
+        isinstance(precomputed_queue, dict)
+        and precomputed_queue.get("entries")
+    ):
+        summary["local_activation_next_action_queue"] = precomputed_queue
     routing = stats.get("routing")
     if isinstance(routing, list):
         summary["routing_top"] = routing[:5]
@@ -13679,7 +13685,13 @@ def build_research_plan(
                 summary["evidence_to_activation_next_action_ledger"],
                 full_rollout_crunch_measurement,
             )
-    activation_queue = build_local_activation_next_action_queue(summary)
+    precomputed_activation_queue = summary.get("local_activation_next_action_queue")
+    activation_queue = (
+        precomputed_activation_queue
+        if isinstance(precomputed_activation_queue, dict)
+        and precomputed_activation_queue.get("entries")
+        else build_local_activation_next_action_queue(summary)
+    )
     if activation_queue is not None:
         summary["local_activation_next_action_queue"] = activation_queue
     candidate_diagnostics, safety_stop_suppressed_diagnostics = _without_suppressed_safety_stop_diagnostics(

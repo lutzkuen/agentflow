@@ -533,3 +533,65 @@ def build_managed_activation_preview_outcomes_report(
     if violations:
         result["egress_guard"]["blocked_keys"] = sorted({item.get("key", "unknown") for item in violations})
     return result
+
+
+def build_managed_activation_preview_unavailable_result(
+    source: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    status: str = "skipped",
+    reason: str = "managed-preview-url-not-configured",
+) -> dict[str, Any]:
+    """Build a review-only no-data preview result from local successor metadata."""
+    from tokenclaw.local_activation_executor import (
+        build_managed_activation_preview_request,
+        build_managed_activation_preview_result,
+    )
+
+    request_payload = build_managed_activation_preview_request(source, now=now)
+    return build_managed_activation_preview_result(
+        request_payload,
+        fetch={
+            "status": str(status or "skipped"),
+            "reason": str(reason or "managed-preview-url-not-configured"),
+            "managed_server_calls_made": False,
+            "provider_calls_made": False,
+            "policy_files_written": False,
+        },
+    )
+
+
+def persist_unavailable_managed_activation_preview_outcomes(
+    store_obj: Any,
+    source: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    stale_after_hours: float = DEFAULT_STALE_AFTER_HOURS,
+    status: str = "skipped",
+    reason: str = "managed-preview-url-not-configured",
+) -> dict[str, Any]:
+    """Persist deterministic no-data preview health rows when preview refresh cannot run."""
+    preview_result = build_managed_activation_preview_unavailable_result(
+        source,
+        now=now,
+        status=status,
+        reason=reason,
+    )
+    report = persist_managed_activation_preview_outcomes(
+        store_obj,
+        preview_result,
+        now=now,
+        stale_after_hours=stale_after_hours,
+    )
+    report["refresh"] = {
+        "schema": "agentflow.managed_activation_preview_refresh_status.v1",
+        "status": "unavailable" if status != "blocked" else "blocked",
+        "reason": str(reason or "managed-preview-url-not-configured"),
+        "source_schema": sanitize_value(source.get("schema")),
+        "submitted_row_count": int((preview_result.get("summary") or {}).get("submitted_row_count") or 0),
+        "managed_server_calls_made": False,
+        "provider_calls_made": False,
+        "policy_files_written": False,
+        "privacy": _privacy(managed_server_calls_made=False),
+    }
+    return report

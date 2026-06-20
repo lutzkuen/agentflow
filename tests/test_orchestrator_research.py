@@ -9871,6 +9871,102 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         self.assertNotIn("req-cli-preview-secret", rendered)
         self.assertNotIn("raw cli managed preview must not leak", rendered)
 
+    def test_cli_refreshes_empty_managed_preview_outcomes_from_successor_queue(self):
+        queue = {
+            "schema": "agentflow.local_activation_next_action_queue.v1",
+            "status": "ranked",
+            "entries": [
+                {
+                    "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:cli-refresh-cache",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                    "current_status": "blocked",
+                    "state": "blocked",
+                    "successor_status": "keep-blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "refresh-managed-activation-preview",
+                    "blocker_codes": ["evidence-older-than-max-age"],
+                    "sample_count": 36,
+                    "projected_savings_usd": 0.075373,
+                    "managed_preview_required": True,
+                    "managed_preview_gate": {
+                        "schema": "agentflow.preview_verified_activation_successor_gate.v1",
+                        "required": True,
+                        "status": "no-data-preview-health",
+                        "verified": False,
+                        "decision": "keep-blocked",
+                        "next_action": "refresh-managed-activation-preview",
+                        "reason": "managed-preview-health-no-data",
+                        "provider_calls_made": False,
+                        "managed_server_calls_made": False,
+                        "policy_files_written": False,
+                        "privacy": {"metadata_only": True, "aggregate_only": True, "review_only": True},
+                    },
+                    "request_id": "req-refresh-secret",
+                    "session_id": "session-refresh-secret",
+                    "raw_prompt": "raw preview refresh value must not leak",
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                }
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            SQLiteStore(db_path).conn.close()
+            issues_path = Path(tmp) / "issues.json"
+            stats_path = Path(tmp) / "stats.json"
+            issues_path.write_text(json.dumps([]), encoding="utf-8")
+            stats_path.write_text(
+                json.dumps(
+                    {
+                        "calls": 0,
+                        "cache_hit_rate": 0.0,
+                        "db": db_path,
+                        "local_activation_next_action_queue": queue,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            code = cli.orchestrator_research_cli(
+                ["--issues-json", str(issues_path), "--stats-json", str(stats_path), "--threshold", "3"],
+                stdout=stdout,
+                stderr=stderr,
+            )
+            store = SQLiteStore(db_path)
+            try:
+                stored_count = store.conn.execute("select count(*) as c from managed_activation_preview_outcomes").fetchone()["c"]
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(stored_count, 1)
+        payload = json.loads(stdout.getvalue())
+        stats_summary = payload["evidence"]["stats_summary"]
+        outcomes = stats_summary["managed_activation_preview_outcomes"]
+        self.assertEqual(outcomes["summary"]["stored_preview_outcome_count"], 1)
+        self.assertEqual(outcomes["summary"]["no_data_preview_health_count"], 1)
+        self.assertEqual(outcomes["refresh"]["reason"], "managed-preview-refresh-not-configured")
+        outcome = outcomes["outcomes"][0]
+        self.assertEqual(outcome["classification"], "no-data-preview-health")
+        self.assertEqual(outcome["preview_status"], "no-data-preview-health")
+        self.assertEqual(outcome["next_action"], "refresh-managed-activation-preview")
+        self.assertEqual(outcome["local_action_family"], "cache")
+        self.assertFalse(outcome["privacy"]["managed_server_calls_made"])
+        self.assertFalse(outcome["privacy"]["provider_calls_made"])
+        self.assertFalse(outcome["privacy"]["policy_files_written"])
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("req-refresh-secret", rendered)
+        self.assertNotIn("session-refresh-secret", rendered)
+        self.assertNotIn("raw preview refresh value must not leak", rendered)
+
     def test_cli_builds_request_shape_rollups_from_stats_db(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "agentflow.sqlite3")

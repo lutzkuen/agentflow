@@ -643,6 +643,33 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
                 cache_replay_evidence,
                 hit_recovery_report=build_isolated_cache_replay_hit_recovery_smoke(),
             )
+        preview_outcomes_empty = (
+            isinstance(managed_preview_outcomes, dict)
+            and int((managed_preview_outcomes.get("summary") or {}).get("stored_preview_outcome_count") or 0) == 0
+        )
+        if preview_outcomes_empty:
+            from tokenclaw.managed_activation_preview_outcomes import (
+                persist_unavailable_managed_activation_preview_outcomes,
+            )
+            from tokenclaw.orchestrator_research import build_local_activation_next_action_queue
+
+            activation_queue = (
+                enriched.get("local_activation_next_action_queue")
+                if isinstance(enriched.get("local_activation_next_action_queue"), dict)
+                else build_local_activation_next_action_queue(enriched)
+            )
+            has_activation_rows = (
+                isinstance(activation_queue, dict)
+                and bool(activation_queue.get("entries") or activation_queue.get("successor_actions"))
+            )
+            if has_activation_rows:
+                enriched["local_activation_next_action_queue"] = activation_queue
+                managed_preview_outcomes = persist_unavailable_managed_activation_preview_outcomes(
+                    store,
+                    activation_queue,
+                    reason="managed-preview-refresh-not-configured",
+                )
+                enriched["managed_activation_preview_outcomes"] = managed_preview_outcomes
     finally:
         try:
             store.conn.close()
