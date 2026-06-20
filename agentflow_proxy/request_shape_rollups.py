@@ -9024,6 +9024,35 @@ def _tool_cache_replay_proof(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tool_cache_review_readiness_gate(
+    readiness_gate: dict[str, Any],
+    replay_proof: dict[str, Any],
+    *,
+    dependency_decision: str,
+) -> dict[str, Any]:
+    gate = dict(readiness_gate)
+    proof_required = dependency_decision == "stable-dependency-evidence"
+    proof_available = bool(replay_proof.get("proof_available"))
+    gate["tool_cache_replay_review_gate"] = {
+        "schema": "agentflow.request_shape_tool_cache_replay_review_gate.v1",
+        "requires_stable_dependency_evidence": True,
+        "requires_live_repeat_or_observed_hit_proof": proof_required,
+        "proof_gate_passed": (not proof_required) or proof_available,
+        "live_repeat_confirmed": bool(replay_proof.get("live_repeat_confirmed")),
+        "observed_hit_proof": bool(replay_proof.get("observed_hit_proof")),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _replayability_privacy(),
+    }
+    if proof_required and not proof_available:
+        gate["raw_stage_gate_status"] = gate.get("gate_status")
+        gate["stage_allowed"] = False
+        gate["gate_status"] = "missing-live-repeat-or-observed-hit-proof"
+        gate["next_action"] = "wait-for-live-repeat-or-observed-hit-proof"
+        gate["reason"] = "missing-live-repeat-or-observed-hit-proof"
+    return gate
+
+
 def _tool_cache_retired_no_repeat(row: dict[str, Any]) -> bool:
     values: list[str] = []
     for key in (
@@ -9076,6 +9105,11 @@ def _tool_cache_review_candidate_from_evidence_row(row: dict[str, Any]) -> dict[
         "unknown-dependency-evidence",
     )
     replay_proof = _tool_cache_replay_proof(row)
+    readiness_gate = _tool_cache_review_readiness_gate(
+        readiness_gate,
+        replay_proof,
+        dependency_decision=dependency_decision,
+    )
     retired_no_repeat = _tool_cache_retired_no_repeat(row)
     if retired_no_repeat:
         candidate_status = "blocked"
@@ -9112,7 +9146,7 @@ def _tool_cache_review_candidate_from_evidence_row(row: dict[str, Any]) -> dict[
         "has_tools": True,
         "sample_count": row_count,
         "row_count": row_count,
-        "review_only": True,
+        "review_only": candidate_status == "review-ready",
         "candidate_status": candidate_status,
         "candidate_decision": candidate_decision,
         "stageable_after_review": stageable_after_review,
@@ -9139,7 +9173,7 @@ def _tool_cache_review_candidate_from_evidence_row(row: dict[str, Any]) -> dict[
         else _local_dependency_fingerprint_metadata(False),
         "replay_proof": replay_proof,
         "requires_live_repeat_or_observed_hit_proof": dependency_decision == "stable-dependency-evidence",
-        "requires_live_repeat_or_savings_floor": dependency_decision == "stable-dependency-evidence",
+        "allows_savings_floor_without_replay_proof": False,
         "requires_operator_review": True,
         "requires_explicit_later_promotion": True,
         "tool_cache_replay_enabled": False,
@@ -9249,7 +9283,18 @@ def _build_tool_cache_review_candidates(rows: list[dict[str, Any]], *, limit: in
             "stable_dependency_evidence_emits_review_only_candidate": any(
                 row.get("dependency_evidence_decision", {}).get("decision") == "stable-dependency-evidence"
                 and row.get("review_only") is True
+                and row.get("candidate_status") == "review-ready"
+                and isinstance(row.get("replay_proof"), dict)
+                and bool(row["replay_proof"].get("proof_available"))
                 for row in candidates
+            ),
+            "review_only_candidates_have_stable_dependency_and_proof": all(
+                row.get("dependency_evidence_decision", {}).get("decision") == "stable-dependency-evidence"
+                and row.get("candidate_status") == "review-ready"
+                and isinstance(row.get("replay_proof"), dict)
+                and bool(row["replay_proof"].get("proof_available"))
+                for row in candidates
+                if row.get("review_only") is True
             ),
             "requires_live_repeat_or_observed_hit_proof": all(
                 isinstance(row.get("replay_proof"), dict)
@@ -9272,12 +9317,8 @@ def _build_tool_cache_review_candidates(rows: list[dict[str, Any]], *, limit: in
                 for row in candidates
                 if row.get("retired_no_repeat") is True
             ),
-            "requires_live_repeat_or_savings_floor": all(
-                isinstance(row.get("replay_proof"), dict)
-                and (
-                    row.get("candidate_status") != "review-ready"
-                    or bool(row.get("replay_proof", {}).get("proof_available"))
-                )
+            "does_not_allow_savings_floor_without_replay_proof": all(
+                not bool(row.get("allows_savings_floor_without_replay_proof"))
                 for row in candidates
                 if row.get("dependency_evidence_decision", {}).get("decision") == "stable-dependency-evidence"
             ),
@@ -9923,8 +9964,10 @@ def build_request_shape_tool_cache_replay_evidence_report(
                     "stable_with_proof_emits_review_ready_preview"
                 )
             ),
-            "review_only_candidates_require_live_repeat_or_savings_floor": bool(
-                review_only_candidates.get("acceptance", {}).get("requires_live_repeat_or_savings_floor")
+            "review_only_candidates_do_not_allow_savings_floor_without_replay_proof": bool(
+                review_only_candidates.get("acceptance", {}).get(
+                    "does_not_allow_savings_floor_without_replay_proof"
+                )
             ),
             "review_only_candidates_require_live_repeat_or_observed_hit_proof": bool(
                 review_only_candidates.get("acceptance", {}).get("requires_live_repeat_or_observed_hit_proof")
