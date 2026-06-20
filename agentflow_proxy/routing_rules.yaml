@@ -47,37 +47,37 @@
 # applied, holdout, or not-selected cohorts from metadata-only request features.
 phase_canary:
   enabled: true
-  policy_id: local-phase-sonnet-haiku-canary-v1
-  model_pattern: sonnet
+  policy_id: local-phase-opus-sonnet-canary-v1
+  model_pattern: opus
   stream: true
-  target_model: haiku
+  target_model: sonnet
   eligible_workflow_phases:
     - tool-execution
+    - summary
   excluded_workflow_phases:
     - planning
     - thinking
     - verification
-    - summary
     - unknown
   eligible_categories:
     - tool-result
+    - tool-light
+    - chat
   excluded_categories:
     - tool-heavy
-    - tool-light
     - code-gen
     - long-context
-    - chat
     - short-completion
   min_workflow_phase_confidence: high
   min_text_chars: 0
   max_text_chars: 0
-  canary_fraction: 0.05
+  canary_fraction: 0.10
   holdout_fraction: 0.10
-  salt: agentflow-phase-routing-canary-v1
+  salt: agentflow-phase-opus-sonnet-canary-v1
   cohort_unit: session
   safety_gates:
-    block_thinking_history: true
-    block_top_level_thinking: true
+    block_thinking_history: false
+    block_top_level_thinking: false
     block_unsupported_streaming_shape: true
     block_unsafe_tool_call_context: true
     strip_model_incompatible_params: true
