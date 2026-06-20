@@ -75,6 +75,16 @@ routing_candidates:
     workflow_phase: summary
     max_text_chars: 8000
     sample_weight: 4
+  - candidate_id: codex-gpt55-to-gpt53-codex-stateless-text
+    label: Codex gpt-5.5 to gpt-5.3-codex for stateless text evidence
+    requested_model: gpt-5.5
+    routed_model: gpt-5.3-codex
+    provider: openai
+    source_surface: codex_turn
+    app_family: codex
+    category: codex-turn
+    workflow_phase: stateless_text
+    max_text_chars: 8000
   - candidate_id: codex-gpt55-to-gpt53-codex-unknown-phase
     label: Codex gpt-5.5 to gpt-5.3-codex when phase is not yet classified
     requested_model: gpt-5.5
