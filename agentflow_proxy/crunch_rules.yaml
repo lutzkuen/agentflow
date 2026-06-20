@@ -841,11 +841,11 @@ request_shape_repeated_context_canaries:
         routing_status: passthrough
       rollout:
         schema: agentflow.request_shape_crunch_canary_rollout.v1
-        canary_enabled: true
-        full_rollout_enabled: false
-        full_rollout_fraction: 0.0
-        canary_fraction: 0.2
-        holdout_fraction: 0.1
+        canary_enabled: false
+        full_rollout_enabled: true
+        full_rollout_fraction: 1.0
+        canary_fraction: 1.0
+        holdout_fraction: 0.0
         canary_salt: local-repeated-context-crunch-canary-f274203cb090
         canary_unit: request_shape_cohort
       projected_saved_chars: 27280
@@ -867,17 +867,19 @@ request_shape_repeated_context_canaries:
         cache_keys_included: false
         file_paths_included: false
         tool_payloads_included: false
-        holdout_required: true
-        max_rollout_fraction: 0.2
-        previous_max_rollout_fraction: 0.0
+        holdout_required: false
+        max_rollout_fraction: 1.0
+        previous_max_rollout_fraction: 0.2
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       policy_decision:
         schema: agentflow.request_shape_crunch_policy_decision_rule_metadata.v1
         decision_id: request-shape-crunch-policy-decision:9c21d88a7c434d6f
         application_fingerprint: request-shape-crunch-policy-apply:5c8c4099f69eb61f
-        source_evidence_schema: agentflow.request_shape_crunch_policy_decision.v1
-        decision: widen
-        graduation_decision: widen
+        full_rollout_fingerprint: request-shape-crunch-full-rollout:3038b0e4f4e5710e
+        source_evidence_schema: agentflow.request_shape_crunch_activation_evidence.v1
+        source_policy_decision_schema: agentflow.request_shape_crunch_policy_decision.v1
+        decision: promote-full
+        graduation_decision: promote-full
         applied_count: 1
         holdout_count: 1
         observed_saved_tokens: 34356
@@ -886,10 +888,10 @@ request_shape_repeated_context_canaries:
         retry_rate_delta: 0.0
         fallback_rate_delta: 0.0
         safety_stop_state: none
-        previous_canary_fraction: 0.1
-        widened_canary_fraction: 0.2
-        full_rollout_fraction: 0.0
-        holdout_fraction: 0.1
+        previous_canary_fraction: 0.2
+        widened_canary_fraction: 1.0
+        full_rollout_fraction: 1.0
+        holdout_fraction: 0.0
         metadata_only: true
         aggregate_only: true
       lifecycle_metadata:
@@ -915,7 +917,7 @@ request_shape_repeated_context_canaries:
         schema: agentflow.request_shape_crunch_policy_decision_rollback_metadata.v1
         present: true
         required_for_promotion: true
-        selected_decision: widen
+        selected_decision: promote-full
         rollback_action_type: disable_repeated_context_crunch_canary
         rollback_reason_codes:
         - safety-stop-observed
