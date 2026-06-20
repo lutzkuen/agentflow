@@ -73,7 +73,6 @@ http://127.0.0.1:4002/agentflow/dashboard
 | Codex VS Code / CLI | `agentflow activate codex` | User-level `~/.codex/config.toml` `openai_base_url`; creates the OpenAI profile if needed | `http://127.0.0.1:4003/v1` | `agentflow run openai` |
 | Claude VS Code / Claude Code | `agentflow activate claude-vscode` | AgentFlow-managed non-secret env file with `ANTHROPIC_BASE_URL`; creates the Claude profile if needed | `http://127.0.0.1:4000` | `agentflow run claude` |
 | Claude Desktop on Linux | `agentflow activate claude-desktop` | User-level Claude Desktop `.desktop` launcher `Exec=` line with `ANTHROPIC_BASE_URL`; creates the Claude profile if needed | `http://127.0.0.1:4000` | `agentflow run claude` |
-| Codex app-server telemetry | No `activate` target | Experimental WebSocket relay for OAuth/subscription app-server telemetry | `ws://127.0.0.1:4013` | `agentflow-codex-app-proxy` |
 | GitHub Copilot | Unsupported | No base-url activation target | Not applicable | Not applicable |
 
 The OpenAI and Anthropic proxies run as separate provider modes. Run two AgentFlow
@@ -314,7 +313,6 @@ It currently supports:
 | --- | --- |
 | Anthropic / Claude-compatible | `POST /v1/messages` |
 | OpenAI-compatible | `POST /v1/responses`, `POST /v1/chat/completions`, WebSocket `/v1/responses`, plus files/uploads passthrough |
-| Codex app-server | Experimental proxy/telemetry path |
 
 AgentFlow gives you local visibility into coding-agent traffic:
 
@@ -322,7 +320,6 @@ AgentFlow gives you local visibility into coding-agent traffic:
 - which app, session, provider, and model generated calls
 - routing, prompt-crunching, cache, retry, backoff, and error decisions
 - policy state and whether local policy files need reload
-- metadata-only Codex app-server telemetry
 
 It is meant for answering "where did the tokens and cost go?" without sending prompts or responses to another service.
 
@@ -394,25 +391,17 @@ The dashboard tells you:
 - routing and prompt-crunch decisions
 - retries, errors, rate-limit/backoff state
 - active local policies and reload status
-- Codex app-server telemetry when used
 
-## Codex app-server telemetry
+## Codex traffic
 
-For Codex OAuth/subscription flows, the OpenAI-compatible base URL path may not be the right fit. AgentFlow also includes an experimental app-server relay:
+Codex API-key traffic uses the OpenAI-compatible local proxy through `agentflow activate codex`.
+For OAuth/subscription unattended worker runs, use direct Codex execution (`AGENTFLOW_CODEX_TRANSPORT=exec`).
+The previous experimental Codex app-server relay on ports 4013 and 4014 has been retired.
 
-```bash
-codex app-server --listen ws://127.0.0.1:4014
-agentflow-codex-app-proxy --host 127.0.0.1 --port 4013 --upstream ws://127.0.0.1:4014
-printf 'Reply with exactly: ok\n' | agentflow-codex-app-client --url ws://127.0.0.1:4013 --cd "$PWD"
-```
-
-This path focuses on telemetry. It records redacted JSON-RPC method names and size-derived metadata, not raw prompts by default.
-Shadow canary execution for Codex app-server routing requires an OpenAI API key in the proxy environment. Set `AGENTFLOW_CODEX_APP_SHADOW_OPENAI_API_KEY`, `AGENTFLOW_OPENAI_API_KEY`, or `OPENAI_API_KEY`; without one, shadow routing remains metadata-only.
-
-Inspect recent Codex telemetry:
+Inspect recent Codex/OpenAI-compatible traffic through normal stats and dashboard commands:
 
 ```bash
-agentflow-codex-diagnose --db ~/.agentflow/agentflow.sqlite3 --pretty
+agentflow stats
 ```
 
 ## Defaults and privacy
