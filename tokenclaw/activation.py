@@ -11,6 +11,7 @@ import tempfile
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from tokenclaw.env import env
 from tokenclaw.paths import default_config_dir as default_agentflow_config_dir, safe_home_dir
 from tokenclaw.upstream_url import normalize_openai_upstream_base_url, redact_url
 
@@ -278,14 +279,16 @@ def _target_host(_: str) -> str:
 def _profile_command_args(profile: dict[str, Any], *, redact: bool = False) -> list[str]:
     target = str(profile.get("id") or "")
     provider = str(profile.get("provider") or "")
+    host = env("TOKENCLAW_HOST") or str(profile.get("host") or DEFAULT_HOST)
+    port = env("TOKENCLAW_PORT")
     if target == "openai" and provider == "openai":
         return [
             "--provider",
             "openai",
             "--host",
-            str(profile.get("host") or DEFAULT_HOST),
+            host,
             "--port",
-            str(profile.get("port") or DEFAULT_OPENAI_PORT),
+            str(port or profile.get("port") or DEFAULT_OPENAI_PORT),
             "--openai-upstream",
             str(
                 redact_url(profile.get("upstream_base_url") or DEFAULT_OPENAI_UPSTREAM_BASE_URL)
@@ -300,9 +303,9 @@ def _profile_command_args(profile: dict[str, Any], *, redact: bool = False) -> l
             "--provider",
             "anthropic",
             "--host",
-            str(profile.get("host") or DEFAULT_HOST),
+            host,
             "--port",
-            str(profile.get("port") or DEFAULT_CLAUDE_PORT),
+            str(port or profile.get("port") or DEFAULT_CLAUDE_PORT),
             "--anthropic-upstream",
             str(
                 redact_url(profile.get("upstream_base_url") or DEFAULT_CLAUDE_UPSTREAM_BASE_URL)

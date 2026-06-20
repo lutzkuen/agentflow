@@ -12,6 +12,7 @@ import httpx
 
 from tokenclaw.cli_common import (
     default_config_dir,
+    default_db_path,
     default_stats_url,
     is_loopback_url as _is_loopback_url,
     open_store_for_db as _open_store_for_db,
@@ -312,7 +313,7 @@ def agentflow_cli(
     savings_report_parser.add_argument(
         "--db",
         default=None,
-        help="Local AgentFlow SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+        help="Local AgentFlow SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
     )
     savings_report_parser.add_argument(
         "--limit",
@@ -519,7 +520,7 @@ def agentflow_cli(
             _write_json(stderr, result)
             return 1
 
-        db_path = getattr(args, "db", None) or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3"))
+        db_path = getattr(args, "db", None) or default_db_path()
         store = None
         db_path_obj = Path(db_path)
         if db_path_obj.exists():

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from tokenclaw.crunch import sha256_text
+from tokenclaw.env import env
 from tokenclaw.pattern_rollout import (
     normalize_pattern_rollout,
     pattern_canary_decision,
@@ -73,7 +74,8 @@ def _default_cache_policy() -> dict[str, Any]:
 
 
 def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
-    env_path = os.getenv(env_name)
+    new_name = env_name.replace("AGENTFLOW_", "TOKENCLAW_", 1) if env_name.startswith("AGENTFLOW_") else env_name
+    env_path = env(new_name)
     candidates: list[Path] = []
     if env_path:
         candidates.append(Path(env_path))
@@ -90,7 +92,7 @@ def _first_existing_rule_path(filename: str, env_name: str) -> Path | None:
 
 
 def _first_existing_cache_canary_policy_path() -> Path | None:
-    env_path = os.getenv("AGENTFLOW_CACHE_CANARY_POLICY")
+    env_path = env("TOKENCLAW_CACHE_CANARY_POLICY")
     if env_path:
         path = Path(env_path)
         return path if path.exists() else None
@@ -446,25 +448,25 @@ def _load_cache_policy() -> tuple[dict[str, Any], str, str]:
                 policy = _apply_cache_policy_yaml(policy, data)
         loaded_path = str(defaults_path)
     if loaded_policy is None:
-        policy["exact_cache"]["enabled"] = os.getenv("AGENTFLOW_CACHE", "1") != "0"
-        policy["exact_cache"]["cache_tool_calls"] = os.getenv("AGENTFLOW_CACHE_TOOL_CALLS", "0") == "1"
-        policy["semantic_cache"]["enabled"] = os.getenv("AGENTFLOW_SEMANTIC_CACHE", "0") == "1"
+        policy["exact_cache"]["enabled"] = env("TOKENCLAW_CACHE", "1") != "0"
+        policy["exact_cache"]["cache_tool_calls"] = env("TOKENCLAW_CACHE_TOOL_CALLS", "0") == "1"
+        policy["semantic_cache"]["enabled"] = env("TOKENCLAW_SEMANTIC_CACHE", "0") == "1"
         policy["semantic_cache"]["threshold"] = float(
-            os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", str(policy["semantic_cache"]["threshold"]))
+            env("TOKENCLAW_SEMANTIC_THRESHOLD", str(policy["semantic_cache"]["threshold"]))
         )
         policy["file_watch"]["enabled"] = _as_bool(
-            os.getenv("AGENTFLOW_CACHE_FILE_WATCH"),
+            env("TOKENCLAW_CACHE_FILE_WATCH"),
             policy["file_watch"]["enabled"],
         )
-        policy["file_watch"]["root"] = os.getenv(
-            "AGENTFLOW_CACHE_WATCH_ROOT",
+        policy["file_watch"]["root"] = env(
+            "TOKENCLAW_CACHE_WATCH_ROOT",
             str(policy["file_watch"]["root"]),
         )
         policy["file_watch"]["max_paths"] = int(
-            os.getenv("AGENTFLOW_CACHE_WATCH_MAX_PATHS", str(policy["file_watch"]["max_paths"]))
+            env("TOKENCLAW_CACHE_WATCH_MAX_PATHS", str(policy["file_watch"]["max_paths"]))
         )
         policy["file_watch"]["capture_candidates"] = _as_bool(
-            os.getenv("AGENTFLOW_CACHE_CAPTURE_CANDIDATES"),
+            env("TOKENCLAW_CACHE_CAPTURE_CANDIDATES"),
             policy["file_watch"]["capture_candidates"],
         )
     _apply_cache_canary_overlay(policy)
@@ -2036,13 +2038,13 @@ def validate_stream_cache_payload(payload: Any, *, provider: str | None = None) 
 
 
 def _default_cache_provider() -> str:
-    return os.getenv("AGENTFLOW_PROVIDER", "anthropic").lower()
+    return env("TOKENCLAW_PROVIDER", "anthropic").lower()
 
 
 def _default_cache_upstream(provider: str) -> str:
     if provider == "openai":
-        return os.getenv("AGENTFLOW_OPENAI_UPSTREAM", "https://api.openai.com").rstrip("/")
-    return os.getenv("AGENTFLOW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com").rstrip("/")
+        return env("TOKENCLAW_OPENAI_UPSTREAM", "https://api.openai.com").rstrip("/")
+    return env("TOKENCLAW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com").rstrip("/")
 
 
 def cache_key_for(
@@ -2059,7 +2061,7 @@ def cache_key_for(
     # Namespacing prevents cache reuse across providers, upstreams, or user-selected projects.
     provider = (provider or _default_cache_provider()).lower()
     upstream = (upstream or _default_cache_upstream(provider)).rstrip("/")
-    namespace = namespace if namespace is not None else os.getenv("AGENTFLOW_CACHE_NAMESPACE", "default")
+    namespace = namespace if namespace is not None else env("TOKENCLAW_CACHE_NAMESPACE", "default")
     key_payload: dict[str, Any] = {
         "version": 2,
         "namespace": namespace,

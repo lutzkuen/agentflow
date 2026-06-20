@@ -8,31 +8,30 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+from tokenclaw.env import env, env_any
 from tokenclaw.paths import default_db_path as agentflow_default_db_path
+from tokenclaw.paths import default_config_dir as tokenclaw_default_config_dir
 
 
 def default_config_dir() -> str:
-    return os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow"))
+    return str(tokenclaw_default_config_dir())
 
 
 def default_db_path() -> str:
-    return os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv(
-        "AGENTFLOW_DB",
-        str(agentflow_default_db_path()),
-    )
+    return env("TOKENCLAW_DATABASE_URL") or env("TOKENCLAW_DB", str(agentflow_default_db_path()))
 
 
 def default_stats_url() -> str:
-    return os.getenv("AGENTFLOW_STATS_URL", "http://127.0.0.1:4002/agentflow/stats")
+    return env("TOKENCLAW_STATS_URL", "http://127.0.0.1:4002/agentflow/stats")
 
 
 def default_loopback_url(
     path: str,
     *,
-    port_env_names: tuple[str, ...] = ("AGENTFLOW_ADMIN_PORT", "AGENTFLOW_PORT"),
+    port_env_names: tuple[str, ...] = ("TOKENCLAW_ADMIN_PORT", "TOKENCLAW_PORT"),
     default_port: str = "4000",
 ) -> str:
-    port = next((os.getenv(name) for name in port_env_names if os.getenv(name)), default_port)
+    port = env_any(port_env_names, default_port)
     return f"http://127.0.0.1:{port}{path}"
 
 
@@ -94,15 +93,15 @@ def redact_secret(value: Any, secret: str | None) -> Any:
 def open_store_for_db(db_arg: str) -> Any:
     from tokenclaw.store import Store
 
-    old_database_url = os.environ.get("AGENTFLOW_DATABASE_URL")
+    old_database_url = os.environ.get("TOKENCLAW_DATABASE_URL")
     try:
         if db_arg.startswith(("postgresql://", "postgres://")):
-            os.environ["AGENTFLOW_DATABASE_URL"] = db_arg
+            os.environ["TOKENCLAW_DATABASE_URL"] = db_arg
             return Store()
-        os.environ.pop("AGENTFLOW_DATABASE_URL", None)
+        os.environ.pop("TOKENCLAW_DATABASE_URL", None)
         return Store(db_arg)
     finally:
         if old_database_url is None:
-            os.environ.pop("AGENTFLOW_DATABASE_URL", None)
+            os.environ.pop("TOKENCLAW_DATABASE_URL", None)
         else:
-            os.environ["AGENTFLOW_DATABASE_URL"] = old_database_url
+            os.environ["TOKENCLAW_DATABASE_URL"] = old_database_url

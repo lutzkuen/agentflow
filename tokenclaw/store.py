@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
+from tokenclaw.env import env, env_int
 from tokenclaw.paths import default_db_path
 
 
@@ -2156,13 +2157,13 @@ class PostgresStore(SQLiteStore):
             from psycopg_pool import ConnectionPool
         except ImportError as exc:
             raise RuntimeError(
-                "AGENTFLOW_DATABASE_URL requires the psycopg pool extra. "
+                "TOKENCLAW_DATABASE_URL requires the psycopg pool extra. "
                 "Install with: python -m pip install 'psycopg[binary,pool]>=3.2'"
             ) from exc
         self.path = database_url
         self.database_url = database_url
-        min_size = int(os.getenv("AGENTFLOW_POSTGRES_POOL_MIN", "1"))
-        max_size = int(os.getenv("AGENTFLOW_POSTGRES_POOL_MAX", "10"))
+        min_size = env_int("TOKENCLAW_POSTGRES_POOL_MIN", 1)
+        max_size = env_int("TOKENCLAW_POSTGRES_POOL_MAX", 10)
         self.pool = ConnectionPool(conninfo=database_url, min_size=min_size, max_size=max_size, open=True)
         self.conn = PostgresConnection(self.pool)
         self._lock = threading.RLock()
@@ -2611,10 +2612,10 @@ class PostgresStore(SQLiteStore):
 
 
 def Store(path: str | None = None) -> SQLiteStore | PostgresStore:
-    database_url = os.getenv("AGENTFLOW_DATABASE_URL", "").strip()
+    database_url = (env("TOKENCLAW_DATABASE_URL") or "").strip()
     if database_url:
         if not database_url.startswith(("postgresql://", "postgres://")):
-            raise ValueError("AGENTFLOW_DATABASE_URL must start with postgresql:// or postgres://")
+            raise ValueError("TOKENCLAW_DATABASE_URL must start with postgresql:// or postgres://")
         return PostgresStore(database_url)
     if path is None:
         path = str(default_db_path())

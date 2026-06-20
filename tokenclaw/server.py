@@ -11,34 +11,35 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, WebSocket
 
+from tokenclaw.env import env, env_float, env_int
 from tokenclaw.paths import default_db_path
 from tokenclaw.upstream_url import normalize_openai_upstream_base_url, redact_url
 
 load_dotenv()
 
-PROVIDER = os.getenv("AGENTFLOW_PROVIDER", "anthropic").lower()
-ANTHROPIC_UPSTREAM = os.getenv("AGENTFLOW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com")
-OPENAI_UPSTREAM = normalize_openai_upstream_base_url(os.getenv("AGENTFLOW_OPENAI_UPSTREAM", "https://api.openai.com"))
+PROVIDER = env("TOKENCLAW_PROVIDER", "anthropic").lower()
+ANTHROPIC_UPSTREAM = env("TOKENCLAW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com")
+OPENAI_UPSTREAM = normalize_openai_upstream_base_url(env("TOKENCLAW_OPENAI_UPSTREAM", "https://api.openai.com"))
 DEFAULT_UPSTREAM = ANTHROPIC_UPSTREAM if PROVIDER == "anthropic" else OPENAI_UPSTREAM
-DEFAULT_DB = os.getenv("AGENTFLOW_DATABASE_URL") or str(default_db_path())
-DEFAULT_PORT = int(os.getenv("AGENTFLOW_PORT", "4000"))
-DEFAULT_HOST = os.getenv("AGENTFLOW_HOST", "0.0.0.0")
+DEFAULT_DB = env("TOKENCLAW_DATABASE_URL") or str(default_db_path())
+DEFAULT_PORT = env_int("TOKENCLAW_PORT", 4000)
+DEFAULT_HOST = env("TOKENCLAW_HOST", "0.0.0.0")
 
-LOG_BODIES = os.getenv("AGENTFLOW_LOG_BODIES", "0") == "1"
-HTTP_TIMEOUT = float(os.getenv("AGENTFLOW_HTTP_TIMEOUT", "600"))
-MIN_REQUEST_INTERVAL_MS = int(os.getenv("AGENTFLOW_MIN_REQUEST_INTERVAL_MS", "0"))
-MAX_TIER_BACKOFF_WAIT = float(os.getenv("AGENTFLOW_MAX_TIER_BACKOFF_WAIT", "30"))
+LOG_BODIES = env("TOKENCLAW_LOG_BODIES", "0") == "1"
+HTTP_TIMEOUT = env_float("TOKENCLAW_HTTP_TIMEOUT", 600.0)
+MIN_REQUEST_INTERVAL_MS = env_int("TOKENCLAW_MIN_REQUEST_INTERVAL_MS", 0)
+MAX_TIER_BACKOFF_WAIT = env_float("TOKENCLAW_MAX_TIER_BACKOFF_WAIT", 30.0)
 # 0 = disabled (unlimited concurrency). Default 2 prevents burst collisions before global backoff coordinates.
-MAX_CONCURRENT_PER_TIER = int(os.getenv("AGENTFLOW_MAX_CONCURRENT_PER_TIER", "2"))
+MAX_CONCURRENT_PER_TIER = env_int("TOKENCLAW_MAX_CONCURRENT_PER_TIER", 2)
 OPENAI_MODEL_LIST = list(dict.fromkeys([
-    os.getenv("AGENTFLOW_OPENAI_LARGE_MODEL", "gpt-5-codex"),
-    os.getenv("AGENTFLOW_OPENAI_SMALL_MODEL", "gpt-5-mini"),
-    os.getenv("AGENTFLOW_OPENAI_TINY_MODEL", "gpt-5-nano"),
+    env("TOKENCLAW_OPENAI_LARGE_MODEL", "gpt-5-codex"),
+    env("TOKENCLAW_OPENAI_SMALL_MODEL", "gpt-5-mini"),
+    env("TOKENCLAW_OPENAI_TINY_MODEL", "gpt-5-nano"),
     "gpt-5.5",
     "gpt-5.2-codex",
     "gpt-5-codex",
 ]))
-OPENAI_AUTH_MODE = os.getenv("AGENTFLOW_OPENAI_AUTH_MODE", "client").lower()
+OPENAI_AUTH_MODE = env("TOKENCLAW_OPENAI_AUTH_MODE", "client").lower()
 
 
 def _tier_backoff_status(now: Optional[float] = None) -> list[dict[str, Any]]:
@@ -256,17 +257,17 @@ async def _log_startup_session_spending_summary() -> None:
     _log_recent_session_spending_summary("startup")
     await _finalize_routing_outcome_labels_once()
     try:
-        label_interval = int(os.getenv("AGENTFLOW_ROUTING_OUTCOME_LABEL_INTERVAL_SECONDS", "60"))
+        label_interval = env_int("TOKENCLAW_ROUTING_OUTCOME_LABEL_INTERVAL_SECONDS", 60)
     except ValueError:
         label_interval = 60
     if label_interval > 0 and _routing_outcome_label_task is None:
         _routing_outcome_label_task = asyncio.create_task(
             _periodic_routing_outcome_label_finalizer(label_interval)
         )
-    if os.getenv("AGENTFLOW_SQLITE_MAINTENANCE_ON_STARTUP", "1").strip().lower() in {"0", "false", "no", "off"}:
+    if env("TOKENCLAW_SQLITE_MAINTENANCE_ON_STARTUP", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
     try:
-        min_interval = int(os.getenv("AGENTFLOW_SQLITE_MAINTENANCE_MIN_INTERVAL_SECONDS", "21600"))
+        min_interval = env_int("TOKENCLAW_SQLITE_MAINTENANCE_MIN_INTERVAL_SECONDS", 21600)
     except ValueError:
         min_interval = 21600
     if not hasattr(store, "sqlite_maintenance_due") or not store.sqlite_maintenance_due(min_interval_seconds=min_interval):
@@ -417,10 +418,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args(argv)
-    os.environ["AGENTFLOW_PROVIDER"] = args.provider
-    os.environ["AGENTFLOW_ANTHROPIC_UPSTREAM"] = args.anthropic_upstream
-    os.environ["AGENTFLOW_OPENAI_UPSTREAM"] = args.openai_upstream
-    os.environ["AGENTFLOW_OPENAI_AUTH_MODE"] = args.openai_auth_mode
+    os.environ["TOKENCLAW_PROVIDER"] = args.provider
+    os.environ["TOKENCLAW_ANTHROPIC_UPSTREAM"] = args.anthropic_upstream
+    os.environ["TOKENCLAW_OPENAI_UPSTREAM"] = args.openai_upstream
+    os.environ["TOKENCLAW_OPENAI_AUTH_MODE"] = args.openai_auth_mode
     configure_provider(args.provider, args.anthropic_upstream, args.openai_upstream, args.openai_auth_mode)
     import uvicorn
     if args.reload:

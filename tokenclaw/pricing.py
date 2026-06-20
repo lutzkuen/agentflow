@@ -4,6 +4,8 @@ import json
 import os
 from typing import Any, Optional
 
+from tokenclaw.env import env
+
 # Approximate public list prices in USD per million tokens. Update in config/env as needed.
 PRICING_SOURCE_OPENAI = "https://developers.openai.com/api/docs/pricing"
 PRICING_VERSION_OPENAI = "2026-06-08"
@@ -82,16 +84,16 @@ MODEL_ALIASES = {
 
 def codex_app_model() -> str:
     return (
-        os.getenv("AGENTFLOW_CODEX_APP_MODEL")
-        or os.getenv("AGENTFLOW_OPENAI_LARGE_MODEL")
+        env("TOKENCLAW_CODEX_APP_MODEL")
+        or env("TOKENCLAW_OPENAI_LARGE_MODEL")
         or DEFAULT_CODEX_APP_MODEL
     )
 
 
 def codex_app_processing_mode() -> str:
     return (
-        os.getenv("AGENTFLOW_CODEX_APP_PROCESSING_MODE")
-        or os.getenv("AGENTFLOW_OPENAI_PROCESSING_MODE")
+        env("TOKENCLAW_CODEX_APP_PROCESSING_MODE")
+        or env("TOKENCLAW_OPENAI_PROCESSING_MODE")
         or DEFAULT_CODEX_APP_PROCESSING_MODE
     ).strip().lower()
 
@@ -117,7 +119,7 @@ def _price_tuple_from_value(value: Any) -> Optional[tuple[float, float, float]]:
 
 
 def _openai_price_overrides(processing_mode: str) -> dict[str, tuple[float, float, float]]:
-    raw = os.getenv("AGENTFLOW_OPENAI_MODEL_PRICES_JSON", "").strip()
+    raw = env("TOKENCLAW_OPENAI_MODEL_PRICES_JSON", "").strip()
     if not raw:
         return {}
     try:

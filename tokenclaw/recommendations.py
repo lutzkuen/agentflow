@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import httpx
 
 from tokenclaw.codex_turn_policy import CODEX_APP_SOURCE_SURFACE
+from tokenclaw.env import env
 from tokenclaw.managed_egress import (
     LIFECYCLE_METADATA_COMMAND_SCHEMAS,
     RAW_FEATURE_KEYS,
@@ -34,17 +35,17 @@ PROMOTION_BLOCKER_ACTION_OUTCOME_ROLLUPS_PATH = "/v1/promotion-blocker-action-ou
 FEATURE_SCHEMA_VERSION = "agentflow.optimization_unit_features.v1"
 POLICY_DECISION_PREFLIGHT_SCHEMA = "agentflow.policy_decision_preflight.v1"
 POLICY_DECISION_SCHEMA = "agentflow.policy_decision.v1"
-MANAGED_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
-RECOMMENDATION_ENABLED_ENV = "AGENTFLOW_RECOMMENDATION_ENABLED"
-RECOMMENDATIONS_ENABLED_ENV = "AGENTFLOW_RECOMMENDATIONS_ENABLED"
-RECOMMENDATION_SERVER_URL_ENV = "AGENTFLOW_RECOMMENDATION_SERVER_URL"
-RECOMMENDATION_TIMEOUT_ENV = "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"
-RECOMMENDATION_FAILURE_MODE_ENV = "AGENTFLOW_RECOMMENDATION_FAILURE_MODE"
-POLICY_DECISION_ENABLED_ENV = "AGENTFLOW_POLICY_DECISION_ENABLED"
-POLICY_DECISIONS_ENABLED_ENV = "AGENTFLOW_POLICY_DECISIONS_ENABLED"
-POLICY_DECISION_MIN_CONFIDENCE_ENV = "AGENTFLOW_POLICY_DECISION_MIN_CONFIDENCE"
-POLICY_DECISION_CANARY_FRACTION_ENV = "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION"
-POLICY_DECISION_CANARY_SALT_ENV = "AGENTFLOW_POLICY_DECISION_CANARY_SALT"
+MANAGED_API_KEY_ENV = "TOKENCLAW_MANAGED_API_KEY"
+RECOMMENDATION_ENABLED_ENV = "TOKENCLAW_RECOMMENDATION_ENABLED"
+RECOMMENDATIONS_ENABLED_ENV = "TOKENCLAW_RECOMMENDATIONS_ENABLED"
+RECOMMENDATION_SERVER_URL_ENV = "TOKENCLAW_RECOMMENDATION_SERVER_URL"
+RECOMMENDATION_TIMEOUT_ENV = "TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS"
+RECOMMENDATION_FAILURE_MODE_ENV = "TOKENCLAW_RECOMMENDATION_FAILURE_MODE"
+POLICY_DECISION_ENABLED_ENV = "TOKENCLAW_POLICY_DECISION_ENABLED"
+POLICY_DECISIONS_ENABLED_ENV = "TOKENCLAW_POLICY_DECISIONS_ENABLED"
+POLICY_DECISION_MIN_CONFIDENCE_ENV = "TOKENCLAW_POLICY_DECISION_MIN_CONFIDENCE"
+POLICY_DECISION_CANARY_FRACTION_ENV = "TOKENCLAW_POLICY_DECISION_CANARY_FRACTION"
+POLICY_DECISION_CANARY_SALT_ENV = "TOKENCLAW_POLICY_DECISION_CANARY_SALT"
 DEFAULT_RECOMMENDATION_SERVER_URL = ""
 ROLLOUT_ACTION_LIFECYCLE_SOURCE_SURFACE = "rollout_action_lifecycle"
 OLD_CONTEXT_SUMMARY_LIFECYCLE_SOURCE_SURFACE = "old_context_summary_lifecycle"
@@ -211,7 +212,7 @@ def _metadata_only_privacy_summary() -> dict[str, Any]:
 
 
 def _env_enabled(name: str, default: str = "0") -> bool:
-    return os.getenv(name, default).strip().lower() not in {"", "0", "false", "no", "off"}
+    return env(name, default).strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _compact_grouping_identifiers(values: dict[str, str | None]) -> dict[str, str]:
@@ -561,13 +562,14 @@ def _as_bool(value: str | None, default: bool = False) -> bool:
 
 
 def recommendations_enabled() -> bool:
-    if os.getenv(RECOMMENDATIONS_ENABLED_ENV) is not None:
-        return _as_bool(os.getenv(RECOMMENDATIONS_ENABLED_ENV), False)
-    return _as_bool(os.getenv(RECOMMENDATION_ENABLED_ENV), False)
+    raw = env(RECOMMENDATIONS_ENABLED_ENV)
+    if raw is not None:
+        return _as_bool(raw, False)
+    return _as_bool(env(RECOMMENDATION_ENABLED_ENV), False)
 
 
 def recommendation_server_url() -> str:
-    raw = os.getenv(RECOMMENDATION_SERVER_URL_ENV)
+    raw = env(RECOMMENDATION_SERVER_URL_ENV)
     if raw is None:
         raw = DEFAULT_RECOMMENDATION_SERVER_URL
     return raw.strip().rstrip("/")
@@ -579,13 +581,13 @@ def recommendation_server_configured() -> bool:
 
 def recommendation_timeout_seconds() -> float:
     try:
-        return max(0.05, float(os.getenv(RECOMMENDATION_TIMEOUT_ENV, "1.5")))
+        return max(0.05, float(env(RECOMMENDATION_TIMEOUT_ENV, "1.5")))
     except ValueError:
         return 1.5
 
 
 def recommendation_failure_mode() -> str:
-    mode = os.getenv(RECOMMENDATION_FAILURE_MODE_ENV, "fallback-local").strip().lower()
+    mode = env(RECOMMENDATION_FAILURE_MODE_ENV, "fallback-local").strip().lower()
     return mode if mode in {"fallback-local"} else "fallback-local"
 
 
@@ -598,11 +600,12 @@ def managed_loopback_auth_allowed() -> bool:
 
 
 def managed_auth_configured() -> bool:
-    return bool(os.getenv(MANAGED_API_KEY_ENV)) or managed_loopback_auth_allowed()
+    return bool(env(MANAGED_API_KEY_ENV)) or managed_loopback_auth_allowed()
 
 
 def managed_auth_source() -> str | None:
-    if os.getenv(MANAGED_API_KEY_ENV):
+    api_key = env(MANAGED_API_KEY_ENV)
+    if api_key:
         return MANAGED_API_KEY_ENV
     if managed_loopback_auth_allowed():
         return "loopback-unauthenticated-dev"
@@ -615,7 +618,7 @@ def _managed_headers() -> dict[str, str]:
         "content-type": "application/json",
         "x-agentflow-local-fallback": "local-policy",
     }
-    api_key = os.getenv(MANAGED_API_KEY_ENV)
+    api_key = env(MANAGED_API_KEY_ENV)
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
     return headers
@@ -623,14 +626,14 @@ def _managed_headers() -> dict[str, str]:
 
 def outcome_feedback_queue_max_attempts() -> int:
     try:
-        return max(1, int(os.getenv("AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS", "3")))
+        return max(1, int(env("TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS", "3")))
     except ValueError:
         return 3
 
 
 def outcome_feedback_queue_retry_delay_seconds() -> float:
     try:
-        return max(0.0, float(os.getenv("AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS", "60")))
+        return max(0.0, float(env("TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS", "60")))
     except ValueError:
         return 60.0
 
@@ -928,13 +931,13 @@ def _base_meta() -> dict[str, Any]:
 
 
 def policy_decisions_enabled() -> bool:
-    if os.getenv(POLICY_DECISIONS_ENABLED_ENV) is not None:
-        return _as_bool(os.getenv(POLICY_DECISIONS_ENABLED_ENV), False)
+    if env(POLICY_DECISIONS_ENABLED_ENV) is not None:
+        return _as_bool(env(POLICY_DECISIONS_ENABLED_ENV), False)
     return _env_enabled(POLICY_DECISION_ENABLED_ENV)
 
 
 def policy_decision_min_confidence() -> float:
-    raw = os.getenv(POLICY_DECISION_MIN_CONFIDENCE_ENV, "0.75")
+    raw = env(POLICY_DECISION_MIN_CONFIDENCE_ENV, "0.75")
     try:
         return max(0.0, min(1.0, float(raw)))
     except (TypeError, ValueError):
@@ -942,7 +945,7 @@ def policy_decision_min_confidence() -> float:
 
 
 def policy_decision_canary_fraction() -> float:
-    raw = os.getenv(POLICY_DECISION_CANARY_FRACTION_ENV, "0.0")
+    raw = env(POLICY_DECISION_CANARY_FRACTION_ENV, "0.0")
     try:
         return max(0.0, min(1.0, float(raw)))
     except (TypeError, ValueError):
@@ -950,7 +953,7 @@ def policy_decision_canary_fraction() -> float:
 
 
 def policy_decision_canary_salt() -> str:
-    return os.getenv(POLICY_DECISION_CANARY_SALT_ENV, "agentflow-policy-decision-canary-v1")
+    return env(POLICY_DECISION_CANARY_SALT_ENV, "agentflow-policy-decision-canary-v1")
 
 
 def _policy_decision_base_meta() -> dict[str, Any]:

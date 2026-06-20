@@ -17,11 +17,14 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from tokenclaw.cli_common import (
+    default_config_dir as _default_config_dir,
+    default_db_path as _default_db_path,
     is_loopback_url as _is_loopback_url,
     open_store_for_db as _open_store_for_db,
     redact_secret as _redact_secret,
     write_json as _write_json,
 )
+from tokenclaw.env import env, env_float
 from tokenclaw.managed_egress import managed_egress_violations
 from tokenclaw.upstream_url import redact_url as _redact_url
 
@@ -201,8 +204,8 @@ def policy_rollback_cli(
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local rule files, default: ~/.agentflow",
+        default=env("TOKENCLAW_POLICY_CONFIG_DIR", _default_config_dir()),
+        help="Directory for local rule files, default: ~/.tokenclaw",
     )
     parser.add_argument(
         "--section",
@@ -222,13 +225,13 @@ def policy_rollback_cli(
     )
     parser.add_argument(
         "--reload-url",
-        default=os.getenv("AGENTFLOW_ADMIN_URL", _default_policy_reload_url()),
+        default=env("TOKENCLAW_ADMIN_URL", _default_policy_reload_url()),
         help=f"Admin reload URL for --apply-id rollback, default: {_default_policy_reload_url()}",
     )
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_ADMIN_TIMEOUT", "10")),
+        default=env_float("TOKENCLAW_ADMIN_TIMEOUT", 10.0),
         help="HTTP timeout in seconds for the loopback reload call, default: 10.",
     )
     parser.add_argument(
@@ -343,8 +346,8 @@ def sqlite_maintenance_cli(argv: Sequence[str] | None = None, *, stdout: Any = N
     parser = argparse.ArgumentParser(description="Run local SQLite retention maintenance for AgentFlow metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow SQLite DB path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+        default=_default_db_path(),
+        help="TokenClaw SQLite DB path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
     )
     parser.add_argument(
         "--retention-days",
@@ -623,14 +626,9 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
         )
         if needs_cache_replay_evidence:
             rules_path = (
-                Path(os.getenv("AGENTFLOW_CACHE_CANARY_POLICY")).expanduser()
-                if os.getenv("AGENTFLOW_CACHE_CANARY_POLICY")
-                else Path(
-                    os.getenv(
-                        "AGENTFLOW_CONFIG_DIR",
-                        os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-                    )
-                ).expanduser()
+                Path(env("TOKENCLAW_CACHE_CANARY_POLICY")).expanduser()
+                if env("TOKENCLAW_CACHE_CANARY_POLICY")
+                else Path(_default_config_dir()).expanduser()
                 / "cache_canary_policy.yaml"
             )
             cache_replay_evidence = build_request_shape_cache_replay_evidence_report(
@@ -1078,7 +1076,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        default=_default_db_path(),
         help="AgentFlow database URL or SQLite path for --persist-outcomes.",
     )
     parser.add_argument(
@@ -1253,8 +1251,8 @@ def managed_activation_preview_outcomes_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=_default_db_path(),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=1000, help="Stored preview outcomes to inspect, default: 1000.")
     parser.add_argument(
@@ -1358,11 +1356,8 @@ def managed_routing_pathway_outcomes_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv(
-            "AGENTFLOW_DATABASE_URL",
-            os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        ),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=_default_db_path(),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=1000, help="Local evidence rows to inspect, default: 1000.")
     parser.add_argument(
@@ -1414,8 +1409,9 @@ def managed_routing_pathway_outcomes_cli(
 def proxy_main() -> None:
     # The provider proxy forwards real API credentials and request bodies upstream.
     # Keep installed CLI defaults localhost-only unless the user explicitly opts in
-    # to a different bind address through AGENTFLOW_HOST or --host.
-    os.environ.setdefault("AGENTFLOW_HOST", "127.0.0.1")
+    # to a different bind address through TOKENCLAW_HOST, the legacy AGENTFLOW_HOST alias, or --host.
+    if "TOKENCLAW_HOST" not in os.environ and "AGENTFLOW_HOST" not in os.environ:
+        os.environ["TOKENCLAW_HOST"] = "127.0.0.1"
 
     from tokenclaw.server import main
 

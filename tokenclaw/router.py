@@ -10,27 +10,29 @@ import yaml
 from pathlib import Path
 from typing import Any
 
+from tokenclaw.env import env, env_int
 from tokenclaw.policy_files import policy_file_snapshot, utc_now
 from tokenclaw.paths import agentflow_config_path, default_db_path, safe_expanduser
 from tokenclaw.pricing import estimate_cost
 from tokenclaw.session_phase_memory import build_session_phase_memory_for_session
 from tokenclaw.store import stable_json
 
-HAIKU_DEFAULT = os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
-SONNET_DEFAULT = os.getenv("AGENTFLOW_SONNET_MODEL", "claude-sonnet-4-6")
-OPUS_DEFAULT = os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4-5")
-OPENAI_LARGE_DEFAULT = os.getenv("AGENTFLOW_OPENAI_LARGE_MODEL", "gpt-5-codex")
-OPENAI_SMALL_DEFAULT = os.getenv("AGENTFLOW_OPENAI_SMALL_MODEL", "gpt-5-mini")
-OPENAI_TINY_DEFAULT = os.getenv("AGENTFLOW_OPENAI_TINY_MODEL", "gpt-5-nano")
+HAIKU_DEFAULT = env("TOKENCLAW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
+SONNET_DEFAULT = env("TOKENCLAW_SONNET_MODEL", "claude-sonnet-4-6")
+OPUS_DEFAULT = env("TOKENCLAW_OPUS_MODEL", "claude-opus-4-5")
+OPENAI_LARGE_DEFAULT = env("TOKENCLAW_OPENAI_LARGE_MODEL", "gpt-5-codex")
+OPENAI_SMALL_DEFAULT = env("TOKENCLAW_OPENAI_SMALL_MODEL", "gpt-5-mini")
+OPENAI_TINY_DEFAULT = env("TOKENCLAW_OPENAI_TINY_MODEL", "gpt-5-nano")
 
-ROUTING_ENABLED = os.getenv("AGENTFLOW_ROUTING", "1") != "0"
-OPENAI_ROUTING_ENABLED = os.getenv("AGENTFLOW_OPENAI_ROUTING", "0") == "1"
-ROUTING_RULES_PATH = os.getenv("AGENTFLOW_ROUTING_RULES", str(agentflow_config_path("routing_rules.yaml")))
-STRIP_THINKING_HISTORY = os.getenv("AGENTFLOW_STRIP_THINKING_HISTORY", "0") == "1"
+ROUTING_ENABLED = env("TOKENCLAW_ROUTING", "1") != "0"
+OPENAI_ROUTING_ENABLED = env("TOKENCLAW_OPENAI_ROUTING", "0") == "1"
+ROUTING_RULES_PATH = env("TOKENCLAW_ROUTING_RULES", str(agentflow_config_path("routing_rules.yaml")))
+STRIP_THINKING_HISTORY = env("TOKENCLAW_STRIP_THINKING_HISTORY", "0") == "1"
 
 
 def _env_flag_enabled(name: str) -> bool:
-    return os.getenv(name, "0").strip().lower() in {"1", "true", "yes", "on"}
+    new_name = name.replace("AGENTFLOW_", "TOKENCLAW_", 1) if name.startswith("AGENTFLOW_") else name
+    return env(new_name, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -561,7 +563,7 @@ def _rules_list(data: Any) -> list[dict[str, Any]]:
 def _load_routing_rules() -> tuple[list[dict], dict[str, Any], list[dict[str, Any]], str, str]:
     defaults_path = Path(__file__).parent / "routing_rules.yaml"
     defaults = _load_routing_yaml(defaults_path) or {"rules": []}
-    env_path = os.getenv("AGENTFLOW_ROUTING_RULES")
+    env_path = env("TOKENCLAW_ROUTING_RULES")
     if env_path:
         p = safe_expanduser(env_path)
         data = _load_routing_yaml(p)
@@ -603,7 +605,7 @@ def _text_bucket(text_chars: int) -> str:
 
 
 def _phase_canary_db_path() -> str | None:
-    database_url = os.getenv("AGENTFLOW_DATABASE_URL")
+    database_url = env("TOKENCLAW_DATABASE_URL")
     if database_url and not database_url.startswith("sqlite:///"):
         return None
     if database_url and database_url.startswith("sqlite:///"):
@@ -2245,10 +2247,10 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
     routed = requested
     reason = "keep requested OpenAI model"
-    if requested_l == OPENAI_LARGE_DEFAULT.lower() and text_chars < int(os.getenv("AGENTFLOW_OPENAI_SMALL_TEXT_CHARS_LT", "6000")):
+    if requested_l == OPENAI_LARGE_DEFAULT.lower() and text_chars < env_int("TOKENCLAW_OPENAI_SMALL_TEXT_CHARS_LT", 6000):
         routed = OPENAI_SMALL_DEFAULT
         reason = "small non-tool OpenAI request"
-    elif requested_l == OPENAI_SMALL_DEFAULT.lower() and text_chars < int(os.getenv("AGENTFLOW_OPENAI_TINY_TEXT_CHARS_LT", "1500")):
+    elif requested_l == OPENAI_SMALL_DEFAULT.lower() and text_chars < env_int("TOKENCLAW_OPENAI_TINY_TEXT_CHARS_LT", 1500):
         routed = OPENAI_TINY_DEFAULT
         reason = "tiny non-tool OpenAI request"
 

@@ -13,11 +13,13 @@ from typing import Any, Sequence
 import httpx
 
 from tokenclaw.cli_common import (
+    default_db_path,
     default_loopback_url,
     is_loopback_url,
     open_store_for_db as _open_store_for_db,
     write_json as _write_json,
 )
+from tokenclaw.env import env, env_float
 from tokenclaw.upstream_url import redact_url as _redact_url
 
 
@@ -36,13 +38,13 @@ def policy_reload_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, 
     parser = argparse.ArgumentParser(description="Reload local AgentFlow policy files through the loopback admin API")
     parser.add_argument(
         "--url",
-        default=os.getenv("AGENTFLOW_ADMIN_URL", _default_policy_reload_url()),
+        default=env("TOKENCLAW_ADMIN_URL", _default_policy_reload_url()),
         help=f"Admin reload URL, default: {_default_policy_reload_url()}",
     )
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_ADMIN_TIMEOUT", "10")),
+        default=env_float("TOKENCLAW_ADMIN_TIMEOUT", 10.0),
         help="HTTP timeout in seconds, default: 10",
     )
     parser.add_argument(
@@ -367,8 +369,8 @@ def policy_review_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="SQLite metadata database path for local impact simulation, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+        default=default_db_path(),
+        help="SQLite metadata database path for local impact simulation, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
     )
     parser.add_argument(
         "--impact-limit",

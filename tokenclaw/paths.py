@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from pathlib import Path
+
+from tokenclaw.env import env
 
 
 def safe_home_dir() -> Path:
@@ -29,10 +32,23 @@ def safe_expanduser(path: str | Path) -> Path:
 
 
 def default_config_dir() -> Path:
-    configured = os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR")
+    configured = env("TOKENCLAW_CONFIG_DIR") or env("TOKENCLAW_POLICY_CONFIG_DIR")
     if configured:
         return safe_expanduser(configured)
-    return safe_home_dir() / ".agentflow"
+    target = safe_home_dir() / ".tokenclaw"
+    _copy_legacy_config_dir_if_needed(target)
+    return target
+
+
+def _copy_legacy_config_dir_if_needed(target: Path) -> None:
+    legacy = safe_home_dir() / ".agentflow"
+    if target.exists() or not legacy.exists() or not legacy.is_dir():
+        return
+    shutil.copytree(legacy, target, symlinks=True)
+    message = f"Copied legacy AgentFlow config directory from {legacy} to {target}; old directory was left intact."
+    import logging
+
+    logging.getLogger("tokenclaw").warning(message)
 
 
 def agentflow_config_path(*parts: str) -> Path:
@@ -40,7 +56,7 @@ def agentflow_config_path(*parts: str) -> Path:
 
 
 def default_db_path() -> Path:
-    configured = os.getenv("AGENTFLOW_DB")
+    configured = env("TOKENCLAW_DB")
     if configured:
         return safe_expanduser(configured.removeprefix("sqlite:///"))
-    return agentflow_config_path("agentflow.sqlite3")
+    return agentflow_config_path("tokenclaw.sqlite3")

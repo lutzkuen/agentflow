@@ -7,20 +7,22 @@ from typing import Any, Callable
 from fastapi import FastAPI
 
 from tokenclaw.dashboard_app import create_dashboard_app
+from tokenclaw.env import env, env_float, env_int
 from tokenclaw.limiter import TierLimiter
+from tokenclaw.paths import default_db_path
 from tokenclaw.store import Store
 
-DEFAULT_DASHBOARD_HOST = os.getenv("AGENTFLOW_DASHBOARD_HOST", "0.0.0.0")
-DEFAULT_DASHBOARD_PORT = int(os.getenv("AGENTFLOW_DASHBOARD_PORT", "4002"))
-DEFAULT_PROXY_HOST = os.getenv("AGENTFLOW_PROXY_HOST") or os.getenv("AGENTFLOW_HOST")
-DEFAULT_DB = os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", os.path.expanduser("~/.agentflow/agentflow.sqlite3"))
-PROVIDER = os.getenv("AGENTFLOW_PROVIDER", "anthropic").lower()
-ANTHROPIC_UPSTREAM = os.getenv("AGENTFLOW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com")
-OPENAI_UPSTREAM = os.getenv("AGENTFLOW_OPENAI_UPSTREAM", "https://api.openai.com")
+DEFAULT_DASHBOARD_HOST = env("TOKENCLAW_DASHBOARD_HOST", "0.0.0.0")
+DEFAULT_DASHBOARD_PORT = env_int("TOKENCLAW_DASHBOARD_PORT", 4002)
+DEFAULT_PROXY_HOST = env("TOKENCLAW_PROXY_HOST") or env("TOKENCLAW_HOST")
+DEFAULT_DB = env("TOKENCLAW_DATABASE_URL") or str(default_db_path())
+PROVIDER = env("TOKENCLAW_PROVIDER", "anthropic").lower()
+ANTHROPIC_UPSTREAM = env("TOKENCLAW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com")
+OPENAI_UPSTREAM = env("TOKENCLAW_OPENAI_UPSTREAM", "https://api.openai.com")
 DEFAULT_UPSTREAM = ANTHROPIC_UPSTREAM if PROVIDER == "anthropic" else OPENAI_UPSTREAM
-MIN_REQUEST_INTERVAL_MS = int(os.getenv("AGENTFLOW_MIN_REQUEST_INTERVAL_MS", "0"))
-MAX_TIER_BACKOFF_WAIT = float(os.getenv("AGENTFLOW_MAX_TIER_BACKOFF_WAIT", "30"))
-MAX_CONCURRENT_PER_TIER = int(os.getenv("AGENTFLOW_MAX_CONCURRENT_PER_TIER", "2"))
+MIN_REQUEST_INTERVAL_MS = env_int("TOKENCLAW_MIN_REQUEST_INTERVAL_MS", 0)
+MAX_TIER_BACKOFF_WAIT = env_float("TOKENCLAW_MAX_TIER_BACKOFF_WAIT", 30.0)
+MAX_CONCURRENT_PER_TIER = env_int("TOKENCLAW_MAX_CONCURRENT_PER_TIER", 2)
 
 
 def _limiter_config() -> dict[str, Any]:

@@ -9,6 +9,7 @@ import yaml
 from pathlib import Path
 from typing import Any
 
+from tokenclaw.env import env
 from tokenclaw.policy_files import policy_file_snapshot, utc_now
 from tokenclaw.paths import agentflow_config_path
 from tokenclaw.pricing import pricing_basis
@@ -874,37 +875,37 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             codex_scaffolding = data.get("codex_repeated_scaffolding") or {}
             if isinstance(codex_scaffolding, dict):
                 _apply_codex_scaffolding_policy_yaml(policy, codex_scaffolding)
-    policy["enabled"] = os.getenv("AGENTFLOW_CRUNCH", "1") != "0"
-    policy["threshold_chars"] = int(os.getenv("AGENTFLOW_CRUNCH_THRESHOLD_CHARS", str(policy["threshold_chars"])))
-    policy["prompt_cache"]["enabled"] = os.getenv("AGENTFLOW_PROMPT_CACHE", "1") != "0"
+    policy["enabled"] = env("TOKENCLAW_CRUNCH", "1") != "0"
+    policy["threshold_chars"] = int(env("TOKENCLAW_CRUNCH_THRESHOLD_CHARS", str(policy["threshold_chars"])))
+    policy["prompt_cache"]["enabled"] = env("TOKENCLAW_PROMPT_CACHE", "1") != "0"
     policy["prompt_cache"]["min_chars"] = int(
-        os.getenv("AGENTFLOW_PROMPT_CACHE_MIN_CHARS", str(policy["prompt_cache"]["min_chars"]))
+        env("TOKENCLAW_PROMPT_CACHE_MIN_CHARS", str(policy["prompt_cache"]["min_chars"]))
     )
     summary = policy["old_context_summarization"]
-    if os.getenv("AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT") is not None:
-        summary["enabled"] = os.getenv("AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT", "0") == "1"
-    summary["model"] = os.getenv("AGENTFLOW_HAIKU_SUMMARY_MODEL", str(summary["model"]))
-    summary["min_request_chars"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MIN_REQUEST_CHARS", str(summary["min_request_chars"])))
-    summary["min_summarized_chars"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MIN_SUMMARIZED_CHARS", str(summary["min_summarized_chars"])))
-    summary["max_turns"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MAX_TURNS", str(summary["max_turns"])))
-    summary["keep_recent_turns"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_KEEP_RECENT_TURNS", str(summary["keep_recent_turns"])))
-    summary["max_summary_chars"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS", str(summary["max_summary_chars"])))
-    summary["max_source_chars"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MAX_SOURCE_CHARS", str(summary["max_source_chars"])))
+    if env("TOKENCLAW_HAIKU_SUMMARIZE_OLD_CONTEXT") is not None:
+        summary["enabled"] = env("TOKENCLAW_HAIKU_SUMMARIZE_OLD_CONTEXT", "0") == "1"
+    summary["model"] = env("TOKENCLAW_HAIKU_SUMMARY_MODEL", str(summary["model"]))
+    summary["min_request_chars"] = int(env("TOKENCLAW_HAIKU_SUMMARY_MIN_REQUEST_CHARS", str(summary["min_request_chars"])))
+    summary["min_summarized_chars"] = int(env("TOKENCLAW_HAIKU_SUMMARY_MIN_SUMMARIZED_CHARS", str(summary["min_summarized_chars"])))
+    summary["max_turns"] = int(env("TOKENCLAW_HAIKU_SUMMARY_MAX_TURNS", str(summary["max_turns"])))
+    summary["keep_recent_turns"] = int(env("TOKENCLAW_HAIKU_SUMMARY_KEEP_RECENT_TURNS", str(summary["keep_recent_turns"])))
+    summary["max_summary_chars"] = int(env("TOKENCLAW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS", str(summary["max_summary_chars"])))
+    summary["max_source_chars"] = int(env("TOKENCLAW_HAIKU_SUMMARY_MAX_SOURCE_CHARS", str(summary["max_source_chars"])))
     provider = policy["enhanced_crunch_provider"]
     provider["mode"] = _normalize_enhanced_provider_mode(
-        os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MODE", str(provider["mode"]))
+        env("TOKENCLAW_ENHANCED_CRUNCH_MODE", str(provider["mode"]))
     )
-    provider["model"] = os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MODEL", provider.get("model") or "") or provider.get("model")
+    provider["model"] = env("TOKENCLAW_ENHANCED_CRUNCH_MODEL", provider.get("model") or "") or provider.get("model")
     provider["model_family"] = (
-        os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MODEL_FAMILY", provider.get("model_family") or "")
+        env("TOKENCLAW_ENHANCED_CRUNCH_MODEL_FAMILY", provider.get("model_family") or "")
         or provider.get("model_family")
     )
     provider["endpoint_url"] = (
-        os.getenv("AGENTFLOW_ENHANCED_CRUNCH_ENDPOINT_URL", provider.get("endpoint_url") or "")
+        env("TOKENCLAW_ENHANCED_CRUNCH_ENDPOINT_URL", provider.get("endpoint_url") or "")
         or provider.get("endpoint_url")
     )
-    if os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD") is not None:
-        provider["max_summary_cost_usd"] = float(os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD", "0"))
+    if env("TOKENCLAW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD") is not None:
+        provider["max_summary_cost_usd"] = float(env("TOKENCLAW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD", "0"))
     _promote_legacy_summary_provider(policy)
     _apply_scaffold_canary_overlay(policy, base_source="local-default")
     return policy, "local-default", str(defaults_path)
