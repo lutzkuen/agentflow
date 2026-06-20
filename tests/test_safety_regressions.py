@@ -17,6 +17,7 @@ if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
     from agentflow_proxy import crunch as crunch_module
+    from agentflow_proxy import managed_session_tier
     from agentflow_proxy import routing_experiments
     from agentflow_proxy import openai_proxy, server
     from agentflow_proxy.limiter import TierBackoffActive
@@ -68,6 +69,9 @@ class ManagedFeedbackAsyncClient:
     policy_decision_body = None
     policy_decision_status = 200
     policy_decision_error = None
+    session_tier_body = None
+    session_tier_status = 200
+    session_tier_error = None
     feedback_error = None
 
     def __init__(self, *args, **kwargs):
@@ -80,6 +84,32 @@ class ManagedFeedbackAsyncClient:
         return False
 
     async def post(self, url, *, headers=None, json=None, **kwargs):
+        if url.endswith("/v1/session-tier"):
+            if ManagedFeedbackAsyncClient.session_tier_error is not None:
+                raise ManagedFeedbackAsyncClient.session_tier_error
+            ManagedFeedbackAsyncClient.calls.append({
+                "kind": "session-tier",
+                "url": url,
+                "headers": dict(headers or {}),
+                "json": json,
+                "kwargs": kwargs,
+            })
+            body = ManagedFeedbackAsyncClient.session_tier_body
+            if body is None:
+                body = {
+                    "schema": "agentflow.session_tier_decision.v1",
+                    "tier": "sonnet",
+                    "confidence": 0.9,
+                    "session_type": "coding-agent-file-ops",
+                    "session_tier_source": "managed",
+                    "hold_tier_for_session": True,
+                    "feature_only": True,
+                    "locally_executed": True,
+                    "provider_forwarding": False,
+                    "server_content_processing": False,
+                    "reason_codes": ["coding-agent-file-ops"],
+                }
+            return FakeJsonResponse(body, ManagedFeedbackAsyncClient.session_tier_status)
         if url.endswith("/v1/policy-decision"):
             if ManagedFeedbackAsyncClient.policy_decision_error is not None:
                 raise ManagedFeedbackAsyncClient.policy_decision_error
@@ -246,7 +276,9 @@ class SafetyRegressionRouteTests(unittest.TestCase):
             "AGENTFLOW_RECOMMENDATION_ENABLED",
             "AGENTFLOW_RECOMMENDATION_SERVER_URL",
             "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
+            "AGENTFLOW_MANAGED_API_KEY",
             "AGENTFLOW_POLICY_DECISION_ENABLED",
+            "AGENTFLOW_SESSION_TIER_ENABLED",
             "AGENTFLOW_OPENAI_RECOMMENDATION_MODE",
             "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION",
             "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_SALT",
@@ -268,7 +300,11 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         ManagedFeedbackAsyncClient.policy_decision_body = None
         ManagedFeedbackAsyncClient.policy_decision_status = 200
         ManagedFeedbackAsyncClient.policy_decision_error = None
+        ManagedFeedbackAsyncClient.session_tier_body = None
+        ManagedFeedbackAsyncClient.session_tier_status = 200
+        ManagedFeedbackAsyncClient.session_tier_error = None
         ManagedFeedbackAsyncClient.feedback_error = None
+        managed_session_tier.clear_session_tier_cache()
         SequencedAsyncClient.calls = []
         SequencedAsyncClient.responses = []
 
@@ -285,6 +321,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         server._tier_backoff_until = self.old_tier_backoff_until
         server.LOG_BODIES = self.old_log_bodies
         routing_experiments.ROUTING_EXPERIMENT_ENABLED = self.old_routing_experiment_enabled
+        managed_session_tier.clear_session_tier_cache()
         server.configure_provider(
             self.old_provider,
             anthropic_upstream=self.old_anthropic_upstream,
@@ -426,6 +463,131 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertTrue(managed["applied"])
         self.assertTrue(managed["changed_model"])
 
+    def test_anthropic_managed_session_tier_caches_and_applies_turn_two_metadata_only(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 8, "output_tokens": 2},
+        }
+        request_body = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "raw prompt secret"}],
+        }
+
+        env = {
+            "AGENTFLOW_SESSION_TIER_ENABLED": "1",
+            "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
+            "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
+        }
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient),
+        ):
+            client = TestClient(server.app)
+            first = client.post("/v1/messages", json=request_body, headers={"x-session-id": "session-tier-secret"})
+            second = client.post("/v1/messages", json=request_body, headers={"x-session-id": "session-tier-secret"})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual([call["kind"] for call in ManagedFeedbackAsyncClient.calls], ["session-tier", "upstream", "upstream"])
+        session_tier_call = ManagedFeedbackAsyncClient.calls[0]
+        session_payload = session_tier_call["json"]
+        self.assertEqual(session_tier_call["url"], "http://127.0.0.1:4100/v1/session-tier")
+        self.assertNotIn("authorization", session_tier_call["headers"])
+        self.assertEqual(session_payload["schema"], "agentflow.session_tier_request.v1")
+        self.assertEqual(session_payload["source_surface"], "anthropic_messages")
+        self.assertEqual(session_payload["app_family"], "claude_code")
+        self.assertEqual(session_payload["requested_model"], "claude-haiku-4-5-20251001")
+        self.assertIn("session_id_hash", session_payload["grouping_identifiers"])
+        self.assertTrue(session_payload["grouping_identifiers"]["session_id_hash"].startswith("sha256:"))
+        self.assertTrue(session_payload["privacy_summary"]["metadata_only"])
+        self.assertFalse(session_payload["privacy_summary"]["raw_body_storage"])
+        self.assertNotIn("session-tier-secret", str(session_payload))
+        self.assertNotIn("raw prompt secret", str(session_payload))
+        self.assertTrue({"messages", "content", "raw_request", "prompt"}.isdisjoint(self._keys_in(session_payload)))
+        self.assertEqual(ManagedFeedbackAsyncClient.calls[1]["json"]["model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(ManagedFeedbackAsyncClient.calls[2]["json"]["model"], "claude-sonnet-4-6")
+
+        rows = server.store.conn.execute("select routing_json from calls").fetchall()
+        self.assertEqual(len(rows), 2)
+        routings = [json.loads(row["routing_json"]) for row in rows]
+        first_routing = next(
+            routing
+            for routing in routings
+            if routing["managed_session_tier"].get("cache_status") == "stored"
+        )
+        second_routing = next(
+            routing
+            for routing in routings
+            if routing["managed_session_tier"].get("cache_status") == "hit"
+        )
+        first_tier = first_routing["managed_session_tier"]
+        second_tier = second_routing["managed_session_tier"]
+        self.assertEqual(first_tier["status"], "received")
+        self.assertEqual(first_tier["cache_status"], "stored")
+        self.assertFalse(first_tier["applied"])
+        self.assertEqual(first_tier["apply_reason"], "first-turn-classification-only")
+        self.assertEqual(second_routing["session_tier_source"], "managed")
+        self.assertEqual(second_tier["status"], "received")
+        self.assertEqual(second_tier["cache_status"], "hit")
+        self.assertTrue(second_tier["applied"])
+        self.assertTrue(second_tier["changed_model"])
+        self.assertEqual(second_tier["tier"], "sonnet")
+        self.assertEqual(second_tier["session_type"], "coding-agent-file-ops")
+        self.assertEqual(second_tier["confidence"], 0.9)
+        self.assertEqual(second_tier["reason_codes"], ["coding-agent-file-ops"])
+        for row in rows:
+            self.assertNotIn("session-tier-secret", row["routing_json"])
+
+    def test_anthropic_managed_session_tier_outage_fails_closed(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        ManagedFeedbackAsyncClient.session_tier_status = 503
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 8, "output_tokens": 2},
+        }
+        request_body = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "raw prompt secret"}],
+        }
+
+        env = {
+            "AGENTFLOW_SESSION_TIER_ENABLED": "1",
+            "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
+            "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
+        }
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient),
+        ):
+            response = TestClient(server.app).post(
+                "/v1/messages",
+                json=request_body,
+                headers={"x-session-id": "session-tier-outage"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([call["kind"] for call in ManagedFeedbackAsyncClient.calls], ["session-tier", "upstream"])
+        self.assertEqual(ManagedFeedbackAsyncClient.calls[1]["json"]["model"], "claude-haiku-4-5-20251001")
+        [row] = server.store.conn.execute("select routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        session_tier = routing["managed_session_tier"]
+        self.assertEqual(session_tier["status"], "error")
+        self.assertEqual(session_tier["reason"], "server-error")
+        self.assertEqual(session_tier["fallback"], "local-policy")
+        self.assertFalse(session_tier["applied"])
+        self.assertNotIn("raw prompt secret", row["routing_json"])
+
     def test_anthropic_policy_decision_route_to_applies_with_loopback_auth_metadata(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
         ManagedFeedbackAsyncClient.policy_decision_body = {
@@ -463,6 +625,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
             patch.dict(os.environ, {
                 "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
                 "AGENTFLOW_POLICY_DECISION_ENABLED": "1",
+                "AGENTFLOW_SESSION_TIER_ENABLED": "0",
                 "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
                 "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
             }, clear=False),

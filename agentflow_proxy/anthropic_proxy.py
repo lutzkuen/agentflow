@@ -85,6 +85,11 @@ from agentflow_proxy.recommendations import (
     queue_policy_event_feedback,
     queue_outcome_feedback,
 )
+from agentflow_proxy.managed_session_tier import (
+    apply_session_tier_to_body,
+    count_tool_definitions,
+    fetch_or_get_session_tier,
+)
 from agentflow_proxy.store import stable_json, utc_now
 
 
@@ -1188,6 +1193,18 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             routed_model = str(resolved_requested_model)
             routing_meta["routed_model"] = routed_model
         crunched["model"] = routed_model
+        session_tier_meta = await fetch_or_get_session_tier(
+            preflight_recommendation_unit,
+            session_id=session_id,
+            tool_count=count_tool_definitions(raw_body),
+        )
+        session_tier_routed_model = apply_session_tier_to_body(
+            crunched,
+            routing_meta,
+            session_tier_meta,
+        )
+        if session_tier_routed_model:
+            routed_model = session_tier_routed_model
         _strip_model_incompatible_params(crunched, routing_meta, str(resolved_requested_model))
         _thinking_param = crunched.get("thinking")
         if (
