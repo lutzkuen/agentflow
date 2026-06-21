@@ -10598,8 +10598,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         deploy = entries["live-service-deploy-failed-after-development"]
         self.assertEqual(deploy["lever"], "activation-feedback")
         self.assertEqual(deploy["local_action_family"], "activation-feedback")
-        self.assertEqual(deploy["current_status"], "keep-blocked")
-        self.assertEqual(deploy["issue_worthy_status"], "blocked")
+        self.assertEqual(deploy["current_status"], "resolved-no-action")
+        self.assertEqual(deploy["state"], "resolved-no-action")
+        self.assertEqual(deploy["issue_worthy_status"], "suppressed")
         self.assertEqual(
             deploy["next_action"],
             "record-live-service-deploy-failure-and-wait-for-shell-guard-health",
@@ -10609,6 +10610,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             "tokenclaw.repeated-diagnostic.live-service-deploy-failed-after-development.v1",
         )
         self.assertFalse(deploy["managed_preview_required"])
+        self.assertTrue(deploy["terminal_successor_state"])
         self.assertTrue(deploy["durable_action_ledger_entry"])
         self.assertTrue(deploy["privacy"]["metadata_only"])
         self.assertTrue(deploy["privacy"]["aggregate_only"])
@@ -10619,7 +10621,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         port = entries["pass-verified-tokenclaw-port"]
         self.assertEqual(port["lever"], "activation-feedback")
         self.assertEqual(port["local_action_family"], "activation-feedback")
-        self.assertEqual(port["current_status"], "keep-blocked")
+        self.assertEqual(port["current_status"], "resolved-no-action")
+        self.assertEqual(port["state"], "resolved-no-action")
+        self.assertEqual(port["issue_worthy_status"], "suppressed")
         self.assertEqual(
             port["next_action"],
             "record-tokenclaw-dev-port-verification-and-keep-prod-deploy-follow-up-narrow",
@@ -10630,6 +10634,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
         self.assertTrue(port["activation_feedback_diagnostic_classification"]["privacy"]["metadata_only"])
         self.assertFalse(port["managed_preview_required"])
+        self.assertTrue(port["terminal_successor_state"])
 
         queue = plan["evidence"]["stats_summary"]["local_activation_next_action_queue"]
         actions = {
@@ -10640,7 +10645,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(set(actions), set(entries))
         for action in actions.values():
             self.assertEqual(action["local_action_family"], "activation-feedback")
-            self.assertEqual(action["successor_status"], "keep-blocked")
+            self.assertEqual(action["successor_status"], "resolved-no-action")
+            self.assertEqual(action["issue_worthy_status"], "suppressed")
+            self.assertTrue(action["terminal_successor_state"])
             self.assertFalse(action["privacy"]["request_ids_included"])
             self.assertFalse(action["privacy"]["absolute_paths_included"])
 
@@ -10709,15 +10716,18 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         for entry in pass_entries:
             self.assertEqual(entry["lever"], "activation-feedback")
             self.assertEqual(entry["local_action_family"], "activation-feedback")
-            self.assertEqual(entry["current_status"], "suppressed")
-            self.assertEqual(entry["state"], "suppressed")
+            self.assertEqual(entry["current_status"], "resolved-no-action")
+            self.assertEqual(entry["state"], "resolved-no-action")
             self.assertEqual(entry["issue_worthy_status"], "suppressed")
-            self.assertEqual(entry["review_status"], "resolved-to-suppressed-pass-diagnostic")
+            self.assertEqual(entry["review_status"], "resolved-to-terminal-pass-diagnostic")
             self.assertEqual(entry["next_action"], "suppress-resolved-activation-feedback-diagnostic")
             self.assertEqual(
                 entry["keep_blocked_reason"],
                 "resolved-activation-feedback-pass-diagnostic-suppressed",
             )
+            self.assertEqual(entry["next_state"], "resolved-no-action")
+            self.assertTrue(entry["terminal_successor_state"])
+            self.assertFalse(entry["managed_preview_required"])
             self.assertTrue(entry["diagnostic_fingerprint"].startswith("tokenclaw.repeated-diagnostic.pass"))
             self.assertTrue(entry["durable_action_ledger_entry"])
             self.assertTrue(entry["activation_feedback_diagnostic_classification"]["privacy"]["metadata_only"])
@@ -10735,8 +10745,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         ]
         self.assertEqual(len(pass_actions), 2)
         for action in pass_actions:
-            self.assertEqual(action["successor_status"], "suppress-duplicate")
+            self.assertEqual(action["successor_status"], "resolved-no-action")
             self.assertEqual(action["issue_worthy_status"], "suppressed")
+            self.assertTrue(action["terminal_successor_state"])
             self.assertEqual(action["recommended_next_action"], "suppress-resolved-activation-feedback-diagnostic")
 
         deploy_entries = [
@@ -10745,7 +10756,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             if entry.get("diagnostic_class") == "live-service-deploy-failed-after-development"
         ]
         self.assertEqual(len(deploy_entries), 1)
-        self.assertEqual(deploy_entries[0]["current_status"], "keep-blocked")
+        self.assertEqual(deploy_entries[0]["current_status"], "resolved-no-action")
+        self.assertEqual(deploy_entries[0]["issue_worthy_status"], "suppressed")
+        self.assertTrue(deploy_entries[0]["terminal_successor_state"])
         self.assertEqual(
             deploy_entries[0]["next_action"],
             "record-live-service-deploy-failure-and-wait-for-shell-guard-health",

@@ -249,6 +249,9 @@ _RESOLVED_ACTIVATION_FEEDBACK_PASS_KEEP_BLOCKED_REASON = (
 _RESOLVED_ACTIVATION_FEEDBACK_PASS_NEXT_ACTION = (
     "suppress-resolved-activation-feedback-diagnostic"
 )
+_TERMINAL_ACTIVATION_SUCCESSOR_STATES = {
+    "resolved-no-action",
+}
 
 
 def _is_resolved_pass_diagnostic(reason: Any, diagnostic_class: Any = None) -> bool:
@@ -1176,24 +1179,26 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
             {
                 "lever": "activation-feedback",
                 "local_action_family": "activation-feedback",
-                "state": "suppressed",
+                "state": "resolved-no-action",
                 "cohort_bucket": f"activation-feedback:{pass_reason}",
                 "fingerprint_cohort_bucket": f"activation-feedback:{pass_reason}",
                 "next_action": _RESOLVED_ACTIVATION_FEEDBACK_PASS_NEXT_ACTION,
-                "review_status": "resolved-to-suppressed-pass-diagnostic",
+                "review_status": "resolved-to-terminal-pass-diagnostic",
                 "issue_worthy_status": "suppressed",
                 "keep_blocked_reason": _RESOLVED_ACTIVATION_FEEDBACK_PASS_KEEP_BLOCKED_REASON,
-                "next_state": "suppressed",
+                "next_state": "resolved-no-action",
                 "next_state_reason": _RESOLVED_ACTIVATION_FEEDBACK_PASS_KEEP_BLOCKED_REASON,
                 "needed_resolution": ["new_sanitized_evidence"],
                 "durable_action_ledger_entry": True,
+                "terminal_successor_state": True,
+                "managed_preview_required": False,
                 "diagnostic_class": _RESOLVED_ACTIVATION_FEEDBACK_PASS_DIAGNOSTIC_CLASS,
                 "diagnostic_reason": pass_reason,
                 "diagnostic_fingerprint": _diagnostic_fingerprint(pass_reason),
                 "activation_feedback_diagnostic_classification": {
                     "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
-                    "status": "resolved-pass-diagnostic-suppressed",
-                    "decision": "suppress",
+                    "status": "resolved-pass-diagnostic-terminal",
+                    "decision": "resolved-no-action",
                     "reason": _RESOLVED_ACTIVATION_FEEDBACK_PASS_KEEP_BLOCKED_REASON,
                     "next_action": _RESOLVED_ACTIVATION_FEEDBACK_PASS_NEXT_ACTION,
                     "privacy": _candidate_privacy(),
@@ -1390,12 +1395,12 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
             {
                 "lever": "activation-feedback",
                 "local_action_family": "activation-feedback",
-                "state": "keep-blocked",
+                "state": "resolved-no-action",
                 "next_action": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_NEXT_ACTION,
                 "review_status": "resolved-to-shell-guard-owned-deploy-health",
-                "issue_worthy_status": "blocked",
+                "issue_worthy_status": "suppressed",
                 "keep_blocked_reason": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_KEEP_BLOCKED_REASON,
-                "next_state": "keep-blocked",
+                "next_state": "resolved-no-action",
                 "next_state_reason": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_KEEP_BLOCKED_REASON,
                 "needed_resolution": [
                     "shell_guard_deploy_health",
@@ -1403,12 +1408,13 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                     "new_sanitized_evidence",
                 ],
                 "durable_action_ledger_entry": True,
+                "terminal_successor_state": True,
                 "managed_preview_required": False,
                 "policy_files_written": False,
                 "activation_feedback_diagnostic_classification": {
                     "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
-                    "status": "deploy-health-keep-blocked",
-                    "decision": "keep-blocked",
+                    "status": "deploy-health-terminal-shell-guard-owned",
+                    "decision": "resolved-no-action",
                     "reason": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_KEEP_BLOCKED_REASON,
                     "next_action": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_NEXT_ACTION,
                     "privacy": _candidate_privacy(),
@@ -1420,24 +1426,25 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
             {
                 "lever": "activation-feedback",
                 "local_action_family": "activation-feedback",
-                "state": "keep-blocked",
+                "state": "resolved-no-action",
                 "next_action": _ACTIVATION_FEEDBACK_PORT_VERIFIED_NEXT_ACTION,
                 "review_status": "resolved-to-dev-port-smoke-context",
-                "issue_worthy_status": "blocked",
+                "issue_worthy_status": "suppressed",
                 "keep_blocked_reason": _ACTIVATION_FEEDBACK_PORT_VERIFIED_KEEP_BLOCKED_REASON,
-                "next_state": "keep-blocked",
+                "next_state": "resolved-no-action",
                 "next_state_reason": _ACTIVATION_FEEDBACK_PORT_VERIFIED_KEEP_BLOCKED_REASON,
                 "needed_resolution": [
                     "bounded_deploy_health_follow_up",
                     "new_sanitized_evidence",
                 ],
                 "durable_action_ledger_entry": True,
+                "terminal_successor_state": True,
                 "managed_preview_required": False,
                 "policy_files_written": False,
                 "activation_feedback_diagnostic_classification": {
                     "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
-                    "status": "dev-port-smoke-recorded",
-                    "decision": "keep-blocked",
+                    "status": "dev-port-smoke-terminal",
+                    "decision": "resolved-no-action",
                     "reason": _ACTIVATION_FEEDBACK_PORT_VERIFIED_KEEP_BLOCKED_REASON,
                     "next_action": _ACTIVATION_FEEDBACK_PORT_VERIFIED_NEXT_ACTION,
                     "privacy": _candidate_privacy(),
@@ -5260,6 +5267,8 @@ def _loop_progress_state(state: str) -> bool:
 def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
     state = str(stage.get("state") or "").strip().lower().replace("_", "-")
     blockers = [str(item).lower().replace("_", "-") for item in stage.get("blocker_codes") or []]
+    if state in _TERMINAL_ACTIVATION_SUCCESSOR_STATES:
+        return state
     if state in {"unblock-ready", "recovery-ready"}:
         return "staged"
     if state in {"retired-no-repeat", "retired-stale-no-traffic"}:
@@ -5642,6 +5651,8 @@ def build_evidence_to_activation_next_action_ledger(
             entry["stale_no_traffic_retirement"] = bool(stage.get("stale_no_traffic_retirement"))
         if stage.get("managed_preview_required") is not None:
             entry["managed_preview_required"] = bool(stage.get("managed_preview_required"))
+        if stage.get("terminal_successor_state") is not None:
+            entry["terminal_successor_state"] = bool(stage.get("terminal_successor_state"))
         if stage.get("omitted_reason"):
             entry["omitted_reason"] = sanitize_value(stage.get("omitted_reason"))
         if stage.get("follow_up_owner"):
@@ -6117,6 +6128,12 @@ def _successor_action_status(entry: dict[str, Any]) -> str:
     current_status = str(entry.get("current_status") or "")
     state = str(entry.get("state") or "")
     issue_status = str(entry.get("issue_worthy_status") or "")
+    if (
+        current_status in _TERMINAL_ACTIVATION_SUCCESSOR_STATES
+        or state in _TERMINAL_ACTIVATION_SUCCESSOR_STATES
+        or bool(entry.get("terminal_successor_state"))
+    ):
+        return "resolved-no-action"
     if state == "retired-stale-no-traffic":
         return "retired-stale-no-traffic"
     if current_status == "suppressed" or state == "suppressed" or issue_status == "suppressed":
@@ -6415,7 +6432,10 @@ def _managed_preview_required_for_successor(entry: dict[str, Any]) -> bool:
         return bool(entry.get("managed_preview_required"))
     family = str(entry.get("local_action_family") or entry.get("lever") or "").strip()
     current_status = str(entry.get("current_status") or "").strip()
+    state = str(entry.get("state") or "").strip()
     duplicate_status = str(entry.get("duplicate_suppression_status") or "").strip()
+    if current_status in _TERMINAL_ACTIVATION_SUCCESSOR_STATES or state in _TERMINAL_ACTIVATION_SUCCESSOR_STATES:
+        return False
     if duplicate_status == "suppressed" or current_status in {"full-rollout", "superseded"}:
         return False
     return family in {"routing", "cache", "managed-recommendation", "activation-feedback"}
@@ -6554,7 +6574,7 @@ def _managed_preview_local_executor_gate(entry: dict[str, Any]) -> dict[str, Any
     passed = bool(
         entry.get("promotion_allowed")
         or entry.get("stage_allowed")
-        or action_status in {"keep-current-rule", "suppress-duplicate", "keep-blocked"}
+        or action_status in {"keep-current-rule", "suppress-duplicate", "keep-blocked", "resolved-no-action"}
     )
     return {
         "schema": "tokenclaw.preview_verified_successor_local_executor_gate.v1",
@@ -7175,6 +7195,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "measured_full_rollout_activation",
         "durable_action_ledger_entry",
         "durable_outcome_ledger_entry",
+        "terminal_successor_state",
         "rollback_required",
         "rollback_applied",
         "stale_no_traffic_retirement",
@@ -7317,6 +7338,8 @@ def _successor_decision_issue_status(action: dict[str, Any]) -> str:
         return "review"
     if decision == "keep-blocked-narrow":
         return "blocked"
+    if decision in _TERMINAL_ACTIVATION_SUCCESSOR_STATES:
+        return "suppressed"
     if decision in {"retire-staged-no-repeat", "suppressed-closed-successor"}:
         return "suppressed"
     if decision == "retired-stale-no-traffic":
@@ -8375,7 +8398,10 @@ def _queue_adjusted_rank_bucket(entry: dict[str, Any]) -> int:
     successor_status = str(entry.get("successor_status") or "").strip()
     issue_status = str(entry.get("issue_worthy_status") or "").strip()
     freshness_state = str(entry.get("freshness_state") or _queue_freshness_state(entry))
-    if status in {"superseded", "suppressed"} or state in {"no-op", "retired-no-repeat", "superseded", "suppressed"}:
+    if (
+        status in {"superseded", "suppressed"} | _TERMINAL_ACTIVATION_SUCCESSOR_STATES
+        or state in {"no-op", "retired-no-repeat", "superseded", "suppressed"} | _TERMINAL_ACTIVATION_SUCCESSOR_STATES
+    ):
         return 5
     if _to_float(entry.get("realized_savings_usd")) > 0:
         return 0
@@ -8566,6 +8592,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "stale_no_traffic_retirement",
         "durable_action_ledger_entry",
         "durable_outcome_ledger_entry",
+        "terminal_successor_state",
         "managed_preview_required",
         "full_rollout_outcome",
         "full_rollout_outcome_next_action",
