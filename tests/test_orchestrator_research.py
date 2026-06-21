@@ -2828,8 +2828,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(queue["summary"]["preview_verified_successor_count"], 1)
-        self.assertEqual(queue["summary"]["preview_required_successor_count"], 2)
-        self.assertEqual(queue["summary"]["preview_blocked_successor_count"], 1)
+        self.assertEqual(queue["summary"]["preview_required_successor_count"], 1)
+        self.assertEqual(queue["summary"]["preview_blocked_successor_count"], 0)
         actions = {action["local_action_family"]: action for action in queue["successor_actions"]}
         routing = actions["routing"]
         self.assertTrue(routing["preview_verified"])
@@ -3204,7 +3204,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_request_shape_rollup_preview_classes_drive_successor_decisions(self):
         cases = [
-            ("activation:shape-no-data", "no-data", "keep-blocked", "no-data-preview-health", False, "emit-request-shape-rollups"),
+            ("activation:shape-no-data", "no-data", "preview-optional", "no-data-preview-health", False, "emit-request-shape-rollups"),
             ("activation:shape-stale", "stale", "review-stale-preview", "stale-preview", False, "refresh-managed-activation-preview"),
             (
                 "activation:shape-too-small",
@@ -4030,6 +4030,126 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(gate["policy_files_written"])
         self.assertFalse(gate["provider_calls_made"])
         self.assertFalse(gate["managed_server_calls_made"])
+
+    def test_preview_optional_no_write_successors_do_not_block_on_missing_managed_preview(self):
+        ledger = {
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:cache-rollback-review",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                    "state": "blocked",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "rollback-cache-replay-rule",
+                    "blocker_codes": ["evidence-older-than-max-age"],
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "emits_cache_apply_action": False,
+                    "cache_apply_action_count": 0,
+                    "cache_entries_written": 0,
+                },
+                {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 2,
+                    "fingerprint": "activation:feedback-keep-blocked",
+                    "lever": "activation-feedback",
+                    "local_action_family": "activation-feedback",
+                    "evidence_schema": "tokenclaw.orchestrator_research_log_diagnostics.v1",
+                    "state": "keep-blocked",
+                    "current_status": "keep-blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence",
+                    "blocker_codes": ["activation-feedback-blocker-review"],
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+                {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 3,
+                    "fingerprint": "activation:rollup-emit",
+                    "lever": "request-shape-rollups",
+                    "local_action_family": "cohort-ranking",
+                    "evidence_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
+                    "state": "missing-evidence",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "emit-request-shape-rollups",
+                    "blocker_codes": ["no-source-traffic-for-request-shape-rollups"],
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+            ],
+        }
+
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
+                    "status": "empty",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": False,
+                    "summary": {
+                        "stored_preview_outcome_count": 0,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                    },
+                    "outcomes": [],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "managed_activation_preview_health": {
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
+                    "status": "no-data",
+                    "accepted_batch_count": 0,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": 0,
+                    "previewed_row_count": 0,
+                    "omitted_row_count": 0,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "privacy_summary": {"metadata_only": True, "request_ids_returned": False},
+                },
+            }
+        )
+
+        actions = {row["source_fingerprint"]: row for row in queue["successor_actions"]}
+        decisions = {row["source_fingerprint"]: row for row in queue["successor_decisions"]}
+        for source, next_action in {
+            "activation:cache-rollback-review": "apply-cache-replay-rollback-before-reobserve",
+            "activation:feedback-keep-blocked": "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence",
+            "activation:rollup-emit": "emit-request-shape-rollups",
+        }.items():
+            with self.subTest(source=source):
+                action = actions[source]
+                decision = decisions[source]
+                gate = action["managed_preview_gate"]
+                self.assertFalse(action["preview_verified"])
+                self.assertEqual(action["successor_status"], "preview-optional")
+                self.assertEqual(action["recommended_next_action"], next_action)
+                self.assertEqual(action["preview_requirement"], "optional")
+                self.assertTrue(action["locally_decisive"])
+                self.assertFalse(gate["required"])
+                self.assertEqual(gate["decision"], "preview-optional")
+                self.assertEqual(gate["status"], "missing-preview")
+                self.assertEqual(gate["health_gate"]["status"], "no-data-preview-health")
+                self.assertFalse(gate["policy_files_written"])
+                self.assertFalse(gate["provider_calls_made"])
+                self.assertFalse(gate["managed_server_calls_made"])
+                self.assertEqual(decision["decision"], "preview-optional")
+                self.assertEqual(decision["recommended_next_action"], next_action)
+                self.assertEqual(decision["preview_requirement"], "optional")
+                self.assertTrue(decision["locally_decisive"])
+                self.assertFalse(decision["policy_files_written"])
+                self.assertTrue(decision["privacy"]["metadata_only"])
 
     def test_preview_agreed_activation_outcomes_emit_successor_decisions(self):
         ledger = {

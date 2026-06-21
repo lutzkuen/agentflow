@@ -6340,6 +6340,42 @@ def _successor_action_status(entry: dict[str, Any]) -> str:
     return "review"
 
 
+def _successor_policy_write_candidate(entry: dict[str, Any]) -> bool:
+    action_status = _successor_action_status(entry)
+    return bool(
+        entry.get("promotion_allowed")
+        or entry.get("stage_allowed")
+        or entry.get("managed_enforced")
+        or entry.get("policy_write_candidate")
+        or entry.get("policy_files_written")
+        or entry.get("provider_calls_made")
+        or entry.get("emits_cache_apply_action")
+        or _to_int(entry.get("cache_apply_action_count")) > 0
+        or _to_int(entry.get("cache_entries_written")) > 0
+        or action_status in {"ready", "review"}
+    )
+
+
+def _successor_local_only_preview_optional(entry: dict[str, Any]) -> bool:
+    if _successor_policy_write_candidate(entry):
+        return False
+    if entry.get("managed_server_calls_made"):
+        return False
+    next_action = str(entry.get("next_action") or entry.get("recommended_next_action") or "").strip()
+    action_status = _successor_action_status(entry)
+    if _is_request_shape_rollup_successor(entry):
+        return next_action in {"", "emit-request-shape-rollups"}
+    if _queue_has_rollback_required_action(entry):
+        return bool(
+            entry.get("policy_files_written") is False
+            or entry.get("emits_cache_apply_action") is False
+            or entry.get("cache_apply_action_count") == 0
+        )
+    if action_status in {"keep-blocked", "review-only", "keep-current-rule", "suppress-duplicate", "resolved-no-action"}:
+        return True
+    return next_action.startswith(("keep-", "collect-", "classify-", "record-", "inspect-"))
+
+
 def _managed_preview_outcomes_report(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     for key in (
         "managed_activation_preview_outcomes",
@@ -6619,6 +6655,8 @@ def _managed_preview_health_gate(
 def _managed_preview_required_for_successor(entry: dict[str, Any]) -> bool:
     if entry.get("managed_preview_required") is not None:
         return bool(entry.get("managed_preview_required"))
+    if _successor_local_only_preview_optional(entry):
+        return False
     family = str(entry.get("local_action_family") or entry.get("lever") or "").strip()
     current_status = str(entry.get("current_status") or "").strip()
     state = str(entry.get("state") or "").strip()
@@ -6755,15 +6793,12 @@ def _crunch_preview_next_action(decision: str, outcome: dict[str, Any], entry: d
 
 def _managed_preview_local_executor_gate(entry: dict[str, Any]) -> dict[str, Any]:
     action_status = _successor_action_status(entry)
-    policy_write_candidate = bool(
-        entry.get("promotion_allowed")
-        or entry.get("stage_allowed")
-        or action_status in {"ready", "review-only", "review"}
-    )
+    policy_write_candidate = _successor_policy_write_candidate(entry)
     passed = bool(
         entry.get("promotion_allowed")
         or entry.get("stage_allowed")
         or action_status in {"keep-current-rule", "suppress-duplicate", "keep-blocked", "resolved-no-action"}
+        or _successor_local_only_preview_optional(entry)
     )
     return {
         "schema": "tokenclaw.preview_verified_successor_local_executor_gate.v1",
@@ -7030,6 +7065,12 @@ def _managed_preview_successor_gate(
         else {}
     )
     outcome = _managed_preview_outcome_for_entry(entry, managed_preview_outcomes)
+    local_only_preview_optional = bool(
+        not required
+        and local_gate.get("passed")
+        and not local_gate.get("policy_write_candidate")
+        and _successor_local_only_preview_optional(entry)
+    )
     if outcome is None or health_blocks_required:
         status = str(health_gate.get("status") or "missing-preview") if health_blocks_required else "missing-preview"
         decision = "keep-blocked" if required else "preview-optional"
@@ -7051,6 +7092,8 @@ def _managed_preview_successor_gate(
             "status": status,
             "verified": False,
             "decision": decision,
+            "preview_requirement": "required" if required else "optional",
+            "locally_decisive": local_only_preview_optional,
             "next_action": sanitize_value(next_action if required else entry.get("next_action")),
             "local_executor_gate": local_gate,
             "health_gate": health_gate,
@@ -7133,6 +7176,10 @@ def _managed_preview_successor_gate(
         decision = _request_shape_rollup_preview_decision(request_shape_outcome_class)
         next_action = _request_shape_rollup_next_action(request_shape_outcome_class, outcome, entry)
         reason = f"request-shape-rollup-{request_shape_outcome_class}"
+        if request_shape_outcome_class == "no-data" and local_only_preview_optional:
+            decision = "preview-optional"
+            next_action = entry.get("next_action") or next_action
+            reason = "managed-preview-optional"
     elif crunch_preview_decision:
         status = _crunch_preview_status(crunch_preview_decision)
         decision = _crunch_preview_successor_decision(crunch_preview_decision)
@@ -7162,16 +7209,21 @@ def _managed_preview_successor_gate(
         decision = "keep-blocked" if required else "review"
         if failed_closed:
             status = "failed-closed"
+            decision = "keep-blocked"
         elif stale:
             status = "stale-preview"
         elif missing:
             status = "missing-preview-decision"
+            decision = "keep-blocked"
         elif disagreement:
             status = "managed-local-disagreement"
+            decision = "keep-blocked"
         elif preview_policy_write or preview_provider_call:
             status = "unsafe-preview-side-effect"
+            decision = "keep-blocked"
         elif cache_rollback_invalid:
             status = cache_rollback_status
+            decision = "keep-blocked"
         elif classification in {"preview-omitted", "omitted", "needs-local-evidence"}:
             status = "preview-omitted"
         else:
@@ -7185,6 +7237,8 @@ def _managed_preview_successor_gate(
         "status": status,
         "verified": verified,
         "decision": decision,
+        "preview_requirement": "required" if required else "optional",
+        "locally_decisive": local_only_preview_optional,
         "next_action": sanitize_value(next_action),
         "local_executor_gate": local_gate,
         "health_gate": health_gate,
@@ -7299,6 +7353,8 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         action["preview_verified"] = bool(preview_gate.get("verified"))
         action["preview_verification_status"] = sanitize_value(preview_gate.get("status"))
         action["preview_verification_decision"] = sanitize_value(preview_gate.get("decision"))
+        action["preview_requirement"] = sanitize_value(preview_gate.get("preview_requirement"))
+        action["locally_decisive"] = bool(preview_gate.get("locally_decisive"))
         if preview_gate.get("request_shape_rollup_outcome_class"):
             action["successor_status"] = sanitize_value(preview_gate.get("decision") or action["successor_status"])
             action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
@@ -7316,6 +7372,21 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
                 action["recommended_next_action"] = sanitize_value(
                     preview_gate.get("next_action") or "refresh-managed-activation-preview"
                 )
+        elif (
+            preview_gate.get("decision") in {"preview-optional", "locally-decisive"}
+            and not preview_gate.get("required")
+            and isinstance(preview_gate.get("local_executor_gate"), dict)
+            and preview_gate["local_executor_gate"].get("passed")
+        ):
+            action["successor_status"] = sanitize_value(preview_gate.get("decision"))
+            action["recommended_next_action"] = sanitize_value(
+                preview_gate.get("next_action") or action["recommended_next_action"]
+            )
+        elif preview_gate.get("decision") == "keep-blocked" and not preview_gate.get("verified"):
+            action["successor_status"] = "keep-blocked"
+            action["recommended_next_action"] = sanitize_value(
+                preview_gate.get("next_action") or action["recommended_next_action"]
+            )
         elif preview_gate.get("verified") and preview_gate.get("decision") == "ready":
             action["successor_status"] = "ready"
             action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
@@ -7621,6 +7692,8 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
         "preview_verified": bool(action.get("preview_verified")),
         "preview_verification_status": sanitize_value(action.get("preview_verification_status")),
         "preview_verification_decision": sanitize_value(action.get("preview_verification_decision")),
+        "preview_requirement": sanitize_value(action.get("preview_requirement") or gate.get("preview_requirement")),
+        "locally_decisive": bool(action.get("locally_decisive") or gate.get("locally_decisive")),
         "preview_agreement_status": "agreed" if gate.get("verified") else sanitize_value(gate.get("status") or "not-previewed"),
         "preview_outcome_status": _managed_preview_public_outcome_status(gate),
         "preview_omitted_reason": sanitize_value(gate.get("omitted_reason")) if gate else None,
@@ -7691,6 +7764,7 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
             "cache_entries_written",
             "emits_cache_apply_action",
             "policy_files_written",
+            "locally_decisive",
             "crunch_preview_confidence",
             "projected_saved_tokens",
             "projected_saved_usd",
