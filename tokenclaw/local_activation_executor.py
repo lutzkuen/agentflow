@@ -200,7 +200,11 @@ def _executor_action_class(row: dict[str, Any]) -> str:
         return "keep-current-rule"
     if status == "suppress-duplicate" or str(row.get("duplicate_suppression_status") or "") == "suppressed":
         return "suppress-duplicate"
-    if current_status == "superseded" or current_state in {"retired-no-repeat", "superseded"} or _has_any(row, "retire-cache-replay"):
+    if (
+        current_status == "superseded"
+        or current_state in {"retired-no-repeat", "retired-stale-no-traffic", "superseded"}
+        or _has_any(row, "retire-cache-replay", "retire-stale-cache-replay")
+    ):
         return "retire"
     if _has_any(row, "semantic-quality-regression-observed", "review-openai-routing-canary-blockers"):
         return "review-only"

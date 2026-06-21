@@ -5179,6 +5179,7 @@ def _loop_state_rank(state: str) -> int:
         "blocked": 6,
         "keep-blocked": 6,
         "no-op": 7,
+        "retired-stale-no-traffic": 8,
     }.get(state, 9)
 
 
@@ -5207,7 +5208,7 @@ def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
     blockers = [str(item).lower().replace("_", "-") for item in stage.get("blocker_codes") or []]
     if state in {"unblock-ready", "recovery-ready"}:
         return "staged"
-    if state == "retired-no-repeat":
+    if state in {"retired-no-repeat", "retired-stale-no-traffic"}:
         return "superseded"
     if state in {"keep-blocked", "retry-later", "superseded"}:
         return state
@@ -5571,6 +5572,10 @@ def build_evidence_to_activation_next_action_ledger(
                 entry[gate_key] = bool(stage.get(gate_key))
         if stage.get("policy_files_written") is not None:
             entry["policy_files_written"] = bool(stage.get("policy_files_written"))
+        if stage.get("rollback_required") is not None:
+            entry["rollback_required"] = bool(stage.get("rollback_required"))
+        if stage.get("stale_no_traffic_retirement") is not None:
+            entry["stale_no_traffic_retirement"] = bool(stage.get("stale_no_traffic_retirement"))
         if stage.get("managed_preview_required") is not None:
             entry["managed_preview_required"] = bool(stage.get("managed_preview_required"))
         if stage.get("omitted_reason"):
@@ -5916,6 +5921,8 @@ def _successor_action_status(entry: dict[str, Any]) -> str:
     current_status = str(entry.get("current_status") or "")
     state = str(entry.get("state") or "")
     issue_status = str(entry.get("issue_worthy_status") or "")
+    if state == "retired-stale-no-traffic":
+        return "retired-stale-no-traffic"
     if duplicate_status == "suppressed":
         if current_status == "full-rollout" or entry.get("measured_full_rollout_activation"):
             return "keep-current-rule"
@@ -6968,6 +6975,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "durable_action_ledger_entry",
         "durable_outcome_ledger_entry",
         "rollback_required",
+        "stale_no_traffic_retirement",
     ):
         if entry.get(key) is not None:
             action[key] = bool(entry.get(key))
@@ -7101,6 +7109,8 @@ def _successor_decision_issue_status(action: dict[str, Any]) -> str:
         return "ready"
     if decision == "rollback-required":
         return "blocked"
+    if decision == "retired-stale-no-traffic":
+        return "suppressed"
     if decision in {"keep-current-rule", "suppress-duplicate"}:
         return "suppressed"
     if decision in {"keep-blocked", "review-stale-preview"}:
@@ -8337,6 +8347,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "wrote_active_policy_files",
         "policy_files_written",
         "rollback_required",
+        "stale_no_traffic_retirement",
         "durable_action_ledger_entry",
         "durable_outcome_ledger_entry",
         "managed_preview_required",
@@ -9479,6 +9490,60 @@ def _cache_replay_warmup_duplicate_suppression(
     return suppression
 
 
+def _cache_replay_stale_no_traffic_duplicate_suppression(
+    *,
+    decision_report: dict[str, Any],
+    top_decision: dict[str, Any],
+    reason: str,
+    reason_codes: list[str],
+    target_local_rule_file: Any,
+    target_local_policy_section: Any,
+) -> dict[str, Any]:
+    existing = (
+        decision_report.get("duplicate_suppression")
+        if isinstance(decision_report.get("duplicate_suppression"), dict)
+        else top_decision.get("duplicate_suppression")
+        if isinstance(top_decision.get("duplicate_suppression"), dict)
+        else {}
+    )
+    suppression = dict(existing)
+    suppression["schema"] = "agentflow.request_shape_cache_replay_stale_no_traffic_retirement_duplicate_suppression.v1"
+    suppression["reason"] = "rollback-stale-no-traffic-retired"
+    suppression["metadata_only"] = True
+    suppression["aggregate_only"] = True
+    suppression["suppresses_generic_cache_replay_activation_issue"] = True
+    suppression["suppresses_generic_replay_ready_issue"] = True
+    suppression["suppresses_new_cache_replay_stage_issue"] = True
+    suppression["suppresses_duplicate_successor_issue"] = True
+    suppression["suppresses_closed_stage_replay_predecessor_titles"] = True
+    suppression.setdefault(
+        "suppressed_predecessor_next_actions",
+        [
+            "stage-cache-replay-canary",
+            "turn-cache-candidate-into-local-replay-evidence",
+            "rollback-cache-replay-rule",
+        ],
+    )
+    suppression.setdefault(
+        "suppressed_predecessor_title_families",
+        [
+            "Stage cache replay canary from evidence-to-activation ledger",
+            "Stage request-shape cache replay cohort",
+            "Turn evidence-older-than-max-age cache candidate into local replay evidence",
+            "Keep cache activation successor blocked on evidence-older-than-max-age",
+        ],
+    )
+    if reason:
+        suppression["retirement_reason"] = sanitize_value(reason)
+    if reason_codes:
+        suppression["reason_codes"] = sanitize_value(reason_codes)
+    if target_local_rule_file:
+        suppression["target_local_rule_file"] = sanitize_value(target_local_rule_file)
+    if target_local_policy_section:
+        suppression["target_local_policy_section"] = sanitize_value(target_local_policy_section)
+    return suppression
+
+
 def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     decision_report = stats_summary.get("request_shape_cache_replay_policy_decision")
     if not isinstance(decision_report, dict):
@@ -9493,10 +9558,32 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         source_evidence = decision_report.get("source_evidence") if isinstance(decision_report.get("source_evidence"), dict) else {}
         evidence = source_evidence
     evidence_summary = evidence.get("summary") if isinstance(evidence.get("summary"), dict) else {}
+    stale_evidence = evidence.get("stale_evidence") if isinstance(evidence.get("stale_evidence"), dict) else {}
+    observed_row_count = _to_int(summary.get("observed_row_count") or evidence_summary.get("observed_row_count"))
+    applied_count = _to_int(summary.get("applied_count") or evidence_summary.get("applied_count"))
+    holdout_count = _to_int(summary.get("holdout_count") or evidence_summary.get("holdout_count"))
+    observed_hits = _to_int(summary.get("observed_hits") or summary.get("exact_hit_count") or evidence_summary.get("observed_hits"))
+    observed_savings = _to_float(summary.get("observed_savings_usd") or evidence_summary.get("observed_savings_usd"))
+    rollback_required = bool(
+        decision == "rollback"
+        or summary.get("rollback_required")
+        or str(decision_report.get("promotion_readiness") or summary.get("promotion_readiness") or "").strip()
+        == "rollback-required"
+    )
+    stale_no_traffic_retirement = bool(
+        rollback_required
+        and stale_evidence.get("stale")
+        and observed_row_count <= 0
+        and applied_count <= 0
+        and holdout_count <= 0
+        and observed_hits <= 0
+        and observed_savings <= 0.0
+    )
     if (
-        _to_int(summary.get("observed_row_count") or evidence_summary.get("observed_row_count")) <= 0
-        and _to_int(summary.get("applied_count") or evidence_summary.get("applied_count")) <= 0
-        and _to_int(summary.get("holdout_count") or evidence_summary.get("holdout_count")) <= 0
+        observed_row_count <= 0
+        and applied_count <= 0
+        and holdout_count <= 0
+        and not stale_no_traffic_retirement
     ):
         return None
     promotion_readiness = str(
@@ -9513,7 +9600,11 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
     ]
     if reason and reason not in reason_codes:
         reason_codes.insert(0, reason)
-    state = _request_shape_cache_replay_policy_decision_state(decision, promotion_readiness)
+    state = (
+        "retired-stale-no-traffic"
+        if stale_no_traffic_retirement
+        else _request_shape_cache_replay_policy_decision_state(decision, promotion_readiness)
+    )
     blockers = [] if state == "measured-savings" else reason_codes
 
     staged = evidence.get("staged_canaries") if isinstance(evidence.get("staged_canaries"), list) else []
@@ -9562,6 +9653,16 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
     target_local_rule_file = summary.get("target_local_rule_file") or top_decision.get("target_local_rule_file")
     target_local_policy_section = summary.get("target_local_policy_section") or top_decision.get("target_local_policy_section")
     duplicate_suppression = (
+        _cache_replay_stale_no_traffic_duplicate_suppression(
+            decision_report=decision_report,
+            top_decision=top_decision,
+            reason=reason,
+            reason_codes=reason_codes,
+            target_local_rule_file=target_local_rule_file,
+            target_local_policy_section=target_local_policy_section,
+        )
+        if stale_no_traffic_retirement
+        else
         _cache_replay_warmup_duplicate_suppression(
             decision_report=decision_report,
             top_decision=top_decision,
@@ -9577,6 +9678,11 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         if isinstance(top_decision.get("duplicate_suppression"), dict)
         else {}
     )
+    next_action = str(
+        decision_report.get("next_action") or summary.get("next_action") or "review-cache-replay-canary-promotion-readiness"
+    )
+    if stale_no_traffic_retirement:
+        next_action = "retire-stale-cache-replay-successor-no-traffic"
 
     return {
         "lever": "cache",
@@ -9584,16 +9690,16 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         "evidence_source": decision_report.get("schema"),
         "source_evidence_schema": evidence.get("schema"),
         "local_action_family": "cache",
-        "next_action": str(decision_report.get("next_action") or summary.get("next_action") or "review-cache-replay-canary-promotion-readiness"),
+        "next_action": next_action,
         "fingerprint_next_action": "stage-cache-replay-canary",
         "fingerprint_evidence_source": "agentflow.request_shape_cache_replayability_dry_run.v1",
         "fingerprint_cohort_bucket": sanitize_value(f"cache:{_sample_count_bucket(fingerprint_sample_count)}"),
         "blocker_codes": sanitize_value(blockers),
         "sample_count": sample_count,
-        "applied_count": _to_int(summary.get("applied_count") or evidence_summary.get("applied_count")),
-        "holdout_count": _to_int(summary.get("holdout_count") or evidence_summary.get("holdout_count")),
-        "actual_hits": _to_int(summary.get("observed_hits") or summary.get("exact_hit_count") or evidence_summary.get("observed_hits")),
-        "actual_saved_cost_usd": round(_to_float(summary.get("observed_savings_usd") or evidence_summary.get("observed_savings_usd")), 8),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "actual_hits": observed_hits,
+        "actual_saved_cost_usd": round(observed_savings, 8),
         "miss_count": _to_int(summary.get("miss_count") or evidence_summary.get("miss_count")),
         "miss_reason_breakdown": sanitize_value(miss_breakdown),
         "top_miss_reason": sanitize_value(top_miss_reason),
@@ -9611,7 +9717,15 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         "reason": sanitize_value(reason),
         "reason_codes": sanitize_value(reason_codes),
         "promotion_allowed": bool(summary.get("promotion_allowed")),
-        "rollback_count": 1 if decision == "rollback" or bool(summary.get("rollback_required")) else 0,
+        "rollback_count": 1 if rollback_required else 0,
+        "rollback_required": rollback_required,
+        "stale_no_traffic_retirement": stale_no_traffic_retirement,
+        "durable_action_ledger_entry": stale_no_traffic_retirement,
+        "issue_worthy_status": "suppressed" if stale_no_traffic_retirement else None,
+        "cache_apply_action_count": 0 if stale_no_traffic_retirement else None,
+        "cache_entries_written": 0 if stale_no_traffic_retirement else None,
+        "emits_cache_apply_action": False if stale_no_traffic_retirement else None,
+        "policy_files_written": False if stale_no_traffic_retirement else None,
         "target_local_rule_file": sanitize_value(target_local_rule_file),
         "target_local_policy_section": sanitize_value(target_local_policy_section),
         "duplicate_suppression": sanitize_value(duplicate_suppression),

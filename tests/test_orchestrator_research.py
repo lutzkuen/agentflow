@@ -6402,6 +6402,161 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
         self.assertTrue(cache_entry["duplicate_suppression"]["suppresses_new_cache_replay_stage_issue"])
 
+    def test_stale_cache_replay_rollback_no_traffic_retires_successor(self):
+        evidence = {
+            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "status": "staged-stale-no-traffic",
+            "reason": "stale-cache-replay-evidence",
+            "staged_canary_count": 1,
+            "staged_canaries": [
+                {
+                    "shape": {
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "category": "chat",
+                    },
+                    "sample_count": 36,
+                    "projected_hits": 35,
+                    "projected_savings_usd": 0.075373,
+                }
+            ],
+            "stale_evidence": {
+                "stale": True,
+                "reason": "evidence-older-than-max-age",
+                "age_hours": 124.396,
+                "max_age_hours": 72.0,
+            },
+            "summary": {
+                "observed_row_count": 0,
+                "applied_count": 0,
+                "holdout_count": 0,
+                "miss_count": 0,
+                "observed_hits": 0,
+                "exact_hit_count": 0,
+                "observed_savings_usd": 0.0,
+                "projected_hits": 35,
+                "projected_savings_usd": 0.075373,
+                "staged_canary_count": 1,
+            },
+        }
+        policy_decision = {
+            "schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+            "decision": "rollback",
+            "promotion_decision": "keep-blocked",
+            "promotion_readiness": "rollback-required",
+            "reason": "stale-cache-replay-evidence",
+            "reason_codes": [
+                "missing-applied-coverage",
+                "missing-holdout-coverage",
+                "missing-observed-cache-hits",
+                "missing-observed-cache-savings",
+                "stale-cache-replay-evidence",
+            ],
+            "next_action": "rollback-cache-replay-rule",
+            "duplicate_suppression": {
+                "schema": "agentflow.request_shape_cache_replay_policy_decision_duplicate_suppression.v1",
+                "reason": "rollback-required",
+                "suppresses_generic_cache_replay_activation_issue": True,
+                "suppresses_generic_replay_ready_issue": True,
+                "suppresses_new_cache_replay_stage_issue": False,
+                "metadata_only": True,
+                "aggregate_only": True,
+            },
+            "summary": {
+                "decision": "rollback",
+                "promotion_readiness": "rollback-required",
+                "next_action": "rollback-cache-replay-rule",
+                "rollback_required": True,
+                "staged_canary_count": 1,
+                "observed_row_count": 0,
+                "applied_count": 0,
+                "holdout_count": 0,
+                "miss_count": 0,
+                "observed_hits": 0,
+                "exact_hit_count": 0,
+                "observed_savings_usd": 0.0,
+                "projected_hits": 35,
+                "projected_savings_usd": 0.075373,
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+            },
+            "top_decision": {
+                "decision_id": "cache-replay-policy-decision:stale-no-traffic",
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+            },
+            "source_evidence": evidence,
+        }
+
+        ledger = build_evidence_to_activation_next_action_ledger(
+            {
+                "request_shape_cache_replay_evidence": evidence,
+                "request_shape_cache_replay_policy_decision": policy_decision,
+            }
+        )
+
+        cache_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "cache")
+        self.assertEqual(cache_entry["state"], "retired-stale-no-traffic")
+        self.assertEqual(cache_entry["current_status"], "superseded")
+        self.assertEqual(cache_entry["issue_worthy_status"], "suppressed")
+        self.assertEqual(cache_entry["next_action"], "retire-stale-cache-replay-successor-no-traffic")
+        self.assertTrue(cache_entry["rollback_required"])
+        self.assertTrue(cache_entry["stale_no_traffic_retirement"])
+        self.assertTrue(cache_entry["durable_action_ledger_entry"])
+        self.assertEqual(cache_entry["cache_apply_action_count"], 0)
+        self.assertEqual(cache_entry["cache_entries_written"], 0)
+        self.assertFalse(cache_entry["emits_cache_apply_action"])
+        self.assertFalse(cache_entry["policy_files_written"])
+        self.assertEqual(cache_entry["projected_saved_usd"], 0.075373)
+        self.assertEqual(cache_entry["source_evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(
+            cache_entry["duplicate_suppression"]["reason"],
+            "rollback-stale-no-traffic-retired",
+        )
+        self.assertTrue(cache_entry["duplicate_suppression"]["suppresses_generic_cache_replay_activation_issue"])
+        self.assertTrue(cache_entry["duplicate_suppression"]["suppresses_generic_replay_ready_issue"])
+        self.assertTrue(cache_entry["duplicate_suppression"]["suppresses_new_cache_replay_stage_issue"])
+        self.assertTrue(cache_entry["duplicate_suppression"]["suppresses_duplicate_successor_issue"])
+
+        queue = build_local_activation_next_action_queue(
+            {"evidence_to_activation_next_action_ledger": ledger}
+        )
+        action = next(row for row in queue["successor_actions"] if row["source_fingerprint"] == cache_entry["fingerprint"])
+        decision = next(row for row in queue["successor_decisions"] if row["source_fingerprint"] == cache_entry["fingerprint"])
+        self.assertEqual(action["state"], "retired-stale-no-traffic")
+        self.assertEqual(action["current_status"], "superseded")
+        self.assertEqual(action["successor_status"], "retired-stale-no-traffic")
+        self.assertEqual(action["recommended_next_action"], "retire-stale-cache-replay-successor-no-traffic")
+        self.assertTrue(action["stale_no_traffic_retirement"])
+        self.assertEqual(action["cache_apply_action_count"], 0)
+        self.assertEqual(action["cache_entries_written"], 0)
+        self.assertFalse(action["emits_cache_apply_action"])
+        self.assertFalse(action["policy_files_written"])
+        self.assertEqual(decision["decision"], "retired-stale-no-traffic")
+        self.assertEqual(decision["issue_worthy_status"], "suppressed")
+        self.assertEqual(decision["cache_apply_action_count"], 0)
+        self.assertEqual(decision["cache_entries_written"], 0)
+        self.assertFalse(decision["emits_cache_apply_action"])
+        self.assertFalse(decision["policy_files_written"])
+
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "request_shape_cache_replay_evidence": evidence,
+                "request_shape_cache_replay_policy_decision": policy_decision,
+                "local_activation_next_action_queue": queue,
+            },
+            now=NOW,
+        )
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertFalse(any("Keep cache activation successor blocked" in title for title in titles))
+        self.assertFalse(any("Stage cache replay canary" in title for title in titles))
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertIn(cache_entry["fingerprint"], rendered)
+        self.assertIn("retired-stale-no-traffic", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertNotIn('"emits_cache_apply_action": true', rendered.lower())
+
     def test_crunch_candidate_ranks_projected_savings_report(self):
         plan = build_research_plan(
             issues=[],
