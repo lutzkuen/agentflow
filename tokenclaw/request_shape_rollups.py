@@ -593,6 +593,133 @@ def _candidate_id(basis: dict[str, Any]) -> str:
     return f"request-shape:{provider}:{endpoint}:{category}:{digest}"
 
 
+def _first_text(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _codex_metadata_window_rows(store_obj: Any, *, limit: int) -> list[dict[str, Any]]:
+    try:
+        raw_rows = store_obj.conn.execute(
+            """
+            select id, created_at, method, direction, message_chars, params_chars,
+                   input_items, input_text_chars, result_chars, error_code,
+                   error_message, latency_ms, routing_json, crunch_json, cache_json,
+                   event_window_json, metadata_json
+            from codex_app_events
+            where direction = 'client_to_server'
+              and method = 'turn/start'
+            order by created_at desc
+            limit ?
+            """,
+            (limit,),
+        ).fetchall()
+    except Exception:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for raw in raw_rows:
+        source = dict(raw)
+        routing = _json_obj(source.get("routing_json"))
+        cache = _json_obj(source.get("cache_json"))
+        crunch = _json_obj(source.get("crunch_json"))
+        event_window = _json_obj(source.get("event_window_json"))
+        metadata = _json_obj(source.get("metadata_json"))
+
+        input_text_chars = (
+            _as_int(source.get("input_text_chars"))
+            or _as_int(event_window.get("input_text_chars"))
+            or _as_int(source.get("message_chars"))
+        )
+        input_tokens = _as_int(event_window.get("input_tokens_est")) or max(0, input_text_chars // 4)
+        output_tokens = _as_int(event_window.get("output_tokens_est")) or max(0, _as_int(source.get("result_chars")) // 4)
+        error_code = _as_int(source.get("error_code"))
+        status_code = 500 if error_code else 200
+        method = _first_text(source.get("method"), event_window.get("method"), "turn/start").replace("/", "_")
+        provider = public_label(_first_text(routing.get("provider"), metadata.get("provider"), "openai"), "openai")
+        source_surface = public_label(
+            _first_text(routing.get("source_surface"), event_window.get("source_surface"), metadata.get("source_surface"), "codex_turn"),
+            "codex_turn",
+        )
+        endpoint = public_label(_first_text(routing.get("endpoint"), event_window.get("endpoint"), method), "turn_start")
+        requested_model = _first_text(
+            routing.get("requested_model"),
+            routing.get("model"),
+            event_window.get("requested_model"),
+            event_window.get("model"),
+            metadata.get("requested_model"),
+        )
+        routed_model = _first_text(routing.get("routed_model"), event_window.get("routed_model"), metadata.get("routed_model"), requested_model)
+        category = public_label(_first_text(routing.get("category"), event_window.get("category"), metadata.get("category"), "codex-turn"), "codex-turn")
+        workflow_phase = public_label(
+            _first_text(routing.get("workflow_phase"), event_window.get("workflow_phase"), metadata.get("workflow_phase"), category),
+            "unknown",
+        )
+        method_counts = event_window.get("method_counts") if isinstance(event_window.get("method_counts"), dict) else {}
+        has_tools = bool(
+            routing.get("has_tools")
+            or event_window.get("has_tools")
+            or _as_int(event_window.get("tool_use_count"))
+            or _as_int(event_window.get("tool_result_count"))
+            or any("tool" in str(key).lower() or "command" in str(key).lower() for key in method_counts)
+        )
+
+        routing_meta = {
+            **routing,
+            "provider": provider,
+            "source_surface": source_surface,
+            "endpoint": endpoint,
+            "requested_model": requested_model,
+            "routed_model": routed_model or requested_model,
+            "text_chars": input_text_chars,
+            "has_tools": has_tools,
+            "category": category,
+            "workflow_phase": workflow_phase,
+            "reason": routing.get("reason") or "codex-app-metadata-window-backfill",
+            "metadata_window_backfill": True,
+        }
+        cache_meta = {
+            "status": "skipped",
+            "reason": "codex-app-cache-disabled",
+            "policy_source": "local-default",
+            **cache,
+        }
+        rows.append(
+            {
+                "id": f"codex-metadata-window:{hashlib.sha256(str(source.get('id') or source.get('created_at')).encode('utf-8')).hexdigest()[:16]}",
+                "created_at": source.get("created_at"),
+                "path": method,
+                "provider": provider,
+                "source_surface": source_surface,
+                "endpoint": endpoint,
+                "requested_model": requested_model,
+                "routed_model": routed_model or requested_model,
+                "requested_model_family": _model_family(requested_model) if requested_model else "unknown",
+                "routed_model_family": _model_family(routed_model or requested_model) if (routed_model or requested_model) else "unknown",
+                "stream": 0,
+                "cache_hit": 1 if cache_meta.get("status") == "hit" else 0,
+                "status_code": status_code,
+                "latency_ms": source.get("latency_ms"),
+                "input_tokens_est": input_tokens,
+                "output_tokens_est": output_tokens,
+                "actual_input_tokens": input_tokens,
+                "actual_output_tokens": output_tokens,
+                "cost_est_usd": _as_float(metadata.get("cost_est_usd") or event_window.get("cost_est_usd")),
+                "cost_baseline_usd": _as_float(metadata.get("cost_baseline_usd") or event_window.get("cost_baseline_usd")),
+                "retry_count": _as_int(metadata.get("retry_count") or event_window.get("retry_count")),
+                "category": category,
+                "crunch_json": stable_json(crunch),
+                "routing_json": stable_json(routing_meta),
+                "cache_json": stable_json(cache_meta),
+                "_metadata_window_backfill": True,
+            }
+        )
+    return rows
+
+
 def _crunch_canary_cohort_id(row: dict[str, Any]) -> str:
     basis = {
         "provider_family": row.get("provider_family"),
@@ -11108,6 +11235,10 @@ def build_request_shape_rollups_report(
             (capped_limit,),
         ).fetchall()
     ]
+    metadata_window_backfilled = False
+    if not rows:
+        rows = _codex_metadata_window_rows(store_obj, limit=capped_limit)
+        metadata_window_backfilled = bool(rows)
 
     groups: dict[str, dict[str, Any]] = {}
     provider_counts: dict[str, int] = {}
@@ -11347,12 +11478,14 @@ def build_request_shape_rollups_report(
         "window": {
             "start": window_start,
             "end": window_end,
-            "source": "recent-local-call-metadata",
+            "source": "recent-local-metadata-window-backfill" if metadata_window_backfilled else "recent-local-call-metadata",
         },
         "summary": {
             "rows_considered": len(rows),
             "rollup_count": len(rollups),
             "collapsed_rows": max(0, len(rows) - len(rollups)),
+            "metadata_window_backfilled": metadata_window_backfilled,
+            "metadata_window_backfill_rows": len(rows) if metadata_window_backfilled else 0,
             "total_cost_est_usd": round(sum(_as_float(row.get("cost_est_usd")) for row in rollups), 6),
             "total_baseline_cost_usd": round(sum(_as_float(row.get("baseline_cost_usd")) for row in rollups), 6),
             "observed_savings_usd": round(sum(_as_float(row.get("observed_savings_usd")) for row in rollups), 6),

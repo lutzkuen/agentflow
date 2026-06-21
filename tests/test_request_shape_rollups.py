@@ -65,6 +65,87 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(report["privacy"]["raw_prompts_included"])
         self.assertFalse(report["privacy"]["request_ids_included"])
 
+    def test_rollups_backfill_from_recent_codex_metadata_windows_without_call_rows(self) -> None:
+        raw_request_id = "raw-codex-request-id-must-not-leak"
+        raw_session_id = "raw-codex-session-id-must-not-leak"
+        raw_thread_id = "raw-codex-thread-id-must-not-leak"
+        raw_prompt = "raw codex prompt must not leak"
+        raw_path = "/tmp/private/codex/source.py"
+        for index in range(2):
+            self.store.log_codex_app_event(
+                id=f"codex-start-{index}",
+                created_at=f"2026-06-21T01:00:0{index}+00:00",
+                direction="client_to_server",
+                method="turn/start",
+                request_id=raw_request_id,
+                thread_id=raw_thread_id,
+                message_chars=42_000,
+                params_chars=200,
+                input_items=3,
+                input_text_chars=42_000,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id=raw_session_id,
+                routing_json=stable_json({
+                    "category": "tool-result",
+                    "workflow_phase": "tool-execution",
+                    "has_tools": True,
+                    "model": "gpt-5",
+                }),
+                crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+                cache_json=stable_json({"status": "skipped", "reason": "codex-app-cache-disabled"}),
+                event_window_json=stable_json({
+                    "schema": "agentflow.codex_app_event_window.v1",
+                    "workflow_phase": "tool-execution",
+                    "input_text_chars": 42_000,
+                    "method_counts": {"turn/start": 1, "item/commandExecution/outputDelta": 4},
+                    "request_id": raw_request_id,
+                    "thread_id": raw_thread_id,
+                    "session_id": raw_session_id,
+                    "prompt": raw_prompt,
+                    "file_path": raw_path,
+                }),
+            )
+
+        report = build_request_shape_rollups_report(self.store, limit=10, persist=False, run_id="codex-backfill")
+        follow_up = report["follow_up_candidates"]
+
+        self.assertEqual(report["window"]["source"], "recent-local-metadata-window-backfill")
+        self.assertEqual(report["summary"]["rows_considered"], 2)
+        self.assertEqual(report["summary"]["metadata_window_backfill_rows"], 2)
+        self.assertGreaterEqual(report["summary"]["rollup_count"], 1)
+        self.assertEqual(follow_up["schema"], "agentflow.request_shape_follow_up_candidates.v1")
+        self.assertEqual(follow_up["status"], "candidates-ranked")
+        self.assertEqual(follow_up["summary"]["rows_considered"], 2)
+        self.assertGreaterEqual(follow_up["summary"]["ranked_candidate_count"], 1)
+        self.assertIsNotNone(follow_up["summary"]["top_next_action"])
+        self.assertTrue(follow_up["privacy"]["metadata_only"])
+        self.assertTrue(follow_up["privacy"]["aggregate_only"])
+        self.assertFalse(follow_up["privacy"]["provider_calls_made"])
+        self.assertFalse(follow_up["privacy"]["managed_server_calls_made"])
+        self.assertFalse(follow_up["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["provider_calls_made"])
+        self.assertFalse(report["privacy"]["managed_server_calls_made"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn(raw_request_id, rendered)
+        self.assertNotIn(raw_session_id, rendered)
+        self.assertNotIn(raw_thread_id, rendered)
+        self.assertNotIn(raw_prompt, rendered)
+        self.assertNotIn(raw_path, rendered)
+
+    def test_rollups_preserve_no_source_traffic_when_calls_and_metadata_windows_empty(self) -> None:
+        report = build_request_shape_rollups_report(self.store, limit=10, persist=False, run_id="empty-backfill")
+
+        self.assertEqual(report["summary"]["rows_considered"], 0)
+        self.assertEqual(report["summary"]["rollup_count"], 0)
+        self.assertFalse(report["summary"]["metadata_window_backfilled"])
+        follow_up = report["follow_up_candidates"]
+        self.assertEqual(follow_up["status"], "no-source-traffic")
+        self.assertEqual(follow_up["summary"]["top_next_action"], "emit-request-shape-rollups")
+        self.assertEqual(follow_up["missing_measurements"], ["no-source-traffic-for-request-shape-rollups"])
+
     def _cache_replay_hit_recovery_smoke(self) -> dict[str, object]:
         return {
             "schema": "agentflow.cache_replay_hit_recovery_smoke.v1",
