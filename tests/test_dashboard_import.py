@@ -3981,6 +3981,90 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
 
+    def test_activation_bottleneck_card_renders_empty_queue_state(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        plan_tmp = tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False)
+        store = Store(tmp.name)
+        plan_path = Path(plan_tmp.name)
+        plan_payload = {
+            "schema": "agentflow.orchestrator_research_plan.v1",
+            "generated_at": "2026-06-19T19:30:00+00:00",
+            "evidence": {
+                "stats_summary": {
+                    "local_activation_next_action_queue": {
+                        "schema": "agentflow.local_activation_next_action_queue.v1",
+                        "status": "ranked",
+                        "summary": {"queued_action_count": 0, "successor_action_count": 0},
+                        "entries": [],
+                        "successor_actions": [],
+                        "successor_decisions": [],
+                        "privacy": {
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                            "raw_prompts_included": False,
+                            "provider_bodies_included": False,
+                            "request_ids_included": False,
+                            "session_ids_included": False,
+                            "cache_keys_included": False,
+                        },
+                    }
+                }
+            },
+        }
+        try:
+            json.dump(plan_payload, plan_tmp)
+            plan_tmp.close()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path),
+                },
+                clear=False,
+            ):
+                app = create_dashboard_app(
+                    store_obj=lambda: store,
+                    default_db=tmp.name,
+                    upstream="https://anthropic.test",
+                    limiter_status=lambda: [],
+                    limiter_config={},
+                    full_stats_ttl_s=0,
+                )
+                client = TestClient(app)
+                queue_response = client.get("/agentflow/stats/local-activation-next-action-queue?limit=5")
+                full_response = client.get("/agentflow/stats/full")
+                dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(queue_response.status_code, 200)
+            self.assertEqual(full_response.status_code, 200)
+            queue_payload = queue_response.json()
+            full_payload = full_response.json()
+            self.assertEqual(queue_payload["status"], "empty")
+            self.assertEqual(queue_payload["summary"]["queued_action_count"], 0)
+            health = full_payload["activation_successor_queue_health"]
+            self.assertEqual(health["schema"], "agentflow.activation_successor_queue_health.v1")
+            self.assertEqual(health["status"], "empty")
+            self.assertEqual(health["summary"]["top_projected_savings_usd"], 0.0)
+            self.assertIn(health["summary"]["top_next_action"], (None, ""))
+            self.assertIn("c-activation-bottleneck", dashboard.text)
+            self.assertIn("renderActivationBottleneckCard(d)", dashboard.text)
+            self.assertFalse(health["privacy"]["raw_prompts_included"])
+            self.assertFalse(health["privacy"]["provider_bodies_included"])
+            self.assertFalse(health["privacy"]["request_ids_included"])
+            self.assertFalse(health["privacy"]["session_ids_included"])
+            self.assertFalse(health["privacy"]["cache_keys_included"])
+        finally:
+            try:
+                plan_tmp.close()
+            except Exception:
+                pass
+            try:
+                plan_path.unlink()
+            except FileNotFoundError:
+                pass
+            store.conn.close()
+            tmp.close()
+
     def test_preview_gated_activation_issue_queue_endpoint_reads_bounded_sanitized_plan(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         plan_tmp = tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False)
@@ -3996,6 +4080,8 @@ class DashboardImportTests(unittest.TestCase):
                 "recommended_next_action": "draft-openai-routing-recovery-canary",
                 "issue_worthy_status": "ready",
                 "blocker_codes": ["preview-fixture"],
+                "projected_savings_usd": 0.123456,
+                "realized_savings_usd": 0.012345,
                 "expected_savings_path": "Move preview-agreed routing evidence into a recovery drill.",
                 "acceptance_metric": "Preview-agreed routing successor emits a ready issue.",
                 "privacy": {"metadata_only": True, "aggregate_only": True},
@@ -4165,10 +4251,13 @@ class DashboardImportTests(unittest.TestCase):
                 )
                 client = TestClient(app)
                 response = client.get("/agentflow/stats/preview-gated-activation-issue-queue?limit=3")
+                full_response = client.get("/agentflow/stats/full")
                 dashboard = client.get("/agentflow/dashboard")
 
             self.assertEqual(response.status_code, 200)
+            self.assertEqual(full_response.status_code, 200)
             payload = response.json()
+            full_payload = full_response.json()
             self.assertEqual(payload["schema"], "agentflow.dashboard_preview_gated_activation_issue_queue.v1")
             self.assertEqual(payload["status"], "ranked")
             self.assertEqual(payload["summary"]["successor_decision_count"], 5)
@@ -4189,11 +4278,28 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["request_ids_included"])
             self.assertFalse(payload["privacy"]["session_ids_included"])
             self.assertFalse(payload["privacy"]["cache_keys_included"])
+            health = full_payload["activation_successor_queue_health"]
+            self.assertEqual(health["schema"], "agentflow.activation_successor_queue_health.v1")
+            self.assertEqual(health["status"], "ranked")
+            self.assertEqual(health["summary"]["top_local_action_family"], "routing")
+            self.assertEqual(health["summary"]["top_next_action"], "draft-openai-routing-recovery-canary")
+            self.assertEqual(health["summary"]["top_blocker"], "preview-fixture")
+            self.assertEqual(health["summary"]["top_projected_savings_usd"], 0.123456)
+            self.assertEqual(health["summary"]["top_realized_savings_usd"], 0.012345)
+            self.assertFalse(health["privacy"]["raw_prompts_included"])
+            self.assertFalse(health["privacy"]["provider_bodies_included"])
+            self.assertFalse(health["privacy"]["request_ids_included"])
+            self.assertFalse(health["privacy"]["session_ids_included"])
+            self.assertFalse(health["privacy"]["cache_keys_included"])
+            self.assertIn("activation_successor_queue_health", full_payload["summary"])
+            self.assertIn("c-activation-bottleneck", dashboard.text)
+            self.assertIn("c-activation-action", dashboard.text)
+            self.assertIn("c-activation-savings", dashboard.text)
             self.assertIn("preview-gated-activation-issue-summary-tbody", dashboard.text)
             self.assertIn("preview-gated-activation-issue-decisions-tbody", dashboard.text)
             self.assertIn("preview-gated-activation-issue-proposals-tbody", dashboard.text)
 
-            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            rendered = json.dumps(payload, sort_keys=True) + json.dumps(full_payload, sort_keys=True) + dashboard.text
             self.assertNotIn(str(plan_path), rendered)
             self.assertNotIn("raw activation prompt must not render", rendered)
             self.assertNotIn("req-preview-secret", rendered)

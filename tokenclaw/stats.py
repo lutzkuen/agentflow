@@ -18250,6 +18250,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     sqlite_maintenance = await stats_sqlite_maintenance(store_obj)
     active_crunch_rule_coverage = _active_crunch_rule_coverage()
     activation_burndown = await stats_local_activation_next_action_queue(limit=5, store_obj=store_obj)
+    activation_successor_queue_health = build_activation_successor_queue_health(limit=5)
 
     def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -19061,9 +19062,11 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "routing_experiment_promotion_reason_counts": routing_experiment_report_summary["promotion_reason_counts"],
             "routing_experiment_promotion_ready_candidates": routing_experiment_report_summary["promotion_ready_candidates"],
             "activation_burndown": activation_burndown.get("summary", {}),
+            "activation_successor_queue_health": activation_successor_queue_health.get("summary", {}),
             "managed_preview_coverage": (activation_burndown.get("managed_preview_coverage") or {}).get("summary", {}),
         },
         "activation_burndown": activation_burndown,
+        "activation_successor_queue_health": activation_successor_queue_health,
         "managed_preview_coverage": activation_burndown.get("managed_preview_coverage"),
         "recent": recent,
         "routing_breakdown": routing_breakdown,
@@ -21576,6 +21579,7 @@ def dashboard_html() -> str:
   <div class="card"><div class="label">Tokens today</div><div class="value" id="c-tokens-today">—</div><div class="sub" id="c-tokens-sub">— provider split</div><div class="sub" id="c-tokens-codex">— Codex telemetry</div></div>
   <div class="card"><div class="label">Calculated spend</div><div class="value" id="c-spend">—</div><div class="sub" id="c-spend-sub">— total</div></div>
   <div class="card green"><div class="label">Savings</div><div class="value" id="c-savings">—</div><div class="sub" id="c-savings-sub">— buckets</div></div>
+  <div class="card"><div class="label">Activation bottleneck</div><div class="value" id="c-activation-bottleneck">—</div><div class="sub" id="c-activation-action">— next action</div><div class="sub" id="c-activation-savings">— projected savings</div></div>
   <div class="card blue"><div class="label">Errors today</div><div class="value" id="c-health">—</div><div class="sub" id="c-health-sub">— latency</div><div class="sub" id="c-health-cooldown">— cooldowns</div></div>
 </div>
 
@@ -23724,6 +23728,7 @@ async function refresh(){
     document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??agentflowBuckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??agentflowBuckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??agentflowBuckets.exact_local_cache_usd??0,4);
     document.getElementById('c-health').textContent=(health.errors_today??health.errors??0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
+    renderActivationBottleneckCard(d);
     renderActivationBurndown(d);
 
     document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
@@ -25839,6 +25844,25 @@ function evidenceActivationPrivacyBadges(privacy){
     privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>',
     privacy.absolute_paths_included?'<span class="badge err">absolute paths</span>':'<span class="badge hit">paths omitted</span>'
   ].join(' ');
+}
+function renderActivationBottleneckCard(d){
+  const health=d.activation_successor_queue_health||{};
+  const summary=health.summary||{};
+  const top=(health.top_entries||[])[0]||{};
+  const family=summary.top_local_action_family||top.local_action_family||summary.top_lever||top.lever||'no bottleneck';
+  const state=summary.top_status||summary.top_state||top.current_status||top.state||health.status||'empty';
+  const nextAction=summary.top_next_action||top.next_action||'none';
+  const blocker=summary.top_blocker||top.top_blocker||(summary.top_blocker_codes||[])[0]||'none';
+  const preview=summary.top_preview_verification_status||top.preview_verification_status||'no preview';
+  const projected=summary.top_projected_savings_usd??top.projected_savings_usd??0;
+  const realized=summary.top_realized_savings_usd??top.realized_savings_usd??0;
+  document.getElementById('c-activation-bottleneck').textContent=family;
+  document.getElementById('c-activation-action').textContent=health.status==='ranked'
+    ? `${state} · ${nextAction}`
+    : (health.status_reason||'No activation bottlenecks available');
+  document.getElementById('c-activation-savings').textContent=health.status==='ranked'
+    ? `projected ${fmt(projected,6)} · realized ${fmt(realized,6)} · ${blocker} · ${preview}`
+    : `projected ${fmt(projected,6)} · read-only`;
 }
 function renderActivationBurndown(d){
   const target=document.getElementById('activation-burndown-tbody');
