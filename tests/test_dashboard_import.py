@@ -4047,7 +4047,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(health["summary"]["top_projected_savings_usd"], 0.0)
             self.assertIn(health["summary"]["top_next_action"], (None, ""))
             self.assertIn("c-activation-bottleneck", dashboard.text)
-            self.assertIn("renderActivationBottleneckCard(d)", dashboard.text)
+            self.assertIn("activation queue is not polled by the shell", dashboard.text)
             self.assertFalse(health["privacy"]["raw_prompts_included"])
             self.assertFalse(health["privacy"]["provider_bodies_included"])
             self.assertFalse(health["privacy"]["request_ids_included"])

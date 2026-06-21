@@ -17421,8 +17421,83 @@ def _accounting_rollup(units: list[dict[str, Any]]) -> dict[str, Any]:
 
 async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
     conn = store_obj.conn
-    calls = conn.execute("select count(*) c from calls").fetchone()["c"]
-    cache_hits = conn.execute("select count(*) c from calls where cache_hit = 1").fetchone()["c"]
+    today_start = _utc_today_start_iso()
+
+    def scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
+        row = conn.execute(sql, params).fetchone()
+        return row[0] if row else None
+
+    calls = int(scalar("select count(*) from calls") or 0)
+    cache_hits = int(scalar("select count(*) from calls where cache_hit = 1") or 0)
+    today_summary = dict(conn.execute(
+        """
+        select count(*) as calls,
+               coalesce(sum(coalesce(cost_est_usd, 0)), 0) as cost_est_usd,
+               coalesce(sum(coalesce(cost_baseline_usd, cost_est_usd, 0)), 0) as cost_baseline_usd,
+               coalesce(sum(case
+                 when coalesce(cost_baseline_usd, 0) > coalesce(cost_est_usd, 0)
+                 then coalesce(cost_baseline_usd, 0) - coalesce(cost_est_usd, 0)
+                 else 0 end), 0) as savings_usd,
+               coalesce(sum(case
+                 when routed_model is not null and requested_model != routed_model
+                 then 1 else 0 end), 0) as routed_count,
+               coalesce(sum(case when cache_hit = 1 then 1 else 0 end), 0) as cache_hits,
+               coalesce(sum(case when status_code >= 400 then 1 else 0 end), 0) as errors,
+               avg(latency_ms) as avg_latency_ms,
+               coalesce(sum(coalesce(actual_input_tokens, input_tokens_est, 0)), 0) as input_tokens,
+               coalesce(sum(coalesce(actual_output_tokens, output_tokens_est, 0)), 0) as output_tokens,
+               coalesce(sum(coalesce(actual_input_tokens, input_tokens_est, 0)
+                            + coalesce(actual_output_tokens, output_tokens_est, 0)
+                            + coalesce(cache_creation_input_tokens, 0)
+                            + coalesce(cache_read_input_tokens, 0)), 0) as total_tokens,
+               coalesce(sum(coalesce(json_extract(crunch_json, '$.saved_chars'), 0)), 0) as crunch_chars_saved,
+               coalesce(sum(coalesce(json_extract(crunch_json, '$.tokens_saved_est'), 0)), 0) as crunch_tokens_saved,
+               coalesce(sum(case when json_extract(crunch_json, '$.changed') = 1 then 1 else 0 end), 0) as crunched_count
+        from calls
+        where created_at >= ?
+        """,
+        (today_start,),
+    ).fetchone())
+    total_summary = dict(conn.execute(
+        """
+        select coalesce(sum(coalesce(cost_est_usd, 0)), 0) as cost_est_usd,
+               coalesce(sum(coalesce(cost_baseline_usd, cost_est_usd, 0)), 0) as cost_baseline_usd,
+               coalesce(sum(case
+                 when coalesce(cost_baseline_usd, 0) > coalesce(cost_est_usd, 0)
+                 then coalesce(cost_baseline_usd, 0) - coalesce(cost_est_usd, 0)
+                 else 0 end), 0) as savings_usd,
+               coalesce(sum(case when status_code >= 400 then 1 else 0 end), 0) as errors,
+               avg(latency_ms) as avg_latency_ms
+        from calls
+        """
+    ).fetchone())
+    today_volume = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select coalesce(provider, 'anthropic') as provider,
+                   coalesce(routed_model_family, requested_model_family, routed_model, requested_model, 'unknown') as model_family,
+                   count(*) as calls,
+                   coalesce(sum(coalesce(cost_est_usd, 0)), 0) as cost_est_usd,
+                   coalesce(sum(coalesce(cost_baseline_usd, cost_est_usd, 0)), 0) as cost_baseline_usd,
+                   coalesce(sum(case
+                     when coalesce(cost_baseline_usd, 0) > coalesce(cost_est_usd, 0)
+                     then coalesce(cost_baseline_usd, 0) - coalesce(cost_est_usd, 0)
+                     else 0 end), 0) as savings_usd,
+                   coalesce(sum(coalesce(actual_input_tokens, input_tokens_est, 0)
+                                + coalesce(actual_output_tokens, output_tokens_est, 0)
+                                + coalesce(cache_creation_input_tokens, 0)
+                                + coalesce(cache_read_input_tokens, 0)), 0) as total_tokens
+            from calls
+            where created_at >= ?
+            group by coalesce(provider, 'anthropic'),
+                     coalesce(routed_model_family, requested_model_family, routed_model, requested_model, 'unknown')
+            order by calls desc
+            limit 20
+            """,
+            (today_start,),
+        ).fetchall()
+    ]
     routed = conn.execute("""
         select coalesce(provider, 'anthropic') as provider,
                coalesce(source_surface, 'unknown') as source_surface,
@@ -17485,11 +17560,111 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
         order by c desc
         limit 20
     """).fetchall()
-    recent = conn.execute("select coalesce(provider, 'anthropic') as provider, created_at, requested_model, routed_model, cache_hit, status_code, latency_ms, cost_est_usd from calls order by created_at desc limit 20").fetchall()
+    recent = conn.execute("""
+        select coalesce(provider, 'anthropic') as provider,
+               created_at,
+               requested_model,
+               routed_model,
+               cache_hit,
+               status_code,
+               latency_ms,
+               coalesce(actual_input_tokens, input_tokens_est, 0) as tokens_in,
+               coalesce(actual_output_tokens, output_tokens_est, 0) as tokens_out,
+               cost_est_usd,
+               cost_baseline_usd,
+               case
+                 when coalesce(cost_baseline_usd, 0) > coalesce(cost_est_usd, 0)
+                 then coalesce(cost_baseline_usd, 0) - coalesce(cost_est_usd, 0)
+                 else 0
+               end as saved_usd,
+               coalesce(category, json_extract(routing_json, '$.category'), 'unknown') as category
+        from calls
+        order by created_at desc
+        limit 50
+    """).fetchall()
+    today_calls = int(today_summary["calls"] or 0)
+    today_cost = float(today_summary["cost_est_usd"] or 0.0)
+    total_cost = float(total_summary["cost_est_usd"] or 0.0)
+    today_savings = float(today_summary["savings_usd"] or 0.0)
+    today_routed = int(today_summary["routed_count"] or 0)
+    today_cache_hits = int(today_summary["cache_hits"] or 0)
+    today_crunch_tokens_saved = int(today_summary["crunch_tokens_saved"] or 0)
+    today_crunch_savings = max(0.0, today_crunch_tokens_saved / 1_000_000 * 3.0)
     return {
+        "schema": "tokenclaw.lightweight_dashboard_stats.v1",
+        "generated_at": utc_now(),
         "calls": calls,
         "cache_hits": cache_hits,
         "cache_hit_rate": (cache_hits / calls) if calls else 0,
+        "today_calls": today_calls,
+        "today_cost_usd": round(today_cost, 8),
+        "today_savings_usd": round(today_savings, 8),
+        "today_volume": today_volume,
+        "today_routing_hit_rate": round(today_routed / today_calls, 4) if today_calls else 0.0,
+        "today_cache_hit_rate": round(today_cache_hits / today_calls, 4) if today_calls else 0.0,
+        "today_crunch_chars_saved": int(today_summary["crunch_chars_saved"] or 0),
+        "today_crunch_tokens_saved": today_crunch_tokens_saved,
+        "today_crunch_savings_usd": round(today_crunch_savings, 8),
+        "summary": {
+            "total_calls": calls,
+            "today_calls": today_calls,
+            "total_cost_usd": round(total_cost, 8),
+            "today_cost_usd": round(today_cost, 8),
+            "today_savings_usd": round(today_savings, 8),
+            "today_routed_count": today_routed,
+            "today_cache_hits": today_cache_hits,
+            "today_crunched_count": int(today_summary["crunched_count"] or 0),
+            "errors": int(total_summary["errors"] or 0),
+            "today_errors": int(today_summary["errors"] or 0),
+            "avg_latency_ms": round(float(total_summary["avg_latency_ms"] or 0), 2),
+        },
+        "executive_summary": {
+            "accounting_today": {
+                "total_tokens": int(today_summary["total_tokens"] or 0),
+                "cost_est_usd": round(today_cost, 8),
+                "captured_savings_usd": round(today_savings, 8),
+                "routing_savings_usd": round(today_savings, 8),
+                "crunch_savings_usd": round(today_crunch_savings, 8),
+                "cache_savings_usd": 0.0,
+                "source_surfaces": [],
+            },
+            "accounting_total": {
+                "cost_est_usd": round(total_cost, 8),
+            },
+            "tokens_today": {
+                "provider_input_tokens": int(today_summary["input_tokens"] or 0),
+                "provider_output_tokens": int(today_summary["output_tokens"] or 0),
+                "provider_total_tokens": int(today_summary["total_tokens"] or 0),
+                "total_tokens": int(today_summary["total_tokens"] or 0),
+                "codex_app_turns": 0,
+                "codex_app_total_tokens_est": 0,
+                "codex_app_input_text_chars": 0,
+            },
+            "spend": {
+                "today_calculated_spend_usd": round(today_cost, 8),
+                "calculated_spend_usd": round(total_cost, 8),
+                "today_provider_spend_usd": round(today_cost, 8),
+                "today_codex_app_estimated_spend_usd": 0.0,
+            },
+            "savings": {
+                "today_tokenclaw_generated_savings_usd": round(today_savings + today_crunch_savings, 8),
+                "today_tokenclaw_generated_buckets": {
+                    "routing_usd": round(today_savings, 8),
+                    "crunching_usd": round(today_crunch_savings, 8),
+                    "exact_local_cache_usd": 0.0,
+                },
+                "today_buckets": {
+                    "routing_usd": round(today_savings, 8),
+                    "crunching_usd": round(today_crunch_savings, 8),
+                    "exact_local_cache_usd": 0.0,
+                },
+            },
+            "health": {
+                "errors": int(total_summary["errors"] or 0),
+                "errors_today": int(today_summary["errors"] or 0),
+                "avg_latency_ms": round(float(today_summary["avg_latency_ms"] or total_summary["avg_latency_ms"] or 0), 2),
+            },
+        },
         "db": default_db,
         "routing": [dict(r) for r in routed],
         "recent": [dict(r) for r in recent],
@@ -23996,7 +24171,9 @@ async function refreshWeekly(){
 
 async function refresh(){
   try{
-    const d=await loadFullStats();
+    const r=await fetch('/tokenclaw/stats');
+    if(!r.ok)throw new Error('stats HTTP '+r.status);
+    const d=await r.json();
     const s=d.summary;
     const e=d.executive_summary||{};
     const acct=e.accounting_today||{};
@@ -24020,15 +24197,18 @@ async function refresh(){
     document.getElementById('c-spend').textContent=fmt(acct.cost_est_usd??spend.today_calculated_spend_usd??spend.today_provider_spend_usd??0,4);
     document.getElementById('c-spend-sub').textContent=fmt(acctTotal.cost_est_usd??spend.calculated_spend_usd??spend.total_provider_spend_usd??0,4)+' total · '+fmt(spend.today_provider_spend_usd||0,4)+' provider reported · '+fmt(spend.today_codex_app_estimated_spend_usd||0,4)+' Codex est';
     const tokenclawBuckets=savings.today_tokenclaw_generated_buckets||buckets;
-    const accountAgentflowSavings=(acct.routing_savings_usd??0)+(acct.crunch_savings_usd??0)+(acct.cache_savings_usd??0);
-    const todayAgentflowSavings=(accountAgentflowSavings||savings.today_tokenclaw_generated_savings_usd)??0;
+    const capturedSavings=acct.captured_savings_usd??savings.today_savings_usd??acct.routing_savings_usd??tokenclawBuckets.routing_usd??0;
+    const todayAgentflowSavings=capturedSavings||savings.today_tokenclaw_generated_savings_usd||0;
     document.getElementById('c-savings').textContent=fmt(todayAgentflowSavings,4);
-    document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??tokenclawBuckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??tokenclawBuckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??tokenclawBuckets.exact_local_cache_usd??0,4);
+    document.getElementById('c-savings-sub').textContent='captured '+fmt(capturedSavings,4)+' · crunch signal '+fmt(acct.crunch_savings_usd??tokenclawBuckets.crunching_usd??0,4)+' · cache hits '+((d.today_cache_hit_rate||0)*100).toFixed(1)+'%';
     document.getElementById('c-health').textContent=(health.errors_today??health.errors??0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
-    renderSavingsLoopBottlenecks(d);
-    renderActivationBottleneckCard(d);
-    renderActivationBurndown(d);
+    document.getElementById('c-savings-loop').textContent='on demand';
+    document.getElementById('c-savings-loop-action').textContent='research panels load outside the default dashboard path';
+    document.getElementById('c-savings-loop-evidence').textContent='open Research for activation and savings-loop details';
+    document.getElementById('c-activation-bottleneck').textContent='on demand';
+    document.getElementById('c-activation-action').textContent='activation queue is not polled by the shell';
+    document.getElementById('c-activation-savings').textContent='use Activation next actions';
 
     document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
   }catch(e){
