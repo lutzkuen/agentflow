@@ -4133,7 +4133,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 decision = decisions[source]
                 gate = action["managed_preview_gate"]
                 self.assertFalse(action["preview_verified"])
-                self.assertEqual(action["successor_status"], "preview-optional")
+                expected_status = (
+                    "source-traffic-acquisition"
+                    if source == "activation:rollup-emit"
+                    else "preview-optional"
+                )
+                self.assertEqual(action["successor_status"], expected_status)
                 self.assertEqual(action["recommended_next_action"], next_action)
                 self.assertEqual(action["preview_requirement"], "optional")
                 self.assertTrue(action["locally_decisive"])
@@ -4144,12 +4149,76 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 self.assertFalse(gate["policy_files_written"])
                 self.assertFalse(gate["provider_calls_made"])
                 self.assertFalse(gate["managed_server_calls_made"])
-                self.assertEqual(decision["decision"], "preview-optional")
+                self.assertEqual(decision["decision"], expected_status)
                 self.assertEqual(decision["recommended_next_action"], next_action)
                 self.assertEqual(decision["preview_requirement"], "optional")
                 self.assertTrue(decision["locally_decisive"])
                 self.assertFalse(decision["policy_files_written"])
                 self.assertTrue(decision["privacy"]["metadata_only"])
+                if source == "activation:rollup-emit":
+                    self.assertEqual(action["action_type"], "source-traffic-acquisition")
+                    self.assertEqual(action["local_action_family"], "source-traffic-acquisition")
+                    self.assertEqual(action["target_downstream_lever"], "cohort-ranking")
+                    self.assertEqual(action["source_schema"], "tokenclaw.request_shape_follow_up_candidates.v1")
+                    self.assertEqual(action["recommended_command"], "tokenclaw-request-shape-rollups")
+                    self.assertEqual(action["recommended_module"], "tokenclaw.request_shape_rollups")
+                    self.assertEqual(action["source_traffic_acquisition"]["status"], "ready")
+                    self.assertEqual(decision["issue_worthy_status"], "suppressed")
+                    self.assertEqual(decision["action_type"], "source-traffic-acquisition")
+                    self.assertEqual(decision["target_downstream_lever"], "cohort-ranking")
+                    self.assertFalse(action["privacy"]["provider_calls_made"])
+                    self.assertFalse(action["privacy"]["managed_server_calls_made"])
+                    self.assertFalse(action["privacy"]["policy_files_written"])
+
+        placeholder_plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 0,
+                "local_activation_next_action_queue": {
+                    "schema": "tokenclaw.local_activation_next_action_queue.v1",
+                    "status": "ranked",
+                    "successor_actions": [
+                        {
+                            "schema": "tokenclaw.local_activation_successor_action.v1",
+                            "fingerprint": "successor:rollup-placeholder",
+                            "source_fingerprint": "activation:rollup-placeholder",
+                            "lever": "request-shape-rollups",
+                            "local_action_family": "cohort-ranking",
+                            "successor_status": "keep-blocked",
+                            "recommended_next_action": "emit-request-shape-rollups",
+                            "state": "missing-evidence",
+                            "current_status": "blocked",
+                            "unblock_reason": "no-source-traffic-for-request-shape-rollups",
+                            "blocker_codes": ["no-source-traffic-for-request-shape-rollups"],
+                            "sample_count": 0,
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        }
+                    ],
+                    "successor_decisions": [
+                        {
+                            "schema": "tokenclaw.local_activation_successor_decision.v1",
+                            "fingerprint": "successor-decision:rollup-placeholder",
+                            "source_fingerprint": "activation:rollup-placeholder",
+                            "successor_action_fingerprint": "successor:rollup-placeholder",
+                            "local_action_family": "cohort-ranking",
+                            "decision": "keep-blocked",
+                            "recommended_next_action": "emit-request-shape-rollups",
+                            "issue_worthy_status": "blocked",
+                            "preview_agreement_status": "missing-preview",
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+        titles = [item["title"] for item in placeholder_plan["backlog_changes"]["create_issues"]]
+        self.assertFalse(
+            any("Keep cohort-ranking activation successor blocked on no-source-traffic" in title for title in titles),
+            "source-traffic acquisition successors should not create generic blocked placeholder issues",
+        )
 
     def test_preview_agreed_activation_outcomes_emit_successor_decisions(self):
         ledger = {

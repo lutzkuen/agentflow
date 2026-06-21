@@ -6334,6 +6334,11 @@ def _successor_action_acceptance_metric(entry: dict[str, Any]) -> str:
     blockers = {str(item) for item in entry.get("blocker_codes") or []}
     next_action = str(entry.get("next_action") or "")
     state = str(entry.get("state") or "")
+    if _is_source_traffic_acquisition_successor(entry):
+        return (
+            "A metadata-only source-traffic acquisition action has a stable fingerprint, concrete next action, "
+            "source schema, downstream lever, and no provider calls, managed-server calls, policy writes, or body logging."
+        )
     if family == "routing" and "semantic-quality-regression-observed" in blockers:
         return (
             "A narrower routing canary or rollback review records applied/holdout coverage, "
@@ -6375,6 +6380,8 @@ def _successor_action_acceptance_metric(entry: dict[str, Any]) -> str:
 
 
 def _successor_action_status(entry: dict[str, Any]) -> str:
+    if _is_source_traffic_acquisition_successor(entry):
+        return "source-traffic-acquisition"
     post_rollback_decision = str(entry.get("post_rollback_successor_decision") or "").strip()
     if post_rollback_decision in {
         "reobserve-after-rollback",
@@ -6752,6 +6759,37 @@ def _is_request_shape_rollup_successor(entry: dict[str, Any], outcome: dict[str,
         or next_action == "emit-request-shape-rollups"
         or "ranked_request_shape_rollup" in blockers
     )
+
+
+def _is_source_traffic_acquisition_successor(entry: dict[str, Any], outcome: dict[str, Any] | None = None) -> bool:
+    if not _is_request_shape_rollup_successor(entry, outcome):
+        return False
+    outcome = outcome if isinstance(outcome, dict) else {}
+    blockers = {
+        str(item).strip()
+        for item in [
+            *(entry.get("blocker_codes") or []),
+            *(outcome.get("blocker_codes") or []),
+            entry.get("unblock_reason"),
+            entry.get("blocking_reason"),
+            entry.get("no_source_traffic_reason"),
+            outcome.get("unblock_reason"),
+            outcome.get("blocking_reason"),
+            outcome.get("no_source_traffic_reason"),
+        ]
+        if str(item or "").strip()
+    }
+    if "no-source-traffic-for-request-shape-rollups" in blockers:
+        return True
+    next_action = str(
+        entry.get("next_action")
+        or entry.get("recommended_next_action")
+        or outcome.get("next_action")
+        or outcome.get("recommended_next_action")
+        or ""
+    ).strip()
+    state = str(entry.get("state") or outcome.get("state") or "").strip()
+    return bool(next_action == "emit-request-shape-rollups" and _to_int(entry.get("sample_count")) <= 0 and state in {"missing-evidence", "blocked", ""})
 
 
 def _request_shape_rollup_outcome_class(outcome: dict[str, Any]) -> str:
@@ -7376,10 +7414,13 @@ def _managed_preview_successor_gate(
 
 def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
     fingerprint = sanitize_value(entry.get("fingerprint") or "")
+    source_traffic_acquisition = _is_source_traffic_acquisition_successor(entry)
+    original_family = sanitize_value(entry.get("local_action_family") or entry.get("lever") or "unknown")
+    local_action_family = "source-traffic-acquisition" if source_traffic_acquisition else original_family
     material = {
         "fingerprint": fingerprint,
         "next_action": sanitize_value(entry.get("next_action") or "inspect-local-evidence"),
-        "local_action_family": sanitize_value(entry.get("local_action_family") or entry.get("lever") or "unknown"),
+        "local_action_family": local_action_family,
     }
     action_fingerprint = public_id(json.dumps(material, sort_keys=True), prefix="successor")
     action = {
@@ -7390,7 +7431,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "fingerprint": action_fingerprint,
         "source_fingerprint": fingerprint,
         "lever": sanitize_value(entry.get("lever") or "unknown"),
-        "local_action_family": sanitize_value(entry.get("local_action_family") or entry.get("lever") or "unknown"),
+        "local_action_family": local_action_family,
         "successor_status": _successor_action_status(entry),
         "current_status": sanitize_value(entry.get("current_status") or "unknown"),
         "state": sanitize_value(entry.get("state") or "unknown"),
@@ -7417,6 +7458,39 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "duplicate_suppression_reason": sanitize_value(entry.get("duplicate_suppression_reason")),
         "privacy": _successor_action_privacy(),
     }
+    if source_traffic_acquisition:
+        evidence_schema = sanitize_value(entry.get("evidence_schema") or "tokenclaw.request_shape_follow_up_candidates.v1")
+        action.update(
+            {
+                "action_type": "source-traffic-acquisition",
+                "source_schema": evidence_schema,
+                "source_traffic_acquisition_status": "ready",
+                "target_downstream_lever": original_family or "cohort-ranking",
+                "recommended_command": "tokenclaw-request-shape-rollups",
+                "recommended_module": "tokenclaw.request_shape_rollups",
+                "issue_worthy_status": "suppressed",
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "source_traffic_acquisition": {
+                    "schema": "tokenclaw.source_traffic_acquisition_action.v1",
+                    "status": "ready",
+                    "source_schema": evidence_schema,
+                    "source_fingerprint": fingerprint,
+                    "recommended_next_action": sanitize_value(entry.get("next_action") or "emit-request-shape-rollups"),
+                    "recommended_command": "tokenclaw-request-shape-rollups",
+                    "recommended_module": "tokenclaw.request_shape_rollups",
+                    "target_downstream_lever": original_family or "cohort-ranking",
+                    "blocker_code": "no-source-traffic-for-request-shape-rollups",
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "policy_files_written": False,
+                    "privacy": _successor_action_privacy(),
+                },
+            }
+        )
     preview_gate = entry.get("managed_preview_gate") if isinstance(entry.get("managed_preview_gate"), dict) else None
     if preview_gate is not None:
         action["managed_preview_gate"] = sanitize_value(preview_gate)
@@ -7448,7 +7522,11 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             and isinstance(preview_gate.get("local_executor_gate"), dict)
             and preview_gate["local_executor_gate"].get("passed")
         ):
-            action["successor_status"] = sanitize_value(preview_gate.get("decision"))
+            action["successor_status"] = (
+                "source-traffic-acquisition"
+                if source_traffic_acquisition
+                else sanitize_value(preview_gate.get("decision"))
+            )
             action["recommended_next_action"] = sanitize_value(
                 preview_gate.get("next_action") or action["recommended_next_action"]
             )
@@ -7564,6 +7642,12 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "managed_recommended_next_action",
         "managed_expected_savings_path",
         "managed_preview_action_ref",
+        "action_type",
+        "source_schema",
+        "source_traffic_acquisition_status",
+        "target_downstream_lever",
+        "recommended_command",
+        "recommended_module",
     ):
         if entry.get(key) is not None:
             action[key] = sanitize_value(entry.get(key))
@@ -7662,6 +7746,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "keep_active_regression_gate",
         "dependency_evidence_review",
         "cache_rollback_guidance",
+        "source_traffic_acquisition",
     ):
         if isinstance(entry.get(key), dict):
             action[key] = sanitize_value(entry.get(key))
@@ -7732,6 +7817,8 @@ def _successor_decision_issue_status(action: dict[str, Any]) -> str:
     if decision in {"retire-staged-no-repeat", "suppressed-closed-successor"}:
         return "suppressed"
     if decision == "retired-stale-no-traffic":
+        return "suppressed"
+    if decision == "source-traffic-acquisition" or action.get("action_type") == "source-traffic-acquisition":
         return "suppressed"
     if decision in {"keep-current-rule", "suppress-duplicate"}:
         return "suppressed"
@@ -7806,6 +7893,12 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
         "top_preview_omission_reason": sanitize_value((gate.get("health_gate") or {}).get("top_omission_reason")) if isinstance(gate.get("health_gate"), dict) else None,
         "target_local_rule_file": sanitize_value(action.get("target_local_rule_file")),
         "target_local_policy_section": sanitize_value(action.get("target_local_policy_section")),
+        "action_type": sanitize_value(action.get("action_type")),
+        "source_schema": sanitize_value(action.get("source_schema")),
+        "source_traffic_acquisition_status": sanitize_value(action.get("source_traffic_acquisition_status")),
+        "target_downstream_lever": sanitize_value(action.get("target_downstream_lever")),
+        "recommended_command": sanitize_value(action.get("recommended_command")),
+        "recommended_module": sanitize_value(action.get("recommended_module")),
         "promotion_readiness": sanitize_value(action.get("promotion_readiness")),
         "promotion_recommendation": sanitize_value(action.get("promotion_recommendation")),
         "rollback_required": bool(action.get("rollback_required")),
@@ -7816,6 +7909,9 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
         "post_rollback_reason": sanitize_value(action.get("post_rollback_reason")),
         "post_rollback_observation": sanitize_value(action.get("post_rollback_observation"))
         if isinstance(action.get("post_rollback_observation"), dict)
+        else None,
+        "source_traffic_acquisition": sanitize_value(action.get("source_traffic_acquisition"))
+        if isinstance(action.get("source_traffic_acquisition"), dict)
         else None,
         "cache_apply_action_count": _to_int(action.get("cache_apply_action_count")),
         "cache_entries_written": _to_int(action.get("cache_entries_written")),
@@ -8551,6 +8647,8 @@ def _proposals_from_activation_successor_decisions(stats_summary: dict[str, Any]
         decision_text = str(decision.get("decision") or "").strip()
         issue_status = str(decision.get("issue_worthy_status") or "").strip()
         if issue_status == "suppressed" or decision_text in {"keep-current-rule", "suppress-duplicate"}:
+            continue
+        if _is_source_traffic_acquisition_successor(action, decision) or action.get("action_type") == "source-traffic-acquisition":
             continue
         if _is_durable_keep_blocked_activation_feedback_placeholder(action, decision):
             continue
