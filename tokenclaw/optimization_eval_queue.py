@@ -42,6 +42,22 @@ _RAW_PRIVACY_MARKERS = (
     "raw",
     "secret",
 )
+_CACHE_MISSING_DEPENDENCY_STATUSES = {
+    "missing",
+    "unknown",
+    "no-data",
+    "dependency-missing",
+    "file-dependency-missing",
+}
+_CACHE_UNSAFE_DEPENDENCY_STATUSES = {
+    "unsafe",
+    "invalidated",
+    "stale",
+    "stale-risk",
+    "changed",
+    "dependency-changed",
+    "file-dependency-changed",
+}
 
 
 def _as_float(value: Any) -> float:
@@ -180,6 +196,71 @@ def _candidate_is_safety_blocked(candidate: dict[str, Any]) -> bool:
     return bool(reasons & {"safety-stop-observed", "rollback-error-rate", "eval-failed"})
 
 
+def _candidate_is_cache_family(candidate: dict[str, Any]) -> bool:
+    action_family = str(candidate.get("action_family") or "").strip().lower().replace("-", "_")
+    optimization_family = str(candidate.get("optimization_family") or "").strip().lower().replace("-", "_")
+    return action_family == "cache" or "cache" in optimization_family
+
+
+def _cache_dependency_status(candidate: dict[str, Any]) -> str:
+    for key in ("file_dependency_status", "dependency_status", "dependency_health", "dependency_gate_status"):
+        value = str(candidate.get(key) or "").strip().lower()
+        if value:
+            return value
+    for key in ("file_dependency_audit", "dependency_audit", "dependency_freshness", "dependency_evidence", "local_dependency_freshness"):
+        audit = candidate.get(key)
+        if not isinstance(audit, dict):
+            continue
+        for nested_key in ("status", "dependency_status", "dependency_health", "reason", "invalidation_reason"):
+            value = str(audit.get(nested_key) or "").strip().lower()
+            if value:
+                return value
+    return ""
+
+
+def _cache_eval_blocker_reason(candidate: dict[str, Any]) -> str | None:
+    if not _candidate_is_cache_family(candidate):
+        return None
+    reasons = set(_safe_reason_codes(candidate.get("reason_codes")))
+    status = _cache_dependency_status(candidate)
+    if status == "unsafe":
+        return "cache-replay-unsafe-dependency"
+    if status in _CACHE_UNSAFE_DEPENDENCY_STATUSES or reasons & {
+        "dependency-changed",
+        "file-dependency-changed",
+        "file-dependency-invalidated",
+        "stale-dependency-blocker",
+    }:
+        return "cache-replay-stale-dependency-risk"
+    if status in _CACHE_MISSING_DEPENDENCY_STATUSES or reasons & {
+        "dependency-audit-missing",
+        "dependency-freshness-missing",
+        "dependency-missing",
+        "file-dependency-evidence-absent",
+        "file-dependency-missing",
+    }:
+        return "cache-replay-missing-dependency-evidence"
+    if reasons & {"missing-safe-invalidation-evidence", "safe-invalidation-required"}:
+        return "cache-replay-missing-safe-invalidation"
+    if candidate.get("requires_dependency_evidence") and not (
+        candidate.get("file_dependency_evidence_available")
+        or candidate.get("safe_invalidation_evidence")
+        or candidate.get("file_dependency_fingerprint_available")
+    ):
+        return "cache-replay-missing-dependency-evidence"
+    return None
+
+
+def _promotion_eval_queue_id(candidate: dict[str, Any]) -> str:
+    return _stable_id(
+        "promotion-eval-queued",
+        candidate.get("candidate_id"),
+        candidate.get("optimization_family"),
+        candidate.get("action_family"),
+        candidate.get("source_surface"),
+    )
+
+
 def _existing_queued_candidate_ids(store: Any) -> set[str]:
     if store is None or not hasattr(store, "conn"):
         return set()
@@ -209,8 +290,17 @@ def _existing_eval_result_ids(store: Any) -> set[str]:
 def _promotion_eval_task(candidate: dict[str, Any], *, backfill_reason_codes: list[str]) -> dict[str, Any]:
     eval_evidence = candidate.get("eval_evidence") if isinstance(candidate.get("eval_evidence"), dict) else {}
     thresholds = candidate.get("thresholds") if isinstance(candidate.get("thresholds"), dict) else {}
+    queue_id = _promotion_eval_queue_id(candidate)
     return {
         "schema": "tokenclaw.optimization_promotion_eval_task.v1",
+        "eval_queue_id": queue_id,
+        "stable_candidate_ref": _stable_id(
+            "promotion-eval-candidate",
+            candidate.get("candidate_id"),
+            candidate.get("optimization_family"),
+            candidate.get("action_family"),
+            candidate.get("source_surface"),
+        ),
         "candidate_id": str(candidate.get("candidate_id") or "unknown"),
         "optimization_family": str(candidate.get("optimization_family") or "unknown"),
         "action_family": str(candidate.get("action_family") or "unknown"),
@@ -523,6 +613,7 @@ def _select_promotion_backfill_tasks(
     verdict_counts: Counter[str] = Counter()
     action_counts: Counter[str] = Counter()
     reason_counts: Counter[str] = Counter()
+    blocker_counts: Counter[str] = Counter()
 
     candidates = promotion_report.get("candidates") if isinstance(promotion_report, dict) else []
     if not isinstance(candidates, list):
@@ -551,6 +642,9 @@ def _select_promotion_backfill_tasks(
             skip_reason = "already-queued"
         elif _candidate_is_safety_blocked(item):
             skip_reason = "safety-blocked"
+        elif cache_blocker := _cache_eval_blocker_reason(item):
+            skip_reason = cache_blocker
+            blocker_counts[cache_blocker] += 1
         elif not _eval_backfill_reasons(item):
             skip_reason = "no-eval-blocker"
         elif not _privacy_safe(item):
@@ -571,6 +665,7 @@ def _select_promotion_backfill_tasks(
     ranked.sort(
         key=lambda entry: (
             -_as_float(entry[0].get("projected_savings_usd")),
+            -_as_int(entry[0].get("sample_count")),
             _action_family_rank(entry[0].get("action_family")),
             -len(_safe_reason_codes(entry[0].get("reason_codes"))),
             str(entry[0].get("candidate_id") or ""),
@@ -595,6 +690,7 @@ def _select_promotion_backfill_tasks(
         "verdict_counts": _count_rows(verdict_counts),
         "action_family_counts": _count_rows(action_counts),
         "reason_code_counts": _count_rows(reason_counts),
+        "blocked_cache_dependency_counts": _count_rows(blocker_counts),
     }
 
 
@@ -620,8 +716,10 @@ def backfill_promotion_eval_tasks(
     if apply and store is not None:
         for task in tasks:
             reason_codes = sorted(set(["eval-queued", *task["backfill_reason_codes"]]))
+            result_id = str(task["eval_queue_id"])
             result = {
                 "schema": "tokenclaw.optimization_promotion_eval_queue_row.v1",
+                "id": result_id,
                 "run_id": run_id,
                 "created_at": generated_at,
                 "status_class": "queued",
@@ -632,7 +730,7 @@ def backfill_promotion_eval_tasks(
                 "privacy": _privacy_summary(),
             }
             store.log_optimization_eval_result(
-                id=f"promotion-eval-queued:{run_id}:{task['candidate_id']}",
+                id=result_id,
                 run_id=run_id,
                 created_at=generated_at,
                 candidate_id=task["candidate_id"],
@@ -660,7 +758,7 @@ def backfill_promotion_eval_tasks(
         "selection": {
             "family": family,
             "limit": max(1, min(int(limit or 25), 1000)),
-            "sort": ["projected_savings_usd", "action_family", "blocker_count", "candidate_id"],
+            "sort": ["projected_savings_usd", "sample_count", "action_family", "blocker_class", "candidate_id"],
         },
         "summary": {
             **summary,
@@ -670,6 +768,20 @@ def backfill_promotion_eval_tasks(
             "already_queued_count": len(queued_before),
         },
         "tasks": tasks,
+        "queue_rows": [
+            {
+                "schema": "tokenclaw.optimization_promotion_eval_queue_row.v1",
+                "id": task["eval_queue_id"],
+                "status_class": "queued",
+                "candidate_id": task["candidate_id"],
+                "reason_codes": sorted(set(["eval-queued", *task["backfill_reason_codes"]])),
+                "task": task,
+                "provider_call_made": False,
+                "managed_server_call_made": False,
+                "privacy": _privacy_summary(),
+            }
+            for task in tasks
+        ],
         "skipped": skipped,
         "source_report_schema": promotion_report.get("schema") if isinstance(promotion_report, dict) else None,
         "privacy": _privacy_summary(),

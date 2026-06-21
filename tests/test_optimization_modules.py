@@ -434,6 +434,115 @@ class OptimizationModuleTests(unittest.TestCase):
         self._assert_privacy_clean(applied)
         self._assert_privacy_clean(json.loads(stored[0]["result_json"]))
 
+    def test_promotion_eval_backfill_ranks_shadow_eval_queue_and_blocks_unsafe_cache(self):
+        base_candidate = {
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "projected_savings_usd": 0.30,
+            "verdict": "needs_eval",
+            "reason_codes": ["eval-results-missing", "insufficient-eval-pass-results"],
+            "eval_evidence": {"result_count": 0, "pass_count": 0},
+            "thresholds": {"min_eval_pass_count": 1},
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_provider_bodies_included": False,
+                "tool_payloads_included": False,
+                "request_ids_included": False,
+            },
+            "prompt": "raw eval prompt secret",
+            "messages": [{"role": "user", "content": "raw eval message secret"}],
+            "request_id": "eval-request-id-secret",
+            "session_id": "eval-session-id-secret",
+        }
+        promotion_report = {
+            "schema": "tokenclaw.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    **base_candidate,
+                    "candidate_id": "queue-routing-lower-sample",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "candidate_target_model": "claude-haiku-4-5-20251001",
+                    "sample_count": 5,
+                },
+                {
+                    **base_candidate,
+                    "candidate_id": "queue-crunch-higher-sample",
+                    "optimization_family": "context_crunch",
+                    "action_family": "crunch",
+                    "candidate_profile": "moderate",
+                    "sample_count": 24,
+                },
+                {
+                    **base_candidate,
+                    "candidate_id": "queue-pattern-middle-sample",
+                    "optimization_family": "managed_pattern_candidate",
+                    "action_family": "crunch",
+                    "candidate_profile": "pattern",
+                    "sample_count": 12,
+                },
+                {
+                    **base_candidate,
+                    "candidate_id": "queue-cache-unsafe-dependency",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "sample_count": 50,
+                    "file_dependency_status": "invalidated",
+                    "reason_codes": [
+                        "eval-results-missing",
+                        "insufficient-eval-pass-results",
+                        "file-dependency-changed",
+                    ],
+                },
+            ],
+        }
+
+        first = backfill_promotion_eval_tasks(
+            None,
+            promotion_report,
+            limit=3,
+            apply=False,
+            now="2026-06-21T13:30:00+00:00",
+        )
+        second = backfill_promotion_eval_tasks(
+            None,
+            promotion_report,
+            limit=3,
+            apply=False,
+            now="2026-06-21T14:30:00+00:00",
+        )
+
+        self.assertEqual(first["schema"], "tokenclaw.optimization_promotion_eval_backfill.v1")
+        self.assertTrue(first["dry_run"])
+        self.assertFalse(first["provider_calls_made"])
+        self.assertFalse(first["managed_server_calls_made"])
+        self.assertFalse(first["wrote_local_policy_files"])
+        self.assertEqual(
+            [task["candidate_id"] for task in first["tasks"]],
+            [
+                "queue-crunch-higher-sample",
+                "queue-pattern-middle-sample",
+                "queue-routing-lower-sample",
+            ],
+        )
+        self.assertEqual([row["id"] for row in first["queue_rows"]], [row["id"] for row in second["queue_rows"]])
+        self.assertEqual([task["stable_candidate_ref"] for task in first["tasks"]], [task["stable_candidate_ref"] for task in second["tasks"]])
+        self.assertTrue(all(task["eval_queue_id"].startswith("promotion-eval-queued-") for task in first["tasks"]))
+        self.assertTrue(any(
+            row["candidate_id"] == "queue-cache-unsafe-dependency"
+            and row["reason"] == "cache-replay-stale-dependency-risk"
+            for row in first["skipped"]
+        ))
+        blocked_counts = {
+            row["value"]: row["count"]
+            for row in first["summary"]["blocked_cache_dependency_counts"]
+        }
+        self.assertEqual(blocked_counts["cache-replay-stale-dependency-risk"], 1)
+        self.assertNotIn("queue-cache-unsafe-dependency", {row["candidate_id"] for row in first["queue_rows"]})
+        self._assert_privacy_clean(first)
+        self._assert_privacy_clean(second)
+
     def test_promotion_report_omits_raw_like_plan_and_eval_result_fields(self):
         plan = {
             "schema": "tokenclaw.optimization_eval_plan.v1",
