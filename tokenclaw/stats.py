@@ -4426,6 +4426,11 @@ def _crunch_rule_breakdowns(
     rule_rows = []
     for row in by_rule.values():
         reasons = row.pop("reason_counts", {})
+        calls_affected = _as_int(row.get("count"))
+        saved_chars = _as_int(row.get("saved_chars"))
+        row["calls_affected"] = calls_affected
+        row["total_chars_saved"] = saved_chars
+        row["avg_chars_saved"] = round(saved_chars / calls_affected, 2) if calls_affected else 0.0
         row["reason_breakdown"] = [
             {"value": key, "count": reasons[key]}
             for key in sorted(reasons, key=lambda key: (-reasons[key], key))
@@ -4433,10 +4438,15 @@ def _crunch_rule_breakdowns(
         rule_rows.append(row)
     group_rows = []
     for row in by_group.values():
+        calls_affected = _as_int(row.get("count"))
+        saved_chars = _as_int(row.get("saved_chars"))
+        row["calls_affected"] = calls_affected
+        row["total_chars_saved"] = saved_chars
+        row["avg_chars_saved"] = round(saved_chars / calls_affected, 2) if calls_affected else 0.0
         row["rule_ids"] = sorted(row["rule_ids"])
         group_rows.append(row)
-    rule_rows.sort(key=lambda row: (row["status"] != "applied", -row["tokens_saved_est"], -row["count"], row["rule_id"]))
-    group_rows.sort(key=lambda row: (row["status"] != "applied", -row["tokens_saved_est"], -row["count"], row["rule_group"]))
+    rule_rows.sort(key=lambda row: (row["status"] != "applied", -row["total_chars_saved"], -row["count"], row["rule_id"]))
+    group_rows.sort(key=lambda row: (row["status"] != "applied", -row["total_chars_saved"], -row["count"], row["rule_group"]))
     return rule_rows, group_rows
 
 
@@ -18847,6 +18857,14 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     """, (today_start,))
     crunch_rule_breakdown, crunch_rule_group_breakdown = _crunch_rule_breakdowns(crunch_rule_rows)
     today_crunch_rule_breakdown, today_crunch_rule_group_breakdown = _crunch_rule_breakdowns(crunch_rule_rows, today_only=True)
+    crunch_rule_savings_breakdown = [
+        row for row in crunch_rule_breakdown
+        if row.get("status") == "applied" and _as_int(row.get("total_chars_saved")) > 0
+    ][:5]
+    today_crunch_rule_savings_breakdown = [
+        row for row in today_crunch_rule_breakdown
+        if row.get("status") == "applied" and _as_int(row.get("total_chars_saved")) > 0
+    ][:5]
     cache_ladder_rows = q("""
         select created_at, stream, cache_hit, status_code, cache_json, routing_json,
                path, coalesce(provider, 'anthropic') as provider,
@@ -19052,6 +19070,8 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "category_breakdown": category_breakdown,
         "cache_decision_breakdown": cache_decision_breakdown,
         "today_cache_decision_breakdown": today_cache_decision_breakdown,
+        "crunch_rule_savings_breakdown": crunch_rule_savings_breakdown,
+        "today_crunch_rule_savings_breakdown": today_crunch_rule_savings_breakdown,
         "crunch_rule_breakdown": crunch_rule_breakdown,
         "today_crunch_rule_breakdown": today_crunch_rule_breakdown,
         "crunch_rule_group_breakdown": crunch_rule_group_breakdown,
@@ -21750,6 +21770,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Crunch breakdown by rule</h2>
+  <table data-table-id="crunch-rule-savings" data-filter-label="Filter crunch savings rules">
+    <thead><tr>
+      <th data-sort-type="text">Rule</th><th data-sort-type="number">Calls affected</th><th data-sort-type="number">Avg chars saved</th><th data-sort-type="number">Total chars saved</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="text">Policy source</th><th data-sort-type="text">Reasons</th>
+    </tr></thead>
+    <tbody id="crunch-rule-savings-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Crunch rule groups today</h2>
   <table data-table-id="crunch-rule-groups-today" data-filter-label="Filter crunch rule groups today">
     <thead><tr>
@@ -23847,7 +23876,23 @@ async function refreshCache(){
         <td class="flags">${reasons||'<span class="badge miss">none</span>'}</td>
       </tr>`;
     }).join('')||'<tr><td colspan="10" style="color:#8b949e">No crunch rule metadata yet</td></tr>';
+    const renderCrunchSavingsRows=(rows)=>rows.slice(0,5).map(row=>{
+      const calls=row.calls_affected??row.count??0;
+      const total=row.total_chars_saved??row.saved_chars??0;
+      const avg=row.avg_chars_saved??(calls?total/calls:0);
+      const reasons=(row.reason_breakdown||[]).slice(0,2).map(item=>`<span class="badge provider">${esc(item.value||'unknown')} ${(item.count||0).toLocaleString()}</span>`).join(' ');
+      return `<tr>
+        <td class="model">${esc(row.rule_id||'unknown')}</td>
+        <td class="tokens">${Number(calls||0).toLocaleString()}</td>
+        <td class="tokens">${Number(avg||0).toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+        <td class="tokens">${Number(total||0).toLocaleString()}</td>
+        <td class="tokens">${Number(row.tokens_saved_est||0).toLocaleString()}</td>
+        <td><span class="badge provider">${esc(row.policy_source||'unknown')}</span></td>
+        <td class="flags">${reasons||'<span class="badge miss">none</span>'}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="7" style="color:#8b949e">No applied crunch savings by rule yet</td></tr>';
     document.getElementById('crunch-rule-groups-today-tbody').innerHTML=renderCrunchGroupRows(d.today_crunch_rule_group_breakdown||[]);
+    document.getElementById('crunch-rule-savings-tbody').innerHTML=renderCrunchSavingsRows(d.crunch_rule_savings_breakdown||d.crunch_rule_breakdown||[]);
     document.getElementById('crunch-rules-tbody').innerHTML=renderCrunchRuleRows(d.crunch_rule_breakdown||[]);
     document.getElementById('pattern-decisions-today-tbody').innerHTML=renderPatternRows(d.today_pattern_decision_breakdown||[]);
     document.getElementById('pattern-decisions-tbody').innerHTML=renderPatternRows(d.pattern_decision_breakdown||[]);

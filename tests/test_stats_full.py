@@ -4562,6 +4562,115 @@ request_shape_repeated_context_canaries:
         }, sort_keys=True)
         self.assertNotIn(secret, rendered)
 
+    def test_crunch_rule_savings_breakdown_matches_sqlite_crunch_json_totals(self):
+        rules = [
+            {
+                "rule_id": "thinking_history_compaction",
+                "rule_group": "thinking_history",
+                "lossiness_class": "semantic_loss_risk",
+                "canary_state": "active",
+                "status": "applied",
+                "reason": "thinking-history-block-omitted",
+                "policy_source": "local-default",
+                "count": 3,
+                "saved_chars": 900,
+                "tokens_saved_est": 225,
+            },
+            {
+                "rule_id": "near_duplicate_block_omission",
+                "rule_group": "structural_dedup",
+                "lossiness_class": "semantic_loss_risk",
+                "canary_state": "active",
+                "status": "applied",
+                "reason": "near-duplicate-text-block-omitted",
+                "policy_source": "local-default",
+                "count": 2,
+                "saved_chars": 500,
+                "tokens_saved_est": 125,
+            },
+            {
+                "rule_id": "whitespace_normalization",
+                "rule_group": "lossless_normalization",
+                "lossiness_class": "lossless",
+                "canary_state": "active",
+                "status": "applied",
+                "reason": "whitespace-normalized",
+                "policy_source": "local-default",
+                "count": 4,
+                "saved_chars": 200,
+                "tokens_saved_est": 50,
+            },
+        ]
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=1000,
+            output_tokens_est=10,
+            actual_input_tokens=1000,
+            actual_output_tokens=10,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({
+                "changed": True,
+                "saved_chars": sum(rule["saved_chars"] for rule in rules),
+                "tokens_saved_est": sum(rule["tokens_saved_est"] for rule in rules),
+                "policy_source": "local-default",
+                "applied_rules": rules,
+            }),
+            routing_json=None,
+            cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="crunch-rule-breakdown-session",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+
+        expected: dict[str, dict[str, int]] = {}
+        for row in server.store.conn.execute("select crunch_json from calls where crunch_json is not null").fetchall():
+            crunch = json.loads(row["crunch_json"])
+            for item in crunch.get("applied_rules") or []:
+                rule_id = item["rule_id"]
+                bucket = expected.setdefault(rule_id, {"calls": 0, "chars": 0})
+                bucket["calls"] += int(item.get("count") or 1)
+                bucket["chars"] += int(item.get("saved_chars") or 0)
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        by_rule = {row["rule_id"]: row for row in result["crunch_rule_savings_breakdown"]}
+
+        self.assertGreaterEqual(len(by_rule), 3)
+        for rule in rules:
+            rule_id = rule["rule_id"]
+            self.assertEqual(by_rule[rule_id]["calls_affected"], expected[rule_id]["calls"])
+            self.assertEqual(by_rule[rule_id]["total_chars_saved"], expected[rule_id]["chars"])
+            self.assertEqual(by_rule[rule_id]["avg_chars_saved"], round(expected[rule_id]["chars"] / expected[rule_id]["calls"], 2))
+        self.assertEqual(
+            [row["rule_id"] for row in result["crunch_rule_savings_breakdown"][:3]],
+            ["thinking_history_compaction", "near_duplicate_block_omission", "whitespace_normalization"],
+        )
+        json.dumps(result["crunch_rule_savings_breakdown"])
+
+    def test_dashboard_html_renders_crunch_breakdown_by_rule_table(self):
+        html = stats_views.dashboard_html()
+
+        self.assertIn("<h2>Crunch breakdown by rule</h2>", html)
+        self.assertIn('id="crunch-rule-savings-tbody"', html)
+        self.assertIn('<th data-sort-type="number">Calls affected</th>', html)
+        self.assertIn('<th data-sort-type="number">Avg chars saved</th>', html)
+        self.assertIn('<th data-sort-type="number">Total chars saved</th>', html)
+        self.assertIn("renderCrunchSavingsRows(d.crunch_rule_savings_breakdown||d.crunch_rule_breakdown||[])", html)
+
     def test_cache_zero_hit_blocker_ladder_ranks_provider_surface_blockers_without_raw_data(self):
         secret_prompt = "raw cache blocker prompt must not leak"
         secret_session = "cache-blocker-session-secret"
