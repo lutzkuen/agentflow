@@ -32,6 +32,7 @@ CODEX_CONFIG_RELATIVE_PATH = Path(".codex") / "config.toml"
 CLAUDE_VSCODE_ENV_FILENAME = "claude-vscode.env"
 CLAUDE_DESKTOP_USER_DESKTOP_PATH = Path(".local") / "share" / "applications" / "claude-desktop.desktop"
 CLAUDE_DESKTOP_SYSTEM_DESKTOP_PATH = Path("/usr/share/applications/claude-desktop.desktop")
+CLAUDE_DESKTOP_SYSTEMD_ENV_PATH = Path(".config") / "environment.d" / "tokenclaw.conf"
 ACTIVATION_TARGETS = ("openai", "claude", "codex", "claude-vscode", "claude-desktop")
 SHELL_PROFILE_CANDIDATES = (".zshrc", ".bashrc", ".profile")
 
@@ -72,6 +73,10 @@ def default_claude_desktop_file_path() -> Path | None:
     if CLAUDE_DESKTOP_SYSTEM_DESKTOP_PATH.exists():
         return CLAUDE_DESKTOP_SYSTEM_DESKTOP_PATH
     return None
+
+
+def default_claude_desktop_systemd_env_path() -> Path:
+    return safe_home_dir() / CLAUDE_DESKTOP_SYSTEMD_ENV_PATH
 
 
 def empty_config() -> dict[str, Any]:
@@ -154,8 +159,11 @@ def validate_activation_config(config: dict[str, Any]) -> list[dict[str, str]]:
             errors.append({"path": f"{target_path}.codex_config_path", "message": "must be a string"})
         if target_name == "claude-vscode" and not isinstance(profile.get("env_file_path"), str):
             errors.append({"path": f"{target_path}.env_file_path", "message": "must be a string"})
-        if target_name == "claude-desktop" and not isinstance(profile.get("desktop_file_path"), str):
-            errors.append({"path": f"{target_path}.desktop_file_path", "message": "must be a string"})
+        if target_name == "claude-desktop":
+            if not isinstance(profile.get("desktop_file_path"), str):
+                errors.append({"path": f"{target_path}.desktop_file_path", "message": "must be a string"})
+            if "env_file_path" in profile and not isinstance(profile.get("env_file_path"), str):
+                errors.append({"path": f"{target_path}.env_file_path", "message": "must be a string"})
     return errors
 
 
@@ -447,6 +455,7 @@ def claude_desktop_activation_profile(
     *,
     claude_profile: dict[str, Any],
     desktop_file_path: Path,
+    env_file_path: Path,
 ) -> dict[str, Any]:
     profile = {
         "id": "claude-desktop",
@@ -456,6 +465,7 @@ def claude_desktop_activation_profile(
         "depends_on": "claude",
         "local_base_url": str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL),
         "desktop_file_path": str(desktop_file_path),
+        "env_file_path": str(env_file_path),
         "safe_env": {
             "ANTHROPIC_BASE_URL": str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL),
         },
@@ -627,6 +637,39 @@ def claude_desktop_base_url_from_desktop_file(raw: str) -> str | None:
             if token.startswith("ANTHROPIC_BASE_URL="):
                 return token.split("=", 1)[1]
         return None
+    return None
+
+
+def update_claude_desktop_systemd_env_file(raw: str, local_base_url: str) -> tuple[str, bool]:
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    wanted = f"ANTHROPIC_BASE_URL={local_base_url}"
+    lines = raw.splitlines(keepends=True)
+    updated = list(lines)
+
+    for index, line in enumerate(lines):
+        line_ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        body = line[:-len(line_ending)] if line_ending else line
+        stripped = body.lstrip()
+        if not stripped.startswith("ANTHROPIC_BASE_URL="):
+            continue
+        prefix = body[: len(body) - len(stripped)]
+        replacement = f"{prefix}{wanted}{line_ending or newline}"
+        if replacement == line:
+            return raw, False
+        updated[index] = replacement
+        return "".join(updated), True
+
+    prefix = "" if not raw or raw.endswith(("\n", "\r")) else newline
+    return raw + prefix + wanted + newline, True
+
+
+def claude_desktop_base_url_from_systemd_env_file(raw: str) -> str | None:
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("ANTHROPIC_BASE_URL="):
+            return stripped.split("=", 1)[1]
     return None
 
 
@@ -828,8 +871,15 @@ def activate_claude_desktop(
     original = path.read_text(encoding="utf-8")
     updated_desktop, desktop_changed = update_claude_desktop_desktop_file(original, local_base_url)
     backup_path = _desktop_backup_path(path)
+    systemd_env_path = default_claude_desktop_systemd_env_path()
+    existing_systemd_env = systemd_env_path.read_text(encoding="utf-8") if systemd_env_path.exists() else ""
+    updated_systemd_env, systemd_env_changed = update_claude_desktop_systemd_env_file(existing_systemd_env, local_base_url)
 
-    desktop_profile = claude_desktop_activation_profile(claude_profile=claude_profile, desktop_file_path=path)
+    desktop_profile = claude_desktop_activation_profile(
+        claude_profile=claude_profile,
+        desktop_file_path=path,
+        env_file_path=systemd_env_path,
+    )
     updated_config = apply_activation_profile(config, claude_profile, config_dir=config_dir)
     updated_config = apply_activation_profile(updated_config, desktop_profile, config_dir=config_dir)
     config_path = activation_config_path(config_dir)
@@ -839,6 +889,9 @@ def activate_claude_desktop(
             if not backup_path.exists():
                 shutil.copy2(path, backup_path)
             path.write_text(updated_desktop, encoding="utf-8")
+        if systemd_env_changed:
+            systemd_env_path.parent.mkdir(parents=True, exist_ok=True)
+            systemd_env_path.write_text(updated_systemd_env, encoding="utf-8")
         config_path = write_activation_config(updated_config, config_dir)
 
     return {
@@ -854,6 +907,8 @@ def activate_claude_desktop(
         "desktop_file_backup_path": str(backup_path) if desktop_changed or backup_path.exists() else None,
         "desktop_file_discovered": discovered,
         "desktop_file_system_level": system_path,
+        "env_file_path": str(systemd_env_path),
+        "env_file_changed": systemd_env_changed,
         "local_base_url": local_base_url,
         "depends_on": "claude",
         "claude_target_created": created_claude,

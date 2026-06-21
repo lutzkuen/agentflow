@@ -5,8 +5,10 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import sys
 from typing import Any, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -25,6 +27,124 @@ ONBOARDING_TARGETS = ("openai", "claude", "codex", "claude-vscode", "claude-desk
 UNSUPPORTED_ONBOARDING_TARGETS = ("copilot",)
 RUN_TARGETS = ("openai", "claude")
 DEFAULT_STATS_URL = "http://127.0.0.1:4002/tokenclaw/stats"
+
+
+def _local_url_with_path(base_url: str, path: str) -> str:
+    parsed = urlsplit(base_url)
+    base_path = parsed.path.rstrip("/")
+    if base_path == "/v1":
+        base_path = ""
+    target_path = "/" + path.lstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, base_path + target_path, "", ""))
+
+
+def _local_sqlite_db_path() -> Path | None:
+    raw = os.environ.get("TOKENCLAW_DATABASE_URL") or os.environ.get("TOKENCLAW_DB")
+    if raw and not raw.startswith("sqlite:///") and "://" in raw:
+        return None
+    if raw:
+        return Path(raw.removeprefix("sqlite:///")).expanduser()
+    return Path(default_db_path()).expanduser()
+
+
+def _calls_count(db_path: Path) -> int | None:
+    if not db_path.exists():
+        return None
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            row = conn.execute("select count(*) from calls").fetchone()
+    except sqlite3.Error:
+        return None
+    return int(row[0] or 0) if row else None
+
+
+def _claude_desktop_routing_verification(result: dict[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
+    local_base_url = str(result.get("local_base_url") or "")
+    verification: dict[str, Any] = {
+        "schema": "tokenclaw.claude_desktop_routing_verification.v1",
+        "proxy_reachable": False,
+        "health_status": "skipped",
+        "test_call_status": "skipped",
+        "db_entry_status": "skipped",
+        "reasons": [],
+    }
+    if not _is_loopback_url(local_base_url):
+        verification["reasons"].append("local-base-url-not-loopback")
+        return verification
+
+    health_url = _local_url_with_path(local_base_url, "/health")
+    verification["health_url"] = health_url
+    try:
+        response = httpx.get(health_url, timeout=timeout)
+    except Exception as exc:
+        verification["health_status"] = "unreachable"
+        verification["health_error"] = type(exc).__name__
+        verification["reasons"].append("proxy-unreachable")
+        return verification
+    verification["health_status_code"] = response.status_code
+    if response.status_code < 200 or response.status_code >= 300:
+        verification["health_status"] = "unhealthy"
+        verification["reasons"].append("health-non-2xx")
+        return verification
+    verification["health_status"] = "reachable"
+    verification["proxy_reachable"] = True
+
+    if os.environ.get("ANTHROPIC_BASE_URL") != local_base_url:
+        verification["reasons"].append("shell-anthropic-base-url-not-tokenclaw")
+        return verification
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    if not api_key and not auth_token:
+        verification["reasons"].append("anthropic-credential-env-missing")
+        return verification
+
+    db_path = _local_sqlite_db_path()
+    before_count = _calls_count(db_path) if db_path is not None else None
+    headers = {
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    if api_key:
+        headers["x-api-key"] = api_key
+    elif auth_token:
+        headers["authorization"] = f"Bearer {auth_token}"
+    payload = {
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ok"}],
+    }
+    messages_url = _local_url_with_path(local_base_url, "/v1/messages")
+    verification["messages_url"] = messages_url
+    try:
+        smoke_response = httpx.post(messages_url, headers=headers, json=payload, timeout=timeout)
+    except Exception as exc:
+        verification["test_call_status"] = "failed"
+        verification["test_call_error"] = type(exc).__name__
+        verification["reasons"].append("smoke-call-failed")
+        return verification
+    verification["test_call_status_code"] = smoke_response.status_code
+    if smoke_response.status_code < 200 or smoke_response.status_code >= 300:
+        verification["test_call_status"] = "failed"
+        verification["reasons"].append("smoke-call-non-2xx")
+        return verification
+    verification["test_call_status"] = "succeeded"
+
+    if db_path is None:
+        verification["db_entry_status"] = "skipped"
+        verification["reasons"].append("db-not-local-sqlite")
+        return verification
+    after_count = _calls_count(db_path)
+    verification["db_path"] = str(db_path)
+    if before_count is None or after_count is None:
+        verification["db_entry_status"] = "skipped"
+        verification["reasons"].append("db-unavailable")
+    elif after_count > before_count:
+        verification["db_entry_status"] = "confirmed"
+    else:
+        verification["db_entry_status"] = "not-confirmed"
+        verification["reasons"].append("db-entry-not-confirmed")
+    return verification
 
 
 def _write_activation_summary(stdout: Any, result: dict[str, Any], *, brand: str = "TokenClaw") -> None:
@@ -59,11 +179,24 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any], *, brand: str
         stdout.write(f"{prefix} {brand} target: claude-desktop\n")
         stdout.write(f"Claude Desktop file: {result['desktop_file_path']}\n")
         stdout.write(f"Desktop file changed: {str(result['desktop_file_changed']).lower()}\n")
+        stdout.write(f"Systemd user env file: {result['env_file_path']}\n")
+        stdout.write(f"Systemd user env file changed: {str(result['env_file_changed']).lower()}\n")
         if result.get("desktop_file_backup_path"):
             stdout.write(f"Backup: {result['desktop_file_backup_path']}\n")
+        verification = result.get("routing_verification") if isinstance(result.get("routing_verification"), dict) else {}
+        if verification:
+            stdout.write(f"Proxy reachable: {str(bool(verification.get('proxy_reachable'))).lower()}\n")
+            stdout.write(f"Test call: {verification.get('test_call_status', 'skipped')}\n")
+            stdout.write(f"DB entry: {verification.get('db_entry_status', 'skipped')}\n")
         stdout.write(f"Depends on {brand} target: {result['depends_on']}\n")
         if result.get("claude_target_created"):
             stdout.write("Claude target was not configured; created the default Claude activation profile.\n")
+        if not result.get("dry_run"):
+            stdout.write(
+                "Session environment updated. Log out and back in (or run:\n"
+                "  systemctl --user import-environment ANTHROPIC_BASE_URL\n"
+                ") for Claude Desktop subprocesses to pick up the new URL.\n"
+            )
         stdout.write(f"Run configured proxy: {result['run_command']}\n")
         stdout.write(f"Config file: {result['config_path']}\n")
         stdout.write(f"{brand} does not store or print ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or token values.\n")
@@ -426,6 +559,8 @@ def _onboarding_cli(
             except activation.ActivationError as exc:
                 _write_activation_config_error(stderr, exc, command="activate")
                 return 2
+            if not result.get("dry_run"):
+                result["routing_verification"] = _claude_desktop_routing_verification(result)
             _write_activation_summary(stdout, result, brand=brand)
             return 0
 
@@ -1046,6 +1181,30 @@ def _doctor_claude_desktop_target(base: dict[str, Any]) -> dict[str, Any]:
         result["status"] = "stale base url"
         result["reasons"].append("claude-desktop-base-url-mismatch")
         return result
+    env_path_value = result.get("env_file_path") or str(activation.default_claude_desktop_systemd_env_path())
+    env_path = Path(str(env_path_value)).expanduser()
+    result["env_file_path"] = str(env_path)
+    result["env_file_exists"] = env_path.exists()
+    if not env_path.exists():
+        result["status"] = "not routed via tokenclaw"
+        result["reasons"].append("env-file-missing")
+        return result
+    try:
+        env_base_url = activation.claude_desktop_base_url_from_systemd_env_file(env_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        result["status"] = "unhealthy"
+        result["reasons"].append("env-file-unreadable")
+        result["config_error"] = type(exc).__name__
+        return result
+    result["env_file_base_url"] = _redact_url(env_base_url) if env_base_url else None
+    if not env_base_url:
+        result["status"] = "not routed via tokenclaw"
+        result["reasons"].append("env-file-base-url-missing")
+        return result
+    if env_base_url != expected:
+        result["status"] = "stale base url"
+        result["reasons"].append("env-file-base-url-mismatch")
+        return result
     result["status"] = "healthy"
     result["ok"] = True
     return result
@@ -1084,6 +1243,8 @@ def _write_activation_doctor_summary(stdout: Any, result: dict[str, Any]) -> Non
             parts.append(f"running upstream: {target['running_upstream_base_url']}")
         if target.get("desktop_file_path"):
             parts.append(f"desktop file: {target['desktop_file_path']}")
+        if target.get("env_file_path"):
+            parts.append(f"env file: {target['env_file_path']}")
         if target.get("reasons"):
             parts.append("reasons: " + ", ".join(str(reason) for reason in target["reasons"]))
         stdout.write(", ".join(parts) + "\n")

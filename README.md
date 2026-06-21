@@ -271,8 +271,9 @@ user environment, not in repository files.
 ## Claude Desktop on Linux
 
 `tokenclaw activate claude-desktop` updates the Claude Desktop `.desktop`
-launcher so GUI launches inherit the local TokenClaw Anthropic base URL. It
-does not write `ANTHROPIC_API_KEY` or token values.
+launcher and writes `~/.config/environment.d/tokenclaw.conf` so Claude Desktop
+and its spawned Claude CLI subprocesses inherit the local TokenClaw Anthropic
+base URL. It does not write `ANTHROPIC_API_KEY` or token values.
 
 ```bash
 tokenclaw activate claude-desktop
@@ -284,6 +285,14 @@ when present. If only `/usr/share/applications/claude-desktop.desktop` exists,
 copy it to the user applications directory or pass `--force` when you intend to
 patch the system-level file with suitable permissions. Use `--desktop-file PATH`
 for custom launcher locations.
+
+After activation, log out and back in so the systemd user environment is
+loaded by desktop-launched apps. To apply it immediately in the current session,
+run:
+
+```bash
+systemctl --user import-environment ANTHROPIC_BASE_URL
+```
 
 ## GitHub Copilot non-goal
 

@@ -952,19 +952,24 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 "[Desktop Entry]\nName=Claude\nExec=/opt/claude-desktop/claude-desktop %U\n",
                 encoding="utf-8",
             )
+            env_file = Path(tmp) / ".config" / "environment.d" / "tokenclaw.conf"
             stdout = io.StringIO()
 
-            code = cli.tokenclaw_cli(
-                [
-                    "activate",
-                    "claude-desktop",
-                    "--config-dir",
-                    str(config_dir),
-                    "--desktop-file",
-                    str(desktop_file),
-                ],
-                stdout=stdout,
-            )
+            with patch.dict(os.environ, {"HOME": tmp}, clear=False), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.get",
+                side_effect=httpx.ConnectError("offline"),
+            ):
+                code = cli.tokenclaw_cli(
+                    [
+                        "activate",
+                        "claude-desktop",
+                        "--config-dir",
+                        str(config_dir),
+                        "--desktop-file",
+                        str(desktop_file),
+                    ],
+                    stdout=stdout,
+                )
 
             self.assertEqual(code, 0)
             self.assertEqual(
@@ -981,11 +986,18 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(profile["depends_on"], "claude")
             self.assertEqual(profile["local_base_url"], "http://127.0.0.1:4000")
             self.assertEqual(profile["desktop_file_path"], str(desktop_file))
+            self.assertEqual(profile["env_file_path"], str(env_file))
             self.assertEqual(profile["safe_env"], {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000"})
+            self.assertEqual(env_file.read_text(encoding="utf-8"), "ANTHROPIC_BASE_URL=http://127.0.0.1:4000\n")
             output = stdout.getvalue()
             self.assertIn("Configured TokenClaw target: claude-desktop", output)
             self.assertIn(f"Claude Desktop file: {desktop_file}", output)
             self.assertIn("Desktop file changed: true", output)
+            self.assertIn(f"Systemd user env file: {env_file}", output)
+            self.assertIn("Systemd user env file changed: true", output)
+            self.assertIn("Proxy reachable: false", output)
+            self.assertIn("Test call: skipped", output)
+            self.assertIn("Session environment updated. Log out and back in", output)
             self.assertIn("Backup:", output)
             self.assertIn("Run configured proxy: tokenclaw run claude", output)
 
@@ -997,51 +1009,64 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 "[Desktop Entry]\nName=Claude\nExec=env FOO=bar ANTHROPIC_BASE_URL=http://old.example /opt/claude %U\n",
                 encoding="utf-8",
             )
+            env_file = Path(tmp) / ".config" / "environment.d" / "tokenclaw.conf"
+            env_file.parent.mkdir(parents=True)
+            env_file.write_text("OTHER_KEY=kept\nANTHROPIC_BASE_URL=http://old.example\n", encoding="utf-8")
 
             first_stdout = io.StringIO()
-            first = cli.tokenclaw_cli(
-                [
-                    "activate",
-                    "claude",
-                    "--config-dir",
-                    str(config_dir),
-                    "--local-base-url",
-                    "http://127.0.0.1:4999",
-                ],
-                stdout=io.StringIO(),
-            )
-            first_desktop = cli.tokenclaw_cli(
-                [
-                    "activate",
-                    "claude-desktop",
-                    "--config-dir",
-                    str(config_dir),
-                    "--desktop-file",
-                    str(desktop_file),
-                ],
-                stdout=first_stdout,
-            )
-            second_stdout = io.StringIO()
-            second = cli.tokenclaw_cli(
-                [
-                    "activate",
-                    "claude-desktop",
-                    "--config-dir",
-                    str(config_dir),
-                    "--desktop-file",
-                    str(desktop_file),
-                ],
-                stdout=second_stdout,
-            )
+            with patch.dict(os.environ, {"HOME": tmp}, clear=False), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.get",
+                side_effect=httpx.ConnectError("offline"),
+            ):
+                first = cli.tokenclaw_cli(
+                    [
+                        "activate",
+                        "claude",
+                        "--config-dir",
+                        str(config_dir),
+                        "--local-base-url",
+                        "http://127.0.0.1:4999",
+                    ],
+                    stdout=io.StringIO(),
+                )
+                first_desktop = cli.tokenclaw_cli(
+                    [
+                        "activate",
+                        "claude-desktop",
+                        "--config-dir",
+                        str(config_dir),
+                        "--desktop-file",
+                        str(desktop_file),
+                    ],
+                    stdout=first_stdout,
+                )
+                second_stdout = io.StringIO()
+                second = cli.tokenclaw_cli(
+                    [
+                        "activate",
+                        "claude-desktop",
+                        "--config-dir",
+                        str(config_dir),
+                        "--desktop-file",
+                        str(desktop_file),
+                    ],
+                    stdout=second_stdout,
+                )
 
             self.assertEqual(first, 0)
             self.assertEqual(first_desktop, 0)
             self.assertEqual(second, 0)
             self.assertIn("Desktop file changed: true", first_stdout.getvalue())
             self.assertIn("Desktop file changed: false", second_stdout.getvalue())
+            self.assertIn("Systemd user env file changed: true", first_stdout.getvalue())
+            self.assertIn("Systemd user env file changed: false", second_stdout.getvalue())
             self.assertEqual(
                 desktop_file.read_text(encoding="utf-8"),
                 "[Desktop Entry]\nName=Claude\nExec=env FOO=bar ANTHROPIC_BASE_URL=http://127.0.0.1:4999 /opt/claude %U\n",
+            )
+            self.assertEqual(
+                env_file.read_text(encoding="utf-8"),
+                "OTHER_KEY=kept\nANTHROPIC_BASE_URL=http://127.0.0.1:4999\n",
             )
 
     def test_activate_claude_desktop_dry_run_does_not_write_files(self):
@@ -1052,25 +1077,28 @@ class AgentflowActivationCliTests(unittest.TestCase):
             desktop_file.write_text(original, encoding="utf-8")
             stdout = io.StringIO()
 
-            code = cli.tokenclaw_cli(
-                [
-                    "activate",
-                    "claude-desktop",
-                    "--config-dir",
-                    str(config_dir),
-                    "--desktop-file",
-                    str(desktop_file),
-                    "--dry-run",
-                ],
-                stdout=stdout,
-            )
+            with patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                code = cli.tokenclaw_cli(
+                    [
+                        "activate",
+                        "claude-desktop",
+                        "--config-dir",
+                        str(config_dir),
+                        "--desktop-file",
+                        str(desktop_file),
+                        "--dry-run",
+                    ],
+                    stdout=stdout,
+                )
 
             self.assertEqual(code, 0)
             self.assertEqual(desktop_file.read_text(encoding="utf-8"), original)
             self.assertFalse((config_dir / "activation.json").exists())
             self.assertFalse(desktop_file.with_name(desktop_file.name + ".tokenclaw.bak").exists())
+            self.assertFalse((Path(tmp) / ".config" / "environment.d" / "tokenclaw.conf").exists())
             self.assertIn("Dry run: would configure TokenClaw target: claude-desktop", stdout.getvalue())
             self.assertIn("Desktop file changed: true", stdout.getvalue())
+            self.assertIn("Systemd user env file changed: true", stdout.getvalue())
 
     def test_activate_claude_desktop_missing_file_fails_actionably(self):
         with TemporaryDirectory() as tmp:
@@ -1097,17 +1125,21 @@ class AgentflowActivationCliTests(unittest.TestCase):
             config_dir = Path(tmp) / "tokenclaw"
             desktop_file = Path(tmp) / "claude-desktop.desktop"
             desktop_file.write_text("[Desktop Entry]\nExec=/opt/claude %U\n", encoding="utf-8")
-            cli.tokenclaw_cli(
-                [
-                    "activate",
-                    "claude-desktop",
-                    "--config-dir",
-                    str(config_dir),
-                    "--desktop-file",
-                    str(desktop_file),
-                ],
-                stdout=io.StringIO(),
-            )
+            with patch.dict(os.environ, {"HOME": tmp}, clear=False), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.get",
+                side_effect=httpx.ConnectError("offline"),
+            ):
+                cli.tokenclaw_cli(
+                    [
+                        "activate",
+                        "claude-desktop",
+                        "--config-dir",
+                        str(config_dir),
+                        "--desktop-file",
+                        str(desktop_file),
+                    ],
+                    stdout=io.StringIO(),
+                )
             stdout = io.StringIO()
 
             code = cli.tokenclaw_cli(["stats", "claude-desktop", "--config-dir", str(config_dir)], stdout=stdout)
@@ -1122,17 +1154,21 @@ class AgentflowActivationCliTests(unittest.TestCase):
             config_dir = Path(tmp) / "tokenclaw"
             desktop_file = Path(tmp) / "claude-desktop.desktop"
             desktop_file.write_text("[Desktop Entry]\nExec=/opt/claude %U\n", encoding="utf-8")
-            cli.tokenclaw_cli(
-                [
-                    "activate",
-                    "claude-desktop",
-                    "--config-dir",
-                    str(config_dir),
-                    "--desktop-file",
-                    str(desktop_file),
-                ],
-                stdout=io.StringIO(),
-            )
+            with patch.dict(os.environ, {"HOME": tmp}, clear=False), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.get",
+                side_effect=httpx.ConnectError("offline"),
+            ):
+                cli.tokenclaw_cli(
+                    [
+                        "activate",
+                        "claude-desktop",
+                        "--config-dir",
+                        str(config_dir),
+                        "--desktop-file",
+                        str(desktop_file),
+                    ],
+                    stdout=io.StringIO(),
+                )
 
             healthy_stdout = io.StringIO()
             healthy_code = cli.tokenclaw_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=healthy_stdout)
@@ -1147,6 +1183,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             healthy = json.loads(healthy_stdout.getvalue())["targets"]["claude-desktop"]
             self.assertEqual(healthy["status"], "healthy")
             self.assertEqual(healthy["desktop_file_base_url"], "http://127.0.0.1:4000")
+            self.assertEqual(healthy["env_file_base_url"], "http://127.0.0.1:4000")
             self.assertEqual(stale_code, 1)
             stale = json.loads(stale_stdout.getvalue())["targets"]["claude-desktop"]
             self.assertEqual(stale["status"], "stale base url")
@@ -1155,6 +1192,74 @@ class AgentflowActivationCliTests(unittest.TestCase):
             missing = json.loads(missing_stdout.getvalue())["targets"]["claude-desktop"]
             self.assertEqual(missing["status"], "not routed via tokenclaw")
             self.assertIn("claude-desktop-base-url-missing", missing["reasons"])
+
+    def test_tokenclaw_doctor_claude_desktop_reports_missing_systemd_env_file(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "tokenclaw"
+            desktop_file = Path(tmp) / "claude-desktop.desktop"
+            desktop_file.write_text("[Desktop Entry]\nExec=/opt/claude %U\n", encoding="utf-8")
+            env_file = Path(tmp) / ".config" / "environment.d" / "tokenclaw.conf"
+            with patch.dict(os.environ, {"HOME": tmp}, clear=False), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.get",
+                side_effect=httpx.ConnectError("offline"),
+            ):
+                cli.tokenclaw_cli(
+                    [
+                        "activate",
+                        "claude-desktop",
+                        "--config-dir",
+                        str(config_dir),
+                        "--desktop-file",
+                        str(desktop_file),
+                    ],
+                    stdout=io.StringIO(),
+                )
+            env_file.unlink()
+            stdout = io.StringIO()
+
+            code = cli.tokenclaw_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=stdout)
+
+            self.assertEqual(code, 1)
+            target = json.loads(stdout.getvalue())["targets"]["claude-desktop"]
+            self.assertEqual(target["status"], "not routed via tokenclaw")
+            self.assertFalse(target["env_file_exists"])
+            self.assertIn("env-file-missing", target["reasons"])
+
+    def test_claude_desktop_routing_verification_confirms_smoke_call_db_entry(self):
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tokenclaw.sqlite3"
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.execute("create table calls (id integer primary key)")
+
+            def post_side_effect(*args, **kwargs):
+                with sqlite3.connect(str(db_path)) as conn:
+                    conn.execute("insert into calls default values")
+                return httpx.Response(200, json={"ok": True})
+
+            with patch.dict(
+                os.environ,
+                {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
+                    "ANTHROPIC_API_KEY": "test-key",
+                    "TOKENCLAW_DATABASE_URL": "",
+                    "TOKENCLAW_DB": str(db_path),
+                },
+                clear=False,
+            ), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.get",
+                return_value=httpx.Response(200, json={"ok": True, "provider": "anthropic"}),
+            ), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.post",
+                side_effect=post_side_effect,
+            ):
+                result = onboarding_cli._claude_desktop_routing_verification(
+                    {"local_base_url": "http://127.0.0.1:4000"}
+                )
+
+            self.assertTrue(result["proxy_reachable"])
+            self.assertEqual(result["health_status"], "reachable")
+            self.assertEqual(result["test_call_status"], "succeeded")
+            self.assertEqual(result["db_entry_status"], "confirmed")
 
     def test_activate_dry_run_does_not_write_config(self):
         with TemporaryDirectory() as tmp:
