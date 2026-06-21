@@ -198,6 +198,95 @@ def _next_action(
     ).strip()
 
 
+def _first_pattern_rule_patch(value: Any) -> dict[str, Any]:
+    patch = value if isinstance(value, dict) else {}
+    rules = patch.get("pattern_rules")
+    if isinstance(rules, list):
+        for rule in rules:
+            if isinstance(rule, dict):
+                return rule
+    return {}
+
+
+def _cache_rollback_guidance_from_decision(decision: dict[str, Any]) -> dict[str, Any] | None:
+    guidance = (
+        decision.get("cache_rollback_guidance")
+        if isinstance(decision.get("cache_rollback_guidance"), dict)
+        else decision.get("rollback_guidance")
+        if isinstance(decision.get("rollback_guidance"), dict)
+        else decision.get("rollback_metadata")
+        if isinstance(decision.get("rollback_metadata"), dict)
+        else {}
+    )
+    local_patch = (
+        guidance.get("local_policy_patch")
+        if isinstance(guidance.get("local_policy_patch"), dict)
+        else decision.get("local_policy_patch")
+        if isinstance(decision.get("local_policy_patch"), dict)
+        else {}
+    )
+    patched_rule = _first_pattern_rule_patch(local_patch or guidance.get("disable_patch"))
+    rollback_required = bool(
+        decision.get("rollback_required")
+        or guidance.get("rollback_required")
+        or str(decision.get("promotion_readiness") or guidance.get("promotion_readiness") or "").strip()
+        == "rollback-required"
+        or str(decision.get("recommended_next_action") or decision.get("next_action") or "").strip()
+        == "rollback-cache-replay-rule"
+    )
+    action_type = str(
+        guidance.get("rollback_action_type")
+        or guidance.get("action_type")
+        or decision.get("rollback_action_type")
+        or ""
+    ).strip()
+    disabled_reason = str(
+        guidance.get("disabled_reason")
+        or decision.get("disabled_reason")
+        or patched_rule.get("disabled_reason")
+        or decision.get("promotion_blocker")
+        or decision.get("observed_hit_blocker")
+        or ""
+    ).strip()
+    target_file = str(
+        guidance.get("target_local_rule_file")
+        or decision.get("target_local_rule_file")
+        or local_patch.get("target_local_rule_file")
+        or ""
+    ).strip()
+    target_section = str(
+        guidance.get("target_local_policy_section")
+        or decision.get("target_local_policy_section")
+        or local_patch.get("target_local_policy_section")
+        or ""
+    ).strip()
+    if not (rollback_required or action_type or disabled_reason or target_file or target_section):
+        return None
+    return {
+        "schema": "agentflow.managed_cache_replay_rollback_guidance.v1",
+        "rollback_required": True,
+        "promotion_readiness": sanitize_value(
+            decision.get("promotion_readiness")
+            or guidance.get("promotion_readiness")
+            or "rollback-required"
+        ),
+        "rollback_action_type": sanitize_value(action_type),
+        "disabled_reason": sanitize_value(disabled_reason),
+        "target_local_rule_file": sanitize_value(target_file),
+        "target_local_policy_section": sanitize_value(target_section),
+        "recommended_next_action": sanitize_value(
+            decision.get("recommended_next_action")
+            or decision.get("next_action")
+            or "rollback-cache-replay-rule"
+        ),
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
+        "emits_cache_apply_action": False,
+    }
+
+
 def _outcome_from_rows(
     *,
     request_row: dict[str, Any],
@@ -297,6 +386,22 @@ def _outcome_from_rows(
         "disagrees_with_local_evidence": disagreement,
         "privacy": _privacy(managed_server_calls_made=managed_server_calls_made),
     }
+    if outcome["local_action_family"] == "cache":
+        rollback_guidance = _cache_rollback_guidance_from_decision(decision)
+        if rollback_guidance is not None:
+            outcome["cache_rollback_guidance"] = rollback_guidance
+            for key in (
+                "rollback_required",
+                "promotion_readiness",
+                "rollback_action_type",
+                "disabled_reason",
+                "target_local_rule_file",
+                "target_local_policy_section",
+                "cache_apply_action_count",
+                "cache_entries_written",
+                "emits_cache_apply_action",
+            ):
+                outcome[key] = rollback_guidance[key]
     return {
         key: value
         for key, value in sanitize_value(outcome).items()

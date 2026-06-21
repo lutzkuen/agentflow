@@ -6303,6 +6303,73 @@ def _managed_preview_public_outcome_status(gate: dict[str, Any]) -> str:
     return "preview-missing"
 
 
+def _cache_rollback_guidance_status(guidance: dict[str, Any]) -> str:
+    target_file = str(guidance.get("target_local_rule_file") or "").strip()
+    target_section = str(guidance.get("target_local_policy_section") or "").strip()
+    action_type = str(guidance.get("rollback_action_type") or "").strip()
+    disabled_reason = str(guidance.get("disabled_reason") or "").strip()
+    if target_file != "cache_rules.yaml":
+        return "cache-rollback-guidance-missing-target-rule-file"
+    if target_section != "cache.pattern_rules":
+        return "cache-rollback-guidance-missing-target-policy-section"
+    if not action_type or "cache_replay" not in action_type:
+        return "cache-rollback-guidance-missing-action-type"
+    if not disabled_reason:
+        return "cache-rollback-guidance-missing-disabled-reason"
+    return "accepted"
+
+
+def _cache_rollback_guidance_from_outcome(outcome: dict[str, Any]) -> dict[str, Any] | None:
+    if str(outcome.get("local_action_family") or "").strip() != "cache":
+        return None
+    guidance = outcome.get("cache_rollback_guidance") if isinstance(outcome.get("cache_rollback_guidance"), dict) else {}
+    rollback_required = bool(
+        outcome.get("rollback_required")
+        or guidance.get("rollback_required")
+        or str(outcome.get("promotion_readiness") or guidance.get("promotion_readiness") or "").strip()
+        == "rollback-required"
+        or str(outcome.get("next_action") or guidance.get("recommended_next_action") or "").strip()
+        == "rollback-cache-replay-rule"
+    )
+    if not rollback_required and not guidance:
+        return None
+    clean = {
+        "schema": "agentflow.local_activation_cache_rollback_guidance.v1",
+        "rollback_required": True,
+        "promotion_readiness": sanitize_value(
+            outcome.get("promotion_readiness")
+            or guidance.get("promotion_readiness")
+            or "rollback-required"
+        ),
+        "rollback_action_type": sanitize_value(
+            outcome.get("rollback_action_type") or guidance.get("rollback_action_type")
+        ),
+        "disabled_reason": sanitize_value(outcome.get("disabled_reason") or guidance.get("disabled_reason")),
+        "target_local_rule_file": sanitize_value(
+            outcome.get("target_local_rule_file") or guidance.get("target_local_rule_file")
+        ),
+        "target_local_policy_section": sanitize_value(
+            outcome.get("target_local_policy_section") or guidance.get("target_local_policy_section")
+        ),
+        "recommended_next_action": "rollback-cache-replay-rule",
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
+        "emits_cache_apply_action": False,
+        "privacy": _managed_preview_successor_privacy(
+            managed_server_calls_made=bool(outcome.get("managed_server_calls_made"))
+        ),
+    }
+    clean["status"] = _cache_rollback_guidance_status(clean)
+    return {
+        key: value
+        for key, value in clean.items()
+        if value not in (None, "", [], 0)
+        or key in {"cache_apply_action_count", "cache_entries_written", "emits_cache_apply_action"}
+    }
+
+
 def _managed_preview_successor_gate(
     entry: dict[str, Any],
     managed_preview_outcomes: dict[str, Any] | None,
@@ -6371,6 +6438,14 @@ def _managed_preview_successor_gate(
         outcome.get("managed_preview_provider_calls_made")
         or outcome.get("provider_calls_made")
     )
+    cache_rollback_guidance = _cache_rollback_guidance_from_outcome(outcome)
+    cache_rollback_status = (
+        str(cache_rollback_guidance.get("status") or "")
+        if isinstance(cache_rollback_guidance, dict)
+        else ""
+    )
+    cache_rollback_accepted = cache_rollback_status == "accepted"
+    cache_rollback_invalid = bool(cache_rollback_guidance) and not cache_rollback_accepted
     verified = bool(
         _managed_preview_classification_agrees(classification)
         and not stale
@@ -6379,11 +6454,14 @@ def _managed_preview_successor_gate(
         and not disagreement
         and not preview_policy_write
         and not preview_provider_call
+        and not cache_rollback_invalid
         and (health_gate.get("passed") or not required)
     )
     action_status = _successor_action_status(entry)
     if verified:
-        if action_status in {"keep-current-rule", "suppress-duplicate"}:
+        if cache_rollback_accepted:
+            decision = "rollback-required"
+        elif action_status in {"keep-current-rule", "suppress-duplicate"}:
             decision = action_status
         elif local_gate["passed"] and str(entry.get("issue_worthy_status") or "") == "ready":
             decision = "ready"
@@ -6394,8 +6472,12 @@ def _managed_preview_successor_gate(
         else:
             decision = "review-only"
         status = "preview-verified"
-        reason = "local-managed-preview-agree"
-        next_action = outcome.get("next_action") or entry.get("next_action")
+        reason = "local-managed-cache-rollback-guidance" if cache_rollback_accepted else "local-managed-preview-agree"
+        next_action = (
+            "rollback-cache-replay-rule"
+            if cache_rollback_accepted
+            else outcome.get("next_action") or entry.get("next_action")
+        )
     else:
         decision = "keep-blocked" if required else "review"
         if failed_closed:
@@ -6408,14 +6490,16 @@ def _managed_preview_successor_gate(
             status = "managed-local-disagreement"
         elif preview_policy_write or preview_provider_call:
             status = "unsafe-preview-side-effect"
+        elif cache_rollback_invalid:
+            status = cache_rollback_status
         elif classification in {"preview-omitted", "omitted", "needs-local-evidence"}:
             status = "preview-omitted"
         else:
             status = classification
         decision = "review-stale-preview" if stale else decision
         reason = status
-        next_action = outcome.get("next_action") or "refresh-managed-activation-preview"
-    return {
+        next_action = "review-managed-cache-rollback-guidance" if cache_rollback_invalid else outcome.get("next_action") or "refresh-managed-activation-preview"
+    gate = {
         "schema": PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA,
         "required": required,
         "status": status,
@@ -6456,6 +6540,10 @@ def _managed_preview_successor_gate(
             managed_server_calls_made=bool(outcome.get("managed_server_calls_made"))
         ),
     }
+    if cache_rollback_guidance is not None:
+        gate["cache_rollback_guidance"] = sanitize_value(cache_rollback_guidance)
+        gate["cache_rollback_guidance_status"] = sanitize_value(cache_rollback_status)
+    return gate
 
 
 def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
@@ -6521,6 +6609,30 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         elif preview_gate.get("verified") and preview_gate.get("decision") == "ready":
             action["successor_status"] = "ready"
             action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
+        elif preview_gate.get("verified") and preview_gate.get("decision") == "rollback-required":
+            rollback_guidance = (
+                preview_gate.get("cache_rollback_guidance")
+                if isinstance(preview_gate.get("cache_rollback_guidance"), dict)
+                else {}
+            )
+            action["successor_status"] = "rollback-required"
+            action["recommended_next_action"] = "rollback-cache-replay-rule"
+            action["rollback_required"] = True
+            action["promotion_readiness"] = "rollback-required"
+            action["promotion_recommendation"] = "rollback-required"
+            action["rollback_action_type"] = sanitize_value(rollback_guidance.get("rollback_action_type"))
+            action["disabled_reason"] = sanitize_value(rollback_guidance.get("disabled_reason"))
+            action["target_local_rule_file"] = sanitize_value(
+                rollback_guidance.get("target_local_rule_file") or action.get("target_local_rule_file")
+            )
+            action["target_local_policy_section"] = sanitize_value(
+                rollback_guidance.get("target_local_policy_section") or action.get("target_local_policy_section")
+            )
+            action["cache_rollback_guidance"] = sanitize_value(rollback_guidance)
+            action["cache_apply_action_count"] = 0
+            action["cache_entries_written"] = 0
+            action["emits_cache_apply_action"] = False
+            action["policy_files_written"] = False
         elif preview_gate.get("verified") and preview_gate.get("decision") == "keep-blocked":
             action["successor_status"] = "keep-blocked"
         elif preview_gate.get("verified") and preview_gate.get("decision") in {"keep-current-rule", "suppress-duplicate"}:
@@ -6544,6 +6656,10 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "keep_blocked_reason",
         "next_state",
         "next_state_reason",
+        "promotion_readiness",
+        "promotion_recommendation",
+        "rollback_action_type",
+        "disabled_reason",
     ):
         if entry.get(key) is not None:
             action[key] = sanitize_value(entry.get(key))
@@ -6562,6 +6678,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "measured_full_rollout_activation",
         "durable_action_ledger_entry",
         "durable_outcome_ledger_entry",
+        "rollback_required",
     ):
         if entry.get(key) is not None:
             action[key] = bool(entry.get(key))
@@ -6630,6 +6747,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "full_rollout_activation_outcome",
         "keep_active_regression_gate",
         "dependency_evidence_review",
+        "cache_rollback_guidance",
     ):
         if isinstance(entry.get(key), dict):
             action[key] = sanitize_value(entry.get(key))
@@ -6671,6 +6789,8 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             "stale_dependency_evidence_rows",
             "unsafe_dependency_evidence_rows",
             "unknown_dependency_evidence_rows",
+            "rollback_required",
+            "policy_files_written",
         }
     }
 
@@ -6679,6 +6799,8 @@ def _successor_decision_issue_status(action: dict[str, Any]) -> str:
     decision = str(action.get("successor_status") or "").strip()
     if decision == "ready":
         return "ready"
+    if decision == "rollback-required":
+        return "blocked"
     if decision in {"keep-current-rule", "suppress-duplicate"}:
         return "suppressed"
     if decision in {"keep-blocked", "review-stale-preview"}:
@@ -6713,12 +6835,31 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
         "preview_omitted_reason": sanitize_value(gate.get("omitted_reason")) if gate else None,
         "preview_no_op_reason": sanitize_value(gate.get("no_op_reason")) if gate else None,
         "top_preview_omission_reason": sanitize_value((gate.get("health_gate") or {}).get("top_omission_reason")) if isinstance(gate.get("health_gate"), dict) else None,
+        "target_local_rule_file": sanitize_value(action.get("target_local_rule_file")),
+        "target_local_policy_section": sanitize_value(action.get("target_local_policy_section")),
+        "promotion_readiness": sanitize_value(action.get("promotion_readiness")),
+        "promotion_recommendation": sanitize_value(action.get("promotion_recommendation")),
+        "rollback_required": bool(action.get("rollback_required")),
+        "rollback_action_type": sanitize_value(action.get("rollback_action_type")),
+        "disabled_reason": sanitize_value(action.get("disabled_reason")),
+        "cache_apply_action_count": _to_int(action.get("cache_apply_action_count")),
+        "cache_entries_written": _to_int(action.get("cache_entries_written")),
+        "emits_cache_apply_action": bool(action.get("emits_cache_apply_action")),
+        "policy_files_written": bool(action.get("policy_files_written")),
         "privacy": _successor_action_privacy(),
     }
     return {
         key: value
         for key, value in sanitize_value(row).items()
-        if value not in (None, "", [], 0) or key in {"preview_verified"}
+        if value not in (None, "", [], 0)
+        or key in {
+            "preview_verified",
+            "rollback_required",
+            "cache_apply_action_count",
+            "cache_entries_written",
+            "emits_cache_apply_action",
+            "policy_files_written",
+        }
     }
 
 

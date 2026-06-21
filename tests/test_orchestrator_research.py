@@ -2943,6 +2943,166 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn('"policy_files_written": true', rendered.lower())
         self.assertNotIn('"provider_calls_made": true', rendered.lower())
 
+    def test_managed_cache_rollback_guidance_drives_local_successor_decision(self):
+        rows = [
+            ("activation:cache-rollback", "accepted", False),
+            ("activation:cache-missing-guidance", "missing-target", False),
+            ("activation:cache-unsafe-guidance", "accepted", True),
+        ]
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": index,
+                    "fingerprint": source,
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                    "state": "blocked",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "rollback-cache-replay-rule",
+                    "blocker_codes": ["evidence-older-than-max-age"],
+                    "sample_count": 36,
+                    "projected_savings_usd": 0.075373,
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                }
+                for index, (source, _kind, _unsafe) in enumerate(rows, start=1)
+            ],
+        }
+        outcomes = []
+        for source, kind, unsafe in rows:
+            guidance = {
+                "schema": "agentflow.managed_cache_replay_rollback_guidance.v1",
+                "rollback_required": True,
+                "rollback_action_type": "disable_openai_exact_cache_replay_policy",
+                "disabled_reason": "stale-cache-replay-evidence",
+                "target_local_rule_file": "cache_rules.yaml" if kind == "accepted" else "",
+                "target_local_policy_section": "cache.pattern_rules" if kind == "accepted" else "",
+                "recommended_next_action": "rollback-cache-replay-rule",
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "cache_apply_action_count": 0,
+                "cache_entries_written": 0,
+                "emits_cache_apply_action": False,
+            }
+            outcomes.append(
+                {
+                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "outcome_fingerprint": f"managed-preview-outcome:{source}",
+                    "source_fingerprint": source,
+                    "preview_ref": f"preview:{source}",
+                    "local_action_family": "cache",
+                    "evidence_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                    "classification": "accepted",
+                    "managed_preview_classification": "accepted",
+                    "decision": "accepted",
+                    "next_action": "rollback-cache-replay-rule",
+                    "rollback_required": True,
+                    "promotion_readiness": "rollback-required",
+                    "cache_rollback_guidance": guidance,
+                    "preview_age_hours": 1.0,
+                    "stale_after_hours": 72.0,
+                    "stale": False,
+                    "missing_preview_decision": False,
+                    "failed_closed": False,
+                    "disagrees_with_local_evidence": False,
+                    "policy_files_written": unsafe,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": True,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                    "raw_prompt": "raw rollback guidance prompt must not leak",
+                }
+            )
+
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "status": "tracked",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": True,
+                    "summary": {
+                        "stored_preview_outcome_count": len(outcomes),
+                        "stale_count": 0,
+                        "missing_preview_decision_count": 0,
+                        "failed_closed_count": 1,
+                        "disagreement_count": 0,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                    },
+                    "outcomes": outcomes,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "managed_activation_preview_health": {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": len(outcomes),
+                    "previewed_row_count": len(outcomes),
+                    "omitted_row_count": 0,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {"cache": len(outcomes)},
+                    "top_omission_reasons": [],
+                    "top_rejection_reasons": [],
+                },
+            }
+        )
+
+        actions = {row["source_fingerprint"]: row for row in queue["successor_actions"]}
+        decisions = {row["source_fingerprint"]: row for row in queue["successor_decisions"]}
+        accepted_action = actions["activation:cache-rollback"]
+        accepted_decision = decisions["activation:cache-rollback"]
+        self.assertTrue(accepted_action["preview_verified"])
+        self.assertEqual(accepted_action["successor_status"], "rollback-required")
+        self.assertEqual(accepted_action["recommended_next_action"], "rollback-cache-replay-rule")
+        self.assertEqual(accepted_action["promotion_readiness"], "rollback-required")
+        self.assertTrue(accepted_action["rollback_required"])
+        self.assertEqual(accepted_action["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(accepted_action["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(accepted_action["rollback_action_type"], "disable_openai_exact_cache_replay_policy")
+        self.assertEqual(accepted_action["disabled_reason"], "stale-cache-replay-evidence")
+        self.assertEqual(accepted_action["cache_apply_action_count"], 0)
+        self.assertEqual(accepted_action["cache_entries_written"], 0)
+        self.assertFalse(accepted_action["emits_cache_apply_action"])
+        self.assertFalse(accepted_action["policy_files_written"])
+        self.assertEqual(accepted_decision["decision"], "rollback-required")
+        self.assertEqual(accepted_decision["issue_worthy_status"], "blocked")
+        self.assertEqual(accepted_decision["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(accepted_decision["promotion_readiness"], "rollback-required")
+        self.assertFalse(accepted_decision["policy_files_written"])
+
+        missing_action = actions["activation:cache-missing-guidance"]
+        missing_decision = decisions["activation:cache-missing-guidance"]
+        self.assertFalse(missing_action["preview_verified"])
+        self.assertEqual(missing_action["successor_status"], "keep-blocked")
+        self.assertEqual(
+            missing_action["preview_verification_status"],
+            "cache-rollback-guidance-missing-target-rule-file",
+        )
+        self.assertEqual(missing_decision["decision"], "keep-blocked")
+        self.assertEqual(missing_decision["cache_apply_action_count"], 0)
+        self.assertEqual(missing_decision["cache_entries_written"], 0)
+        self.assertFalse(missing_decision["emits_cache_apply_action"])
+
+        unsafe_action = actions["activation:cache-unsafe-guidance"]
+        unsafe_decision = decisions["activation:cache-unsafe-guidance"]
+        self.assertFalse(unsafe_action["preview_verified"])
+        self.assertEqual(unsafe_action["successor_status"], "keep-blocked")
+        self.assertEqual(unsafe_action["preview_verification_status"], "unsafe-preview-side-effect")
+        self.assertEqual(unsafe_decision["decision"], "keep-blocked")
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("raw rollback guidance prompt must not leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+
     def test_stored_no_data_preview_outcomes_keep_successor_blocked(self):
         ledger = {
             "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",

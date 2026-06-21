@@ -923,6 +923,79 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertNotIn('"policy_files_written": true', rendered.lower())
         self.assertEqual(managed_egress_violations(report), [])
 
+    def test_managed_activation_preview_outcomes_preserve_cache_rollback_guidance(self):
+        preview_result = {
+            "schema": "agentflow.managed_activation_preview_result.v1",
+            "generated_at": NOW.isoformat(),
+            "preview_request": {
+                "schema": "agentflow.managed_activation_preview_request.v1",
+                "generated_at": NOW.isoformat(),
+                "rows": [
+                    {
+                        "handoff_ref": "handoff:cache-rollback",
+                        "source_activation_ref": "activation-ref:cache-rollback",
+                        "source_successor_ref": "successor-ref:cache-rollback",
+                        "local_action_family": "cache",
+                        "evidence_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                        "current_status": "blocked",
+                        "executor_action_class": "keep-blocked",
+                        "executor_next_action": "rollback-cache-replay-rule",
+                        "blocker_codes": ["evidence-older-than-max-age"],
+                    }
+                ],
+            },
+            "preview": {
+                "schema": "agentflow.managed_activation_preview_response.v1",
+                "decisions": [
+                    {
+                        "handoff_ref": "handoff:cache-rollback",
+                        "classification": "accepted",
+                        "decision": "accepted",
+                        "recommended_next_action": "rollback-cache-replay-rule",
+                        "rollback_required": True,
+                        "promotion_readiness": "rollback-required",
+                        "rollback_metadata": {
+                            "rollback_action_type": "disable_openai_exact_cache_replay_policy",
+                            "target_local_rule_file": "cache_rules.yaml",
+                            "target_local_policy_section": "cache.pattern_rules",
+                            "disabled_reason": "stale-cache-replay-evidence",
+                        },
+                        "review_only": True,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                        "raw_prompt": "raw rollback response prompt must not leak",
+                    }
+                ],
+            },
+            "fetch": {"status": "ok", "status_code": 200, "managed_server_calls_made": True},
+        }
+
+        with TemporaryDirectory() as tmpdir:
+            store = Store(str(Path(tmpdir) / "agentflow.sqlite3"))
+            try:
+                report = persist_managed_activation_preview_outcomes(store, preview_result, now=NOW)
+            finally:
+                store.conn.close()
+
+        outcome = report["outcomes"][0]
+        guidance = outcome["cache_rollback_guidance"]
+        self.assertEqual(outcome["classification"], "review-only")
+        self.assertTrue(outcome["rollback_required"])
+        self.assertEqual(outcome["promotion_readiness"], "rollback-required")
+        self.assertEqual(outcome["next_action"], "rollback-cache-replay-rule")
+        self.assertEqual(guidance["rollback_action_type"], "disable_openai_exact_cache_replay_policy")
+        self.assertEqual(guidance["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(guidance["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(guidance["disabled_reason"], "stale-cache-replay-evidence")
+        self.assertEqual(outcome["cache_apply_action_count"], 0)
+        self.assertEqual(outcome["cache_entries_written"], 0)
+        self.assertFalse(outcome["emits_cache_apply_action"])
+        self.assertFalse(outcome["policy_files_written"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("raw rollback response prompt must not leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertEqual(managed_egress_violations(report), [])
+
     def test_managed_activation_preview_outcomes_cli_reports_stored_outcomes(self):
         request_payload = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
         preview_result = build_managed_activation_preview_result(
