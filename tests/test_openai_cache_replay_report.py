@@ -2262,8 +2262,12 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(decision["decision"], "rollback")
         patch = decision["top_decision"]["local_policy_patch"]
         rollback_rule_id = patch["pattern_rules"][0]["id"]
+        self.assertEqual(rollback_rule_id, "local-openai-cache-replay-canary-stale")
         self.assertEqual(patch["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(patch["source_canary_policy_file"], "cache_canary_policy.yaml")
         self.assertEqual(decision["top_decision"]["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(decision["top_decision"]["reason"], "stale-no-canary-traffic")
+        self.assertEqual(evidence["stale_zero_traffic_rule_count"], 1)
         self.assertTrue(decision["top_decision"]["duplicate_suppression"]["suppresses_generic_replay_ready_issue"])
         self.assertTrue(decision["top_decision"]["duplicate_suppression"]["suppresses_generic_cache_replay_activation_issue"])
 
@@ -2333,8 +2337,9 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(rollback_action["local_policy_patch"]["pattern_rules"][0]["id"], rollback_rule_id)
         self.assertEqual(
             rollback_action["local_policy_patch"]["pattern_rules"][0]["disabled_reason"],
-            "stale-cache-replay-evidence",
+            "stale-no-canary-traffic",
         )
+        self.assertGreater(rollback_action["local_policy_patch"]["pattern_rules"][0]["evidence_age_hours"], 72.0)
         self.assertTrue(rollback_action["duplicate_suppression"]["suppresses_generic_replay_ready_issue"])
         self.assertTrue(rollback_action["duplicate_suppression"]["suppresses_generic_cache_replay_activation_issue"])
 
@@ -2356,19 +2361,237 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         applied = json.loads(apply_out.getvalue())
         self.assertTrue(applied["wrote_policy_files"])
         self.assertEqual(applied["rollback_applied_rules"][0]["id"], rollback_rule_id)
-        self.assertEqual(applied["rollback_applied_rules"][0]["disabled_reason"], "stale-cache-replay-evidence")
+        self.assertEqual(applied["rollback_applied_rules"][0]["disabled_reason"], "stale-no-canary-traffic")
 
         cache_rules = yaml.safe_load(cache_rules_path.read_text(encoding="utf-8"))
         rule = cache_rules["pattern_rules"][0]
         self.assertEqual(rule["id"], rollback_rule_id)
         self.assertFalse(rule["enabled"])
-        self.assertEqual(rule["disabled_reason"], "stale-cache-replay-evidence")
+        self.assertEqual(rule["disabled_reason"], "stale-no-canary-traffic")
         self.assertEqual(rule["policy_source"], "local-manual")
         self.assertIn("graduation", rule)
         rendered = apply_out.getvalue()
         self.assertNotIn("raw prompt must not leak", rendered)
         self.assertNotIn("raw-cache-key-secret", rendered)
         self.assertTrue(applied["privacy"]["metadata_only"])
+
+    def test_openai_cache_replay_apply_rolls_back_stale_zero_traffic_rule_from_cache_rules(self) -> None:
+        config_dir = Path(self.tmpdir.name) / "rollback-cache-rules-config"
+        config_dir.mkdir()
+        cache_rules_path = config_dir / "cache_rules.yaml"
+        event_log = config_dir / "policy_events.jsonl"
+        rule_id = "local-openai-cache-replay-canary-stale-direct"
+        candidate_id = "request-shape-cache-replay:responses:chat:stale-direct"
+        shape = {
+            "provider_family": "openai",
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "category": "chat",
+            "workflow_phase": "chat",
+            "stream": False,
+            "has_tools": False,
+            "text_bucket": "2k_8k_chars",
+            "token_bucket": "500_2k_tokens",
+        }
+        cache_rules_path.write_text(
+            yaml.safe_dump(
+                {
+                    "exact_cache": {"enabled": True, "cache_tool_calls": False},
+                    "semantic_cache": {"enabled": False, "threshold": 0.95},
+                    "pattern_rules": [
+                        {
+                            "id": rule_id,
+                            "enabled": True,
+                            "policy_source": "local-manual",
+                            "candidate_id": candidate_id,
+                            "target_cache_policy": {
+                                "schema": "tokenclaw.request_shape_cache_replay_target_policy.v1",
+                                "policy_section": "cache.pattern_rules",
+                                "target_local_policy": "cache_rules",
+                                "target_local_rule_file": "cache_rules.yaml",
+                                "policy_source": "local-manual",
+                                "local_file_backed": True,
+                                "rules_path_included": False,
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                            },
+                            "conditions": {
+                                "pattern_hashes": ["sha256:*"],
+                                **shape,
+                                "replayability_levels": ["features_only", "local-exact-response"],
+                            },
+                            "action": {
+                                "type": "exact_cache_pattern",
+                                "allow_tool_calls": False,
+                                "safe_invalidation": False,
+                                "streaming": False,
+                                "scope": "session",
+                                "ttl_seconds": 3600,
+                            },
+                            "rollout": {
+                                "schema": "tokenclaw.pattern_policy_rollout.v1",
+                                "recommendation_mode": "openai-cache-replay-request-shape-canary",
+                                "canary_enabled": True,
+                                "canary_fraction": 0.1,
+                                "holdout_fraction": 0.1,
+                                "canary_salt": rule_id,
+                                "canary_unit": "request_fingerprint",
+                            },
+                            "graduation": {
+                                "schema": "tokenclaw.request_shape_cache_replay_shape_activation.v1",
+                                "source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
+                                "source_reason": "replay-ready-exact-non-tool-shape",
+                                **shape,
+                                "projected_hits": 35,
+                                "projected_savings_usd": 0.075373,
+                                "sample_count": 36,
+                                "aggregate_only": True,
+                                "staged_at": "2026-06-15T00:00:00+00:00",
+                            },
+                        }
+                    ],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"TOKENCLAW_POLICY_EVENTS_LOG": str(event_log)}, clear=False):
+            apply_out = io.StringIO()
+            apply_code = cli.openai_cache_replay_apply_cli(
+                [
+                    "--db",
+                    self.db_path,
+                    "--config-dir",
+                    str(config_dir),
+                    "--opportunity-limit",
+                    "20",
+                    "--impact-limit",
+                    "20",
+                ],
+                stdout=apply_out,
+            )
+
+            self.assertEqual(apply_code, 0)
+            applied = json.loads(apply_out.getvalue())
+            self.assertTrue(applied["wrote_policy_files"])
+            self.assertEqual(applied["summary"]["rollback_action_count"], 1)
+            self.assertEqual(applied["summary"]["rollback_patch_count"], 1)
+            self.assertEqual(applied["rollback_actions"][0]["reason"], "stale-no-canary-traffic")
+            patch_rule = applied["rollback_actions"][0]["local_policy_patch"]["pattern_rules"][0]
+            self.assertEqual(patch_rule["id"], rule_id)
+            self.assertEqual(patch_rule["disabled_reason"], "stale-no-canary-traffic")
+            self.assertGreater(patch_rule["evidence_age_hours"], 72.0)
+
+            cache_rules = yaml.safe_load(cache_rules_path.read_text(encoding="utf-8"))
+            rule = cache_rules["pattern_rules"][0]
+            self.assertEqual(rule["id"], rule_id)
+            self.assertFalse(rule["enabled"])
+            self.assertEqual(rule["disabled_reason"], "stale-no-canary-traffic")
+
+            from tokenclaw.policy_events import recent_policy_events
+
+            events = recent_policy_events(limit=1)["events"]
+            self.assertEqual(events[0]["action"], "openai-cache-replay-apply")
+            details = events[0]["details"]
+            self.assertEqual(details["rollback_reasons"], ["stale-no-canary-traffic"])
+            self.assertEqual(details["rollback_applied_rules"][0]["id"], rule_id)
+            self.assertGreater(details["rollback_evidence_age_hours"][0], 72.0)
+
+    def test_request_shape_cache_replay_recent_canary_feedback_blocks_stale_zero_traffic_rollback(self) -> None:
+        config_dir = Path(self.tmpdir.name) / "fresh-feedback-config"
+        config_dir.mkdir()
+        cache_rules_path = config_dir / "cache_rules.yaml"
+        rule_id = "local-openai-cache-replay-canary-fresh-hit"
+        candidate_id = "request-shape-cache-replay:responses:chat:fresh-hit"
+        shape = {
+            "provider_family": "openai",
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "category": "chat",
+            "workflow_phase": "chat",
+            "stream": False,
+            "has_tools": False,
+            "text_bucket": "2k_8k_chars",
+            "token_bucket": "500_2k_tokens",
+        }
+        cache_rules_path.write_text(
+            yaml.safe_dump(
+                {
+                    "pattern_rules": [
+                        {
+                            "id": rule_id,
+                            "enabled": True,
+                            "policy_source": "local-manual",
+                            "candidate_id": candidate_id,
+                            "target_cache_policy": {"target_local_rule_file": "cache_rules.yaml"},
+                            "conditions": {
+                                "pattern_hashes": ["sha256:*"],
+                                **shape,
+                                "replayability_levels": ["features_only", "local-exact-response"],
+                            },
+                            "action": {
+                                "type": "exact_cache_pattern",
+                                "allow_tool_calls": False,
+                                "safe_invalidation": False,
+                                "streaming": False,
+                                "scope": "session",
+                                "ttl_seconds": 3600,
+                            },
+                            "rollout": {
+                                "schema": "tokenclaw.pattern_policy_rollout.v1",
+                                "recommendation_mode": "openai-cache-replay-request-shape-canary",
+                                "canary_enabled": True,
+                                "canary_fraction": 0.1,
+                                "holdout_fraction": 0.1,
+                                "canary_salt": rule_id,
+                                "canary_unit": "request_fingerprint",
+                            },
+                            "graduation": {
+                                "schema": "tokenclaw.request_shape_cache_replay_shape_activation.v1",
+                                "source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
+                                "source_reason": "replay-ready-exact-non-tool-shape",
+                                **shape,
+                                "projected_hits": 35,
+                                "projected_savings_usd": 0.075373,
+                                "sample_count": 36,
+                                "aggregate_only": True,
+                                "staged_at": "2026-06-15T00:00:00+00:00",
+                            },
+                        }
+                    ],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        self._log_openai_call(
+            cache_status="hit",
+            cache_reason="exact-hit",
+            cache_hit=1,
+            cost=0.0,
+            cost_baseline=0.04,
+            cache_extra=self._cache_replay_meta(
+                candidate_id=candidate_id,
+                rule_id=rule_id,
+                canary_status="hit",
+                cohort="canary_applied",
+                reason="exact-hit",
+            ),
+        )
+
+        evidence = build_request_shape_cache_replay_evidence_report(
+            self.store,
+            rules_path=cache_rules_path,
+            limit=20,
+        )
+        decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+
+        self.assertEqual(evidence["stale_zero_traffic_rule_count"], 0)
+        self.assertFalse(evidence["stale_evidence"]["stale"])
+        self.assertNotEqual(decision["decision"], "rollback")
+        self.assertFalse(decision["summary"]["rollback_required"])
+        self.assertNotEqual(decision["next_action"], "rollback-cache-replay-rule")
 
     def test_openai_cache_replay_apply_stages_request_shape_canaries(self) -> None:
         pattern_hash = "sha256:" + "f" * 64

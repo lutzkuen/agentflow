@@ -6507,6 +6507,30 @@ def _cache_replay_staged_policy_summary(rules: list[dict[str, Any]]) -> list[dic
     return summaries
 
 
+def _cache_replay_staged_rule_observation_keys(
+    cache_meta: dict[str, Any],
+    *,
+    staged_rule_ids: set[str],
+    staged_candidate_ids: set[str],
+) -> tuple[set[str], set[str]]:
+    observed_rule_ids: set[str] = set()
+    observed_candidate_ids: set[str] = set()
+    pattern_rule = cache_meta.get("pattern_rule") if isinstance(cache_meta.get("pattern_rule"), dict) else {}
+    replay_canary = (
+        cache_meta.get("cache_replay_canary")
+        if isinstance(cache_meta.get("cache_replay_canary"), dict)
+        else {}
+    )
+    for meta in (pattern_rule, replay_canary):
+        rule_id = str(meta.get("rule_id") or meta.get("id") or "")
+        candidate_id = str(meta.get("candidate_id") or "")
+        if rule_id and rule_id in staged_rule_ids:
+            observed_rule_ids.add(rule_id)
+        if candidate_id and candidate_id in staged_candidate_ids:
+            observed_candidate_ids.add(candidate_id)
+    return observed_rule_ids, observed_candidate_ids
+
+
 def _cache_replay_row_matches_staged_rules(
     cache_meta: dict[str, Any],
     *,
@@ -6529,6 +6553,42 @@ def _cache_replay_row_matches_staged_rules(
     graduation = pattern_rule.get("graduation") if isinstance(pattern_rule.get("graduation"), dict) else {}
     projection = replay_canary.get("projection") if isinstance(replay_canary.get("projection"), dict) else {}
     return graduation.get("source_schema") == REPLAYABILITY_DRY_RUN_SCHEMA or projection.get("source_schema") == REPLAYABILITY_DRY_RUN_SCHEMA
+
+
+def _cache_replay_stale_zero_traffic_rules(
+    staged_rules: list[dict[str, Any]],
+    *,
+    observed_rule_ids: set[str],
+    observed_candidate_ids: set[str],
+    now: datetime,
+    max_age_hours: float,
+) -> list[dict[str, Any]]:
+    stale_rules: list[dict[str, Any]] = []
+    for rule in staged_rules:
+        rule_id = str(rule.get("rule_id") or "")
+        candidate_id = str(rule.get("candidate_id") or "")
+        rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
+        if not bool(rule.get("enabled", True)) or rollout.get("canary_enabled") is False:
+            continue
+        if (rule_id and rule_id in observed_rule_ids) or (candidate_id and candidate_id in observed_candidate_ids):
+            continue
+        staged_at = _parse_utc(rule.get("staged_at"))
+        if staged_at is None:
+            continue
+        age_hours = round((now - staged_at).total_seconds() / 3600.0, 3)
+        if age_hours <= max_age_hours:
+            continue
+        stale_rules.append({
+            "rank": rule.get("index"),
+            "rule_id": rule_id or None,
+            "staged_at": staged_at.isoformat(),
+            "age_hours": age_hours,
+            "max_age_hours": float(max_age_hours),
+            "reason": "stale-no-canary-traffic",
+            "metadata_only": True,
+            "aggregate_only": True,
+        })
+    return stale_rules
 
 
 def _row_shape_matches_staged_rule(row: dict[str, Any], routing: dict[str, Any], rule: dict[str, Any]) -> bool:
@@ -6845,10 +6905,17 @@ def build_request_shape_cache_replay_evidence_report(
     limit: int = 10000,
     max_age_hours: float = DEFAULT_CACHE_REPLAY_CANARY_MAX_EVIDENCE_AGE_HOURS,
 ) -> dict[str, Any]:
+    policy_file_name = Path(rules_path).name
     policy, policy_exists = _load_cache_replay_canary_policy(rules_path)
     staged_rules = _request_shape_cache_replay_policy_rules(policy)
     staged_rule_ids = {str(rule.get("rule_id")) for rule in staged_rules if rule.get("rule_id")}
     staged_candidate_ids = {str(rule.get("candidate_id")) for rule in staged_rules if rule.get("candidate_id")}
+    candidate_to_rule_ids: dict[str, set[str]] = {}
+    for rule in staged_rules:
+        candidate_id = str(rule.get("candidate_id") or "")
+        rule_id = str(rule.get("rule_id") or "")
+        if candidate_id and rule_id:
+            candidate_to_rule_ids.setdefault(candidate_id, set()).add(rule_id)
     capped_limit = max(1, min(int(limit or 1), 10000))
     rows = store_obj.optimization_action_ledger_rows(limit=capped_limit)
 
@@ -6875,6 +6942,8 @@ def build_request_shape_cache_replay_evidence_report(
     latest_warmup_miss_at: datetime | None = None
     warmup_miss_count = 0
     non_warmup_miss_count = 0
+    observed_staged_rule_ids: set[str] = set()
+    observed_staged_candidate_ids: set[str] = set()
 
     for row in rows:
         cache_meta = _json_obj(row.get("cache_json"))
@@ -6889,6 +6958,15 @@ def build_request_shape_cache_replay_evidence_report(
 
         routing = _json_obj(row.get("routing_json"))
         observed_rows += 1
+        row_rule_ids, row_candidate_ids = _cache_replay_staged_rule_observation_keys(
+            cache_meta,
+            staged_rule_ids=staged_rule_ids,
+            staged_candidate_ids=staged_candidate_ids,
+        )
+        observed_staged_rule_ids.update(row_rule_ids)
+        observed_staged_candidate_ids.update(row_candidate_ids)
+        for candidate_id in row_candidate_ids:
+            observed_staged_rule_ids.update(candidate_to_rule_ids.get(candidate_id, set()))
         replay_canary = (
             cache_meta.get("cache_replay_canary")
             if isinstance(cache_meta.get("cache_replay_canary"), dict)
@@ -6975,6 +7053,13 @@ def build_request_shape_cache_replay_evidence_report(
     observed_rows += shape_bypass_count
 
     now = _parse_utc(utc_now()) or datetime.now(timezone.utc)
+    stale_zero_traffic_rules = _cache_replay_stale_zero_traffic_rules(
+        staged_rules,
+        observed_rule_ids=observed_staged_rule_ids,
+        observed_candidate_ids=observed_staged_candidate_ids,
+        now=now,
+        max_age_hours=max_age_hours,
+    )
     staged_times = [
         parsed
         for rule in staged_rules
@@ -6982,9 +7067,27 @@ def build_request_shape_cache_replay_evidence_report(
     ]
     reference_time = latest_observed or (min(staged_times) if staged_times else None)
     age_hours = round((now - reference_time).total_seconds() / 3600.0, 3) if reference_time else None
-    stale = bool(age_hours is not None and age_hours > max_age_hours)
+    stale = bool(stale_zero_traffic_rules or (age_hours is not None and age_hours > max_age_hours))
     durable_outcome: dict[str, Any] | None = None
-    if not policy_exists:
+    if stale_zero_traffic_rules:
+        status = "staged-stale-no-traffic"
+        reason = "stale-no-canary-traffic"
+        next_action = "rollback-cache-replay-rule"
+        durable_outcome = {
+            "schema": "tokenclaw.request_shape_cache_replay_durable_outcome.v1",
+            "decision": "rollback",
+            "reason": reason,
+            "next_action": next_action,
+            "source_canary_policy_file": policy_file_name,
+            "target_local_rule_file": "cache_rules.yaml",
+            "policy_files_written": False,
+            "cache_entries_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+    elif not policy_exists:
         status = "no-canary-policy"
         reason = "cache-canary-policy-missing"
         next_action = "stage-cache-replay-canary"
@@ -7002,7 +7105,7 @@ def build_request_shape_cache_replay_evidence_report(
                 "decision": "rollback",
                 "reason": reason,
                 "next_action": next_action,
-                "source_canary_policy_file": "cache_canary_policy.yaml",
+                "source_canary_policy_file": policy_file_name,
                 "target_local_rule_file": "cache_rules.yaml",
                 "policy_files_written": False,
                 "cache_entries_written": False,
@@ -7064,7 +7167,7 @@ def build_request_shape_cache_replay_evidence_report(
         "reason": reason,
         "next_action": next_action,
         "source": {
-            "policy_file": "cache_canary_policy.yaml",
+            "policy_file": policy_file_name,
             "policy_file_present": policy_exists,
             "policy_path_included": False,
             "rows_scanned": len(rows),
@@ -7072,6 +7175,8 @@ def build_request_shape_cache_replay_evidence_report(
         },
         "staged_canary_count": len(staged_rules),
         "staged_canaries": staged_canary_summaries,
+        "stale_zero_traffic_rule_count": len(stale_zero_traffic_rules),
+        "stale_zero_traffic_rules": stale_zero_traffic_rules,
         "summary": {
             "observed_row_count": observed_rows,
             "applied_count": lifecycle_counts["canary_applied_count"],
@@ -7098,6 +7203,7 @@ def build_request_shape_cache_replay_evidence_report(
             "repeat_window_elapsed": warmup_analysis["repeat_window"]["elapsed"],
             "later_exact_repeat_expected": warmup_analysis["repeat_window"]["later_exact_repeat_expected"],
             "later_exact_repeat_absent": warmup_analysis["repeat_window"]["later_exact_repeat_absent"],
+            "stale_zero_traffic_rule_count": len(stale_zero_traffic_rules),
         },
         "lifecycle_counts": lifecycle_counts,
         "cache_status_breakdown": _breakdown(cache_status_counts),
@@ -7113,7 +7219,8 @@ def build_request_shape_cache_replay_evidence_report(
             "reference_time": reference_time.isoformat() if reference_time else None,
             "age_hours": age_hours,
             "stale": stale,
-            "reason": "evidence-older-than-max-age" if stale else "fresh-or-not-yet-observed",
+            "reason": "stale-no-canary-traffic" if stale_zero_traffic_rules else ("evidence-older-than-max-age" if stale else "fresh-or-not-yet-observed"),
+            "zero_traffic_rule_count": len(stale_zero_traffic_rules),
         },
         "acceptance": {
             "has_staged_canary_metadata": bool(staged_rules),
@@ -7129,7 +7236,10 @@ def build_request_shape_cache_replay_evidence_report(
             "reports_durable_rollback_or_retirement_reason": durable_outcome is not None,
             "aggregate_only": True,
         },
-        "privacy": _cache_replay_evidence_privacy(),
+        "privacy": {
+            **_cache_replay_evidence_privacy(),
+            "rule_ids_included": bool(stale_zero_traffic_rules),
+        },
     }
 
 
@@ -7164,6 +7274,42 @@ def _cache_replay_policy_rule_id(evidence: dict[str, Any]) -> str:
     shape = top.get("shape") if isinstance(top, dict) else {}
     digest = hashlib.sha256(stable_json(shape).encode("utf-8")).hexdigest()[:16]
     return f"local-openai-cache-replay-promoted:{digest}"
+
+
+def _cache_replay_policy_source_file(evidence: dict[str, Any] | None) -> str:
+    source = evidence.get("source") if isinstance(evidence, dict) and isinstance(evidence.get("source"), dict) else {}
+    return public_label(source.get("policy_file"), "cache_canary_policy.yaml")
+
+
+def _cache_replay_policy_disable_patch_rules(evidence: dict[str, Any] | None, reason: str) -> list[dict[str, Any]]:
+    stale_rules = (
+        evidence.get("stale_zero_traffic_rules")
+        if isinstance(evidence, dict) and isinstance(evidence.get("stale_zero_traffic_rules"), list)
+        else []
+    )
+    patch_rules: list[dict[str, Any]] = []
+    for rule in stale_rules:
+        if not isinstance(rule, dict):
+            continue
+        rule_id = str(rule.get("rule_id") or "")
+        if not rule_id:
+            continue
+        patch_rules.append({
+            "id": rule_id,
+            "enabled": False,
+            "disabled_reason": reason,
+            "rollback_reason": "stale-no-canary-traffic",
+            "evidence_age_hours": rule.get("age_hours"),
+        })
+    if patch_rules:
+        return patch_rules
+    return [
+        {
+            "id": _cache_replay_policy_rule_id(evidence or {}),
+            "enabled": False,
+            "disabled_reason": reason,
+        }
+    ]
 
 
 def _cache_replay_policy_decision_top_canary(evidence: dict[str, Any]) -> dict[str, Any]:
@@ -7495,6 +7641,8 @@ def _cache_replay_policy_reason_codes(evidence: dict[str, Any] | None) -> list[s
             codes.append(public_label(top_warmup_blocker, "cache-warmup-miss"))
     if metrics["stale_evidence"]:
         codes.append("stale-cache-replay-evidence")
+    if _as_int(evidence.get("stale_zero_traffic_rule_count")) > 0:
+        codes.append("stale-no-canary-traffic")
     if metrics["invalidation_skipped_count"] > 0:
         codes.append("invalidation-or-stale-risk-observed")
     if metrics["unsupported_shape_count"] > 0:
@@ -7557,6 +7705,8 @@ def _cache_replay_policy_decision_reason(evidence: dict[str, Any] | None, decisi
     if decision == "widen":
         return "cache-replay-canary-hit-recovery-observed"
     if decision == "rollback":
+        if isinstance(evidence, dict) and _as_int(evidence.get("stale_zero_traffic_rule_count")) > 0:
+            return "stale-no-canary-traffic"
         return "stale-cache-replay-evidence"
     if decision == "retire-staged-no-repeat":
         return "repeat-window-elapsed-no-live-repeat"
@@ -7628,22 +7778,19 @@ def _cache_replay_policy_promotion_readiness(evidence: dict[str, Any] | None, de
 
 
 def _cache_replay_policy_rollback_metadata(evidence: dict[str, Any] | None, decision: str) -> dict[str, Any]:
-    rule_id = _cache_replay_policy_rule_id(evidence or {})
+    reason = _cache_replay_policy_decision_reason(evidence, decision)
+    patch_rules = _cache_replay_policy_disable_patch_rules(evidence, reason)
     return {
         "schema": "tokenclaw.request_shape_cache_replay_policy_decision_rollback_metadata.v1",
         "required_for_promotion": True,
         "rollback_action_type": "disable_openai_exact_cache_replay_policy",
         "target_local_rule_file": "cache_rules.yaml",
-        "source_canary_policy_file": "cache_canary_policy.yaml",
-        "rule_id": rule_id,
+        "source_canary_policy_file": _cache_replay_policy_source_file(evidence),
+        "rule_id": patch_rules[0]["id"] if patch_rules else None,
+        "rule_count": len(patch_rules),
+        "reason": reason,
         "disable_patch": {
-            "pattern_rules": [
-                {
-                    "id": rule_id,
-                    "enabled": False,
-                    "disabled_reason": _cache_replay_policy_decision_reason(evidence, decision),
-                }
-            ]
+            "pattern_rules": patch_rules,
         },
         "metadata_only": True,
         "aggregate_only": True,
@@ -7714,14 +7861,8 @@ def _cache_replay_policy_patch(evidence: dict[str, Any] | None, decision: str) -
                 else "rollback_openai_exact_cache_replay_policy"
             ),
             "target_local_rule_file": "cache_rules.yaml",
-            "source_canary_policy_file": "cache_canary_policy.yaml",
-            "pattern_rules": [
-                {
-                    "id": rule_id,
-                    "enabled": False,
-                    "disabled_reason": reason,
-                }
-            ],
+            "source_canary_policy_file": _cache_replay_policy_source_file(evidence),
+            "pattern_rules": _cache_replay_policy_disable_patch_rules(evidence, reason),
             "metadata_only": True,
             "aggregate_only": True,
             "rules_path_included": False,
@@ -7843,7 +7984,7 @@ def build_request_shape_cache_replay_policy_decision_report(
         "target_local_policy": "cache_rules",
         "target_local_rule_file": "cache_rules.yaml",
         "target_local_policy_section": "cache.pattern_rules",
-        "source_canary_policy_file": "cache_canary_policy.yaml",
+        "source_canary_policy_file": _cache_replay_policy_source_file(evidence),
         "policy_source": "local-manual" if metrics["staged_canary_count"] else "unknown",
         "decision_options": ["widen", "rollback", "retire-staged-no-repeat", "keep-staged", "keep-blocked"],
         "promotion_decision_options": ["promote", "keep-staged-warmup", "retire-staged-no-repeat", "keep-blocked"],
@@ -7968,7 +8109,7 @@ def build_request_shape_cache_replay_policy_decision_report(
             "policy_source": entry["policy_source"],
             "target_local_rule_file": "cache_rules.yaml",
             "target_local_policy_section": "cache.pattern_rules",
-            "source_canary_policy_file": "cache_canary_policy.yaml",
+            "source_canary_policy_file": _cache_replay_policy_source_file(evidence),
             "policy_files_written": False,
             "cache_entries_written": False,
         },

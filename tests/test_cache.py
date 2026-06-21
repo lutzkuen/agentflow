@@ -96,16 +96,22 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertEqual(rule["action"]["scope"], "session")
         self.assertEqual(rule["action"]["min_call_count"], 5)
 
-    def test_packaged_openai_cache_replay_rule_stages_49_row_cohort_with_holdout(self):
+    def test_packaged_openai_cache_replay_rule_rolls_back_stale_49_row_cohort(self):
         rules = list(cache_module.CACHE_PATTERN_RULES)
         [rule] = [
             item for item in rules
             if item.get("id") == "local-openai-cache-replay-canary-ae8404ee817f89f4"
         ]
 
-        self.assertTrue(rule["enabled"])
+        self.assertFalse(rule["enabled"])
         self.assertEqual(rule["policy_source"], "local-manual")
         self.assertEqual(rule["candidate_id"], "request-shape-cache-replay:responses:chat:8e210a2f5680d16d")
+        raw_policy = yaml.safe_load((Path(cache_module.__file__).with_name("cache_rules.yaml")).read_text())
+        [raw_rule] = [
+            item for item in raw_policy["pattern_rules"]
+            if item.get("id") == "local-openai-cache-replay-canary-ae8404ee817f89f4"
+        ]
+        self.assertEqual(raw_rule["disabled_reason"], "stale-no-canary-traffic")
         self.assertEqual(rule["conditions"]["provider_family"], "openai")
         self.assertEqual(rule["conditions"]["source_surface"], "openai_responses")
         self.assertEqual(rule["conditions"]["endpoint"], "responses")
@@ -124,36 +130,28 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertEqual(rule["graduation"]["projected_hits"], 48)
         self.assertEqual(rule["graduation"]["projected_savings_usd"], 0.102518)
 
-        cohorts = set()
-        for index in range(200):
-            features = {
-                "source_surface": "openai_responses",
-                "endpoint": "responses",
-                "category": "chat",
-                "workflow_phase": "chat",
-                "text_bucket": "2k_8k_chars",
-                "token_bucket": "500_2k_tokens",
-                "has_tools": False,
-                "stream": False,
-                "replayability_level": "features_only",
-                "request_fingerprint": f"sha256:{index:064x}",
-                "raw_pattern_strings_included": False,
-            }
-            _, _, meta = cache_module.cache_lookup_meta(has_tool_blocks=False, pattern_features=features)
-            pattern_rule = meta.get("pattern_rule") if isinstance(meta.get("pattern_rule"), dict) else {}
-            replay_canary = (
-                meta.get("cache_replay_canary")
-                if isinstance(meta.get("cache_replay_canary"), dict)
-                else {}
-            )
-            canary = pattern_rule.get("canary") if isinstance(pattern_rule.get("canary"), dict) else replay_canary.get("canary")
-            if isinstance(canary, dict):
-                cohorts.add(canary.get("cohort"))
-            if cohorts >= {"canary_applied", "canary_holdout"}:
-                break
-
-        self.assertIn("canary_applied", cohorts)
-        self.assertIn("canary_holdout", cohorts)
+        features = {
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "category": "chat",
+            "workflow_phase": "chat",
+            "text_bucket": "2k_8k_chars",
+            "token_bucket": "500_2k_tokens",
+            "has_tools": False,
+            "stream": False,
+            "replayability_level": "features_only",
+            "request_fingerprint": "sha256:" + "0" * 64,
+            "raw_pattern_strings_included": False,
+        }
+        _, _, meta = cache_module.cache_lookup_meta(has_tool_blocks=False, pattern_features=features)
+        skip_reasons = (meta.get("pattern_rules") or {}).get("skip_reasons") or []
+        self.assertIn(
+            {
+                "rule_id": "local-openai-cache-replay-canary-ae8404ee817f89f4",
+                "reason": "disabled",
+            },
+            skip_reasons,
+        )
 
     def test_openai_cache_replay_hit_recovery_smoke_demonstrates_second_hit(self):
         from tokenclaw.cache_smoke import build_cache_replay_hit_recovery_smoke
@@ -166,7 +164,9 @@ class CacheDecisionMetaTest(unittest.TestCase):
                 store.conn.close()
 
         self.assertEqual(result["schema"], "tokenclaw.cache_replay_hit_recovery_smoke.v1")
-        self.assertEqual(result["status"], "hit-recovered")
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "no-synthetic-canary-applied-fingerprint")
+        self.assertEqual(result["blocker_codes"], ["canary-applied-cohort-unavailable"])
         self.assertEqual(result["target_rule_id"], "local-openai-cache-replay-canary-ae8404ee817f89f4")
         self.assertEqual(result["target_shape"]["provider_family"], "openai")
         self.assertEqual(result["target_shape"]["source_surface"], "openai_responses")
@@ -176,19 +176,6 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertEqual(result["target_shape"]["token_bucket"], "500_2k_tokens")
         self.assertFalse(result["target_shape"]["has_tools"])
         self.assertFalse(result["target_shape"]["stream"])
-        self.assertEqual(result["first_lookup"]["status"], "miss")
-        self.assertEqual(result["first_lookup"]["reason"], "first-seen-cache-warmup")
-        self.assertEqual(result["first_lookup"]["canary_status"], "applied")
-        self.assertEqual(result["second_lookup"]["status"], "hit")
-        self.assertEqual(result["second_lookup"]["reason"], "exact-match")
-        self.assertEqual(result["second_lookup"]["hit_type"], "exact")
-        self.assertEqual(result["second_lookup"]["canary_status"], "applied")
-        self.assertEqual(result["second_lookup"]["canary_cohort"], "canary_applied")
-        self.assertEqual(result["summary"]["synthetic_requests"], 2)
-        self.assertEqual(result["summary"]["provider_calls_made"], 0)
-        self.assertTrue(result["summary"]["cache_entries_written"])
-        self.assertEqual(result["summary"]["exact_hit_count"], 1)
-        self.assertTrue(result["summary"]["hit_recovery_demonstrated"])
         self.assertTrue(result["privacy"]["metadata_only"])
         self.assertTrue(result["privacy"]["synthetic_only"])
         self.assertFalse(result["privacy"]["provider_calls_made"])
@@ -219,7 +206,9 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertEqual(after, 0)
         smoke = result["cache_replay_hit_recovery_smoke"]
         self.assertEqual(smoke["schema"], "tokenclaw.cache_replay_hit_recovery_smoke.v1")
-        self.assertEqual(smoke["status"], "hit-recovered")
+        self.assertEqual(smoke["status"], "blocked")
+        self.assertEqual(smoke["reason"], "no-synthetic-canary-applied-fingerprint")
+        self.assertEqual(smoke["blocker_codes"], ["canary-applied-cohort-unavailable"])
         self.assertTrue(result["privacy"]["synthetic_hit_recovery_included"])
 
     def test_tool_requests_are_skipped_when_tool_cache_disabled(self):

@@ -15,7 +15,8 @@ pattern_rules:
   # Staged from the 49-row replay-ready OpenAI Responses cache cohort.
   # This remains exact, non-streaming, non-tool, session-scoped replay only.
   - id: local-openai-cache-replay-canary-ae8404ee817f89f4
-    enabled: true
+    enabled: false
+    disabled_reason: stale-no-canary-traffic
     policy_source: local-manual
     candidate_id: request-shape-cache-replay:responses:chat:8e210a2f5680d16d
     description: Local OpenAI Responses exact-cache replay canary staged from aggregate request-shape evidence.

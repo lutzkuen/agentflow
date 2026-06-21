@@ -1952,10 +1952,14 @@ class RequestShapeRollupTests(unittest.TestCase):
         }
         self.assertIn(("2k_8k_chars", "500_2k_tokens"), handled_shapes)
         self.assertIn(("8k_32k_chars", "2k_8k_tokens"), handled_shapes)
-        for handled in handled_shapes.values():
+        expected_handled_states = {
+            ("2k_8k_chars", "500_2k_tokens"): "blocked-local-policy",
+            ("8k_32k_chars", "2k_8k_tokens"): "active-local-policy",
+        }
+        for bucket, handled in handled_shapes.items():
             self.assertTrue(handled["handled_by_local_policy"])
             self.assertEqual(handled["next_action"], "already-handled-by-local-cache-policy")
-            self.assertEqual(handled["handled_local_policy"]["handled_state"], "active-local-policy")
+            self.assertEqual(handled["handled_local_policy"]["handled_state"], expected_handled_states[bucket])
             self.assertEqual(handled["handled_local_policy"]["source_policy_file"], "cache_rules.yaml")
             self.assertFalse(handled["handled_local_policy"]["rule_ids_included"])
             self.assertFalse(handled["handled_local_policy"]["cohort_ids_included"])
@@ -3037,17 +3041,19 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(evidence["schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(evidence["status"], "staged-stale-no-traffic")
         self.assertNotEqual(evidence["status"], "staged-no-traffic")
-        self.assertEqual(evidence["reason"], "stale-cache-replay-evidence")
+        self.assertEqual(evidence["reason"], "stale-no-canary-traffic")
         self.assertEqual(evidence["next_action"], "rollback-cache-replay-rule")
         self.assertTrue(evidence["stale_evidence"]["stale"])
-        self.assertEqual(evidence["stale_evidence"]["reason"], "evidence-older-than-max-age")
+        self.assertEqual(evidence["stale_evidence"]["reason"], "stale-no-canary-traffic")
+        self.assertEqual(evidence["stale_evidence"]["zero_traffic_rule_count"], 1)
+        self.assertTrue(evidence["privacy"]["rule_ids_included"])
         self.assertEqual(evidence["summary"]["observed_row_count"], 0)
         self.assertEqual(evidence["summary"]["applied_count"], 0)
         self.assertEqual(evidence["summary"]["holdout_count"], 0)
         durable = evidence["durable_outcome"]
         self.assertEqual(durable["schema"], "tokenclaw.request_shape_cache_replay_durable_outcome.v1")
         self.assertEqual(durable["decision"], "rollback")
-        self.assertEqual(durable["reason"], "stale-cache-replay-evidence")
+        self.assertEqual(durable["reason"], "stale-no-canary-traffic")
         self.assertEqual(durable["next_action"], "rollback-cache-replay-rule")
         self.assertFalse(durable["policy_files_written"])
         self.assertFalse(durable["cache_entries_written"])
@@ -3058,7 +3064,6 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(evidence["privacy"]["aggregate_only"])
         rendered = json.dumps(evidence, sort_keys=True)
         self.assertNotIn(str(policy_path), rendered)
-        self.assertNotIn("local-openai-cache-replay-canary", rendered)
         self.assertNotIn("request-shape-cache-replay:", rendered)
 
     def test_cache_replay_evidence_reports_observed_applied_holdout_and_blockers(self) -> None:

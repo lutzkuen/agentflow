@@ -134,6 +134,32 @@ def _request_shape_cache_replay_rollback_action(
     }
 
 
+def _dedupe_cache_replay_rollback_actions(actions: list[dict[str, Any] | None]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen_rule_ids: set[str] = set()
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        patch = action.get("local_policy_patch") if isinstance(action.get("local_policy_patch"), dict) else {}
+        rules = [rule for rule in patch.get("pattern_rules") or [] if isinstance(rule, dict)]
+        next_rules: list[dict[str, Any]] = []
+        for rule in rules:
+            rule_id = str(rule.get("id") or "")
+            if rule_id and rule_id in seen_rule_ids:
+                continue
+            if rule_id:
+                seen_rule_ids.add(rule_id)
+            next_rules.append(rule)
+        if not next_rules:
+            continue
+        next_action = dict(action)
+        next_patch = dict(patch)
+        next_patch["pattern_rules"] = next_rules
+        next_action["local_policy_patch"] = next_patch
+        deduped.append(next_action)
+    return deduped
+
+
 def _apply_cache_rules_disable_patch(
     policy: dict[str, Any],
     patch: dict[str, Any],
@@ -945,12 +971,20 @@ def build_openai_cache_replay_apply_plan(
     projected_hits = sum(_as_int(item.get("projected_hits")) for item in accepted)
     projected_savings = sum(_as_float(item.get("projected_savings_usd")) for item in accepted)
     config_path = Path(config_dir).expanduser() if config_dir is not None else Path.cwd()
-    rollback_action = _request_shape_cache_replay_rollback_action(
-        store_obj,
-        rules_path=config_path / CACHE_CANARY_POLICY_FILE,
-        limit=max(opportunity_limit, impact_limit),
+    rollback_actions = _dedupe_cache_replay_rollback_actions(
+        [
+            _request_shape_cache_replay_rollback_action(
+                store_obj,
+                rules_path=config_path / CACHE_RULES_FILE,
+                limit=max(opportunity_limit, impact_limit),
+            ),
+            _request_shape_cache_replay_rollback_action(
+                store_obj,
+                rules_path=config_path / CACHE_CANARY_POLICY_FILE,
+                limit=max(opportunity_limit, impact_limit),
+            ),
+        ]
     )
-    rollback_actions = [rollback_action] if rollback_action else []
     rollback_patch_count = sum(
         len(((action.get("local_policy_patch") or {}).get("pattern_rules") or []))
         for action in rollback_actions
@@ -1122,6 +1156,8 @@ def apply_openai_cache_replay_candidates(
             "sha256_after": _sha256_text(new_rules_text) if changed_rules else None,
             "bytes_after": len(new_rules_text.encode("utf-8")) if changed_rules else 0,
             "reason": action.get("reason") or "rollback-cache-replay-rule",
+            "reason_codes": action.get("reason_codes") or [],
+            "evidence_age_hours": (((action.get("rollback_metadata") or {}).get("disable_patch") or {}).get("pattern_rules") or [{}])[0].get("evidence_age_hours"),
             "target_local_rule_file": CACHE_RULES_FILE,
             "target_local_policy_section": "cache.pattern_rules",
             "dry_run": bool(dry_run),

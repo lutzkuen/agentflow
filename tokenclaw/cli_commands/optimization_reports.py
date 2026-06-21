@@ -4447,6 +4447,22 @@ def openai_cache_replay_apply_cli(argv: Sequence[str] | None = None, *, stdout: 
             "dry_run": bool(args.dry_run),
             "accepted_candidate_count": (result.get("summary") or {}).get("accepted_candidate_count"),
             "policy_rule_count": (result.get("summary") or {}).get("policy_rule_count"),
+            "rollback_action_count": (result.get("summary") or {}).get("rollback_action_count"),
+            "rollback_patch_count": (result.get("summary") or {}).get("rollback_patch_count"),
+            "rollback_applied_rules": result.get("rollback_applied_rules") or [],
+            "rollback_missing_rules": result.get("rollback_missing_rules") or [],
+            "rollback_reasons": sorted({
+                str(action.get("reason"))
+                for action in result.get("rollback_actions") or []
+                if isinstance(action, dict) and action.get("reason")
+            }),
+            "rollback_evidence_age_hours": [
+                rule.get("evidence_age_hours")
+                for action in result.get("rollback_actions") or []
+                if isinstance(action, dict)
+                for rule in (((action.get("rollback_metadata") or {}).get("disable_patch") or {}).get("pattern_rules") or [])
+                if isinstance(rule, dict) and rule.get("evidence_age_hours") is not None
+            ],
             "wrote_policy_files": bool(result.get("wrote_policy_files")),
             "exit_code": 0 if result.get("ok") else 1,
         },
