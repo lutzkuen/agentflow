@@ -2067,6 +2067,210 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-ledger-policy-secret", rendered)
         self.assertNotIn("req-ledger-secret", rendered)
 
+    def test_closed_activation_lifecycle_predecessors_are_reported_without_stale_proposals(self):
+        closed_issues = [
+            issue(
+                710,
+                "Rank request-shape blockers into local action cohorts",
+                ["backlog", "status:ready", "priority:p1", "privacy"],
+                state="CLOSED",
+                closed="2026-06-10T08:00:00Z",
+            ),
+            issue(
+                711,
+                "Turn evidence-older-than-max-age cache candidate into local replay evidence",
+                ["backlog", "status:ready", "priority:p1", "cache", "privacy"],
+                state="CLOSED",
+                closed="2026-06-10T08:00:00Z",
+            ),
+            issue(
+                712,
+                "Rank crunch savings follow-up for repeated-context-crunch-cohorts",
+                ["backlog", "status:ready", "priority:p1", "crunch", "privacy"],
+                state="CLOSED",
+                closed="2026-06-10T08:00:00Z",
+            ),
+            issue(
+                713,
+                "Convert activation-feedback candidate into implementation-ready savings issue",
+                ["backlog", "status:ready", "priority:p2", "privacy"],
+                state="CLOSED",
+                closed="2026-06-10T08:00:00Z",
+            ),
+        ]
+        plan = build_research_plan(
+            issues=closed_issues,
+            stats={
+                "calls": 0,
+                "evidence_to_activation_loop": {
+                    "schema": "tokenclaw.evidence_to_activation_savings_loop.v1",
+                    "status": "missing-evidence",
+                    "levers": [
+                        {
+                            "lever": "request-shape-rollups",
+                            "state": "missing-evidence",
+                            "evidence_source": "tokenclaw.request_shape_follow_up_candidates.v1",
+                            "local_action_family": "cohort-ranking",
+                            "next_action": "emit-request-shape-rollups",
+                            "blocker_codes": ["no-source-traffic-for-request-shape-rollups"],
+                            "sample_count": 0,
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        },
+                        {
+                            "lever": "cache",
+                            "state": "blocked",
+                            "evidence_source": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                            "local_action_family": "cache",
+                            "next_action": "rollback-cache-replay-rule",
+                            "blocker_codes": ["evidence-older-than-max-age"],
+                            "sample_count": 36,
+                            "projected_saved_usd": 0.075373,
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        },
+                        {
+                            "lever": "crunch",
+                            "state": "no-op",
+                            "evidence_source": "tokenclaw.crunch_savings_signal.v1",
+                            "local_action_family": "crunch",
+                            "next_action": "rank-repeated-context-crunch-dry-run",
+                            "blocker_codes": [
+                                "repeated-context-crunch-cohorts",
+                                "positive-observed-or-projected-savings",
+                            ],
+                            "sample_count": 0,
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        },
+                        {
+                            "lever": "activation-feedback",
+                            "state": "keep-blocked",
+                            "evidence_source": "tokenclaw.orchestrator_research_log_diagnostics.v1",
+                            "local_action_family": "activation-feedback",
+                            "next_action": "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence",
+                            "blocker_codes": ["activation-feedback-blocker-review"],
+                            "diagnostic_class": "activation-feedback-blocker-review",
+                            "diagnostic_reason": "activation-feedback-blocker-review",
+                            "sample_count": 2,
+                            "activation_feedback_diagnostic_classification": {
+                                "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
+                                "status": "already-resolved-keep-blocked",
+                                "decision": "keep-blocked",
+                                "reason": "activation-feedback-blocker-review-already-resolved-to-bounded-local-action-ledger",
+                                "privacy": {"metadata_only": True, "aggregate_only": True},
+                            },
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        },
+                    ],
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        self.assertEqual(ledger["summary"]["closed_issue_seen_count"], 4)
+        self.assertEqual(
+            {row["lever"]: row["current_status"] for row in ledger["entries"]},
+            {
+                "request-shape-rollups": "blocked",
+                "cache": "blocked",
+                "crunch": "superseded",
+                "activation-feedback": "keep-blocked",
+            },
+        )
+        for row in ledger["entries"]:
+            self.assertEqual(row["issue_status"], "closed-issue-seen")
+            self.assertIn("prior_issue", row)
+            self.assertTrue(row["privacy"]["metadata_only"])
+            self.assertTrue(row["privacy"]["aggregate_only"])
+
+        queue = plan["evidence"]["stats_summary"]["local_activation_next_action_queue"]
+        self.assertEqual(queue["summary"]["queued_action_count"], 4)
+        self.assertIn("superseded", {row["current_status"] for row in queue["entries"]})
+        self.assertIn("keep-blocked", {row["current_status"] for row in queue["entries"]})
+        closed_titles = {item["title"] for item in closed_issues}
+        created_titles = {item["title"] for item in plan["backlog_changes"]["create_issues"]}
+        self.assertTrue(created_titles)
+        self.assertTrue(created_titles.isdisjoint(closed_titles))
+        self.assertEqual(
+            plan["evidence"]["issue_proposal_suppression"]["suppressed_closed_predecessor_count"],
+            0,
+        )
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw closed lifecycle prompt must not leak", rendered)
+        self.assertNotIn("req-closed-lifecycle-secret", rendered)
+        self.assertFalse(plan["privacy"]["raw_prompts_included"])
+
+    def test_closed_lifecycle_proposal_dedupe_keeps_progressed_and_fresh_successors(self):
+        closed_issue = issue(
+            720,
+            "Stage request-shape cache replay cohort",
+            ["backlog", "status:ready", "priority:p1", "cache", "privacy"],
+            state="CLOSED",
+            closed="2026-06-10T08:00:00Z",
+            body=(
+                "Fingerprint: activation:cacheclosed123\n"
+                "Top next action: stage-cache-replay-canary"
+            ),
+        )
+        proposals = [
+            {
+                "repo": "lutzkuen/tokenclaw",
+                "title": "Stage request-shape cache replay cohort",
+                "labels": ["backlog", "status:ready", "priority:p1", "cache", "privacy"],
+                "body": (
+                    "Fingerprint: activation:cacheclosed123\n"
+                    "Top next action: stage-cache-replay-canary"
+                ),
+            },
+            {
+                "repo": "lutzkuen/tokenclaw",
+                "title": "Advance request-shape cache replay cohort from evidence-to-activation ledger (cacheclosed123)",
+                "labels": ["backlog", "status:ready", "priority:p2", "cache", "privacy"],
+                "body": (
+                    "Fingerprint: activation:cacheclosed123\n"
+                    "Top next action: rollback-cache-replay-rule"
+                ),
+            },
+            {
+                "repo": "lutzkuen/tokenclaw",
+                "title": "Advance request-shape cache replay cohort from evidence-to-activation ledger (fresh4567)",
+                "labels": ["backlog", "status:ready", "priority:p2", "cache", "privacy"],
+                "body": (
+                    "Fingerprint: activation:fresh4567\n"
+                    "Top next action: collect-cache-replay-canary-evidence"
+                ),
+            },
+        ]
+
+        deduped, metadata = _dedupe_create_issue_proposals_with_metadata(
+            proposals,
+            existing_issues=[closed_issue],
+            now=NOW,
+        )
+
+        self.assertEqual(
+            [item["title"] for item in deduped],
+            [
+                "Advance request-shape cache replay cohort from evidence-to-activation ledger (cacheclosed123)",
+                "Advance request-shape cache replay cohort from evidence-to-activation ledger (fresh4567)",
+            ],
+        )
+        progressed = deduped[0]
+        self.assertEqual(
+            progressed["closed_lifecycle_predecessor_reason"],
+            "same-fingerprint-next-action-progressed",
+        )
+        self.assertEqual(progressed["closed_lifecycle_predecessor"]["number"], 720)
+        self.assertEqual(progressed["closed_lifecycle_predecessor_fingerprint"], "activation:cacheclosed123")
+        self.assertEqual(metadata["suppressed_count"], 1)
+        self.assertEqual(metadata["closed_prior_issue_count"], 1)
+        self.assertEqual(metadata["suppressed"][0]["reason"], "exact-title-already-exists")
+        self.assertEqual(metadata["suppressed"][0]["suppression_kind"], "closed-prior-issue")
+        self.assertTrue(metadata["privacy"]["metadata_only"])
+        rendered = json.dumps({"deduped": deduped, "metadata": metadata}, sort_keys=True)
+        self.assertNotIn("req-closed-lifecycle-secret", rendered)
+        self.assertNotIn("raw closed lifecycle prompt must not leak", rendered)
+
     def test_local_activation_next_action_queue_ranks_savings_and_unblock_reasons(self):
         ledger = {
             "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
