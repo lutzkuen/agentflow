@@ -4915,6 +4915,67 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
     replay_summary = replay_dry_run.get("summary") if isinstance(replay_dry_run, dict) and isinstance(replay_dry_run.get("summary"), dict) else {}
     replay_cohorts = replay_dry_run.get("cohorts") if isinstance(replay_dry_run, dict) and isinstance(replay_dry_run.get("cohorts"), list) else []
     crunch_policy_decision = report.get("crunch_policy_decision") if isinstance(report.get("crunch_policy_decision"), dict) else None
+    snapshot = report.get("rollup_snapshot") if isinstance(report.get("rollup_snapshot"), dict) else None
+    snapshot_freshness = report.get("snapshot_freshness") if isinstance(report.get("snapshot_freshness"), dict) else {}
+    if not clean_ranked and snapshot is not None:
+        stale = bool(snapshot_freshness.get("stale") or report.get("snapshot_stale"))
+        snapshot_summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
+        signal_summary = {
+            "calls": calls,
+            "rows_considered": _to_int(snapshot_summary.get("rows_considered") or report_summary.get("rows_considered")),
+            "rollup_count": _to_int(snapshot_summary.get("rollup_count") or report_summary.get("rollup_count")),
+            "ranked_candidate_count": _to_int(snapshot_summary.get("ranked_candidate_count")),
+            "top_next_action": sanitize_value(snapshot_summary.get("top_next_action") or follow_up_summary.get("top_next_action")),
+            "top_local_action_family": sanitize_value(
+                snapshot_summary.get("top_local_action_family") or follow_up_summary.get("top_local_action_family")
+            ),
+            "top_readiness_state": sanitize_value(snapshot_summary.get("top_readiness_state")),
+            "class_breakdown": sanitize_value(snapshot_summary.get("class_breakdown") or []),
+            "blocker_breakdown": sanitize_value(snapshot_summary.get("blocker_breakdown") or []),
+            "local_action_family_breakdown": sanitize_value(snapshot_summary.get("local_action_family_breakdown") or []),
+            "readiness_breakdown": sanitize_value(snapshot_summary.get("readiness_breakdown") or []),
+            "next_action_breakdown": sanitize_value(snapshot_summary.get("next_action_breakdown") or []),
+            "cache_replayability_replay_ready_cohort_count": _to_int(
+                snapshot_summary.get("cache_replayability_replay_ready_cohort_count")
+            ),
+            "cache_replayability_skipped_cohort_count": _to_int(
+                snapshot_summary.get("cache_replayability_skipped_cohort_count")
+            ),
+            "cache_replayability_projected_hits": _to_int(snapshot_summary.get("cache_replayability_projected_hits")),
+            "cache_replayability_projected_savings_usd": round(
+                _to_float(snapshot_summary.get("cache_replayability_projected_savings_usd")),
+                8,
+            ),
+            "projected_crunch_tokens_saved": _to_int(snapshot_summary.get("projected_crunch_tokens_saved")),
+            "projected_crunch_savings_usd": round(_to_float(snapshot_summary.get("projected_crunch_savings_usd")), 8),
+            "total_projected_savings_usd": round(_to_float(snapshot_summary.get("total_projected_savings_usd")), 8),
+            "snapshot_status": "snapshot-stale" if stale else "snapshot-reused",
+            "snapshot_age_hours": snapshot_freshness.get("age_hours"),
+            "snapshot_max_age_hours": snapshot_freshness.get("max_age_hours"),
+        }
+        return {
+            "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+            "status": "snapshot-stale" if stale else "snapshot-reused",
+            "source_schema": sanitize_value(snapshot.get("source_schema") or report.get("schema")),
+            "source_snapshot_schema": sanitize_value(snapshot.get("schema")),
+            "summary": signal_summary,
+            "top_candidate": None,
+            "candidates": [],
+            "local_action_cohorts": [],
+            "missing_measurements": ["snapshot-stale"] if stale else [],
+            "snapshot_freshness": sanitize_value(snapshot_freshness),
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+                "individual_candidate_ids_included": False,
+                "absolute_paths_included": False,
+            },
+        }
     evidence_gap_ranked = bool(clean_ranked) and all(
         str(row.get("no_source_traffic_reason") or "") == "no-source-traffic-for-request-shape-rollups"
         for row in clean_ranked

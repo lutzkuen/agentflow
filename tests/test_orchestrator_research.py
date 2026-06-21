@@ -98,6 +98,139 @@ def issue(
 
 
 class OrchestratorResearchPlanTests(unittest.TestCase):
+    def test_request_shape_snapshot_reused_for_zero_call_research_plan(self):
+        snapshot = {
+            "schema": "agentflow.request_shape_rollup_snapshot.v1",
+            "source_schema": "agentflow.request_shape_rollups.v1",
+            "generated_at": "2026-06-11T07:00:00+00:00",
+            "run_id": "snapshot-fresh",
+            "window": {
+                "start": "2026-06-11T06:00:00+00:00",
+                "end": "2026-06-11T06:30:00+00:00",
+                "source": "recent-local-call-metadata",
+            },
+            "summary": {
+                "rows_considered": 120,
+                "rollup_count": 4,
+                "ranked_candidate_count": 2,
+                "top_next_action": "stage-repeated-context-crunch-canary",
+                "top_local_action_family": "crunch",
+                "top_readiness_state": "activation-ready",
+                "class_breakdown": [{"value": "repeated_context", "count": 84}],
+                "blocker_breakdown": [{"value": "invalidation-evidence-missing", "count": 32}],
+                "readiness_breakdown": [{"value": "activation-ready", "count": 84}],
+                "next_action_breakdown": [{"value": "stage-repeated-context-crunch-canary", "count": 84}],
+                "local_action_family_breakdown": [{"value": "crunch", "count": 84}],
+                "projected_crunch_tokens_saved": 4200,
+                "projected_crunch_savings_usd": 0.0126,
+                "total_projected_savings_usd": 0.0126,
+            },
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+                "individual_candidate_ids_included": False,
+                "absolute_paths_included": False,
+            },
+        }
+
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 0,
+                "today_calls": 0,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "generated_at": snapshot["generated_at"],
+                    "summary": {"rows_considered": 0, "rollup_count": 0},
+                    "rollup_snapshot": snapshot,
+                    "snapshot_freshness": {
+                        "schema": "agentflow.request_shape_rollup_snapshot_freshness.v1",
+                        "status": "fresh",
+                        "stale": False,
+                        "age_hours": 1.0,
+                        "max_age_hours": 72.0,
+                    },
+                    "follow_up_candidates": {
+                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "status": "snapshot-reused",
+                        "summary": {},
+                        "candidates": [],
+                        "blocker_cohorts": [],
+                    },
+                },
+            },
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["request_shape_rollup_candidates"]
+        self.assertEqual(signal["status"], "snapshot-reused")
+        self.assertEqual(signal["summary"]["rollup_count"], 4)
+        self.assertEqual(signal["summary"]["ranked_candidate_count"], 2)
+        self.assertEqual(signal["summary"]["blocker_breakdown"][0]["value"], "invalidation-evidence-missing")
+        self.assertEqual(signal["summary"]["readiness_breakdown"][0]["value"], "activation-ready")
+        self.assertNotIn("no-source-traffic-for-request-shape-rollups", signal["missing_measurements"])
+        self.assertTrue(signal["privacy"]["metadata_only"])
+        self.assertFalse(signal["privacy"]["request_ids_included"])
+
+    def test_request_shape_snapshot_stale_is_marked_not_reused_as_fresh(self):
+        snapshot = {
+            "schema": "agentflow.request_shape_rollup_snapshot.v1",
+            "source_schema": "agentflow.request_shape_rollups.v1",
+            "generated_at": "2026-06-01T07:00:00+00:00",
+            "run_id": "snapshot-stale",
+            "window": {"source": "recent-local-call-metadata"},
+            "summary": {
+                "rows_considered": 120,
+                "rollup_count": 4,
+                "ranked_candidate_count": 2,
+                "top_next_action": "stage-repeated-context-crunch-canary",
+                "top_local_action_family": "crunch",
+                "top_readiness_state": "activation-ready",
+                "blocker_breakdown": [{"value": "invalidation-evidence-missing", "count": 32}],
+                "readiness_breakdown": [{"value": "activation-ready", "count": 84}],
+            },
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 0,
+                "today_calls": 0,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 0, "rollup_count": 0},
+                    "rollup_snapshot": snapshot,
+                    "snapshot_freshness": {
+                        "schema": "agentflow.request_shape_rollup_snapshot_freshness.v1",
+                        "status": "snapshot-stale",
+                        "stale": True,
+                        "age_hours": 240.0,
+                        "max_age_hours": 72.0,
+                    },
+                    "follow_up_candidates": {
+                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "status": "snapshot-stale",
+                        "summary": {},
+                        "candidates": [],
+                        "blocker_cohorts": [],
+                    },
+                },
+            },
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["request_shape_rollup_candidates"]
+        self.assertEqual(signal["status"], "snapshot-stale")
+        self.assertEqual(signal["summary"]["rollup_count"], 4)
+        self.assertEqual(signal["missing_measurements"], ["snapshot-stale"])
+        self.assertEqual(signal["summary"]["snapshot_status"], "snapshot-stale")
+
     def test_no_ready_issues_enters_research_and_creates_actionable_issue(self):
         plan = build_research_plan(
             issues=[

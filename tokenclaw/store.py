@@ -879,6 +879,24 @@ class SQLiteStore:
             )
             """)
             cur.execute("""
+            create table if not exists request_shape_rollup_snapshots (
+              id text primary key,
+              run_id text not null,
+              generated_at text not null,
+              window_start text,
+              window_end text,
+              source text,
+              rows_considered integer not null default 0,
+              rollup_count integer not null default 0,
+              ranked_candidate_count integer not null default 0,
+              top_next_action text,
+              top_local_action_family text,
+              top_readiness_state text,
+              total_projected_savings_usd real,
+              snapshot_json text not null
+            )
+            """)
+            cur.execute("""
             create table if not exists managed_activation_preview_outcomes (
               fingerprint text primary key,
               created_at text not null,
@@ -966,6 +984,10 @@ class SQLiteStore:
             cur.execute("""
             create index if not exists idx_request_shape_rollups_recent
             on request_shape_rollups(generated_at, candidate_id)
+            """)
+            cur.execute("""
+            create index if not exists idx_request_shape_rollup_snapshots_recent
+            on request_shape_rollup_snapshots(generated_at)
             """)
             cur.execute("""
             create index if not exists idx_managed_activation_preview_outcomes_updated
@@ -2148,6 +2170,64 @@ class SQLiteStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def persist_request_shape_rollup_snapshot(
+        self,
+        snapshot: dict[str, Any],
+    ) -> int:
+        run_id = str(snapshot.get("run_id") or "").strip()
+        generated_at = str(snapshot.get("generated_at") or "").strip()
+        if not run_id or not generated_at:
+            return 0
+        summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
+        window = snapshot.get("window") if isinstance(snapshot.get("window"), dict) else {}
+        cols = [
+            "id", "run_id", "generated_at", "window_start", "window_end",
+            "source", "rows_considered", "rollup_count", "ranked_candidate_count",
+            "top_next_action", "top_local_action_family", "top_readiness_state",
+            "total_projected_savings_usd", "snapshot_json",
+        ]
+        row = {
+            "id": str(snapshot.get("snapshot_id") or f"{run_id}:request-shape-rollup-snapshot"),
+            "run_id": run_id,
+            "generated_at": generated_at,
+            "window_start": window.get("start"),
+            "window_end": window.get("end"),
+            "source": window.get("source"),
+            "rows_considered": int(summary.get("rows_considered") or 0),
+            "rollup_count": int(summary.get("rollup_count") or 0),
+            "ranked_candidate_count": int(summary.get("ranked_candidate_count") or 0),
+            "top_next_action": summary.get("top_next_action"),
+            "top_local_action_family": summary.get("top_local_action_family"),
+            "top_readiness_state": summary.get("top_readiness_state"),
+            "total_projected_savings_usd": float(summary.get("total_projected_savings_usd") or 0.0),
+            "snapshot_json": stable_json(snapshot),
+        }
+        with self._lock:
+            self.conn.execute("delete from request_shape_rollup_snapshots where run_id = ?", (run_id,))
+            self.conn.execute(
+                f"insert into request_shape_rollup_snapshots({','.join(cols)}) values ({','.join(['?']*len(cols))})",
+                [row.get(c) for c in cols],
+            )
+            self.conn.commit()
+        return 1
+
+    def latest_request_shape_rollup_snapshot(self) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            select snapshot_json
+            from request_shape_rollup_snapshots
+            order by generated_at desc
+            limit 1
+            """
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            parsed = json.loads(row["snapshot_json"])
+        except (TypeError, ValueError, KeyError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
 
 class PostgresStore(SQLiteStore):
     backend = "postgres"
@@ -2428,6 +2508,24 @@ class PostgresStore(SQLiteStore):
             )
             """,
             """
+            create table if not exists request_shape_rollup_snapshots (
+              id text primary key,
+              run_id text not null,
+              generated_at timestamptz not null,
+              window_start timestamptz,
+              window_end timestamptz,
+              source text,
+              rows_considered integer not null default 0,
+              rollup_count integer not null default 0,
+              ranked_candidate_count integer not null default 0,
+              top_next_action text,
+              top_local_action_family text,
+              top_readiness_state text,
+              total_projected_savings_usd numeric,
+              snapshot_json text not null
+            )
+            """,
+            """
             create table if not exists managed_activation_preview_outcomes (
               fingerprint text primary key,
               created_at timestamptz not null,
@@ -2514,6 +2612,10 @@ class PostgresStore(SQLiteStore):
         self.conn.execute("""
             create index if not exists idx_request_shape_rollups_recent
             on request_shape_rollups(generated_at, candidate_id)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_request_shape_rollup_snapshots_recent
+            on request_shape_rollup_snapshots(generated_at)
         """)
         self.conn.execute("""
             create index if not exists idx_managed_activation_preview_outcomes_updated

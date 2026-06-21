@@ -19,6 +19,7 @@ from tokenclaw.store import stable_json, utc_now
 
 SCHEMA = "agentflow.request_shape_rollups.v1"
 ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
+ROLLUP_SNAPSHOT_SCHEMA = "agentflow.request_shape_rollup_snapshot.v1"
 REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
 REPLAY_INVALIDATION_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence.v1"
 REPLAY_INVALIDATION_EVIDENCE_COHORT_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence_cohort.v1"
@@ -94,6 +95,7 @@ DEFAULT_CACHE_REPLAY_CANARY_MAX_EVIDENCE_AGE_HOURS = 72.0
 DEFAULT_CACHE_REPLAY_MIN_STAGE_ROWS = 10
 DEFAULT_CACHE_REPLAY_MIN_STAGE_PROJECTED_HITS = 5
 DEFAULT_CACHE_REPLAY_MIN_STAGE_SAVINGS_USD = 0.01
+DEFAULT_ROLLUP_SNAPSHOT_MAX_AGE_HOURS = 72.0
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -11270,6 +11272,187 @@ def _persistable_row(
     }
 
 
+def _rollup_snapshot_from_report(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    follow_up = report.get("follow_up_candidates") if isinstance(report.get("follow_up_candidates"), dict) else {}
+    follow_up_summary = follow_up.get("summary") if isinstance(follow_up.get("summary"), dict) else {}
+    replay = report.get("cache_replayability_dry_run") if isinstance(report.get("cache_replayability_dry_run"), dict) else {}
+    replay_summary = replay.get("summary") if isinstance(replay.get("summary"), dict) else {}
+    crunch = report.get("crunch_opportunity_dry_run") if isinstance(report.get("crunch_opportunity_dry_run"), dict) else {}
+    crunch_summary = crunch.get("summary") if isinstance(crunch.get("summary"), dict) else {}
+    generated_at = str(report.get("generated_at") or utc_now())
+    run_id = str(report.get("run_id") or f"shape-rollups-{uuid4().hex[:12]}")
+    return {
+        "schema": ROLLUP_SNAPSHOT_SCHEMA,
+        "snapshot_id": f"{run_id}:request-shape-rollup-snapshot",
+        "source_schema": report.get("schema") or SCHEMA,
+        "generated_at": generated_at,
+        "run_id": run_id,
+        "window": report.get("window") if isinstance(report.get("window"), dict) else {},
+        "summary": {
+            "rows_considered": _as_int(summary.get("rows_considered")),
+            "rollup_count": _as_int(summary.get("rollup_count")),
+            "ranked_candidate_count": _as_int(follow_up_summary.get("ranked_candidate_count")),
+            "top_next_action": follow_up_summary.get("top_next_action") or summary.get("top_next_action"),
+            "top_local_action_family": follow_up_summary.get("top_local_action_family") or summary.get("top_local_action_family"),
+            "top_readiness_state": follow_up_summary.get("top_readiness_state"),
+            "class_breakdown": follow_up_summary.get("class_breakdown")
+            if isinstance(follow_up_summary.get("class_breakdown"), list)
+            else [],
+            "blocker_breakdown": follow_up_summary.get("blocker_breakdown")
+            if isinstance(follow_up_summary.get("blocker_breakdown"), list)
+            else [],
+            "readiness_breakdown": follow_up_summary.get("readiness_breakdown")
+            if isinstance(follow_up_summary.get("readiness_breakdown"), list)
+            else [],
+            "next_action_breakdown": follow_up_summary.get("next_action_breakdown")
+            if isinstance(follow_up_summary.get("next_action_breakdown"), list)
+            else [],
+            "local_action_family_breakdown": follow_up_summary.get("local_action_family_breakdown")
+            if isinstance(follow_up_summary.get("local_action_family_breakdown"), list)
+            else [],
+            "candidate_family_breakdown": report.get("candidate_family_breakdown")
+            if isinstance(report.get("candidate_family_breakdown"), list)
+            else [],
+            "blocker_code_breakdown": report.get("blocker_code_breakdown")
+            if isinstance(report.get("blocker_code_breakdown"), list)
+            else [],
+            "cache_replayability_replay_ready_cohort_count": _as_int(replay_summary.get("replay_ready_cohort_count")),
+            "cache_replayability_skipped_cohort_count": _as_int(replay_summary.get("skipped_cohort_count")),
+            "cache_replayability_projected_hits": _as_int(replay_summary.get("projected_hits")),
+            "cache_replayability_projected_savings_usd": round(_as_float(replay_summary.get("projected_savings_usd")), 8),
+            "projected_crunch_tokens_saved": _as_int(crunch_summary.get("projected_saved_tokens")),
+            "projected_crunch_savings_usd": round(_as_float(crunch_summary.get("projected_savings_usd")), 8),
+            "total_projected_savings_usd": round(
+                _as_float(replay_summary.get("projected_savings_usd"))
+                + _as_float(crunch_summary.get("projected_savings_usd")),
+                8,
+            ),
+            "no_source_traffic_reason": None,
+        },
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "provider_bodies_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+            "absolute_paths_included": False,
+            "file_paths_included": False,
+            "managed_server_calls_made": False,
+            "provider_calls_made": False,
+            "policy_files_written": False,
+        },
+    }
+
+
+def _snapshot_age_metadata(
+    snapshot: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    max_age_hours: float = DEFAULT_ROLLUP_SNAPSHOT_MAX_AGE_HOURS,
+) -> dict[str, Any]:
+    generated = _parse_utc(snapshot.get("generated_at"))
+    now_dt = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age_hours = None
+    stale = True
+    if generated is not None:
+        age_hours = round(max(0.0, (now_dt - generated).total_seconds() / 3600.0), 3)
+        stale = bool(max_age_hours > 0 and age_hours > max_age_hours)
+    return {
+        "schema": "agentflow.request_shape_rollup_snapshot_freshness.v1",
+        "status": "snapshot-stale" if stale else "fresh",
+        "stale": stale,
+        "age_hours": age_hours,
+        "max_age_hours": max_age_hours,
+        "reason": "snapshot-stale" if stale else "snapshot-fresh",
+    }
+
+
+def latest_request_shape_rollup_snapshot_report(
+    store_obj: Any,
+    *,
+    now: datetime | None = None,
+    max_age_hours: float = DEFAULT_ROLLUP_SNAPSHOT_MAX_AGE_HOURS,
+) -> dict[str, Any] | None:
+    if not hasattr(store_obj, "latest_request_shape_rollup_snapshot"):
+        return None
+    snapshot = store_obj.latest_request_shape_rollup_snapshot()
+    if not isinstance(snapshot, dict):
+        return None
+    freshness = _snapshot_age_metadata(snapshot, now=now, max_age_hours=max_age_hours)
+    summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
+    if _as_int(summary.get("rollup_count")) <= 0 and _as_int(summary.get("ranked_candidate_count")) <= 0:
+        return None
+    follow_up_summary = {
+        key: summary.get(key)
+        for key in (
+            "rows_considered",
+            "rollup_count",
+            "ranked_candidate_count",
+            "top_next_action",
+            "top_local_action_family",
+            "top_readiness_state",
+            "class_breakdown",
+            "blocker_breakdown",
+            "readiness_breakdown",
+            "next_action_breakdown",
+            "local_action_family_breakdown",
+            "no_source_traffic_reason",
+        )
+    }
+    return {
+        "schema": SCHEMA,
+        "generated_at": snapshot.get("generated_at"),
+        "run_id": snapshot.get("run_id"),
+        "source": "request-shape-rollup-snapshot",
+        "snapshot_reused": not freshness["stale"],
+        "snapshot_stale": freshness["stale"],
+        "snapshot_freshness": freshness,
+        "rollup_snapshot": snapshot,
+        "window": snapshot.get("window") if isinstance(snapshot.get("window"), dict) else {},
+        "summary": {
+            "rows_considered": _as_int(summary.get("rows_considered")),
+            "rollup_count": _as_int(summary.get("rollup_count")),
+            "collapsed_rows": 0,
+            "metadata_window_backfilled": False,
+            "body_rows_read": 0,
+            "follow_up_candidate_count": _as_int(summary.get("ranked_candidate_count")),
+            "top_next_action": summary.get("top_next_action"),
+            "top_local_action_family": summary.get("top_local_action_family"),
+            "top_readiness_state": summary.get("top_readiness_state"),
+            "snapshot_status": freshness["status"],
+            "snapshot_age_hours": freshness["age_hours"],
+            "snapshot_max_age_hours": freshness["max_age_hours"],
+            "total_projected_savings_usd": _as_float(summary.get("total_projected_savings_usd")),
+        },
+        "candidate_family_breakdown": summary.get("candidate_family_breakdown")
+        if isinstance(summary.get("candidate_family_breakdown"), list)
+        else [],
+        "blocker_code_breakdown": summary.get("blocker_code_breakdown")
+        if isinstance(summary.get("blocker_code_breakdown"), list)
+        else [],
+        "follow_up_candidates": {
+            "schema": FOLLOW_UP_CANDIDATES_SCHEMA,
+            "status": "snapshot-stale" if freshness["stale"] else "snapshot-reused",
+            "summary": follow_up_summary,
+            "top_candidate": None,
+            "top_blocker_cohort": None,
+            "candidates": [],
+            "blocker_cohorts": [],
+            "missing_measurements": ["snapshot-stale"] if freshness["stale"] else [],
+            "privacy": _shape_follow_up_privacy(),
+        },
+        "rollups": [],
+        "privacy": snapshot.get("privacy") if isinstance(snapshot.get("privacy"), dict) else _shape_follow_up_privacy(),
+    }
+
+
 def build_request_shape_rollups_report(
     store_obj: Any,
     *,
@@ -11534,7 +11717,7 @@ def build_request_shape_rollups_report(
         crunch_canary_impact["summary"]["repeated_context_blocked_count"] = repeated_context_impact_rows["summary"]["blocked_count"]
         crunch_canary_impact["summary"]["repeated_context_superseded_count"] = repeated_context_impact_rows["summary"]["superseded_count"]
 
-    return {
+    report = {
         "schema": SCHEMA,
         "generated_at": generated_at,
         "run_id": run_id,
@@ -11593,3 +11776,18 @@ def build_request_shape_rollups_report(
             "managed_server_calls_made": False,
         },
     }
+    snapshot = _rollup_snapshot_from_report(report)
+    report["rollup_snapshot"] = snapshot
+    if (
+        persist
+        and hasattr(store_obj, "persist_request_shape_rollup_snapshot")
+        and (
+            _as_int(snapshot.get("summary", {}).get("rollup_count")) > 0
+            or _as_int(snapshot.get("summary", {}).get("ranked_candidate_count")) > 0
+        )
+    ):
+        report["snapshot_persisted_count"] = store_obj.persist_request_shape_rollup_snapshot(snapshot)
+    else:
+        report["snapshot_persisted_count"] = 0
+    report["snapshot_persisted"] = bool(report["snapshot_persisted_count"])
+    return report

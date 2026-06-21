@@ -31,6 +31,7 @@ from tokenclaw.request_shape_rollups import (
     build_request_shape_follow_up_candidates,
     build_request_shape_rollups_report,
     build_request_shape_tool_cache_replay_evidence_report,
+    latest_request_shape_rollup_snapshot_report,
     record_request_shape_crunch_policy_decision_ledger,
     request_shape_crunch_canary_lifecycle,
 )
@@ -678,6 +679,24 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["summary"]["collapsed_rows"], 2)
         self.assertEqual(report["summary"]["follow_up_candidate_count"], 2)
         self.assertEqual(report["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertTrue(report["snapshot_persisted"])
+        self.assertEqual(report["snapshot_persisted_count"], 1)
+        snapshot = report["rollup_snapshot"]
+        self.assertEqual(snapshot["schema"], "agentflow.request_shape_rollup_snapshot.v1")
+        self.assertEqual(snapshot["summary"]["rollup_count"], 2)
+        self.assertEqual(snapshot["summary"]["ranked_candidate_count"], 2)
+        self.assertEqual(snapshot["summary"]["top_readiness_state"], "activation-ready")
+        self.assertTrue(snapshot["privacy"]["metadata_only"])
+        self.assertTrue(snapshot["privacy"]["aggregate_only"])
+        rendered_snapshot = json.dumps(snapshot, sort_keys=True)
+        self.assertNotIn("raw prompt must not leak", rendered_snapshot)
+        self.assertNotIn("raw-session-id-must-not-leak", rendered_snapshot)
+        self.assertNotIn("raw-cache-key-must-not-leak", rendered_snapshot)
+        latest_snapshot_report = latest_request_shape_rollup_snapshot_report(self.store)
+        self.assertIsNotNone(latest_snapshot_report)
+        assert latest_snapshot_report is not None
+        self.assertEqual(latest_snapshot_report["snapshot_freshness"]["status"], "fresh")
+        self.assertEqual(latest_snapshot_report["rollup_snapshot"]["summary"]["rollup_count"], 2)
         follow_up = report["follow_up_candidates"]
         self.assertEqual(follow_up["schema"], "agentflow.request_shape_follow_up_candidates.v1")
         self.assertEqual(follow_up["status"], "candidates-ranked")

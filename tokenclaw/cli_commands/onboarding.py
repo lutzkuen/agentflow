@@ -545,7 +545,8 @@ def _onboarding_cli(
         if args.json:
             _write_json(stdout, result)
         else:
-            _write_savings_report_summary(stdout, result)
+            summary_brand = "AgentFlow" if command_name == "agentflow" else brand
+            _write_savings_report_summary(stdout, result, brand=summary_brand)
         return 0 if result.get("ok") else 1
 
     if args.command == "demo":
@@ -556,8 +557,9 @@ def _onboarding_cli(
             if args.json:
                 _write_json(stdout, result)
             else:
+                demo_brand = "AgentFlow" if command_name == "agentflow" else brand
                 stdout.write(
-                    f"{brand} local savings rule drill: "
+                    f"{demo_brand} local savings rule drill: "
                     f"{result.get('status')} "
                     f"{result.get('rule_family')} "
                     f"applied={str(bool(result.get('applied'))).lower()} "
@@ -591,12 +593,14 @@ def _onboarding_cli(
         if args.json:
             _write_json(stdout, result)
         else:
-            heading = f"{brand} savings demo" if args.demo_command == "savings" else f"{brand} golden path"
+            demo_brand = "AgentFlow" if command_name == "agentflow" else brand
+            heading = f"{demo_brand} savings demo" if args.demo_command == "savings" else f"{demo_brand} golden path"
+            savings_label = "agentflow_saved" if command_name == "agentflow" else "tokenclaw_saved"
             stdout.write(
                 f"{heading}: "
                 f"{result.get('decision_status')} "
                 f"{result.get('local_action_family')} "
-                f"tokenclaw_saved=${float(result.get('estimated_agentflow_savings_usd') or 0.0):.6f} "
+                f"{savings_label}=${float(result.get('estimated_agentflow_savings_usd') or 0.0):.6f} "
                 f"provider_prompt_cache_discount=${float(result.get('provider_prompt_cache_discount_usd') or 0.0):.6f} "
                 f"managed_server_required={str(bool(result.get('managed_server_required'))).lower()}\n"
             )
@@ -1085,10 +1089,10 @@ def _write_activation_doctor_summary(stdout: Any, result: dict[str, Any]) -> Non
         stdout.write(", ".join(parts) + "\n")
 
 
-def _write_savings_report_summary(stdout: Any, result: dict[str, Any]) -> None:
+def _write_savings_report_summary(stdout: Any, result: dict[str, Any], *, brand: str = "TokenClaw") -> None:
     opportunities = result.get("opportunities") if isinstance(result.get("opportunities"), list) else []
     count = len(opportunities)
-    stdout.write(f"TokenClaw savings report: {count} opportunit{'y' if count == 1 else 'ies'}\n")
+    stdout.write(f"{brand} savings report: {count} opportunit{'y' if count == 1 else 'ies'}\n")
     for opp in opportunities:
         if not isinstance(opp, dict):
             continue

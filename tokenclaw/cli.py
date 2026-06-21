@@ -566,6 +566,7 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
     from tokenclaw.request_shape_rollups import (
         build_request_shape_cache_replay_evidence_report,
         build_request_shape_cache_replay_policy_decision_report,
+        latest_request_shape_rollup_snapshot_report,
         build_request_shape_rollups_report,
     )
     from tokenclaw.cache_smoke import build_isolated_cache_replay_hit_recovery_smoke
@@ -613,13 +614,27 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
             )
             enriched["managed_activation_preview_outcomes"] = managed_preview_outcomes
         if needs_rollups:
-            enriched["request_shape_rollups"] = build_request_shape_rollups_report(
+            rollups_report = build_request_shape_rollups_report(
                 store,
                 limit=limit,
-                persist=False,
+                persist=True,
                 run_id="orchestrator-research-dry-run",
                 managed_preview_outcomes=managed_preview_outcomes,
             )
+            if int((rollups_report.get("summary") or {}).get("rows_considered") or 0) <= 0:
+                try:
+                    max_age = float(os.getenv("AGENTFLOW_RESEARCH_REQUEST_SHAPE_SNAPSHOT_MAX_AGE_HOURS", "72"))
+                except ValueError:
+                    max_age = 72.0
+                snapshot_report = latest_request_shape_rollup_snapshot_report(
+                    store,
+                    max_age_hours=max_age,
+                )
+                if snapshot_report is not None:
+                    rollups_report = snapshot_report
+            enriched["request_shape_rollups"] = rollups_report
+            if isinstance(rollups_report.get("rollup_snapshot"), dict):
+                enriched["request_shape_rollup_snapshot"] = rollups_report["rollup_snapshot"]
         cache_replay_evidence = (
             enriched.get("request_shape_cache_replay_evidence")
             if isinstance(enriched.get("request_shape_cache_replay_evidence"), dict)
