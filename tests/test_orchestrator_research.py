@@ -2111,6 +2111,142 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-queue-secret", rendered)
         self.assertNotIn("/tmp/private-queue.py", rendered)
 
+    def test_local_activation_next_action_queue_ranks_freshness_adjusted_successors(self):
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:fresh-routing",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "state": "review",
+                    "current_status": "review",
+                    "issue_worthy_status": "ready",
+                    "next_action": "draft-openai-routing-recovery-canary",
+                    "blocker_codes": [],
+                    "sample_count": 200,
+                    "savings_per_1000_calls_usd": 6.0,
+                    "evidence_freshness_status": "fresh",
+                    "evidence_age_hours": 2.0,
+                    "max_evidence_age_hours": 72.0,
+                    "target_local_rule_file": "routing_rules.yaml",
+                    "target_local_policy_section": "routing.rules",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 2,
+                    "fingerprint": "activation:stale-cache-rollback",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "state": "blocked",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "rollback-cache-replay-rule",
+                    "blocker_codes": ["evidence-older-than-max-age"],
+                    "sample_count": 100,
+                    "projected_saved_usd": 0.5,
+                    "rollback_required": True,
+                    "promotion_readiness": "rollback-required",
+                    "evidence_age_hours": 96.0,
+                    "max_evidence_age_hours": 72.0,
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 3,
+                    "fingerprint": "activation:feedback-duplicate",
+                    "lever": "activation-feedback",
+                    "local_action_family": "activation-feedback",
+                    "state": "keep-blocked",
+                    "current_status": "keep-blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "refresh-managed-activation-preview",
+                    "blocker_codes": ["activation-feedback-blocker-review"],
+                    "sample_count": 4,
+                    "managed_preview_gate": {
+                        "status": "no-data-preview-health",
+                        "verified": False,
+                        "required": True,
+                    },
+                },
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 4,
+                    "fingerprint": "activation:feedback-duplicate",
+                    "lever": "activation-feedback",
+                    "local_action_family": "activation-feedback",
+                    "state": "keep-blocked",
+                    "current_status": "keep-blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "refresh-managed-activation-preview",
+                    "blocker_codes": ["activation-feedback-blocker-review"],
+                    "sample_count": 4,
+                    "request_id": "req-freshness-rank-secret",
+                    "session_id": "sess-freshness-rank-secret",
+                    "cache_key": "cache-freshness-rank-secret",
+                    "raw_prompt": "raw freshness rank prompt must not leak",
+                },
+            ],
+        }
+
+        queue = build_local_activation_next_action_queue(
+            {"evidence_to_activation_next_action_ledger": ledger}
+        )
+
+        self.assertEqual(
+            [(entry["lever"], entry["next_action"]) for entry in queue["entries"]],
+            [
+                ("routing", "draft-openai-routing-recovery-canary"),
+                ("cache", "rollback-cache-replay-rule"),
+                ("activation-feedback", "refresh-managed-activation-preview"),
+                ("activation-feedback", "refresh-managed-activation-preview"),
+            ],
+        )
+        ready = queue["entries"][0]
+        rollback = queue["entries"][1]
+        duplicate = queue["entries"][3]
+        self.assertEqual(ready["freshness_state"], "fresh")
+        self.assertEqual(ready["blocking_reason"], "review")
+        self.assertEqual(ready["savings_per_1000_calls_usd"], 6.0)
+        self.assertEqual(ready["freshness_adjusted_savings_per_1000_calls_usd"], 6.0)
+        self.assertEqual(ready["rank_basis"]["rank_bucket"], 1)
+        self.assertEqual(rollback["freshness_state"], "stale-rollback-required")
+        self.assertEqual(rollback["blocking_reason"], "evidence-older-than-max-age")
+        self.assertEqual(rollback["savings_per_1000_calls_usd"], 5.0)
+        self.assertEqual(rollback["freshness_adjusted_savings_per_1000_calls_usd"], 4.5)
+        self.assertTrue(rollback["rank_basis"]["rollback_required"])
+        self.assertEqual(duplicate["duplicate_suppression_status"], "suppressed")
+        self.assertEqual(duplicate["duplicate_suppression_reason"], "duplicate-successor-fingerprint")
+        self.assertEqual(duplicate["issue_worthy_status"], "suppressed")
+        self.assertEqual(queue["summary"]["top_freshness_state"], "fresh")
+        self.assertEqual(queue["summary"]["top_blocking_reason"], "review")
+        self.assertEqual(queue["summary"]["top_savings_per_1000_calls_usd"], 6.0)
+        self.assertEqual(queue["summary"]["top_rank_basis"]["freshness_state"], "fresh")
+        self.assertEqual(queue["summary"]["non_duplicate_successor_action_count"], 3)
+
+        actions_by_source = {
+            action["source_fingerprint"]: action for action in queue["successor_actions"]
+        }
+        self.assertEqual(actions_by_source["activation:fresh-routing"]["freshness_state"], "fresh")
+        self.assertEqual(
+            actions_by_source["activation:stale-cache-rollback"]["freshness_state"],
+            "stale-rollback-required",
+        )
+        self.assertEqual(
+            actions_by_source["activation:stale-cache-rollback"]["rank_basis"]["rank_bucket"],
+            1,
+        )
+        self.assertEqual(len(actions_by_source), 3)
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("req-freshness-rank-secret", rendered)
+        self.assertNotIn("sess-freshness-rank-secret", rendered)
+        self.assertNotIn("cache-freshness-rank-secret", rendered)
+        self.assertNotIn("raw freshness rank prompt must not leak", rendered)
+
     def test_local_activation_successors_record_preview_verified_gates(self):
         ledger = {
             "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",

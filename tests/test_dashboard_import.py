@@ -3768,6 +3768,18 @@ class DashboardImportTests(unittest.TestCase):
                             "top_current_status": "full-rollout",
                             "top_next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
                             "top_unblock_reason": "repeated-context-crunch-full-rollout-active",
+                            "top_blocking_reason": "repeated-context-crunch-full-rollout-active",
+                            "top_freshness_state": "fresh",
+                            "top_savings_per_1000_calls_usd": 10.39388,
+                            "top_freshness_adjusted_savings_per_1000_calls_usd": 10.39388,
+                            "top_rank_basis": {
+                                "schema": "agentflow.local_activation_successor_rank_basis.v1",
+                                "rank_bucket": 0,
+                                "freshness_state": "fresh",
+                                "freshness_adjusted_savings_per_1000_calls_usd": 10.39388,
+                                "savings_per_1000_calls_usd": 10.39388,
+                                "sample_count": 2484,
+                            },
                             "top_realized_savings_usd": 25.8185,
                             "top_projected_savings_usd": 25.818387,
                             "total_realized_savings_usd": 27.55975,
@@ -3788,6 +3800,19 @@ class DashboardImportTests(unittest.TestCase):
                                 "current_status": "full-rollout",
                                 "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
                                 "unblock_reason": "repeated-context-crunch-full-rollout-active",
+                                "blocking_reason": "repeated-context-crunch-full-rollout-active",
+                                "freshness_state": "fresh",
+                                "rank_bucket": 0,
+                                "freshness_adjusted_savings_per_1000_calls_usd": 10.39388,
+                                "savings_per_1000_calls_usd": 10.39388,
+                                "rank_basis": {
+                                    "schema": "agentflow.local_activation_successor_rank_basis.v1",
+                                    "rank_bucket": 0,
+                                    "freshness_state": "fresh",
+                                    "freshness_adjusted_savings_per_1000_calls_usd": 10.39388,
+                                    "savings_per_1000_calls_usd": 10.39388,
+                                    "sample_count": 2484,
+                                },
                                 "blocker_codes": ["repeated-context-crunch-full-rollout-active"],
                                 "sample_count": 2484,
                                 "applied_count": 107,
@@ -3875,6 +3900,11 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(payload["entries"][0]["lever"], "crunch")
             self.assertEqual(payload["entries"][0]["target_local_rule_file"], "crunch_rules.yaml")
             self.assertEqual(payload["entries"][0]["realized_savings_usd"], 25.8185)
+            self.assertEqual(payload["entries"][0]["freshness_state"], "fresh")
+            self.assertEqual(payload["entries"][0]["blocking_reason"], "repeated-context-crunch-full-rollout-active")
+            self.assertEqual(payload["entries"][0]["rank_basis"]["rank_bucket"], 0)
+            self.assertEqual(payload["summary"]["top_freshness_state"], "fresh")
+            self.assertEqual(payload["summary"]["top_savings_per_1000_calls_usd"], 10.39388)
             self.assertEqual(full_payload["activation_burndown"]["schema"], "agentflow.dashboard_local_activation_next_action_queue.v1")
             self.assertEqual(full_payload["activation_burndown"]["summary"]["queued_action_count"], 2)
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["lever"], "crunch")

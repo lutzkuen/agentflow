@@ -20740,6 +20740,11 @@ def _public_local_activation_queue_summary(summary: dict[str, Any], entry_count:
             "top_current_status",
             "top_next_action",
             "top_unblock_reason",
+            "top_blocking_reason",
+            "top_freshness_state",
+            "top_savings_per_1000_calls_usd",
+            "top_freshness_adjusted_savings_per_1000_calls_usd",
+            "top_rank_basis",
             "top_realized_savings_usd",
             "top_projected_savings_usd",
             "total_realized_savings_usd",
@@ -20753,6 +20758,11 @@ def _public_local_activation_queue_summary(summary: dict[str, Any], entry_count:
     public["queued_action_count"] = _as_int(public.get("queued_action_count")) or entry_count
     public["top_realized_savings_usd"] = round(_as_float(public.get("top_realized_savings_usd")), 8)
     public["top_projected_savings_usd"] = round(_as_float(public.get("top_projected_savings_usd")), 8)
+    public["top_savings_per_1000_calls_usd"] = round(_as_float(public.get("top_savings_per_1000_calls_usd")), 8)
+    public["top_freshness_adjusted_savings_per_1000_calls_usd"] = round(
+        _as_float(public.get("top_freshness_adjusted_savings_per_1000_calls_usd")),
+        8,
+    )
     public["total_realized_savings_usd"] = round(_as_float(public.get("total_realized_savings_usd")), 8)
     public["total_projected_savings_usd"] = round(_as_float(public.get("total_projected_savings_usd")), 8)
     for key in ("lever_counts", "status_counts", "unblock_reason_counts"):
@@ -21239,6 +21249,10 @@ def _public_local_activation_queue_entry(
         "issue_worthy_status",
         "next_action",
         "unblock_reason",
+        "blocking_reason",
+        "freshness_state",
+        "rank_bucket",
+        "rank_basis",
         "blocker_codes",
         "sample_count",
         "applied_count",
@@ -21249,6 +21263,7 @@ def _public_local_activation_queue_entry(
         "realized_savings_usd",
         "projected_savings_usd",
         "savings_per_1000_calls_usd",
+        "freshness_adjusted_savings_per_1000_calls_usd",
         "target_local_rule_file",
         "target_local_policy_section",
         "duplicate_suppression_status",
@@ -21277,9 +21292,15 @@ def _public_local_activation_queue_entry(
         "fallback_count",
         "safety_stop_count",
         "rollback_count",
+        "rank_bucket",
     ):
         public[key] = _as_int(public.get(key))
-    for key in ("realized_savings_usd", "projected_savings_usd", "savings_per_1000_calls_usd"):
+    for key in (
+        "realized_savings_usd",
+        "projected_savings_usd",
+        "savings_per_1000_calls_usd",
+        "freshness_adjusted_savings_per_1000_calls_usd",
+    ):
         public[key] = round(_as_float(public.get(key)), 8)
     if not isinstance(public.get("blocker_codes"), list):
         public["blocker_codes"] = []

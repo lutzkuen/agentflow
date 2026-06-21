@@ -6488,6 +6488,14 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "sample_count": _to_int(entry.get("sample_count")),
         "realized_savings_usd": round(_to_float(entry.get("realized_savings_usd")), 8),
         "projected_savings_usd": round(_to_float(entry.get("projected_savings_usd")), 8),
+        "savings_per_1000_calls_usd": round(_to_float(entry.get("savings_per_1000_calls_usd")), 8),
+        "freshness_adjusted_savings_per_1000_calls_usd": round(
+            _to_float(entry.get("freshness_adjusted_savings_per_1000_calls_usd")),
+            8,
+        ),
+        "freshness_state": sanitize_value(entry.get("freshness_state")),
+        "blocking_reason": sanitize_value(entry.get("blocking_reason")),
+        "rank_basis": sanitize_value(entry.get("rank_basis")) if isinstance(entry.get("rank_basis"), dict) else None,
         "issue_worthy_status": sanitize_value(entry.get("issue_worthy_status") or "review"),
         "duplicate_suppression_status": sanitize_value(entry.get("duplicate_suppression_status")),
         "duplicate_suppression_reason": sanitize_value(entry.get("duplicate_suppression_reason")),
@@ -6592,6 +6600,8 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "canary_fraction",
         "holdout_fraction",
         "savings_per_1000_calls_usd",
+        "freshness_adjusted_savings_per_1000_calls_usd",
+        "freshness_multiplier",
     ):
         if entry.get(key) is not None:
             action[key] = round(_to_float(entry.get(key)), 8)
@@ -6645,6 +6655,8 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             "preview_verified",
             "preview_verification_status",
             "preview_verification_decision",
+            "savings_per_1000_calls_usd",
+            "freshness_adjusted_savings_per_1000_calls_usd",
             "cache_apply_action_count",
             "cache_entries_written",
             "tool_cache_replay_enabled",
@@ -7496,9 +7508,217 @@ def _queue_rank_bucket(entry: dict[str, Any], realized: float, projected: float)
     return 2
 
 
+def _queue_savings_per_1000(entry: dict[str, Any], projected: float, realized: float) -> float:
+    explicit = _to_float(entry.get("savings_per_1000_calls_usd"))
+    if explicit > 0:
+        return explicit
+    sample_count = _to_int(entry.get("sample_count"))
+    if sample_count <= 0:
+        return 0.0
+    value = realized if realized > 0 else projected
+    return (value / sample_count) * 1000.0 if value > 0 else 0.0
+
+
+def _queue_evidence_age_hours(entry: dict[str, Any]) -> float | None:
+    for key in ("evidence_age_hours", "preview_age_hours"):
+        if entry.get(key) is not None:
+            return _to_float(entry.get(key))
+    for key in (
+        "evidence_freshness",
+        "activation_feedback_freshness_gate",
+        "stale_evidence",
+    ):
+        value = entry.get(key)
+        if isinstance(value, dict):
+            for age_key in ("age_hours", "preview_age_hours", "evidence_age_hours"):
+                if value.get(age_key) is not None:
+                    return _to_float(value.get(age_key))
+    gate = entry.get("managed_preview_gate") if isinstance(entry.get("managed_preview_gate"), dict) else {}
+    if gate.get("preview_age_hours") is not None:
+        return _to_float(gate.get("preview_age_hours"))
+    health_gate = gate.get("health_gate") if isinstance(gate.get("health_gate"), dict) else {}
+    if health_gate.get("latest_preview_age_hours") is not None:
+        return _to_float(health_gate.get("latest_preview_age_hours"))
+    return None
+
+
+def _queue_max_evidence_age_hours(entry: dict[str, Any]) -> float | None:
+    for key in ("max_evidence_age_hours", "stale_after_hours"):
+        if entry.get(key) is not None:
+            return _to_float(entry.get(key))
+    for key in (
+        "evidence_freshness",
+        "activation_feedback_freshness_gate",
+        "stale_evidence",
+    ):
+        value = entry.get(key)
+        if isinstance(value, dict):
+            for max_key in ("max_age_hours", "stale_after_hours", "max_evidence_age_hours"):
+                if value.get(max_key) is not None:
+                    return _to_float(value.get(max_key))
+    gate = entry.get("managed_preview_gate") if isinstance(entry.get("managed_preview_gate"), dict) else {}
+    if gate.get("stale_after_hours") is not None:
+        return _to_float(gate.get("stale_after_hours"))
+    health_gate = gate.get("health_gate") if isinstance(gate.get("health_gate"), dict) else {}
+    if health_gate.get("stale_after_hours") is not None:
+        return _to_float(health_gate.get("stale_after_hours"))
+    return None
+
+
+def _queue_has_rollback_required_action(entry: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        str(entry.get(key) or "")
+        for key in (
+            "next_action",
+            "recommended_next_action",
+            "promotion_readiness",
+            "promotion_recommendation",
+            "impact_recommendation",
+            "observed_hit_blocker",
+            "unblock_reason",
+            "reason",
+        )
+    ).lower()
+    for code in entry.get("blocker_codes") or []:
+        haystack += f" {code}".lower()
+    return bool(entry.get("rollback_required")) or "rollback-required" in haystack or "rollback-" in haystack
+
+
+def _queue_freshness_state(entry: dict[str, Any]) -> str:
+    gate = entry.get("managed_preview_gate") if isinstance(entry.get("managed_preview_gate"), dict) else {}
+    gate_status = str(gate.get("status") or "").strip()
+    raw_statuses = [
+        str(entry.get("evidence_freshness_status") or "").strip(),
+        str(entry.get("freshness_state") or "").strip(),
+        gate_status,
+    ]
+    for key in ("evidence_freshness", "activation_feedback_freshness_gate", "stale_evidence"):
+        value = entry.get(key)
+        if isinstance(value, dict):
+            raw_statuses.append(str(value.get("status") or "").strip())
+            raw_statuses.append(str(value.get("reason") or "").strip())
+            if value.get("stale") is True:
+                raw_statuses.append("stale")
+    lowered = " ".join(status.lower() for status in raw_statuses if status)
+    blockers = " ".join(str(item).lower() for item in entry.get("blocker_codes") or [])
+    text = f"{lowered} {blockers} {entry.get('unblock_reason') or ''} {entry.get('next_action') or ''}".lower()
+    age = _queue_evidence_age_hours(entry)
+    max_age = _queue_max_evidence_age_hours(entry)
+    stale = (
+        "stale" in text
+        or "evidence-older-than-max-age" in text
+        or (age is not None and max_age is not None and max_age > 0 and age > max_age)
+    )
+    if stale and _queue_has_rollback_required_action(entry):
+        return "stale-rollback-required"
+    if stale:
+        return "stale"
+    if "no-data" in text or "missing-preview" in text or "missing-evidence" in text:
+        return "no-data"
+    if "fresh" in text or (age is not None and max_age is not None and max_age > 0 and age <= max_age):
+        return "fresh"
+    return "unknown"
+
+
+def _queue_freshness_multiplier(freshness_state: str) -> float:
+    if freshness_state == "fresh":
+        return 1.0
+    if freshness_state == "stale-rollback-required":
+        return 0.9
+    if freshness_state == "unknown":
+        return 0.7
+    if freshness_state == "no-data":
+        return 0.35
+    return 0.25
+
+
+def _queue_adjusted_rank_bucket(entry: dict[str, Any]) -> int:
+    status = str(entry.get("current_status") or "").strip()
+    state = str(entry.get("state") or "").strip()
+    successor_status = str(entry.get("successor_status") or "").strip()
+    issue_status = str(entry.get("issue_worthy_status") or "").strip()
+    freshness_state = str(entry.get("freshness_state") or _queue_freshness_state(entry))
+    if status in {"superseded"} or state in {"no-op", "retired-no-repeat", "superseded"}:
+        return 5
+    if _to_float(entry.get("realized_savings_usd")) > 0:
+        return 0
+    if freshness_state == "stale-rollback-required":
+        return 1
+    if issue_status == "ready" or successor_status == "ready":
+        return 1 if freshness_state in {"fresh", "unknown"} else 3
+    if _to_float(entry.get("projected_savings_usd")) > 0 or _to_float(entry.get("savings_per_1000_calls_usd")) > 0:
+        return 2 if freshness_state in {"fresh", "unknown"} else 3
+    if str(entry.get("duplicate_suppression_status") or "") == "suppressed":
+        return 4
+    return 3
+
+
+def _queue_rank_basis(entry: dict[str, Any]) -> dict[str, Any]:
+    projected = _to_float(entry.get("projected_savings_usd"))
+    realized = _to_float(entry.get("realized_savings_usd"))
+    savings_per_1000 = _queue_savings_per_1000(entry, projected, realized)
+    freshness_state = _queue_freshness_state(entry)
+    multiplier = _queue_freshness_multiplier(freshness_state)
+    age = _queue_evidence_age_hours(entry)
+    max_age = _queue_max_evidence_age_hours(entry)
+    basis = {
+        "schema": "agentflow.local_activation_successor_rank_basis.v1",
+        "rank_bucket": _queue_adjusted_rank_bucket({**entry, "freshness_state": freshness_state}),
+        "freshness_state": freshness_state,
+        "freshness_multiplier": multiplier,
+        "freshness_adjusted_savings_per_1000_calls_usd": round(savings_per_1000 * multiplier, 8),
+        "savings_per_1000_calls_usd": round(savings_per_1000, 8),
+        "sample_count": _to_int(entry.get("sample_count")),
+        "projected_savings_usd": round(projected, 8),
+        "realized_savings_usd": round(realized, 8),
+        "rollback_required": _queue_has_rollback_required_action(entry),
+        "blocking_reason": sanitize_value(entry.get("blocking_reason") or entry.get("unblock_reason")),
+    }
+    if age is not None:
+        basis["evidence_age_hours"] = round(age, 3)
+    if max_age is not None:
+        basis["max_evidence_age_hours"] = round(max_age, 3)
+    return {key: value for key, value in basis.items() if value not in (None, "", [])}
+
+
+def _apply_queue_rank_metadata(entry: dict[str, Any]) -> None:
+    basis = _queue_rank_basis(entry)
+    entry["freshness_state"] = basis["freshness_state"]
+    entry["blocking_reason"] = sanitize_value(entry.get("unblock_reason") or basis.get("blocking_reason"))
+    entry["rank_bucket"] = basis["rank_bucket"]
+    entry["freshness_multiplier"] = basis["freshness_multiplier"]
+    entry["freshness_adjusted_savings_per_1000_calls_usd"] = basis[
+        "freshness_adjusted_savings_per_1000_calls_usd"
+    ]
+    entry["savings_per_1000_calls_usd"] = basis["savings_per_1000_calls_usd"]
+    entry["rank_basis"] = basis
+
+
+def _apply_queue_duplicate_fingerprint_suppression(entries: list[dict[str, Any]]) -> None:
+    seen: set[str] = set()
+    for entry in entries:
+        fingerprint = str(entry.get("fingerprint") or "").strip()
+        if not fingerprint:
+            continue
+        if fingerprint not in seen:
+            seen.add(fingerprint)
+            continue
+        entry["duplicate_suppression_status"] = "suppressed"
+        entry["duplicate_suppression_reason"] = "duplicate-successor-fingerprint"
+        entry["issue_worthy_status"] = "suppressed"
+        entry["duplicate_suppression"] = {
+            "schema": "agentflow.local_activation_successor_duplicate_suppression.v1",
+            "reason": "duplicate-successor-fingerprint",
+            "suppresses_duplicate_successor_issue": True,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+
+
 def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str, Any]:
     projected = round(_queue_projected_savings(entry), 8)
     realized = round(_queue_realized_savings(entry, projected), 8)
+    savings_per_1000 = round(_queue_savings_per_1000(entry, projected, realized), 8)
     blocker_codes = sanitize_value([str(item) for item in entry.get("blocker_codes") or [] if str(item or "").strip()])
     duplicate_status = _queue_duplicate_suppression_status(entry)
     suppression = entry.get("duplicate_suppression") if isinstance(entry.get("duplicate_suppression"), dict) else {}
@@ -7524,7 +7744,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "rollback_count": _to_int(entry.get("rollback_count")),
         "realized_savings_usd": realized,
         "projected_savings_usd": projected,
-        "savings_per_1000_calls_usd": round(_to_float(entry.get("savings_per_1000_calls_usd")), 8),
+        "savings_per_1000_calls_usd": savings_per_1000,
         "target_local_rule_file": sanitize_value(entry.get("target_local_rule_file")),
         "target_local_policy_section": sanitize_value(entry.get("target_local_policy_section")),
         "duplicate_suppression_status": duplicate_status,
@@ -7605,6 +7825,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "active_policy_changed",
         "wrote_active_policy_files",
         "policy_files_written",
+        "rollback_required",
         "durable_action_ledger_entry",
         "durable_outcome_ledger_entry",
         "managed_preview_required",
@@ -7617,6 +7838,11 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "evidence_freshness_status",
         "evidence_age_hours",
         "max_evidence_age_hours",
+        "stale_after_hours",
+        "promotion_readiness",
+        "promotion_recommendation",
+        "impact_recommendation",
+        "observed_hit_blocker",
     )
     for key in passthrough_keys:
         if entry.get(key) is not None:
@@ -7655,6 +7881,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
             clean[breakdown_key] = sanitize_value(entry.get(breakdown_key))
     preserved_empty_keys = {
         "rank",
+        "rank_bucket",
         "ledger_rank",
         "sample_count",
         "matched_count",
@@ -7666,6 +7893,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "realized_savings_usd",
         "projected_savings_usd",
         "savings_per_1000_calls_usd",
+        "freshness_adjusted_savings_per_1000_calls_usd",
+        "freshness_multiplier",
         "canary_fraction",
         "holdout_fraction",
         "affected_rows",
@@ -7690,6 +7919,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "active_policy_changed",
         "wrote_active_policy_files",
         "policy_files_written",
+        "rollback_required",
         "executor_compatible",
         "missing_applied_coverage",
         "missing_holdout_coverage",
@@ -7743,9 +7973,13 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
                 managed_preview_outcomes,
                 managed_preview_health,
             )
+    _apply_queue_duplicate_fingerprint_suppression(entries)
+    for entry in entries:
+        _apply_queue_rank_metadata(entry)
     entries.sort(
         key=lambda item: (
-            _queue_rank_bucket(item, _to_float(item.get("realized_savings_usd")), _to_float(item.get("projected_savings_usd"))),
+            _to_int(item.get("rank_bucket")),
+            -_to_float(item.get("freshness_adjusted_savings_per_1000_calls_usd")),
             -_to_float(item.get("realized_savings_usd")),
             -_to_float(item.get("projected_savings_usd")),
             -_to_float(item.get("savings_per_1000_calls_usd")),
@@ -7804,6 +8038,11 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             "top_current_status": top.get("current_status"),
             "top_next_action": top.get("next_action"),
             "top_unblock_reason": top.get("unblock_reason"),
+            "top_blocking_reason": top.get("blocking_reason"),
+            "top_freshness_state": top.get("freshness_state"),
+            "top_savings_per_1000_calls_usd": top.get("savings_per_1000_calls_usd"),
+            "top_freshness_adjusted_savings_per_1000_calls_usd": top.get("freshness_adjusted_savings_per_1000_calls_usd"),
+            "top_rank_basis": top.get("rank_basis"),
             "top_realized_savings_usd": top.get("realized_savings_usd"),
             "top_projected_savings_usd": top.get("projected_savings_usd"),
             "total_realized_savings_usd": round(sum(_to_float(item.get("realized_savings_usd")) for item in entries), 8),
