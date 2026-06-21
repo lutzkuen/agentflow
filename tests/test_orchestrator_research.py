@@ -5920,6 +5920,64 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(suppression["suppressed_closed_predecessor_count"], 1)
         self.assertEqual(suppression["successor_required_count"], 1)
 
+    def test_renamed_repo_proposal_is_canonicalized_before_issue_creation(self):
+        proposal = {
+            "repo": "lutzkuen/agentflow",
+            "title": "Collect request-shape routing lifecycle evidence",
+            "labels": ["backlog", "status:ready", "priority:p2"],
+            "body": "## Evidence\n\n- Top next action: collect-request-shape-routing-lifecycle-evidence\n",
+        }
+
+        deduped, suppression = _dedupe_create_issue_proposals_with_metadata(
+            [proposal],
+            existing_issues=[],
+            trusted_author="lutzkuen",
+            now=NOW,
+        )
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["repo"], "lutzkuen/tokenclaw")
+        self.assertEqual(suppression["repo_renamed_count"], 1)
+        self.assertEqual(suppression["repo_normalizations"][0]["from_repo"], "lutzkuen/agentflow")
+        self.assertEqual(suppression["repo_normalizations"][0]["to_repo"], "lutzkuen/tokenclaw")
+        self.assertEqual(suppression["repo_normalizations"][0]["reason"], "repo-renamed")
+
+    def test_closed_predecessor_suppresses_renamed_repo_duplicate_proposal(self):
+        proposal = {
+            "repo": "lutzkuen/agentflow",
+            "title": "Follow up cache replay cohort with renamed title",
+            "labels": ["backlog", "status:ready"],
+            "body": "## Evidence\n\n- Fingerprint: activation:renamed123456\n",
+        }
+
+        deduped, suppression = _dedupe_create_issue_proposals_with_metadata(
+            [proposal],
+            existing_issues=[
+                issue(
+                    617,
+                    "Completed cache replay predecessor with different title",
+                    ["backlog", "status:ready", "cache"],
+                    repo="lutzkuen/agentflow",
+                    state="CLOSED",
+                    closed="2026-06-11T08:20:00Z",
+                    body="Resolved predecessor.\n\nFingerprint: activation:renamed123456\n",
+                )
+            ],
+            trusted_author="lutzkuen",
+            now=NOW,
+        )
+
+        self.assertEqual(deduped, [])
+        self.assertEqual(suppression["repo_renamed_count"], 1)
+        self.assertEqual(suppression["fingerprint_match_count"], 1)
+        suppressed = suppression["suppressed"][0]
+        self.assertEqual(suppressed["repo"], "lutzkuen/tokenclaw")
+        self.assertEqual(suppressed["existing_issue"]["repo"], "lutzkuen/tokenclaw")
+        self.assertEqual(suppressed["suppression_kind"], "closed-prior-issue")
+        self.assertEqual(suppressed["suppression_reason"], "new-evidence-required")
+        self.assertIn("closed-predecessor", suppressed["reason_codes"])
+        self.assertIn("new-evidence-required", suppressed["reason_codes"])
+
     def test_recent_closed_issue_with_same_fingerprint_allows_advanced_next_action(self):
         proposal = {
             "repo": "lutzkuen/tokenclaw",

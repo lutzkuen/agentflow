@@ -554,6 +554,40 @@ def _is_trusted(issue: dict[str, Any], trusted_author: str) -> bool:
     return not trusted_author or _author_login(issue) == trusted_author
 
 
+_RENAMED_REPOS = {
+    "lutzkuen/agentflow": "lutzkuen/tokenclaw",
+    "lutzkuen/agentflow_server": "lutzkuen/tokenclaw_server",
+}
+
+
+def _repo_name(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("nameWithOwner") or value.get("name_with_owner") or value.get("full_name") or "")
+    return str(value or "")
+
+
+def _canonical_repo(value: Any) -> str:
+    repo = _repo_name(value).strip()
+    if not repo:
+        return "unknown"
+    return _RENAMED_REPOS.get(repo.lower(), repo)
+
+
+def _proposal_with_canonical_repo(proposal: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    raw_repo = str(proposal.get("repo") or "lutzkuen/tokenclaw").strip() or "lutzkuen/tokenclaw"
+    canonical_repo = _canonical_repo(raw_repo)
+    if canonical_repo == raw_repo:
+        return proposal, None
+    normalized = dict(proposal)
+    normalized["repo"] = canonical_repo
+    return normalized, {
+        "title": sanitize_value(proposal.get("title")),
+        "from_repo": sanitize_value(raw_repo),
+        "to_repo": sanitize_value(canonical_repo),
+        "reason": "repo-renamed",
+    }
+
+
 def _is_actionable_ready(issue: dict[str, Any], trusted_author: str) -> bool:
     labels = _label_names(issue)
     return _is_open(issue) and _is_trusted(issue, trusted_author) and "status:ready" in labels and "status:blocked" not in labels
@@ -585,7 +619,7 @@ def _is_recent_closed_issue(issue: dict[str, Any], *, now: datetime, recent_days
 
 def _issue_ref(issue: dict[str, Any]) -> dict[str, Any]:
     return {
-        "repo": issue.get("repo") or issue.get("repository") or "unknown",
+        "repo": _canonical_repo(issue.get("repo") or issue.get("repository") or "unknown"),
         "number": _issue_number(issue),
         "title": sanitize_value(str(issue.get("title") or "")),
         "url": sanitize_value(issue.get("url") or issue.get("html_url") or ""),
@@ -13555,7 +13589,7 @@ def _finalize_create_issue_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
             body = f"{body.rstrip()}\n\n{label_section.rstrip()}\n"
     finalized["body"] = body
     finalized["title"] = redact_text(str(finalized.get("title") or ""))
-    finalized["repo"] = redact_text(str(finalized.get("repo") or "lutzkuen/tokenclaw"))
+    finalized["repo"] = redact_text(_canonical_repo(finalized.get("repo") or "lutzkuen/tokenclaw"))
     return finalized
 
 
@@ -13690,6 +13724,7 @@ def _dedupe_create_issue_proposals_with_metadata(
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     existing_by_key: dict[str, dict[str, Any]] = {}
     existing_by_fingerprint: dict[str, dict[str, Any]] = {}
+    repo_normalizations: list[dict[str, Any]] = []
     for issue in existing_issues:
         if not isinstance(issue, dict) or not _is_trusted(issue, trusted_author):
             continue
@@ -13706,7 +13741,10 @@ def _dedupe_create_issue_proposals_with_metadata(
     seen_fingerprints = set(existing_by_fingerprint)
     deduped: list[dict[str, Any]] = []
     suppressed: list[dict[str, Any]] = []
-    for proposal in proposals:
+    for raw_proposal in proposals:
+        proposal, repo_normalization = _proposal_with_canonical_repo(raw_proposal)
+        if repo_normalization is not None:
+            repo_normalizations.append(repo_normalization)
         key = _issue_title_key(proposal.get("title"))
         if not key:
             continue
@@ -13716,6 +13754,7 @@ def _dedupe_create_issue_proposals_with_metadata(
             matched_issue = existing_by_key.get(key) or (
                 existing_by_fingerprint.get(matched_fingerprint) if matched_fingerprint else None
             )
+            matched_issue_is_closed = bool(matched_issue is not None and not _is_open(matched_issue))
             if (
                 key not in seen
                 and matched_fingerprint is not None
@@ -13734,14 +13773,21 @@ def _dedupe_create_issue_proposals_with_metadata(
             reason = "exact-title-already-exists" if key in seen else "evidence-fingerprint-already-exists"
             row = {
                 "title": sanitize_value(proposal.get("title")),
-                "repo": sanitize_value(proposal.get("repo") or (matched_issue or {}).get("repo") or "unknown"),
+                "repo": sanitize_value(_canonical_repo(proposal.get("repo") or (matched_issue or {}).get("repo") or "unknown")),
                 "proposal_key": key,
                 "reason": reason,
+                "suppression_reason": "new-evidence-required" if matched_issue_is_closed else (
+                    "open-duplicate" if matched_issue is not None else "duplicate-generated-proposal"
+                ),
+                "reason_codes": [
+                    "closed-predecessor" if matched_issue_is_closed else (
+                        "open-duplicate" if matched_issue is not None else "duplicate-generated-proposal"
+                    )
+                ],
             }
             if matched_fingerprint:
                 row["evidence_fingerprint"] = sanitize_value(matched_fingerprint)
             if matched_issue is not None:
-                matched_issue_is_closed = not _is_open(matched_issue)
                 row.update(
                     {
                         "existing_issue": _issue_ref(matched_issue),
@@ -13752,6 +13798,7 @@ def _dedupe_create_issue_proposals_with_metadata(
                 if matched_issue_is_closed:
                     row["successor_required"] = True
                     row["successor_reason"] = "recent-closed-exact-title-match"
+                    row["reason_codes"].append("new-evidence-required")
             else:
                 row["suppression_kind"] = "duplicate-generated-proposal"
             suppressed.append(row)
@@ -13771,6 +13818,8 @@ def _dedupe_create_issue_proposals_with_metadata(
         "successor_required_count": sum(1 for item in suppressed if item.get("successor_required")),
         "open_existing_issue_count": sum(1 for item in suppressed if item.get("suppression_kind") == "open-existing-issue"),
         "fingerprint_match_count": sum(1 for item in suppressed if item.get("reason") == "evidence-fingerprint-already-exists"),
+        "repo_renamed_count": len(repo_normalizations),
+        "repo_normalizations": repo_normalizations[:20],
         "recent_closed_days": recent_closed_days,
         "suppressed": suppressed[:20],
         "privacy": {
@@ -14725,7 +14774,7 @@ def _repeated_diagnostic_comment_for_issue(
         sequencing="Use before creating duplicate replacement issues for the same diagnostic pattern.",
     )
     return {
-        "repo": issue.get("repo") or "lutzkuen/tokenclaw",
+        "repo": _canonical_repo(issue.get("repo") or "lutzkuen/tokenclaw"),
         "number": _issue_number(issue),
         "action": "comment",
         "body": body,
@@ -15379,6 +15428,8 @@ def build_research_plan(
         "suppressed_count": 0,
         "closed_prior_issue_count": 0,
         "open_existing_issue_count": 0,
+        "repo_renamed_count": 0,
+        "repo_normalizations": [],
         "suppressed": [],
         "privacy": {
             "metadata_only": True,
