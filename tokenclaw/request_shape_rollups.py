@@ -11272,6 +11272,107 @@ def _persistable_row(
     }
 
 
+def _snapshot_safe_rollup_row(row: dict[str, Any], *, source_schema: str | None = None) -> dict[str, Any]:
+    lifecycle = row.get("crunch_canary_lifecycle") if isinstance(row.get("crunch_canary_lifecycle"), dict) else {}
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    return {
+        "schema": ROLLUP_ROW_SCHEMA,
+        "source_schema": source_schema or row.get("source_schema") or row.get("schema") or ROLLUP_ROW_SCHEMA,
+        "provider_family": public_label(row.get("provider_family"), "unknown"),
+        "source_surface": public_label(row.get("source_surface"), "unknown"),
+        "endpoint": public_label(row.get("endpoint"), "unknown"),
+        "requested_model_family": public_label(row.get("requested_model_family"), "unknown"),
+        "routed_model_family": public_label(row.get("routed_model_family"), "unknown"),
+        "category": public_label(row.get("category"), "unknown"),
+        "workflow_phase": public_label(row.get("workflow_phase"), "unknown"),
+        "stream": bool(row.get("stream")),
+        "has_tools": bool(row.get("has_tools")),
+        "text_bucket": public_label(row.get("text_bucket"), "unknown"),
+        "token_bucket": public_label(row.get("token_bucket"), "unknown"),
+        "cache_status": public_label(row.get("cache_status"), "unknown"),
+        "routing_status": public_label(row.get("routing_status"), "unknown"),
+        "candidate_families": _public_label_list(row.get("candidate_families")),
+        "candidate_work_classes": _public_label_list(row.get("candidate_work_classes")),
+        "blocker_codes": _public_label_list(row.get("blocker_codes")),
+        "row_count": _as_int(row.get("row_count")),
+        "sample_count": _as_int(row.get("row_count") or row.get("sample_count")),
+        "error_count": _as_int(row.get("error_count")),
+        "retry_count": _as_int(row.get("retry_count")),
+        "cache_hit_count": _as_int(row.get("cache_hit_count")),
+        "input_tokens": _as_int(row.get("input_tokens")),
+        "successful_input_tokens": _as_int(row.get("successful_input_tokens") or row.get("input_tokens")),
+        "output_tokens": _as_int(row.get("output_tokens")),
+        "cost_est_usd": round(_as_float(row.get("cost_est_usd")), 6),
+        "baseline_cost_usd": round(_as_float(row.get("baseline_cost_usd")), 6),
+        "observed_savings_usd": round(_as_float(row.get("observed_savings_usd")), 6),
+        "input_token_cost_usd": round(_as_float(row.get("input_token_cost_usd")), 6),
+        "current_crunch_tokens_saved": _as_int(row.get("current_crunch_tokens_saved")),
+        "current_crunch_chars_saved": _as_int(row.get("current_crunch_chars_saved")),
+        "current_crunch_savings_usd": round(_as_float(row.get("current_crunch_savings_usd")), 6),
+        "projected_crunch_tokens_saved": _as_int(row.get("projected_crunch_tokens_saved")),
+        "projected_crunch_chars_saved": _as_int(row.get("projected_crunch_chars_saved")),
+        "projected_crunch_savings_usd": round(_as_float(row.get("projected_crunch_savings_usd")), 6),
+        "crunch_canary_lifecycle": {
+            "schema": CRUNCH_CANARY_LIFECYCLE_SCHEMA,
+            "cohort_id": public_label(lifecycle.get("cohort_id"), "unknown"),
+            "policy_id": public_label(lifecycle.get("policy_id"), "unknown"),
+            "applied_count": _as_int(lifecycle.get("applied_count")),
+            "holdout_count": _as_int(lifecycle.get("holdout_count")),
+            "skipped_count": _as_int(lifecycle.get("skipped_count")),
+            "safety_stopped_count": _as_int(lifecycle.get("safety_stopped_count")),
+            "fallback_count": _as_int(lifecycle.get("fallback_count")),
+            "rollback_count": _as_int(lifecycle.get("rollback_count")),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "metadata": {
+            "schema": "tokenclaw.request_shape_rollup_metadata.v1",
+            "candidate_class_breakdown": metadata.get("candidate_class_breakdown")
+            if isinstance(metadata.get("candidate_class_breakdown"), list)
+            else [],
+            "blocker_breakdown": metadata.get("blocker_breakdown")
+            if isinstance(metadata.get("blocker_breakdown"), list)
+            else [],
+            "aggregate_only": True,
+            "raw_body_required": False,
+        },
+        "privacy": _shape_follow_up_privacy(),
+    }
+
+
+def _snapshot_safe_rollup_rows(report: dict[str, Any], *, limit: int = 25) -> list[dict[str, Any]]:
+    source_schema = report.get("schema") or SCHEMA
+    rows = [
+        _snapshot_safe_rollup_row(row, source_schema=source_schema)
+        for row in report.get("rollups") or []
+        if isinstance(row, dict)
+    ]
+    rows.sort(
+        key=lambda item: (
+            _as_float(item.get("projected_crunch_savings_usd")),
+            _as_int(item.get("projected_crunch_tokens_saved")),
+            _as_float(item.get("cost_est_usd")),
+            _as_int(item.get("row_count")),
+        ),
+        reverse=True,
+    )
+    return rows[: max(1, min(_as_int(limit) or 25, 100))]
+
+
+def _snapshot_rollup_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = snapshot.get("rollups")
+    if not isinstance(rows, list):
+        rows = snapshot.get("local_action_cohorts")
+    if not isinstance(rows, list):
+        return []
+    source_schema = snapshot.get("source_schema") or ROLLUP_SNAPSHOT_SCHEMA
+    return [
+        _snapshot_safe_rollup_row(row, source_schema=str(source_schema))
+        for row in rows
+        if isinstance(row, dict)
+    ]
+
+
 def _rollup_snapshot_from_report(report: dict[str, Any]) -> dict[str, Any]:
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     follow_up = report.get("follow_up_candidates") if isinstance(report.get("follow_up_candidates"), dict) else {}
@@ -11330,6 +11431,7 @@ def _rollup_snapshot_from_report(report: dict[str, Any]) -> dict[str, Any]:
             ),
             "no_source_traffic_reason": None,
         },
+        "rollups": _snapshot_safe_rollup_rows(report),
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -11389,6 +11491,9 @@ def latest_request_shape_rollup_snapshot_report(
     summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
     if _as_int(summary.get("rollup_count")) <= 0 and _as_int(summary.get("ranked_candidate_count")) <= 0:
         return None
+    rollups = _snapshot_rollup_rows(snapshot)
+    follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10) if rollups else None
+    crunch_opportunity_dry_run = build_request_shape_crunch_opportunity_dry_run(rollups, limit=25) if rollups else None
     follow_up_summary = {
         key: summary.get(key)
         for key in (
@@ -11406,6 +11511,8 @@ def latest_request_shape_rollup_snapshot_report(
             "no_source_traffic_reason",
         )
     }
+    if isinstance(follow_up_candidates, dict) and not freshness["stale"]:
+        follow_up_summary = follow_up_candidates["summary"]
     return {
         "schema": SCHEMA,
         "generated_at": snapshot.get("generated_at"),
@@ -11430,6 +11537,10 @@ def latest_request_shape_rollup_snapshot_report(
             "snapshot_age_hours": freshness["age_hours"],
             "snapshot_max_age_hours": freshness["max_age_hours"],
             "total_projected_savings_usd": _as_float(summary.get("total_projected_savings_usd")),
+            "snapshot_rehydrated_rollup_count": len(rollups),
+            "snapshot_rehydrated_crunch_candidate_count": _as_int(
+                (crunch_opportunity_dry_run or {}).get("summary", {}).get("candidate_count")
+            ),
         },
         "candidate_family_breakdown": summary.get("candidate_family_breakdown")
         if isinstance(summary.get("candidate_family_breakdown"), list)
@@ -11437,7 +11548,9 @@ def latest_request_shape_rollup_snapshot_report(
         "blocker_code_breakdown": summary.get("blocker_code_breakdown")
         if isinstance(summary.get("blocker_code_breakdown"), list)
         else [],
-        "follow_up_candidates": {
+        "follow_up_candidates": follow_up_candidates
+        if isinstance(follow_up_candidates, dict) and not freshness["stale"]
+        else {
             "schema": FOLLOW_UP_CANDIDATES_SCHEMA,
             "status": "snapshot-stale" if freshness["stale"] else "snapshot-reused",
             "summary": follow_up_summary,
@@ -11448,7 +11561,10 @@ def latest_request_shape_rollup_snapshot_report(
             "missing_measurements": ["snapshot-stale"] if freshness["stale"] else [],
             "privacy": _shape_follow_up_privacy(),
         },
-        "rollups": [],
+        "crunch_opportunity_dry_run": crunch_opportunity_dry_run
+        if isinstance(crunch_opportunity_dry_run, dict) and not freshness["stale"]
+        else None,
+        "rollups": rollups if not freshness["stale"] else [],
         "privacy": snapshot.get("privacy") if isinstance(snapshot.get("privacy"), dict) else _shape_follow_up_privacy(),
     }
 

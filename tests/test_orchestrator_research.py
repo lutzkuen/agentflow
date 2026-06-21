@@ -11333,6 +11333,186 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["raw_prompts_included"])
         self.assertFalse(payload["privacy"]["provider_bodies_included"])
 
+    def test_cli_feeds_rehydrated_request_shape_cohorts_into_crunch_dry_run(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            store = SQLiteStore(db_path)
+            try:
+                stored = store.persist_request_shape_rollup_snapshot(
+                    {
+                        "schema": "tokenclaw.request_shape_rollup_snapshot.v1",
+                        "source_schema": "tokenclaw.activation_rollup_snapshot.v1",
+                        "generated_at": utc_now(),
+                        "run_id": "snapshot-crunch-research",
+                        "window": {
+                            "start": "2026-06-21T06:00:00+00:00",
+                            "end": "2026-06-21T06:30:00+00:00",
+                            "source": "persisted-activation-rollup-snapshot",
+                        },
+                        "summary": {
+                            "rows_considered": 8,
+                            "rollup_count": 3,
+                            "ranked_candidate_count": 3,
+                            "top_next_action": "stage-repeated-context-crunch-canary",
+                            "top_local_action_family": "crunch",
+                            "top_readiness_state": "activation-ready",
+                            "class_breakdown": [{"value": "repeated_context", "count": 8}],
+                            "blocker_breakdown": [{"value": "insufficient-repeat-evidence", "count": 1}],
+                            "readiness_breakdown": [
+                                {"value": "activation-ready", "count": 4},
+                                {"value": "blocked", "count": 1},
+                            ],
+                            "next_action_breakdown": [
+                                {"value": "stage-repeated-context-crunch-canary", "count": 4}
+                            ],
+                            "local_action_family_breakdown": [{"value": "crunch", "count": 8}],
+                            "projected_crunch_tokens_saved": 9000,
+                            "projected_crunch_savings_usd": 0.027,
+                            "total_projected_savings_usd": 0.027,
+                        },
+                        "rollups": [
+                            {
+                                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                                "provider_family": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "endpoint": "messages",
+                                "category": "tool-result",
+                                "workflow_phase": "tool-execution",
+                                "stream": True,
+                                "has_tools": True,
+                                "text_bucket": "8k_32k_chars",
+                                "token_bucket": "8k_32k_tokens",
+                                "cache_status": "skipped",
+                                "routing_status": "passthrough",
+                                "candidate_work_classes": ["repeated_context", "crunch"],
+                                "candidate_families": ["crunch_candidate"],
+                                "blocker_codes": [],
+                                "row_count": 4,
+                                "successful_input_tokens": 60_000,
+                                "input_tokens": 60_000,
+                                "input_token_cost_usd": 0.18,
+                                "projected_crunch_tokens_saved": 9000,
+                                "projected_crunch_chars_saved": 36_000,
+                                "projected_crunch_savings_usd": 0.027,
+                            },
+                            {
+                                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                                "provider_family": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "endpoint": "messages",
+                                "category": "chat",
+                                "workflow_phase": "chat",
+                                "stream": False,
+                                "has_tools": False,
+                                "text_bucket": "2k_8k_chars",
+                                "token_bucket": "500_2k_tokens",
+                                "cache_status": "miss",
+                                "routing_status": "passthrough",
+                                "candidate_work_classes": ["repeated_context", "crunch"],
+                                "candidate_families": ["crunch_candidate"],
+                                "blocker_codes": ["insufficient-repeat-evidence"],
+                                "row_count": 1,
+                                "successful_input_tokens": 1200,
+                                "input_tokens": 1200,
+                                "input_token_cost_usd": 0.0036,
+                                "projected_crunch_tokens_saved": 0,
+                                "projected_crunch_chars_saved": 0,
+                                "projected_crunch_savings_usd": 0.0,
+                            },
+                            {
+                                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                                "provider_family": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "endpoint": "messages",
+                                "category": "tool-result",
+                                "workflow_phase": "tool-execution",
+                                "stream": True,
+                                "has_tools": True,
+                                "text_bucket": "32k_128k_chars",
+                                "token_bucket": "8k_32k_tokens",
+                                "cache_status": "skipped",
+                                "routing_status": "passthrough",
+                                "candidate_work_classes": ["repeated_context", "crunch"],
+                                "candidate_families": ["crunch_candidate"],
+                                "blocker_codes": [],
+                                "row_count": 3,
+                                "successful_input_tokens": 90_000,
+                                "input_tokens": 90_000,
+                                "input_token_cost_usd": 0.27,
+                                "projected_crunch_tokens_saved": 12_000,
+                                "projected_crunch_chars_saved": 48_000,
+                                "projected_crunch_savings_usd": 0.036,
+                                "crunch_canary_lifecycle": {
+                                    "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
+                                    "cohort_id": "local-repeated-context-crunch-canary-existing",
+                                    "policy_id": "local-repeated-context-crunch-canary-existing",
+                                    "applied_count": 1,
+                                    "holdout_count": 1,
+                                },
+                            },
+                        ],
+                        "privacy": {
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                            "raw_prompts_included": False,
+                            "provider_bodies_included": False,
+                            "request_ids_included": False,
+                            "session_ids_included": False,
+                            "cache_keys_included": False,
+                            "individual_candidate_ids_included": False,
+                            "absolute_paths_included": False,
+                            "provider_calls_made": False,
+                            "managed_server_calls_made": False,
+                            "policy_files_written": False,
+                        },
+                    }
+                )
+            finally:
+                store.conn.close()
+
+            self.assertEqual(stored, 1)
+            issues_path = Path(tmp) / "issues.json"
+            stats_path = Path(tmp) / "stats.json"
+            issues_path.write_text(json.dumps([]), encoding="utf-8")
+            stats_path.write_text(json.dumps({"calls": 0, "today_calls": 0, "db": db_path}), encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            code = cli.orchestrator_research_cli(
+                ["--issues-json", str(issues_path), "--stats-json", str(stats_path), "--threshold", "3"],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        stats_summary = payload["evidence"]["stats_summary"]
+        crunch = stats_summary["crunch_savings_signal"]
+        top_report = crunch["top_report"]
+        self.assertEqual(crunch["status"], "projected-savings-ranked")
+        self.assertEqual(top_report["report_key"], "request_shape_crunch_opportunity")
+        self.assertEqual(top_report["schema"], "tokenclaw.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertGreaterEqual(top_report["candidate_count"], 1)
+        self.assertGreater(top_report["projected_saved_tokens"], 0)
+        self.assertGreater(top_report["projected_saved_usd"], 0)
+        self.assertEqual(top_report["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(top_report["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertFalse(top_report["privacy"]["provider_bodies_included"])
+        self.assertFalse(top_report["privacy"]["request_ids_included"])
+        self.assertEqual(crunch["missing_measurements"], [])
+        shape_signal = stats_summary["request_shape_rollup_candidates"]
+        self.assertEqual(shape_signal["status"], "candidates-ranked")
+        self.assertGreaterEqual(shape_signal["summary"]["ranked_candidate_count"], 1)
+        self.assertTrue(shape_signal["privacy"]["metadata_only"])
+        self.assertTrue(shape_signal["privacy"]["aggregate_only"])
+        self.assertFalse(shape_signal["privacy"]["raw_prompts_included"])
+        self.assertFalse(shape_signal["privacy"]["provider_bodies_included"])
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("request-id-secret", rendered)
+        self.assertNotIn("session-id-secret", rendered)
+
     def test_cli_enriches_staged_request_shape_cache_replay_evidence_from_local_policy(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "tokenclaw.sqlite3")

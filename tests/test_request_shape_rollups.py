@@ -688,6 +688,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["top_readiness_state"], "activation-ready")
         self.assertTrue(snapshot["privacy"]["metadata_only"])
         self.assertTrue(snapshot["privacy"]["aggregate_only"])
+        self.assertGreaterEqual(len(snapshot["rollups"]), 1)
+        self.assertEqual(snapshot["rollups"][0]["schema"], "tokenclaw.request_shape_rollup_row.v1")
+        self.assertGreater(snapshot["rollups"][0]["projected_crunch_tokens_saved"], 0)
         rendered_snapshot = json.dumps(snapshot, sort_keys=True)
         self.assertNotIn("raw prompt must not leak", rendered_snapshot)
         self.assertNotIn("raw-session-id-must-not-leak", rendered_snapshot)
@@ -697,6 +700,13 @@ class RequestShapeRollupTests(unittest.TestCase):
         assert latest_snapshot_report is not None
         self.assertEqual(latest_snapshot_report["snapshot_freshness"]["status"], "fresh")
         self.assertEqual(latest_snapshot_report["rollup_snapshot"]["summary"]["rollup_count"], 2)
+        self.assertEqual(latest_snapshot_report["summary"]["snapshot_rehydrated_rollup_count"], 2)
+        self.assertEqual(latest_snapshot_report["follow_up_candidates"]["status"], "candidates-ranked")
+        self.assertEqual(latest_snapshot_report["crunch_opportunity_dry_run"]["status"], "ranked")
+        self.assertGreater(
+            latest_snapshot_report["crunch_opportunity_dry_run"]["summary"]["projected_saved_tokens"],
+            0,
+        )
         follow_up = report["follow_up_candidates"]
         self.assertEqual(follow_up["schema"], "tokenclaw.request_shape_follow_up_candidates.v1")
         self.assertEqual(follow_up["status"], "candidates-ranked")
