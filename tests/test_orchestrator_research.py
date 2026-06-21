@@ -6899,6 +6899,119 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-secret", rendered)
         self.assertNotIn("/home/lutz/private/shape_secret.py", rendered)
 
+    def test_zero_row_request_shape_crunch_rank_emits_source_traffic_drill(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 0,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "crunch_chars_saved": 0,
+                "request_shape_rollups": {
+                    "schema": "tokenclaw.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 0, "rollup_count": 0},
+                    "crunch_opportunity_dry_run": {
+                        "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
+                        "status": "no-positive-projection",
+                        "summary": {
+                            "rows_considered": 0,
+                            "candidate_count": 0,
+                            "matched_count": 0,
+                            "projected_saved_chars": 0,
+                            "projected_saved_tokens": 0,
+                            "projected_saved_usd": 0.0,
+                            "activation_state": "missing-evidence",
+                            "top_next_action": "rank-repeated-context-crunch-dry-run",
+                        },
+                        "missing_measurements": [
+                            "repeated-context-crunch-cohorts",
+                            "positive-observed-or-projected-savings",
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
+        self.assertEqual(signal["status"], "non-positive-projection")
+        top_report = signal["top_report"]
+        self.assertEqual(top_report["report_key"], "request_shape_crunch_opportunity")
+        self.assertEqual(top_report["source_traffic_drill"]["schema"], "tokenclaw.request_shape_crunch_source_traffic_drill.v1")
+        self.assertEqual(
+            top_report["source_traffic_drill"]["source_schema"],
+            "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
+        )
+        self.assertEqual(top_report["source_traffic_drill"]["top_missing_measurement"], "repeated-context-crunch-cohorts")
+        self.assertEqual(top_report["source_traffic_drill"]["next_action"], "collect-source-traffic")
+        self.assertEqual(top_report["next_action"], "collect-source-traffic")
+        self.assertEqual(top_report["missing_measurements"][0], "repeated-context-crunch-cohorts")
+        self.assertTrue(top_report["duplicate_suppression"]["fingerprint"].startswith("crunch-source-drill:"))
+        self.assertTrue(top_report["duplicate_suppression"]["suppresses_policy_write_candidate"])
+        self.assertEqual(top_report["source_traffic_drill"]["source_window"]["status"], "missing")
+        self.assertTrue(top_report["source_traffic_drill"]["privacy"]["metadata_only"])
+        self.assertTrue(top_report["source_traffic_drill"]["privacy"]["aggregate_only"])
+        self.assertFalse(top_report["source_traffic_drill"]["privacy"]["raw_prompts_included"])
+        self.assertFalse(top_report["source_traffic_drill"]["privacy"]["request_ids_included"])
+
+    def test_request_shape_crunch_rollup_cohorts_rank_projected_savings(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 91,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "crunch_chars_saved": 0,
+                "request_shape_rollups": {
+                    "schema": "tokenclaw.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 91, "rollup_count": 2},
+                    "crunch_opportunity_dry_run": {
+                        "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
+                        "status": "ranked",
+                        "summary": {
+                            "rows_considered": 91,
+                            "cohort_count": 2,
+                            "matched_count": 73,
+                            "projected_saved_chars": 128000,
+                            "projected_saved_tokens": 32000,
+                            "projected_saved_usd": 0.096,
+                            "activation_state": "activation-ready",
+                            "top_next_action": "stage-repeated-context-crunch-canary",
+                        },
+                        "cohorts": [
+                            {
+                                "class": "repeated_context",
+                                "row_count": 41,
+                                "projected_saved_tokens": 18000,
+                                "projected_saved_usd": 0.054,
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
+        self.assertEqual(signal["status"], "projected-savings-ranked")
+        top_report = signal["top_report"]
+        self.assertEqual(top_report["report_key"], "request_shape_crunch_opportunity")
+        self.assertEqual(top_report["candidate_count"], 2)
+        self.assertEqual(top_report["matched_count"], 73)
+        self.assertEqual(top_report["projected_saved_chars"], 128000)
+        self.assertEqual(top_report["projected_saved_tokens"], 32000)
+        self.assertEqual(top_report["projected_saved_usd"], 0.096)
+        self.assertNotIn("source_traffic_drill", top_report)
+        self.assertEqual(signal["missing_measurements"], [])
+
     def test_crunch_candidate_preserves_activation_missing_measurement(self):
         plan = build_research_plan(
             issues=[],

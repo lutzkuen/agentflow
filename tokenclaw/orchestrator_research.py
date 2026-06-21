@@ -2496,6 +2496,102 @@ def _top_breakdown_item(report: dict[str, Any], *keys: str) -> dict[str, Any] | 
     return None
 
 
+def _crunch_source_traffic_drill(
+    *,
+    report_key: str,
+    report: dict[str, Any],
+    summary: dict[str, Any],
+    rows_considered: int,
+    candidate_count: int,
+    matched_count: int,
+    projected_usd: float,
+    projected_tokens: int,
+    projected_chars: int,
+    report_missing: list[str],
+    current_next_action: str,
+) -> dict[str, Any] | None:
+    if report_key != "request_shape_crunch_opportunity":
+        return None
+    if candidate_count > 0 or projected_usd > 0 or projected_tokens > 0 or projected_chars > 0:
+        return None
+
+    source_schema = sanitize_value(report.get("schema") or "tokenclaw.request_shape_crunch_opportunity_dry_run.v1")
+    missing = [item for item in report_missing if item]
+    if not missing:
+        if rows_considered <= 0:
+            missing = ["no-source-traffic-for-request-shape-rollups"]
+        elif matched_count <= 0:
+            missing = ["repeated-context-crunch-cohorts"]
+        else:
+            missing = ["positive-observed-or-projected-savings"]
+    top_missing = sanitize_value(missing[0])
+    missing_text = " ".join(missing).lower()
+    if "legacy" in missing_text:
+        next_action = "adopt-legacy-evidence"
+    elif "rollup" in missing_text and rows_considered <= 0:
+        next_action = "refresh-rollups"
+    elif "no-source-traffic" in missing_text or "repeated-context-crunch-cohorts" in missing_text:
+        next_action = "collect-source-traffic"
+    else:
+        next_action = sanitize_value(current_next_action or "rank-repeated-context-cohorts")
+
+    window = report.get("window") if isinstance(report.get("window"), dict) else {}
+    source_window = {
+        "schema": "tokenclaw.request_shape_crunch_source_window.v1",
+        "status": "missing" if rows_considered <= 0 else "present",
+        "rows_considered": rows_considered,
+        "matched_count": matched_count,
+        "source": sanitize_value(window.get("source") or summary.get("source_window") or "request-shape-rollups"),
+    }
+    if window.get("start") or summary.get("window_start"):
+        source_window["start"] = sanitize_value(window.get("start") or summary.get("window_start"))
+    if window.get("end") or summary.get("window_end"):
+        source_window["end"] = sanitize_value(window.get("end") or summary.get("window_end"))
+
+    fingerprint = public_id(
+        json.dumps(
+            {
+                "source_schema": source_schema,
+                "top_missing_measurement": top_missing,
+                "next_action": next_action,
+                "rows_considered": rows_considered,
+                "candidate_count": candidate_count,
+                "matched_count": matched_count,
+            },
+            sort_keys=True,
+        ),
+        prefix="crunch-source-drill",
+    )
+    duplicate_suppression = {
+        "schema": "tokenclaw.request_shape_crunch_source_traffic_drill_duplicate_suppression.v1",
+        "fingerprint": fingerprint,
+        "reason": top_missing,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "suppresses_duplicate_source_traffic_drill": True,
+        "suppresses_policy_write_candidate": True,
+    }
+    return {
+        "schema": "tokenclaw.request_shape_crunch_source_traffic_drill.v1",
+        "status": "source-traffic-drill",
+        "source_schema": source_schema,
+        "top_missing_measurement": top_missing,
+        "missing_measurements": missing[:10],
+        "source_rollup_table": "request_shape_rollups",
+        "source_window": source_window,
+        "activation_snapshot": {
+            "schema": "tokenclaw.request_shape_crunch_activation_snapshot.v1",
+            "status": sanitize_value(summary.get("activation_state") or "missing-evidence"),
+            "candidate_count": candidate_count,
+            "projected_saved_tokens": projected_tokens,
+            "projected_saved_usd": round(projected_usd, 6),
+        },
+        "next_action": next_action,
+        "duplicate_suppression": duplicate_suppression,
+        "privacy": _candidate_privacy(),
+    }
+
+
 def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, Any] | None:
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     if not summary and not report.get("schema"):
@@ -2511,6 +2607,8 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
             "metadata_candidate_count",
             "recommended_count",
             "planned_count",
+            "ranked_candidate_count",
+            "cohort_count",
             "summary_model_hint_rows",
             "matched_candidates",
         ),
@@ -2622,7 +2720,38 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
     ][:10]
     rules = report.get("rules") if isinstance(report.get("rules"), list) else []
     top_rule = next((item for item in rules if isinstance(item, dict)), {})
-    return {
+    source_traffic_drill = _crunch_source_traffic_drill(
+        report_key=report_key,
+        report=report,
+        summary=summary,
+        rows_considered=rows_considered,
+        candidate_count=candidate_count,
+        matched_count=matched_count,
+        projected_usd=projected_usd,
+        projected_tokens=projected_tokens,
+        projected_chars=projected_chars,
+        report_missing=report_missing,
+        current_next_action=next_action,
+    )
+    duplicate_suppression = (
+        sanitize_value(
+            activation_follow_up.get("duplicate_suppression")
+            if isinstance(activation_follow_up.get("duplicate_suppression"), dict)
+            else report.get("duplicate_suppression")
+        )
+        if (
+            isinstance(activation_follow_up.get("duplicate_suppression"), dict)
+            or isinstance(report.get("duplicate_suppression"), dict)
+        )
+        else {}
+    )
+    if source_traffic_drill is not None:
+        duplicate_suppression = source_traffic_drill["duplicate_suppression"]
+        no_op_reason = source_traffic_drill["top_missing_measurement"]
+        next_action = source_traffic_drill["next_action"]
+        report_missing = source_traffic_drill["missing_measurements"]
+
+    result = {
         "report_key": report_key,
         "schema": sanitize_value(report.get("schema")),
         "status": status,
@@ -2670,18 +2799,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         "missing_measurements": report_missing,
         "canary_already_staged": bool(activation_follow_up.get("canary_already_staged")),
         "canary_already_applied": bool(activation_follow_up.get("canary_already_applied")),
-        "duplicate_suppression": (
-            sanitize_value(
-                activation_follow_up.get("duplicate_suppression")
-                if isinstance(activation_follow_up.get("duplicate_suppression"), dict)
-                else report.get("duplicate_suppression")
-            )
-            if (
-                isinstance(activation_follow_up.get("duplicate_suppression"), dict)
-                or isinstance(report.get("duplicate_suppression"), dict)
-            )
-            else {}
-        ),
+        "duplicate_suppression": duplicate_suppression,
         "decision": sanitize_value(report.get("decision") or summary.get("decision")) if is_policy_decision or is_activation_evidence else None,
         "graduation_decision": sanitize_value(report.get("graduation_decision") or summary.get("graduation_decision"))
         if is_policy_decision or is_activation_evidence
@@ -2706,6 +2824,9 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
             "absolute_paths_included": False,
         },
     }
+    if source_traffic_drill is not None:
+        result["source_traffic_drill"] = source_traffic_drill
+    return result
 
 
 def _crunch_policy_decision_has_measured_evidence(report: dict[str, Any]) -> bool:
