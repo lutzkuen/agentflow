@@ -10558,6 +10558,131 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, rendered)
 
+    def test_resolved_activation_feedback_pass_diagnostics_are_suppressed(self):
+        log_lines = [
+            (
+                "Tester verdict: PASS for the issue-specific acceptance metric. "
+                "request_id=req-pass-secret path=/tmp/private-pass.log"
+            ),
+            (
+                "Tester verdict: PASS for the issue-specific acceptance metric. "
+                "session_id=session-pass-secret"
+            ),
+            (
+                "Tester verdict: PASS. The configured tester sub-agent could not be invoked "
+                "because codex/claude were unavailable on PATH, so verification was performed directly."
+            ),
+            (
+                "Tester verdict: PASS. The configured tester sub-agent could not be invoked "
+                "because codex/claude were unavailable on PATH, so verification was performed directly."
+            ),
+            "Reason: live service deploy failed after development landing",
+        ]
+
+        plan = build_research_plan(
+            issues=[],
+            log_sources=log_lines,
+            threshold=1,
+            now=NOW,
+        )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        reasons = {item["reason"] for item in diagnostics}
+        self.assertIn("pass-for-the-issue-specific-acceptance-metric", reasons)
+        self.assertIn("pass.-the-configured-tester-sub-agent-could", reasons)
+        self.assertIn("live-service-deploy-failed-after-development", reasons)
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        pass_entries = [
+            entry
+            for entry in ledger["entries"]
+            if entry.get("diagnostic_class") == "resolved-activation-feedback-pass-diagnostic"
+        ]
+        self.assertEqual(len(pass_entries), 2)
+        for entry in pass_entries:
+            self.assertEqual(entry["lever"], "activation-feedback")
+            self.assertEqual(entry["local_action_family"], "activation-feedback")
+            self.assertEqual(entry["current_status"], "suppressed")
+            self.assertEqual(entry["state"], "suppressed")
+            self.assertEqual(entry["issue_worthy_status"], "suppressed")
+            self.assertEqual(entry["review_status"], "resolved-to-suppressed-pass-diagnostic")
+            self.assertEqual(entry["next_action"], "suppress-resolved-activation-feedback-diagnostic")
+            self.assertEqual(
+                entry["keep_blocked_reason"],
+                "resolved-activation-feedback-pass-diagnostic-suppressed",
+            )
+            self.assertTrue(entry["diagnostic_fingerprint"].startswith("agentflow.repeated-diagnostic.pass"))
+            self.assertTrue(entry["durable_action_ledger_entry"])
+            self.assertTrue(entry["activation_feedback_diagnostic_classification"]["privacy"]["metadata_only"])
+            self.assertTrue(entry["privacy"]["metadata_only"])
+            self.assertTrue(entry["privacy"]["aggregate_only"])
+            self.assertFalse(entry["privacy"]["request_ids_included"])
+            self.assertFalse(entry["privacy"]["session_ids_included"])
+            self.assertFalse(entry["privacy"]["absolute_paths_included"])
+
+        queue = plan["evidence"]["stats_summary"]["local_activation_next_action_queue"]
+        pass_actions = [
+            action
+            for action in queue["successor_actions"]
+            if action.get("diagnostic_class") == "resolved-activation-feedback-pass-diagnostic"
+        ]
+        self.assertEqual(len(pass_actions), 2)
+        for action in pass_actions:
+            self.assertEqual(action["successor_status"], "suppress-duplicate")
+            self.assertEqual(action["issue_worthy_status"], "suppressed")
+            self.assertEqual(action["recommended_next_action"], "suppress-resolved-activation-feedback-diagnostic")
+
+        deploy_entries = [
+            entry
+            for entry in ledger["entries"]
+            if entry.get("diagnostic_class") == "live-service-deploy-failed-after-development"
+        ]
+        self.assertEqual(len(deploy_entries), 1)
+        self.assertEqual(deploy_entries[0]["current_status"], "keep-blocked")
+        self.assertEqual(
+            deploy_entries[0]["next_action"],
+            "record-live-service-deploy-failure-and-wait-for-shell-guard-health",
+        )
+
+        created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
+        self.assertFalse(any("pass for the issue specific acceptance metric" in title for title in created_titles))
+        self.assertFalse(any("configured tester sub agent" in title for title in created_titles))
+        self.assertFalse(any("live service deploy failed after development" in title for title in created_titles))
+
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        suppressed_classes = {item.get("diagnostic_class") for item in suppression["suppressed"]}
+        self.assertIn("resolved-activation-feedback-pass-diagnostic", suppressed_classes)
+        self.assertIn("live-service-deploy-failed-after-development", suppressed_classes)
+        self.assertGreaterEqual(suppression["activation_feedback_keep_blocked_suppressed_count"], 3)
+
+        repeat_plan = build_research_plan(
+            issues=[],
+            log_sources=log_lines,
+            threshold=1,
+            now=NOW,
+        )
+        repeat_pass_entries = [
+            entry
+            for entry in repeat_plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]["entries"]
+            if entry.get("diagnostic_class") == "resolved-activation-feedback-pass-diagnostic"
+        ]
+        self.assertEqual(
+            {entry["diagnostic_fingerprint"] for entry in repeat_pass_entries},
+            {entry["diagnostic_fingerprint"] for entry in pass_entries},
+        )
+        self.assertEqual(
+            {entry["fingerprint"] for entry in repeat_pass_entries},
+            {entry["fingerprint"] for entry in pass_entries},
+        )
+
+        rendered = json.dumps(plan, sort_keys=True)
+        for secret in (
+            "req-pass-secret",
+            "session-pass-secret",
+            "/tmp/private-pass.log",
+        ):
+            self.assertNotIn(secret, rendered)
+
     def test_unclassified_canary_cohort_skip_is_reclassified(self):
         with TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "run.log"

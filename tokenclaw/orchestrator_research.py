@@ -242,6 +242,29 @@ _PASS_DIAGNOSTIC_REASONS = {
     "promotion-thresholds-met",
 }
 
+_RESOLVED_ACTIVATION_FEEDBACK_PASS_DIAGNOSTIC_CLASS = "resolved-activation-feedback-pass-diagnostic"
+_RESOLVED_ACTIVATION_FEEDBACK_PASS_KEEP_BLOCKED_REASON = (
+    "resolved-activation-feedback-pass-diagnostic-suppressed"
+)
+_RESOLVED_ACTIVATION_FEEDBACK_PASS_NEXT_ACTION = (
+    "suppress-resolved-activation-feedback-diagnostic"
+)
+
+
+def _is_resolved_pass_diagnostic(reason: Any, diagnostic_class: Any = None) -> bool:
+    reason_text = _normal_diagnostic_token(reason)
+    class_text = _normal_diagnostic_token(diagnostic_class)
+    for text in {reason_text, class_text}:
+        if not text:
+            continue
+        if text in _PASS_DIAGNOSTIC_REASONS:
+            return True
+        if text.startswith("pass-") and "verified-tokenclaw-port" not in text and "verified-agentflow-port" not in text:
+            return True
+        if text.endswith("-passed"):
+            return True
+    return False
+
 _DIAGNOSTIC_TAXONOMY: tuple[dict[str, Any], ...] = (
     {
         "class": "safety-stop",
@@ -1102,7 +1125,7 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
     taxonomy = _diagnostic_taxonomy(diagnostic_class) or _diagnostic_taxonomy(reason)
     if taxonomy is not None:
         diagnostic_class = str(taxonomy["class"])
-    if not reason or reason in _PASS_DIAGNOSTIC_REASONS or diagnostic_class in _PASS_DIAGNOSTIC_REASONS:
+    if not reason:
         return None
 
     lifecycle_context = diagnostic.get("lifecycle_context") if isinstance(diagnostic.get("lifecycle_context"), dict) else {}
@@ -1147,7 +1170,37 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
     if diagnostic_class:
         stage["privacy"] = _candidate_privacy()
 
-    if "missing-anthropic-canary-lifecycle-evidence" in text:
+    if _is_resolved_pass_diagnostic(reason, diagnostic_class):
+        pass_reason = reason or diagnostic_class or "pass"
+        stage.update(
+            {
+                "lever": "activation-feedback",
+                "local_action_family": "activation-feedback",
+                "state": "suppressed",
+                "cohort_bucket": f"activation-feedback:{pass_reason}",
+                "fingerprint_cohort_bucket": f"activation-feedback:{pass_reason}",
+                "next_action": _RESOLVED_ACTIVATION_FEEDBACK_PASS_NEXT_ACTION,
+                "review_status": "resolved-to-suppressed-pass-diagnostic",
+                "issue_worthy_status": "suppressed",
+                "keep_blocked_reason": _RESOLVED_ACTIVATION_FEEDBACK_PASS_KEEP_BLOCKED_REASON,
+                "next_state": "suppressed",
+                "next_state_reason": _RESOLVED_ACTIVATION_FEEDBACK_PASS_KEEP_BLOCKED_REASON,
+                "needed_resolution": ["new_sanitized_evidence"],
+                "durable_action_ledger_entry": True,
+                "diagnostic_class": _RESOLVED_ACTIVATION_FEEDBACK_PASS_DIAGNOSTIC_CLASS,
+                "diagnostic_reason": pass_reason,
+                "diagnostic_fingerprint": _diagnostic_fingerprint(pass_reason),
+                "activation_feedback_diagnostic_classification": {
+                    "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+                    "status": "resolved-pass-diagnostic-suppressed",
+                    "decision": "suppress",
+                    "reason": _RESOLVED_ACTIVATION_FEEDBACK_PASS_KEEP_BLOCKED_REASON,
+                    "next_action": _RESOLVED_ACTIVATION_FEEDBACK_PASS_NEXT_ACTION,
+                    "privacy": _candidate_privacy(),
+                },
+            }
+        )
+    elif "missing-anthropic-canary-lifecycle-evidence" in text:
         stage.update(
             {
                 "lever": "routing",
@@ -1527,6 +1580,7 @@ def _activation_feedback_blocker_review_suppression(diagnostic: dict[str, Any]) 
         "missing-dependency-evidence",
         "no-local-representation",
         "pass-verified-tokenclaw-port",
+        _RESOLVED_ACTIVATION_FEEDBACK_PASS_DIAGNOSTIC_CLASS,
         "stale-evidence",
     }:
         return None
@@ -5210,6 +5264,8 @@ def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
         return "staged"
     if state in {"retired-no-repeat", "retired-stale-no-traffic"}:
         return "superseded"
+    if state == "suppressed":
+        return "suppressed"
     if state in {"keep-blocked", "retry-later", "superseded"}:
         return state
     if _to_int(stage.get("safety_stopped_count")) > 0 or any("safety" in blocker for blocker in blockers):
@@ -5923,6 +5979,8 @@ def _successor_action_status(entry: dict[str, Any]) -> str:
     issue_status = str(entry.get("issue_worthy_status") or "")
     if state == "retired-stale-no-traffic":
         return "retired-stale-no-traffic"
+    if current_status == "suppressed" or state == "suppressed" or issue_status == "suppressed":
+        return "suppress-duplicate"
     if duplicate_status == "suppressed":
         if current_status == "full-rollout" or entry.get("measured_full_rollout_activation"):
             return "keep-current-rule"
@@ -8159,7 +8217,7 @@ def _queue_adjusted_rank_bucket(entry: dict[str, Any]) -> int:
     successor_status = str(entry.get("successor_status") or "").strip()
     issue_status = str(entry.get("issue_worthy_status") or "").strip()
     freshness_state = str(entry.get("freshness_state") or _queue_freshness_state(entry))
-    if status in {"superseded"} or state in {"no-op", "retired-no-repeat", "superseded"}:
+    if status in {"superseded", "suppressed"} or state in {"no-op", "retired-no-repeat", "superseded", "suppressed"}:
         return 5
     if _to_float(entry.get("realized_savings_usd")) > 0:
         return 0
