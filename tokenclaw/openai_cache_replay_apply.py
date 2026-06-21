@@ -17,7 +17,11 @@ from tokenclaw.openai_cache_replay_impact import build_openai_cache_replay_impac
 from tokenclaw.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
 from tokenclaw.openai_cache_replay_report import _as_float, _as_int, _json_obj
 from tokenclaw.pattern_rollout import PATTERN_ROLLOUT_SCHEMA
-from tokenclaw.request_shape_rollups import build_request_shape_rollups_report
+from tokenclaw.request_shape_rollups import (
+    build_request_shape_cache_replay_evidence_report,
+    build_request_shape_cache_replay_policy_decision_report,
+    build_request_shape_rollups_report,
+)
 from tokenclaw.store import utc_now
 
 
@@ -25,6 +29,7 @@ SCHEMA = "agentflow.openai_cache_replay_apply.v1"
 PLAN_SCHEMA = "agentflow.openai_cache_replay_apply_plan.v1"
 POLICY_SCHEMA = "agentflow.openai_cache_replay_canary_policy.v1"
 CACHE_CANARY_POLICY_FILE = "cache_canary_policy.yaml"
+CACHE_RULES_FILE = "cache_rules.yaml"
 
 _READY_VERDICTS = {"widen", "promote", "ready"}
 _PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
@@ -66,6 +71,114 @@ def _write_policy_file(path: Path, text: str) -> str | None:
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
     return backup_path
+
+
+def _read_policy_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _request_shape_cache_replay_rollback_action(
+    store_obj: Any,
+    *,
+    rules_path: Path,
+    limit: int,
+) -> dict[str, Any] | None:
+    evidence = build_request_shape_cache_replay_evidence_report(
+        store_obj,
+        rules_path=rules_path,
+        limit=limit,
+    )
+    decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+    top = decision.get("top_decision") if isinstance(decision.get("top_decision"), dict) else {}
+    patch = top.get("local_policy_patch") if isinstance(top.get("local_policy_patch"), dict) else {}
+    if not bool(top.get("rollback_required")) or not patch:
+        return None
+    if patch.get("target_local_rule_file") != CACHE_RULES_FILE:
+        return None
+    if top.get("target_local_policy_section") != "cache.pattern_rules":
+        return None
+    rules = [rule for rule in patch.get("pattern_rules") or [] if isinstance(rule, dict)]
+    if not rules:
+        return None
+    return {
+        "schema": "agentflow.openai_cache_replay_file_backed_rollback_action.v1",
+        "source_schema": decision.get("schema"),
+        "decision_id": top.get("decision_id"),
+        "decision": top.get("decision"),
+        "promotion_readiness": top.get("promotion_readiness"),
+        "next_action": top.get("next_action") or decision.get("next_action"),
+        "reason": top.get("reason") or decision.get("reason"),
+        "reason_codes": top.get("reason_codes") or decision.get("reason_codes") or [],
+        "target_local_rule_file": CACHE_RULES_FILE,
+        "target_local_policy_section": "cache.pattern_rules",
+        "source_canary_policy_file": patch.get("source_canary_policy_file") or CACHE_CANARY_POLICY_FILE,
+        "local_policy_patch": {
+            "schema": patch.get("schema"),
+            "patch_type": patch.get("patch_type"),
+            "target_local_rule_file": CACHE_RULES_FILE,
+            "source_canary_policy_file": patch.get("source_canary_policy_file") or CACHE_CANARY_POLICY_FILE,
+            "pattern_rules": rules,
+            "metadata_only": True,
+            "aggregate_only": True,
+            "rules_path_included": False,
+        },
+        "duplicate_suppression": top.get("duplicate_suppression") or decision.get("duplicate_suppression") or {},
+        "rollback_metadata": top.get("rollback_metadata") or {},
+        "privacy": top.get("privacy") or decision.get("privacy") or {},
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _apply_cache_rules_disable_patch(
+    policy: dict[str, Any],
+    patch: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    updated = dict(policy)
+    existing_rules = updated.get("pattern_rules")
+    if not isinstance(existing_rules, list):
+        existing_rules = []
+    updated_rules: list[Any] = []
+    patch_rules = [rule for rule in patch.get("pattern_rules") or [] if isinstance(rule, dict)]
+    by_id = {str(rule.get("id")): rule for rule in patch_rules if rule.get("id")}
+    changed: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+
+    for item in existing_rules:
+        if not isinstance(item, dict):
+            updated_rules.append(item)
+            continue
+        rule_id = str(item.get("id") or item.get("rule_id") or "")
+        patch_rule = by_id.get(rule_id)
+        if not patch_rule:
+            updated_rules.append(item)
+            continue
+        next_item = dict(item)
+        next_item["enabled"] = bool(patch_rule.get("enabled"))
+        if patch_rule.get("disabled_reason") is not None:
+            next_item["disabled_reason"] = str(patch_rule.get("disabled_reason"))
+        updated_rules.append(next_item)
+        changed.append({
+            "id": rule_id,
+            "enabled": next_item["enabled"],
+            "disabled_reason": next_item.get("disabled_reason"),
+        })
+
+    changed_ids = {item["id"] for item in changed}
+    for patch_rule in patch_rules:
+        rule_id = str(patch_rule.get("id") or "")
+        if rule_id and rule_id not in changed_ids:
+            missing.append({
+                "id": rule_id,
+                "reason": "cache-rule-not-found",
+            })
+
+    updated["pattern_rules"] = updated_rules
+    return updated, changed, missing
 
 
 def _read_openai_cache_rows(store_obj: Any, limit: int) -> list[dict[str, Any]]:
@@ -594,6 +707,7 @@ def _safety_stop_count(dry_run: dict[str, Any]) -> int:
 def build_openai_cache_replay_apply_plan(
     store_obj: Any,
     *,
+    config_dir: str | Path | None = None,
     opportunity_limit: int = 1000,
     impact_limit: int = 500,
     min_observed_savings_usd: float = 0.0,
@@ -830,10 +944,23 @@ def build_openai_cache_replay_apply_plan(
     canary_summary = canary_dry_run.get("summary") if isinstance(canary_dry_run.get("summary"), dict) else {}
     projected_hits = sum(_as_int(item.get("projected_hits")) for item in accepted)
     projected_savings = sum(_as_float(item.get("projected_savings_usd")) for item in accepted)
+    config_path = Path(config_dir).expanduser() if config_dir is not None else Path.cwd()
+    rollback_action = _request_shape_cache_replay_rollback_action(
+        store_obj,
+        rules_path=config_path / CACHE_CANARY_POLICY_FILE,
+        limit=max(opportunity_limit, impact_limit),
+    )
+    rollback_actions = [rollback_action] if rollback_action else []
+    rollback_patch_count = sum(
+        len(((action.get("local_policy_patch") or {}).get("pattern_rules") or []))
+        for action in rollback_actions
+        if isinstance(action, dict)
+    )
+    ok = bool(accepted or rollback_actions)
     return {
         "schema": PLAN_SCHEMA,
         "generated_at": utc_now(),
-        "ok": bool(accepted),
+        "ok": ok,
         "read_only": True,
         "wrote_local_files": False,
         "provider_calls_made": False,
@@ -843,6 +970,8 @@ def build_openai_cache_replay_apply_plan(
             "accepted_candidate_count": len(accepted),
             "skipped_candidate_count": len(skipped),
             "policy_rule_count": len(rules),
+            "rollback_action_count": len(rollback_actions),
+            "rollback_patch_count": rollback_patch_count,
             "holdout_fraction": holdout,
             "canary_fraction": round(1.0 - holdout, 6),
             "min_observed_savings_usd": float(min_observed_savings_usd),
@@ -897,6 +1026,7 @@ def build_openai_cache_replay_apply_plan(
         },
         "accepted_candidates": accepted,
         "skipped_candidates": skipped[:50],
+        "rollback_actions": rollback_actions,
         "policy": policy,
         "privacy": {
             "metadata_only": True,
@@ -945,23 +1075,57 @@ def apply_openai_cache_replay_candidates(
     holdout_fraction: float = 0.20,
     max_candidates: int = 10,
 ) -> dict[str, Any]:
+    config_path = Path(config_dir).expanduser()
     plan = build_openai_cache_replay_apply_plan(
         store_obj,
+        config_dir=config_path,
         opportunity_limit=opportunity_limit,
         impact_limit=impact_limit,
         min_observed_savings_usd=min_observed_savings_usd,
         holdout_fraction=holdout_fraction,
         max_candidates=max_candidates,
     )
-    config_path = Path(config_dir).expanduser()
     path = config_path / CACHE_CANARY_POLICY_FILE
     policy = plan.get("policy") if isinstance(plan.get("policy"), dict) else {}
     text = yaml.safe_dump(policy, sort_keys=False)
     old_text = path.read_text(encoding="utf-8") if path.exists() else None
     changed = old_text != text
     backup_path = None
-    if plan.get("ok") and changed and not dry_run:
+    canary_ok = bool(plan.get("accepted_candidates"))
+    if canary_ok and changed and not dry_run:
         backup_path = _write_policy_file(path, text)
+
+    rollback_files: list[dict[str, Any]] = []
+    rollback_applied: list[dict[str, Any]] = []
+    rollback_missing: list[dict[str, Any]] = []
+    for action in plan.get("rollback_actions") or []:
+        if not isinstance(action, dict):
+            continue
+        patch = action.get("local_policy_patch") if isinstance(action.get("local_policy_patch"), dict) else {}
+        rules_path = config_path / CACHE_RULES_FILE
+        old_rules_text = rules_path.read_text(encoding="utf-8") if rules_path.exists() else None
+        rules_policy = _read_policy_yaml(rules_path)
+        updated_policy, changed_rules, missing_rules = _apply_cache_rules_disable_patch(rules_policy, patch)
+        new_rules_text = yaml.safe_dump(updated_policy, sort_keys=False)
+        rules_changed = bool(changed_rules) and old_rules_text != new_rules_text
+        rules_backup_path = None
+        if rules_changed and not dry_run:
+            rules_backup_path = _write_policy_file(rules_path, new_rules_text)
+        rollback_applied.extend(changed_rules)
+        rollback_missing.extend(missing_rules)
+        rollback_files.append({
+            "section": "cache.pattern_rules",
+            "path": str(rules_path),
+            "changed": rules_changed,
+            "backup_path": rules_backup_path,
+            "sha256_before": _sha256_text(old_rules_text) if old_rules_text is not None else None,
+            "sha256_after": _sha256_text(new_rules_text) if changed_rules else None,
+            "bytes_after": len(new_rules_text.encode("utf-8")) if changed_rules else 0,
+            "reason": action.get("reason") or "rollback-cache-replay-rule",
+            "target_local_rule_file": CACHE_RULES_FILE,
+            "target_local_policy_section": "cache.pattern_rules",
+            "dry_run": bool(dry_run),
+        })
 
     result = {
         "schema": SCHEMA,
@@ -973,17 +1137,20 @@ def apply_openai_cache_replay_candidates(
         "summary": plan.get("summary") or {},
         "accepted_candidates": plan.get("accepted_candidates") or [],
         "skipped_candidates": plan.get("skipped_candidates") or [],
+        "rollback_actions": plan.get("rollback_actions") or [],
+        "rollback_applied_rules": rollback_applied,
+        "rollback_missing_rules": rollback_missing,
         "files": [{
             "section": "cache",
             "path": str(path),
-            "changed": bool(changed and plan.get("ok")),
+            "changed": bool(changed and canary_ok),
             "backup_path": backup_path,
             "sha256_before": _sha256_text(old_text) if old_text is not None else None,
-            "sha256_after": _sha256_text(text) if plan.get("ok") else None,
-            "bytes_after": len(text.encode("utf-8")) if plan.get("ok") else 0,
-            "reason": None if plan.get("ok") else "no-ready-openai-cache-replay-candidates",
-        }],
-        "wrote_policy_files": bool(plan.get("ok") and changed and not dry_run),
+            "sha256_after": _sha256_text(text) if canary_ok else None,
+            "bytes_after": len(text.encode("utf-8")) if canary_ok else 0,
+            "reason": None if canary_ok else "no-ready-openai-cache-replay-candidates",
+        }, *rollback_files],
+        "wrote_policy_files": bool((canary_ok and changed and not dry_run) or any(item.get("changed") for item in rollback_files if not dry_run)),
         "provider_calls_made": False,
         "managed_server_calls_made": False,
         "privacy": plan.get("privacy") or {},

@@ -24,6 +24,10 @@ from tokenclaw.openai_cache_replay_impact import build_openai_cache_replay_impac
 from tokenclaw.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
 from tokenclaw.openai_cache_replay_report import build_openai_cache_replay_report
 from tokenclaw.provider_adoption import capture_provider_tool_adoption
+from tokenclaw.request_shape_rollups import (
+    build_request_shape_cache_replay_evidence_report,
+    build_request_shape_cache_replay_policy_decision_report,
+)
 from tokenclaw.stats import (
     stats_openai_cache_replay_impact,
     stats_openai_cache_replay_readiness,
@@ -2171,6 +2175,200 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 self.assertEqual(str(reloaded.CACHE_CANARY_RULES_PATH), str(policy_path))
         finally:
             _reload_cache_module_for_test()
+
+    def test_openai_cache_replay_apply_rolls_back_stale_policy_decision_to_cache_rules(self) -> None:
+        config_dir = Path(self.tmpdir.name) / "rollback-config"
+        config_dir.mkdir()
+        canary_path = config_dir / "cache_canary_policy.yaml"
+        shape = {
+            "provider_family": "openai",
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "category": "chat",
+            "workflow_phase": "chat",
+            "stream": False,
+            "has_tools": False,
+            "text_bucket": "2k_8k_chars",
+            "token_bucket": "500_2k_tokens",
+        }
+        canary_path.write_text(
+            yaml.safe_dump(
+                {
+                    "schema": "agentflow.openai_cache_replay_canary_policy.v1",
+                    "policy_source": "local-manual",
+                    "pattern_rules": [
+                        {
+                            "id": "local-openai-cache-replay-canary-stale",
+                            "enabled": True,
+                            "policy_source": "local-manual",
+                            "target_cache_policy": {
+                                "schema": "agentflow.request_shape_cache_replay_target_policy.v1",
+                                "policy_section": "cache.pattern_rules",
+                                "target_local_policy": "cache_rules",
+                                "target_local_rule_file": "cache_rules.yaml",
+                                "policy_source": "local-manual",
+                                "local_file_backed": True,
+                                "managed_dependency": "optional",
+                                "rules_path_included": False,
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                            },
+                            "conditions": {
+                                "pattern_hashes": ["sha256:*"],
+                                **shape,
+                                "replayability_levels": ["features_only", "local-exact-response"],
+                            },
+                            "action": {
+                                "type": "exact_cache_pattern",
+                                "allow_tool_calls": False,
+                                "safe_invalidation": False,
+                                "streaming": False,
+                                "scope": "session",
+                                "ttl_seconds": 3600,
+                            },
+                            "rollout": {
+                                "schema": "agentflow.pattern_policy_rollout.v1",
+                                "recommendation_mode": "openai-cache-replay-request-shape-canary",
+                                "canary_enabled": True,
+                                "canary_fraction": 0.1,
+                                "holdout_fraction": 0.1,
+                                "canary_salt": "local-openai-cache-replay-canary-stale",
+                                "canary_unit": "request_fingerprint",
+                            },
+                            "graduation": {
+                                "schema": "agentflow.request_shape_cache_replay_shape_activation.v1",
+                                "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                                "source_reason": "replay-ready-exact-non-tool-shape",
+                                **shape,
+                                "projected_hits": 35,
+                                "projected_savings_usd": 0.075373,
+                                "sample_count": 36,
+                                "aggregate_only": True,
+                                "staged_at": "2026-06-15T00:00:00+00:00",
+                            },
+                        }
+                    ],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        evidence = build_request_shape_cache_replay_evidence_report(
+            self.store,
+            rules_path=canary_path,
+            limit=20,
+        )
+        decision = build_request_shape_cache_replay_policy_decision_report(evidence)
+        self.assertEqual(decision["decision"], "rollback")
+        patch = decision["top_decision"]["local_policy_patch"]
+        rollback_rule_id = patch["pattern_rules"][0]["id"]
+        self.assertEqual(patch["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(decision["top_decision"]["target_local_policy_section"], "cache.pattern_rules")
+        self.assertTrue(decision["top_decision"]["duplicate_suppression"]["suppresses_generic_replay_ready_issue"])
+        self.assertTrue(decision["top_decision"]["duplicate_suppression"]["suppresses_generic_cache_replay_activation_issue"])
+
+        cache_rules_path = config_dir / "cache_rules.yaml"
+        cache_rules_path.write_text(
+            yaml.safe_dump(
+                {
+                    "exact_cache": {"enabled": True, "cache_tool_calls": False},
+                    "semantic_cache": {"enabled": False, "threshold": 0.95},
+                    "pattern_rules": [
+                        {
+                            "id": rollback_rule_id,
+                            "enabled": True,
+                            "policy_source": "local-manual",
+                            "description": "Promoted OpenAI Responses exact-cache replay rule.",
+                            "conditions": {
+                                "pattern_hashes": ["sha256:*"],
+                                **shape,
+                                "replayability_levels": ["features_only", "local-exact-response"],
+                            },
+                            "action": {
+                                "type": "exact_cache_pattern",
+                                "allow_tool_calls": False,
+                                "safe_invalidation": False,
+                                "streaming": False,
+                                "scope": "session",
+                                "ttl_seconds": 3600,
+                            },
+                            "graduation": {
+                                "schema": "agentflow.request_shape_cache_replay_policy_graduation.v1",
+                                "source_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                            },
+                        }
+                    ],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        before = cache_rules_path.read_text(encoding="utf-8")
+
+        dry_run_out = io.StringIO()
+        dry_run_code = cli.openai_cache_replay_apply_cli(
+            [
+                "--db",
+                self.db_path,
+                "--config-dir",
+                str(config_dir),
+                "--opportunity-limit",
+                "20",
+                "--impact-limit",
+                "20",
+                "--dry-run",
+            ],
+            stdout=dry_run_out,
+        )
+        self.assertEqual(dry_run_code, 0)
+        dry_run = json.loads(dry_run_out.getvalue())
+        self.assertTrue(dry_run["dry_run"])
+        self.assertFalse(dry_run["wrote_policy_files"])
+        self.assertEqual(cache_rules_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(dry_run["summary"]["rollback_action_count"], 1)
+        self.assertEqual(dry_run["summary"]["rollback_patch_count"], 1)
+        rollback_action = dry_run["rollback_actions"][0]
+        self.assertEqual(rollback_action["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(rollback_action["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(rollback_action["local_policy_patch"]["pattern_rules"][0]["id"], rollback_rule_id)
+        self.assertEqual(
+            rollback_action["local_policy_patch"]["pattern_rules"][0]["disabled_reason"],
+            "stale-cache-replay-evidence",
+        )
+        self.assertTrue(rollback_action["duplicate_suppression"]["suppresses_generic_replay_ready_issue"])
+        self.assertTrue(rollback_action["duplicate_suppression"]["suppresses_generic_cache_replay_activation_issue"])
+
+        apply_out = io.StringIO()
+        apply_code = cli.openai_cache_replay_apply_cli(
+            [
+                "--db",
+                self.db_path,
+                "--config-dir",
+                str(config_dir),
+                "--opportunity-limit",
+                "20",
+                "--impact-limit",
+                "20",
+            ],
+            stdout=apply_out,
+        )
+        self.assertEqual(apply_code, 0)
+        applied = json.loads(apply_out.getvalue())
+        self.assertTrue(applied["wrote_policy_files"])
+        self.assertEqual(applied["rollback_applied_rules"][0]["id"], rollback_rule_id)
+        self.assertEqual(applied["rollback_applied_rules"][0]["disabled_reason"], "stale-cache-replay-evidence")
+
+        cache_rules = yaml.safe_load(cache_rules_path.read_text(encoding="utf-8"))
+        rule = cache_rules["pattern_rules"][0]
+        self.assertEqual(rule["id"], rollback_rule_id)
+        self.assertFalse(rule["enabled"])
+        self.assertEqual(rule["disabled_reason"], "stale-cache-replay-evidence")
+        self.assertEqual(rule["policy_source"], "local-manual")
+        self.assertIn("graduation", rule)
+        rendered = apply_out.getvalue()
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("raw-cache-key-secret", rendered)
+        self.assertTrue(applied["privacy"]["metadata_only"])
 
     def test_openai_cache_replay_apply_stages_request_shape_canaries(self) -> None:
         pattern_hash = "sha256:" + "f" * 64
