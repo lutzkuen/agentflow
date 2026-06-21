@@ -212,6 +212,34 @@ def _rollup_freshness_row(
     }
 
 
+def _crunch_dry_run_row(conn: Any) -> dict[str, Any]:
+    rollup_count = _as_int(_safe_scalar(conn, "select count(*) from request_shape_rollups"))
+    snapshot_count = _as_int(_safe_scalar(conn, "select count(*) from request_shape_rollup_snapshots"))
+    rows_considered = rollup_count if rollup_count > 0 else snapshot_count
+    blocked = rows_considered <= 0
+    return {
+        "kind": "crunch-dry-run",
+        "status": "blocked" if blocked else "clear",
+        "blocker_code": "zero-row-crunch-dry-run" if blocked else None,
+        "why": "crunch dry-run has zero rehydrated request-shape rows"
+        if blocked
+        else f"crunch dry-run can rehydrate {rows_considered} persisted request-shape evidence rows",
+        "operator_action": "Refresh request-shape rollups and rerun repeated-context crunch dry-run ranking."
+        if blocked
+        else "Crunch dry-run source rows are present.",
+        "command": "tokenclaw request-shape-rollups --dry-run" if blocked else "tokenclaw request-shape-crunch-canary-stage",
+        "metrics": {
+            "local_action_family": "crunch",
+            "target_local_rule_file": "crunch_rules.yaml",
+            "rows_considered": rows_considered,
+            "request_shape_rollup_count": rollup_count,
+            "request_shape_rollup_snapshot_count": snapshot_count,
+            "zero_row_dry_run": blocked,
+        },
+        "privacy": _metadata_privacy(),
+    }
+
+
 def _activation_queue_policy_rows(activation_burndown: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(activation_burndown, dict):
         return []
@@ -324,6 +352,7 @@ def build_savings_loop_bottlenecks_report(
         ),
         _legacy_gap_row(canonical_db=canonical_db, legacy_db=legacy_db),
         _rollup_freshness_row(conn, now=now_dt, max_age_hours=max(0.0, float(rollup_max_age_hours))),
+        _crunch_dry_run_row(conn),
     ]
     policy_rows = _cache_policy_rows(
         store_obj,
@@ -357,6 +386,7 @@ def build_savings_loop_bottlenecks_report(
     source_metrics = next((row.get("metrics") for row in rows if row.get("kind") == "source-traffic"), {}) or {}
     legacy_metrics = next((row.get("metrics") for row in rows if row.get("kind") == "stranded-legacy-db"), {}) or {}
     rollup_metrics = next((row.get("metrics") for row in rows if row.get("kind") == "rollup-freshness"), {}) or {}
+    crunch_metrics = next((row.get("metrics") for row in rows if row.get("kind") == "crunch-dry-run"), {}) or {}
     stale_policy_count = sum(1 for row in rows if row.get("kind") == "stale-policy-rule" and row.get("status") == "blocked")
     return {
         "schema": SAVINGS_LOOP_BOTTLENECKS_SCHEMA,
@@ -378,6 +408,8 @@ def build_savings_loop_bottlenecks_report(
             "request_shape_rollup_count": _as_int(rollup_metrics.get("request_shape_rollup_count")),
             "request_shape_rollup_snapshot_count": _as_int(rollup_metrics.get("request_shape_rollup_snapshot_count")),
             "newest_rollup_age_hours": rollup_metrics.get("newest_evidence_age_hours"),
+            "crunch_dry_run_rows_considered": _as_int(crunch_metrics.get("rows_considered")),
+            "zero_row_crunch_dry_run": bool(crunch_metrics.get("zero_row_dry_run")),
             "stale_policy_rule_count": stale_policy_count,
         },
         "rows": rows,

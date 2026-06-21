@@ -110,6 +110,131 @@ def _metadata_only_privacy() -> dict[str, bool]:
     }
 
 
+def _crunch_canary_lifecycle_for_stats(crunch: dict[str, Any]) -> dict[str, Any] | None:
+    for key in (
+        "request_shape_repeated_context_canary",
+        "repeated_context_crunch_canary",
+        "request_shape_crunch_canary",
+        "crunch_canary",
+    ):
+        meta = crunch.get(key)
+        if isinstance(meta, dict):
+            status = public_label(meta.get("status") or meta.get("lifecycle") or meta.get("cohort"), "unknown")
+            cohort = public_label(meta.get("cohort") or status, "unknown")
+            if status in {"canary-applied", "canary_applied"}:
+                status = "applied"
+            elif status in {"canary-holdout", "canary_holdout"}:
+                status = "holdout"
+            return {
+                "status": status,
+                "cohort": cohort.replace("-", "_"),
+                "policy_id": public_label(meta.get("policy_id"), "unknown"),
+                "cohort_id": public_label(meta.get("cohort_id"), "unknown"),
+                "rule_group": public_label(meta.get("rule_group") or meta.get("candidate_rule") or "repeated-context-conservative", "repeated-context-conservative"),
+            }
+    return None
+
+
+def _crunch_canary_captured_savings(conn: Any, *, limit: int = 10_000) -> dict[str, Any]:
+    groups: dict[tuple[str, str, str], dict[str, Any]] = {}
+    try:
+        rows = conn.execute(
+            """
+            select crunch_json, cost_est_usd, cost_baseline_usd
+            from calls
+            where crunch_json is not null
+            order by created_at desc
+            limit ?
+            """,
+            (max(1, min(int(limit or 1), 50_000)),),
+        ).fetchall()
+    except Exception:
+        rows = []
+    for row in rows:
+        crunch = _json_obj(row["crunch_json"] if hasattr(row, "keys") else row[0])
+        lifecycle = _crunch_canary_lifecycle_for_stats(crunch)
+        if lifecycle is None:
+            continue
+        status = str(lifecycle.get("status") or "")
+        cohort = str(lifecycle.get("cohort") or "")
+        is_applied = status == "applied" or cohort == "canary_applied"
+        is_holdout = status == "holdout" or cohort == "canary_holdout"
+        if not (is_applied or is_holdout):
+            continue
+        key = (
+            str(lifecycle.get("policy_id") or "unknown"),
+            str(lifecycle.get("cohort_id") or "unknown"),
+            str(lifecycle.get("rule_group") or "repeated-context-conservative"),
+        )
+        group = groups.setdefault(
+            key,
+            {
+                "policy_id": key[0],
+                "cohort_id": key[1],
+                "rule_group": key[2],
+                "applied_count": 0,
+                "holdout_count": 0,
+                "applied_cost_delta_usd": 0.0,
+                "holdout_cost_delta_usd": 0.0,
+                "applied_saved_tokens": 0,
+                "holdout_saved_tokens": 0,
+            },
+        )
+        cost = _as_float(row["cost_est_usd"] if hasattr(row, "keys") else row[1])
+        baseline = _as_float(row["cost_baseline_usd"] if hasattr(row, "keys") else row[2]) or cost
+        delta = baseline - cost
+        saved_tokens = _as_int(crunch.get("tokens_saved_est") or crunch.get("saved_tokens"))
+        if is_applied:
+            group["applied_count"] += 1
+            group["applied_cost_delta_usd"] += delta
+            group["applied_saved_tokens"] += saved_tokens
+        else:
+            group["holdout_count"] += 1
+            group["holdout_cost_delta_usd"] += delta
+            group["holdout_saved_tokens"] += saved_tokens
+
+    captured_rows: list[dict[str, Any]] = []
+    for group in groups.values():
+        applied_count = _as_int(group.get("applied_count"))
+        holdout_count = _as_int(group.get("holdout_count"))
+        holdout_avg_delta = _as_float(group.get("holdout_cost_delta_usd")) / holdout_count if holdout_count else 0.0
+        captured_usd = max(0.0, _as_float(group.get("applied_cost_delta_usd")) - (holdout_avg_delta * applied_count))
+        holdout_avg_tokens = _as_int(group.get("holdout_saved_tokens")) / holdout_count if holdout_count else 0.0
+        captured_tokens = max(0, int(round(_as_int(group.get("applied_saved_tokens")) - (holdout_avg_tokens * applied_count))))
+        captured_rows.append({
+            "policy_id": group["policy_id"],
+            "cohort_id": group["cohort_id"],
+            "rule_group": group["rule_group"],
+            "status": "captured" if applied_count > 0 and holdout_count > 0 and captured_usd > 0 else "no-captured-savings",
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "captured_saved_tokens": captured_tokens,
+            "captured_saved_usd": round(captured_usd, 8),
+            "applied_cost_delta_usd": round(_as_float(group.get("applied_cost_delta_usd")), 8),
+            "holdout_cost_delta_usd": round(_as_float(group.get("holdout_cost_delta_usd")), 8),
+            "holdout_avg_cost_delta_usd": round(holdout_avg_delta, 8),
+        })
+    captured_rows.sort(
+        key=lambda item: (_as_float(item.get("captured_saved_usd")), _as_int(item.get("captured_saved_tokens"))),
+        reverse=True,
+    )
+    total_captured = sum(_as_float(row.get("captured_saved_usd")) for row in captured_rows)
+    return {
+        "schema": "tokenclaw.crunch_canary_captured_savings_stats.v1",
+        "status": "captured" if total_captured > 0 else "no-captured-savings",
+        "summary": {
+            "cohort_count": len(captured_rows),
+            "captured_cohort_count": sum(1 for row in captured_rows if row.get("status") == "captured"),
+            "applied_count": sum(_as_int(row.get("applied_count")) for row in captured_rows),
+            "holdout_count": sum(_as_int(row.get("holdout_count")) for row in captured_rows),
+            "captured_saved_tokens": sum(_as_int(row.get("captured_saved_tokens")) for row in captured_rows),
+            "captured_saved_usd": round(total_captured, 8),
+        },
+        "rows": captured_rows[:50],
+        "privacy": _metadata_only_privacy(),
+    }
+
+
 def _crunch_rule_candidate_paths() -> list[Path]:
     candidates: list[Path] = []
     env_path = os.getenv("TOKENCLAW_CRUNCH_RULES")
@@ -18333,6 +18458,9 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             provider=row["provider"],
         ) or 0
 
+    crunch_canary_captured_savings = _crunch_canary_captured_savings(conn)
+    crunch_canary_captured_summary = crunch_canary_captured_savings.get("summary", {})
+
     summary_applied_count = int(s("""
         select count(*) from calls
         where json_extract(crunch_json, '$.old_context_summarization.status') = 'applied'
@@ -18996,6 +19124,10 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "crunch_tokens_saved": int(crunch_tokens_saved),
             "crunch_savings_usd": round(crunch_savings, 6),
             "today_crunch_savings_usd": round(today_crunch_savings, 6),
+            "crunch_captured_savings_usd": round(_as_float(crunch_canary_captured_summary.get("captured_saved_usd")), 6),
+            "crunch_captured_saved_tokens": _as_int(crunch_canary_captured_summary.get("captured_saved_tokens")),
+            "crunch_captured_applied_count": _as_int(crunch_canary_captured_summary.get("applied_count")),
+            "crunch_captured_holdout_count": _as_int(crunch_canary_captured_summary.get("holdout_count")),
             "avg_crunch_ratio": round(avg_crunch_ratio, 4),
             "active_crunch_rule_coverage": active_crunch_rule_coverage,
             "old_context_summary_applied_count": summary_applied_count,
@@ -19089,6 +19221,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "today_crunch_rule_breakdown": today_crunch_rule_breakdown,
         "crunch_rule_group_breakdown": crunch_rule_group_breakdown,
         "today_crunch_rule_group_breakdown": today_crunch_rule_group_breakdown,
+        "crunch_canary_captured_savings": crunch_canary_captured_savings,
         "cache_zero_hit_blocker_ladder": cache_zero_hit_blocker_ladder,
         "cache_effectiveness": cache_effectiveness,
         "cache_replayability": cache_replayability,
@@ -25884,18 +26017,19 @@ function renderSavingsLoopBottlenecks(d){
   const sourceRows=summary.source_traffic_rows||0;
   const stranded=summary.stranded_legacy_rows||0;
   const rollups=summary.request_shape_rollup_count||0;
+  const crunchRows=summary.crunch_dry_run_rows_considered||0;
   const stalePolicies=summary.stale_policy_rule_count||0;
   const card=document.getElementById('c-savings-loop');
   if(card){
     card.textContent=status;
     document.getElementById('c-savings-loop-action').textContent=`${summary.top_blocker_code||'none'} · ${topCommand}`;
-    document.getElementById('c-savings-loop-evidence').textContent=`source ${sourceRows.toLocaleString()} · stranded ${stranded.toLocaleString()} · rollups ${rollups.toLocaleString()} · stale policies ${stalePolicies.toLocaleString()}`;
+    document.getElementById('c-savings-loop-evidence').textContent=`source ${sourceRows.toLocaleString()} · stranded ${stranded.toLocaleString()} · rollups ${rollups.toLocaleString()} · crunch rows ${crunchRows.toLocaleString()} · stale policies ${stalePolicies.toLocaleString()}`;
   }
   const target=document.getElementById('savings-loop-bottlenecks-tbody');
   if(!target)return;
   target.innerHTML=rows.map(row=>{
     const metrics=row.metrics||{};
-    const count=metrics.active_window_rows??metrics.stranded_legacy_rows??metrics.request_shape_rollup_count??metrics.stale_zero_traffic_rule_count??metrics.sample_count??'—';
+    const count=metrics.active_window_rows??metrics.stranded_legacy_rows??metrics.rows_considered??metrics.request_shape_rollup_count??metrics.stale_zero_traffic_rule_count??metrics.sample_count??'—';
     const age=metrics.newest_evidence_age_hours??metrics.age_hours??'—';
     return `<tr>
       <td><span class="badge provider">${esc(row.kind||'unknown')}</span><div class="sub">${esc(row.blocker_code||'no blocker')}</div></td>

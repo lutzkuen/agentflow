@@ -100,11 +100,14 @@ pattern_rules:
                 self.assertTrue(report["summary"]["below_activation_threshold"])
                 self.assertEqual(report["summary"]["stranded_legacy_rows"], 1)
                 self.assertEqual(report["summary"]["request_shape_rollup_count"], 0)
+                self.assertTrue(report["summary"]["zero_row_crunch_dry_run"])
+                self.assertEqual(report["summary"]["crunch_dry_run_rows_considered"], 0)
                 self.assertGreaterEqual(report["summary"]["stale_policy_rule_count"], 1)
                 blockers = {row["blocker_code"] for row in report["rows"] if row.get("blocker_code")}
                 self.assertIn("source-traffic-below-activation-threshold", blockers)
                 self.assertIn("stranded-legacy-agentflow-sqlite-evidence", blockers)
                 self.assertIn("no-request-shape-rollups", blockers)
+                self.assertIn("zero-row-crunch-dry-run", blockers)
                 self.assertIn("stale-no-canary-traffic", blockers)
                 commands = {row["command"] for row in report["rows"]}
                 self.assertIn("tokenclaw db adopt-legacy", commands)

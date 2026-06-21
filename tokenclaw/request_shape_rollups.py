@@ -50,6 +50,7 @@ CRUNCH_CANARY_APPLY_SCHEMA = "tokenclaw.request_shape_crunch_canary_apply.v1"
 CRUNCH_CANARY_APPLY_BATCH_SCHEMA = "tokenclaw.request_shape_crunch_canary_apply_batch.v1"
 CRUNCH_CANARY_LIFECYCLE_SCHEMA = "tokenclaw.request_shape_crunch_canary_lifecycle.v1"
 CRUNCH_CANARY_IMPACT_SCHEMA = "tokenclaw.request_shape_crunch_canary_impact.v1"
+CRUNCH_CAPTURED_SAVINGS_SCHEMA = "tokenclaw.request_shape_crunch_captured_savings.v1"
 CRUNCH_CANARY_IMPACT_ROWS_SCHEMA = "tokenclaw.request_shape_crunch_canary_impact_rows.v1"
 CRUNCH_CANARY_IMPACT_ROW_SCHEMA = "tokenclaw.request_shape_crunch_canary_impact_row.v1"
 CRUNCH_POLICY_DECISION_SCHEMA = "tokenclaw.request_shape_crunch_policy_decision.v1"
@@ -996,6 +997,7 @@ def _crunch_canary_lifecycle_from_meta(crunch: dict[str, Any]) -> dict[str, Any]
                 "policy_source": public_label(meta.get("policy_source"), "local-manual"),
                 "source_evidence_schema": public_label(meta.get("source_evidence_schema"), "unknown"),
                 "source_evidence_schemas": _public_label_list(meta.get("source_evidence_schemas")),
+                "rule_group": public_label(meta.get("rule_group") or meta.get("candidate_rule") or "repeated-context-conservative", "repeated-context-conservative"),
                 "staged_at": meta.get("staged_at") if isinstance(meta.get("staged_at"), str) else None,
                 "projected_saved_chars": _as_int(meta.get("projected_saved_chars")),
                 "projected_saved_tokens": _as_int(meta.get("projected_saved_tokens")),
@@ -1076,6 +1078,8 @@ def _empty_crunch_impact_cohort() -> dict[str, Any]:
         "saved_chars": 0,
         "saved_tokens": 0,
         "saved_usd": 0.0,
+        "cost_est_usd": 0.0,
+        "baseline_cost_usd": 0.0,
         "latency_ms_total": 0,
         "latency_sample_count": 0,
         "error_count": 0,
@@ -1106,6 +1110,7 @@ def _empty_crunch_impact_candidate(policy_id: str, cohort_id: str, row: dict[str
         "policy_source": public_label(lifecycle.get("policy_source") or "local-manual", "local-manual"),
         "source_evidence_schema": public_label(lifecycle.get("source_evidence_schema"), "unknown"),
         "source_evidence_schemas": _public_label_list(lifecycle.get("source_evidence_schemas")),
+        "rule_group": public_label(lifecycle.get("rule_group") or "repeated-context-conservative", "repeated-context-conservative"),
         "staged_at": lifecycle.get("staged_at") if isinstance(lifecycle.get("staged_at"), str) else None,
         "projected_saved_chars": _as_int(lifecycle.get("projected_saved_chars")),
         "projected_saved_tokens": _as_int(lifecycle.get("projected_saved_tokens")),
@@ -1151,6 +1156,10 @@ def _add_crunch_impact_row(candidate: dict[str, Any], row: dict[str, Any], crunc
     cohort["saved_chars"] += saved_chars
     cohort["saved_tokens"] += saved_tokens
     cohort["saved_usd"] += saved_usd
+    cost_est = _as_float(row.get("cost_est_usd"))
+    baseline = _as_float(row.get("cost_baseline_usd") or row.get("baseline_cost_usd"))
+    cohort["cost_est_usd"] += cost_est
+    cohort["baseline_cost_usd"] += baseline if baseline > 0 else cost_est
     latency_ms = _as_int(row.get("latency_ms"), -1)
     if latency_ms >= 0:
         cohort["latency_ms_total"] += latency_ms
@@ -1186,6 +1195,12 @@ def _finalize_crunch_impact_cohort(raw: dict[str, Any]) -> dict[str, Any]:
         "saved_chars": _as_int(raw.get("saved_chars")),
         "saved_tokens": _as_int(raw.get("saved_tokens")),
         "saved_usd": round(_as_float(raw.get("saved_usd")), 8),
+        "cost_est_usd": round(_as_float(raw.get("cost_est_usd")), 8),
+        "baseline_cost_usd": round(_as_float(raw.get("baseline_cost_usd")), 8),
+        "cost_delta_usd": round(
+            _as_float(raw.get("baseline_cost_usd")) - _as_float(raw.get("cost_est_usd")),
+            8,
+        ),
         "latency_avg_ms": round(_as_int(raw.get("latency_ms_total")) / latency_samples, 2) if latency_samples else None,
         "error_count": errors,
         "retry_count": retries,
@@ -1376,6 +1391,90 @@ def _crunch_impact_coverage(
         "applied_to_holdout_ratio": round(applied_count / holdout_count, 6) if holdout_count else None,
         "aggregate_only": True,
         "metadata_only": True,
+    }
+
+
+def _crunch_captured_savings(
+    *,
+    policy_id: Any,
+    cohort_id: Any,
+    rule_group: Any,
+    applied: dict[str, Any],
+    holdout: dict[str, Any],
+    projected_saved_tokens: int,
+    projected_saved_usd: float,
+) -> dict[str, Any]:
+    applied_count = _as_int(applied.get("count"))
+    holdout_count = _as_int(holdout.get("count"))
+    applied_cost_delta = _as_float(applied.get("cost_delta_usd"))
+    holdout_cost_delta = _as_float(holdout.get("cost_delta_usd"))
+    holdout_avg_delta = holdout_cost_delta / holdout_count if holdout_count else 0.0
+    expected_holdout_delta = holdout_avg_delta * applied_count
+    captured_usd = max(0.0, applied_cost_delta - expected_holdout_delta)
+
+    applied_saved_tokens = _as_int(applied.get("saved_tokens"))
+    holdout_saved_tokens = _as_int(holdout.get("saved_tokens"))
+    holdout_avg_tokens = holdout_saved_tokens / holdout_count if holdout_count else 0.0
+    captured_tokens = max(0, int(round(applied_saved_tokens - (holdout_avg_tokens * applied_count))))
+    realization_ratio = (
+        round(captured_usd / _as_float(projected_saved_usd), 6)
+        if _as_float(projected_saved_usd) > 0
+        else None
+    )
+    status = "captured" if applied_count > 0 and holdout_count > 0 and captured_usd > 0 else "no-captured-savings"
+    if applied_count <= 0 or holdout_count <= 0:
+        status = "missing-applied-or-holdout-coverage"
+    return {
+        "schema": CRUNCH_CAPTURED_SAVINGS_SCHEMA,
+        "status": status,
+        "policy_id": public_label(policy_id, "unknown"),
+        "cohort_id": public_label(cohort_id, "unknown"),
+        "rule_group": public_label(rule_group, "repeated-context-conservative"),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "applied_cost_est_usd": round(_as_float(applied.get("cost_est_usd")), 8),
+        "applied_baseline_cost_usd": round(_as_float(applied.get("baseline_cost_usd")), 8),
+        "holdout_cost_est_usd": round(_as_float(holdout.get("cost_est_usd")), 8),
+        "holdout_baseline_cost_usd": round(_as_float(holdout.get("baseline_cost_usd")), 8),
+        "applied_cost_delta_usd": round(applied_cost_delta, 8),
+        "holdout_cost_delta_usd": round(holdout_cost_delta, 8),
+        "holdout_avg_cost_delta_usd": round(holdout_avg_delta, 8),
+        "expected_holdout_cost_delta_usd": round(expected_holdout_delta, 8),
+        "captured_saved_tokens": captured_tokens,
+        "captured_saved_usd": round(captured_usd, 8),
+        "projected_saved_tokens": _as_int(projected_saved_tokens),
+        "projected_saved_usd": round(_as_float(projected_saved_usd), 8),
+        "projection_realization_ratio": realization_ratio,
+        "measurement_basis": "canary-applied baseline-minus-actual cost delta minus holdout average cost delta scaled to applied coverage",
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _crunch_captured_savings_summary(captured_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    captured_count = sum(1 for row in captured_rows if row.get("status") == "captured")
+    applied = sum(_as_int(row.get("applied_count")) for row in captured_rows)
+    holdout = sum(_as_int(row.get("holdout_count")) for row in captured_rows)
+    captured_usd = sum(_as_float(row.get("captured_saved_usd")) for row in captured_rows)
+    projected_usd = sum(_as_float(row.get("projected_saved_usd")) for row in captured_rows)
+    rule_groups: dict[str, int] = {}
+    for row in captured_rows:
+        _increment(rule_groups, row.get("rule_group") or "repeated-context-conservative")
+    return {
+        "schema": "tokenclaw.request_shape_crunch_captured_savings_summary.v1",
+        "status": "captured" if captured_count else "no-captured-savings",
+        "cohort_count": len(captured_rows),
+        "captured_cohort_count": captured_count,
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "captured_saved_tokens": sum(_as_int(row.get("captured_saved_tokens")) for row in captured_rows),
+        "captured_saved_usd": round(captured_usd, 8),
+        "projected_saved_tokens": sum(_as_int(row.get("projected_saved_tokens")) for row in captured_rows),
+        "projected_saved_usd": round(projected_usd, 8),
+        "projection_realization_ratio": round(captured_usd / projected_usd, 6) if projected_usd > 0 else None,
+        "rule_group_breakdown": _breakdown(rule_groups),
+        "privacy": _crunch_opportunity_privacy(),
     }
 
 
@@ -2235,11 +2334,21 @@ def build_request_shape_crunch_canary_impact_report(
             rollback_count=_as_int(rollback.get("count")),
             unknown_count=_as_int(cohorts["unknown"].get("count")),
         )
+        captured_savings = _crunch_captured_savings(
+            policy_id=raw["policy_id"],
+            cohort_id=raw["cohort_id"],
+            rule_group=raw.get("rule_group"),
+            applied=applied,
+            holdout=holdout,
+            projected_saved_tokens=_as_int(raw.get("projected_saved_tokens")),
+            projected_saved_usd=_as_float(raw.get("projected_saved_usd")),
+        )
         finalized.append(
             {
                 "schema": "tokenclaw.request_shape_crunch_canary_impact_candidate.v1",
                 "policy_id": raw["policy_id"],
                 "cohort_id": raw["cohort_id"],
+                "rule_group": raw.get("rule_group"),
                 "cohort_metadata": raw["cohort_metadata"],
                 "policy_source": raw["policy_source"],
                 "source_evidence_schema": raw.get("source_evidence_schema"),
@@ -2292,6 +2401,10 @@ def build_request_shape_crunch_canary_impact_report(
                 "missing_measurements": candidate_missing_measurements,
                 "coverage": coverage,
                 "applied_vs_holdout_coverage": coverage,
+                "captured_savings": captured_savings,
+                "captured_saved_tokens": _as_int(captured_savings.get("captured_saved_tokens")),
+                "captured_saved_usd": round(_as_float(captured_savings.get("captured_saved_usd")), 8),
+                "projection_realization_ratio": captured_savings.get("projection_realization_ratio"),
                 "promotion_metadata": {
                     "schema": "tokenclaw.request_shape_crunch_canary_promotion_recommendation.v1",
                     "action_family": "crunch",
@@ -2311,6 +2424,8 @@ def build_request_shape_crunch_canary_impact_report(
                     "rollback_count": _as_int(rollback.get("count")),
                     "observed_saved_tokens": _as_int(applied.get("saved_tokens")),
                     "observed_saved_usd": round(_as_float(applied.get("saved_usd")), 8),
+                    "captured_saved_tokens": _as_int(captured_savings.get("captured_saved_tokens")),
+                    "captured_saved_usd": round(_as_float(captured_savings.get("captured_saved_usd")), 8),
                     "error_rate_delta": round(_as_float(applied.get("error_rate")) - _as_float(holdout.get("error_rate")), 6),
                     "retry_rate_delta": round(_as_float(applied.get("retry_rate")) - _as_float(holdout.get("retry_rate")), 6),
                     "latency_avg_delta_ms": latency_delta,
@@ -2418,6 +2533,12 @@ def build_request_shape_crunch_canary_impact_report(
         impact_candidates=finalized,
         activation_ready_measurements=activation_ready_measurements,
     )
+    captured_savings_rows = [
+        item["captured_savings"]
+        for item in finalized
+        if isinstance(item.get("captured_savings"), dict)
+    ]
+    captured_savings = _crunch_captured_savings_summary(captured_savings_rows)
     return {
         "schema": CRUNCH_CANARY_IMPACT_SCHEMA,
         "status": status,
@@ -2435,12 +2556,16 @@ def build_request_shape_crunch_canary_impact_report(
             "saved_chars": sum(_as_int(item.get("saved_chars")) for item in finalized),
             "saved_tokens": sum(_as_int(item.get("saved_tokens")) for item in finalized),
             "saved_usd": round(sum(_as_float(item.get("saved_usd")) for item in finalized), 8),
+            "captured_saved_tokens": captured_savings["captured_saved_tokens"],
+            "captured_saved_usd": captured_savings["captured_saved_usd"],
+            "captured_savings_status": captured_savings["status"],
+            "projection_realization_ratio": captured_savings["projection_realization_ratio"],
             "estimated_saved_chars": sum(_as_int(item.get("estimated_saved_chars")) for item in finalized),
             "estimated_saved_tokens": sum(_as_int(item.get("estimated_saved_tokens")) for item in finalized),
             "estimated_saved_usd": round(sum(_as_float(item.get("estimated_saved_usd")) for item in finalized), 8),
-            "projected_saved_chars": sum(_as_int(item.get("saved_chars")) for item in finalized),
-            "projected_saved_tokens": sum(_as_int(item.get("saved_tokens")) for item in finalized),
-            "projected_saved_usd": round(sum(_as_float(item.get("saved_usd")) for item in finalized), 8),
+            "projected_saved_chars": sum(_as_int(item.get("projected_saved_chars")) for item in finalized),
+            "projected_saved_tokens": sum(_as_int(item.get("projected_saved_tokens")) for item in finalized),
+            "projected_saved_usd": round(sum(_as_float(item.get("projected_saved_usd")) for item in finalized), 8),
             "error_rate_delta": round(max((_as_float(item.get("error_rate_delta")) for item in finalized), default=0.0), 6),
             "retry_rate_delta": round(max((_as_float(item.get("retry_rate_delta")) for item in finalized), default=0.0), 6),
             "latency_avg_delta_ms": max(
@@ -2510,6 +2635,8 @@ def build_request_shape_crunch_canary_impact_report(
             "repeated_context_blocked_count": repeated_context_impact_rows["summary"]["blocked_count"],
             "repeated_context_superseded_count": repeated_context_impact_rows["summary"]["superseded_count"],
         },
+        "captured_savings": captured_savings,
+        "captured_savings_rows": captured_savings_rows,
         "verdict_breakdown": _breakdown(verdict_counts),
         "impact_recommendation_breakdown": recommendation_breakdown,
         "durable_next_action_breakdown": _breakdown(durable_action_counts),
@@ -2615,6 +2742,11 @@ def _crunch_policy_decision_metrics(candidate: dict[str, Any] | None) -> dict[st
         "observed_saved_chars": _as_int(candidate.get("saved_chars")) if candidate else 0,
         "observed_saved_tokens": _as_int(candidate.get("saved_tokens")) if candidate else 0,
         "observed_saved_usd": round(_as_float(candidate.get("saved_usd")) if candidate else 0.0, 8),
+        "captured_saved_tokens": _as_int(candidate.get("captured_saved_tokens")) if candidate else 0,
+        "captured_saved_usd": round(_as_float(candidate.get("captured_saved_usd")) if candidate else 0.0, 8),
+        "projected_saved_tokens": _as_int(candidate.get("projected_saved_tokens")) if candidate else 0,
+        "projected_saved_usd": round(_as_float(candidate.get("projected_saved_usd")) if candidate else 0.0, 8),
+        "projection_realization_ratio": candidate.get("projection_realization_ratio") if candidate else None,
         "applied_error_count": _as_int(candidate.get("applied_error_count")) if candidate else 0,
         "holdout_error_count": _as_int(candidate.get("holdout_error_count")) if candidate else 0,
         "applied_retry_count": _as_int(candidate.get("applied_retry_count")) if candidate else 0,
@@ -2698,6 +2830,11 @@ def _crunch_policy_decision_from_candidate(candidate: dict[str, Any] | None) -> 
         "coverage": metrics["coverage"],
         "observed_saved_tokens": metrics["observed_saved_tokens"],
         "observed_saved_usd": metrics["observed_saved_usd"],
+        "captured_saved_tokens": metrics["captured_saved_tokens"],
+        "captured_saved_usd": metrics["captured_saved_usd"],
+        "projected_saved_tokens": metrics["projected_saved_tokens"],
+        "projected_saved_usd": metrics["projected_saved_usd"],
+        "projection_realization_ratio": metrics["projection_realization_ratio"],
         "error_rate_delta": metrics["error_rate_delta"],
         "retry_rate_delta": metrics["retry_rate_delta"],
         "fallback_rate_delta": metrics["fallback_rate_delta"],
@@ -2763,6 +2900,11 @@ def build_request_shape_crunch_policy_decision_report(impact_report: dict[str, A
             "holdout_count": metrics["holdout_count"],
             "observed_saved_tokens": metrics["observed_saved_tokens"],
             "observed_saved_usd": metrics["observed_saved_usd"],
+            "captured_saved_tokens": metrics["captured_saved_tokens"],
+            "captured_saved_usd": metrics["captured_saved_usd"],
+            "projected_saved_tokens": metrics["projected_saved_tokens"],
+            "projected_saved_usd": metrics["projected_saved_usd"],
+            "projection_realization_ratio": metrics["projection_realization_ratio"],
             "error_rate_delta": metrics["error_rate_delta"],
             "retry_rate_delta": metrics["retry_rate_delta"],
             "fallback_rate_delta": metrics["fallback_rate_delta"],
@@ -4353,6 +4495,12 @@ def request_shape_crunch_canary_lifecycle(action: dict[str, Any], features: dict
         "schema": CRUNCH_CANARY_LIFECYCLE_SCHEMA,
         "policy_id": policy_id,
         "cohort_id": cohort_id,
+        "rule_group": public_label(action.get("rule_group") or action.get("candidate_rule") or "repeated-context-conservative", "repeated-context-conservative"),
+        "source_evidence_schema": public_label(action.get("source_evidence_schema"), "unknown"),
+        "source_evidence_schemas": _public_label_list(action.get("source_evidence_schemas")),
+        "projected_saved_chars": _as_int(action.get("projected_saved_chars")),
+        "projected_saved_tokens": _as_int(action.get("projected_saved_tokens")),
+        "projected_saved_usd": round(_as_float(action.get("projected_saved_usd")), 8),
         "raw_prompts_included": False,
         "provider_bodies_included": False,
         "request_ids_included": False,
