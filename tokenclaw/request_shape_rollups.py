@@ -7946,6 +7946,140 @@ def _cache_replay_policy_rollback_metadata(evidence: dict[str, Any] | None, deci
     }
 
 
+def _cache_replay_policy_post_rollback_reobserve_window(
+    evidence: dict[str, Any] | None,
+    decision: str,
+    promotion_readiness: str,
+    metrics: dict[str, Any],
+    warmup_analysis: dict[str, Any],
+) -> dict[str, Any]:
+    top = _cache_replay_policy_decision_top_canary(evidence or {})
+    shape = top.get("shape") if isinstance(top.get("shape"), dict) else {}
+    stale = evidence.get("stale_evidence") if isinstance(evidence, dict) and isinstance(evidence.get("stale_evidence"), dict) else {}
+    max_age_hours = _as_float(stale.get("max_age_hours"), DEFAULT_CACHE_REPLAY_CANARY_MAX_EVIDENCE_AGE_HOURS)
+    ttl_seconds = _as_int(top.get("ttl_seconds"), DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS)
+    observed_rows = metrics["observed_row_count"]
+    applied_count = metrics["applied_count"]
+    holdout_count = metrics["holdout_count"]
+    observed_hits = metrics["observed_hits"]
+    repeat_window = warmup_analysis.get("repeat_window") if isinstance(warmup_analysis.get("repeat_window"), dict) else {}
+    traffic_floor = {
+        "schema": "tokenclaw.request_shape_cache_replay_reobserve_traffic_floor.v1",
+        "minimum_observed_rows": DEFAULT_CACHE_REPLAY_MIN_STAGE_ROWS,
+        "minimum_applied_count": 1,
+        "minimum_holdout_count": 1,
+        "minimum_observed_hits_for_promotion": 1,
+        "minimum_repeat_window_seconds": ttl_seconds,
+        "projected_hits": metrics["projected_hits"],
+        "projected_savings_usd": metrics["projected_savings_usd"],
+        "sample_count": _as_int(top.get("sample_count")) or metrics["observed_row_count"],
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    traffic_floor_met = bool(
+        observed_rows >= traffic_floor["minimum_observed_rows"]
+        and applied_count >= traffic_floor["minimum_applied_count"]
+        and holdout_count >= traffic_floor["minimum_holdout_count"]
+    )
+    enough_for_promotion_review = bool(traffic_floor_met and observed_hits >= traffic_floor["minimum_observed_hits_for_promotion"])
+    repeat_absent_after_floor = bool(
+        traffic_floor_met
+        and repeat_window.get("elapsed")
+        and repeat_window.get("later_exact_repeat_expected")
+        and repeat_window.get("later_exact_repeat_absent")
+    )
+    if decision == "rollback":
+        state = "rollback-required"
+        next_state = "reobserve-window-open"
+        next_action = "apply-cache-replay-rollback-before-reobserve"
+        status = "fresh-reobserve-window-after-rollback"
+    elif promotion_readiness == "promotion-ready":
+        state = "promotion-ready"
+        next_state = "promotion-ready"
+        next_action = "promote-cache-replay-rule"
+        status = "reobserve-window-complete"
+    elif decision == "retire-staged-no-repeat" or repeat_absent_after_floor:
+        state = "retire-no-repeat"
+        next_state = "retire-no-repeat"
+        next_action = "retire-cache-replay-canary-no-repeat"
+        status = "reobserve-window-complete"
+    elif traffic_floor_met:
+        state = "reobserve-window-open"
+        next_state = "review-cache-replay-evidence"
+        next_action = "review-cache-replay-canary-promotion-readiness"
+        status = "reobserve-traffic-floor-met"
+    else:
+        state = "reobserve-window-open" if not metrics["stale_evidence"] else "rollback-required"
+        next_state = "reobserve-window-open"
+        next_action = "collect-cache-replay-canary-traffic"
+        status = "reobserve-window-open"
+    return {
+        "schema": "tokenclaw.request_shape_cache_replay_post_rollback_reobserve_window.v1",
+        "status": status,
+        "decision": "reobserve-after-rollback" if decision == "rollback" else state,
+        "state": state,
+        "next_state": next_state,
+        "next_action": next_action,
+        "opens_after": "rollback-applied" if decision == "rollback" else "already-open",
+        "rollback_required": decision == "rollback",
+        "traffic_floor": traffic_floor,
+        "traffic_floor_met": traffic_floor_met,
+        "enough_for_promotion_review": enough_for_promotion_review,
+        "repeat_absent_after_floor": repeat_absent_after_floor,
+        "expiry": {
+            "schema": "tokenclaw.request_shape_cache_replay_reobserve_window_expiry.v1",
+            "reference": "rollback_applied_at" if decision == "rollback" else "latest_observed_at",
+            "max_age_hours": max_age_hours,
+            "ttl_seconds": ttl_seconds,
+            "expires_at_included": False,
+            "expired": False if decision == "rollback" else bool(metrics["stale_evidence"]),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "target_shape": {
+            key: shape.get(key)
+            for key in (
+                "provider_family",
+                "source_surface",
+                "endpoint",
+                "category",
+                "workflow_phase",
+                "text_bucket",
+                "token_bucket",
+                "has_tools",
+                "stream",
+            )
+            if key in shape
+        },
+        "lifecycle_states": [
+            "rollback-required",
+            "reobserve-window-open",
+            "retire-no-repeat",
+            "promotion-ready",
+        ],
+        "observed": {
+            "observed_row_count": observed_rows,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "observed_hits": observed_hits,
+            "observed_savings_usd": metrics["observed_savings_usd"],
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "file_paths_included": False,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
 def _cache_replay_policy_duplicate_suppression(
     decision: str,
     promotion_readiness: str,
@@ -8111,6 +8245,13 @@ def build_request_shape_cache_replay_policy_decision_report(
     promotion_allowed = decision == "widen"
     rollback_required = decision == "rollback"
     retirement_required = decision == "retire-staged-no-repeat"
+    post_rollback_observation = _cache_replay_policy_post_rollback_reobserve_window(
+        evidence,
+        decision,
+        promotion_readiness,
+        metrics,
+        warmup_analysis,
+    )
     if promotion_readiness == "promotion-ready":
         reason_codes = list(dict.fromkeys(["promotion-ready", *reason_codes]))
     if retirement_required:
@@ -8178,6 +8319,9 @@ def build_request_shape_cache_replay_policy_decision_report(
             else []
         ),
         "rollback_metadata": rollback_metadata,
+        "post_rollback_observation": post_rollback_observation,
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
         "duplicate_suppression": duplicate_suppression,
         "local_policy_patch": local_policy_patch,
         "privacy": _cache_replay_policy_decision_privacy(),
@@ -8202,6 +8346,7 @@ def build_request_shape_cache_replay_policy_decision_report(
         "decisions": [entry],
         "warmup_analysis": warmup_analysis,
         "hit_recovery_metrics": hit_recovery_metrics,
+        "post_rollback_observation": post_rollback_observation,
         "duplicate_suppression": duplicate_suppression,
         "summary": {
             "decision": decision,
@@ -8254,11 +8399,18 @@ def build_request_shape_cache_replay_policy_decision_report(
             "promotion_blocker": promotion_blocker,
             "observed_hit_blocker": observed_hit_blocker,
             "stale_evidence": metrics["stale_evidence"],
+            "post_rollback_observation_status": post_rollback_observation["status"],
+            "post_rollback_observation_state": post_rollback_observation["state"],
+            "post_rollback_observation_next_state": post_rollback_observation["next_state"],
+            "post_rollback_observation_next_action": post_rollback_observation["next_action"],
+            "reobserve_traffic_floor_met": post_rollback_observation["traffic_floor_met"],
+            "reobserve_window_max_age_hours": post_rollback_observation["expiry"]["max_age_hours"],
             "policy_source": entry["policy_source"],
             "target_local_rule_file": "cache_rules.yaml",
             "target_local_policy_section": "cache.pattern_rules",
             "source_canary_policy_file": _cache_replay_policy_source_file(evidence),
             "policy_files_written": False,
+            "cache_apply_action_count": 0,
             "cache_entries_written": False,
         },
         "source_evidence": {
@@ -8304,6 +8456,12 @@ def build_request_shape_cache_replay_policy_decision_report(
             "reports_observed_hit_blocker": bool(observed_hit_blocker) or metrics["observed_hits"] > 0,
             "reports_warmup_analysis": isinstance(warmup_analysis, dict),
             "reports_repeat_window_metadata": isinstance(warmup_analysis.get("repeat_window"), dict),
+            "emits_post_rollback_reobserve_window": isinstance(post_rollback_observation, dict),
+            "reports_reobserve_traffic_floor": isinstance(post_rollback_observation.get("traffic_floor"), dict),
+            "reports_reobserve_expiry_metadata": isinstance(post_rollback_observation.get("expiry"), dict),
+            "reports_reobserve_next_state": bool(post_rollback_observation.get("next_state")),
+            "reobserve_window_writes_no_cache_entries": post_rollback_observation["cache_entries_written"] == 0,
+            "reobserve_window_emits_no_cache_apply_actions": post_rollback_observation["cache_apply_action_count"] == 0,
             "distinguishes_first_seen_warmup_from_ineffective_replay": True,
             "drafts_local_policy_patch_or_blocker": bool(local_policy_patch) or bool(reason_codes),
             "targets_file_backed_cache_policy": entry["target_local_rule_file"] == "cache_rules.yaml",
