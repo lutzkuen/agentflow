@@ -78,6 +78,20 @@ DEPENDENCY_EVIDENCE_DECISION_OPTIONS = (
     "not-required",
 )
 REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
+LARGE_CONTEXT_TOKEN_BUCKETS = {"8k_32k_tokens", "gte_32k_tokens"}
+# Ordinal ranking of text-size buckets used as an aggregate-only "median text size"
+# signal when promoting repeated-context drills into ranked crunch cohorts.
+REPEATED_CONTEXT_TEXT_BUCKET_ORDINALS = {
+    "unknown": 0,
+    "lt_2k_chars": 1,
+    "2k_8k_chars": 2,
+    "8k_32k_chars": 3,
+    "32k_128k_chars": 4,
+    "gte_128k_chars": 5,
+}
+# A repeated-context shape needs at least this many sampled calls before it is
+# treated as repeat evidence rather than a one-off request.
+REPEATED_CONTEXT_CRUNCH_MIN_SAMPLES = 2
 REPLAY_SUPPORTED_ENDPOINTS = {"messages", "responses", "chat_completions", "chat"}
 REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE = 0.05
 DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION = 0.10
@@ -4071,7 +4085,7 @@ def _shape_crunch_decision(row: dict[str, Any]) -> dict[str, Any]:
 
     if row_count < 2:
         blockers.add("insufficient-repeat-evidence")
-    if text_bucket not in REPEATED_CONTEXT_TEXT_BUCKETS and token_bucket not in {"8k_32k_tokens", "gte_32k_tokens"}:
+    if text_bucket not in REPEATED_CONTEXT_TEXT_BUCKETS and token_bucket not in LARGE_CONTEXT_TOKEN_BUCKETS:
         blockers.add("not-large-context")
     if "crunch" not in classes and "repeated_context" not in classes:
         blockers.add("not-crunch-work-class")
@@ -5184,6 +5198,178 @@ def _request_shape_crunch_follow_up(
     }
 
 
+def _repeated_context_drill_signal(row: dict[str, Any], *, row_count: int, candidate_status: str) -> dict[str, Any]:
+    """Aggregate-only ranking signal that promotes a repeated-context rollup drill.
+
+    Surfaces the levers the crunch dry-run ranks repeated-context cohorts on:
+    sample count, a bucketed/median text-size signal, the plateau/repetition signal
+    derived from how many of the sampled calls are repeats, projected saved tokens,
+    and whether a canary safety blocker demotes the cohort. No raw bodies, prompts,
+    or candidate identifiers are read.
+    """
+
+    sample_count = max(0, _as_int(row_count))
+    text_bucket = str(row.get("text_bucket") or "unknown")
+    token_bucket = str(row.get("token_bucket") or "unknown")
+    row_input_tokens = _as_int(row.get("successful_input_tokens") or row.get("input_tokens"))
+    median_input_tokens = int(round(row_input_tokens / sample_count)) if sample_count > 0 else 0
+    # Plateau/repetition signal: fraction of the sampled calls that are repeats of the
+    # shared shape. Approaches 1.0 as repeated context accumulates, 0.0 for a one-off.
+    repetition_signal = round((sample_count - 1) / sample_count, 6) if sample_count > 0 else 0.0
+    large_context = text_bucket in REPEATED_CONTEXT_TEXT_BUCKETS or token_bucket in LARGE_CONTEXT_TOKEN_BUCKETS
+    repeat_evidence = sample_count >= REPEATED_CONTEXT_CRUNCH_MIN_SAMPLES
+    safety_blocked = candidate_status == "safety-blocked"
+    projected_tokens = _as_int(row.get("projected_crunch_tokens_saved"))
+    projected_usd = _as_float(row.get("projected_crunch_savings_usd"))
+    observed_tokens = _as_int(row.get("current_crunch_tokens_saved"))
+
+    if safety_blocked:
+        drill_state = "safety-blocked"
+    elif not repeat_evidence:
+        drill_state = "no-repeat"
+    elif not large_context:
+        drill_state = "too-small"
+    elif projected_tokens <= 0 and observed_tokens <= 0:
+        drill_state = "missing-projection"
+    else:
+        drill_state = "ranked"
+
+    return {
+        "schema": "tokenclaw.request_shape_repeated_context_drill_signal.v1",
+        "drill_state": drill_state,
+        "sample_count": sample_count,
+        "text_bucket": public_label(text_bucket, "unknown"),
+        "token_bucket": public_label(token_bucket, "unknown"),
+        "text_size_ordinal": REPEATED_CONTEXT_TEXT_BUCKET_ORDINALS.get(text_bucket, 0),
+        "median_sample_input_tokens": median_input_tokens,
+        "repetition_signal": repetition_signal,
+        "large_context": large_context,
+        "repeat_evidence": repeat_evidence,
+        "safety_blocked": safety_blocked,
+        "projected_saved_tokens": projected_tokens,
+        "projected_saved_usd": round(projected_usd, 6),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _repeated_context_drill_rank_key(signal: dict[str, Any]) -> tuple[Any, ...]:
+    # Rank order from issue #797: sample count, median text size, plateau/repetition
+    # signal, projected saved tokens; safety blockers demote a cohort below all others.
+    return (
+        not bool(signal.get("safety_blocked")),
+        _as_int(signal.get("sample_count")),
+        _as_int(signal.get("text_size_ordinal")),
+        _as_int(signal.get("median_sample_input_tokens")),
+        _as_float(signal.get("repetition_signal")),
+        _as_int(signal.get("projected_saved_tokens")),
+        round(_as_float(signal.get("projected_saved_usd")), 6),
+    )
+
+
+def _build_repeated_context_crunch_drill(
+    cohorts: list[dict[str, Any]],
+    *,
+    crunch_row_count: int,
+    matched_count: int,
+    has_cohort_filter: bool,
+) -> dict[str, Any]:
+    """Deterministic drill block that either ranks repeated large-context cohorts or
+    explains which threshold (source / repeat / size) is missing.
+
+    This graduates zero-row crunch drills into ranked repeated-context cohorts when
+    local rollups meet the sample and size thresholds, and otherwise emits an explicit
+    ``no-source`` / ``no-repeat`` / ``too-small`` state. Policy writes stay disabled;
+    only ranked evidence and a dry-run state are produced.
+    """
+
+    signals = [
+        cohort.get("repeated_context_drill_signal")
+        for cohort in cohorts
+        if isinstance(cohort.get("repeated_context_drill_signal"), dict)
+    ]
+    repeat_evidence_count = sum(1 for signal in signals if signal.get("repeat_evidence"))
+    large_context_count = sum(1 for signal in signals if signal.get("large_context"))
+    repeated_large_context = [
+        signal
+        for signal in signals
+        if signal.get("repeat_evidence") and signal.get("large_context")
+    ]
+    no_repeat_count = sum(1 for signal in signals if not signal.get("repeat_evidence"))
+    too_small_count = sum(
+        1 for signal in signals if signal.get("repeat_evidence") and not signal.get("large_context")
+    )
+    safety_blocked_count = sum(1 for signal in signals if signal.get("safety_blocked"))
+
+    if not signals or matched_count <= 0:
+        state = "no-source"
+        missing_threshold = "matching-repeated-context-source-traffic" if has_cohort_filter else "repeated-context-source-traffic"
+        next_action = "collect-source-traffic"
+    elif not repeated_large_context:
+        if repeat_evidence_count <= 0:
+            state = "no-repeat"
+            missing_threshold = f"repeated-context-min-samples-{REPEATED_CONTEXT_CRUNCH_MIN_SAMPLES}"
+            next_action = "collect-repeated-context-samples"
+        else:
+            state = "too-small"
+            missing_threshold = "repeated-context-large-context-size"
+            next_action = "collect-large-context-samples"
+    else:
+        state = "ranked"
+        missing_threshold = None
+        next_action = "rank-repeated-context-crunch-cohorts"
+
+    ranked = sorted(repeated_large_context, key=_repeated_context_drill_rank_key, reverse=True)
+    ranked_cohorts: list[dict[str, Any]] = []
+    cohort_by_signal_id = {id(cohort.get("repeated_context_drill_signal")): cohort for cohort in cohorts}
+    for rank, signal in enumerate(ranked, start=1):
+        cohort = cohort_by_signal_id.get(id(signal), {})
+        ranked_cohorts.append(
+            {
+                "schema": "tokenclaw.request_shape_repeated_context_drill_cohort.v1",
+                "rank": rank,
+                "cohort_id": cohort.get("cohort_id"),
+                "policy_id": cohort.get("policy_id"),
+                "readiness": cohort.get("readiness"),
+                "candidate_status": cohort.get("candidate_status"),
+                "sample_count": _as_int(signal.get("sample_count")),
+                "text_bucket": signal.get("text_bucket"),
+                "median_sample_input_tokens": _as_int(signal.get("median_sample_input_tokens")),
+                "repetition_signal": _as_float(signal.get("repetition_signal")),
+                "projected_saved_tokens": _as_int(signal.get("projected_saved_tokens")),
+                "projected_saved_usd": round(_as_float(signal.get("projected_saved_usd")), 6),
+                "safety_blocked": bool(signal.get("safety_blocked")),
+            }
+        )
+
+    projected_tokens = sum(_as_int(item["projected_saved_tokens"]) for item in ranked_cohorts)
+    projected_usd = round(sum(_as_float(item["projected_saved_usd"]) for item in ranked_cohorts), 6)
+
+    return {
+        "schema": "tokenclaw.request_shape_repeated_context_crunch_drill.v1",
+        "state": state,
+        "missing_threshold": missing_threshold,
+        "next_action": next_action,
+        "crunch_row_count": max(0, _as_int(crunch_row_count)),
+        "matched_count": max(0, _as_int(matched_count)),
+        "candidate_cohort_count": len(signals),
+        "ranked_cohort_count": len(ranked_cohorts),
+        "repeat_evidence_cohort_count": repeat_evidence_count,
+        "large_context_cohort_count": large_context_count,
+        "no_repeat_cohort_count": no_repeat_count,
+        "too_small_cohort_count": too_small_count,
+        "safety_blocked_cohort_count": safety_blocked_count,
+        "min_sample_threshold": REPEATED_CONTEXT_CRUNCH_MIN_SAMPLES,
+        "large_context_text_buckets": sorted(REPEATED_CONTEXT_TEXT_BUCKETS),
+        "large_context_token_buckets": sorted(LARGE_CONTEXT_TOKEN_BUCKETS),
+        "projected_saved_tokens": projected_tokens,
+        "projected_saved_usd": projected_usd,
+        "ranked_cohorts": ranked_cohorts,
+        "policy_files_written": False,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
 def build_request_shape_crunch_opportunity_dry_run(
     rollups: list[dict[str, Any]],
     *,
@@ -5312,6 +5498,11 @@ def build_request_shape_crunch_opportunity_dry_run(
                 "privacy": _crunch_opportunity_privacy(),
             }
         cohort["duplicate_suppression"] = _request_shape_crunch_cohort_duplicate_suppression(cohort, existing_rules)
+        cohort["repeated_context_drill_signal"] = _repeated_context_drill_signal(
+            row,
+            row_count=row_count,
+            candidate_status=candidate_status,
+        )
         cohorts.append(cohort)
 
     cohorts.sort(
@@ -5424,6 +5615,13 @@ def build_request_shape_crunch_opportunity_dry_run(
         }
     )
 
+    repeated_context_drill = _build_repeated_context_crunch_drill(
+        cohorts,
+        crunch_row_count=len(crunch_rows),
+        matched_count=matched_count,
+        has_cohort_filter=bool(filter_conditions),
+    )
+
     return {
         "schema": CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
         "status": status,
@@ -5461,6 +5659,8 @@ def build_request_shape_crunch_opportunity_dry_run(
             "target_local_rule_file": "crunch_rules.yaml" if cohorts else None,
             "activation_state": activation_follow_up["activation_state"],
             "top_next_action": activation_follow_up["next_action"],
+            "repeated_context_drill_state": repeated_context_drill["state"],
+            "repeated_context_ranked_cohort_count": repeated_context_drill["ranked_cohort_count"],
             "provider_calls_made": 0,
             "cache_entries_written": 0,
             "policy_files_written": False,
@@ -5468,6 +5668,7 @@ def build_request_shape_crunch_opportunity_dry_run(
             "streaming_replay_enabled": False,
         },
         "activation_follow_up": activation_follow_up,
+        "repeated_context_drill": repeated_context_drill,
         "recommended_actions": recommended_actions,
         "readiness_breakdown": _breakdown(readiness_counts),
         "candidate_status_breakdown": _breakdown(candidate_status_counts),
@@ -11255,9 +11456,11 @@ def _candidate_work_classes(
     observed_savings: float,
 ) -> list[str]:
     classes: set[str] = set()
-    repeated_large_context = row_count >= 2 and text_bucket in REPEATED_CONTEXT_TEXT_BUCKETS
-    token_heavy_context = token_bucket in {"8k_32k_tokens", "gte_32k_tokens"}
-    if repeated_large_context or (row_count >= 2 and token_heavy_context):
+    repeated_large_context = (
+        row_count >= REPEATED_CONTEXT_CRUNCH_MIN_SAMPLES and text_bucket in REPEATED_CONTEXT_TEXT_BUCKETS
+    )
+    token_heavy_context = token_bucket in LARGE_CONTEXT_TOKEN_BUCKETS
+    if repeated_large_context or (row_count >= REPEATED_CONTEXT_CRUNCH_MIN_SAMPLES and token_heavy_context):
         classes.add("repeated_context")
         classes.add("crunch")
     if any(family in {"cache_replay", "cache_blocker"} for family in candidate_families) or any(

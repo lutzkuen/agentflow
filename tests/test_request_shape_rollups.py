@@ -4636,6 +4636,162 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(dry_run["privacy"]["aggregate_only"])
         self.assertFalse(dry_run["privacy"]["provider_calls_made"])
         self.assertFalse(dry_run["privacy"]["managed_server_calls_made"])
+        drill = dry_run["repeated_context_drill"]
+        self.assertEqual(drill["schema"], "tokenclaw.request_shape_repeated_context_crunch_drill.v1")
+        self.assertEqual(drill["state"], "no-repeat")
+        self.assertEqual(drill["missing_threshold"], "repeated-context-min-samples-2")
+        self.assertEqual(drill["next_action"], "collect-repeated-context-samples")
+        self.assertEqual(drill["ranked_cohort_count"], 0)
+        self.assertEqual(drill["no_repeat_cohort_count"], 1)
+        self.assertEqual(drill["ranked_cohorts"], [])
+        self.assertFalse(drill["policy_files_written"])
+        self.assertEqual(dry_run["summary"]["repeated_context_drill_state"], "no-repeat")
+
+    def test_crunch_opportunity_dry_run_drill_ranks_repeated_large_context_cohorts(self) -> None:
+        rollups = [
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "source_schema": "tokenclaw.request_shape_rollup_row.v1",
+                "candidate_work_classes": ["repeated_context", "crunch"],
+                "provider_family": "anthropic",
+                "source_surface": "anthropic_messages",
+                "endpoint": "messages",
+                "category": "chat",
+                "workflow_phase": "thinking",
+                "stream": False,
+                "has_tools": False,
+                "cache_status": "miss",
+                "routing_status": "passthrough",
+                "text_bucket": "gte_128k_chars",
+                "token_bucket": "gte_32k_tokens",
+                "row_count": 8,
+                "successful_input_tokens": 1_600_000,
+                "input_tokens": 1_600_000,
+                "input_token_cost_usd": 4.8,
+                "projected_crunch_tokens_saved": 70_000,
+                "projected_crunch_chars_saved": 280_000,
+                "projected_crunch_savings_usd": 0.21,
+                "current_crunch_tokens_saved": 0,
+                "current_crunch_chars_saved": 0,
+                "current_crunch_savings_usd": 0.0,
+                "blocker_codes": [],
+            },
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "source_schema": "tokenclaw.request_shape_rollup_row.v1",
+                "candidate_work_classes": ["repeated_context", "crunch"],
+                "provider_family": "anthropic",
+                "source_surface": "anthropic_messages",
+                "endpoint": "messages",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "stream": False,
+                "has_tools": True,
+                "cache_status": "miss",
+                "routing_status": "passthrough",
+                "text_bucket": "8k_32k_chars",
+                "token_bucket": "8k_32k_tokens",
+                "row_count": 3,
+                "successful_input_tokens": 45_000,
+                "input_tokens": 45_000,
+                "input_token_cost_usd": 0.135,
+                "projected_crunch_tokens_saved": 1_500,
+                "projected_crunch_chars_saved": 6_000,
+                "projected_crunch_savings_usd": 0.0045,
+                "current_crunch_tokens_saved": 0,
+                "current_crunch_chars_saved": 0,
+                "current_crunch_savings_usd": 0.0,
+                "blocker_codes": [],
+            },
+        ]
+
+        dry_run = build_request_shape_crunch_opportunity_dry_run(rollups)
+
+        drill = dry_run["repeated_context_drill"]
+        self.assertEqual(drill["state"], "ranked")
+        self.assertIsNone(drill["missing_threshold"])
+        self.assertEqual(drill["next_action"], "rank-repeated-context-crunch-cohorts")
+        self.assertEqual(drill["ranked_cohort_count"], 2)
+        self.assertEqual(drill["repeat_evidence_cohort_count"], 2)
+        self.assertEqual(drill["large_context_cohort_count"], 2)
+        self.assertEqual(drill["min_sample_threshold"], 2)
+        self.assertEqual(drill["projected_saved_tokens"], 71_500)
+        self.assertGreater(drill["projected_saved_usd"], 0)
+        self.assertEqual(dry_run["summary"]["repeated_context_drill_state"], "ranked")
+        self.assertEqual(dry_run["summary"]["repeated_context_ranked_cohort_count"], 2)
+        ranks = drill["ranked_cohorts"]
+        self.assertEqual([item["rank"] for item in ranks], [1, 2])
+        # Larger sample count + larger median text size + higher projection ranks first.
+        self.assertEqual(ranks[0]["sample_count"], 8)
+        self.assertEqual(ranks[0]["text_bucket"], "gte_128k_chars")
+        self.assertEqual(ranks[0]["median_sample_input_tokens"], 200_000)
+        self.assertEqual(ranks[0]["projected_saved_tokens"], 70_000)
+        self.assertFalse(ranks[0]["safety_blocked"])
+        self.assertGreater(ranks[0]["repetition_signal"], ranks[1]["repetition_signal"])
+        self.assertEqual(ranks[1]["sample_count"], 3)
+        rendered = json.dumps(drill, sort_keys=True)
+        for forbidden in ("raw prompt", "/tmp/", "req_", "sess_", "cache-key-"):
+            self.assertNotIn(forbidden, rendered)
+        self.assertTrue(drill["privacy"]["metadata_only"])
+        self.assertTrue(drill["privacy"]["aggregate_only"])
+        self.assertFalse(drill["policy_files_written"])
+
+    def test_crunch_opportunity_dry_run_drill_reports_too_small_when_repeats_are_small(self) -> None:
+        rollups = [
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "source_schema": "tokenclaw.request_shape_rollup_row.v1",
+                "candidate_work_classes": ["repeated_context", "crunch"],
+                "provider_family": "anthropic",
+                "source_surface": "anthropic_messages",
+                "endpoint": "messages",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "stream": False,
+                "has_tools": False,
+                "cache_status": "miss",
+                "routing_status": "passthrough",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "row_count": 5,
+                "successful_input_tokens": 6_000,
+                "input_tokens": 6_000,
+                "input_token_cost_usd": 0.018,
+                "projected_crunch_tokens_saved": 0,
+                "projected_crunch_chars_saved": 0,
+                "projected_crunch_savings_usd": 0.0,
+                "current_crunch_tokens_saved": 0,
+                "current_crunch_chars_saved": 0,
+                "current_crunch_savings_usd": 0.0,
+                "blocker_codes": [],
+            }
+        ]
+
+        dry_run = build_request_shape_crunch_opportunity_dry_run(rollups)
+
+        drill = dry_run["repeated_context_drill"]
+        self.assertEqual(drill["state"], "too-small")
+        self.assertEqual(drill["missing_threshold"], "repeated-context-large-context-size")
+        self.assertEqual(drill["next_action"], "collect-large-context-samples")
+        self.assertEqual(drill["ranked_cohort_count"], 0)
+        self.assertEqual(drill["too_small_cohort_count"], 1)
+        self.assertEqual(drill["repeat_evidence_cohort_count"], 1)
+        self.assertEqual(drill["large_context_cohort_count"], 0)
+        self.assertEqual(dry_run["summary"]["repeated_context_drill_state"], "too-small")
+
+    def test_crunch_opportunity_dry_run_drill_reports_no_source_without_crunch_rows(self) -> None:
+        dry_run = build_request_shape_crunch_opportunity_dry_run([])
+
+        self.assertEqual(dry_run["status"], "no-repeated-context-crunch-cohorts")
+        drill = dry_run["repeated_context_drill"]
+        self.assertEqual(drill["state"], "no-source")
+        self.assertEqual(drill["missing_threshold"], "repeated-context-source-traffic")
+        self.assertEqual(drill["next_action"], "collect-source-traffic")
+        self.assertEqual(drill["crunch_row_count"], 0)
+        self.assertEqual(drill["matched_count"], 0)
+        self.assertEqual(drill["candidate_cohort_count"], 0)
+        self.assertEqual(drill["ranked_cohorts"], [])
+        self.assertEqual(dry_run["summary"]["repeated_context_drill_state"], "no-source")
 
     def test_crunch_canary_stage_report_targets_anthropic_thinking_tool_result_cohort(self) -> None:
         for cost in (0.08, 0.07, 0.09):
