@@ -7249,6 +7249,121 @@ def _cache_replay_warmup_window_analysis(
     }
 
 
+def _cache_replay_bounded_reobserve_window(
+    *,
+    status: str,
+    reason: str,
+    stale: bool,
+    stale_reason: str,
+    stale_zero_traffic_rule_count: int,
+    staged_canaries: list[dict[str, Any]],
+    observed_rows: int,
+    applied_count: int,
+    holdout_count: int,
+    observed_hits: int,
+    projected_hits: int,
+    projected_savings_usd: float,
+    warmup_analysis: dict[str, Any],
+    max_age_hours: float,
+) -> dict[str, Any]:
+    top_canary = staged_canaries[0] if staged_canaries else {}
+    ttl_seconds = _as_int(top_canary.get("ttl_seconds"), DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS)
+    repeat_window = (
+        warmup_analysis.get("repeat_window")
+        if isinstance(warmup_analysis.get("repeat_window"), dict)
+        else {}
+    )
+    traffic_floor = {
+        "schema": "tokenclaw.request_shape_cache_replay_reobserve_traffic_floor.v1",
+        "minimum_observed_rows": DEFAULT_CACHE_REPLAY_MIN_STAGE_ROWS,
+        "minimum_applied_count": 1,
+        "minimum_holdout_count": 1,
+        "minimum_observed_hits_for_promotion": 1,
+        "minimum_repeat_window_seconds": ttl_seconds,
+        "projected_hits": projected_hits,
+        "projected_savings_usd": round(projected_savings_usd, 6),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    traffic_floor_met = bool(
+        observed_rows >= traffic_floor["minimum_observed_rows"]
+        and applied_count >= traffic_floor["minimum_applied_count"]
+        and holdout_count >= traffic_floor["minimum_holdout_count"]
+    )
+    repeat_absent_after_floor = bool(
+        traffic_floor_met
+        and repeat_window.get("elapsed")
+        and repeat_window.get("later_exact_repeat_expected")
+        and repeat_window.get("later_exact_repeat_absent")
+    )
+    if repeat_absent_after_floor:
+        decision = "retire-staged-no-repeat"
+        window_status = "reobserve-window-complete-no-repeat"
+        next_action = "retire-cache-replay-canary-no-repeat"
+        blocker_codes = ["repeat-window-elapsed-no-live-repeat"]
+        opens_after = "already-open"
+    elif stale:
+        decision = "rollback-required"
+        window_status = "rollback-required-before-reobserve"
+        next_action = "apply-cache-replay-rollback-before-reobserve"
+        blocker_codes = [stale_reason or reason or "stale-cache-replay-evidence"]
+        opens_after = "rollback-applied"
+    elif status in {"staged-no-traffic", "observed"}:
+        decision = "reobserve"
+        window_status = "reobserve-window-open"
+        next_action = "collect-cache-replay-canary-traffic"
+        blocker_codes = [] if observed_rows > 0 else ["missing-observed-cache-replay-traffic"]
+        opens_after = "already-open"
+    else:
+        decision = "not-required"
+        window_status = "not-required"
+        next_action = reason or "cache-replay-reobserve-not-required"
+        blocker_codes = []
+        opens_after = "not-required"
+    return {
+        "schema": "tokenclaw.request_shape_cache_replay_bounded_reobserve_window.v1",
+        "status": window_status,
+        "decision": decision,
+        "next_action": next_action,
+        "reason": stale_reason if stale else reason,
+        "blocker_codes": blocker_codes,
+        "opens_after": opens_after,
+        "stale_zero_traffic_rule_count": stale_zero_traffic_rule_count,
+        "traffic_floor": traffic_floor,
+        "traffic_floor_met": traffic_floor_met,
+        "repeat_absent_after_floor": repeat_absent_after_floor,
+        "observed": {
+            "observed_row_count": observed_rows,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "observed_hits": observed_hits,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "expiry": {
+            "schema": "tokenclaw.request_shape_cache_replay_reobserve_window_expiry.v1",
+            "reference": "rollback_applied_at" if stale else "latest_observed_at",
+            "max_age_hours": float(max_age_hours),
+            "ttl_seconds": ttl_seconds,
+            "expires_at_included": False,
+            "expired": bool(stale),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "file_paths_included": False,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
 def build_request_shape_cache_replay_evidence_report(
     store_obj: Any,
     *,
@@ -7510,13 +7625,39 @@ def build_request_shape_cache_replay_evidence_report(
         now=now,
         top_applied_miss_blocker=top_applied_miss_blocker,
     )
+    stale_reason = (
+        "stale-no-canary-traffic"
+        if stale_zero_traffic_rules
+        else ("evidence-older-than-max-age" if stale else "fresh-or-not-yet-observed")
+    )
+    reobserve_window = _cache_replay_bounded_reobserve_window(
+        status=status,
+        reason=reason,
+        stale=stale,
+        stale_reason=stale_reason,
+        stale_zero_traffic_rule_count=len(stale_zero_traffic_rules),
+        staged_canaries=staged_canary_summaries,
+        observed_rows=observed_rows,
+        applied_count=lifecycle_counts["canary_applied_count"],
+        holdout_count=lifecycle_counts["canary_holdout_count"],
+        observed_hits=observed_hits,
+        projected_hits=projected_hits,
+        projected_savings_usd=projected_savings,
+        warmup_analysis=warmup_analysis,
+        max_age_hours=max_age_hours,
+    )
     return {
         "schema": REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA,
         "status": status,
         "ok": bool(staged_rules),
         "generated_at": utc_now(),
         "reason": reason,
-        "next_action": next_action,
+        "next_action": (
+            reobserve_window["next_action"]
+            if reobserve_window["decision"] in {"rollback-required", "retire-staged-no-repeat"}
+            else next_action
+        ),
+        "policy_next_action": next_action,
         "source": {
             "policy_file": policy_file_name,
             "policy_file_present": policy_exists,
@@ -7555,6 +7696,9 @@ def build_request_shape_cache_replay_evidence_report(
             "later_exact_repeat_expected": warmup_analysis["repeat_window"]["later_exact_repeat_expected"],
             "later_exact_repeat_absent": warmup_analysis["repeat_window"]["later_exact_repeat_absent"],
             "stale_zero_traffic_rule_count": len(stale_zero_traffic_rules),
+            "reobserve_window_status": reobserve_window["status"],
+            "reobserve_window_decision": reobserve_window["decision"],
+            "reobserve_window_next_action": reobserve_window["next_action"],
         },
         "lifecycle_counts": lifecycle_counts,
         "cache_status_breakdown": _breakdown(cache_status_counts),
@@ -7563,6 +7707,7 @@ def build_request_shape_cache_replay_evidence_report(
         "miss_reason_breakdown": applied_miss_blocker_breakdown,
         "applied_miss_blocker_breakdown": applied_miss_blocker_breakdown,
         "warmup_analysis": warmup_analysis,
+        "reobserve_window": reobserve_window,
         "durable_outcome": durable_outcome,
         "stale_evidence": {
             "max_age_hours": float(max_age_hours),
@@ -7570,7 +7715,7 @@ def build_request_shape_cache_replay_evidence_report(
             "reference_time": reference_time.isoformat() if reference_time else None,
             "age_hours": age_hours,
             "stale": stale,
-            "reason": "stale-no-canary-traffic" if stale_zero_traffic_rules else ("evidence-older-than-max-age" if stale else "fresh-or-not-yet-observed"),
+            "reason": stale_reason,
             "zero_traffic_rule_count": len(stale_zero_traffic_rules),
         },
         "acceptance": {
@@ -7582,6 +7727,10 @@ def build_request_shape_cache_replay_evidence_report(
             "reports_applied_miss_blocker_breakdown": isinstance(applied_miss_blocker_breakdown, list),
             "reports_warmup_analysis": isinstance(warmup_analysis, dict),
             "reports_repeat_window_metadata": isinstance(warmup_analysis.get("repeat_window"), dict),
+            "reports_bounded_reobserve_window": isinstance(reobserve_window, dict),
+            "reports_reobserve_traffic_floor": isinstance(reobserve_window.get("traffic_floor"), dict),
+            "reobserve_window_writes_no_cache_entries": reobserve_window["cache_entries_written"] == 0,
+            "reobserve_window_emits_no_cache_apply_actions": reobserve_window["cache_apply_action_count"] == 0,
             "distinguishes_first_seen_warmup_from_ineffective_replay": True,
             "reports_stale_evidence_metadata": True,
             "reports_durable_rollback_or_retirement_reason": durable_outcome is not None,
@@ -8627,6 +8776,7 @@ def build_request_shape_cache_replay_policy_decision_report(
             ),
             "hit_recovery_metrics": hit_recovery_metrics,
             "warmup_analysis": warmup_analysis,
+            "reobserve_window": evidence.get("reobserve_window") if isinstance(evidence.get("reobserve_window"), dict) else {},
             "stale_evidence": evidence.get("stale_evidence") if isinstance(evidence.get("stale_evidence"), dict) else {},
             "privacy": _cache_replay_evidence_privacy(),
         },

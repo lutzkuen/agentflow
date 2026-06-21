@@ -7122,6 +7122,29 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "projected_savings_usd": 0.075373,
                 "staged_canary_count": 1,
             },
+            "reobserve_window": {
+                "schema": "tokenclaw.request_shape_cache_replay_bounded_reobserve_window.v1",
+                "status": "rollback-required-before-reobserve",
+                "decision": "rollback-required",
+                "next_action": "apply-cache-replay-rollback-before-reobserve",
+                "reason": "evidence-older-than-max-age",
+                "blocker_codes": ["evidence-older-than-max-age"],
+                "traffic_floor": {
+                    "schema": "tokenclaw.request_shape_cache_replay_reobserve_traffic_floor.v1",
+                    "minimum_observed_rows": 10,
+                    "minimum_applied_count": 1,
+                    "minimum_holdout_count": 1,
+                    "minimum_observed_hits_for_promotion": 1,
+                    "minimum_repeat_window_seconds": 3600,
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                },
+                "cache_apply_action_count": 0,
+                "cache_entries_written": 0,
+                "policy_files_written": False,
+                "metadata_only": True,
+                "aggregate_only": True,
+            },
         }
         policy_decision = {
             "schema": "tokenclaw.request_shape_cache_replay_policy_decision.v1",
@@ -7184,6 +7207,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(cache_entry["current_status"], "superseded")
         self.assertEqual(cache_entry["issue_worthy_status"], "suppressed")
         self.assertEqual(cache_entry["next_action"], "retire-stale-cache-replay-successor-no-traffic")
+        self.assertEqual(cache_entry["reobserve_window_decision"], "rollback-required")
+        self.assertEqual(
+            cache_entry["reobserve_window_next_action"],
+            "apply-cache-replay-rollback-before-reobserve",
+        )
         self.assertTrue(cache_entry["rollback_required"])
         self.assertTrue(cache_entry["stale_no_traffic_retirement"])
         self.assertTrue(cache_entry["durable_action_ledger_entry"])

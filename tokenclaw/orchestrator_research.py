@@ -5804,6 +5804,9 @@ def build_evidence_to_activation_next_action_ledger(
             "reason",
             "reason_codes",
             "source_evidence_schema",
+            "reobserve_window_status",
+            "reobserve_window_decision",
+            "reobserve_window_next_action",
         ):
             if stage.get(decision_key):
                 entry[decision_key] = sanitize_value(stage.get(decision_key))
@@ -10285,6 +10288,7 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         evidence = source_evidence
     evidence_summary = evidence.get("summary") if isinstance(evidence.get("summary"), dict) else {}
     stale_evidence = evidence.get("stale_evidence") if isinstance(evidence.get("stale_evidence"), dict) else {}
+    reobserve_window = evidence.get("reobserve_window") if isinstance(evidence.get("reobserve_window"), dict) else {}
     observed_row_count = _to_int(summary.get("observed_row_count") or evidence_summary.get("observed_row_count"))
     applied_count = _to_int(summary.get("applied_count") or evidence_summary.get("applied_count"))
     holdout_count = _to_int(summary.get("holdout_count") or evidence_summary.get("holdout_count"))
@@ -10472,6 +10476,9 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         "cache_entries_written": 0 if stale_no_traffic_retirement else None,
         "emits_cache_apply_action": False if stale_no_traffic_retirement else None,
         "policy_files_written": False if stale_no_traffic_retirement else None,
+        "reobserve_window_status": sanitize_value(reobserve_window.get("status")),
+        "reobserve_window_decision": sanitize_value(reobserve_window.get("decision")),
+        "reobserve_window_next_action": sanitize_value(reobserve_window.get("next_action")),
         "target_local_rule_file": sanitize_value(target_local_rule_file),
         "target_local_policy_section": sanitize_value(target_local_policy_section),
         "duplicate_suppression": sanitize_value(duplicate_suppression),
@@ -10493,13 +10500,20 @@ def _request_shape_cache_replay_evidence_loop_stage(stats_summary: dict[str, Any
     actual_saved = _to_float(summary.get("observed_savings_usd"))
     blockers = _request_shape_cache_replay_evidence_blockers(evidence)
     stale = evidence.get("stale_evidence") if isinstance(evidence.get("stale_evidence"), dict) else {}
+    reobserve_window = evidence.get("reobserve_window") if isinstance(evidence.get("reobserve_window"), dict) else {}
     status = str(evidence.get("status") or "").strip()
     next_action = str(evidence.get("next_action") or "").strip()
 
     if stale.get("stale"):
         state = "blocked"
-        if not next_action:
-            next_action = "refresh-cache-replay-canary-evidence"
+        next_action = str(reobserve_window.get("next_action") or next_action or "refresh-cache-replay-canary-evidence")
+        reobserve_blockers = [
+            str(item)
+            for item in reobserve_window.get("blocker_codes") or []
+            if str(item or "").strip()
+        ]
+        if reobserve_blockers:
+            blockers = list(dict.fromkeys(reobserve_blockers + blockers))
     elif actual_hits > 0 or actual_saved > 0:
         state = "measured-savings"
         if not next_action:
@@ -10557,6 +10571,15 @@ def _request_shape_cache_replay_evidence_loop_stage(stats_summary: dict[str, Any
         "projected_saved_usd": round(_to_float(summary.get("projected_savings_usd") or top_canary.get("projected_savings_usd")), 8),
         "cohort_bucket": sanitize_value(cohort_bucket),
         "staged_canary_count": staged_count,
+        "promotion_readiness": sanitize_value(reobserve_window.get("decision")),
+        "rollback_required": bool(reobserve_window.get("decision") == "rollback-required"),
+        "reobserve_window_status": sanitize_value(reobserve_window.get("status")),
+        "reobserve_window_decision": sanitize_value(reobserve_window.get("decision")),
+        "reobserve_window_next_action": sanitize_value(reobserve_window.get("next_action")),
+        "cache_apply_action_count": _to_int(reobserve_window.get("cache_apply_action_count")),
+        "cache_entries_written": _to_int(reobserve_window.get("cache_entries_written")),
+        "emits_cache_apply_action": False if reobserve_window else None,
+        "policy_files_written": bool(reobserve_window.get("policy_files_written")) if reobserve_window else None,
     }
 
 
