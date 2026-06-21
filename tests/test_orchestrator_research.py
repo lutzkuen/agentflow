@@ -4657,6 +4657,177 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw successor issue prompt must not leak", rendered)
         self.assertNotIn("req-successor-issue-secret", rendered)
 
+    def test_durable_keep_blocked_activation_feedback_successors_do_not_create_placeholders(self):
+        def feedback_action(source, blocker, next_action, keep_blocked_reason):
+            return {
+                "schema": "tokenclaw.local_activation_successor_action.v1",
+                "fingerprint": f"successor:{source.rsplit(':', 1)[-1]}",
+                "source_fingerprint": source,
+                "lever": "activation-feedback",
+                "local_action_family": "activation-feedback",
+                "successor_status": "keep-blocked",
+                "current_status": "keep-blocked",
+                "state": "keep-blocked",
+                "recommended_next_action": "refresh-managed-activation-preview",
+                "unblock_reason": blocker,
+                "blocker_codes": [blocker],
+                "diagnostic_class": blocker,
+                "diagnostic_reason": blocker,
+                "diagnostic_fingerprint": f"tokenclaw.repeated-diagnostic.{blocker}.v1",
+                "durable_action_ledger_entry": True,
+                "keep_blocked_reason": keep_blocked_reason,
+                "needed_resolution": ["new_sanitized_evidence", "bounded_local_action_issue"],
+                "next_state": "keep-blocked",
+                "next_state_reason": keep_blocked_reason,
+                "acceptance_metric": "The successor action has a stable fingerprint, concrete next action, local action family, and metadata-only privacy flags.",
+                "expected_savings_path": "Convert repeated activation-feedback diagnostics into a durable local action issue without rediscovering the same blocker.",
+                "activation_feedback_diagnostic_classification": {
+                    "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
+                    "status": "already-resolved-keep-blocked",
+                    "decision": "keep-blocked",
+                    "reason": keep_blocked_reason,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "privacy": {
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                    "raw_prompts_included": False,
+                    "provider_bodies_included": False,
+                    "request_ids_included": False,
+                    "session_ids_included": False,
+                    "cache_keys_included": False,
+                    "individual_candidate_ids_included": False,
+                },
+                "managed_preview_gate": {
+                    "schema": "tokenclaw.preview_verified_activation_successor_gate.v1",
+                    "required": True,
+                    "verified": False,
+                    "decision": "keep-blocked",
+                    "status": "no-data-preview-health",
+                    "next_action": "refresh-managed-activation-preview",
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            }
+
+        def feedback_decision(action):
+            return {
+                "schema": "tokenclaw.local_activation_successor_decision.v1",
+                "fingerprint": f"successor-decision:{action['source_fingerprint'].rsplit(':', 1)[-1]}",
+                "source_fingerprint": action["source_fingerprint"],
+                "successor_action_fingerprint": action["fingerprint"],
+                "decision": "keep-blocked",
+                "issue_worthy_status": "blocked",
+                "local_action_family": "activation-feedback",
+                "recommended_next_action": "refresh-managed-activation-preview",
+                "preview_agreement_status": "no-data-preview-health",
+                "preview_outcome_status": "preview-missing",
+                "preview_verification_decision": "keep-blocked",
+                "preview_verification_status": "no-data-preview-health",
+                "preview_verified": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "privacy": {
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                    "raw_prompts_included": False,
+                    "provider_bodies_included": False,
+                    "request_ids_included": False,
+                    "session_ids_included": False,
+                    "cache_keys_included": False,
+                    "individual_candidate_ids_included": False,
+                },
+            }
+
+        actions = [
+            feedback_action(
+                "activation:7f8570a369adac79",
+                "activation-feedback-blocker-review",
+                "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence",
+                "activation-feedback-blocker-review-already-resolved-to-bounded-local-action-ledger",
+            ),
+            feedback_action(
+                "activation:17b66ef1aac77c6a",
+                "live-service-deploy-failed-after-development",
+                "record-live-service-deploy-failure-and-wait-for-shell-guard-health",
+                "live-service-deploy-failed-after-development-owned-by-shell-guard",
+            ),
+        ]
+        for action, next_action in zip(
+            actions,
+            [
+                "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence",
+                "record-live-service-deploy-failure-and-wait-for-shell-guard-health",
+            ],
+        ):
+            action["recommended_next_action"] = next_action
+
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 0,
+                "local_activation_next_action_queue": {
+                    "schema": "tokenclaw.local_activation_next_action_queue.v1",
+                    "status": "ranked",
+                    "entries": [
+                        {
+                            "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
+                            "fingerprint": action["source_fingerprint"],
+                            "lever": "activation-feedback",
+                            "local_action_family": "activation-feedback",
+                            "state": "keep-blocked",
+                            "current_status": "keep-blocked",
+                            "next_action": action["recommended_next_action"],
+                            "blocker_codes": action["blocker_codes"],
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        }
+                        for action in actions
+                    ],
+                    "successor_actions": actions,
+                    "successor_decisions": [feedback_decision(action) for action in actions],
+                    "summary": {"successor_action_count": len(actions), "successor_decision_count": len(actions)},
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        created = plan["backlog_changes"]["create_issues"]
+        rendered_titles = " ".join(item["title"] for item in created)
+        self.assertNotIn("Keep activation-feedback activation successor blocked on activation-feedback-blocker-review", rendered_titles)
+        self.assertNotIn("Keep activation-feedback activation successor blocked on live-service-deploy-failed-after-development", rendered_titles)
+        self.assertFalse(
+            any(
+                item.get("proposal_source") == "preview-verified-activation-successor"
+                and "activation-feedback" in item["title"]
+                for item in created
+            )
+        )
+
+        queue = plan["evidence"]["stats_summary"]["local_activation_next_action_queue"]
+        by_source = {item["source_fingerprint"]: item for item in queue["successor_actions"]}
+        self.assertEqual(set(by_source), {"activation:7f8570a369adac79", "activation:17b66ef1aac77c6a"})
+        for source, action in by_source.items():
+            self.assertEqual(action["local_action_family"], "activation-feedback")
+            self.assertEqual(action["successor_status"], "keep-blocked")
+            self.assertTrue(action["durable_action_ledger_entry"])
+            self.assertTrue(action["fingerprint"].startswith("successor:"))
+            self.assertIn(action["recommended_next_action"], {
+                "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence",
+                "record-live-service-deploy-failure-and-wait-for-shell-guard-health",
+            })
+            self.assertTrue(action["privacy"]["metadata_only"])
+            self.assertTrue(action["privacy"]["aggregate_only"])
+            self.assertFalse(action["privacy"]["raw_prompts_included"])
+            self.assertFalse(action["privacy"]["provider_bodies_included"])
+            self.assertFalse(action["privacy"]["request_ids_included"])
+            self.assertFalse(action["privacy"]["session_ids_included"])
+        decisions = {item["source_fingerprint"]: item for item in queue["successor_decisions"]}
+        self.assertEqual(set(decisions), set(by_source))
+        self.assertTrue(all(item["decision"] == "keep-blocked" for item in decisions.values()))
+        self.assertTrue(all(item["privacy"]["metadata_only"] for item in decisions.values()))
+
     def test_tool_cache_dependency_preview_blockers_emit_safe_invalidation_drill_issue(self):
         dependency_rows = [
             (

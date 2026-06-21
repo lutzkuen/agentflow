@@ -8334,6 +8334,47 @@ def _is_new_sanitized_activation_feedback_successor(action: dict[str, Any], deci
     return str(classification.get("status") or action.get("diagnostic_evidence_status") or "").strip() == "new-sanitized-evidence"
 
 
+def _is_durable_keep_blocked_activation_feedback_placeholder(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+) -> bool:
+    family = str(action.get("local_action_family") or decision.get("local_action_family") or "").strip()
+    if family != "activation-feedback":
+        return False
+    if _is_new_sanitized_activation_feedback_successor(action, decision):
+        return False
+    if not bool(action.get("durable_action_ledger_entry")):
+        return False
+    status_values = {
+        str(action.get("state") or "").strip(),
+        str(action.get("current_status") or "").strip(),
+        str(action.get("successor_status") or "").strip(),
+        str(decision.get("decision") or "").strip(),
+        str(decision.get("issue_worthy_status") or "").strip(),
+    }
+    if not ({"keep-blocked", "blocked"} & status_values):
+        return False
+    next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "").strip()
+    keep_blocked_reason = str(action.get("keep_blocked_reason") or "").strip()
+    needed = {str(item).strip() for item in action.get("needed_resolution") or [] if str(item or "").strip()}
+    classification = (
+        action.get("activation_feedback_diagnostic_classification")
+        if isinstance(action.get("activation_feedback_diagnostic_classification"), dict)
+        else {}
+    )
+    classification_decision = str(classification.get("decision") or "").strip()
+    classification_status = str(classification.get("status") or "").strip()
+    if (
+        keep_blocked_reason
+        or "new_sanitized_evidence" in needed
+        or next_action.startswith(("keep-", "record-"))
+        or classification_decision == "keep-blocked"
+        or classification_status.endswith("keep-blocked")
+    ):
+        return True
+    return False
+
+
 def _activation_feedback_diagnostic_proposal_from_rows(
     action: dict[str, Any],
     decision: dict[str, Any],
@@ -8440,6 +8481,8 @@ def _proposals_from_activation_successor_decisions(stats_summary: dict[str, Any]
         decision_text = str(decision.get("decision") or "").strip()
         issue_status = str(decision.get("issue_worthy_status") or "").strip()
         if issue_status == "suppressed" or decision_text in {"keep-current-rule", "suppress-duplicate"}:
+            continue
+        if _is_durable_keep_blocked_activation_feedback_placeholder(action, decision):
             continue
         if _is_new_sanitized_activation_feedback_successor(action, decision):
             if issue_status in {"ready", "review"} and decision_text in {"ready", "review", "review-only"}:
