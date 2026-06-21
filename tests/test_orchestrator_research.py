@@ -2334,7 +2334,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             [(entry["lever"], entry["next_action"]) for entry in queue["entries"]],
             [
                 ("routing", "draft-openai-routing-recovery-canary"),
-                ("cache", "rollback-cache-replay-rule"),
+                ("cache", "apply-cache-replay-rollback-before-reobserve"),
                 ("activation-feedback", "refresh-managed-activation-preview"),
                 ("activation-feedback", "refresh-managed-activation-preview"),
             ],
@@ -2348,7 +2348,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(ready["freshness_adjusted_savings_per_1000_calls_usd"], 6.0)
         self.assertEqual(ready["rank_basis"]["rank_bucket"], 1)
         self.assertEqual(rollback["freshness_state"], "stale-rollback-required")
-        self.assertEqual(rollback["blocking_reason"], "evidence-older-than-max-age")
+        self.assertEqual(rollback["blocking_reason"], "cache-replay-rollback-not-applied")
         self.assertEqual(rollback["savings_per_1000_calls_usd"], 5.0)
         self.assertEqual(rollback["freshness_adjusted_savings_per_1000_calls_usd"], 4.5)
         self.assertTrue(rollback["rank_basis"]["rollback_required"])
@@ -2379,6 +2379,113 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("sess-freshness-rank-secret", rendered)
         self.assertNotIn("cache-freshness-rank-secret", rendered)
         self.assertNotIn("raw freshness rank prompt must not leak", rendered)
+
+    def test_cache_replay_post_rollback_successors_emit_narrow_decisions(self):
+        def cache_entry(source, *, rollback_applied=False, no_repeat=False, fresh=False):
+            blockers = ["evidence-older-than-max-age"]
+            state = "blocked"
+            current_status = "blocked"
+            next_action = "rollback-cache-replay-rule"
+            promotion_readiness = "rollback-required"
+            if no_repeat:
+                blockers = ["retire-staged-no-repeat", "repeat-window-elapsed-no-live-repeat"]
+                state = "retired-no-repeat"
+                current_status = "superseded"
+                next_action = "retire-cache-replay-canary-no-repeat"
+                promotion_readiness = "retire-staged-no-repeat"
+            return {
+                "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                "rank": 1,
+                "fingerprint": source,
+                "lever": "cache",
+                "local_action_family": "cache",
+                "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                "state": state,
+                "current_status": current_status,
+                "issue_worthy_status": "blocked",
+                "next_action": next_action,
+                "blocker_codes": blockers,
+                "sample_count": 36,
+                "applied_count": 6 if fresh else 0,
+                "holdout_count": 4 if fresh else 0,
+                "miss_count": 2 if fresh else 0,
+                "warmup_miss_count": 1 if fresh else 0,
+                "exact_hit_count": 0,
+                "projected_savings_usd": 0.075373,
+                "rollback_required": not no_repeat,
+                "rollback_applied": rollback_applied,
+                "rollback_applied_rules": [{"id": "local-openai-cache-replay-promoted:public"}]
+                if rollback_applied
+                else [],
+                "promotion_readiness": promotion_readiness,
+                "evidence_age_hours": 2.0 if fresh else 96.0,
+                "max_evidence_age_hours": 72.0,
+                "target_local_rule_file": "cache_rules.yaml",
+                "target_local_policy_section": "cache.pattern_rules",
+                "cache_apply_action_count": 0,
+                "cache_entries_written": 0,
+                "emits_cache_apply_action": False,
+                "policy_files_written": False,
+                "raw_prompt": "raw cache replay successor prompt must not leak",
+                "cache_key": "raw-cache-replay-key",
+            }
+
+        ledger = {
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                cache_entry("activation:stale-rollback-applied", rollback_applied=True),
+                cache_entry("activation:stale-rollback-not-applied"),
+                cache_entry("activation:cache-retired-no-repeat", no_repeat=True),
+                cache_entry("activation:fresh-reobserve", rollback_applied=True, fresh=True),
+            ],
+        }
+
+        queue = build_local_activation_next_action_queue(
+            {"evidence_to_activation_next_action_ledger": ledger}
+        )
+
+        entries = {row["fingerprint"]: row for row in queue["entries"]}
+        actions = {row["source_fingerprint"]: row for row in queue["successor_actions"]}
+        decisions = {row["source_fingerprint"]: row for row in queue["successor_decisions"]}
+
+        applied = actions["activation:stale-rollback-applied"]
+        self.assertEqual(applied["successor_status"], "reobserve-after-rollback")
+        self.assertEqual(applied["recommended_next_action"], "reobserve-cache-replay-after-rollback")
+        self.assertEqual(applied["post_rollback_successor_decision"], "reobserve-after-rollback")
+        self.assertEqual(entries["activation:stale-rollback-applied"]["unblock_reason"], "cache-replay-rollback-applied")
+        self.assertNotIn("evidence-older-than-max-age", entries["activation:stale-rollback-applied"]["blocker_codes"])
+
+        blocked = actions["activation:stale-rollback-not-applied"]
+        self.assertEqual(blocked["successor_status"], "keep-blocked-narrow")
+        self.assertEqual(blocked["recommended_next_action"], "apply-cache-replay-rollback-before-reobserve")
+        self.assertEqual(decisions["activation:stale-rollback-not-applied"]["decision"], "keep-blocked-narrow")
+        self.assertEqual(entries["activation:stale-rollback-not-applied"]["unblock_reason"], "cache-replay-rollback-not-applied")
+        self.assertNotIn("evidence-older-than-max-age", entries["activation:stale-rollback-not-applied"]["blocker_codes"])
+
+        retired = actions["activation:cache-retired-no-repeat"]
+        self.assertEqual(retired["state"], "retired-no-repeat")
+        self.assertEqual(retired["recommended_next_action"], "retire-cache-replay-canary-no-repeat")
+
+        fresh = actions["activation:fresh-reobserve"]
+        self.assertEqual(fresh["successor_status"], "reobserve-after-rollback")
+        self.assertEqual(fresh["post_rollback_observation"]["applied_count"], 6)
+        self.assertEqual(fresh["post_rollback_observation"]["holdout_count"], 4)
+        self.assertEqual(fresh["post_rollback_observation"]["warmup_miss_count"], 1)
+
+        for row in [*actions.values(), *decisions.values()]:
+            self.assertTrue(row["privacy"]["metadata_only"])
+            self.assertTrue(row["privacy"]["aggregate_only"])
+            self.assertEqual(row["cache_apply_action_count"], 0)
+            self.assertEqual(row["cache_entries_written"], 0)
+            self.assertFalse(row["emits_cache_apply_action"])
+            self.assertFalse(row["policy_files_written"])
+
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("raw cache replay successor prompt must not leak", rendered)
+        self.assertNotIn("raw-cache-replay-key", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertNotIn('"emits_cache_apply_action": true', rendered.lower())
 
     def test_local_activation_successors_record_preview_verified_gates(self):
         ledger = {

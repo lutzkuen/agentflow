@@ -5571,6 +5571,8 @@ def build_evidence_to_activation_next_action_ledger(
             "unknown_dependency_evidence_rows",
             "cache_apply_action_count",
             "cache_entries_written",
+            "warmup_miss_count",
+            "exact_hit_count",
         ):
             if stage.get(count_key) is not None:
                 entry[count_key] = _to_int(stage.get(count_key))
@@ -5630,6 +5632,12 @@ def build_evidence_to_activation_next_action_ledger(
             entry["policy_files_written"] = bool(stage.get("policy_files_written"))
         if stage.get("rollback_required") is not None:
             entry["rollback_required"] = bool(stage.get("rollback_required"))
+        if stage.get("rollback_applied") is not None:
+            entry["rollback_applied"] = bool(stage.get("rollback_applied"))
+        if stage.get("rollback_applied_rule_count") is not None:
+            entry["rollback_applied_rule_count"] = _to_int(stage.get("rollback_applied_rule_count"))
+        if isinstance(stage.get("rollback_applied_rules"), list):
+            entry["rollback_applied_rules"] = sanitize_value(stage.get("rollback_applied_rules"))
         if stage.get("stale_no_traffic_retirement") is not None:
             entry["stale_no_traffic_retirement"] = bool(stage.get("stale_no_traffic_retirement"))
         if stage.get("managed_preview_required") is not None:
@@ -5902,6 +5910,130 @@ def _queue_realized_savings(entry: dict[str, Any], projected: float) -> float:
     return 0.0
 
 
+def _cache_replay_rollback_applied(entry: dict[str, Any]) -> bool:
+    if bool(entry.get("rollback_applied")):
+        return True
+    for key in ("rollback_applied_rules", "applied_rollback_rules"):
+        value = entry.get(key)
+        if isinstance(value, list) and value:
+            return True
+    for key in ("rollback_applied_rule_count", "applied_rollback_rule_count"):
+        if _to_int(entry.get(key)) > 0:
+            return True
+    return False
+
+
+def _cache_replay_post_rollback_classification(entry: dict[str, Any]) -> dict[str, Any] | None:
+    family = str(entry.get("local_action_family") or entry.get("lever") or "").strip()
+    if family != "cache":
+        return None
+    target_file = str(entry.get("target_local_rule_file") or "").strip()
+    target_section = str(entry.get("target_local_policy_section") or "").strip()
+    evidence_schema = str(entry.get("evidence_schema") or entry.get("source_evidence_schema") or "")
+    text = " ".join(
+        [
+            str(entry.get("state") or ""),
+            str(entry.get("current_status") or ""),
+            str(entry.get("next_action") or ""),
+            str(entry.get("promotion_readiness") or ""),
+            str(entry.get("promotion_recommendation") or ""),
+            str(entry.get("policy_decision") or ""),
+            str(entry.get("reason") or ""),
+            " ".join(str(item) for item in entry.get("blocker_codes") or []),
+        ]
+    ).lower()
+    cache_replay_shape = bool(
+        target_file == "cache_rules.yaml"
+        or target_section == "cache.pattern_rules"
+        or "cache_replay" in evidence_schema
+        or "cache-replay" in evidence_schema
+        or "cache-replay" in text
+        or "cache replay" in text
+    )
+    if not cache_replay_shape:
+        return None
+
+    no_repeat = bool(
+        entry.get("stale_no_traffic_retirement")
+        or "retire-staged-no-repeat" in text
+        or "retired-no-repeat" in text
+        or "retired-stale-no-traffic" in text
+    )
+    if no_repeat:
+        return None
+
+    rollback_required = bool(
+        entry.get("rollback_required")
+        or "rollback-required" in text
+        or "rollback-cache-replay-rule" in text
+        or str(entry.get("policy_decision") or "") == "rollback"
+    )
+    if not rollback_required:
+        return None
+
+    if _cache_replay_rollback_applied(entry):
+        return {
+            "decision": "reobserve-after-rollback",
+            "next_action": "reobserve-cache-replay-after-rollback",
+            "reason": "cache-replay-rollback-applied",
+            "issue_worthy_status": "review",
+            "current_status": "review",
+            "state": "reobserve-after-rollback",
+            "blocker_codes": ["cache-replay-rollback-applied"],
+        }
+
+    return {
+        "decision": "keep-blocked-narrow",
+        "next_action": "apply-cache-replay-rollback-before-reobserve",
+        "reason": "cache-replay-rollback-not-applied",
+        "issue_worthy_status": "blocked",
+        "current_status": "blocked",
+        "state": "keep-blocked-narrow",
+        "blocker_codes": ["cache-replay-rollback-not-applied"],
+    }
+
+
+def _apply_cache_replay_post_rollback_classification(entry: dict[str, Any]) -> None:
+    classification = _cache_replay_post_rollback_classification(entry)
+    if not classification:
+        return
+    entry["post_rollback_successor_decision"] = classification["decision"]
+    entry["post_rollback_next_action"] = classification["next_action"]
+    entry["post_rollback_reason"] = classification["reason"]
+    entry["next_action"] = classification["next_action"]
+    entry["unblock_reason"] = classification["reason"]
+    entry["blocking_reason"] = classification["reason"]
+    entry["blocker_codes"] = classification["blocker_codes"]
+    entry["issue_worthy_status"] = classification["issue_worthy_status"]
+    entry["current_status"] = classification["current_status"]
+    entry["state"] = classification["state"]
+    entry["cache_apply_action_count"] = 0
+    entry["cache_entries_written"] = 0
+    entry["emits_cache_apply_action"] = False
+    entry["policy_files_written"] = False
+    if classification["decision"] in {"reobserve-after-rollback", "keep-blocked-narrow"}:
+        entry["rollback_required"] = True
+    entry["post_rollback_observation"] = {
+        "schema": "tokenclaw.cache_replay_post_rollback_observation.v1",
+        "decision": classification["decision"],
+        "next_action": classification["next_action"],
+        "reason": classification["reason"],
+        "applied_count": _to_int(entry.get("applied_count")),
+        "holdout_count": _to_int(entry.get("holdout_count")),
+        "miss_count": _to_int(entry.get("miss_count")),
+        "warmup_miss_count": _to_int(entry.get("warmup_miss_count")),
+        "exact_hit_count": _to_int(entry.get("exact_hit_count") or entry.get("actual_hits")),
+        "stale_age_hours": round(_to_float(entry.get("evidence_age_hours")), 3),
+        "blocker_codes": classification["blocker_codes"],
+        "metadata_only": True,
+        "aggregate_only": True,
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
+        "emits_cache_apply_action": False,
+        "policy_files_written": False,
+    }
+
+
 def _successor_action_privacy() -> dict[str, Any]:
     return {
         "metadata_only": True,
@@ -5973,6 +6105,14 @@ def _successor_action_acceptance_metric(entry: dict[str, Any]) -> str:
 
 
 def _successor_action_status(entry: dict[str, Any]) -> str:
+    post_rollback_decision = str(entry.get("post_rollback_successor_decision") or "").strip()
+    if post_rollback_decision in {
+        "reobserve-after-rollback",
+        "keep-blocked-narrow",
+        "retire-staged-no-repeat",
+        "suppressed-closed-successor",
+    }:
+        return post_rollback_decision
     duplicate_status = str(entry.get("duplicate_suppression_status") or "")
     current_status = str(entry.get("current_status") or "")
     state = str(entry.get("state") or "")
@@ -7014,6 +7154,9 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "rollup_outcome_status",
         "successor_action_fingerprint",
         "successor_decision_fingerprint",
+        "post_rollback_successor_decision",
+        "post_rollback_next_action",
+        "post_rollback_reason",
     ):
         if entry.get(key) is not None:
             action[key] = sanitize_value(entry.get(key))
@@ -7033,6 +7176,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "durable_action_ledger_entry",
         "durable_outcome_ledger_entry",
         "rollback_required",
+        "rollback_applied",
         "stale_no_traffic_retirement",
     ):
         if entry.get(key) is not None:
@@ -7049,6 +7193,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "affected_rows",
         "cache_apply_action_count",
         "cache_entries_written",
+        "warmup_miss_count",
         "observed_hits",
         "exact_hit_count",
         "tools_present_rows",
@@ -7085,6 +7230,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "coverage",
         "recovery_plan",
         "activation_feedback_diagnostic_classification",
+        "post_rollback_observation",
     ):
         if isinstance(entry.get(key), dict):
             action[key] = sanitize_value(entry.get(key))
@@ -7167,6 +7313,12 @@ def _successor_decision_issue_status(action: dict[str, Any]) -> str:
         return "ready"
     if decision == "rollback-required":
         return "blocked"
+    if decision == "reobserve-after-rollback":
+        return "review"
+    if decision == "keep-blocked-narrow":
+        return "blocked"
+    if decision in {"retire-staged-no-repeat", "suppressed-closed-successor"}:
+        return "suppressed"
     if decision == "retired-stale-no-traffic":
         return "suppressed"
     if decision in {"keep-current-rule", "suppress-duplicate"}:
@@ -7237,6 +7389,12 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
         "rollback_required": bool(action.get("rollback_required")),
         "rollback_action_type": sanitize_value(action.get("rollback_action_type")),
         "disabled_reason": sanitize_value(action.get("disabled_reason")),
+        "post_rollback_successor_decision": sanitize_value(action.get("post_rollback_successor_decision")),
+        "post_rollback_next_action": sanitize_value(action.get("post_rollback_next_action")),
+        "post_rollback_reason": sanitize_value(action.get("post_rollback_reason")),
+        "post_rollback_observation": sanitize_value(action.get("post_rollback_observation"))
+        if isinstance(action.get("post_rollback_observation"), dict)
+        else None,
         "cache_apply_action_count": _to_int(action.get("cache_apply_action_count")),
         "cache_entries_written": _to_int(action.get("cache_entries_written")),
         "emits_cache_apply_action": bool(action.get("emits_cache_apply_action")),
@@ -8423,6 +8581,12 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "promotion_recommendation",
         "impact_recommendation",
         "observed_hit_blocker",
+        "rollback_applied",
+        "post_rollback_successor_decision",
+        "post_rollback_next_action",
+        "post_rollback_reason",
+        "warmup_miss_count",
+        "exact_hit_count",
     )
     for key in passthrough_keys:
         if entry.get(key) is not None:
@@ -8448,9 +8612,14 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "evidence_freshness",
         "coverage",
         "recovery_plan",
+        "post_rollback_observation",
+        "local_policy_patch",
     ):
         if isinstance(entry.get(review_key), dict):
             clean[review_key] = sanitize_value(entry.get(review_key))
+    for list_key in ("rollback_applied_rules", "applied_rollback_rules"):
+        if isinstance(entry.get(list_key), list):
+            clean[list_key] = sanitize_value(entry.get(list_key))
     for breakdown_key in (
         "blocker_breakdown",
         "dependency_evidence_decision_breakdown",
@@ -8508,7 +8677,10 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "measured_full_rollout_activation",
         "evidence_age_hours",
         "max_evidence_age_hours",
+        "warmup_miss_count",
+        "exact_hit_count",
     }
+    _apply_cache_replay_post_rollback_classification(clean)
     return {key: value for key, value in clean.items() if value not in (None, "", [], 0) or key in preserved_empty_keys}
 
 
@@ -9628,6 +9800,19 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         or str(decision_report.get("promotion_readiness") or summary.get("promotion_readiness") or "").strip()
         == "rollback-required"
     )
+    rollback_applied_rules = (
+        decision_report.get("rollback_applied_rules")
+        if isinstance(decision_report.get("rollback_applied_rules"), list)
+        else summary.get("rollback_applied_rules")
+        if isinstance(summary.get("rollback_applied_rules"), list)
+        else []
+    )
+    rollback_applied = bool(
+        decision_report.get("rollback_applied")
+        or summary.get("rollback_applied")
+        or rollback_applied_rules
+        or _to_int(decision_report.get("rollback_applied_rule_count") or summary.get("rollback_applied_rule_count")) > 0
+    )
     stale_no_traffic_retirement = bool(
         rollback_required
         and stale_evidence.get("stale")
@@ -9759,6 +9944,8 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         "actual_hits": observed_hits,
         "actual_saved_cost_usd": round(observed_savings, 8),
         "miss_count": _to_int(summary.get("miss_count") or evidence_summary.get("miss_count")),
+        "warmup_miss_count": _to_int(summary.get("warmup_miss_count") or evidence_summary.get("warmup_miss_count")),
+        "exact_hit_count": _to_int(summary.get("exact_hit_count") or evidence_summary.get("exact_hit_count")),
         "miss_reason_breakdown": sanitize_value(miss_breakdown),
         "top_miss_reason": sanitize_value(top_miss_reason),
         "observed_hit_blocker": sanitize_value(observed_hit_blocker),
@@ -9777,6 +9964,11 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         "promotion_allowed": bool(summary.get("promotion_allowed")),
         "rollback_count": 1 if rollback_required else 0,
         "rollback_required": rollback_required,
+        "rollback_applied": rollback_applied,
+        "rollback_applied_rule_count": _to_int(
+            decision_report.get("rollback_applied_rule_count") or summary.get("rollback_applied_rule_count") or len(rollback_applied_rules)
+        ),
+        "rollback_applied_rules": sanitize_value(rollback_applied_rules[:5]),
         "stale_no_traffic_retirement": stale_no_traffic_retirement,
         "durable_action_ledger_entry": stale_no_traffic_retirement,
         "issue_worthy_status": "suppressed" if stale_no_traffic_retirement else None,
