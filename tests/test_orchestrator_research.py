@@ -11244,6 +11244,95 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         self.assertNotIn("raw response must not leak", rendered)
         self.assertNotIn("raw-session-id-must-not-leak", rendered)
 
+    def test_cli_rehydrates_request_shape_candidates_from_persisted_snapshot_when_live_rows_empty(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            store = SQLiteStore(db_path)
+            try:
+                stored = store.persist_request_shape_rollup_snapshot(
+                    {
+                        "schema": "tokenclaw.request_shape_rollup_snapshot.v1",
+                        "source_schema": "tokenclaw.activation_rollup_snapshot.v1",
+                        "generated_at": utc_now(),
+                        "run_id": "snapshot-only-research",
+                        "window": {
+                            "start": "2026-06-21T06:00:00+00:00",
+                            "end": "2026-06-21T06:30:00+00:00",
+                            "source": "persisted-activation-rollup-snapshot",
+                        },
+                        "summary": {
+                            "rows_considered": 36,
+                            "rollup_count": 3,
+                            "ranked_candidate_count": 1,
+                            "top_next_action": "stage-repeated-context-crunch-canary",
+                            "top_local_action_family": "crunch",
+                            "top_readiness_state": "activation-ready",
+                            "class_breakdown": [{"value": "repeated_context", "count": 36}],
+                            "blocker_breakdown": [],
+                            "readiness_breakdown": [{"value": "activation-ready", "count": 36}],
+                            "next_action_breakdown": [
+                                {"value": "stage-repeated-context-crunch-canary", "count": 36}
+                            ],
+                            "local_action_family_breakdown": [{"value": "crunch", "count": 36}],
+                            "projected_crunch_tokens_saved": 4200,
+                            "projected_crunch_savings_usd": 0.0126,
+                            "total_projected_savings_usd": 0.0126,
+                        },
+                        "privacy": {
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                            "raw_prompts_included": False,
+                            "provider_bodies_included": False,
+                            "request_ids_included": False,
+                            "session_ids_included": False,
+                            "cache_keys_included": False,
+                            "individual_candidate_ids_included": False,
+                            "absolute_paths_included": False,
+                            "provider_calls_made": False,
+                            "managed_server_calls_made": False,
+                            "policy_files_written": False,
+                        },
+                    }
+                )
+            finally:
+                store.conn.close()
+
+            self.assertEqual(stored, 1)
+            issues_path = Path(tmp) / "issues.json"
+            stats_path = Path(tmp) / "stats.json"
+            issues_path.write_text(json.dumps([]), encoding="utf-8")
+            stats_path.write_text(json.dumps({"calls": 0, "today_calls": 0, "db": db_path}), encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            code = cli.orchestrator_research_cli(
+                ["--issues-json", str(issues_path), "--stats-json", str(stats_path), "--threshold", "3"],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        stats_summary = payload["evidence"]["stats_summary"]
+        signal = stats_summary["request_shape_rollup_candidates"]
+        self.assertEqual(signal["status"], "snapshot-reused")
+        self.assertEqual(signal["source_schema"], "tokenclaw.activation_rollup_snapshot.v1")
+        self.assertEqual(signal["source_snapshot_schema"], "tokenclaw.request_shape_rollup_snapshot.v1")
+        self.assertEqual(signal["summary"]["rows_considered"], 36)
+        self.assertEqual(signal["summary"]["ranked_candidate_count"], 1)
+        self.assertEqual(signal["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(signal["missing_measurements"], [])
+        self.assertTrue(signal["privacy"]["metadata_only"])
+        self.assertTrue(signal["privacy"]["aggregate_only"])
+        self.assertFalse(signal["privacy"]["raw_prompts_included"])
+        self.assertFalse(signal["privacy"]["provider_bodies_included"])
+        self.assertFalse(signal["privacy"]["request_ids_included"])
+        self.assertFalse(signal["privacy"]["session_ids_included"])
+        self.assertFalse(signal["privacy"]["cache_keys_included"])
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+        self.assertFalse(payload["privacy"]["provider_bodies_included"])
+
     def test_cli_enriches_staged_request_shape_cache_replay_evidence_from_local_policy(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "tokenclaw.sqlite3")
