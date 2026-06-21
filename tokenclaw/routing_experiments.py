@@ -1726,6 +1726,278 @@ def _score_routing_promotion_candidate(
     }
 
 
+def _configured_candidate_key(candidate: dict[str, Any]) -> tuple[str, str, bool, str, str, str, str]:
+    return (
+        _public_label(candidate.get("provider")),
+        _public_label(candidate.get("source_surface")),
+        bool(candidate.get("stream")),
+        _public_label(candidate.get("requested_model"), fallback=""),
+        _public_label(candidate.get("routed_model"), fallback=""),
+        _public_label(candidate.get("category")),
+        _public_label(candidate.get("workflow_phase")),
+    )
+
+
+def _report_candidate_key(candidate: dict[str, Any]) -> tuple[str, str, bool, str, str, str, str]:
+    return (
+        _public_label(candidate.get("provider")),
+        _public_label(candidate.get("source_surface")),
+        bool(candidate.get("stream")),
+        _public_label(candidate.get("requested_model"), fallback=""),
+        _public_label(candidate.get("routed_model"), fallback=""),
+        _public_label(candidate.get("category")),
+        _public_label(candidate.get("workflow_phase")),
+    )
+
+
+def _scoreboard_candidate_id(candidate: dict[str, Any]) -> str:
+    explicit = candidate.get("candidate_id") or candidate.get("configured_candidate_id")
+    if explicit:
+        return _public_label(explicit, fallback="unknown-candidate")
+    parts = list(_report_candidate_key(candidate))
+    payload = json.dumps(parts, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"shadow-route-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _new_readiness_scoreboard_row(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "tokenclaw.routing_candidate_readiness_scoreboard_row.v1",
+        "candidate_id": _scoreboard_candidate_id(candidate),
+        "label": _public_label(candidate.get("label"), fallback=""),
+        "provider": _public_label(candidate.get("provider")),
+        "source_surface": _public_label(candidate.get("source_surface")),
+        "stream": bool(candidate.get("stream")),
+        "requested_model": _public_label(candidate.get("requested_model"), fallback=""),
+        "routed_model": _public_label(candidate.get("routed_model"), fallback=""),
+        "category": _public_label(candidate.get("category")),
+        "workflow_phase": _public_label(candidate.get("workflow_phase")),
+        "sample_count": 0,
+        "compared_count": 0,
+        "passed_count": 0.0,
+        "holdout_count": 0,
+        "applied_count": 0,
+        "baseline_cost_usd": 0.0,
+        "candidate_cost_usd": 0.0,
+        "holdout_baseline_cost_usd": 0.0,
+        "applied_candidate_cost_usd": 0.0,
+        "candidate_error_count": 0.0,
+        "primary_error_count": 0.0,
+        "fallback_or_retry_count": 0,
+        "similarity_total": 0.0,
+        "similarity_count": 0,
+        "latest_evidence_at": None,
+        "mode_counts": {},
+        "reason_codes": [],
+    }
+
+
+def _merge_readiness_observed_row(row: dict[str, Any], observed: dict[str, Any]) -> None:
+    samples = int(observed.get("samples") or 0)
+    compared = int(observed.get("compared_samples") or 0)
+    mode = str(observed.get("mode") or "unknown")
+    primary_cost = float(observed.get("primary_cost_usd") or 0.0)
+    shadow_cost = float(observed.get("shadow_cost_usd") or 0.0)
+    pass_rate = observed.get("pass_rate")
+    avg_similarity = observed.get("avg_similarity")
+
+    row["sample_count"] += samples
+    row["compared_count"] += compared
+    if pass_rate is not None:
+        row["passed_count"] += float(pass_rate) * compared
+    if avg_similarity is not None:
+        row["similarity_total"] += float(avg_similarity) * compared
+        row["similarity_count"] += compared
+    row["fallback_or_retry_count"] += int(observed.get("fallback_or_retry_count") or 0)
+    row["primary_error_count"] += float(observed.get("primary_error_rate") or 0.0) * samples
+    row["mode_counts"][mode] = int(row["mode_counts"].get(mode, 0)) + samples
+
+    if mode == "applied_routed_down":
+        candidate_cost = primary_cost
+        baseline_cost = shadow_cost
+        row["applied_count"] += samples
+        row["applied_candidate_cost_usd"] += candidate_cost
+        row["candidate_error_count"] += float(observed.get("primary_error_rate") or 0.0) * samples
+    else:
+        baseline_cost = primary_cost
+        candidate_cost = shadow_cost
+        row["holdout_count"] += samples
+        row["holdout_baseline_cost_usd"] += baseline_cost
+        row["candidate_error_count"] += float(observed.get("shadow_error_rate") or 0.0) * samples
+
+    row["baseline_cost_usd"] += baseline_cost
+    row["candidate_cost_usd"] += candidate_cost
+    for reason in observed.get("promotion_reason_codes") or []:
+        if reason:
+            row["reason_codes"].append(str(reason))
+    latest = observed.get("last_sample_at")
+    if latest and (row.get("latest_evidence_at") is None or str(latest) > str(row["latest_evidence_at"])):
+        row["latest_evidence_at"] = latest
+
+
+def _finalize_readiness_scoreboard_row(row: dict[str, Any], *, min_samples: int) -> dict[str, Any]:
+    samples = int(row.get("sample_count") or 0)
+    compared = int(row.get("compared_count") or 0)
+    applied_count = int(row.get("applied_count") or 0)
+    holdout_count = int(row.get("holdout_count") or 0)
+    pass_rate = (float(row.get("passed_count") or 0.0) / compared) if compared else None
+    avg_similarity = (
+        float(row.get("similarity_total") or 0.0) / int(row.get("similarity_count") or 0)
+        if int(row.get("similarity_count") or 0)
+        else None
+    )
+    candidate_error_rate = float(row.get("candidate_error_count") or 0.0) / samples if samples else 0.0
+    fallback_rate = int(row.get("fallback_or_retry_count") or 0) / samples if samples else 0.0
+    realized_vs_baseline = float(row.get("baseline_cost_usd") or 0.0) - float(row.get("candidate_cost_usd") or 0.0)
+    if applied_count and holdout_count:
+        holdout_avg = float(row.get("holdout_baseline_cost_usd") or 0.0) / holdout_count
+        realized_vs_holdout = (holdout_avg * applied_count) - float(row.get("applied_candidate_cost_usd") or 0.0)
+    else:
+        realized_vs_holdout = realized_vs_baseline
+
+    reasons = sorted(set(str(reason) for reason in row.get("reason_codes") or [] if reason))
+    status = "ready"
+    if samples <= 0:
+        status = "insufficient-evidence"
+        reasons.append("no-source-traffic")
+    if samples < min_samples:
+        status = "insufficient-evidence"
+        reasons.append("insufficient-samples")
+    if compared < min_samples:
+        status = "insufficient-evidence"
+        reasons.append("insufficient-compared-samples")
+    if pass_rate is not None and pass_rate < ROUTING_PROMOTION_MIN_PASS_RATE:
+        status = "regressing"
+        reasons.append("below-similarity-pass-rate")
+    if candidate_error_rate > ROUTING_PROMOTION_MAX_SHADOW_ERROR_RATE:
+        status = "regressing"
+        reasons.append("candidate-error-rate-high")
+    if realized_vs_baseline < 0 or realized_vs_holdout < 0:
+        status = "regressing"
+        reasons.append("candidate-more-expensive")
+    if int(row.get("fallback_or_retry_count") or 0) > 0 and status == "ready":
+        status = "regressing"
+        reasons.append("fallback-or-retry-observed")
+    if not reasons and status == "ready":
+        reasons.append("readiness-thresholds-met")
+
+    mode_counts = [
+        {"value": key, "count": count}
+        for key, count in sorted(row.get("mode_counts", {}).items(), key=lambda item: (-item[1], item[0]))
+    ]
+    finalized = dict(row)
+    finalized.update(
+        {
+            "readiness_status": status,
+            "ready": status == "ready",
+            "min_sample_gate": {
+                "min_samples": min_samples,
+                "sample_count": samples,
+                "compared_count": compared,
+                "sample_gate_passed": samples >= min_samples,
+                "compared_gate_passed": compared >= min_samples,
+            },
+            "sample_count": samples,
+            "compared_count": compared,
+            "holdout_count": holdout_count,
+            "applied_count": applied_count,
+            "pass_rate": round(pass_rate, 6) if pass_rate is not None else None,
+            "avg_similarity": round(avg_similarity, 6) if avg_similarity is not None else None,
+            "candidate_error_rate": round(candidate_error_rate, 6),
+            "fallback_or_retry_rate": round(fallback_rate, 6),
+            "baseline_cost_usd": round(float(row.get("baseline_cost_usd") or 0.0), 8),
+            "candidate_cost_usd": round(float(row.get("candidate_cost_usd") or 0.0), 8),
+            "realized_cost_delta_vs_baseline_usd": round(realized_vs_baseline, 8),
+            "realized_cost_delta_vs_holdout_usd": round(realized_vs_holdout, 8),
+            "mode_counts": mode_counts,
+            "reason_codes": sorted(set(reasons)),
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "content_free": True,
+                "raw_prompts_included": False,
+                "raw_provider_bodies_included": False,
+                "raw_responses_included": False,
+                "tool_payloads_included": False,
+                "request_ids_included": False,
+                "raw_session_ids_included": False,
+                "filesystem_paths_included": False,
+                "cache_keys_included": False,
+            },
+        }
+    )
+    for key in ("passed_count", "similarity_total", "similarity_count", "candidate_error_count", "primary_error_count", "holdout_baseline_cost_usd", "applied_candidate_cost_usd"):
+        finalized.pop(key, None)
+    return finalized
+
+
+def _build_routing_candidate_readiness_scoreboard(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    min_samples = ROUTING_EXPERIMENT_MIN_SAMPLES
+    configured = _all_routing_candidates()
+    rows_by_key: dict[tuple[str, str, bool, str, str, str, str], dict[str, Any]] = {}
+    if configured:
+        for candidate in configured:
+            rows_by_key[_configured_candidate_key(candidate)] = _new_readiness_scoreboard_row(candidate)
+
+    for observed in candidates:
+        key = _report_candidate_key(observed)
+        row = rows_by_key.setdefault(key, _new_readiness_scoreboard_row(observed))
+        if observed.get("candidate_id") and not row.get("candidate_id"):
+            row["candidate_id"] = _scoreboard_candidate_id(observed)
+        _merge_readiness_observed_row(row, observed)
+
+    rows = [_finalize_readiness_scoreboard_row(row, min_samples=min_samples) for row in rows_by_key.values()]
+    rows.sort(
+        key=lambda item: (
+            {"ready": 0, "regressing": 1, "insufficient-evidence": 2}.get(str(item.get("readiness_status")), 3),
+            -int(item.get("sample_count") or 0),
+            str(item.get("candidate_id") or ""),
+        )
+    )
+    status_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    for row in rows:
+        status_counts[str(row.get("readiness_status") or "unknown")] = status_counts.get(str(row.get("readiness_status") or "unknown"), 0) + 1
+        for reason in row.get("reason_codes") or []:
+            reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
+    return {
+        "schema": "tokenclaw.routing_candidate_readiness_scoreboard.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "summary": {
+            "candidate_count": len(rows),
+            "configured_candidate_count": len(configured),
+            "sample_count": sum(int(row.get("sample_count") or 0) for row in rows),
+            "compared_count": sum(int(row.get("compared_count") or 0) for row in rows),
+            "ready_count": status_counts.get("ready", 0),
+            "insufficient_evidence_count": status_counts.get("insufficient-evidence", 0),
+            "regressing_count": status_counts.get("regressing", 0),
+            "total_realized_cost_delta_vs_baseline_usd": round(sum(float(row.get("realized_cost_delta_vs_baseline_usd") or 0.0) for row in rows), 8),
+            "total_realized_cost_delta_vs_holdout_usd": round(sum(float(row.get("realized_cost_delta_vs_holdout_usd") or 0.0) for row in rows), 8),
+            "min_samples": min_samples,
+        },
+        "readiness_counts": _count_rows(status_counts, key_name="status"),
+        "reason_counts": _count_rows(reason_counts),
+        "candidates": rows,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "content_free": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "filesystem_paths_included": False,
+            "cache_keys_included": False,
+        },
+    }
+
+
 def _text_chars_from_routing(routing: dict[str, Any]) -> int:
     for source in (routing.get("routing_experiment"), routing):
         if not isinstance(source, dict):
@@ -2668,6 +2940,10 @@ def build_routing_experiment_report(
         routing = _parse_jsonish(row["routing_json"])
         mode = _sample_mode_from_experiment(experiment)
         workflow_phase = _workflow_phase_from_payloads(experiment, routing)
+        candidate_id = _public_label(
+            experiment.get("candidate_id") or (experiment.get("selected_candidate") or {}).get("candidate_id"),
+            fallback="",
+        )
         key = (
             _public_label(row["provider"]),
             _public_label(row["source_surface"]),
@@ -2689,6 +2965,7 @@ def build_routing_experiment_report(
                 "category": key[5],
                 "workflow_phase": key[6],
                 "mode": key[7],
+                "candidate_id": candidate_id,
                 "routing_reasons": {},
                 "mode_composition": {},
                 "samples": 0,
@@ -2707,6 +2984,8 @@ def build_routing_experiment_report(
                 "last_sample_at": None,
             },
         )
+        if candidate_id and not item.get("candidate_id"):
+            item["candidate_id"] = candidate_id
         item["samples"] += 1
         item["mode_composition"][mode] = item["mode_composition"].get(mode, 0) + 1
         reason = _public_label(row["routing_reason"])
@@ -2952,6 +3231,7 @@ def build_routing_experiment_report(
         window_hours=window_hours,
         limit=limit,
     )
+    readiness_scoreboard = _build_routing_candidate_readiness_scoreboard(candidates)
     return {
         "schema": "tokenclaw.routing_experiment_report.v1",
         "generated_at": utc_now(),
@@ -2971,8 +3251,11 @@ def build_routing_experiment_report(
             "source_surfaces": list(ROUTING_EXPERIMENT_POLICY.get("source_surfaces") or []),
             "streaming_shadow_source_surfaces": list(ROUTING_EXPERIMENT_POLICY.get("streaming_shadow_source_surfaces") or []),
             "model_pairs": list(ROUTING_EXPERIMENT_POLICY.get("model_pairs") or []),
+            "routing_candidates": list(ROUTING_EXPERIMENT_POLICY.get("routing_candidates") or []),
+            "routing_candidate_count": len(ROUTING_EXPERIMENT_POLICY.get("routing_candidates") or []),
             "categories": list(ROUTING_EXPERIMENT_POLICY.get("categories") or []),
             "workflow_phases": list(ROUTING_EXPERIMENT_POLICY.get("workflow_phases") or []),
+            "min_samples_for_confidence": ROUTING_EXPERIMENT_MIN_SAMPLES,
             "min_text_chars": int(ROUTING_EXPERIMENT_POLICY.get("min_text_chars") or 0),
             "max_text_chars": int(ROUTING_EXPERIMENT_POLICY.get("max_text_chars") or 0),
             "eligibility_overrides": list(ROUTING_EXPERIMENT_POLICY.get("eligibility_overrides") or []),
@@ -3006,12 +3289,21 @@ def build_routing_experiment_report(
             "promotion_verdict_counts": promotion_verdict_counts,
             "promotion_reason_counts": promotion_reason_counts,
             "promotion_ready_candidates": int(promotion_verdict_counts.get("promote", 0)),
+            "readiness_scoreboard_counts": {
+                item["status"]: item["count"]
+                for item in readiness_scoreboard.get("readiness_counts", [])
+                if isinstance(item, dict)
+            },
+            "routing_readiness_ready_count": readiness_scoreboard.get("summary", {}).get("ready_count", 0),
+            "routing_readiness_insufficient_evidence_count": readiness_scoreboard.get("summary", {}).get("insufficient_evidence_count", 0),
+            "routing_readiness_regressing_count": readiness_scoreboard.get("summary", {}).get("regressing_count", 0),
         },
         "decision_reasons": decision_reasons,
         "decision_surfaces": decision_surfaces,
         "eligibility_projection": eligibility_projection,
         "claude_shadow_yield": claude_shadow_yield,
         "post_fix_shadow_yield": post_fix_shadow_yield,
+        "readiness_scoreboard": readiness_scoreboard,
         "candidates": candidates,
         "privacy": {
             "metadata_only": True,

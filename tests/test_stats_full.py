@@ -8099,6 +8099,122 @@ request_shape_repeated_context_canaries:
         self.assertFalse(result["provider_calls_made"])
         self.assertFalse(result["managed_server_calls_made"])
 
+    def test_shadow_routing_readiness_scoreboard_gates_configured_candidates(self):
+        policy = {
+            "profile_id": "test-shadow-readiness-scoreboard",
+            "mode": "shadow_candidate_pass_through",
+            "sample_rate": 0.25,
+            "daily_budget_usd": 10.0,
+            "min_samples_for_confidence": 3,
+            "providers": ["openai"],
+            "source_surfaces": ["codex_turn"],
+            "model_pairs": [{"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"}],
+            "routing_candidates": [
+                {
+                    "candidate_id": "candidate-ready",
+                    "requested_model": "gpt-5-codex",
+                    "routed_model": "gpt-5-mini",
+                    "provider": "openai",
+                    "source_surface": "codex_turn",
+                    "category": "codex-ready",
+                    "workflow_phase": "summary",
+                },
+                {
+                    "candidate_id": "candidate-too-small",
+                    "requested_model": "gpt-5-codex",
+                    "routed_model": "gpt-5-mini",
+                    "provider": "openai",
+                    "source_surface": "codex_turn",
+                    "category": "codex-too-small",
+                    "workflow_phase": "summary",
+                },
+                {
+                    "candidate_id": "candidate-regressing",
+                    "requested_model": "gpt-5-codex",
+                    "routed_model": "gpt-5-mini",
+                    "provider": "openai",
+                    "source_surface": "codex_turn",
+                    "category": "codex-regressing",
+                    "workflow_phase": "summary",
+                },
+                {
+                    "candidate_id": "candidate-no-traffic",
+                    "requested_model": "gpt-5-codex",
+                    "routed_model": "gpt-5-mini",
+                    "provider": "openai",
+                    "source_surface": "codex_turn",
+                    "category": "codex-no-traffic",
+                    "workflow_phase": "summary",
+                },
+            ],
+            "categories": [],
+            "workflow_phases": [],
+        }
+        with patch.multiple(
+            routing_experiments,
+            ROUTING_EXPERIMENT_ENABLED=True,
+            ROUTING_EXPERIMENT_MIN_SAMPLES=3,
+            ROUTING_EXPERIMENT_SAMPLE_RATE=0.25,
+            ROUTING_EXPERIMENT_DAILY_BUDGET_USD=10.0,
+            ROUTING_EXPERIMENT_POLICY=policy,
+        ):
+            for idx in range(3):
+                self._log_shadow_routing_promotion_sample(
+                    candidate="ready",
+                    idx=idx,
+                    category="codex-ready",
+                    experiment_extra={"candidate_id": "candidate-ready"},
+                )
+                self._log_shadow_routing_promotion_sample(
+                    candidate="regressing",
+                    idx=idx,
+                    category="codex-regressing",
+                    passed=False,
+                    experiment_extra={"candidate_id": "candidate-regressing"},
+                )
+            self._log_shadow_routing_promotion_sample(
+                candidate="too-small",
+                idx=0,
+                category="codex-too-small",
+                experiment_extra={"candidate_id": "candidate-too-small"},
+            )
+
+            result = asyncio.run(stats_views.stats_shadow_routing_promotion_readiness(server.store, limit=20))
+            app = create_dashboard_app(
+                store_obj=server.store,
+                default_db=self.tmp.name,
+                upstream="https://api.example.invalid",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            endpoint = client.get("/tokenclaw/stats/shadow-routing-promotion-readiness?limit=20")
+            html = client.get("/tokenclaw/dashboard")
+
+        self.assertEqual(endpoint.status_code, 200)
+        self.assertEqual(html.status_code, 200)
+        rows = {row["candidate_id"]: row for row in result["candidates"]}
+        self.assertEqual(rows["candidate-ready"]["readiness_status"], "ready")
+        self.assertGreater(rows["candidate-ready"]["realized_cost_delta_vs_baseline_usd"], 0)
+        self.assertGreater(rows["candidate-ready"]["realized_cost_delta_vs_holdout_usd"], 0)
+        self.assertEqual(rows["candidate-too-small"]["readiness_status"], "insufficient-evidence")
+        self.assertIn("insufficient-samples", rows["candidate-too-small"]["reason_codes"])
+        self.assertEqual(rows["candidate-no-traffic"]["readiness_status"], "insufficient-evidence")
+        self.assertEqual(rows["candidate-no-traffic"]["sample_count"], 0)
+        self.assertIn("no-source-traffic", rows["candidate-no-traffic"]["reason_codes"])
+        self.assertEqual(rows["candidate-regressing"]["readiness_status"], "regressing")
+        self.assertIn("below-similarity-pass-rate", rows["candidate-regressing"]["reason_codes"])
+        self.assertEqual(result["summary"]["readiness_ready_count"], 1)
+        self.assertEqual(result["summary"]["readiness_regressing_count"], 1)
+        self.assertGreaterEqual(result["summary"]["readiness_insufficient_evidence_count"], 2)
+        self.assertIn("candidate-no-traffic", {row["candidate_id"] for row in endpoint.json()["candidates"]})
+        self.assertIn("Delta vs holdout", html.text)
+        rendered = json.dumps(result, sort_keys=True) + json.dumps(endpoint.json(), sort_keys=True) + html.text
+        self._assert_shadow_promotion_forbidden_absent(rendered)
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+
     def test_sessions_include_thinking_token_breakdown(self):
         server.store.log_call(
             id=str(uuid.uuid4()),

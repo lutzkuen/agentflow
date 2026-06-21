@@ -11492,6 +11492,9 @@ async def stats_claude_routing_promotion_funnel(store_obj: Any, limit: int = 100
 
 
 def _shadow_routing_candidate_id(row: dict[str, Any]) -> str:
+    explicit = row.get("candidate_id") or row.get("configured_candidate_id")
+    if explicit:
+        return str(explicit)
     parts = [
         row.get("provider"),
         row.get("source_surface"),
@@ -11504,6 +11507,18 @@ def _shadow_routing_candidate_id(row: dict[str, Any]) -> str:
     return f"shadow-route-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
 
 
+def _shadow_routing_row_key(row: dict[str, Any]) -> tuple[str, str, bool, str, str, str, str]:
+    return (
+        str(row.get("provider") or "unknown"),
+        str(row.get("source_surface") or "unknown"),
+        bool(row.get("stream")),
+        str(row.get("requested_model") or ""),
+        str(row.get("routed_model") or ""),
+        str(row.get("category") or "unknown"),
+        str(row.get("workflow_phase") or "unknown"),
+    )
+
+
 def _shadow_routing_readiness_state(verdict: str, mode: str) -> str:
     if verdict == "promote":
         return "ready-to-stage" if mode == "shadow_candidate_pass_through" else "ready-to-widen"
@@ -11514,6 +11529,90 @@ def _shadow_routing_readiness_state(verdict: str, mode: str) -> str:
     if verdict == "reject":
         return "rejected"
     return "unknown"
+
+
+def _shadow_routing_scoreboard_to_candidate_row(row: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    status = str(row.get("readiness_status") or "insufficient-evidence")
+    verdict = {
+        "ready": "promote",
+        "regressing": "reject",
+        "insufficient-evidence": "needs_more_samples",
+    }.get(status, "unknown")
+    sample_rate = _as_float(row.get("sample_rate") or policy.get("sample_rate"))
+    applied_count = _as_int(row.get("applied_count"))
+    holdout_count = _as_int(row.get("holdout_count"))
+    return {
+        "candidate_id": str(row.get("candidate_id") or "unknown"),
+        "label": row.get("label"),
+        "provider": str(row.get("provider") or "unknown"),
+        "source_surface": str(row.get("source_surface") or "unknown"),
+        "stream": bool(row.get("stream")),
+        "requested_model": row.get("requested_model"),
+        "routed_model": row.get("routed_model"),
+        "model_pair": f"{row.get('requested_model') or 'unknown'} -> {row.get('routed_model') or 'unknown'}",
+        "category": str(row.get("category") or "unknown"),
+        "workflow_phase": str(row.get("workflow_phase") or "unknown"),
+        "sample_mode": "configured-shadow-candidate",
+        "sample_rate": sample_rate,
+        "sample_count": _as_int(row.get("sample_count")),
+        "compared_count": _as_int(row.get("compared_count")),
+        "compared_coverage": round(_as_int(row.get("compared_count")) / max(1, _as_int(row.get("sample_count"))), 6),
+        "pass_rate": row.get("pass_rate"),
+        "avg_similarity": row.get("avg_similarity"),
+        "primary_error_rate": 0.0,
+        "shadow_error_rate": _as_float(row.get("candidate_error_rate")),
+        "fallback_or_retry_count": _as_int(row.get("fallback_or_retry_count")),
+        "fallback_or_retry_rate": _as_float(row.get("fallback_or_retry_rate")),
+        "cost_delta_usd": _as_float(row.get("realized_cost_delta_vs_baseline_usd")),
+        "realized_cost_delta_vs_baseline_usd": _as_float(row.get("realized_cost_delta_vs_baseline_usd")),
+        "realized_cost_delta_vs_holdout_usd": _as_float(row.get("realized_cost_delta_vs_holdout_usd")),
+        "baseline_cost_usd": _as_float(row.get("baseline_cost_usd")),
+        "candidate_cost_usd": _as_float(row.get("candidate_cost_usd")),
+        "avg_latency_delta_ms": None,
+        "last_sample_at": row.get("latest_evidence_at"),
+        "last_sample_age_hours": None,
+        "promotion_verdict": verdict,
+        "readiness_state": status,
+        "readiness_status": status,
+        "promotion_ready": status == "ready",
+        "promotion_scope": "stage_local_canary_from_shadow",
+        "evidence_kind": "shadow_candidate_scoreboard",
+        "reason_codes": [str(reason) for reason in (row.get("reason_codes") or []) if reason is not None][:10],
+        "thresholds": row.get("min_sample_gate") or {},
+        "freshness": {
+            "age_hours": None,
+            "fresh": bool(row.get("latest_evidence_at")),
+        },
+        "canary": {
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "applied_fraction": sample_rate if applied_count else 0.0,
+            "holdout_fraction": sample_rate if holdout_count else 0.0,
+            "shadow_only": holdout_count > 0,
+            "canary_evidence": applied_count > 0,
+            "safety_stop_state": "clear",
+            "safety_stop_count": 0,
+        },
+        "budget": {
+            "daily_budget_usd": _as_float(policy.get("daily_budget_usd")),
+            "today_shadow_spend_usd": _as_float(policy.get("today_shadow_spend_usd")),
+            "daily_budget_exhausted": bool(policy.get("daily_budget_exhausted")),
+        },
+        "routing_reasons": [],
+        "privacy": row.get("privacy") or {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "content_free": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "filesystem_paths_included": False,
+            "cache_keys_included": False,
+        },
+    }
 
 
 def _shadow_routing_candidate_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -11629,7 +11728,43 @@ async def stats_shadow_routing_promotion_readiness(store_obj: Any, limit: int = 
     report = build_routing_experiment_report(store_obj, limit=capped_limit)
     policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
-    candidates = _shadow_routing_candidate_rows(report)
+    legacy_candidates = _shadow_routing_candidate_rows(report)
+    scoreboard = report.get("readiness_scoreboard") if isinstance(report.get("readiness_scoreboard"), dict) else {}
+    scoreboard_rows = [
+        _shadow_routing_scoreboard_to_candidate_row(row, policy)
+        for row in scoreboard.get("candidates", [])
+        if isinstance(row, dict)
+    ]
+    legacy_by_key = {_shadow_routing_row_key(row): row for row in legacy_candidates}
+    candidates: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str, bool, str, str, str, str]] = set()
+    for row in scoreboard_rows:
+        key = _shadow_routing_row_key(row)
+        merged = {**row, **legacy_by_key.get(key, {})}
+        for field in (
+            "readiness_status",
+            "realized_cost_delta_vs_baseline_usd",
+            "realized_cost_delta_vs_holdout_usd",
+            "baseline_cost_usd",
+            "candidate_cost_usd",
+        ):
+            if field in row:
+                merged[field] = row[field]
+        merged["readiness_state"] = row.get("readiness_status") or merged.get("readiness_state")
+        merged["reason_codes"] = sorted(set((merged.get("reason_codes") or []) + (row.get("reason_codes") or [])))
+        candidates.append(merged)
+        seen_keys.add(key)
+    for row in legacy_candidates:
+        key = _shadow_routing_row_key(row)
+        if key not in seen_keys:
+            candidates.append(row)
+    candidates.sort(
+        key=lambda row: (
+            {"ready": 0, "regressing": 1, "insufficient-evidence": 2}.get(str(row.get("readiness_status") or row.get("readiness_state")), 3),
+            -_as_int(row.get("sample_count")),
+            str(row.get("candidate_id") or ""),
+        )
+    )
     verdict_counts: dict[str, int] = {}
     readiness_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
@@ -11664,6 +11799,12 @@ async def stats_shadow_routing_promotion_readiness(store_obj: Any, limit: int = 
             "candidate_count": len(candidates),
             "sample_count": _as_int(summary.get("sample_count")),
             "compared_count": _as_int(summary.get("comparison_count")),
+            "readiness_ready_count": (scoreboard.get("summary") or {}).get("ready_count", 0),
+            "readiness_insufficient_evidence_count": (scoreboard.get("summary") or {}).get("insufficient_evidence_count", 0),
+            "readiness_regressing_count": (scoreboard.get("summary") or {}).get("regressing_count", 0),
+            "readiness_total_realized_cost_delta_vs_baseline_usd": (scoreboard.get("summary") or {}).get("total_realized_cost_delta_vs_baseline_usd", 0.0),
+            "readiness_total_realized_cost_delta_vs_holdout_usd": (scoreboard.get("summary") or {}).get("total_realized_cost_delta_vs_holdout_usd", 0.0),
+            "min_samples": (scoreboard.get("summary") or {}).get("min_samples", 0),
             "shadow_only_count": sum(_as_int((row.get("canary") or {}).get("holdout_count")) for row in candidates),
             "applied_canary_count": sum(_as_int((row.get("canary") or {}).get("applied_count")) for row in candidates),
             "promotion_ready_count": sum(1 for row in candidates if row.get("promotion_verdict") == "promote"),
@@ -11683,6 +11824,7 @@ async def stats_shadow_routing_promotion_readiness(store_obj: Any, limit: int = 
         "candidates": candidates,
         "source_reports": {
             "routing_experiment_report_schema": report.get("schema"),
+            "routing_candidate_readiness_scoreboard_schema": scoreboard.get("schema"),
         },
         "privacy": {
             "metadata_only": True,
@@ -22989,7 +23131,7 @@ def dashboard_html() -> str:
   <h2>Shadow-routing promotion readiness</h2>
   <table data-table-id="shadow-routing-promotion-summary" data-filter-label="Filter shadow-routing promotion summary">
     <thead><tr>
-      <th data-sort-type="number">Candidates</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Compared</th><th data-sort-type="number">Promote</th><th data-sort-type="number">Hold</th><th data-sort-type="number">Needs samples</th><th data-sort-type="number">Reject</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="percent">Pass rate</th><th data-sort-type="money">Cost delta</th><th data-sort-type="text">Managed feedback</th><th data-sort-type="text">Privacy</th>
+      <th data-sort-type="number">Candidates</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Compared</th><th data-sort-type="number">Ready</th><th data-sort-type="number">Insufficient</th><th data-sort-type="number">Regressing</th><th data-sort-type="number">Min samples</th><th data-sort-type="number">Promote</th><th data-sort-type="number">Reject</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="percent">Pass rate</th><th data-sort-type="money">Delta vs baseline</th><th data-sort-type="money">Delta vs holdout</th><th data-sort-type="text">Managed feedback</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="shadow-routing-promotion-summary-tbody"></tbody>
   </table>
@@ -22998,7 +23140,7 @@ def dashboard_html() -> str:
   <h2>Shadow-routing promotion candidates</h2>
   <table class="activity-table" data-table-id="shadow-routing-promotion-candidates" data-filter-label="Filter shadow-routing promotion candidates">
     <thead><tr>
-      <th data-sort-type="text">Readiness</th><th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Model pair</th><th data-sort-type="text">Phase / category</th><th data-sort-type="text">Sample mode</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Compared</th><th data-sort-type="percent">Pass rate</th><th data-sort-type="percent">Shadow errors</th><th data-sort-type="number">Fallback/retry</th><th data-sort-type="money">Cost delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Canary health</th><th data-sort-type="time">Freshness</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Privacy</th>
+      <th data-sort-type="text">Readiness</th><th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Model pair</th><th data-sort-type="text">Phase / category</th><th data-sort-type="text">Sample mode</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Compared</th><th data-sort-type="percent">Pass rate</th><th data-sort-type="percent">Candidate errors</th><th data-sort-type="number">Fallback/retry</th><th data-sort-type="money">Delta vs baseline</th><th data-sort-type="money">Delta vs holdout</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Canary health</th><th data-sort-type="time">Freshness</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="shadow-routing-promotion-candidates-tbody"></tbody>
   </table>
@@ -25629,6 +25771,9 @@ async function refreshOptimizationPromotionActions(){
   }catch(e){}
 }
 function shadowPromotionBadge(status){
+  if(status==='ready')return'hit';
+  if(status==='regressing')return'err';
+  if(status==='insufficient-evidence')return'miss';
   if(status==='ready-to-stage'||status==='ready-to-widen'||status==='promote')return'hit';
   if(status==='rejected'||status==='reject')return'err';
   if(status==='held'||status==='hold')return'routed';
@@ -25724,14 +25869,17 @@ async function refreshShadowRoutingPromotionReadiness(){
       <td class="tokens">${(s.candidate_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.sample_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.compared_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.readiness_ready_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.readiness_insufficient_evidence_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.readiness_regressing_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.min_samples||0).toLocaleString()}</td>
       <td class="tokens">${(s.promotion_ready_count||0).toLocaleString()}</td>
-      <td class="tokens">${(s.hold_count||0).toLocaleString()}</td>
-      <td class="tokens">${(s.needs_more_samples_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.reject_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.applied_canary_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.shadow_only_count||0).toLocaleString()}</td>
       <td class="tokens">${s.pass_rate==null?'—':fmtPctValue(s.pass_rate)}</td>
-      <td class="${(s.cost_delta_usd||0)<0?'cost':'savings'}">${fmt(s.cost_delta_usd||0,6)}</td>
+      <td class="${(s.readiness_total_realized_cost_delta_vs_baseline_usd||0)<0?'cost':'savings'}">${fmt(s.readiness_total_realized_cost_delta_vs_baseline_usd||0,6)}</td>
+      <td class="${(s.readiness_total_realized_cost_delta_vs_holdout_usd||0)<0?'cost':'savings'}">${fmt(s.readiness_total_realized_cost_delta_vs_holdout_usd||0,6)}</td>
       <td class="flags">${feedbackBadges}</td>
       <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">raw prompts omitted</span> <span class="badge hit">request IDs omitted</span> <span class="badge hit">payload omitted</span></td>
     </tr>`;
@@ -25746,8 +25894,10 @@ async function refreshShadowRoutingPromotionReadiness(){
         `<span class="badge provider">canary ${fmtPctValue(canary.applied_fraction||0)}</span>`,
         `<span class="badge provider">holdout ${fmtPctValue(canary.holdout_fraction||0)}</span>`
       ].join(' ');
+      const deltaBaseline=row.realized_cost_delta_vs_baseline_usd!=null?row.realized_cost_delta_vs_baseline_usd:row.cost_delta_usd;
+      const deltaHoldout=row.realized_cost_delta_vs_holdout_usd!=null?row.realized_cost_delta_vs_holdout_usd:row.cost_delta_usd;
       return `<tr>
-        <td><span class="badge ${shadowPromotionBadge(row.readiness_state)}">${esc(row.readiness_state||'unknown')}</span></td>
+        <td><span class="badge ${shadowPromotionBadge(row.readiness_status||row.readiness_state)}">${esc(row.readiness_status||row.readiness_state||'unknown')}</span></td>
         <td><span class="badge ${shadowPromotionBadge(row.promotion_verdict)}">${esc(row.promotion_verdict||'unknown')}</span></td>
         <td class="model">${esc(row.candidate_id||'unknown')}</td>
         <td><span class="badge provider">${esc(shortProvider(row.provider||'unknown'))}</span> <span class="badge stream">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
@@ -25759,14 +25909,15 @@ async function refreshShadowRoutingPromotionReadiness(){
         <td class="tokens">${row.pass_rate==null?'—':fmtPctValue(row.pass_rate)}</td>
         <td class="${(row.shadow_error_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.shadow_error_rate||0)}</td>
         <td class="tokens">${(row.fallback_or_retry_count||0).toLocaleString()} <span class="badge ${row.fallback_or_retry_count?'routed':'hit'}">${fmtPctValue(row.fallback_or_retry_rate||0)}</span></td>
-        <td class="${(row.cost_delta_usd||0)<0?'cost':'savings'}">${fmt(row.cost_delta_usd||0,6)}</td>
+        <td class="${(deltaBaseline||0)<0?'cost':'savings'}">${fmt(deltaBaseline||0,6)}</td>
+        <td class="${(deltaHoldout||0)<0?'cost':'savings'}">${fmt(deltaHoldout||0,6)}</td>
         <td class="latency">${fmtMs(row.avg_latency_delta_ms)}</td>
         <td class="flags">${health}</td>
         <td class="ts">${row.last_sample_at?ago(row.last_sample_at):'—'} ${row.freshness&&row.freshness.fresh?'<span class="badge hit">fresh</span>':'<span class="badge routed">stale</span>'}</td>
         <td class="flags">${shadowPromotionReasonBadges(row.reason_codes)}</td>
         <td class="flags">${(row.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">content omitted</span></td>
       </tr>`;
-    }).join('')||'<tr><td colspan="18" style="color:#8b949e">No shadow-routing promotion candidates recorded in local metadata</td></tr>';
+    }).join('')||'<tr><td colspan="19" style="color:#8b949e">No shadow-routing promotion candidates recorded in local metadata</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }
