@@ -512,6 +512,11 @@ def _onboarding_cli(
     savings_loop_parser.add_argument("--activation-min-source-rows", type=int, default=10, help="Minimum source rows before activation is considered alive, default: 10.")
     savings_loop_parser.add_argument("--rollup-max-age-hours", type=float, default=72.0, help="Maximum rollup/snapshot evidence age, default: 72.")
     savings_loop_parser.add_argument("--policy-max-age-hours", type=float, default=72.0, help="Maximum staged policy evidence age, default: 72.")
+    savings_loop_parser.add_argument(
+        "--adopt-legacy-preflight",
+        action="store_true",
+        help="Before reporting, adopt richer sibling legacy SQLite metadata into the canonical DB.",
+    )
     savings_loop_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     savings_loop_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     savings_loop_parser.add_argument(
@@ -736,6 +741,7 @@ def _onboarding_cli(
                     rollup_max_age_hours=float(args.rollup_max_age_hours),
                     policy_max_age_hours=float(args.policy_max_age_hours),
                     policy_scan_limit=int(args.limit),
+                    adopt_legacy_preflight=bool(args.adopt_legacy_preflight),
                 )
             finally:
                 store.conn.close()

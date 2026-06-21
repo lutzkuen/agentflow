@@ -127,6 +127,118 @@ pattern_rules:
                 canonical.conn.close()
                 legacy.conn.close()
 
+    def test_legacy_adoption_preflight_clears_stranded_storage_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical_db = root / "tokenclaw.sqlite3"
+            legacy_db = root / "agentflow.sqlite3"
+            canonical = Store(str(canonical_db))
+            legacy = Store(str(legacy_db))
+            try:
+                self._log_call(canonical, call_id="canonical-call", created_at="2026-06-21T11:00:00+00:00")
+                self._log_call(legacy, call_id="legacy-call-1", created_at="2026-06-21T11:10:00+00:00")
+                self._log_call(legacy, call_id="legacy-call-2", created_at="2026-06-21T11:20:00+00:00")
+                legacy.persist_request_shape_rollups(
+                    run_id="legacy-rollups",
+                    generated_at="2026-06-21T11:25:00+00:00",
+                    rows=[
+                        {
+                            "id": "legacy-rollup-1",
+                            "run_id": "legacy-rollups",
+                            "generated_at": "2026-06-21T11:25:00+00:00",
+                            "window_start": "2026-06-21T10:00:00+00:00",
+                            "window_end": "2026-06-21T11:00:00+00:00",
+                            "rollup_key": "surface:endpoint:chat",
+                            "candidate_id": "legacy-candidate-redacted",
+                            "source_surface": "anthropic_messages",
+                            "endpoint": "messages",
+                            "provider_family": "anthropic",
+                            "requested_model_family": "sonnet",
+                            "routed_model_family": "sonnet",
+                            "category": "chat",
+                            "workflow_phase": "chat",
+                            "stream": 0,
+                            "has_tools": 0,
+                            "text_bucket": "2k_8k_chars",
+                            "token_bucket": "500_2k_tokens",
+                            "cache_status": "miss",
+                            "routing_status": "kept",
+                            "candidate_families_json": stable_json(["crunch"]),
+                            "blocker_codes_json": stable_json([]),
+                            "row_count": 2,
+                            "error_count": 0,
+                            "retry_count": 0,
+                            "cache_hit_count": 0,
+                            "cost_est_usd": 0.1,
+                            "baseline_cost_usd": 0.2,
+                            "observed_savings_usd": 0.1,
+                            "input_tokens": 100,
+                            "output_tokens": 10,
+                            "metadata_json": stable_json({"metadata_only": True}),
+                        }
+                    ],
+                )
+                legacy.persist_request_shape_rollup_snapshot(
+                    {
+                        "snapshot_id": "legacy-snapshot-1",
+                        "run_id": "legacy-rollups",
+                        "generated_at": "2026-06-21T11:25:00+00:00",
+                        "window": {
+                            "source": "fixture",
+                            "start": "2026-06-21T10:00:00+00:00",
+                            "end": "2026-06-21T11:00:00+00:00",
+                        },
+                        "summary": {
+                            "rows_considered": 2,
+                            "rollup_count": 1,
+                            "ranked_candidate_count": 1,
+                            "top_next_action": "rank-repeated-context-crunch-dry-run",
+                            "top_local_action_family": "crunch",
+                            "top_readiness_state": "ready",
+                            "total_projected_savings_usd": 0.1,
+                        },
+                    }
+                )
+
+                report = build_savings_loop_bottlenecks_report(
+                    canonical,
+                    db_path=canonical_db,
+                    legacy_db=legacy_db,
+                    config_dir=root / "config",
+                    activation_min_source_rows=1,
+                    rollup_max_age_hours=72,
+                    policy_scan_limit=50,
+                    adopt_legacy_preflight=True,
+                    now=NOW,
+                )
+
+                blockers = {row["blocker_code"] for row in report["rows"] if row.get("blocker_code")}
+                self.assertNotIn("stranded-legacy-agentflow-sqlite-evidence", blockers)
+                self.assertEqual(report["summary"]["stranded_legacy_rows"], 0)
+                self.assertEqual(report["summary"]["source_traffic_rows"], 3)
+                self.assertEqual(report["summary"]["request_shape_rollup_count"], 1)
+                self.assertEqual(report["summary"]["request_shape_rollup_snapshot_count"], 1)
+                self.assertEqual(report["summary"]["crunch_dry_run_rows_considered"], 1)
+                self.assertFalse(report["summary"]["zero_row_crunch_dry_run"])
+                self.assertEqual(report["legacy_adoption_preflight"]["status"], "adopted-gap-cleared")
+                self.assertEqual(report["legacy_adoption_preflight"]["rows_inserted"], 4)
+                self.assertTrue(report["legacy_adoption_preflight"]["gap_cleared"])
+                self.assertTrue(report["legacy_adoption_preflight"]["privacy"]["metadata_only"])
+                self.assertTrue(report["legacy_adoption_preflight"]["privacy"]["aggregate_only"])
+
+                rendered = json.dumps(report, sort_keys=True)
+                self.assertNotIn(str(canonical_db), rendered)
+                self.assertNotIn(str(legacy_db), rendered)
+                self.assertNotIn("legacy-candidate-redacted", rendered)
+                self.assertFalse(report["privacy"]["raw_prompts_included"])
+                self.assertFalse(report["privacy"]["provider_bodies_included"])
+                self.assertFalse(report["privacy"]["request_ids_included"])
+                self.assertFalse(report["privacy"]["session_ids_included"])
+                self.assertFalse(report["privacy"]["cache_keys_included"])
+            finally:
+                canonical.conn.close()
+                legacy.conn.close()
+
     def test_cli_and_dashboard_expose_same_metadata_only_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -435,6 +435,11 @@ def savings_loop_bottlenecks_cli(argv: Sequence[str] | None = None, *, stdout: A
     parser.add_argument("--rollup-max-age-hours", type=float, default=72.0, help="Maximum rollup/snapshot evidence age, default: 72.")
     parser.add_argument("--policy-max-age-hours", type=float, default=72.0, help="Maximum staged policy evidence age, default: 72.")
     parser.add_argument("--policy-scan-limit", type=int, default=1000, help="Bounded recent metadata rows to inspect for policy traffic, default: 1000.")
+    parser.add_argument(
+        "--adopt-legacy-preflight",
+        action="store_true",
+        help="Before reporting, adopt richer sibling legacy SQLite metadata into the canonical DB.",
+    )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     args = parser.parse_args(argv)
 
@@ -453,6 +458,7 @@ def savings_loop_bottlenecks_cli(argv: Sequence[str] | None = None, *, stdout: A
             rollup_max_age_hours=args.rollup_max_age_hours,
             policy_max_age_hours=args.policy_max_age_hours,
             policy_scan_limit=args.policy_scan_limit,
+            adopt_legacy_preflight=bool(args.adopt_legacy_preflight),
         )
     finally:
         store.conn.close()
