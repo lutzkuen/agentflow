@@ -2450,10 +2450,32 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         decisions = {row["source_fingerprint"]: row for row in queue["successor_decisions"]}
 
         applied = actions["activation:stale-rollback-applied"]
-        self.assertEqual(applied["successor_status"], "reobserve-after-rollback")
-        self.assertEqual(applied["recommended_next_action"], "reobserve-cache-replay-after-rollback")
-        self.assertEqual(applied["post_rollback_successor_decision"], "reobserve-after-rollback")
-        self.assertEqual(entries["activation:stale-rollback-applied"]["unblock_reason"], "cache-replay-rollback-applied")
+        self.assertEqual(applied["successor_status"], "retired-stale-no-traffic")
+        self.assertEqual(applied["recommended_next_action"], "retire-stale-cache-replay-successor-no-traffic")
+        self.assertEqual(applied["post_rollback_successor_decision"], "retired-stale-no-traffic")
+        self.assertTrue(applied["stale_no_traffic_retirement"])
+        self.assertTrue(applied["terminal_successor_state"])
+        self.assertEqual(
+            applied["post_rollback_observation"]["reason"],
+            "post-rollback-observation-window-elapsed-no-traffic",
+        )
+        self.assertTrue(applied["post_rollback_observation"]["observation_window_elapsed"])
+        self.assertTrue(applied["post_rollback_observation"]["no_reobserve_traffic"])
+        self.assertEqual(applied["post_rollback_observation"]["observation_age_hours"], 96.0)
+        self.assertEqual(applied["post_rollback_observation"]["max_observation_age_hours"], 72.0)
+        self.assertTrue(
+            entries["activation:stale-rollback-applied"]["duplicate_suppression"][
+                "suppresses_duplicate_successor_issue"
+            ]
+        )
+        self.assertEqual(
+            decisions["activation:stale-rollback-applied"]["decision"],
+            "retired-stale-no-traffic",
+        )
+        self.assertEqual(
+            decisions["activation:stale-rollback-applied"]["issue_worthy_status"],
+            "suppressed",
+        )
         self.assertNotIn("evidence-older-than-max-age", entries["activation:stale-rollback-applied"]["blocker_codes"])
 
         blocked = actions["activation:stale-rollback-not-applied"]
@@ -2472,6 +2494,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(fresh["post_rollback_observation"]["applied_count"], 6)
         self.assertEqual(fresh["post_rollback_observation"]["holdout_count"], 4)
         self.assertEqual(fresh["post_rollback_observation"]["warmup_miss_count"], 1)
+        self.assertFalse(fresh["post_rollback_observation"]["observation_window_elapsed"])
+        self.assertFalse(fresh["post_rollback_observation"]["no_reobserve_traffic"])
 
         for row in [*actions.values(), *decisions.values()]:
             self.assertTrue(row["privacy"]["metadata_only"])

@@ -5982,7 +5982,46 @@ def _cache_replay_post_rollback_classification(entry: dict[str, Any]) -> dict[st
     if not rollback_required:
         return None
 
+    evidence_age_hours = _queue_evidence_age_hours(entry)
+    max_age_hours = _queue_max_evidence_age_hours(entry)
+    if max_age_hours is None:
+        max_age_hours = 72.0
+    applied_count = _to_int(entry.get("applied_count"))
+    holdout_count = _to_int(entry.get("holdout_count"))
+    miss_count = _to_int(entry.get("miss_count"))
+    warmup_miss_count = _to_int(entry.get("warmup_miss_count"))
+    exact_hit_count = _to_int(entry.get("exact_hit_count") or entry.get("actual_hits"))
+    no_reobserve_traffic = bool(
+        applied_count <= 0
+        and holdout_count <= 0
+        and miss_count <= 0
+        and warmup_miss_count <= 0
+        and exact_hit_count <= 0
+    )
+    observation_window_elapsed = bool(
+        evidence_age_hours is not None
+        and max_age_hours is not None
+        and evidence_age_hours >= max_age_hours
+    )
+
     if _cache_replay_rollback_applied(entry):
+        if no_reobserve_traffic and observation_window_elapsed:
+            return {
+                "decision": "retired-stale-no-traffic",
+                "next_action": "retire-stale-cache-replay-successor-no-traffic",
+                "reason": "post-rollback-observation-window-elapsed-no-traffic",
+                "issue_worthy_status": "suppressed",
+                "current_status": "superseded",
+                "state": "retired-stale-no-traffic",
+                "blocker_codes": ["post-rollback-observation-window-elapsed-no-traffic"],
+                "stale_no_traffic_retirement": True,
+                "durable_action_ledger_entry": True,
+                "terminal_successor_state": True,
+                "observation_window_elapsed": observation_window_elapsed,
+                "no_reobserve_traffic": no_reobserve_traffic,
+                "evidence_age_hours": evidence_age_hours,
+                "max_evidence_age_hours": max_age_hours,
+            }
         return {
             "decision": "reobserve-after-rollback",
             "next_action": "reobserve-cache-replay-after-rollback",
@@ -5991,6 +6030,10 @@ def _cache_replay_post_rollback_classification(entry: dict[str, Any]) -> dict[st
             "current_status": "review",
             "state": "reobserve-after-rollback",
             "blocker_codes": ["cache-replay-rollback-applied"],
+            "observation_window_elapsed": observation_window_elapsed,
+            "no_reobserve_traffic": no_reobserve_traffic,
+            "evidence_age_hours": evidence_age_hours,
+            "max_evidence_age_hours": max_age_hours,
         }
 
     return {
@@ -6001,6 +6044,10 @@ def _cache_replay_post_rollback_classification(entry: dict[str, Any]) -> dict[st
         "current_status": "blocked",
         "state": "keep-blocked-narrow",
         "blocker_codes": ["cache-replay-rollback-not-applied"],
+        "observation_window_elapsed": observation_window_elapsed,
+        "no_reobserve_traffic": no_reobserve_traffic,
+        "evidence_age_hours": evidence_age_hours,
+        "max_evidence_age_hours": max_age_hours,
     }
 
 
@@ -6022,8 +6069,23 @@ def _apply_cache_replay_post_rollback_classification(entry: dict[str, Any]) -> N
     entry["cache_entries_written"] = 0
     entry["emits_cache_apply_action"] = False
     entry["policy_files_written"] = False
-    if classification["decision"] in {"reobserve-after-rollback", "keep-blocked-narrow"}:
+    if classification["decision"] in {"reobserve-after-rollback", "keep-blocked-narrow", "retired-stale-no-traffic"}:
         entry["rollback_required"] = True
+    if classification.get("stale_no_traffic_retirement") is not None:
+        entry["stale_no_traffic_retirement"] = bool(classification.get("stale_no_traffic_retirement"))
+    if classification.get("durable_action_ledger_entry") is not None:
+        entry["durable_action_ledger_entry"] = bool(classification.get("durable_action_ledger_entry"))
+    if classification.get("terminal_successor_state") is not None:
+        entry["terminal_successor_state"] = bool(classification.get("terminal_successor_state"))
+    if classification["decision"] == "retired-stale-no-traffic":
+        entry["duplicate_suppression"] = _cache_replay_stale_no_traffic_duplicate_suppression(
+            decision_report={},
+            top_decision={},
+            reason=classification["reason"],
+            reason_codes=classification["blocker_codes"],
+            target_local_rule_file=entry.get("target_local_rule_file"),
+            target_local_policy_section=entry.get("target_local_policy_section"),
+        )
     entry["post_rollback_observation"] = {
         "schema": "tokenclaw.cache_replay_post_rollback_observation.v1",
         "decision": classification["decision"],
@@ -6034,8 +6096,13 @@ def _apply_cache_replay_post_rollback_classification(entry: dict[str, Any]) -> N
         "miss_count": _to_int(entry.get("miss_count")),
         "warmup_miss_count": _to_int(entry.get("warmup_miss_count")),
         "exact_hit_count": _to_int(entry.get("exact_hit_count") or entry.get("actual_hits")),
-        "stale_age_hours": round(_to_float(entry.get("evidence_age_hours")), 3),
+        "observation_age_hours": round(_to_float(classification.get("evidence_age_hours")), 3),
+        "max_observation_age_hours": round(_to_float(classification.get("max_evidence_age_hours")), 3),
+        "observation_window_elapsed": bool(classification.get("observation_window_elapsed")),
+        "no_reobserve_traffic": bool(classification.get("no_reobserve_traffic")),
+        "stale_age_hours": round(_to_float(classification.get("evidence_age_hours")), 3),
         "blocker_codes": classification["blocker_codes"],
+        "terminal_successor_state": bool(classification.get("terminal_successor_state")),
         "metadata_only": True,
         "aggregate_only": True,
         "cache_apply_action_count": 0,
@@ -6129,14 +6196,14 @@ def _successor_action_status(entry: dict[str, Any]) -> str:
     current_status = str(entry.get("current_status") or "")
     state = str(entry.get("state") or "")
     issue_status = str(entry.get("issue_worthy_status") or "")
+    if state == "retired-stale-no-traffic":
+        return "retired-stale-no-traffic"
     if (
         current_status in _TERMINAL_ACTIVATION_SUCCESSOR_STATES
         or state in _TERMINAL_ACTIVATION_SUCCESSOR_STATES
         or bool(entry.get("terminal_successor_state"))
     ):
         return "resolved-no-action"
-    if state == "retired-stale-no-traffic":
-        return "retired-stale-no-traffic"
     if current_status == "suppressed" or state == "suppressed" or issue_status == "suppressed":
         return "suppress-duplicate"
     if duplicate_status == "suppressed":
