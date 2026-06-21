@@ -2867,6 +2867,170 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw preview fixture value must not leak", rendered)
         self.assertNotIn('"policy_files_written": true', rendered.lower())
 
+    def test_request_shape_rollup_preview_classes_drive_successor_decisions(self):
+        cases = [
+            ("activation:shape-no-data", "no-data", "keep-blocked", "no-data-preview-health", False, "emit-request-shape-rollups"),
+            ("activation:shape-stale", "stale", "review-stale-preview", "stale-preview", False, "refresh-managed-activation-preview"),
+            (
+                "activation:shape-too-small",
+                "too-small",
+                "keep-blocked",
+                "request-shape-rollup-too-small",
+                False,
+                "keep-request-shape-rollups-observing",
+            ),
+            (
+                "activation:shape-unsafe",
+                "unsafe",
+                "keep-blocked",
+                "unsafe-request-shape-rollup",
+                False,
+                "keep-request-shape-rollup-blocked-for-safety",
+            ),
+            (
+                "activation:shape-review-ready",
+                "review-ready",
+                "ready",
+                "preview-verified",
+                True,
+                "review-request-shape-rollup-local-action",
+            ),
+        ]
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": index,
+                    "fingerprint": source,
+                    "lever": "request-shape-rollups",
+                    "local_action_family": "cohort-ranking",
+                    "evidence_schema": "agentflow.request_shape_follow_up_candidates.v1",
+                    "state": "blocked",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "ready" if outcome_class == "review-ready" else "blocked",
+                    "next_action": "emit-request-shape-rollups",
+                    "blocker_codes": ["ranked_request_shape_rollup"],
+                    "sample_count": 20 + index,
+                    "source_queue_rank": index,
+                    "source_ledger_rank": index + 10,
+                    "policy_files_written": False,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                    "request_id": f"req-shape-secret-{index}",
+                    "raw_prompt": "raw request-shape preview value must not leak",
+                }
+                for index, (source, outcome_class, _decision, _status, _verified, _next_action) in enumerate(cases, start=1)
+            ],
+        }
+        outcomes = [
+            {
+                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": f"managed-preview-outcome:{source}",
+                "source_fingerprint": source,
+                "source_queue_rank": index,
+                "source_ledger_rank": index + 10,
+                "preview_ref": f"preview:{source}",
+                "local_action_family": "cohort-ranking",
+                "evidence_schema": "agentflow.request_shape_follow_up_candidates.v1",
+                "classification": "review-only",
+                "managed_preview_classification": "accepted",
+                "decision": "accepted",
+                "next_action": expected_next,
+                "cohort_class": outcome_class,
+                "rollup_outcome_status": outcome_class,
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+                "raw_prompt": "raw managed request-shape preview must not leak",
+            }
+            for index, (source, outcome_class, _decision, _status, _verified, expected_next) in enumerate(cases, start=1)
+        ]
+
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "status": "tracked",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": True,
+                    "summary": {
+                        "stored_preview_outcome_count": len(outcomes),
+                        "stale_count": 0,
+                        "missing_preview_decision_count": 0,
+                        "failed_closed_count": 0,
+                        "disagreement_count": 0,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                    },
+                    "outcomes": outcomes,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "managed_activation_preview_health": {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": len(outcomes),
+                    "previewed_row_count": len(outcomes),
+                    "omitted_row_count": 0,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {"cohort-ranking": len(outcomes)},
+                    "top_omission_reasons": [],
+                    "top_rejection_reasons": [],
+                },
+            }
+        )
+
+        decisions = {row["source_fingerprint"]: row for row in queue["successor_decisions"]}
+        actions = {row["source_fingerprint"]: row for row in queue["successor_actions"]}
+        for source, outcome_class, expected_decision, expected_status, expected_verified, expected_next in cases:
+            with self.subTest(outcome_class=outcome_class):
+                action = actions[source]
+                decision = decisions[source]
+                self.assertEqual(action["request_shape_rollup_outcome_class"], outcome_class)
+                self.assertEqual(decision["request_shape_rollup_outcome_class"], outcome_class)
+                self.assertEqual(action["successor_status"], expected_decision)
+                self.assertEqual(action["preview_verification_status"], expected_status)
+                self.assertEqual(action["recommended_next_action"], expected_next)
+                self.assertEqual(decision["decision"], expected_decision)
+                self.assertEqual(decision["preview_agreement_status"], "agreed" if expected_verified else expected_status)
+                self.assertEqual(decision["preview_verified"], expected_verified)
+                self.assertFalse(action["policy_files_written"])
+                self.assertFalse(decision["policy_files_written"])
+                self.assertFalse(action["managed_preview_gate"]["policy_files_written"])
+                self.assertTrue(action["managed_preview_gate"]["privacy"]["metadata_only"])
+                self.assertTrue(action["managed_preview_gate"]["privacy"]["aggregate_only"])
+
+        class_counts = {
+            row["value"]: row["count"]
+            for row in queue["summary"]["request_shape_rollup_outcome_class_counts"]
+        }
+        self.assertEqual(class_counts, {item[1]: 1 for item in cases})
+        family_row = queue["summary"]["preview_agreement_by_local_action_family"][0]
+        self.assertEqual(family_row["local_action_family"], "cohort-ranking")
+        self.assertEqual(family_row["request_shape_no_data_count"], 1)
+        self.assertEqual(family_row["request_shape_stale_count"], 1)
+        self.assertEqual(family_row["request_shape_too_small_count"], 1)
+        self.assertEqual(family_row["request_shape_unsafe_count"], 1)
+        self.assertEqual(family_row["request_shape_review_ready_count"], 1)
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("req-shape-secret", rendered)
+        self.assertNotIn("raw request-shape preview value must not leak", rendered)
+        self.assertNotIn("raw managed request-shape preview must not leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertNotIn('"provider_calls_made": true', rendered.lower())
+
     def test_server_style_preview_outcomes_feed_successor_queue(self):
         rows = [
             (

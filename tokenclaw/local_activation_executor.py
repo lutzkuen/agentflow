@@ -825,6 +825,16 @@ def _preview_decision(row: dict[str, Any]) -> dict[str, Any]:
         "policy_files_written": bool(row.get("policy_files_written")),
         "provider_calls_made": bool(row.get("provider_calls_made")),
     }
+    for key in (
+        "cohort_class",
+        "rollup_outcome_status",
+        "source_fingerprint",
+        "source_successor_fingerprint",
+        "source_queue_rank",
+        "source_ledger_rank",
+    ):
+        if row.get(key) is not None:
+            result[key] = sanitize_value(row.get(key))
     preserved = {
         "review_only",
         "feature_only",

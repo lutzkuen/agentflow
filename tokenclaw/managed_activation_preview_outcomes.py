@@ -339,6 +339,17 @@ def _outcome_from_rows(
         "outcome_fingerprint": _row_fingerprint(handoff_ref, request_row, decision),
         "handoff_ref": sanitize_value(handoff_ref),
         "preview_ref": sanitize_value(decision.get("preview_ref")),
+        "source_fingerprint": sanitize_value(
+            decision.get("source_fingerprint")
+            or request_row.get("source_fingerprint")
+            or request_row.get("source_activation_fingerprint")
+        ),
+        "source_successor_fingerprint": sanitize_value(
+            decision.get("source_successor_fingerprint")
+            or request_row.get("source_successor_fingerprint")
+        ),
+        "source_queue_rank": sanitize_value(decision.get("source_queue_rank") or request_row.get("source_queue_rank")),
+        "source_ledger_rank": sanitize_value(decision.get("source_ledger_rank") or request_row.get("source_ledger_rank")),
         "source_executor_ref": sanitize_value(request_row.get("source_executor_ref")),
         "source_activation_ref": sanitize_value(request_row.get("source_activation_ref")),
         "source_successor_ref": sanitize_value(request_row.get("source_successor_ref")),
@@ -354,6 +365,10 @@ def _outcome_from_rows(
         "decision": sanitize_value(decision.get("decision") or "missing"),
         "decision_status": sanitize_value(decision.get("status") or decision.get("decision") or "missing"),
         "managed_preview_classification": sanitize_value(decision_classification),
+        "cohort_class": sanitize_value(decision.get("cohort_class") or request_row.get("cohort_class")),
+        "rollup_outcome_status": sanitize_value(
+            decision.get("rollup_outcome_status") or request_row.get("rollup_outcome_status")
+        ),
         "agreement_status": sanitize_value(decision.get("agreement_status")),
         "agrees_with_local_next_action": bool(decision.get("agrees_with_local_next_action")),
         "classification": classification,

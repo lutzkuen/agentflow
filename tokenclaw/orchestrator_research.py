@@ -6216,6 +6216,63 @@ def _managed_preview_required_for_successor(entry: dict[str, Any]) -> bool:
     return family in {"routing", "cache", "managed-recommendation", "activation-feedback"}
 
 
+def _is_request_shape_rollup_successor(entry: dict[str, Any], outcome: dict[str, Any] | None = None) -> bool:
+    outcome = outcome if isinstance(outcome, dict) else {}
+    family = str(entry.get("local_action_family") or entry.get("lever") or outcome.get("local_action_family") or "").strip()
+    lever = str(entry.get("lever") or outcome.get("lever") or "").strip()
+    evidence_schema = str(entry.get("evidence_schema") or outcome.get("evidence_schema") or "").strip()
+    next_action = str(entry.get("next_action") or outcome.get("next_action") or "").strip()
+    blockers = {str(item) for item in entry.get("blocker_codes") or [] if str(item or "").strip()}
+    return bool(
+        family == "cohort-ranking"
+        or lever == "request-shape-rollups"
+        or evidence_schema == "agentflow.request_shape_follow_up_candidates.v1"
+        or next_action == "emit-request-shape-rollups"
+        or "ranked_request_shape_rollup" in blockers
+    )
+
+
+def _request_shape_rollup_outcome_class(outcome: dict[str, Any]) -> str:
+    for key in ("cohort_class", "rollup_outcome_status", "request_shape_rollup_outcome_status"):
+        text = str(outcome.get(key) or "").strip().lower().replace("_", "-")
+        if text in {"no-data", "stale", "too-small", "unsafe", "review-ready"}:
+            return text
+    return ""
+
+
+def _request_shape_rollup_preview_status(outcome_class: str) -> str:
+    return {
+        "no-data": "no-data-preview-health",
+        "stale": "stale-preview",
+        "too-small": "request-shape-rollup-too-small",
+        "unsafe": "unsafe-request-shape-rollup",
+        "review-ready": "preview-verified",
+    }.get(outcome_class, "")
+
+
+def _request_shape_rollup_preview_decision(outcome_class: str) -> str:
+    if outcome_class == "review-ready":
+        return "ready"
+    if outcome_class == "stale":
+        return "review-stale-preview"
+    return "keep-blocked"
+
+
+def _request_shape_rollup_next_action(outcome_class: str, outcome: dict[str, Any], entry: dict[str, Any]) -> str:
+    explicit = str(outcome.get("next_action") or outcome.get("recommended_next_action") or "").strip()
+    if outcome_class == "review-ready":
+        return sanitize_value(explicit or "review-request-shape-rollup-local-action")
+    if outcome_class == "stale":
+        return sanitize_value(explicit or "refresh-managed-activation-preview")
+    if outcome_class == "too-small":
+        return sanitize_value(explicit or "keep-request-shape-rollups-observing")
+    if outcome_class == "unsafe":
+        return sanitize_value(explicit or "keep-request-shape-rollup-blocked-for-safety")
+    if outcome_class == "no-data":
+        return sanitize_value(explicit or entry.get("next_action") or "emit-request-shape-rollups")
+    return sanitize_value(explicit or entry.get("next_action") or "inspect-local-evidence")
+
+
 def _managed_preview_local_executor_gate(entry: dict[str, Any]) -> dict[str, Any]:
     action_status = _successor_action_status(entry)
     policy_write_candidate = bool(
@@ -6346,11 +6403,11 @@ def _managed_preview_public_outcome_status(gate: dict[str, Any]) -> str:
     if gate.get("verified"):
         return "preview-agreed"
     status = str(gate.get("status") or "not-previewed").strip()
-    if status in {"managed-local-disagreement", "failed-closed", "unsafe-preview-side-effect", "rejected"}:
+    if status in {"managed-local-disagreement", "failed-closed", "unsafe-preview-side-effect", "unsafe-request-shape-rollup", "rejected"}:
         return "preview-disagreed"
     if status in {"stale-preview", "stale-preview-health"}:
         return "preview-stale"
-    if status in {"preview-omitted", "omitted", "needs-local-evidence"}:
+    if status in {"preview-omitted", "omitted", "needs-local-evidence", "request-shape-rollup-too-small"}:
         return "preview-omitted"
     if status in {
         "missing-preview",
@@ -6487,6 +6544,11 @@ def _managed_preview_successor_gate(
         }
 
     classification = str(outcome.get("classification") or "unknown").strip() or "unknown"
+    request_shape_outcome_class = (
+        _request_shape_rollup_outcome_class(outcome)
+        if _is_request_shape_rollup_successor(entry, outcome)
+        else ""
+    )
     stale = bool(outcome.get("stale"))
     missing = bool(outcome.get("missing_preview_decision"))
     failed_closed = bool(outcome.get("failed_closed"))
@@ -6518,8 +6580,21 @@ def _managed_preview_successor_gate(
         and not cache_rollback_invalid
         and (health_gate.get("passed") or not required)
     )
+    if request_shape_outcome_class:
+        verified = bool(
+            request_shape_outcome_class == "review-ready"
+            and not preview_policy_write
+            and not preview_provider_call
+            and not failed_closed
+            and not disagreement
+        )
     action_status = _successor_action_status(entry)
-    if verified:
+    if request_shape_outcome_class:
+        status = _request_shape_rollup_preview_status(request_shape_outcome_class)
+        decision = _request_shape_rollup_preview_decision(request_shape_outcome_class)
+        next_action = _request_shape_rollup_next_action(request_shape_outcome_class, outcome, entry)
+        reason = f"request-shape-rollup-{request_shape_outcome_class}"
+    elif verified:
         if cache_rollback_accepted:
             decision = "rollback-required"
         elif action_status in {"keep-current-rule", "suppress-duplicate"}:
@@ -6584,6 +6659,9 @@ def _managed_preview_successor_gate(
         "stale_after_hours": outcome.get("stale_after_hours"),
         "classification": classification,
         "managed_preview_classification": sanitize_value(outcome.get("managed_preview_classification")),
+        "cohort_class": sanitize_value(outcome.get("cohort_class")),
+        "rollup_outcome_status": sanitize_value(outcome.get("rollup_outcome_status")),
+        "request_shape_rollup_outcome_class": sanitize_value(request_shape_outcome_class),
         "preview_outcome_status": _managed_preview_public_outcome_status(
             {"verified": verified, "status": status}
         ),
@@ -6656,7 +6734,10 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         action["preview_verified"] = bool(preview_gate.get("verified"))
         action["preview_verification_status"] = sanitize_value(preview_gate.get("status"))
         action["preview_verification_decision"] = sanitize_value(preview_gate.get("decision"))
-        if preview_gate.get("decision") == "review-stale-preview":
+        if preview_gate.get("request_shape_rollup_outcome_class"):
+            action["successor_status"] = sanitize_value(preview_gate.get("decision") or action["successor_status"])
+            action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
+        elif preview_gate.get("decision") == "review-stale-preview":
             action["successor_status"] = "review-stale-preview"
             action["recommended_next_action"] = sanitize_value(
                 preview_gate.get("next_action") or "refresh-managed-activation-preview"
@@ -6699,6 +6780,10 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         elif preview_gate.get("verified") and preview_gate.get("decision") in {"keep-current-rule", "suppress-duplicate"}:
             action["successor_status"] = sanitize_value(preview_gate.get("decision"))
             action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
+        if preview_gate.get("request_shape_rollup_outcome_class"):
+            action["request_shape_rollup_outcome_class"] = sanitize_value(preview_gate.get("request_shape_rollup_outcome_class"))
+            action["cohort_class"] = sanitize_value(preview_gate.get("cohort_class"))
+            action["rollup_outcome_status"] = sanitize_value(preview_gate.get("rollup_outcome_status"))
     for key in (
         "evidence_schema",
         "source_surface",
@@ -6721,6 +6806,9 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "promotion_recommendation",
         "rollback_action_type",
         "disabled_reason",
+        "request_shape_rollup_outcome_class",
+        "cohort_class",
+        "rollup_outcome_status",
     ):
         if entry.get(key) is not None:
             action[key] = sanitize_value(entry.get(key))
@@ -6895,6 +6983,9 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
         "preview_outcome_status": _managed_preview_public_outcome_status(gate),
         "preview_omitted_reason": sanitize_value(gate.get("omitted_reason")) if gate else None,
         "preview_no_op_reason": sanitize_value(gate.get("no_op_reason")) if gate else None,
+        "request_shape_rollup_outcome_class": sanitize_value(gate.get("request_shape_rollup_outcome_class")) if gate else None,
+        "cohort_class": sanitize_value(gate.get("cohort_class")) if gate else None,
+        "rollup_outcome_status": sanitize_value(gate.get("rollup_outcome_status")) if gate else None,
         "top_preview_omission_reason": sanitize_value((gate.get("health_gate") or {}).get("top_omission_reason")) if isinstance(gate.get("health_gate"), dict) else None,
         "target_local_rule_file": sanitize_value(action.get("target_local_rule_file")),
         "target_local_policy_section": sanitize_value(action.get("target_local_policy_section")),
@@ -7625,12 +7716,21 @@ def _preview_successor_summary(successor_actions: list[dict[str, Any]]) -> dict[
     family: dict[str, Counter[str]] = {}
     omitted_reasons: Counter[str] = Counter()
     no_op_reasons: Counter[str] = Counter()
+    request_shape_classes: Counter[str] = Counter()
     for action in successor_actions:
         if not isinstance(action, dict):
             continue
         family_name = str(action.get("local_action_family") or "unknown")
         counts = family.setdefault(family_name, Counter())
         gate = action.get("managed_preview_gate") if isinstance(action.get("managed_preview_gate"), dict) else {}
+        request_shape_class = str(
+            action.get("request_shape_rollup_outcome_class")
+            or gate.get("request_shape_rollup_outcome_class")
+            or ""
+        ).strip()
+        if request_shape_class:
+            request_shape_classes[request_shape_class] += 1
+            counts[f"request-shape:{request_shape_class}"] += 1
         if gate.get("verified"):
             counts["agreed"] += 1
         elif gate:
@@ -7668,10 +7768,19 @@ def _preview_successor_summary(successor_actions: list[dict[str, Any]]) -> dict[
                 "missing_count": counts["missing"],
                 "blocked_count": counts["blocked"],
                 "not_previewed_count": counts["not_previewed"],
+                "request_shape_no_data_count": counts["request-shape:no-data"],
+                "request_shape_stale_count": counts["request-shape:stale"],
+                "request_shape_too_small_count": counts["request-shape:too-small"],
+                "request_shape_unsafe_count": counts["request-shape:unsafe"],
+                "request_shape_review_ready_count": counts["request-shape:review-ready"],
             }
         )
     return {
         "preview_agreement_by_local_action_family": family_rows,
+        "request_shape_rollup_outcome_class_counts": [
+            {"value": key, "count": count}
+            for key, count in sorted(request_shape_classes.items())
+        ],
         "preview_top_omitted_reasons": [
             {"value": key, "count": count}
             for key, count in sorted(omitted_reasons.items(), key=lambda item: (-item[1], item[0]))[:10]
@@ -8233,6 +8342,9 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             "preview_gate_status_counts": [{"value": key, "count": count} for key, count in sorted(preview_status_counts.items())],
             "preview_gate_decision_counts": [{"value": key, "count": count} for key, count in sorted(preview_decision_counts.items())],
             "preview_agreement_by_local_action_family": preview_successor_summary["preview_agreement_by_local_action_family"],
+            "request_shape_rollup_outcome_class_counts": preview_successor_summary[
+                "request_shape_rollup_outcome_class_counts"
+            ],
             "preview_top_omitted_reasons": preview_successor_summary["preview_top_omitted_reasons"],
             "preview_top_no_op_reasons": preview_successor_summary["preview_top_no_op_reasons"],
             "top_lever": top.get("lever"),
