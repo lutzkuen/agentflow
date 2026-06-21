@@ -11188,6 +11188,161 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         self.assertNotIn("req-cli-preview-secret", rendered)
         self.assertNotIn("raw cli managed preview must not leak", rendered)
 
+    def test_stored_managed_ranked_actions_prioritize_local_successors(self):
+        ledger = {
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:local-first",
+                    "lever": "routing",
+                    "local_action_family": "routing",
+                    "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
+                    "state": "review",
+                    "current_status": "review",
+                    "issue_worthy_status": "ready",
+                    "next_action": "draft-low-managed-priority-routing",
+                    "blocker_codes": ["semantic-quality-regression-observed"],
+                    "sample_count": 200,
+                    "projected_savings_usd": 0.10,
+                    "stage_allowed": True,
+                    "target_local_rule_file": "routing_rules.yaml",
+                    "target_local_policy_section": "routing.rules",
+                },
+                {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 2,
+                    "fingerprint": "activation:managed-first",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                    "state": "blocked",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "rollback-cache-replay-rule",
+                    "blocker_codes": ["evidence-older-than-max-age"],
+                    "sample_count": 36,
+                    "projected_savings_usd": 0.01,
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                },
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        with TemporaryDirectory() as tmp:
+            preview_now = datetime.now(timezone.utc)
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            queue = build_local_activation_next_action_queue(
+                {"evidence_to_activation_next_action_ledger": ledger}
+            )
+            from tokenclaw.local_activation_executor import (
+                build_managed_activation_preview_request,
+                build_managed_activation_preview_result,
+            )
+            from tokenclaw.managed_activation_preview_outcomes import (
+                persist_managed_activation_preview_outcomes,
+            )
+
+            request_payload = build_managed_activation_preview_request(queue, now=preview_now)
+            request_by_source = {
+                row["source_activation_ref"]: row
+                for row in request_payload["rows"]
+                if row.get("source_activation_ref")
+            }
+            managed_first_ref = next(
+                row["source_activation_ref"]
+                for row in request_payload["rows"]
+                if row["source_activation_ref"] == "activation:managed-first"
+            )
+            local_first_ref = next(
+                row["source_activation_ref"]
+                for row in request_payload["rows"]
+                if row["source_activation_ref"] == "activation:local-first"
+            )
+            response_payload = {
+                "schema": "tokenclaw.managed_activation_preview_response.v1",
+                "decisions": [
+                    {
+                        "handoff_ref": request_by_source[local_first_ref]["handoff_ref"],
+                        "decision": "review-only-recommendation",
+                        "recommended_next_action": "draft-low-managed-priority-routing",
+                        "review_only": True,
+                        "raw_prompt": "raw decision must not leak",
+                    },
+                    {
+                        "handoff_ref": request_by_source[managed_first_ref]["handoff_ref"],
+                        "decision": "review-only-recommendation",
+                        "recommended_next_action": "rollback-cache-replay-rule",
+                        "review_only": True,
+                        "session_id": "session-decision-must-not-leak",
+                    },
+                ],
+                "ranked_next_actions": [
+                    {
+                        "rank": 2,
+                        "handoff_ref": request_by_source[local_first_ref]["handoff_ref"],
+                        "local_action_family": "routing",
+                        "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
+                        "recommended_next_action": "draft-low-managed-priority-routing",
+                        "expected_savings_path": "Lower managed priority routing path.",
+                        "request_id": "req-ranked-low-must-not-leak",
+                    },
+                    {
+                        "rank": 1,
+                        "handoff_ref": request_by_source[managed_first_ref]["handoff_ref"],
+                        "local_action_family": "cache",
+                        "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                        "recommended_next_action": "rollback-cache-replay-rule",
+                        "expected_savings_path": "Unblocks highest expected cache savings first.",
+                        "projected_savings_usd": 0.075373,
+                        "raw_prompt": "raw ranked action must not leak",
+                    },
+                ],
+            }
+            preview_result = build_managed_activation_preview_result(
+                request_payload,
+                response_payload=response_payload,
+                fetch={"status": "ok", "status_code": 200, "managed_server_calls_made": True},
+            )
+            store = SQLiteStore(db_path)
+            try:
+                managed_outcomes = persist_managed_activation_preview_outcomes(store, preview_result, now=preview_now)
+            finally:
+                store.conn.close()
+
+        prioritized = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": managed_outcomes,
+            }
+        )
+        self.assertIsNotNone(prioritized)
+        actions = prioritized["successor_actions"]
+        self.assertEqual(actions[0]["source_fingerprint"], "activation:managed-first")
+        self.assertEqual(actions[0]["managed_rank"], 1)
+        self.assertEqual(actions[0]["managed_recommended_next_action"], "rollback-cache-replay-rule")
+        self.assertEqual(
+            actions[0]["managed_expected_savings_path"],
+            "Unblocks highest expected cache savings first.",
+        )
+        self.assertEqual(actions[0]["managed_priority_source"], "ranked-managed-preview")
+        self.assertEqual(prioritized["summary"]["managed_ranked_successor_count"], 2)
+        self.assertEqual(prioritized["summary"]["managed_priority_overlay_status"], "ranked-managed-preview")
+        decision = prioritized["successor_decisions"][0]
+        self.assertEqual(decision["source_fingerprint"], "activation:managed-first")
+        self.assertEqual(decision["managed_rank"], 1)
+        self.assertFalse(decision["privacy"]["provider_calls_made"])
+        self.assertFalse(decision["privacy"]["policy_files_written"])
+        self.assertFalse(decision["privacy"]["raw_prompts_included"])
+        rendered = json.dumps(prioritized, sort_keys=True)
+        self.assertNotIn("raw decision must not leak", rendered)
+        self.assertNotIn("raw ranked action must not leak", rendered)
+        self.assertNotIn("req-ranked-low-must-not-leak", rendered)
+        self.assertNotIn("session-decision-must-not-leak", rendered)
+
     def test_cli_refreshes_empty_managed_preview_outcomes_from_successor_queue(self):
         queue = {
             "schema": "tokenclaw.local_activation_next_action_queue.v1",

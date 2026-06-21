@@ -22,6 +22,7 @@ HANDOFF_PRIVACY_SCHEMA = "tokenclaw.local_activation_managed_handoff_privacy.v1"
 PREVIEW_REQUEST_SCHEMA = "tokenclaw.managed_activation_preview_request.v1"
 PREVIEW_RESULT_SCHEMA = "tokenclaw.managed_activation_preview_result.v1"
 PREVIEW_DECISION_SCHEMA = "tokenclaw.managed_activation_preview_decision.v1"
+PREVIEW_RANKED_NEXT_ACTION_SCHEMA = "tokenclaw.managed_activation_preview_ranked_next_action.v1"
 
 SAFE_SELECTABLE_CLASSES = {"draft-local-policy", "review-only", "retire"}
 SUPPORTED_PREVIEW_LOCAL_ACTION_FAMILIES = ["routing", "crunch", "cache", "activation-feedback"]
@@ -787,8 +788,28 @@ def _preview_decision_rows(response_payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _preview_ranked_next_action_rows(response_payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(response_payload, dict):
+        return []
+    for key in ("ranked_next_actions", "ranked_actions", "next_actions"):
+        value = response_payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    preview = response_payload.get("preview")
+    if isinstance(preview, dict):
+        return _preview_ranked_next_action_rows(preview)
+    return []
+
+
 def _decision_bool(row: dict[str, Any], *keys: str) -> bool:
     return any(bool(row.get(key)) for key in keys)
+
+
+def _rank_value(row: dict[str, Any]) -> int:
+    try:
+        return int(row.get("rank") or row.get("managed_rank") or row.get("priority_rank") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _preview_decision(row: dict[str, Any]) -> dict[str, Any]:
@@ -870,6 +891,57 @@ def _preview_decision(row: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in result.items() if value not in (None, "", []) or key in preserved}
 
 
+def _preview_ranked_next_action(row: dict[str, Any]) -> dict[str, Any]:
+    rank = _rank_value(row)
+    result = {
+        "schema": PREVIEW_RANKED_NEXT_ACTION_SCHEMA,
+        "rank": rank,
+        "handoff_ref": sanitize_value(row.get("handoff_ref") or row.get("source_handoff_ref")),
+        "preview_ref": _public_ref(
+            row.get("preview_ref")
+            or row.get("fingerprint")
+            or row.get("decision_id")
+            or row.get("handoff_ref"),
+            prefix="preview-action",
+        ),
+        "local_action_family": sanitize_value(row.get("local_action_family") or row.get("family")),
+        "evidence_schema": sanitize_value(row.get("evidence_schema")),
+        "recommended_next_action": sanitize_value(row.get("recommended_next_action") or row.get("next_action")),
+        "expected_savings_path": sanitize_value(row.get("expected_savings_path")),
+        "classification": sanitize_value(row.get("classification") or row.get("status")),
+        "decision": sanitize_value(row.get("decision") or row.get("preview_decision") or row.get("status")),
+        "source_fingerprint": sanitize_value(row.get("source_fingerprint")),
+        "source_successor_fingerprint": sanitize_value(row.get("source_successor_fingerprint")),
+        "source_queue_rank": sanitize_value(row.get("source_queue_rank")),
+        "source_ledger_rank": sanitize_value(row.get("source_ledger_rank")),
+        "successor_action_fingerprint": sanitize_value(row.get("successor_action_fingerprint")),
+        "successor_decision_fingerprint": sanitize_value(row.get("successor_decision_fingerprint")),
+        "projected_saved_tokens": sanitize_value(row.get("projected_saved_tokens")),
+        "projected_saved_usd": sanitize_value(row.get("projected_saved_usd") or row.get("projected_savings_usd")),
+        "projected_savings_usd": sanitize_value(row.get("projected_savings_usd") or row.get("projected_saved_usd")),
+        "review_only": True,
+        "feature_only": True,
+        "locally_executed": True,
+        "provider_forwarding": False,
+        "server_content_processing": False,
+        "managed_enforced": bool(row.get("managed_enforced")),
+        "policy_files_written": bool(row.get("policy_files_written")),
+        "provider_calls_made": bool(row.get("provider_calls_made")),
+    }
+    preserved = {
+        "rank",
+        "review_only",
+        "feature_only",
+        "locally_executed",
+        "provider_forwarding",
+        "server_content_processing",
+        "managed_enforced",
+        "policy_files_written",
+        "provider_calls_made",
+    }
+    return {key: value for key, value in result.items() if value not in (None, "", [], 0) or key in preserved}
+
+
 def build_managed_activation_preview_result(
     request_payload: dict[str, Any],
     *,
@@ -879,6 +951,11 @@ def build_managed_activation_preview_result(
     """Summarize an optional managed preview response without retaining raw server payloads."""
     rows = [row for row in request_payload.get("rows") or [] if isinstance(row, dict)]
     decisions = [_preview_decision(row) for row in _preview_decision_rows(response_payload)]
+    ranked_next_actions = [
+        row
+        for row in (_preview_ranked_next_action(row) for row in _preview_ranked_next_action_rows(response_payload))
+        if row.get("rank")
+    ]
     handoff_refs = {str(row.get("handoff_ref") or "") for row in rows if row.get("handoff_ref")}
     decision_refs = {str(row.get("handoff_ref") or "") for row in decisions if row.get("handoff_ref")}
     matched_refs = sorted(handoff_refs & decision_refs)
@@ -912,7 +989,9 @@ def build_managed_activation_preview_result(
         "preview": {
             "schema": "tokenclaw.managed_activation_preview_decisions.v1",
             "decision_count": len(decisions),
+            "ranked_next_action_count": len(ranked_next_actions),
             "decisions": decisions,
+            "ranked_next_actions": ranked_next_actions,
         },
         "coverage": {
             "schema": "tokenclaw.managed_activation_preview_coverage.v1",
@@ -933,6 +1012,7 @@ def build_managed_activation_preview_result(
             "handoff_row_count": len(rows),
             "preview_row_count": len(decisions),
             "preview_decision_count": len(decisions),
+            "ranked_next_action_count": len(ranked_next_actions),
             "matched_handoff_ref_count": len(matched_refs),
             "missing_preview_decision_count": max(0, len(rows) - len(matched_refs)),
             "omission_count": omitted_count,

@@ -80,6 +80,18 @@ def _decision_rows(preview_result: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _ranked_next_action_rows(preview_result: dict[str, Any]) -> list[dict[str, Any]]:
+    preview = preview_result.get("preview")
+    if isinstance(preview, dict):
+        rows = preview.get("ranked_next_actions")
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
+    rows = preview_result.get("ranked_next_actions")
+    if isinstance(rows, list):
+        return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
 def _request_rows(preview_result: dict[str, Any]) -> list[dict[str, Any]]:
     request = preview_result.get("preview_request")
     if isinstance(request, dict):
@@ -113,6 +125,79 @@ def _matching_decisions(preview_result: dict[str, Any]) -> dict[str, dict[str, A
         if ref:
             result[ref] = row
     return result
+
+
+def _ranked_next_action_rank(row: dict[str, Any]) -> int:
+    try:
+        return int(row.get("rank") or row.get("managed_rank") or row.get("priority_rank") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ranked_next_action_match_score(request_row: dict[str, Any], ranked_action: dict[str, Any]) -> int:
+    score = 0
+    request_handoff = str(request_row.get("handoff_ref") or "").strip()
+    action_handoff = str(ranked_action.get("handoff_ref") or ranked_action.get("source_handoff_ref") or "").strip()
+    if request_handoff and action_handoff:
+        if request_handoff == action_handoff:
+            score += 50
+        else:
+            return -1
+    request_activation_ref = str(request_row.get("source_activation_ref") or "").strip()
+    action_activation_ref = str(ranked_action.get("source_activation_ref") or "").strip()
+    if request_activation_ref and action_activation_ref:
+        if request_activation_ref == action_activation_ref:
+            score += 24
+        else:
+            return -1
+    request_successor_ref = str(request_row.get("source_successor_ref") or "").strip()
+    action_successor_ref = str(ranked_action.get("source_successor_ref") or "").strip()
+    if request_successor_ref and action_successor_ref:
+        if request_successor_ref == action_successor_ref:
+            score += 20
+        else:
+            return -1
+    request_family = str(request_row.get("local_action_family") or "").strip()
+    action_family = str(ranked_action.get("local_action_family") or ranked_action.get("family") or "").strip()
+    if request_family and action_family:
+        if request_family == action_family:
+            score += 10
+        else:
+            return -1
+    request_schema = str(request_row.get("evidence_schema") or "").strip()
+    action_schema = str(ranked_action.get("evidence_schema") or "").strip()
+    if request_schema and action_schema:
+        if request_schema == action_schema:
+            score += 6
+        else:
+            return -1
+    request_next_action = str(request_row.get("executor_next_action") or "").strip()
+    action_next_action = str(
+        ranked_action.get("recommended_next_action")
+        or ranked_action.get("next_action")
+        or ""
+    ).strip()
+    if request_next_action and action_next_action and request_next_action == action_next_action:
+        score += 3
+    return score
+
+
+def _ranked_next_action_for_request_row(
+    request_row: dict[str, Any],
+    ranked_actions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    best: tuple[int, int, dict[str, Any]] | None = None
+    for action in ranked_actions:
+        rank = _ranked_next_action_rank(action)
+        if rank <= 0:
+            continue
+        score = _ranked_next_action_match_score(request_row, action)
+        if score <= 0:
+            continue
+        rank_key = (score, -rank, action)
+        if best is None or rank_key[:2] > best[:2]:
+            best = rank_key
+    return best[2] if best else None
 
 
 def _decision_text(decision: dict[str, Any]) -> str:
@@ -291,6 +376,7 @@ def _outcome_from_rows(
     *,
     request_row: dict[str, Any],
     decision: dict[str, Any],
+    ranked_next_action: dict[str, Any] | None,
     preview_result: dict[str, Any],
     now: datetime,
     stale_after_hours: float,
@@ -316,6 +402,14 @@ def _outcome_from_rows(
         or preview_managed_enforced
     )
     disagreement = _disagrees_with_local(request_row, decision)
+    ranked_next_action = ranked_next_action if isinstance(ranked_next_action, dict) else {}
+    managed_rank = _ranked_next_action_rank(ranked_next_action)
+    managed_recommended_next_action = str(
+        ranked_next_action.get("recommended_next_action")
+        or ranked_next_action.get("next_action")
+        or ""
+    ).strip()
+    managed_expected_savings_path = str(ranked_next_action.get("expected_savings_path") or "").strip()
     classification = _classification(
         decision_classification=decision_classification,
         fetch_status=fetch_status,
@@ -422,6 +516,12 @@ def _outcome_from_rows(
         "fetch_status": sanitize_value(fetch_status),
         "fetch_reason": sanitize_value(fetch_reason),
         "next_action": _next_action(classification=classification, request_row=request_row, decision=decision),
+        "managed_rank": managed_rank,
+        "managed_recommended_next_action": sanitize_value(managed_recommended_next_action),
+        "managed_expected_savings_path": sanitize_value(managed_expected_savings_path),
+        "managed_preview_action_ref": sanitize_value(ranked_next_action.get("preview_ref")),
+        "managed_priority_source": "ranked-managed-preview" if managed_rank > 0 else "local-successor-rank",
+        "managed_rank_fallback_reason": None if managed_rank > 0 else "managed-ranked-next-action-missing",
         "omitted_reason": sanitize_value(decision.get("omitted_reason")),
         "no_op_reason": sanitize_value(decision.get("no_op_reason")),
         "reason_codes": sanitize_value(reason_codes),
@@ -582,10 +682,12 @@ def persist_managed_activation_preview_outcomes(
     now_dt = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     now_text = now_dt.isoformat()
     decisions = _matching_decisions(preview_result)
+    ranked_actions = _ranked_next_action_rows(preview_result)
     outcomes = [
         _outcome_from_rows(
             request_row=row,
             decision=decisions.get(str(row.get("handoff_ref") or "").strip(), {}),
+            ranked_next_action=_ranked_next_action_for_request_row(row, ranked_actions),
             preview_result=preview_result,
             now=now_dt,
             stale_after_hours=stale_after_hours,

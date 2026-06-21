@@ -6065,6 +6065,7 @@ def _successor_action_privacy() -> dict[str, Any]:
         "absolute_paths_included": False,
         "individual_candidate_ids_included": False,
         "policy_file_contents_included": False,
+        "policy_files_written": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
     }
@@ -6725,6 +6726,35 @@ def _managed_preview_public_outcome_status(gate: dict[str, Any]) -> str:
     return "preview-missing"
 
 
+def _managed_preview_rank_is_usable(gate: dict[str, Any]) -> bool:
+    rank = _to_int(gate.get("managed_rank"))
+    if rank <= 0:
+        return False
+    status = str(gate.get("status") or "").strip()
+    if status in {
+        "missing-preview",
+        "missing-preview-decision",
+        "no-data-preview-health",
+        "stale-preview",
+        "stale-preview-health",
+        "failed-closed",
+        "unsafe-preview-side-effect",
+        "privacy-rejected-preview-health",
+        "rejected-preview-health",
+    }:
+        return False
+    return not bool(
+        gate.get("stale")
+        or gate.get("missing_preview_decision")
+        or gate.get("failed_closed")
+    )
+
+
+def _queue_managed_priority_rank(entry: dict[str, Any]) -> int:
+    gate = entry.get("managed_preview_gate") if isinstance(entry.get("managed_preview_gate"), dict) else {}
+    return _to_int(gate.get("managed_rank")) if _managed_preview_rank_is_usable(gate) else 0
+
+
 def _cache_rollback_guidance_status(guidance: dict[str, Any]) -> str:
     target_file = str(guidance.get("target_local_rule_file") or "").strip()
     target_section = str(guidance.get("target_local_policy_section") or "").strip()
@@ -6842,6 +6872,8 @@ def _managed_preview_successor_gate(
             "managed_server_calls_made": bool(health_gate.get("managed_server_calls_made")),
             "stored_preview_outcome_count": _to_int(report_summary.get("stored_preview_outcome_count")),
             "reason": reason,
+            "managed_priority_source": "local-successor-rank",
+            "managed_rank_fallback_reason": "managed-preview-health-blocked" if health_blocks_required else "managed-preview-outcome-missing",
             "privacy": _managed_preview_successor_privacy(
                 managed_server_calls_made=bool(health_gate.get("managed_server_calls_made"))
             ),
@@ -7001,6 +7033,12 @@ def _managed_preview_successor_gate(
         "observed_crunch_ratio": sanitize_value(outcome.get("observed_crunch_ratio")),
         "successor_action_fingerprint": sanitize_value(outcome.get("successor_action_fingerprint")),
         "successor_decision_fingerprint": sanitize_value(outcome.get("successor_decision_fingerprint")),
+        "managed_rank": _to_int(outcome.get("managed_rank")),
+        "managed_recommended_next_action": sanitize_value(outcome.get("managed_recommended_next_action")),
+        "managed_expected_savings_path": sanitize_value(outcome.get("managed_expected_savings_path")),
+        "managed_preview_action_ref": sanitize_value(outcome.get("managed_preview_action_ref")),
+        "managed_priority_source": sanitize_value(outcome.get("managed_priority_source") or "local-successor-rank"),
+        "managed_rank_fallback_reason": sanitize_value(outcome.get("managed_rank_fallback_reason")),
         "preview_outcome_status": _managed_preview_public_outcome_status(
             {"verified": verified, "status": status}
         ),
@@ -7146,6 +7184,21 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
                 action["observed_saved_usd"] = round(_to_float(preview_gate.get("observed_saved_usd")), 8)
             if preview_gate.get("observed_crunch_ratio") is not None:
                 action["observed_crunch_ratio"] = round(_to_float(preview_gate.get("observed_crunch_ratio")), 8)
+        if preview_gate.get("managed_rank") is not None:
+            action["managed_rank"] = _to_int(preview_gate.get("managed_rank"))
+            action["managed_priority_source"] = (
+                "ranked-managed-preview"
+                if _managed_preview_rank_is_usable(preview_gate)
+                else "local-successor-rank"
+            )
+        if preview_gate.get("managed_recommended_next_action"):
+            action["managed_recommended_next_action"] = sanitize_value(preview_gate.get("managed_recommended_next_action"))
+        if preview_gate.get("managed_expected_savings_path"):
+            action["managed_expected_savings_path"] = sanitize_value(preview_gate.get("managed_expected_savings_path"))
+        if preview_gate.get("managed_preview_action_ref"):
+            action["managed_preview_action_ref"] = sanitize_value(preview_gate.get("managed_preview_action_ref"))
+        if preview_gate.get("managed_rank_fallback_reason"):
+            action["managed_rank_fallback_reason"] = sanitize_value(preview_gate.get("managed_rank_fallback_reason"))
     for key in (
         "evidence_schema",
         "source_surface",
@@ -7177,6 +7230,11 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "post_rollback_successor_decision",
         "post_rollback_next_action",
         "post_rollback_reason",
+        "managed_priority_source",
+        "managed_rank_fallback_reason",
+        "managed_recommended_next_action",
+        "managed_expected_savings_path",
+        "managed_preview_action_ref",
     ):
         if entry.get(key) is not None:
             action[key] = sanitize_value(entry.get(key))
@@ -7228,6 +7286,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "unknown_dependency_evidence_rows",
         "observed_saved_tokens",
         "projected_saved_tokens",
+        "managed_rank",
     ):
         if entry.get(key) is not None:
             action[key] = _to_int(entry.get(key))
@@ -7324,6 +7383,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             "observed_saved_tokens",
             "observed_saved_usd",
             "observed_crunch_ratio",
+            "managed_rank",
         }
     }
 
@@ -7404,6 +7464,14 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
         if gate and gate.get("observed_crunch_ratio") is not None
         else None,
         "successor_decision_fingerprint": sanitize_value(gate.get("successor_decision_fingerprint")) if gate else None,
+        "managed_rank": _to_int(gate.get("managed_rank")) if gate and gate.get("managed_rank") is not None else None,
+        "managed_recommended_next_action": sanitize_value(gate.get("managed_recommended_next_action")) if gate else None,
+        "managed_expected_savings_path": sanitize_value(gate.get("managed_expected_savings_path")) if gate else None,
+        "managed_preview_action_ref": sanitize_value(gate.get("managed_preview_action_ref")) if gate else None,
+        "managed_priority_source": (
+            "ranked-managed-preview" if gate and _managed_preview_rank_is_usable(gate) else "local-successor-rank"
+        ),
+        "managed_rank_fallback_reason": sanitize_value(gate.get("managed_rank_fallback_reason")) if gate else None,
         "top_preview_omission_reason": sanitize_value((gate.get("health_gate") or {}).get("top_omission_reason")) if isinstance(gate.get("health_gate"), dict) else None,
         "target_local_rule_file": sanitize_value(action.get("target_local_rule_file")),
         "target_local_policy_section": sanitize_value(action.get("target_local_policy_section")),
@@ -7442,6 +7510,7 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
             "observed_saved_tokens",
             "observed_saved_usd",
             "observed_crunch_ratio",
+            "managed_rank",
         }
     }
 
@@ -8755,8 +8824,25 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
     _apply_queue_duplicate_fingerprint_suppression(entries)
     for entry in entries:
         _apply_queue_rank_metadata(entry)
+        managed_rank = _queue_managed_priority_rank(entry)
+        gate = entry.get("managed_preview_gate") if isinstance(entry.get("managed_preview_gate"), dict) else {}
+        entry["managed_priority_rank"] = managed_rank
+        entry["managed_priority_source"] = (
+            "ranked-managed-preview" if managed_rank > 0 else "local-successor-rank"
+        )
+        if managed_rank > 0:
+            entry["managed_rank"] = managed_rank
+            entry["managed_recommended_next_action"] = sanitize_value(gate.get("managed_recommended_next_action"))
+            entry["managed_expected_savings_path"] = sanitize_value(gate.get("managed_expected_savings_path"))
+            entry["managed_preview_action_ref"] = sanitize_value(gate.get("managed_preview_action_ref"))
+        else:
+            entry["managed_rank_fallback_reason"] = sanitize_value(
+                gate.get("managed_rank_fallback_reason") or "managed-ranked-next-action-missing"
+            )
     entries.sort(
         key=lambda item: (
+            0 if _to_int(item.get("managed_priority_rank")) > 0 else 1,
+            _to_int(item.get("managed_priority_rank")) if _to_int(item.get("managed_priority_rank")) > 0 else 999_999,
             _to_int(item.get("rank_bucket")),
             -_to_float(item.get("freshness_adjusted_savings_per_1000_calls_usd")),
             -_to_float(item.get("realized_savings_usd")),
@@ -8791,6 +8877,12 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
     preview_verified_count = sum(1 for gate in preview_gates if gate.get("verified"))
     preview_required_count = sum(1 for gate in preview_gates if gate.get("required"))
     preview_blocked_count = sum(1 for gate in preview_gates if gate.get("required") and not gate.get("verified"))
+    managed_ranked_count = sum(1 for item in entries if _to_int(item.get("managed_priority_rank")) > 0)
+    managed_rank_fallback_counts: Counter[str] = Counter(
+        str(item.get("managed_rank_fallback_reason") or "none")
+        for item in entries
+        if _to_int(item.get("managed_priority_rank")) <= 0
+    )
     preview_status_counts: Counter[str] = Counter(str(gate.get("status") or "unknown") for gate in preview_gates)
     preview_decision_counts: Counter[str] = Counter(str(gate.get("decision") or "unknown") for gate in preview_gates)
 
@@ -8807,6 +8899,11 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             "preview_verified_successor_count": preview_verified_count,
             "preview_required_successor_count": preview_required_count,
             "preview_blocked_successor_count": preview_blocked_count,
+            "managed_ranked_successor_count": managed_ranked_count,
+            "managed_priority_overlay_status": "ranked-managed-preview" if managed_ranked_count else "local-successor-rank",
+            "managed_rank_fallback_reason_counts": [
+                {"value": key, "count": count} for key, count in sorted(managed_rank_fallback_counts.items())
+            ],
             "preview_gate_status_counts": [{"value": key, "count": count} for key, count in sorted(preview_status_counts.items())],
             "preview_gate_decision_counts": [{"value": key, "count": count} for key, count in sorted(preview_decision_counts.items())],
             "preview_agreement_by_local_action_family": preview_successor_summary["preview_agreement_by_local_action_family"],
