@@ -23,6 +23,8 @@ PREVIEW_REQUEST_SCHEMA = "tokenclaw.managed_activation_preview_request.v1"
 PREVIEW_RESULT_SCHEMA = "tokenclaw.managed_activation_preview_result.v1"
 PREVIEW_DECISION_SCHEMA = "tokenclaw.managed_activation_preview_decision.v1"
 PREVIEW_RANKED_NEXT_ACTION_SCHEMA = "tokenclaw.managed_activation_preview_ranked_next_action.v1"
+BUNDLE_SCHEMA = "tokenclaw.local_activation_executor_bundle.v1"
+BUNDLE_OUTCOME_SCHEMA = "tokenclaw.local_activation_executor_bundle_outcome.v1"
 
 SAFE_SELECTABLE_CLASSES = {"draft-local-policy", "review-only", "retire"}
 SUPPORTED_PREVIEW_LOCAL_ACTION_FAMILIES = ["routing", "crunch", "cache", "activation-feedback"]
@@ -536,6 +538,202 @@ def _handoff_ref(entry: dict[str, Any], *, prefix: str = "handoff") -> str:
         "target": entry.get("target_local_rule_file"),
     }
     return public_id(json.dumps(material, sort_keys=True), prefix=prefix) or f"{prefix}:unknown"
+
+
+def _bundle_result_status(entry: dict[str, Any]) -> str:
+    action_class = str(entry.get("executor_action_class") or "").strip()
+    successor_status = str(entry.get("successor_status") or "").strip()
+    current_state = str(entry.get("current_state") or "").strip()
+    next_action = str(entry.get("executor_next_action") or "").strip()
+    if action_class == "rollback-required" or successor_status == "rollback-required":
+        return "rollback-required"
+    if (
+        action_class == "retire"
+        or current_state in {"retired-no-repeat", "retired-stale-no-traffic"}
+        or "retire" in next_action
+    ):
+        return "retired-no-repeat"
+    if action_class in {"draft-local-policy", "review-only"}:
+        return "drafted"
+    return "blocked"
+
+
+def _bundle_ref(entry: dict[str, Any], result_status: str) -> str:
+    material = {
+        "executor": entry.get("fingerprint"),
+        "source": entry.get("source_fingerprint"),
+        "family": entry.get("local_action_family"),
+        "result": result_status,
+        "next_action": entry.get("executor_next_action"),
+        "target": entry.get("target_local_rule_file"),
+    }
+    return public_id(json.dumps(material, sort_keys=True), prefix="executor-bundle") or "executor-bundle:unknown"
+
+
+def _bundle_outcome_ref(entry: dict[str, Any], result_status: str) -> str:
+    material = {
+        "bundle": _bundle_ref(entry, result_status),
+        "result": result_status,
+        "source": entry.get("source_fingerprint"),
+        "next_action": entry.get("executor_next_action"),
+    }
+    return public_id(json.dumps(material, sort_keys=True), prefix="executor-outcome") or "executor-outcome:unknown"
+
+
+def _review_bundle_from_entry(entry: dict[str, Any], *, generated_at: str) -> dict[str, Any]:
+    result_status = _bundle_result_status(entry)
+    rollback_required = result_status == "rollback-required"
+    local_gate = {
+        "schema": "tokenclaw.local_activation_executor_bundle_gate.v1",
+        "status": sanitize_value(result_status),
+        "executor_status": sanitize_value(entry.get("executor_status") or "unknown"),
+        "executor_action_class": sanitize_value(entry.get("executor_action_class") or "review-only"),
+        "managed_preview_required": bool(entry.get("managed_preview_required")),
+        "preview_verified": bool(entry.get("preview_verified")),
+        "preview_verification_status": sanitize_value(entry.get("preview_verification_status")),
+        "preview_verification_decision": sanitize_value(entry.get("preview_verification_decision")),
+        "blocker_codes": sanitize_value(entry.get("blocker_codes") or []),
+        "reason_codes": sanitize_value(entry.get("reason_codes") or []),
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
+    rollback_safety = {
+        "schema": "tokenclaw.local_activation_executor_bundle_rollback_safety.v1",
+        "rollback_required": rollback_required,
+        "rollback_count": _as_int(entry.get("rollback_count")),
+        "safety_stop_count": _as_int(entry.get("safety_stop_count")),
+        "fallback_count": _as_int(entry.get("fallback_count")),
+        "retry_count": _as_int(entry.get("retry_count")),
+        "error_rate_delta": round(_as_float(entry.get("error_rate_delta")), 8),
+        "retry_rate_delta": round(_as_float(entry.get("retry_rate_delta")), 8),
+        "fallback_rate_delta": round(_as_float(entry.get("fallback_rate_delta")), 8),
+        "full_rollout_outcome": sanitize_value(entry.get("full_rollout_outcome")),
+        "full_rollout_successor_decision": sanitize_value(entry.get("full_rollout_successor_decision")),
+        "full_rollout_successor_next_action": sanitize_value(entry.get("full_rollout_successor_next_action")),
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _privacy(),
+    }
+    bundle_ref = _bundle_ref(entry, result_status)
+    outcome_row = {
+        "schema": BUNDLE_OUTCOME_SCHEMA,
+        "outcome_fingerprint": _bundle_outcome_ref(entry, result_status),
+        "bundle_ref": bundle_ref,
+        "source_executor_fingerprint": sanitize_value(entry.get("fingerprint")),
+        "source_fingerprint": sanitize_value(entry.get("source_fingerprint")),
+        "source_successor_fingerprint": sanitize_value(entry.get("source_successor_fingerprint")),
+        "result": result_status,
+        "result_options": ["drafted", "blocked", "rollback-required", "retired-no-repeat"],
+        "durable_outcome_row": True,
+        "executor_next_action": sanitize_value(entry.get("executor_next_action") or "inspect-local-evidence"),
+        "local_action_family": sanitize_value(entry.get("local_action_family") or "unknown"),
+        "target_local_policy_section": sanitize_value(entry.get("target_local_policy_section")),
+        "target_local_rule_file": sanitize_value(entry.get("target_local_rule_file")),
+        "candidate_rule_file": sanitize_value(entry.get("target_local_rule_file")),
+        "expected_savings_path": sanitize_value(entry.get("expected_savings_path")),
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _privacy(),
+    }
+    result = {
+        "schema": BUNDLE_SCHEMA,
+        "generated_at": generated_at,
+        "status": result_status,
+        "mode": "review-only",
+        "dry_run": True,
+        "review_only": True,
+        "bundle_ref": bundle_ref,
+        "stable_fingerprint": bundle_ref,
+        "rank": _as_int(entry.get("rank")),
+        "source_rank": _as_int(entry.get("source_rank") or entry.get("rank")),
+        "source_queue_rank": _as_int(entry.get("source_queue_rank")),
+        "source_ledger_rank": _as_int(entry.get("source_ledger_rank")),
+        "source_executor_fingerprint": sanitize_value(entry.get("fingerprint")),
+        "source_fingerprint": sanitize_value(entry.get("source_fingerprint")),
+        "source_successor_fingerprint": sanitize_value(entry.get("source_successor_fingerprint")),
+        "local_action_family": sanitize_value(entry.get("local_action_family") or "unknown"),
+        "lever": sanitize_value(entry.get("lever") or entry.get("local_action_family") or "unknown"),
+        "executor_action_class": sanitize_value(entry.get("executor_action_class") or "review-only"),
+        "executor_next_action": sanitize_value(entry.get("executor_next_action") or "inspect-local-evidence"),
+        "target_local_policy_section": sanitize_value(entry.get("target_local_policy_section")),
+        "target_local_rule_file": sanitize_value(entry.get("target_local_rule_file")),
+        "candidate_rule_file": sanitize_value(entry.get("target_local_rule_file")),
+        "expected_savings_path": sanitize_value(entry.get("expected_savings_path")),
+        "acceptance_metric": sanitize_value(entry.get("acceptance_metric")),
+        "local_gate": local_gate,
+        "rollback_safety": rollback_safety,
+        "outcome": outcome_row,
+        "summary": {
+            "bundle_count": 1,
+            "outcome_result": result_status,
+            "local_action_family": sanitize_value(entry.get("local_action_family") or "unknown"),
+            "executor_next_action": sanitize_value(entry.get("executor_next_action") or "inspect-local-evidence"),
+            "target_local_policy_section": sanitize_value(entry.get("target_local_policy_section")),
+            "candidate_rule_file": sanitize_value(entry.get("target_local_rule_file")),
+            "stable_fingerprint": bundle_ref,
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        },
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _privacy(),
+    }
+    result = sanitize_value(result)
+    violations = managed_egress_violations(result)
+    result["egress_guard"] = {
+        "schema": "tokenclaw.managed_egress_guard.v1",
+        "status": "passed" if not violations else "blocked",
+        "blocked": bool(violations),
+        "violation_count": len(violations),
+        "raw_values_logged": False,
+    }
+    if violations:
+        result["egress_guard"]["blocked_keys"] = sorted({item.get("key", "unknown") for item in violations})
+    return result
+
+
+def build_local_activation_executor_bundle(
+    source: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    action_rank: int = 1,
+) -> dict[str, Any]:
+    """Build exactly one review-only local executor bundle for a ranked activation action."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    plan = source if source.get("schema") == SCHEMA else build_local_activation_executor_plan(source, now=now)
+    entries = [entry for entry in plan.get("entries") or [] if isinstance(entry, dict)]
+    desired_rank = max(1, int(action_rank or 1))
+    entry = next((item for item in entries if _as_int(item.get("rank")) == desired_rank), None)
+    if entry is None and entries:
+        entry = sorted(entries, key=lambda item: _as_int(item.get("rank")) or 999_999)[0]
+    if entry is None:
+        result = {
+            "schema": BUNDLE_SCHEMA,
+            "generated_at": now.isoformat(),
+            "status": "blocked",
+            "reason": "no-ranked-activation-actions",
+            "mode": "review-only",
+            "dry_run": True,
+            "review_only": True,
+            "summary": {
+                "bundle_count": 0,
+                "outcome_result": "blocked",
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+            },
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "privacy": _privacy(),
+        }
+        return sanitize_value(result)
+    return _review_bundle_from_entry(entry, generated_at=now.isoformat())
 
 
 def _public_ref(value: Any, *, prefix: str) -> str | None:

@@ -858,6 +858,17 @@ def local_activation_executor_cli(argv: Sequence[str] | None = None, *, stdout: 
         action="store_true",
         help="Emit feature-only managed handoff rows for the local executor outcomes.",
     )
+    parser.add_argument(
+        "--review-bundle",
+        action="store_true",
+        help="Emit exactly one review-only local executor bundle for a ranked activation action.",
+    )
+    parser.add_argument(
+        "--bundle-rank",
+        type=int,
+        default=1,
+        help="Activation action rank to emit with --review-bundle, default: 1.",
+    )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     args = parser.parse_args(argv)
 
@@ -865,6 +876,7 @@ def local_activation_executor_cli(argv: Sequence[str] | None = None, *, stdout: 
     stderr = stderr if stderr is not None else sys.stderr
 
     from tokenclaw.local_activation_executor import (
+        build_local_activation_executor_bundle,
         build_local_activation_executor_managed_handoff,
         build_local_activation_executor_plan,
     )
@@ -879,11 +891,12 @@ def local_activation_executor_cli(argv: Sequence[str] | None = None, *, stdout: 
         _write_json(stderr, {"ok": False, "error": {"type": "invalid_plan_json", "message": "plan JSON must be an object"}})
         return 1
 
-    report = (
-        build_local_activation_executor_managed_handoff(plan)
-        if args.managed_handoff
-        else build_local_activation_executor_plan(plan)
-    )
+    if args.review_bundle:
+        report = build_local_activation_executor_bundle(plan, action_rank=args.bundle_rank)
+    elif args.managed_handoff:
+        report = build_local_activation_executor_managed_handoff(plan)
+    else:
+        report = build_local_activation_executor_plan(plan)
     write_json(stdout, report, pretty=args.pretty)
     return 0
 

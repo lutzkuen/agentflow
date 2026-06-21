@@ -12,6 +12,7 @@ from tokenclaw import cli
 from tokenclaw.local_activation_executor import (
     build_managed_activation_preview_request,
     build_managed_activation_preview_result,
+    build_local_activation_executor_bundle,
     build_local_activation_executor_managed_handoff,
     build_local_activation_executor_plan,
 )
@@ -672,6 +673,120 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["schema"], "tokenclaw.local_activation_managed_handoff.v1")
         self.assertEqual(result["summary"]["handoff_row_count"], 4)
         self.assertEqual(result["egress_guard"]["status"], "passed")
+
+    def test_local_activation_executor_bundle_drafts_one_review_only_action(self):
+        result = build_local_activation_executor_bundle(
+            _executor_handoff_fixture_plan(),
+            now=NOW,
+            action_rank=1,
+        )
+
+        self.assertEqual(result["schema"], "tokenclaw.local_activation_executor_bundle.v1")
+        self.assertEqual(result["status"], "drafted")
+        self.assertEqual(result["mode"], "review-only")
+        self.assertEqual(result["summary"]["bundle_count"], 1)
+        self.assertEqual(result["summary"]["outcome_result"], "drafted")
+        self.assertEqual(result["local_action_family"], "cache")
+        self.assertEqual(result["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(result["candidate_rule_file"], "cache_rules.yaml")
+        self.assertEqual(result["local_gate"]["status"], "drafted")
+        self.assertEqual(result["outcome"]["result"], "drafted")
+        self.assertTrue(result["stable_fingerprint"].startswith("executor-bundle:"))
+        self.assertTrue(result["outcome"]["outcome_fingerprint"].startswith("executor-outcome:"))
+        self.assertFalse(result["policy_files_written"])
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+        self.assertFalse(result["outcome"]["policy_files_written"])
+        self.assertFalse(result["outcome"]["provider_calls_made"])
+        self.assertFalse(result["outcome"]["managed_server_calls_made"])
+        self.assertTrue(result["privacy"]["metadata_only"])
+        self.assertTrue(result["privacy"]["aggregate_only"])
+        self.assertFalse(result["privacy"]["raw_prompts_included"])
+        self.assertFalse(result["privacy"]["provider_bodies_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+        self.assertFalse(result["privacy"]["file_paths_included"])
+        self.assertFalse(result["privacy"]["policy_file_contents_included"])
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("cache-review-secret", rendered)
+        self.assertNotIn("/tmp/private-cache-review.py", rendered)
+        self.assertNotIn("raw cache review prompt must not leak", rendered)
+
+    def test_local_activation_executor_bundle_records_blocked_rollback_and_retired_results(self):
+        blocked = build_local_activation_executor_bundle(
+            _executor_handoff_fixture_plan(),
+            now=NOW,
+            action_rank=2,
+        )
+        rollback_gate = _full_rollout_gate(
+            state="rollback-required",
+            next_action="rollback-full-rollout-repeated-context-crunch-rule",
+            reason_codes=["rollback-observed"],
+        )
+        rollback_gate["regression_counters"]["rollback_count"] = 1
+        rollback = build_local_activation_executor_bundle(
+            _full_rollout_queue_plan(_full_rollout_queue_entry(gate=rollback_gate, outcome="rollback-required")),
+            now=NOW,
+        )
+        retired_source = {
+            "schema": "tokenclaw.local_activation_next_action_queue.v1",
+            "status": "ranked",
+            "entries": [
+                {
+                    "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:retired-cache",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "current_status": "superseded",
+                    "state": "retired-no-repeat",
+                    "successor_status": "review",
+                    "next_action": "retire-cache-replay-canary-no-repeat",
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                }
+            ],
+        }
+        retired = build_local_activation_executor_bundle(retired_source, now=NOW)
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["outcome"]["result"], "blocked")
+        self.assertEqual(blocked["local_gate"]["status"], "blocked")
+        self.assertEqual(rollback["status"], "rollback-required")
+        self.assertEqual(rollback["outcome"]["result"], "rollback-required")
+        self.assertTrue(rollback["rollback_safety"]["rollback_required"])
+        self.assertEqual(rollback["rollback_safety"]["rollback_count"], 1)
+        self.assertEqual(retired["status"], "retired-no-repeat")
+        self.assertEqual(retired["outcome"]["result"], "retired-no-repeat")
+        self.assertEqual(retired["candidate_rule_file"], "cache_rules.yaml")
+        for result in (blocked, rollback, retired):
+            self.assertEqual(result["summary"]["bundle_count"], 1)
+            self.assertIn(result["status"], ["drafted", "blocked", "rollback-required", "retired-no-repeat"])
+            self.assertFalse(result["policy_files_written"])
+            self.assertFalse(result["provider_calls_made"])
+            self.assertFalse(result["managed_server_calls_made"])
+            self.assertTrue(result["privacy"]["metadata_only"])
+            self.assertEqual(result["egress_guard"]["status"], "passed")
+
+    def test_local_activation_executor_cli_emits_review_bundle(self):
+        with TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.json"
+            plan_path.write_text(json.dumps(_executor_handoff_fixture_plan()), encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.local_activation_executor_cli(
+                ["--plan-json", str(plan_path), "--review-bundle", "--bundle-rank", "1", "--pretty"],
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["schema"], "tokenclaw.local_activation_executor_bundle.v1")
+        self.assertEqual(result["status"], "drafted")
+        self.assertEqual(result["summary"]["bundle_count"], 1)
+        self.assertEqual(result["local_action_family"], "cache")
 
     def test_managed_activation_preview_request_is_feature_only(self):
         result = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
