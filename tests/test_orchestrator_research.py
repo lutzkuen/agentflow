@@ -9486,6 +9486,117 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, rendered)
 
+    def test_activation_deploy_diagnostics_become_durable_local_actions(self):
+        log_lines = [
+            "Reason: live service deploy failed after development landing request_id=req-deploy-secret path=/tmp/private-deploy.log",
+            "Reason: live service deploy failed after development landing session_id=session-deploy-secret",
+            (
+                "Tester verdict: PASS. Verified TOKENCLAW_PORT=4001 activated Claude dev smoke "
+                "started Uvicorn on http://127.0.0.1:4001 and exited by timeout after startup "
+                "request_id=req-port-secret"
+            ),
+            (
+                "Test verdict: PASS. Verified AGENTFLOW_PORT=4001 legacy smoke also started "
+                "session_id=session-port-secret"
+            ),
+        ]
+
+        plan = build_research_plan(
+            issues=[],
+            log_sources=log_lines,
+            threshold=1,
+            now=NOW,
+        )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        reasons = [item["reason"] for item in diagnostics]
+        self.assertIn("live-service-deploy-failed-after-development", reasons)
+        self.assertIn("pass-verified-tokenclaw-port", reasons)
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        entries = {
+            entry.get("diagnostic_class"): entry
+            for entry in ledger["entries"]
+            if entry.get("diagnostic_class") in {
+                "live-service-deploy-failed-after-development",
+                "pass-verified-tokenclaw-port",
+            }
+        }
+        self.assertEqual(
+            set(entries),
+            {"live-service-deploy-failed-after-development", "pass-verified-tokenclaw-port"},
+        )
+
+        deploy = entries["live-service-deploy-failed-after-development"]
+        self.assertEqual(deploy["lever"], "activation-feedback")
+        self.assertEqual(deploy["local_action_family"], "activation-feedback")
+        self.assertEqual(deploy["current_status"], "keep-blocked")
+        self.assertEqual(deploy["issue_worthy_status"], "blocked")
+        self.assertEqual(
+            deploy["next_action"],
+            "record-live-service-deploy-failure-and-wait-for-shell-guard-health",
+        )
+        self.assertEqual(
+            deploy["diagnostic_fingerprint"],
+            "agentflow.repeated-diagnostic.live-service-deploy-failed-after-development.v1",
+        )
+        self.assertFalse(deploy["managed_preview_required"])
+        self.assertTrue(deploy["durable_action_ledger_entry"])
+        self.assertTrue(deploy["privacy"]["metadata_only"])
+        self.assertTrue(deploy["privacy"]["aggregate_only"])
+        self.assertFalse(deploy["privacy"]["request_ids_included"])
+        self.assertFalse(deploy["privacy"]["session_ids_included"])
+        self.assertFalse(deploy["privacy"]["absolute_paths_included"])
+
+        port = entries["pass-verified-tokenclaw-port"]
+        self.assertEqual(port["lever"], "activation-feedback")
+        self.assertEqual(port["local_action_family"], "activation-feedback")
+        self.assertEqual(port["current_status"], "keep-blocked")
+        self.assertEqual(
+            port["next_action"],
+            "record-tokenclaw-dev-port-verification-and-keep-prod-deploy-follow-up-narrow",
+        )
+        self.assertEqual(
+            port["diagnostic_fingerprint"],
+            "agentflow.repeated-diagnostic.pass-verified-tokenclaw-port.v1",
+        )
+        self.assertTrue(port["activation_feedback_diagnostic_classification"]["privacy"]["metadata_only"])
+        self.assertFalse(port["managed_preview_required"])
+
+        queue = plan["evidence"]["stats_summary"]["local_activation_next_action_queue"]
+        actions = {
+            action.get("diagnostic_class"): action
+            for action in queue["successor_actions"]
+            if action.get("diagnostic_class") in entries
+        }
+        self.assertEqual(set(actions), set(entries))
+        for action in actions.values():
+            self.assertEqual(action["local_action_family"], "activation-feedback")
+            self.assertEqual(action["successor_status"], "keep-blocked")
+            self.assertFalse(action["privacy"]["request_ids_included"])
+            self.assertFalse(action["privacy"]["absolute_paths_included"])
+
+        created_titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertFalse(any("live service deploy failed after development" in title for title in created_titles))
+        self.assertFalse(any("pass verified tokenclaw port" in title for title in created_titles))
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        suppressed_classes = {
+            item.get("diagnostic_class")
+            for item in suppression["suppressed"]
+        }
+        self.assertIn("live-service-deploy-failed-after-development", suppressed_classes)
+        self.assertIn("pass-verified-tokenclaw-port", suppressed_classes)
+
+        rendered = json.dumps(plan, sort_keys=True)
+        for secret in (
+            "req-deploy-secret",
+            "session-deploy-secret",
+            "req-port-secret",
+            "session-port-secret",
+            "/tmp/private-deploy.log",
+        ):
+            self.assertNotIn(secret, rendered)
+
     def test_unclassified_canary_cohort_skip_is_reclassified(self):
         with TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "run.log"

@@ -170,6 +170,10 @@ _ACTIVATION_FEEDBACK_HUMAN_REVIEW_REQUIRED_RE = re.compile(
 _METADATA_ONLY_TRUE_RE = re.compile(r"metadata[-_ ]only\s*[:=]\s*(?:true|1|yes)", re.IGNORECASE)
 _AGGREGATE_ONLY_TRUE_RE = re.compile(r"aggregate[-_ ]only\s*[:=]\s*(?:true|1|yes)", re.IGNORECASE)
 _NEXT_ACTION_RE = re.compile(r"next[-_ ]action\s*[:=]\s*[\"']?([A-Za-z0-9_.:-]+)", re.IGNORECASE)
+_PASS_VERIFIED_TOKENCLAW_PORT_RE = re.compile(
+    r"\bpass\b.*\bverified\b.*\b(?:tokenclaw|agentflow)[-_ ]?port\b",
+    re.IGNORECASE,
+)
 
 
 def _is_safety_stop_signal_line(line: str) -> bool:
@@ -351,6 +355,33 @@ _DIAGNOSTIC_TAXONOMY: tuple[dict[str, Any], ...] = (
         "acceptance_check": "The next research plan emits a durable activation-feedback ledger entry with a concrete next action, stable fingerprint, and metadata-only privacy flags.",
     },
     {
+        "class": "live-service-deploy-failed-after-development",
+        "priority": 82,
+        "aliases": (
+            "live-service-deploy-failed-after-development",
+            "live-service-deploy-failed-after-development-landing",
+            "deploy-failed-after-development",
+            "development-landing-deploy-failed",
+        ),
+        "backlog_action": "needs-human-review",
+        "unblock_path": "Keep prod restart ownership with the shell guard and record a bounded deployment-health follow-up instead of creating generic activation work.",
+        "acceptance_check": "The next research plan reports the deploy diagnostic with a stable fingerprint, concrete next action, activation-feedback local action family, and metadata-only privacy flags.",
+    },
+    {
+        "class": "pass-verified-tokenclaw-port",
+        "priority": 84,
+        "aliases": (
+            "pass-verified-tokenclaw-port",
+            "pass-verified-tokenclaw-port-4001",
+            "pass-verified-agentflow-port",
+            "verified-tokenclaw-port",
+            "verified-tokenclaw-port-4001",
+        ),
+        "backlog_action": "needs-human-review",
+        "unblock_path": "Record the verified dev-port smoke result as bounded activation-feedback context and keep any live deploy follow-up narrow.",
+        "acceptance_check": "The next research plan reports the verified-port diagnostic with a stable fingerprint, concrete next action, activation-feedback local action family, and metadata-only privacy flags.",
+    },
+    {
         "class": "unclassified-skip-or-blocker",
         "priority": 90,
         "aliases": ("unclassified-skip-or-blocker",),
@@ -402,6 +433,18 @@ _ACTIVATION_FEEDBACK_STALE_EVIDENCE_KEEP_BLOCKED_REASON = (
 )
 _ACTIVATION_FEEDBACK_STALE_EVIDENCE_NEXT_ACTION = (
     "collect-fresh-activation-feedback-evidence-before-activation"
+)
+_ACTIVATION_FEEDBACK_DEPLOY_FAILURE_KEEP_BLOCKED_REASON = (
+    "live-service-deploy-failed-after-development-owned-by-shell-guard"
+)
+_ACTIVATION_FEEDBACK_DEPLOY_FAILURE_NEXT_ACTION = (
+    "record-live-service-deploy-failure-and-wait-for-shell-guard-health"
+)
+_ACTIVATION_FEEDBACK_PORT_VERIFIED_KEEP_BLOCKED_REASON = (
+    "pass-verified-tokenclaw-port-recorded-as-dev-smoke-context"
+)
+_ACTIVATION_FEEDBACK_PORT_VERIFIED_NEXT_ACTION = (
+    "record-tokenclaw-dev-port-verification-and-keep-prod-deploy-follow-up-narrow"
 )
 _ACTIVATION_FEEDBACK_FRESHNESS_MAX_AGE_HOURS = 72.0
 
@@ -602,6 +645,10 @@ def _diagnostics_from_logs(log_sources: Iterable[str | Path], *, limit: int = 10
                 reason = "unclassified-skip-or-blocker"
                 counter[reason] += 1
                 examples.setdefault(reason, line[:240])
+            if _PASS_VERIFIED_TOKENCLAW_PORT_RE.search(line):
+                reason = "pass-verified-tokenclaw-port"
+                counter[reason] += 1
+                examples.setdefault(reason, "metadata-only tokenclaw dev-port verification")
     diagnostics: list[dict[str, Any]] = []
     for reason, count in counter.most_common(limit):
         item = {"reason": reason, "count": count, "example": examples.get(reason, "")}
@@ -615,7 +662,11 @@ def _diagnostic_taxonomy(reason: Any) -> dict[str, Any] | None:
     text = str(reason or "").strip().lower().replace("_", "-").replace(" ", "-")
     if not text or text in _PASS_DIAGNOSTIC_REASONS:
         return None
-    if text.startswith("pass-") or text.endswith("-passed"):
+    if (
+        (text.startswith("pass-") or text.endswith("-passed"))
+        and "verified-tokenclaw-port" not in text
+        and "verified-agentflow-port" not in text
+    ):
         return None
     for entry in _DIAGNOSTIC_TAXONOMY:
         aliases = tuple(str(alias).lower().replace("_", "-").replace(" ", "-") for alias in entry["aliases"])
@@ -1281,6 +1332,65 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                 "evidence_age_hours": freshness_gate.get("age_hours"),
             }
         )
+    elif diagnostic_class == "live-service-deploy-failed-after-development":
+        stage.update(
+            {
+                "lever": "activation-feedback",
+                "local_action_family": "activation-feedback",
+                "state": "keep-blocked",
+                "next_action": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_NEXT_ACTION,
+                "review_status": "resolved-to-shell-guard-owned-deploy-health",
+                "issue_worthy_status": "blocked",
+                "keep_blocked_reason": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_KEEP_BLOCKED_REASON,
+                "next_state": "keep-blocked",
+                "next_state_reason": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_KEEP_BLOCKED_REASON,
+                "needed_resolution": [
+                    "shell_guard_deploy_health",
+                    "bounded_local_action_issue",
+                    "new_sanitized_evidence",
+                ],
+                "durable_action_ledger_entry": True,
+                "managed_preview_required": False,
+                "policy_files_written": False,
+                "activation_feedback_diagnostic_classification": {
+                    "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+                    "status": "deploy-health-keep-blocked",
+                    "decision": "keep-blocked",
+                    "reason": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_KEEP_BLOCKED_REASON,
+                    "next_action": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_NEXT_ACTION,
+                    "privacy": _candidate_privacy(),
+                },
+            }
+        )
+    elif diagnostic_class == "pass-verified-tokenclaw-port":
+        stage.update(
+            {
+                "lever": "activation-feedback",
+                "local_action_family": "activation-feedback",
+                "state": "keep-blocked",
+                "next_action": _ACTIVATION_FEEDBACK_PORT_VERIFIED_NEXT_ACTION,
+                "review_status": "resolved-to-dev-port-smoke-context",
+                "issue_worthy_status": "blocked",
+                "keep_blocked_reason": _ACTIVATION_FEEDBACK_PORT_VERIFIED_KEEP_BLOCKED_REASON,
+                "next_state": "keep-blocked",
+                "next_state_reason": _ACTIVATION_FEEDBACK_PORT_VERIFIED_KEEP_BLOCKED_REASON,
+                "needed_resolution": [
+                    "bounded_deploy_health_follow_up",
+                    "new_sanitized_evidence",
+                ],
+                "durable_action_ledger_entry": True,
+                "managed_preview_required": False,
+                "policy_files_written": False,
+                "activation_feedback_diagnostic_classification": {
+                    "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+                    "status": "dev-port-smoke-recorded",
+                    "decision": "keep-blocked",
+                    "reason": _ACTIVATION_FEEDBACK_PORT_VERIFIED_KEEP_BLOCKED_REASON,
+                    "next_action": _ACTIVATION_FEEDBACK_PORT_VERIFIED_NEXT_ACTION,
+                    "privacy": _candidate_privacy(),
+                },
+            }
+        )
     elif diagnostic_class == "activation-feedback-blocker-review":
         classification = (
             diagnostic.get("activation_feedback_diagnostic_classification")
@@ -1413,8 +1523,10 @@ def _activation_feedback_blocker_review_suppression(diagnostic: dict[str, Any]) 
     diagnostic_class = _normal_diagnostic_token(stage.get("diagnostic_class") or diagnostic.get("diagnostic_class"))
     if diagnostic_class not in {
         "activation-feedback-blocker-review",
+        "live-service-deploy-failed-after-development",
         "missing-dependency-evidence",
         "no-local-representation",
+        "pass-verified-tokenclaw-port",
         "stale-evidence",
     }:
         return None
@@ -5398,6 +5510,8 @@ def build_evidence_to_activation_next_action_ledger(
                 entry[gate_key] = bool(stage.get(gate_key))
         if stage.get("policy_files_written") is not None:
             entry["policy_files_written"] = bool(stage.get("policy_files_written"))
+        if stage.get("managed_preview_required") is not None:
+            entry["managed_preview_required"] = bool(stage.get("managed_preview_required"))
         if stage.get("omitted_reason"):
             entry["omitted_reason"] = sanitize_value(stage.get("omitted_reason"))
         if stage.get("follow_up_owner"):
@@ -5481,6 +5595,7 @@ def build_evidence_to_activation_next_action_ledger(
             "active_policy_changed",
             "wrote_active_policy_files",
             "policy_files_written",
+            "managed_preview_required",
             "executor_compatible",
             "evidence_age_hours",
             "max_evidence_age_hours",
