@@ -193,6 +193,11 @@ from tokenclaw.cli_commands.optimization_reports import (
 )
 
 
+def _env_enabled(name: str, default: bool = False) -> bool:
+    fallback = "1" if default else "0"
+    return os.getenv(name, fallback).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
 
 def policy_rollback_cli(
     argv: Sequence[str] | None = None,
@@ -1182,6 +1187,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
     parser.add_argument(
         "--persist-outcomes",
         action="store_true",
+        default=_env_enabled("TOKENCLAW_MANAGED_ACTIVATION_PREVIEW_PERSIST_OUTCOMES", False),
         help="Persist sanitized managed preview decisions as review-only local outcomes.",
     )
     parser.add_argument(

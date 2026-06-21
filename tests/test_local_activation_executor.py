@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from pathlib import Path
@@ -1312,6 +1313,101 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["stored_preview_outcomes"]["summary"]["missing_preview_decision_count"], 3)
         self.assertEqual(result["egress_guard"]["status"], "passed")
         self.assertEqual(managed_egress_violations(result), [])
+
+    def test_managed_activation_preview_refresh_env_persists_review_only_outcomes_for_report_cli(self):
+        with TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.json"
+            db_path = Path(tmpdir) / "tokenclaw.sqlite3"
+            plan_path.write_text(json.dumps(_preview_required_successor_queue_plan()), encoding="utf-8")
+            stdout = io.StringIO()
+            response = Mock()
+            response.status_code = 200
+            response.text = "{}"
+
+            def response_json():
+                posted = post_mock.call_args.kwargs["json"]
+                return {
+                    "schema": "tokenclaw.managed_activation_preview_response.v1",
+                    "decisions": [
+                        {
+                            "handoff_ref": row["handoff_ref"],
+                            "classification": "accepted",
+                            "decision": "keep-blocked",
+                            "status": "accepted",
+                            "recommended_next_action": row["executor_next_action"],
+                            "agreement_status": "agreed",
+                            "agrees_with_local_next_action": True,
+                            "reason_codes": ["managed-preview-agreed"],
+                            "review_only": True,
+                            "policy_files_written": False,
+                            "provider_calls_made": False,
+                            "raw_prompt": "raw refresh preview value must not leak",
+                            "request_id": "req-refresh-secret",
+                            "session_id": "session-refresh-secret",
+                            "cache_key": "cache-refresh-secret",
+                            "tenant_id": "tenant-refresh-secret",
+                            "tool_payload": {"secret": "tool-refresh-secret"},
+                            "policy_file_contents": "policy refresh secret",
+                        }
+                        for row in posted["rows"]
+                    ],
+                }
+
+            response.json.side_effect = response_json
+
+            with patch.dict(
+                os.environ,
+                {"TOKENCLAW_MANAGED_ACTIVATION_PREVIEW_PERSIST_OUTCOMES": "1"},
+            ):
+                with patch("tokenclaw.cli.httpx.post", return_value=response) as post_mock:
+                    code = cli.managed_activation_preview_cli(
+                        [
+                            "--plan-json",
+                            str(plan_path),
+                            "--managed-preview-url",
+                            "https://managed.example.test/v1/activation-preview",
+                            "--db",
+                            str(db_path),
+                            "--pretty",
+                        ],
+                        stdout=stdout,
+                    )
+            report_stdout = io.StringIO()
+            report_code = cli.managed_activation_preview_outcomes_cli(
+                ["--db", str(db_path), "--pretty"],
+                stdout=report_stdout,
+            )
+
+        result = json.loads(stdout.getvalue())
+        report = json.loads(report_stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(report_code, 0)
+        self.assertEqual(result["stored_preview_outcomes"]["summary"]["stored_preview_outcome_count"], 3)
+        self.assertEqual(report["summary"]["stored_preview_outcome_count"], 3)
+        self.assertEqual(report["summary"]["classification_counts"], [{"count": 3, "value": "review-only"}])
+        self.assertTrue(report["managed_server_calls_made"])
+        self.assertFalse(report["policy_files_written"])
+        self.assertFalse(report["provider_calls_made"])
+        self.assertEqual(report["egress_guard"]["status"], "passed")
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["review_only"])
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["provider_bodies_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
+        self.assertFalse(report["privacy"]["tenant_ids_included"])
+        self.assertFalse(report["privacy"]["tool_payloads_included"])
+        self.assertFalse(report["privacy"]["policy_file_contents_included"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("raw refresh preview value must not leak", rendered)
+        self.assertNotIn("req-refresh-secret", rendered)
+        self.assertNotIn("session-refresh-secret", rendered)
+        self.assertNotIn("cache-refresh-secret", rendered)
+        self.assertNotIn("tenant-refresh-secret", rendered)
+        self.assertNotIn("tool-refresh-secret", rendered)
+        self.assertNotIn("policy refresh secret", rendered)
+        self.assertEqual(managed_egress_violations(report), [])
 
     def test_managed_activation_preview_cli_submits_pathway_outcomes_before_preview(self):
         with TemporaryDirectory() as tmpdir:
