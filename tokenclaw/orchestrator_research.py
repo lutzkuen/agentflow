@@ -6273,6 +6273,72 @@ def _request_shape_rollup_next_action(outcome_class: str, outcome: dict[str, Any
     return sanitize_value(explicit or entry.get("next_action") or "inspect-local-evidence")
 
 
+def _is_repeated_context_crunch_successor(entry: dict[str, Any], outcome: dict[str, Any] | None = None) -> bool:
+    outcome = outcome if isinstance(outcome, dict) else {}
+    family = str(entry.get("local_action_family") or entry.get("lever") or outcome.get("local_action_family") or "").strip()
+    evidence_schema = str(entry.get("evidence_schema") or outcome.get("evidence_schema") or "").strip()
+    next_action = str(entry.get("next_action") or outcome.get("next_action") or "").strip()
+    cohort_class = str(entry.get("cohort_class") or outcome.get("cohort_class") or "").strip()
+    blockers = {str(item) for item in entry.get("blocker_codes") or [] if str(item or "").strip()}
+    return bool(
+        family == "crunch"
+        and (
+            evidence_schema
+            in {
+                "agentflow.crunch_savings_signal.v1",
+                "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                "agentflow.request_shape_crunch_canary_impact.v1",
+                "agentflow.request_shape_crunch_policy_decision.v1",
+                "agentflow.request_shape_crunch_activation_evidence.v1",
+            }
+            or "repeated-context-crunch" in next_action
+            or "repeated-context-crunch" in cohort_class
+            or any("repeated-context-crunch" in blocker or "crunch-preview" in blocker for blocker in blockers)
+        )
+    )
+
+
+def _crunch_preview_decision(outcome: dict[str, Any]) -> str:
+    for key in ("crunch_preview_decision", "decision", "status"):
+        text = str(outcome.get(key) or "").strip().lower().replace("_", "-")
+        if text in {"review-ready", "keep-staged", "keep-blocked", "too-small", "quality-risk"}:
+            return text
+    return ""
+
+
+def _crunch_preview_status(decision: str) -> str:
+    return {
+        "review-ready": "preview-verified",
+        "keep-staged": "crunch-preview-keep-staged",
+        "keep-blocked": "crunch-preview-keep-blocked",
+        "too-small": "crunch-preview-too-small",
+        "quality-risk": "crunch-preview-quality-risk",
+    }.get(decision, "")
+
+
+def _crunch_preview_successor_decision(decision: str) -> str:
+    if decision == "review-ready":
+        return "review-only"
+    if decision == "keep-staged":
+        return "review-staged"
+    return "keep-blocked"
+
+
+def _crunch_preview_next_action(decision: str, outcome: dict[str, Any], entry: dict[str, Any]) -> str:
+    explicit = str(outcome.get("next_action") or outcome.get("recommended_next_action") or "").strip()
+    if decision == "review-ready":
+        return sanitize_value(explicit or "review-repeated-context-crunch-preview")
+    if decision == "keep-staged":
+        return sanitize_value(explicit or "keep-repeated-context-crunch-staged")
+    if decision == "too-small":
+        return sanitize_value(explicit or "keep-repeated-context-crunch-observing")
+    if decision == "quality-risk":
+        return sanitize_value(explicit or "keep-repeated-context-crunch-blocked")
+    if decision == "keep-blocked":
+        return sanitize_value(explicit or "collect-repeated-context-crunch-evidence")
+    return sanitize_value(explicit or entry.get("next_action") or "rank-repeated-context-crunch-dry-run")
+
+
 def _managed_preview_local_executor_gate(entry: dict[str, Any]) -> dict[str, Any]:
     action_status = _successor_action_status(entry)
     policy_write_candidate = bool(
@@ -6336,14 +6402,13 @@ def _managed_preview_outcome_match_score(entry: dict[str, Any], outcome: dict[st
             score += 24
         else:
             return -1
-    entry_successor = str(entry.get("source_successor_fingerprint") or "").strip()
-    if not entry_successor:
-        entry_successor = _managed_preview_entry_successor_fingerprint(entry) or ""
+    explicit_entry_successor = str(entry.get("source_successor_fingerprint") or "").strip()
+    entry_successor = explicit_entry_successor or _managed_preview_entry_successor_fingerprint(entry) or ""
     outcome_successor = str(outcome.get("source_successor_fingerprint") or outcome.get("successor_fingerprint") or "").strip()
     if entry_successor and outcome_successor:
         if entry_successor == outcome_successor:
             score += 12
-        else:
+        elif explicit_entry_successor:
             return -1
     entry_successor_ref = _managed_preview_public_ref(entry_successor, prefix="successor-ref")
     outcome_successor_ref = str(outcome.get("source_successor_ref") or "").strip()
@@ -6403,11 +6468,25 @@ def _managed_preview_public_outcome_status(gate: dict[str, Any]) -> str:
     if gate.get("verified"):
         return "preview-agreed"
     status = str(gate.get("status") or "not-previewed").strip()
-    if status in {"managed-local-disagreement", "failed-closed", "unsafe-preview-side-effect", "unsafe-request-shape-rollup", "rejected"}:
+    if status in {
+        "managed-local-disagreement",
+        "failed-closed",
+        "unsafe-preview-side-effect",
+        "unsafe-request-shape-rollup",
+        "crunch-preview-quality-risk",
+        "rejected",
+    }:
         return "preview-disagreed"
     if status in {"stale-preview", "stale-preview-health"}:
         return "preview-stale"
-    if status in {"preview-omitted", "omitted", "needs-local-evidence", "request-shape-rollup-too-small"}:
+    if status in {
+        "preview-omitted",
+        "omitted",
+        "needs-local-evidence",
+        "request-shape-rollup-too-small",
+        "crunch-preview-too-small",
+        "crunch-preview-keep-blocked",
+    }:
         return "preview-omitted"
     if status in {
         "missing-preview",
@@ -6549,6 +6628,11 @@ def _managed_preview_successor_gate(
         if _is_request_shape_rollup_successor(entry, outcome)
         else ""
     )
+    crunch_preview_decision = (
+        _crunch_preview_decision(outcome)
+        if _is_repeated_context_crunch_successor(entry, outcome)
+        else ""
+    )
     stale = bool(outcome.get("stale"))
     missing = bool(outcome.get("missing_preview_decision"))
     failed_closed = bool(outcome.get("failed_closed"))
@@ -6588,12 +6672,27 @@ def _managed_preview_successor_gate(
             and not failed_closed
             and not disagreement
         )
+    if crunch_preview_decision:
+        verified = bool(
+            crunch_preview_decision in {"review-ready", "keep-staged"}
+            and not stale
+            and not missing
+            and not preview_policy_write
+            and not preview_provider_call
+            and not failed_closed
+            and not disagreement
+        )
     action_status = _successor_action_status(entry)
     if request_shape_outcome_class:
         status = _request_shape_rollup_preview_status(request_shape_outcome_class)
         decision = _request_shape_rollup_preview_decision(request_shape_outcome_class)
         next_action = _request_shape_rollup_next_action(request_shape_outcome_class, outcome, entry)
         reason = f"request-shape-rollup-{request_shape_outcome_class}"
+    elif crunch_preview_decision:
+        status = _crunch_preview_status(crunch_preview_decision)
+        decision = _crunch_preview_successor_decision(crunch_preview_decision)
+        next_action = _crunch_preview_next_action(crunch_preview_decision, outcome, entry)
+        reason = f"crunch-preview-{crunch_preview_decision}"
     elif verified:
         if cache_rollback_accepted:
             decision = "rollback-required"
@@ -6662,6 +6761,21 @@ def _managed_preview_successor_gate(
         "cohort_class": sanitize_value(outcome.get("cohort_class")),
         "rollup_outcome_status": sanitize_value(outcome.get("rollup_outcome_status")),
         "request_shape_rollup_outcome_class": sanitize_value(request_shape_outcome_class),
+        "crunch_preview_decision": sanitize_value(crunch_preview_decision),
+        "crunch_preview_confidence": sanitize_value(outcome.get("crunch_preview_confidence")),
+        "quality_risk_reason_codes": sanitize_value(outcome.get("quality_risk_reason_codes") or []),
+        "projected_saved_tokens": sanitize_value(outcome.get("projected_saved_tokens")),
+        "projected_saved_usd": sanitize_value(
+            outcome.get("projected_saved_usd") or outcome.get("projected_savings_usd")
+        ),
+        "projected_savings_usd": sanitize_value(
+            outcome.get("projected_savings_usd") or outcome.get("projected_saved_usd")
+        ),
+        "observed_saved_tokens": sanitize_value(outcome.get("observed_saved_tokens")),
+        "observed_saved_usd": sanitize_value(outcome.get("observed_saved_usd")),
+        "observed_crunch_ratio": sanitize_value(outcome.get("observed_crunch_ratio")),
+        "successor_action_fingerprint": sanitize_value(outcome.get("successor_action_fingerprint")),
+        "successor_decision_fingerprint": sanitize_value(outcome.get("successor_decision_fingerprint")),
         "preview_outcome_status": _managed_preview_public_outcome_status(
             {"verified": verified, "status": status}
         ),
@@ -6737,6 +6851,9 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         if preview_gate.get("request_shape_rollup_outcome_class"):
             action["successor_status"] = sanitize_value(preview_gate.get("decision") or action["successor_status"])
             action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
+        elif preview_gate.get("crunch_preview_decision"):
+            action["successor_status"] = sanitize_value(preview_gate.get("decision") or action["successor_status"])
+            action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
         elif preview_gate.get("decision") == "review-stale-preview":
             action["successor_status"] = "review-stale-preview"
             action["recommended_next_action"] = sanitize_value(
@@ -6784,6 +6901,26 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             action["request_shape_rollup_outcome_class"] = sanitize_value(preview_gate.get("request_shape_rollup_outcome_class"))
             action["cohort_class"] = sanitize_value(preview_gate.get("cohort_class"))
             action["rollup_outcome_status"] = sanitize_value(preview_gate.get("rollup_outcome_status"))
+        if preview_gate.get("crunch_preview_decision"):
+            action["crunch_preview_decision"] = sanitize_value(preview_gate.get("crunch_preview_decision"))
+            action["quality_risk_reason_codes"] = sanitize_value(preview_gate.get("quality_risk_reason_codes") or [])
+            action["cohort_class"] = sanitize_value(preview_gate.get("cohort_class"))
+            action["successor_action_fingerprint"] = sanitize_value(preview_gate.get("successor_action_fingerprint"))
+            action["successor_decision_fingerprint"] = sanitize_value(preview_gate.get("successor_decision_fingerprint"))
+            if preview_gate.get("crunch_preview_confidence") is not None:
+                action["crunch_preview_confidence"] = round(_to_float(preview_gate.get("crunch_preview_confidence")), 8)
+            if preview_gate.get("projected_saved_tokens") is not None:
+                action["projected_saved_tokens"] = _to_int(preview_gate.get("projected_saved_tokens"))
+            if preview_gate.get("projected_saved_usd") is not None:
+                action["projected_saved_usd"] = round(_to_float(preview_gate.get("projected_saved_usd")), 8)
+            if preview_gate.get("projected_savings_usd") is not None:
+                action["projected_savings_usd"] = round(_to_float(preview_gate.get("projected_savings_usd")), 8)
+            if preview_gate.get("observed_saved_tokens") is not None:
+                action["observed_saved_tokens"] = _to_int(preview_gate.get("observed_saved_tokens"))
+            if preview_gate.get("observed_saved_usd") is not None:
+                action["observed_saved_usd"] = round(_to_float(preview_gate.get("observed_saved_usd")), 8)
+            if preview_gate.get("observed_crunch_ratio") is not None:
+                action["observed_crunch_ratio"] = round(_to_float(preview_gate.get("observed_crunch_ratio")), 8)
     for key in (
         "evidence_schema",
         "source_surface",
@@ -6807,8 +6944,11 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "rollback_action_type",
         "disabled_reason",
         "request_shape_rollup_outcome_class",
+        "crunch_preview_decision",
         "cohort_class",
         "rollup_outcome_status",
+        "successor_action_fingerprint",
+        "successor_decision_fingerprint",
     ):
         if entry.get(key) is not None:
             action[key] = sanitize_value(entry.get(key))
@@ -6868,6 +7008,10 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "savings_per_1000_calls_usd",
         "freshness_adjusted_savings_per_1000_calls_usd",
         "freshness_multiplier",
+        "crunch_preview_confidence",
+        "observed_crunch_ratio",
+        "projected_saved_usd",
+        "observed_saved_usd",
     ):
         if entry.get(key) is not None:
             action[key] = round(_to_float(entry.get(key)), 8)
@@ -6906,6 +7050,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "evidence_state_breakdown",
         "next_action_breakdown",
         "needed_resolution",
+        "quality_risk_reason_codes",
     ):
         if isinstance(entry.get(key), list):
             action[key] = sanitize_value(entry.get(key))
@@ -6940,6 +7085,12 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             "unknown_dependency_evidence_rows",
             "rollback_required",
             "policy_files_written",
+            "crunch_preview_confidence",
+            "projected_saved_tokens",
+            "projected_saved_usd",
+            "observed_saved_tokens",
+            "observed_saved_usd",
+            "observed_crunch_ratio",
         }
     }
 
@@ -6984,8 +7135,32 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
         "preview_omitted_reason": sanitize_value(gate.get("omitted_reason")) if gate else None,
         "preview_no_op_reason": sanitize_value(gate.get("no_op_reason")) if gate else None,
         "request_shape_rollup_outcome_class": sanitize_value(gate.get("request_shape_rollup_outcome_class")) if gate else None,
+        "crunch_preview_decision": sanitize_value(gate.get("crunch_preview_decision")) if gate else None,
+        "crunch_preview_confidence": round(_to_float(gate.get("crunch_preview_confidence")), 8)
+        if gate and gate.get("crunch_preview_confidence") is not None
+        else None,
+        "quality_risk_reason_codes": sanitize_value(gate.get("quality_risk_reason_codes") or []) if gate else None,
         "cohort_class": sanitize_value(gate.get("cohort_class")) if gate else None,
         "rollup_outcome_status": sanitize_value(gate.get("rollup_outcome_status")) if gate else None,
+        "projected_saved_tokens": _to_int(gate.get("projected_saved_tokens"))
+        if gate and gate.get("projected_saved_tokens") is not None
+        else None,
+        "projected_saved_usd": round(_to_float(gate.get("projected_saved_usd")), 8)
+        if gate and gate.get("projected_saved_usd") is not None
+        else None,
+        "projected_savings_usd": round(_to_float(gate.get("projected_savings_usd")), 8)
+        if gate and gate.get("projected_savings_usd") is not None
+        else None,
+        "observed_saved_tokens": _to_int(gate.get("observed_saved_tokens"))
+        if gate and gate.get("observed_saved_tokens") is not None
+        else None,
+        "observed_saved_usd": round(_to_float(gate.get("observed_saved_usd")), 8)
+        if gate and gate.get("observed_saved_usd") is not None
+        else None,
+        "observed_crunch_ratio": round(_to_float(gate.get("observed_crunch_ratio")), 8)
+        if gate and gate.get("observed_crunch_ratio") is not None
+        else None,
+        "successor_decision_fingerprint": sanitize_value(gate.get("successor_decision_fingerprint")) if gate else None,
         "top_preview_omission_reason": sanitize_value((gate.get("health_gate") or {}).get("top_omission_reason")) if isinstance(gate.get("health_gate"), dict) else None,
         "target_local_rule_file": sanitize_value(action.get("target_local_rule_file")),
         "target_local_policy_section": sanitize_value(action.get("target_local_policy_section")),
@@ -7011,6 +7186,13 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
             "cache_entries_written",
             "emits_cache_apply_action",
             "policy_files_written",
+            "crunch_preview_confidence",
+            "projected_saved_tokens",
+            "projected_saved_usd",
+            "projected_savings_usd",
+            "observed_saved_tokens",
+            "observed_saved_usd",
+            "observed_crunch_ratio",
         }
     }
 
@@ -7717,6 +7899,7 @@ def _preview_successor_summary(successor_actions: list[dict[str, Any]]) -> dict[
     omitted_reasons: Counter[str] = Counter()
     no_op_reasons: Counter[str] = Counter()
     request_shape_classes: Counter[str] = Counter()
+    crunch_preview_decisions: Counter[str] = Counter()
     for action in successor_actions:
         if not isinstance(action, dict):
             continue
@@ -7731,6 +7914,14 @@ def _preview_successor_summary(successor_actions: list[dict[str, Any]]) -> dict[
         if request_shape_class:
             request_shape_classes[request_shape_class] += 1
             counts[f"request-shape:{request_shape_class}"] += 1
+        crunch_preview_decision = str(
+            action.get("crunch_preview_decision")
+            or gate.get("crunch_preview_decision")
+            or ""
+        ).strip()
+        if crunch_preview_decision:
+            crunch_preview_decisions[crunch_preview_decision] += 1
+            counts[f"crunch-preview:{crunch_preview_decision}"] += 1
         if gate.get("verified"):
             counts["agreed"] += 1
         elif gate:
@@ -7773,6 +7964,11 @@ def _preview_successor_summary(successor_actions: list[dict[str, Any]]) -> dict[
                 "request_shape_too_small_count": counts["request-shape:too-small"],
                 "request_shape_unsafe_count": counts["request-shape:unsafe"],
                 "request_shape_review_ready_count": counts["request-shape:review-ready"],
+                "crunch_preview_review_ready_count": counts["crunch-preview:review-ready"],
+                "crunch_preview_keep_staged_count": counts["crunch-preview:keep-staged"],
+                "crunch_preview_keep_blocked_count": counts["crunch-preview:keep-blocked"],
+                "crunch_preview_too_small_count": counts["crunch-preview:too-small"],
+                "crunch_preview_quality_risk_count": counts["crunch-preview:quality-risk"],
             }
         )
     return {
@@ -7780,6 +7976,10 @@ def _preview_successor_summary(successor_actions: list[dict[str, Any]]) -> dict[
         "request_shape_rollup_outcome_class_counts": [
             {"value": key, "count": count}
             for key, count in sorted(request_shape_classes.items())
+        ],
+        "crunch_preview_decision_counts": [
+            {"value": key, "count": count}
+            for key, count in sorted(crunch_preview_decisions.items())
         ],
         "preview_top_omitted_reasons": [
             {"value": key, "count": count}
@@ -8344,6 +8544,9 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             "preview_agreement_by_local_action_family": preview_successor_summary["preview_agreement_by_local_action_family"],
             "request_shape_rollup_outcome_class_counts": preview_successor_summary[
                 "request_shape_rollup_outcome_class_counts"
+            ],
+            "crunch_preview_decision_counts": preview_successor_summary[
+                "crunch_preview_decision_counts"
             ],
             "preview_top_omitted_reasons": preview_successor_summary["preview_top_omitted_reasons"],
             "preview_top_no_op_reasons": preview_successor_summary["preview_top_no_op_reasons"],

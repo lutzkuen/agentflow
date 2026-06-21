@@ -369,6 +369,51 @@ def _outcome_from_rows(
         "rollup_outcome_status": sanitize_value(
             decision.get("rollup_outcome_status") or request_row.get("rollup_outcome_status")
         ),
+        "crunch_preview_decision": sanitize_value(
+            decision.get("crunch_preview_decision") or request_row.get("crunch_preview_decision")
+        ),
+        "crunch_preview_confidence": sanitize_value(
+            decision.get("crunch_preview_confidence") or request_row.get("crunch_preview_confidence")
+        ),
+        "quality_risk_reason_codes": sanitize_value(
+            decision.get("quality_risk_reason_codes") or request_row.get("quality_risk_reason_codes") or []
+        ),
+        "projected_saved_tokens": sanitize_value(
+            decision.get("projected_saved_tokens") or request_row.get("projected_saved_tokens")
+        ),
+        "projected_saved_usd": sanitize_value(
+            decision.get("projected_saved_usd")
+            or decision.get("projected_savings_usd")
+            or request_row.get("projected_saved_usd")
+            or request_row.get("projected_savings_usd")
+        ),
+        "projected_savings_usd": sanitize_value(
+            decision.get("projected_savings_usd")
+            or decision.get("projected_saved_usd")
+            or request_row.get("projected_savings_usd")
+            or request_row.get("projected_saved_usd")
+        ),
+        "observed_saved_tokens": sanitize_value(
+            decision.get("observed_saved_tokens") or request_row.get("observed_saved_tokens")
+        ),
+        "observed_saved_usd": sanitize_value(
+            decision.get("observed_saved_usd") or request_row.get("observed_saved_usd")
+        ),
+        "observed_crunch_ratio": sanitize_value(
+            decision.get("observed_crunch_ratio") or request_row.get("observed_crunch_ratio")
+        ),
+        "successor_action_fingerprint": sanitize_value(
+            decision.get("successor_action_fingerprint") or request_row.get("successor_action_fingerprint")
+        ),
+        "successor_decision_fingerprint": sanitize_value(
+            decision.get("successor_decision_fingerprint") or request_row.get("successor_decision_fingerprint")
+        ),
+        "target_local_policy_section": sanitize_value(
+            decision.get("target_local_policy_section") or request_row.get("target_local_policy_section")
+        ),
+        "target_local_rule_file": sanitize_value(
+            decision.get("target_local_rule_file") or request_row.get("target_local_rule_file")
+        ),
         "agreement_status": sanitize_value(decision.get("agreement_status")),
         "agrees_with_local_next_action": bool(decision.get("agrees_with_local_next_action")),
         "classification": classification,

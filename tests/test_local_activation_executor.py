@@ -996,6 +996,98 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertNotIn('"policy_files_written": true', rendered.lower())
         self.assertEqual(managed_egress_violations(report), [])
 
+    def test_managed_activation_preview_outcomes_preserve_crunch_preview_fields(self):
+        preview_result = {
+            "schema": "agentflow.managed_activation_preview_result.v1",
+            "generated_at": NOW.isoformat(),
+            "preview_request": {
+                "schema": "agentflow.managed_activation_preview_request.v1",
+                "generated_at": NOW.isoformat(),
+                "rows": [
+                    {
+                        "handoff_ref": "handoff:crunch-preview",
+                        "source_activation_ref": "activation-ref:crunch-preview",
+                        "source_successor_ref": "successor-ref:crunch-preview",
+                        "local_action_family": "crunch",
+                        "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                        "current_status": "ready",
+                        "executor_action_class": "review-only",
+                        "executor_next_action": "rank-repeated-context-crunch-dry-run",
+                        "cohort_class": "repeated-context-crunch",
+                        "source_queue_rank": 7,
+                        "source_ledger_rank": 2,
+                        "source_successor_fingerprint": "successor:crunch-preview",
+                    }
+                ],
+            },
+            "preview": {
+                "schema": "agentflow.managed_activation_preview_response.v1",
+                "decisions": [
+                    {
+                        "handoff_ref": "handoff:crunch-preview",
+                        "classification": "accepted",
+                        "decision": "review-ready",
+                        "crunch_preview_decision": "review-ready",
+                        "crunch_preview_confidence": 0.88,
+                        "recommended_next_action": "rank-repeated-context-crunch-dry-run",
+                        "reason_codes": [
+                            "crunch-preview:review-ready",
+                            "repeated-context-crunch-review-ready",
+                        ],
+                        "quality_risk_reason_codes": [],
+                        "projected_saved_tokens": 18400,
+                        "projected_saved_usd": 0.184,
+                        "projected_savings_usd": 0.184,
+                        "observed_saved_tokens": 4200,
+                        "observed_saved_usd": 0.042,
+                        "observed_crunch_ratio": 0.31,
+                        "sample_count": 72,
+                        "applied_count": 28,
+                        "holdout_count": 24,
+                        "rollback_count": 0,
+                        "safety_stop_count": 0,
+                        "source_queue_rank": 7,
+                        "source_ledger_rank": 2,
+                        "source_successor_fingerprint": "successor:crunch-preview",
+                        "successor_action_fingerprint": "successor-action:crunch-preview",
+                        "successor_decision_fingerprint": "successor-decision:crunch-preview",
+                        "target_local_policy_section": "crunch.rules",
+                        "target_local_rule_file": "crunch_rules.yaml",
+                        "review_only": True,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                        "raw_prompt": "raw crunch preview response must not leak",
+                    }
+                ],
+            },
+            "fetch": {"status": "ok", "status_code": 200, "managed_server_calls_made": True},
+        }
+
+        with TemporaryDirectory() as tmpdir:
+            store = Store(str(Path(tmpdir) / "agentflow.sqlite3"))
+            try:
+                report = persist_managed_activation_preview_outcomes(store, preview_result, now=NOW)
+            finally:
+                store.conn.close()
+
+        outcome = report["outcomes"][0]
+        self.assertEqual(outcome["classification"], "review-only")
+        self.assertEqual(outcome["crunch_preview_decision"], "review-ready")
+        self.assertEqual(outcome["crunch_preview_confidence"], 0.88)
+        self.assertEqual(outcome["projected_saved_tokens"], 18400)
+        self.assertEqual(outcome["projected_saved_usd"], 0.184)
+        self.assertEqual(outcome["observed_saved_tokens"], 4200)
+        self.assertEqual(outcome["observed_saved_usd"], 0.042)
+        self.assertEqual(outcome["observed_crunch_ratio"], 0.31)
+        self.assertEqual(outcome["successor_decision_fingerprint"], "successor-decision:crunch-preview")
+        self.assertEqual(outcome["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertFalse(outcome["policy_files_written"])
+        self.assertFalse(outcome["provider_calls_made"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("raw crunch preview response must not leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertEqual(managed_egress_violations(report), [])
+
     def test_managed_activation_preview_outcomes_cli_reports_stored_outcomes(self):
         request_payload = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
         preview_result = build_managed_activation_preview_result(

@@ -3031,6 +3031,219 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn('"policy_files_written": true', rendered.lower())
         self.assertNotIn('"provider_calls_made": true', rendered.lower())
 
+    def test_crunch_preview_decisions_drive_successor_actions(self):
+        cases = [
+            (
+                "activation:crunch-review-ready",
+                "review-ready",
+                "review-only",
+                "preview-verified",
+                True,
+                "rank-repeated-context-crunch-dry-run",
+                [],
+            ),
+            (
+                "activation:crunch-keep-staged",
+                "keep-staged",
+                "review-staged",
+                "crunch-preview-keep-staged",
+                True,
+                "keep-repeated-context-crunch-staged",
+                [],
+            ),
+            (
+                "activation:crunch-too-small",
+                "too-small",
+                "keep-blocked",
+                "crunch-preview-too-small",
+                False,
+                "keep-repeated-context-crunch-observing",
+                [],
+            ),
+            (
+                "activation:crunch-quality-risk",
+                "quality-risk",
+                "keep-blocked",
+                "crunch-preview-quality-risk",
+                False,
+                "keep-repeated-context-crunch-blocked",
+                ["semantic-quality-regression"],
+            ),
+            (
+                "activation:crunch-keep-blocked",
+                "keep-blocked",
+                "keep-blocked",
+                "crunch-preview-keep-blocked",
+                False,
+                "collect-repeated-context-crunch-evidence",
+                [],
+            ),
+        ]
+        ledger = {
+            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": index,
+                    "fingerprint": source,
+                    "lever": "crunch",
+                    "local_action_family": "crunch",
+                    "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                    "state": "ranked-evidence",
+                    "current_status": "ready",
+                    "issue_worthy_status": "ready",
+                    "next_action": "rank-repeated-context-crunch-dry-run",
+                    "blocker_codes": ["repeated-context-crunch-opportunity", *risk_codes],
+                    "sample_count": 70 + index,
+                    "applied_count": 20,
+                    "holdout_count": 20,
+                    "rollback_count": 0,
+                    "safety_stop_count": 0,
+                    "projected_saved_tokens": 18000 + index,
+                    "projected_savings_usd": 0.18 + index / 1000,
+                    "target_local_policy_section": "crunch.rules",
+                    "target_local_rule_file": "crunch_rules.yaml",
+                    "source_queue_rank": index,
+                    "source_ledger_rank": index + 20,
+                    "policy_files_written": False,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                    "request_id": f"req-crunch-secret-{index}",
+                    "raw_prompt": "raw crunch preview value must not leak",
+                }
+                for index, (source, _preview, _decision, _status, _verified, _next, risk_codes) in enumerate(cases, start=1)
+            ],
+        }
+        outcomes = [
+            {
+                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": f"managed-preview-outcome:{source}",
+                "source_fingerprint": source,
+                "source_queue_rank": index,
+                "source_ledger_rank": index + 20,
+                "source_successor_fingerprint": f"successor:crunch-{index}",
+                "successor_action_fingerprint": f"successor-action:crunch-{index}",
+                "successor_decision_fingerprint": f"successor-decision:crunch-{index}",
+                "preview_ref": f"preview:{source}",
+                "local_action_family": "crunch",
+                "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                "classification": "review-only" if preview in {"review-ready", "keep-staged"} else "preview-omitted",
+                "managed_preview_classification": "accepted" if preview in {"review-ready", "keep-staged"} else "needs-local-evidence",
+                "decision": preview,
+                "next_action": expected_next,
+                "cohort_class": "repeated-context-crunch",
+                "crunch_preview_decision": preview,
+                "crunch_preview_confidence": 0.88 if preview == "review-ready" else 0.62,
+                "reason_codes": [
+                    f"crunch-preview:{preview}",
+                    *risk_codes,
+                ],
+                "quality_risk_reason_codes": risk_codes,
+                "projected_saved_tokens": 18000 + index,
+                "projected_saved_usd": 0.18 + index / 1000,
+                "projected_savings_usd": 0.18 + index / 1000,
+                "observed_saved_tokens": 4200 + index,
+                "observed_saved_usd": 0.042 + index / 10000,
+                "observed_crunch_ratio": 0.31,
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "target_local_policy_section": "crunch.rules",
+                "target_local_rule_file": "crunch_rules.yaml",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+                "raw_prompt": "raw managed crunch preview must not leak",
+            }
+            for index, (source, preview, _decision, _status, _verified, expected_next, risk_codes) in enumerate(cases, start=1)
+        ]
+
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "status": "tracked",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": True,
+                    "summary": {
+                        "stored_preview_outcome_count": len(outcomes),
+                        "stale_count": 0,
+                        "missing_preview_decision_count": 0,
+                        "failed_closed_count": 0,
+                        "disagreement_count": 0,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                    },
+                    "outcomes": outcomes,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "managed_activation_preview_health": {
+                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": len(outcomes),
+                    "previewed_row_count": len(outcomes),
+                    "omitted_row_count": 0,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {"crunch": len(outcomes)},
+                    "top_omission_reasons": [],
+                    "top_rejection_reasons": [],
+                },
+            }
+        )
+
+        decisions = {row["source_fingerprint"]: row for row in queue["successor_decisions"]}
+        actions = {row["source_fingerprint"]: row for row in queue["successor_actions"]}
+        for source, preview, expected_decision, expected_status, expected_verified, expected_next, risk_codes in cases:
+            with self.subTest(crunch_preview_decision=preview):
+                action = actions[source]
+                decision = decisions[source]
+                self.assertEqual(action["crunch_preview_decision"], preview)
+                self.assertEqual(decision["crunch_preview_decision"], preview)
+                self.assertEqual(action["successor_status"], expected_decision)
+                self.assertEqual(action["preview_verification_status"], expected_status)
+                self.assertEqual(action["recommended_next_action"], expected_next)
+                self.assertEqual(decision["decision"], expected_decision)
+                self.assertEqual(decision["preview_verified"], expected_verified)
+                self.assertEqual(decision["preview_agreement_status"], "agreed" if expected_verified else expected_status)
+                self.assertEqual(action["projected_saved_tokens"], 18000 + cases.index((source, preview, expected_decision, expected_status, expected_verified, expected_next, risk_codes)) + 1)
+                self.assertGreater(action["projected_saved_usd"], 0)
+                self.assertEqual(action["target_local_rule_file"], "crunch_rules.yaml")
+                self.assertFalse(action["policy_files_written"])
+                self.assertFalse(decision["policy_files_written"])
+                self.assertFalse(action["managed_preview_gate"]["policy_files_written"])
+                self.assertFalse(action["managed_preview_gate"]["provider_calls_made"])
+                self.assertTrue(action["managed_preview_gate"]["privacy"]["metadata_only"])
+                if risk_codes:
+                    self.assertEqual(action["quality_risk_reason_codes"], risk_codes)
+
+        preview_counts = {
+            row["value"]: row["count"]
+            for row in queue["summary"]["crunch_preview_decision_counts"]
+        }
+        self.assertEqual(preview_counts, {item[1]: 1 for item in cases})
+        family_row = queue["summary"]["preview_agreement_by_local_action_family"][0]
+        self.assertEqual(family_row["local_action_family"], "crunch")
+        self.assertEqual(family_row["crunch_preview_review_ready_count"], 1)
+        self.assertEqual(family_row["crunch_preview_keep_staged_count"], 1)
+        self.assertEqual(family_row["crunch_preview_too_small_count"], 1)
+        self.assertEqual(family_row["crunch_preview_quality_risk_count"], 1)
+        self.assertEqual(family_row["crunch_preview_keep_blocked_count"], 1)
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("req-crunch-secret", rendered)
+        self.assertNotIn("raw crunch preview value must not leak", rendered)
+        self.assertNotIn("raw managed crunch preview must not leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertNotIn('"provider_calls_made": true', rendered.lower())
+
     def test_server_style_preview_outcomes_feed_successor_queue(self):
         rows = [
             (
