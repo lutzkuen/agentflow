@@ -719,6 +719,53 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["egress_guard"]["status"], "passed")
         self.assertEqual(managed_egress_violations(result), [])
 
+    def test_managed_activation_preview_request_filters_top_ranked_preview_successors(self):
+        plan = json.loads(json.dumps(_preview_required_successor_queue_plan()))
+        plan["entries"][0]["managed_preview_gate"]["managed_rank"] = 2
+        plan["entries"][0]["managed_priority_source"] = "ranked-managed-preview"
+        plan["entries"][1]["managed_preview_gate"]["managed_rank"] = 1
+        plan["entries"][1]["managed_priority_source"] = "ranked-managed-preview"
+        plan["entries"][2]["durable_action_ledger_entry"] = True
+        plan["entries"][2]["keep_blocked_reason"] = "activation-feedback-blocker-review-already-resolved"
+        plan["entries"][2]["next_state_reason"] = "activation-feedback-blocker-review-already-resolved"
+        verified_gate = json.loads(json.dumps(plan["entries"][0]["managed_preview_gate"]))
+        verified_gate.update({"verified": True, "status": "agreed", "decision": "ready"})
+        plan["entries"].append(
+            {
+                **plan["entries"][0],
+                "rank": 4,
+                "fingerprint": "activation:preview-verified",
+                "managed_rank": 3,
+                "managed_preview_gate": verified_gate,
+                "preview_verified": True,
+            }
+        )
+
+        result = build_managed_activation_preview_request(plan, now=NOW, top_successor_count=2)
+
+        self.assertEqual(result["schema"], "tokenclaw.managed_activation_preview_request.v1")
+        self.assertEqual(result["summary"]["handoff_row_count"], 2)
+        self.assertEqual(result["summary"]["preview_required_row_count"], 2)
+        self.assertEqual(result["summary"]["preview_refresh_filter"], "top-ranked-preview-required")
+        self.assertEqual(result["summary"]["preview_refresh_limit"], 2)
+        self.assertEqual(result["summary"]["preview_refresh_eligible_row_count"], 2)
+        self.assertEqual(result["summary"]["preview_refresh_submitted_row_count"], 2)
+        self.assertEqual(result["summary"]["preview_refresh_skipped_resolved_keep_blocked_count"], 1)
+        families = [row["local_action_family"] for row in result["rows"]]
+        self.assertEqual(families, ["cache", "routing"])
+        ranks = [row["managed_rank"] for row in result["rows"]]
+        self.assertEqual(ranks, [1, 2])
+        for row in result["rows"]:
+            self.assertTrue(row["preview_refresh_selected"])
+            self.assertEqual(row["preview_refresh_rank_source"], "managed-rank")
+            self.assertTrue(row["managed_preview_required"])
+            self.assertFalse(row["preview_verified"])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("activation-feedback-blocker-review-already-resolved", rendered)
+        self.assertNotIn("activation:preview-verified", rendered)
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
+
     def test_managed_activation_preview_result_summarizes_review_only_decisions(self):
         request_payload = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
         first_ref = request_payload["rows"][0]["handoff_ref"]
@@ -1311,6 +1358,109 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertEqual(result["summary"]["omission_count"], 0)
         self.assertEqual(result["stored_preview_outcomes"]["import"]["imported_count"], 4)
         self.assertEqual(result["stored_preview_outcomes"]["summary"]["missing_preview_decision_count"], 3)
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
+
+    def test_managed_activation_preview_cli_persists_top_ranked_successor_batch(self):
+        plan = json.loads(json.dumps(_preview_required_successor_queue_plan()))
+        plan["entries"][0]["managed_preview_gate"]["managed_rank"] = 2
+        plan["entries"][1]["managed_preview_gate"]["managed_rank"] = 1
+        plan["entries"][2]["durable_action_ledger_entry"] = True
+        plan["entries"][2]["keep_blocked_reason"] = "activation-feedback-blocker-review-already-resolved"
+        plan["entries"][2]["next_state_reason"] = "activation-feedback-blocker-review-already-resolved"
+
+        with TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.json"
+            db_path = Path(tmpdir) / "tokenclaw.sqlite3"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            stdout = io.StringIO()
+            response = Mock()
+            response.status_code = 200
+            response.text = "{}"
+
+            def response_json():
+                posted = post_mock.call_args.kwargs["json"]
+                return {
+                    "schema": "tokenclaw.managed_activation_preview_response.v1",
+                    "decisions": [
+                        {
+                            "handoff_ref": row["handoff_ref"],
+                            "classification": "accepted",
+                            "decision": "keep-blocked",
+                            "status": "accepted",
+                            "recommended_next_action": row["executor_next_action"],
+                            "agreement_status": "agreed",
+                            "agrees_with_local_next_action": True,
+                            "review_only": True,
+                            "policy_files_written": False,
+                            "provider_calls_made": False,
+                            "raw_prompt": "raw top preview value must not leak",
+                        }
+                        for row in posted["rows"]
+                    ],
+                    "ranked_next_actions": [
+                        {
+                            "rank": row["managed_rank"],
+                            "handoff_ref": row["handoff_ref"],
+                            "local_action_family": row["local_action_family"],
+                            "evidence_schema": row["evidence_schema"],
+                            "recommended_next_action": row["executor_next_action"],
+                            "expected_savings_path": "Clears top preview health blocker.",
+                        }
+                        for row in posted["rows"]
+                    ],
+                }
+
+            response.json.side_effect = response_json
+
+            with patch("tokenclaw.cli.httpx.post", return_value=response) as post_mock:
+                code = cli.managed_activation_preview_cli(
+                    [
+                        "--plan-json",
+                        str(plan_path),
+                        "--managed-preview-url",
+                        "https://managed.example.test/v1/activation-preview",
+                        "--top-preview-successors",
+                        "2",
+                        "--persist-outcomes",
+                        "--db",
+                        str(db_path),
+                        "--pretty",
+                    ],
+                    stdout=stdout,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(post_mock.call_count, 1)
+        posted = post_mock.call_args.kwargs["json"]
+        self.assertEqual(posted["summary"]["handoff_row_count"], 2)
+        self.assertEqual(posted["summary"]["preview_refresh_filter"], "top-ranked-preview-required")
+        self.assertEqual([row["local_action_family"] for row in posted["rows"]], ["cache", "routing"])
+        self.assertEqual([row["managed_rank"] for row in posted["rows"]], [1, 2])
+        self.assertEqual(managed_egress_violations(posted), [])
+
+        result = json.loads(stdout.getvalue())
+        stored = result["stored_preview_outcomes"]
+        self.assertEqual(result["summary"]["submitted_row_count"], 2)
+        self.assertEqual(result["summary"]["ranked_next_action_count"], 2)
+        self.assertEqual(stored["import"]["imported_count"], 2)
+        self.assertEqual(stored["summary"]["stored_preview_outcome_count"], 2)
+        self.assertEqual(stored["summary"]["no_data_preview_health_count"], 0)
+        self.assertEqual(stored["summary"]["missing_preview_decision_count"], 0)
+        self.assertTrue(stored["managed_server_calls_made"])
+        self.assertFalse(stored["provider_calls_made"])
+        self.assertFalse(stored["policy_files_written"])
+        for row in stored["outcomes"]:
+            self.assertEqual(row["classification"], "review-only")
+            self.assertGreater(row["managed_rank"], 0)
+            self.assertEqual(row["managed_priority_source"], "ranked-managed-preview")
+            self.assertTrue(row["privacy"]["metadata_only"])
+            self.assertTrue(row["privacy"]["review_only"])
+            self.assertFalse(row["privacy"]["provider_calls_made"])
+            self.assertFalse(row["privacy"]["policy_files_written"])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("raw top preview value must not leak", rendered)
+        self.assertNotIn("activation-feedback-blocker-review-already-resolved", rendered)
         self.assertEqual(result["egress_guard"]["status"], "passed")
         self.assertEqual(managed_egress_violations(result), [])
 

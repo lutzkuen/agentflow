@@ -1191,6 +1191,15 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
         help="Persist sanitized managed preview decisions as review-only local outcomes.",
     )
     parser.add_argument(
+        "--top-preview-successors",
+        type=int,
+        default=int(os.getenv("TOKENCLAW_MANAGED_ACTIVATION_PREVIEW_TOP_SUCCESSORS", "0")),
+        help=(
+            "Submit only the top N preview-required, unverified activation successors. "
+            "Default 0 keeps the full legacy handoff batch."
+        ),
+    )
+    parser.add_argument(
         "--routing-pathway-outcomes-json",
         default=os.getenv("TOKENCLAW_ROUTING_PATHWAY_OUTCOMES_JSON", ""),
         help=(
@@ -1245,7 +1254,10 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
         _write_json(stderr, {"ok": False, "error": {"type": "invalid_plan_json", "message": "plan JSON must be an object"}})
         return 1
 
-    request_payload = build_managed_activation_preview_request(plan)
+    request_payload = build_managed_activation_preview_request(
+        plan,
+        top_successor_count=int(args.top_preview_successors or 0),
+    )
     routing_pathway_batch = _routing_pathway_outcome_batch_result(
         status="skipped",
         reason="routing-pathway-outcome-batch-input-not-configured",

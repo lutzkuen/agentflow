@@ -806,6 +806,7 @@ def build_managed_activation_preview_unavailable_result(
     source: dict[str, Any],
     *,
     now: datetime | None = None,
+    top_successor_count: int = 0,
     status: str = "skipped",
     reason: str = "managed-preview-url-not-configured",
 ) -> dict[str, Any]:
@@ -815,7 +816,11 @@ def build_managed_activation_preview_unavailable_result(
         build_managed_activation_preview_result,
     )
 
-    request_payload = build_managed_activation_preview_request(source, now=now)
+    request_payload = build_managed_activation_preview_request(
+        source,
+        now=now,
+        top_successor_count=int(top_successor_count or 0),
+    )
     return build_managed_activation_preview_result(
         request_payload,
         fetch={
@@ -834,6 +839,7 @@ def persist_unavailable_managed_activation_preview_outcomes(
     *,
     now: datetime | None = None,
     stale_after_hours: float = DEFAULT_STALE_AFTER_HOURS,
+    top_successor_count: int = 0,
     status: str = "skipped",
     reason: str = "managed-preview-url-not-configured",
 ) -> dict[str, Any]:
@@ -841,6 +847,7 @@ def persist_unavailable_managed_activation_preview_outcomes(
     preview_result = build_managed_activation_preview_unavailable_result(
         source,
         now=now,
+        top_successor_count=int(top_successor_count or 0),
         status=status,
         reason=reason,
     )

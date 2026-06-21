@@ -366,6 +366,12 @@ def _executor_entry(row: dict[str, Any]) -> dict[str, Any]:
     entry["preview_verification_decision"] = sanitize_value(_preview_decision_value(row, gate))
     if gate:
         entry["managed_preview_gate"] = sanitize_value(gate)
+        if gate.get("managed_rank") is not None and not row.get("managed_rank"):
+            entry["managed_rank"] = _as_int(gate.get("managed_rank"))
+        if gate.get("managed_priority_source") is not None and not row.get("managed_priority_source"):
+            entry["managed_priority_source"] = sanitize_value(gate.get("managed_priority_source"))
+        if gate.get("managed_rank_fallback_reason") is not None and not row.get("managed_rank_fallback_reason"):
+            entry["managed_rank_fallback_reason"] = sanitize_value(gate.get("managed_rank_fallback_reason"))
     for key in (
         "evidence_schema",
         "source_surface",
@@ -375,6 +381,17 @@ def _executor_entry(row: dict[str, Any]) -> dict[str, Any]:
         "requested_model",
         "candidate_target_model",
         "required_local_executor",
+        "managed_rank",
+        "managed_priority_rank",
+        "managed_priority_source",
+        "managed_rank_fallback_reason",
+        "durable_action_ledger_entry",
+        "keep_blocked_reason",
+        "next_state",
+        "next_state_reason",
+        "diagnostic_class",
+        "diagnostic_reason",
+        "review_status",
     ):
         if row.get(key) is not None:
             entry[key] = sanitize_value(row.get(key))
@@ -408,6 +425,9 @@ def _executor_entry(row: dict[str, Any]) -> dict[str, Any]:
         "managed_server_calls_made",
         "managed_preview_required",
         "preview_verified",
+        "managed_rank",
+        "managed_priority_rank",
+        "durable_action_ledger_entry",
     }
     return {key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in preserved}
 
@@ -557,6 +577,12 @@ def _handoff_row(entry: dict[str, Any]) -> dict[str, Any]:
         "source_executor_ref": _public_ref(entry.get("fingerprint"), prefix="executor-ref"),
         "source_activation_ref": _public_ref(entry.get("source_fingerprint"), prefix="activation-ref"),
         "source_successor_ref": _public_ref(entry.get("source_successor_fingerprint"), prefix="successor-ref"),
+        "source_queue_rank": _as_int(entry.get("source_queue_rank")),
+        "source_ledger_rank": _as_int(entry.get("source_ledger_rank")),
+        "managed_rank": _as_int(entry.get("managed_rank")),
+        "managed_priority_rank": _as_int(entry.get("managed_priority_rank")),
+        "managed_priority_source": sanitize_value(entry.get("managed_priority_source")),
+        "managed_rank_fallback_reason": sanitize_value(entry.get("managed_rank_fallback_reason")),
         "managed_dependency": "optional",
         "locally_executed": True,
         "feature_only": True,
@@ -597,6 +623,13 @@ def _handoff_row(entry: dict[str, Any]) -> dict[str, Any]:
         "reason_codes": sanitize_value(entry.get("reason_codes") or []),
         "duplicate_suppression_status": sanitize_value(entry.get("duplicate_suppression_status")),
         "duplicate_suppression_reason": sanitize_value(entry.get("duplicate_suppression_reason")),
+        "durable_action_ledger_entry": bool(entry.get("durable_action_ledger_entry")),
+        "keep_blocked_reason": sanitize_value(entry.get("keep_blocked_reason")),
+        "next_state": sanitize_value(entry.get("next_state")),
+        "next_state_reason": sanitize_value(entry.get("next_state_reason")),
+        "diagnostic_class": sanitize_value(entry.get("diagnostic_class")),
+        "diagnostic_reason": sanitize_value(entry.get("diagnostic_reason")),
+        "review_status": sanitize_value(entry.get("review_status")),
         "new_activation_issue_recommended": entry.get("new_activation_issue_recommended"),
         "measured_full_rollout_activation": entry.get("measured_full_rollout_activation"),
         "durable_outcome_ledger_entry": entry.get("durable_outcome_ledger_entry"),
@@ -613,6 +646,11 @@ def _handoff_row(entry: dict[str, Any]) -> dict[str, Any]:
         "managed_server_calls_made",
         "managed_preview_required",
         "preview_verified",
+        "source_queue_rank",
+        "source_ledger_rank",
+        "managed_rank",
+        "managed_priority_rank",
+        "durable_action_ledger_entry",
         "provider_forwarding",
         "server_content_processing",
         "managed_enforced",
@@ -709,10 +747,84 @@ def build_local_activation_executor_managed_handoff(
     return result
 
 
+def _preview_rank_value(row: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        value = _as_int(row.get(key))
+        if value > 0:
+            return value
+    gate = row.get("managed_preview_gate") if isinstance(row.get("managed_preview_gate"), dict) else {}
+    return _as_int(gate.get("managed_rank"))
+
+
+def _durable_keep_blocked_diagnostic(row: dict[str, Any]) -> bool:
+    if not bool(row.get("durable_action_ledger_entry")):
+        return False
+    if str(row.get("local_action_family") or "").strip() != "activation-feedback":
+        return False
+    return str(row.get("executor_action_class") or "").strip() == "keep-blocked"
+
+
+def _needs_fresh_preview(row: dict[str, Any]) -> bool:
+    if not bool(row.get("managed_preview_required")):
+        return False
+    if bool(row.get("preview_verified")):
+        return False
+    if _durable_keep_blocked_diagnostic(row):
+        return False
+    status = str(row.get("preview_verification_status") or "").strip()
+    decision = str(row.get("preview_verification_decision") or "").strip()
+    if status in {"preview-verified", "verified", "agreed"}:
+        return False
+    if decision in {"ready", "accepted"}:
+        return False
+    return True
+
+
+def _top_preview_rows(rows: list[dict[str, Any]], *, top_successor_count: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    limit = max(0, int(top_successor_count or 0))
+    if limit <= 0:
+        return rows, {
+            "preview_refresh_filter": "all",
+            "preview_refresh_limit": 0,
+            "preview_refresh_eligible_row_count": len(rows),
+            "preview_refresh_submitted_row_count": len(rows),
+            "preview_refresh_omitted_row_count": 0,
+            "preview_refresh_skipped_resolved_keep_blocked_count": 0,
+        }
+
+    eligible = [row for row in rows if _needs_fresh_preview(row)]
+    skipped_resolved = sum(1 for row in rows if _durable_keep_blocked_diagnostic(row))
+
+    def sort_key(row: dict[str, Any]) -> tuple[int, int, int, int]:
+        managed_rank = _preview_rank_value(row, "managed_rank", "managed_priority_rank")
+        local_rank = _preview_rank_value(row, "rank", "source_rank", "source_queue_rank", "source_ledger_rank")
+        effective_rank = managed_rank if managed_rank > 0 else local_rank or 999_999
+        managed_bucket = 0 if managed_rank > 0 else 1
+        return (managed_bucket, effective_rank, local_rank or 999_999, _as_int(row.get("rank")) or 999_999)
+
+    ranked = sorted(eligible, key=sort_key)
+    selected = ranked[:limit]
+    selected_refs = {str(row.get("handoff_ref") or "") for row in selected}
+    for row in selected:
+        managed_rank = _preview_rank_value(row, "managed_rank", "managed_priority_rank")
+        row["preview_refresh_selected"] = True
+        row["preview_refresh_rank_source"] = "managed-rank" if managed_rank > 0 else "local-rank"
+    return selected, {
+        "preview_refresh_filter": "top-ranked-preview-required",
+        "preview_refresh_limit": limit,
+        "preview_refresh_eligible_row_count": len(eligible),
+        "preview_refresh_submitted_row_count": len(selected),
+        "preview_refresh_omitted_row_count": max(0, len(rows) - len(selected)),
+        "preview_refresh_skipped_resolved_keep_blocked_count": skipped_resolved,
+        "preview_refresh_selected_handoff_refs": sorted(ref for ref in selected_refs if ref),
+    }
+
+
 def build_managed_activation_preview_request(
     source: dict[str, Any],
     *,
     now: datetime | None = None,
+    top_successor_count: int = 0,
 ) -> dict[str, Any]:
     """Build the feature-only batch request for an opt-in managed activation preview."""
     handoff = (
@@ -720,7 +832,8 @@ def build_managed_activation_preview_request(
         if source.get("schema") == HANDOFF_SCHEMA
         else build_local_activation_executor_managed_handoff(source, now=now)
     )
-    rows = [row for row in handoff.get("rows") or [] if isinstance(row, dict)]
+    all_rows = [row for row in handoff.get("rows") or [] if isinstance(row, dict)]
+    rows, refresh_summary = _top_preview_rows(all_rows, top_successor_count=int(top_successor_count or 0))
     family_counts = Counter(str(row.get("local_action_family") or "unknown") for row in rows)
     preview_required_rows = [row for row in rows if bool(row.get("managed_preview_required"))]
     preview_required_family_counts = Counter(str(row.get("local_action_family") or "unknown") for row in preview_required_rows)
@@ -758,6 +871,7 @@ def build_managed_activation_preview_request(
             "policy_files_written": False,
             "provider_calls_made": False,
             "managed_server_calls_made": False,
+            **refresh_summary,
         },
         "privacy": _handoff_privacy(),
     }
