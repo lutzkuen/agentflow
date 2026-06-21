@@ -3957,6 +3957,35 @@ def _shape_crunch_decision(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _shape_crunch_candidate_status(decision: dict[str, Any]) -> str:
+    readiness = str(decision.get("readiness") or "unknown")
+    reason = str(decision.get("reason") or "")
+    blockers = {str(item) for item in decision.get("blockers") or []}
+    if readiness == "measurement-ready":
+        return "candidate"
+    if readiness == "canary-safety-stopped" or "canary-safety-stopped" in blockers:
+        return "safety-blocked"
+    if readiness in {"canary-staged", "canary-applied", "canary-holdout"}:
+        return "policy-write-required"
+    if reason in {"insufficient-repeat-evidence", "not-large-context"} or blockers.intersection(
+        {"insufficient-repeat-evidence", "not-large-context"}
+    ):
+        return "too-small"
+    if reason in {"missing-token-metadata", "non-positive-projection"} or blockers.intersection(
+        {"missing-token-metadata", "non-positive-projection"}
+    ):
+        return "missing-observed-savings"
+    return "blocked"
+
+
+def _shape_crunch_policy_write_status(candidate_status: str) -> str:
+    if candidate_status == "candidate":
+        return "policy-write-required"
+    if candidate_status == "policy-write-required":
+        return "policy-already-written"
+    return "no-policy-write"
+
+
 def _bounded_fraction(value: float, default: float) -> float:
     try:
         number = float(value)
@@ -5026,6 +5055,8 @@ def build_request_shape_crunch_opportunity_dry_run(
     ]
     cohorts: list[dict[str, Any]] = []
     readiness_counts: dict[str, int] = {}
+    candidate_status_counts: dict[str, int] = {}
+    policy_write_status_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
     blocker_counts: dict[str, int] = {}
     work_class_counts: dict[str, int] = {}
@@ -5050,6 +5081,8 @@ def build_request_shape_crunch_opportunity_dry_run(
         classes = sorted({public_label(item, "unknown") for item in row.get("candidate_work_classes") or []})
         readiness = str(decision["readiness"])
         reason = str(decision["reason"])
+        candidate_status = _shape_crunch_candidate_status(decision)
+        policy_write_status = _shape_crunch_policy_write_status(candidate_status)
         row_projected_tokens = _as_int(row.get("projected_crunch_tokens_saved"))
         row_projected_chars = _as_int(row.get("projected_crunch_chars_saved"))
         row_projected_savings = _as_float(row.get("projected_crunch_savings_usd"))
@@ -5064,6 +5097,8 @@ def build_request_shape_crunch_opportunity_dry_run(
         safety_stopped_count = _as_int(lifecycle.get("safety_stopped_count"))
 
         _increment(readiness_counts, readiness)
+        _increment(candidate_status_counts, candidate_status, row_count)
+        _increment(policy_write_status_counts, policy_write_status, row_count)
         _increment(reason_counts, reason)
         for blocker in decision.get("blockers") or []:
             _increment(blocker_counts, blocker)
@@ -5087,8 +5122,12 @@ def build_request_shape_crunch_opportunity_dry_run(
                 "policy_id": policy_id,
                 "source_evidence_schema": row.get("source_schema") or row.get("schema") or ROLLUP_ROW_SCHEMA,
                 "readiness": readiness,
+                "candidate_status": candidate_status,
+                "policy_write_status": policy_write_status,
+                "policy_write_required": policy_write_status == "policy-write-required",
                 "reason": reason,
                 "blockers": decision.get("blockers") or [],
+                "blocker_codes": decision.get("blockers") or [],
                 "evidence_blocker_codes": _public_label_list(row.get("blocker_codes")),
                 "provider_family": row.get("provider_family"),
                 "source_surface": row.get("source_surface"),
@@ -5102,6 +5141,7 @@ def build_request_shape_crunch_opportunity_dry_run(
                 "text_bucket": row.get("text_bucket"),
                 "token_bucket": row.get("token_bucket"),
                 "row_count": row_count,
+                "sample_count": row_count,
                 "work_classes": classes,
                 "current_conservative_tokens_saved": row_observed_tokens,
                 "current_conservative_chars_saved": row_observed_chars,
@@ -5111,6 +5151,9 @@ def build_request_shape_crunch_opportunity_dry_run(
                 "projected_saved_usd": round(row_projected_savings, 6),
                 "crunch_canary_lifecycle": lifecycle,
                 "candidate_rule": "repeated-context-conservative-dry-run",
+                "target_local_policy": "crunch_rules",
+                "target_local_policy_section": "crunch.rules",
+                "target_local_rule_file": "crunch_rules.yaml",
                 "estimate_basis": (
                     "metadata-only projection using aggregate input tokens, repeated-shape row count, "
                     f"and {REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE:.0%} conservative input-token reduction"
@@ -5179,6 +5222,20 @@ def build_request_shape_crunch_opportunity_dry_run(
         missing.append("matching-repeated-context-crunch-cohorts" if filter_conditions else "repeated-context-crunch-cohorts")
     if projected_tokens <= 0 and observed_tokens <= 0 and projected_savings <= 0 and observed_savings <= 0:
         missing.append("positive-observed-or-projected-savings")
+    no_op_reason = None
+    if status in {"no-positive-crunch-opportunity", "no-repeated-context-crunch-cohorts"}:
+        no_op_reason = (
+            "no-repeated-context-crunch-cohorts"
+            if not cohorts
+            else top_blocker
+            or (
+                "too-small"
+                if candidate_status_counts.get("too-small")
+                else "missing-observed-savings"
+                if candidate_status_counts.get("missing-observed-savings")
+                else "no-positive-crunch-opportunity"
+            )
+        )
     activation_follow_up = _request_shape_crunch_follow_up(
         status=status,
         report_key="request_shape_crunch_opportunity",
@@ -5229,6 +5286,9 @@ def build_request_shape_crunch_opportunity_dry_run(
             "canary_applied_cohort_count": readiness_counts.get("canary-applied", 0),
             "canary_holdout_cohort_count": readiness_counts.get("canary-holdout", 0),
             "canary_safety_stopped_cohort_count": readiness_counts.get("canary-safety-stopped", 0),
+            "candidate_status_counts": _breakdown(candidate_status_counts),
+            "policy_write_status_counts": _breakdown(policy_write_status_counts),
+            "policy_write_required_count": candidate_status_counts.get("candidate", 0),
             "canary_applied_rows": canary_applied_rows,
             "canary_holdout_rows": canary_holdout_rows,
             "canary_safety_stopped_rows": canary_safety_stopped_rows,
@@ -5246,6 +5306,9 @@ def build_request_shape_crunch_opportunity_dry_run(
             "projected_saved_chars": projected_chars,
             "projected_saved_usd": round(projected_savings, 6),
             "top_blocker_code": top_blocker,
+            "no_op_reason": no_op_reason,
+            "target_local_policy_section": "crunch.rules" if cohorts else None,
+            "target_local_rule_file": "crunch_rules.yaml" if cohorts else None,
             "activation_state": activation_follow_up["activation_state"],
             "top_next_action": activation_follow_up["next_action"],
             "provider_calls_made": 0,
@@ -5257,10 +5320,13 @@ def build_request_shape_crunch_opportunity_dry_run(
         "activation_follow_up": activation_follow_up,
         "recommended_actions": recommended_actions,
         "readiness_breakdown": _breakdown(readiness_counts),
+        "candidate_status_breakdown": _breakdown(candidate_status_counts),
+        "policy_write_status_breakdown": _breakdown(policy_write_status_counts),
         "reason_breakdown": _breakdown(reason_counts),
         "blocker_reason_breakdown": blocker_breakdown,
         "work_class_breakdown": _breakdown(work_class_counts),
         "cohorts": cohorts[: max(1, min(_as_int(limit) or 25, 1000))],
+        "no_op_reason": no_op_reason,
         "missing_measurements": missing,
         "privacy": _crunch_opportunity_privacy(),
     }

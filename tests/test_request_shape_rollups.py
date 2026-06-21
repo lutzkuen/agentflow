@@ -23,6 +23,7 @@ from tokenclaw.request_shape_rollups import (
     build_request_shape_crunch_canary_impact_report,
     build_request_shape_crunch_canary_impact_rows_report,
     build_request_shape_crunch_activation_evidence_report,
+    build_request_shape_crunch_opportunity_dry_run,
     build_request_shape_crunch_remaining_measurement_report,
     build_request_shape_crunch_policy_decision_ledger,
     build_request_shape_crunch_policy_decision_report,
@@ -4467,10 +4468,24 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(follow_up["privacy"]["aggregate_only"])
         top = dry_run["cohorts"][0]
         self.assertEqual(top["readiness"], "measurement-ready")
+        self.assertEqual(top["candidate_status"], "candidate")
+        self.assertEqual(top["policy_write_status"], "policy-write-required")
+        self.assertTrue(top["policy_write_required"])
         self.assertEqual(top["reason"], "repeated-context-crunch-opportunity")
+        self.assertEqual(top["sample_count"], 3)
+        self.assertEqual(top["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(top["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(top["blocker_codes"], [])
+        self.assertIn("duplicate_suppression", top)
         self.assertIn("repeated_context", top["work_classes"])
         self.assertIn("crunch", top["work_classes"])
         self.assertEqual(top["candidate_rule"], "repeated-context-conservative-dry-run")
+        status_counts = {item["value"]: item["count"] for item in dry_run["candidate_status_breakdown"]}
+        self.assertEqual(status_counts["candidate"], 3)
+        policy_counts = {item["value"]: item["count"] for item in dry_run["policy_write_status_breakdown"]}
+        self.assertEqual(policy_counts["policy-write-required"], 3)
+        self.assertEqual(dry_run["summary"]["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(dry_run["summary"]["target_local_rule_file"], "crunch_rules.yaml")
         self.assertEqual(dry_run["summary"]["recommended_action_count"], 1)
         action = dry_run["recommended_actions"][0]
         self.assertEqual(action["schema"], "agentflow.request_shape_crunch_canary_action.v1")
@@ -4502,6 +4517,58 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(dry_run["privacy"]["provider_bodies_included"])
         self.assertFalse(dry_run["privacy"]["session_ids_included"])
         self.assertFalse(dry_run["privacy"]["cache_keys_included"])
+
+    def test_crunch_opportunity_dry_run_noops_for_small_or_one_off_rollups(self) -> None:
+        small_rollups = [
+            {
+                "schema": "agentflow.request_shape_rollup_row.v1",
+                "source_schema": "agentflow.request_shape_rollup_row.v1",
+                "candidate_work_classes": ["repeated_context", "crunch"],
+                "provider_family": "anthropic",
+                "source_surface": "anthropic_messages",
+                "endpoint": "messages",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "stream": False,
+                "has_tools": False,
+                "cache_status": "miss",
+                "routing_status": "passthrough",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "row_count": 1,
+                "successful_input_tokens": 1_200,
+                "input_tokens": 1_200,
+                "input_token_cost_usd": 0.0036,
+                "projected_crunch_tokens_saved": 0,
+                "projected_crunch_chars_saved": 0,
+                "projected_crunch_savings_usd": 0.0,
+                "current_crunch_tokens_saved": 0,
+                "current_crunch_chars_saved": 0,
+                "current_crunch_savings_usd": 0.0,
+                "blocker_codes": ["exact-cache-miss"],
+            }
+        ]
+
+        dry_run = build_request_shape_crunch_opportunity_dry_run(small_rollups)
+
+        self.assertEqual(dry_run["status"], "no-positive-crunch-opportunity")
+        self.assertEqual(dry_run["summary"]["recommended_action_count"], 0)
+        self.assertEqual(dry_run["summary"]["no_op_reason"], "insufficient-repeat-evidence")
+        self.assertEqual(dry_run["no_op_reason"], "insufficient-repeat-evidence")
+        self.assertIn("positive-observed-or-projected-savings", dry_run["missing_measurements"])
+        self.assertEqual(dry_run["cohorts"][0]["candidate_status"], "too-small")
+        self.assertEqual(dry_run["cohorts"][0]["policy_write_status"], "no-policy-write")
+        self.assertFalse(dry_run["cohorts"][0]["policy_write_required"])
+        self.assertEqual(dry_run["cohorts"][0]["sample_count"], 1)
+        self.assertEqual(dry_run["cohorts"][0]["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(dry_run["cohorts"][0]["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertIn("insufficient-repeat-evidence", dry_run["cohorts"][0]["blocker_codes"])
+        status_counts = {item["value"]: item["count"] for item in dry_run["candidate_status_breakdown"]}
+        self.assertEqual(status_counts["too-small"], 1)
+        self.assertTrue(dry_run["privacy"]["metadata_only"])
+        self.assertTrue(dry_run["privacy"]["aggregate_only"])
+        self.assertFalse(dry_run["privacy"]["provider_calls_made"])
+        self.assertFalse(dry_run["privacy"]["managed_server_calls_made"])
 
     def test_crunch_canary_stage_report_targets_anthropic_thinking_tool_result_cohort(self) -> None:
         for cost in (0.08, 0.07, 0.09):
