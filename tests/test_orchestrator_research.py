@@ -9655,6 +9655,67 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(signal["privacy"]["session_ids_included"])
         self.assertFalse(signal["privacy"]["cache_keys_included"])
 
+    def test_context_plateaus_feed_repeated_context_crunch_dry_run(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 96,
+                "today_calls": 96,
+                "context_plateaus": [
+                    {
+                        "session_id": "session-secret-must-not-leak",
+                        "sid": "secret",
+                        "source_surface": "anthropic_messages",
+                        "app_family": "claude",
+                        "calls": 24,
+                        "plateau_pairs": 18,
+                        "median_text_chars": 96_000,
+                        "p90_text_chars": 118_000,
+                        "cost_usd": 0.72,
+                        "cache_read_savings_usd": 0.18,
+                        "crunch_saved_chars": 4_000,
+                    }
+                ],
+                "request_shape_rollups": {
+                    "schema": "tokenclaw.request_shape_rollups.v1",
+                    "status": "no-source-traffic",
+                    "summary": {
+                        "rows_considered": 0,
+                        "rollup_count": 0,
+                    },
+                    "rollups": [],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        crunch = stats_summary["crunch_savings_signal"]
+        top_report = crunch["top_report"]
+        self.assertEqual(crunch["status"], "projected-savings-ranked")
+        self.assertEqual(top_report["report_key"], "request_shape_crunch_opportunity")
+        self.assertEqual(top_report["schema"], "tokenclaw.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertGreaterEqual(top_report["candidate_count"], 1)
+        self.assertGreater(top_report["projected_saved_tokens"], 0)
+        self.assertGreater(top_report["projected_saved_usd"], 0)
+        self.assertEqual(top_report["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(top_report["target_local_rule_file"], "crunch_rules.yaml")
+
+        signal = stats_summary["request_shape_rollup_candidates"]
+        self.assertEqual(signal["status"], "candidates-ranked")
+        self.assertEqual(signal["source_schema"], "tokenclaw.request_shape_follow_up_candidates.v1")
+        self.assertEqual(signal["top_candidate"]["local_action_family"], "crunch")
+        self.assertEqual(signal["top_candidate"]["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertGreater(signal["top_candidate"]["projected_saved_tokens"], 0)
+        self.assertFalse(top_report["privacy"]["provider_bodies_included"])
+        self.assertFalse(top_report["privacy"]["request_ids_included"])
+        self.assertFalse(top_report["privacy"]["session_ids_included"])
+        self.assertFalse(top_report["privacy"]["cache_keys_included"])
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("session-secret-must-not-leak", rendered)
+
     def test_zero_hit_cache_ladder_generates_cache_replay_issue(self):
         plan = build_research_plan(
             issues=[],

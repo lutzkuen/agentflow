@@ -20,6 +20,8 @@ from tokenclaw.store import stable_json, utc_now
 SCHEMA = "tokenclaw.request_shape_rollups.v1"
 ROLLUP_ROW_SCHEMA = "tokenclaw.request_shape_rollup_row.v1"
 ROLLUP_SNAPSHOT_SCHEMA = "tokenclaw.request_shape_rollup_snapshot.v1"
+CONTEXT_PLATEAU_ROLLUP_SCHEMA = "tokenclaw.context_plateau_crunch_rollups.v1"
+CONTEXT_PLATEAU_ROLLUP_ROW_SCHEMA = "tokenclaw.context_plateau_crunch_rollup_row.v1"
 REPLAYABILITY_DRY_RUN_SCHEMA = "tokenclaw.request_shape_cache_replayability_dry_run.v1"
 REPLAY_INVALIDATION_EVIDENCE_SCHEMA = "tokenclaw.request_shape_cache_invalidation_evidence.v1"
 REPLAY_INVALIDATION_EVIDENCE_COHORT_SCHEMA = "tokenclaw.request_shape_cache_invalidation_evidence_cohort.v1"
@@ -11874,6 +11876,262 @@ def build_request_shape_follow_up_candidates(
         "candidates": clean,
         "blocker_cohorts": clean,
         "missing_measurements": missing,
+        "privacy": _shape_follow_up_privacy(),
+    }
+
+
+def _context_plateau_source_surface(row: dict[str, Any]) -> str:
+    source = public_label(row.get("source_surface"), "")
+    if source:
+        return source
+    surfaces = row.get("source_surfaces")
+    if isinstance(surfaces, list):
+        for item in surfaces:
+            if isinstance(item, dict):
+                source = public_label(item.get("source_surface"), "")
+                if source:
+                    return source
+    app_family = public_label(row.get("app_family"), "")
+    if app_family == "codex":
+        return "codex_app"
+    if app_family in {"claude", "claude-code", "claude_code"}:
+        return "anthropic_messages"
+    return "unknown"
+
+
+def _context_plateau_provider_endpoint(source_surface: str, row: dict[str, Any]) -> tuple[str, str]:
+    provider = public_label(row.get("provider_family") or row.get("provider"), "")
+    endpoint = public_label(row.get("endpoint"), "")
+    if provider and endpoint:
+        return provider, endpoint
+    if source_surface.startswith("openai"):
+        return provider or "openai", endpoint or ("chat" if "chat" in source_surface else "responses")
+    if source_surface.startswith("anthropic"):
+        return provider or "anthropic", endpoint or "messages"
+    if source_surface == "codex_app":
+        return provider or "openai", endpoint or "turn_start"
+    return provider or "unknown", endpoint or "unknown"
+
+
+def _context_plateau_model(provider: str, source_surface: str) -> str:
+    if provider == "anthropic" or source_surface.startswith("anthropic"):
+        return "claude-sonnet"
+    if provider == "openai" or source_surface.startswith("openai") or source_surface == "codex_app":
+        return "gpt-5"
+    return "unknown"
+
+
+def _context_plateau_rollup_groups(stats: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = stats.get("context_plateaus")
+    if not isinstance(rows, list):
+        sessions = stats.get("sessions") if isinstance(stats.get("sessions"), dict) else {}
+        rows = sessions.get("context_plateaus") if isinstance(sessions.get("context_plateaus"), list) else []
+
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        plateau_pairs = _as_int(row.get("plateau_pairs") or row.get("context_plateau_pairs"))
+        if plateau_pairs <= 0:
+            continue
+        median_chars = _as_int(row.get("median_text_chars"))
+        p90_chars = _as_int(row.get("p90_text_chars"))
+        representative_chars = median_chars or p90_chars
+        if representative_chars <= 0:
+            continue
+
+        source_surface = _context_plateau_source_surface(row)
+        provider, endpoint = _context_plateau_provider_endpoint(source_surface, row)
+        app_family = public_label(row.get("app_family"), "unknown")
+        category = public_label(
+            row.get("category") or ("chat" if source_surface.startswith("openai") else "tool-result"),
+            "unknown",
+        )
+        workflow_phase = public_label(
+            row.get("workflow_phase") or ("chat" if category == "chat" else "tool-execution"),
+            "unknown",
+        )
+        stream = bool(row.get("stream")) if row.get("stream") is not None else source_surface.startswith("anthropic")
+        has_tools = bool(row.get("has_tools")) if row.get("has_tools") is not None else category.startswith("tool")
+        sample_count = max(_as_int(row.get("calls")), plateau_pairs + 1, REPEATED_CONTEXT_CRUNCH_MIN_SAMPLES)
+        token_count = max(1, representative_chars // 4)
+        total_input_tokens = token_count * sample_count
+        repetition_signal = min(1.0, plateau_pairs / float(max(sample_count, 1)))
+        cost = _as_float(row.get("cost_usd"))
+        model = _context_plateau_model(provider, source_surface)
+        input_token_cost = cost if cost > 0 else _input_savings_usd(total_input_tokens, provider=provider, model=model)
+        projected_tokens = int(total_input_tokens * REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE * repetition_signal)
+        projected_savings = input_token_cost * REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE * repetition_signal
+        current_saved_chars = _as_int(row.get("crunch_saved_chars"))
+        current_saved_tokens = max(0, current_saved_chars // 4)
+        current_savings = _input_savings_usd(
+            current_saved_tokens,
+            provider=provider,
+            model=model,
+            fallback_cost=cost,
+            fallback_tokens=total_input_tokens,
+        )
+        basis = {
+            "source_surface": source_surface,
+            "endpoint": endpoint,
+            "provider_family": provider,
+            "requested_model_family": model,
+            "routed_model_family": model,
+            "category": category,
+            "workflow_phase": workflow_phase,
+            "stream": stream,
+            "has_tools": has_tools,
+            "text_bucket": _text_bucket(representative_chars),
+            "token_bucket": _token_bucket(token_count),
+            "cache_status": public_label(row.get("cache_status"), "skipped" if stream or has_tools else "miss"),
+            "routing_status": public_label(row.get("routing_status"), "passthrough"),
+        }
+        rollup_key = hashlib.sha256(stable_json(basis).encode("utf-8")).hexdigest()[:24]
+        group = groups.setdefault(
+            rollup_key,
+            {
+                "schema": CONTEXT_PLATEAU_ROLLUP_ROW_SCHEMA,
+                "source_schema": "tokenclaw.context_plateau_session_aggregate.v1",
+                "rollup_key": rollup_key,
+                "candidate_id": _candidate_id(basis),
+                **basis,
+                "row_count": 0,
+                "sample_count": 0,
+                "context_plateau_pair_count": 0,
+                "context_plateau_session_count": 0,
+                "error_count": 0,
+                "retry_count": 0,
+                "cache_hit_count": 0,
+                "cost_est_usd": 0.0,
+                "baseline_cost_usd": 0.0,
+                "observed_savings_usd": 0.0,
+                "input_tokens": 0,
+                "successful_input_tokens": 0,
+                "output_tokens": 0,
+                "input_token_cost_usd": 0.0,
+                "current_crunch_tokens_saved": 0,
+                "current_crunch_chars_saved": 0,
+                "current_crunch_savings_usd": 0.0,
+                "projected_crunch_tokens_saved": 0,
+                "projected_crunch_chars_saved": 0,
+                "projected_crunch_savings_usd": 0.0,
+                "candidate_families": ["crunch_candidate"],
+                "candidate_work_classes": ["repeated_context", "crunch"],
+                "blocker_codes": [],
+                "metadata": {
+                    "schema": "tokenclaw.context_plateau_crunch_rollup_metadata.v1",
+                    "source": "context_plateaus",
+                    "app_family_breakdown": {},
+                    "source_surface_breakdown": {},
+                    "raw_body_required": False,
+                    "aggregate_only": True,
+                    "metadata_only": True,
+                },
+                "privacy": _shape_follow_up_privacy(),
+            },
+        )
+        group["row_count"] += sample_count
+        group["sample_count"] += sample_count
+        group["context_plateau_pair_count"] += plateau_pairs
+        group["context_plateau_session_count"] += 1
+        group["cost_est_usd"] += cost
+        group["baseline_cost_usd"] += cost
+        group["input_tokens"] += total_input_tokens
+        group["successful_input_tokens"] += total_input_tokens
+        group["input_token_cost_usd"] += input_token_cost
+        group["current_crunch_tokens_saved"] += current_saved_tokens
+        group["current_crunch_chars_saved"] += current_saved_chars
+        group["current_crunch_savings_usd"] += current_savings
+        group["projected_crunch_tokens_saved"] += projected_tokens
+        group["projected_crunch_chars_saved"] += projected_tokens * 4
+        group["projected_crunch_savings_usd"] += projected_savings
+        metadata = group["metadata"]
+        app_counts = metadata["app_family_breakdown"]
+        source_counts = metadata["source_surface_breakdown"]
+        app_counts[app_family] = app_counts.get(app_family, 0) + sample_count
+        source_counts[source_surface] = source_counts.get(source_surface, 0) + sample_count
+
+    rollups = []
+    for group in groups.values():
+        group["cost_est_usd"] = round(_as_float(group.get("cost_est_usd")), 6)
+        group["baseline_cost_usd"] = round(_as_float(group.get("baseline_cost_usd")), 6)
+        group["input_token_cost_usd"] = round(_as_float(group.get("input_token_cost_usd")), 6)
+        group["current_crunch_savings_usd"] = round(_as_float(group.get("current_crunch_savings_usd")), 6)
+        group["projected_crunch_savings_usd"] = round(_as_float(group.get("projected_crunch_savings_usd")), 6)
+        lifecycle = {
+            "schema": CRUNCH_CANARY_LIFECYCLE_SCHEMA,
+            "cohort_id": _crunch_canary_cohort_id(group),
+            "policy_id": _crunch_canary_policy_id(_crunch_canary_cohort_id(group)),
+            "applied_count": 0,
+            "holdout_count": 0,
+            "skipped_count": 0,
+            "safety_stopped_count": 0,
+            "fallback_count": 0,
+            "rollback_count": 0,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+        group["crunch_canary_lifecycle"] = lifecycle
+        metadata = group["metadata"]
+        metadata["app_family_breakdown"] = _breakdown(metadata["app_family_breakdown"])
+        metadata["source_surface_breakdown"] = _breakdown(metadata["source_surface_breakdown"])
+        metadata["candidate_class_breakdown"] = [
+            {"value": "repeated_context", "count": _as_int(group.get("row_count"))},
+            {"value": "crunch", "count": _as_int(group.get("row_count"))},
+        ]
+        rollups.append(_snapshot_safe_rollup_row(group, source_schema=CONTEXT_PLATEAU_ROLLUP_ROW_SCHEMA))
+    rollups.sort(
+        key=lambda item: (
+            _as_float(item.get("projected_crunch_savings_usd")),
+            _as_int(item.get("projected_crunch_tokens_saved")),
+            _as_int(item.get("row_count")),
+        ),
+        reverse=True,
+    )
+    return rollups
+
+
+def build_context_plateau_crunch_rollup_report(
+    stats: dict[str, Any],
+    *,
+    limit: int = 25,
+) -> dict[str, Any] | None:
+    if not isinstance(stats, dict):
+        return None
+    rollups = _context_plateau_rollup_groups(stats)
+    if not rollups:
+        return None
+    capped_limit = max(1, min(_as_int(limit, 25), 100))
+    rollups = rollups[:capped_limit]
+    follow_up = build_request_shape_follow_up_candidates(rollups, limit=min(capped_limit, 10))
+    crunch = build_request_shape_crunch_opportunity_dry_run(rollups, limit=capped_limit)
+    summary = {
+        "rows_considered": sum(_as_int(row.get("row_count")) for row in rollups),
+        "rollup_count": len(rollups),
+        "collapsed_rows": 0,
+        "metadata_window_backfilled": False,
+        "body_rows_read": 0,
+        "follow_up_candidate_count": _as_int(follow_up["summary"].get("ranked_candidate_count")),
+        "top_next_action": follow_up["summary"].get("top_next_action"),
+        "top_local_action_family": follow_up["summary"].get("top_local_action_family"),
+        "top_readiness_state": follow_up["summary"].get("top_readiness_state"),
+        "projected_crunch_tokens_saved": _as_int(crunch["summary"].get("projected_saved_tokens")),
+        "projected_crunch_savings_usd": round(_as_float(crunch["summary"].get("projected_saved_usd")), 8),
+        "total_projected_savings_usd": round(_as_float(crunch["summary"].get("projected_saved_usd")), 8),
+        "source": "context-plateau-session-aggregates",
+        "policy_files_written": False,
+    }
+    return {
+        "schema": CONTEXT_PLATEAU_ROLLUP_SCHEMA,
+        "generated_at": utc_now(),
+        "source": "context-plateau-session-aggregates",
+        "window": {
+            "source": "context_plateaus",
+        },
+        "summary": summary,
+        "follow_up_candidates": follow_up,
+        "crunch_opportunity_dry_run": crunch,
+        "rollups": rollups,
         "privacy": _shape_follow_up_privacy(),
     }
 

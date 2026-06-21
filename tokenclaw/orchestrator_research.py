@@ -3704,7 +3704,39 @@ def _request_shape_report(stats: dict[str, Any]) -> dict[str, Any] | None:
     for key in ("request_shape_rollups", "request_shape_rollup_report", "request_shape_rollup_candidates_report"):
         report = stats.get(key)
         if isinstance(report, dict):
+            summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+            sparse = (
+                _to_int(summary.get("rows_considered")) <= 0
+                or (
+                    _to_int(summary.get("rollup_count")) <= 0
+                    and not isinstance(report.get("crunch_opportunity_dry_run"), dict)
+                )
+            )
+            if sparse:
+                try:
+                    from tokenclaw.request_shape_rollups import build_context_plateau_crunch_rollup_report
+                except Exception:
+                    return report
+                plateau_report = build_context_plateau_crunch_rollup_report(stats)
+                if isinstance(plateau_report, dict):
+                    plateau_report["fallback_for_sparse_request_shape_report"] = {
+                        "schema": "tokenclaw.context_plateau_request_shape_fallback.v1",
+                        "original_schema": sanitize_value(report.get("schema")),
+                        "original_status": sanitize_value(report.get("status")),
+                        "original_rows_considered": _to_int(summary.get("rows_considered")),
+                        "original_rollup_count": _to_int(summary.get("rollup_count")),
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                    }
+                    return plateau_report
             return report
+    try:
+        from tokenclaw.request_shape_rollups import build_context_plateau_crunch_rollup_report
+    except Exception:
+        return None
+    plateau_report = build_context_plateau_crunch_rollup_report(stats)
+    if isinstance(plateau_report, dict):
+        return plateau_report
     return None
 
 
