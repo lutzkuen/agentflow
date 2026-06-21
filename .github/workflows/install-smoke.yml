@@ -1,0 +1,168 @@
+name: Clean install smoke
+
+'on':
+  pull_request:
+    paths:
+      - pyproject.toml
+      - tokenclaw/activation.py
+      - tokenclaw/cli*.py
+      - tokenclaw/cli_commands/**
+      - tokenclaw/server.py
+      - tokenclaw/store.py
+      - .github/workflows/install-smoke.yml
+  schedule:
+    - cron: '0 3 * * *'
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  wheel-smoke:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: '3.11'
+            proxy_smoke: true
+          - os: ubuntu-latest
+            python-version: '3.12'
+            proxy_smoke: true
+          - os: macos-latest
+            python-version: '3.12'
+            proxy_smoke: true
+          - os: windows-latest
+            python-version: '3.12'
+            proxy_smoke: false
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Build wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Install built wheel into clean venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .venv-smoke
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            venv_python=".venv-smoke/Scripts/python.exe"
+            venv_bin="$(pwd -W)/.venv-smoke/Scripts"
+          else
+            venv_python=".venv-smoke/bin/python"
+            venv_bin="$PWD/.venv-smoke/bin"
+          fi
+          "$venv_python" -m pip install --upgrade pip
+          "$venv_python" -m pip install dist/*.whl
+          echo "VENV_PY=$venv_python" >> "$GITHUB_ENV"
+          echo "$venv_bin" >> "$GITHUB_PATH"
+
+      - name: CLI smoke
+        shell: bash
+        env:
+          TOKENCLAW_CONFIG_DIR: ${{ runner.temp }}/tokenclaw-config
+          TOKENCLAW_DB: ${{ runner.temp }}/tokenclaw.sqlite3
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOKENCLAW_CONFIG_DIR" "$RUNNER_TEMP/codex" "$RUNNER_TEMP/desktop"
+          desktop_file="$RUNNER_TEMP/desktop/claude-desktop.desktop"
+          cat > "$desktop_file" <<'EOF'
+          [Desktop Entry]
+          Name=Claude
+          Exec=/opt/claude-desktop/claude-desktop %U
+          EOF
+
+          tokenclaw version
+          tokenclaw activate claude --dry-run | tee claude-activate.out
+          grep -F "Local base URL for clients: http://127.0.0.1:4000" claude-activate.out
+          tokenclaw activate openai --dry-run
+          tokenclaw activate codex --codex-config "$RUNNER_TEMP/codex/config.toml" --dry-run
+          tokenclaw activate claude >/dev/null
+          tokenclaw activate openai >/dev/null
+
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            set +e
+            tokenclaw activate claude-desktop --dry-run > claude-desktop.out 2> claude-desktop.err
+            desktop_status=$?
+            set -e
+            if [[ "$desktop_status" -eq 0 ]]; then
+              echo "Windows claude-desktop discovery unexpectedly succeeded without a launcher"
+              cat claude-desktop.out
+              exit 1
+            fi
+            cat claude-desktop.err
+            grep -E "Claude Desktop .*file not found|desktop file not found" claude-desktop.err
+          else
+            tokenclaw activate claude-desktop --desktop-file "$desktop_file" --dry-run
+          fi
+
+          set +e
+          tokenclaw doctor > doctor.out 2> doctor.err
+          doctor_status=$?
+          set -e
+          if [[ "$doctor_status" -eq 0 ]]; then
+            echo "tokenclaw doctor unexpectedly succeeded while no proxy is running"
+            cat doctor.out
+            exit 1
+          fi
+          cat doctor.out
+          cat doctor.err
+
+      - name: DB smoke
+        shell: bash
+        env:
+          TOKENCLAW_CONFIG_DIR: ${{ runner.temp }}/tokenclaw-config
+          TOKENCLAW_DB: ${{ runner.temp }}/tokenclaw.sqlite3
+        run: |
+          set -euo pipefail
+          tokenclaw stats --json | "$VENV_PY" -m json.tool
+          tokenclaw db adopt-legacy --dry-run | "$VENV_PY" -m json.tool
+
+      - name: Proxy health smoke
+        if: matrix.proxy_smoke
+        shell: bash
+        env:
+          TOKENCLAW_CONFIG_DIR: ${{ runner.temp }}/tokenclaw-proxy-config
+          TOKENCLAW_DB: ${{ runner.temp }}/tokenclaw-proxy.sqlite3
+          ANTHROPIC_API_KEY: dummy-token
+        run: |
+          set -euo pipefail
+          tokenclaw activate claude
+          tokenclaw run claude > tokenclaw-claude.log 2>&1 &
+          proxy_pid=$!
+          trap 'kill "$proxy_pid" 2>/dev/null || true; wait "$proxy_pid" 2>/dev/null || true' EXIT
+
+          for _ in {1..20}; do
+            if "$VENV_PY" - <<'PY'
+          import sys
+          import httpx
+
+          try:
+              response = httpx.get("http://127.0.0.1:4000/health", timeout=0.5)
+          except Exception:
+              sys.exit(1)
+          sys.exit(0 if response.status_code == 200 else 1)
+          PY
+            then
+              exit 0
+            fi
+            sleep 0.5
+          done
+
+          cat tokenclaw-claude.log
+          exit 1
