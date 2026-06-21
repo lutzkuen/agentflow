@@ -13,11 +13,13 @@ from tokenclaw.request_shape_rollups import (
     DEFAULT_CACHE_REPLAY_CANARY_MAX_EVIDENCE_AGE_HOURS,
     DEFAULT_ROLLUP_SNAPSHOT_MAX_AGE_HOURS,
     build_request_shape_cache_replay_evidence_report,
+    build_request_shape_rollups_report,
 )
 from tokenclaw.store import utc_now
 
 
 SAVINGS_LOOP_BOTTLENECKS_SCHEMA = "tokenclaw.savings_loop_bottlenecks.v1"
+ROLLUP_REFRESH_PREFLIGHT_SCHEMA = "tokenclaw.request_shape_rollup_refresh_preflight.v1"
 DEFAULT_ACTIVE_WINDOW_HOURS = 24.0
 DEFAULT_ACTIVATION_MIN_SOURCE_ROWS = 10
 
@@ -269,6 +271,7 @@ def _rollup_freshness_row(
     *,
     now: datetime,
     max_age_hours: float,
+    refresh_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rollup_count = _as_int(_safe_scalar(conn, "select count(*) from request_shape_rollups"))
     snapshot_count = _as_int(_safe_scalar(conn, "select count(*) from request_shape_rollup_snapshots"))
@@ -276,21 +279,32 @@ def _rollup_freshness_row(
     newest_snapshot_at = _safe_scalar(conn, "select max(generated_at) from request_shape_rollup_snapshots")
     newest_candidates = [_parse_utc(newest_rollup_at), _parse_utc(newest_snapshot_at)]
     newest = max((candidate for candidate in newest_candidates if candidate is not None), default=None)
+    refresh = refresh_preflight if isinstance(refresh_preflight, dict) else {}
+    refresh_rollup_count = _as_int(refresh.get("rollup_count"))
+    refresh_newest_at = refresh.get("newest_evidence_at") if isinstance(refresh.get("newest_evidence_at"), str) else None
+    refresh_newest = _parse_utc(refresh_newest_at)
+    if refresh_rollup_count > 0 and (newest is None or (refresh_newest is not None and refresh_newest >= newest)):
+        newest = refresh_newest or now
     age_hours = round((now - newest).total_seconds() / 3600.0, 3) if newest else None
     stale = bool(age_hours is None or (max_age_hours > 0 and age_hours > max_age_hours))
-    if rollup_count <= 0 and snapshot_count <= 0:
+    refreshed = refresh_rollup_count > 0 and not stale
+    if rollup_count <= 0 and snapshot_count <= 0 and not refreshed:
         blocker = "no-request-shape-rollups"
         why = "canonical DB has no request-shape rollups or snapshots"
         action = "Emit request-shape rollups from local metadata."
         command = "tokenclaw request-shape-rollups --dry-run"
-    elif stale:
+    elif stale and not refreshed:
         blocker = "request-shape-rollups-stale"
         why = f"newest request-shape rollup/snapshot is {age_hours}h old; max age is {max_age_hours}h"
         action = "Refresh request-shape rollups before ranking new activation cohorts."
         command = "tokenclaw request-shape-rollups --dry-run"
     else:
         blocker = None
-        why = "request-shape rollup evidence is present and fresh"
+        why = (
+            "canonical traffic refresh produced fresh request-shape rollup evidence"
+            if refreshed and rollup_count <= 0 and snapshot_count <= 0
+            else "request-shape rollup evidence is present and fresh"
+        )
         action = "No rollup refresh action is needed."
         command = "none"
     return {
@@ -305,6 +319,11 @@ def _rollup_freshness_row(
             "request_shape_rollup_snapshot_count": snapshot_count,
             "newest_rollup_generated_at": newest_rollup_at,
             "newest_snapshot_generated_at": newest_snapshot_at,
+            "canonical_refresh_status": public_label(refresh.get("status"), "not-run"),
+            "canonical_refresh_rows_considered": _as_int(refresh.get("rows_considered")),
+            "canonical_refresh_rollup_count": refresh_rollup_count,
+            "canonical_refresh_ranked_candidate_count": _as_int(refresh.get("ranked_candidate_count")),
+            "canonical_refresh_newest_evidence_at": refresh_newest_at,
             "newest_evidence_age_hours": age_hours,
             "max_age_hours": max_age_hours,
             "stale": stale,
@@ -313,10 +332,21 @@ def _rollup_freshness_row(
     }
 
 
-def _crunch_dry_run_row(conn: Any) -> dict[str, Any]:
+def _crunch_dry_run_row(conn: Any, *, refresh_preflight: dict[str, Any] | None = None) -> dict[str, Any]:
     rollup_count = _as_int(_safe_scalar(conn, "select count(*) from request_shape_rollups"))
     snapshot_count = _as_int(_safe_scalar(conn, "select count(*) from request_shape_rollup_snapshots"))
-    rows_considered = rollup_count if rollup_count > 0 else snapshot_count
+    refresh = refresh_preflight if isinstance(refresh_preflight, dict) else {}
+    refresh_rows = _as_int(refresh.get("crunch_dry_run_rows_considered"))
+    rows_considered = rollup_count if rollup_count > 0 else snapshot_count if snapshot_count > 0 else refresh_rows
+    evidence_source = (
+        "persisted-rollups"
+        if rollup_count > 0
+        else "persisted-snapshots"
+        if snapshot_count > 0
+        else "canonical-refresh-dry-run"
+        if refresh_rows > 0
+        else "none"
+    )
     blocked = rows_considered <= 0
     return {
         "kind": "crunch-dry-run",
@@ -335,8 +365,90 @@ def _crunch_dry_run_row(conn: Any) -> dict[str, Any]:
             "rows_considered": rows_considered,
             "request_shape_rollup_count": rollup_count,
             "request_shape_rollup_snapshot_count": snapshot_count,
+            "canonical_refresh_status": public_label(refresh.get("status"), "not-run"),
+            "canonical_refresh_crunch_dry_run_rows_considered": refresh_rows,
+            "evidence_source": evidence_source,
             "zero_row_dry_run": blocked,
         },
+        "privacy": _metadata_privacy(),
+    }
+
+
+def _request_shape_rollup_refresh_preflight(
+    store_obj: Any,
+    *,
+    source_metrics: dict[str, Any],
+    activation_min_source_rows: int,
+    limit: int,
+) -> dict[str, Any]:
+    source_rows = _as_int(source_metrics.get("active_window_rows"))
+    if source_rows < max(0, int(activation_min_source_rows)):
+        return {
+            "schema": ROLLUP_REFRESH_PREFLIGHT_SCHEMA,
+            "status": "skipped-below-source-threshold",
+            "enabled": False,
+            "persisted": False,
+            "source_traffic_rows": source_rows,
+            "activation_min_source_rows": max(0, int(activation_min_source_rows)),
+            "rows_considered": 0,
+            "rollup_count": 0,
+            "ranked_candidate_count": 0,
+            "crunch_dry_run_rows_considered": 0,
+            "newest_evidence_at": None,
+            "privacy": _metadata_privacy(),
+        }
+    capped_limit = max(1, min(int(limit or 1000), 10_000))
+    try:
+        report = build_request_shape_rollups_report(
+            store_obj,
+            limit=capped_limit,
+            persist=False,
+            run_id="savings-loop-canonical-refresh-dry-run",
+        )
+    except Exception as exc:
+        return {
+            "schema": ROLLUP_REFRESH_PREFLIGHT_SCHEMA,
+            "status": "unavailable",
+            "enabled": True,
+            "persisted": False,
+            "source_traffic_rows": source_rows,
+            "activation_min_source_rows": max(0, int(activation_min_source_rows)),
+            "error_type": public_label(exc.__class__.__name__, "Exception"),
+            "rows_considered": 0,
+            "rollup_count": 0,
+            "ranked_candidate_count": 0,
+            "crunch_dry_run_rows_considered": 0,
+            "newest_evidence_at": None,
+            "privacy": _metadata_privacy(),
+        }
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    follow_up = report.get("follow_up_candidates") if isinstance(report.get("follow_up_candidates"), dict) else {}
+    follow_up_summary = follow_up.get("summary") if isinstance(follow_up.get("summary"), dict) else {}
+    crunch = report.get("crunch_opportunity_dry_run") if isinstance(report.get("crunch_opportunity_dry_run"), dict) else {}
+    crunch_summary = crunch.get("summary") if isinstance(crunch.get("summary"), dict) else {}
+    window = report.get("window") if isinstance(report.get("window"), dict) else {}
+    rollup_count = _as_int(summary.get("rollup_count"))
+    rows_considered = _as_int(summary.get("rows_considered"))
+    ranked_candidate_count = _as_int(follow_up_summary.get("ranked_candidate_count"))
+    crunch_rows = _as_int(crunch_summary.get("rows_considered"))
+    status = "refreshed" if rollup_count > 0 else "no-rollups"
+    return {
+        "schema": ROLLUP_REFRESH_PREFLIGHT_SCHEMA,
+        "status": status,
+        "enabled": True,
+        "persisted": False,
+        "source_traffic_rows": source_rows,
+        "activation_min_source_rows": max(0, int(activation_min_source_rows)),
+        "rows_considered": rows_considered,
+        "rollup_count": rollup_count,
+        "ranked_candidate_count": ranked_candidate_count,
+        "crunch_dry_run_rows_considered": crunch_rows,
+        "newest_evidence_at": window.get("end") if isinstance(window.get("end"), str) else report.get("generated_at"),
+        "generated_at": report.get("generated_at"),
+        "top_next_action": public_label(follow_up_summary.get("top_next_action"), "unknown"),
+        "top_local_action_family": public_label(follow_up_summary.get("top_local_action_family"), "unknown"),
+        "top_readiness_state": public_label(follow_up_summary.get("top_readiness_state"), "unknown"),
+        "crunch_dry_run_status": public_label(crunch.get("status"), "unknown"),
         "privacy": _metadata_privacy(),
     }
 
@@ -451,15 +563,28 @@ def build_savings_loop_bottlenecks_report(
         legacy_db=legacy_db,
         enabled=bool(adopt_legacy_preflight),
     )
+    source_row = _source_traffic_row(
+        conn,
+        since=since,
+        activation_min_source_rows=max(0, int(activation_min_source_rows)),
+    )
+    source_metrics = source_row.get("metrics") if isinstance(source_row.get("metrics"), dict) else {}
+    refresh_preflight = _request_shape_rollup_refresh_preflight(
+        store_obj,
+        source_metrics=source_metrics,
+        activation_min_source_rows=max(0, int(activation_min_source_rows)),
+        limit=max(1, min(int(policy_scan_limit or 1), 10000)),
+    )
     rows = [
-        _source_traffic_row(
-            conn,
-            since=since,
-            activation_min_source_rows=max(0, int(activation_min_source_rows)),
-        ),
+        source_row,
         _legacy_gap_row(canonical_db=canonical_db, legacy_db=legacy_db),
-        _rollup_freshness_row(conn, now=now_dt, max_age_hours=max(0.0, float(rollup_max_age_hours))),
-        _crunch_dry_run_row(conn),
+        _rollup_freshness_row(
+            conn,
+            now=now_dt,
+            max_age_hours=max(0.0, float(rollup_max_age_hours)),
+            refresh_preflight=refresh_preflight,
+        ),
+        _crunch_dry_run_row(conn, refresh_preflight=refresh_preflight),
     ]
     policy_rows = _cache_policy_rows(
         store_obj,
@@ -521,8 +646,16 @@ def build_savings_loop_bottlenecks_report(
             "legacy_adoption_preflight_status": adoption_preflight.get("status"),
             "legacy_adoption_rows_inserted": _as_int(adoption_preflight.get("rows_inserted")),
             "legacy_adoption_gap_cleared": bool(adoption_preflight.get("gap_cleared")),
+            "request_shape_rollup_refresh_status": refresh_preflight.get("status"),
+            "request_shape_rollup_refresh_rows_considered": _as_int(refresh_preflight.get("rows_considered")),
+            "request_shape_rollup_refresh_rollup_count": _as_int(refresh_preflight.get("rollup_count")),
+            "request_shape_rollup_refresh_ranked_candidate_count": _as_int(refresh_preflight.get("ranked_candidate_count")),
+            "request_shape_rollup_refresh_crunch_dry_run_rows_considered": _as_int(
+                refresh_preflight.get("crunch_dry_run_rows_considered")
+            ),
         },
         "rows": rows,
         "legacy_adoption_preflight": adoption_preflight,
+        "request_shape_rollup_refresh": refresh_preflight,
         "privacy": _metadata_privacy(),
     }

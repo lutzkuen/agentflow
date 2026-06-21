@@ -20,25 +20,52 @@ NOW = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
 
 
 class SavingsLoopBottlenecksTest(unittest.TestCase):
-    def _log_call(self, store: Store, *, call_id: str, created_at: str) -> None:
+    def _log_call(
+        self,
+        store: Store,
+        *,
+        call_id: str,
+        created_at: str,
+        category: str = "chat",
+        workflow_phase: str = "chat",
+        stream: int = 0,
+        has_tools: bool = False,
+        text_chars: int = 40,
+        input_tokens: int = 10,
+        cost_est_usd: float = 0.001,
+        cost_baseline_usd: float = 0.001,
+    ) -> None:
         store.log_call(
             id=call_id,
             created_at=created_at,
             path="/v1/messages",
             requested_model="claude-sonnet-4-5",
             routed_model="claude-sonnet-4-5",
-            stream=0,
+            stream=stream,
             cache_hit=0,
             status_code=200,
             latency_ms=1,
-            input_tokens_est=10,
+            input_tokens_est=input_tokens,
             output_tokens_est=2,
-            cost_est_usd=0.001,
-            cost_baseline_usd=0.001,
+            actual_input_tokens=input_tokens,
+            actual_output_tokens=2,
+            cost_est_usd=cost_est_usd,
+            cost_baseline_usd=cost_baseline_usd,
             crunch_json=stable_json({"changed": False}),
-            routing_json=stable_json({"reason": "test"}),
-            cache_json=stable_json({"status": "miss"}),
-            category="chat",
+            routing_json=stable_json({
+                "reason": "test",
+                "category": category,
+                "workflow_phase": workflow_phase,
+                "has_tools": has_tools,
+                "text_chars": text_chars,
+            }),
+            cache_json=stable_json({"status": "skipped" if stream else "miss", "reason": "streaming" if stream else "exact-miss"}),
+            category=category,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+            requested_model_family="claude-sonnet",
+            routed_model_family="claude-sonnet",
         )
 
     def _write_stale_cache_canary(self, config_dir: Path) -> None:
@@ -238,6 +265,80 @@ pattern_rules:
             finally:
                 canonical.conn.close()
                 legacy.conn.close()
+
+    def test_canonical_rollup_refresh_clears_missing_rollup_and_zero_crunch_blockers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "tokenclaw.sqlite3"
+            store = Store(str(db))
+            try:
+                for index, cost in enumerate((0.02, 0.03, 0.04), start=1):
+                    self._log_call(
+                        store,
+                        call_id=f"canonical-rollup-source-{index}",
+                        created_at=f"2026-06-21T11:0{index}:00+00:00",
+                        category="tool-result",
+                        workflow_phase="tool-execution",
+                        stream=1,
+                        has_tools=True,
+                        text_chars=24_000,
+                        input_tokens=6_000,
+                        cost_est_usd=cost,
+                        cost_baseline_usd=cost + 0.01,
+                    )
+
+                dry_stdout = io.StringIO()
+                dry_code = cli.request_shape_rollups_cli(
+                    [
+                        "--db",
+                        str(db),
+                        "--limit",
+                        "20",
+                        "--run-id",
+                        "canonical-refresh-dry-run",
+                        "--dry-run",
+                    ],
+                    stdout=dry_stdout,
+                )
+                self.assertEqual(dry_code, 0)
+                dry_report = json.loads(dry_stdout.getvalue())
+                self.assertGreaterEqual(dry_report["summary"]["rollup_count"], 1)
+                self.assertGreaterEqual(dry_report["follow_up_candidates"]["summary"]["ranked_candidate_count"], 1)
+                self.assertGreater(dry_report["crunch_opportunity_dry_run"]["summary"]["rows_considered"], 0)
+                self.assertEqual(store.conn.execute("select count(*) from request_shape_rollups").fetchone()[0], 0)
+                self.assertEqual(store.conn.execute("select count(*) from request_shape_rollup_snapshots").fetchone()[0], 0)
+
+                report = build_savings_loop_bottlenecks_report(
+                    store,
+                    db_path=db,
+                    config_dir=root / "config",
+                    activation_min_source_rows=3,
+                    policy_scan_limit=20,
+                    now=NOW,
+                )
+
+                blockers = {row["blocker_code"] for row in report["rows"] if row.get("blocker_code")}
+                self.assertNotIn("no-request-shape-rollups", blockers)
+                self.assertNotIn("zero-row-crunch-dry-run", blockers)
+                self.assertEqual(report["summary"]["request_shape_rollup_count"], 0)
+                self.assertEqual(report["summary"]["request_shape_rollup_snapshot_count"], 0)
+                self.assertEqual(report["summary"]["request_shape_rollup_refresh_status"], "refreshed")
+                self.assertGreaterEqual(report["summary"]["request_shape_rollup_refresh_rollup_count"], 1)
+                self.assertGreater(report["summary"]["request_shape_rollup_refresh_crunch_dry_run_rows_considered"], 0)
+                self.assertFalse(report["summary"]["zero_row_crunch_dry_run"])
+                self.assertEqual(report["request_shape_rollup_refresh"]["schema"], "tokenclaw.request_shape_rollup_refresh_preflight.v1")
+                self.assertFalse(report["request_shape_rollup_refresh"]["persisted"])
+                self.assertTrue(report["request_shape_rollup_refresh"]["privacy"]["metadata_only"])
+                self.assertTrue(report["request_shape_rollup_refresh"]["privacy"]["aggregate_only"])
+                rendered = json.dumps(report, sort_keys=True)
+                self.assertNotIn(str(db), rendered)
+                self.assertFalse(report["privacy"]["raw_prompts_included"])
+                self.assertFalse(report["privacy"]["provider_bodies_included"])
+                self.assertFalse(report["privacy"]["request_ids_included"])
+                self.assertFalse(report["privacy"]["session_ids_included"])
+                self.assertFalse(report["privacy"]["cache_keys_included"])
+            finally:
+                store.conn.close()
 
     def test_cli_and_dashboard_expose_same_metadata_only_report(self):
         with tempfile.TemporaryDirectory() as tmp:
