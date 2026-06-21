@@ -642,15 +642,41 @@ def _attach_recent_closed_github_issues_for_research(
 
 
 def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> dict[str, Any] | None:
+    if stats is None:
+        stats = {}
     if not isinstance(stats, dict):
         return stats
 
-    db = stats.get("db")
-    if not isinstance(db, str) or not db.strip():
+    db_arg, db_source = _research_db_source(stats)
+    if db_source == "stats-without-db":
         return stats
-    db_arg = db.strip()
-    if not db_arg.startswith(("postgresql://", "postgres://")) and not Path(db_arg).expanduser().exists():
-        return stats
+    if not db_arg:
+        enriched = dict(stats)
+        enriched["request_shape_research_source"] = _research_db_source_report(
+            db_arg=None,
+            source=db_source,
+            status="unavailable",
+            reason="canonical-tokenclaw-db-unconfigured",
+        )
+        enriched.setdefault(
+            "request_shape_rollups",
+            _request_shape_source_unavailable_report("canonical-tokenclaw-db-unconfigured"),
+        )
+        return enriched
+    db_available = db_arg.startswith(("postgresql://", "postgres://")) or Path(db_arg).expanduser().exists()
+    if not db_available:
+        enriched = dict(stats)
+        enriched["request_shape_research_source"] = _research_db_source_report(
+            db_arg=db_arg,
+            source=db_source,
+            status="unavailable",
+            reason="canonical-tokenclaw-db-missing",
+        )
+        enriched.setdefault(
+            "request_shape_rollups",
+            _request_shape_source_unavailable_report("canonical-tokenclaw-db-missing"),
+        )
+        return enriched
 
     try:
         limit = max(1, min(int(os.getenv("TOKENCLAW_RESEARCH_REQUEST_SHAPE_LIMIT", "1000")), 10_000))
@@ -688,6 +714,13 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
         return stats
 
     enriched = dict(stats)
+    enriched["db"] = db_arg
+    enriched["request_shape_research_source"] = _research_db_source_report(
+        db_arg=db_arg,
+        source=db_source,
+        status="available",
+        reason="canonical-tokenclaw-db-selected",
+    )
     store = _open_store_for_db(db_arg)
     try:
         managed_preview_outcomes = (
@@ -786,6 +819,125 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
             pass
 
     return enriched
+
+
+def _research_db_source(stats: dict[str, Any]) -> tuple[str | None, str]:
+    db = stats.get("db")
+    if isinstance(db, str) and db.strip():
+        return db.strip(), "stats-db"
+    if not _stats_need_canonical_db_fallback(stats):
+        return None, "stats-without-db"
+    configured = env("TOKENCLAW_DATABASE_URL") or env("TOKENCLAW_DB")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip(), "environment"
+    default_db = _default_db_path()
+    if isinstance(default_db, str) and default_db.strip():
+        return default_db.strip(), "default-tokenclaw-db"
+    return None, "unconfigured"
+
+
+def _stats_need_canonical_db_fallback(stats: dict[str, Any]) -> bool:
+    if not stats:
+        return True
+    status = str(stats.get("status") or stats.get("stats") or stats.get("error") or "").strip().lower()
+    if status in {"unavailable", "stats-unavailable", "error"}:
+        return True
+    if stats.get("stats_unavailable") is True:
+        return True
+    return False
+
+
+def _research_db_path_class(db_arg: str | None) -> str:
+    if not db_arg:
+        return "unknown"
+    if db_arg.startswith(("postgresql://", "postgres://")):
+        return "configured-postgres-url"
+    expanded = os.path.abspath(os.path.expanduser(db_arg.removeprefix("sqlite:///")))
+    home = os.path.abspath(os.path.expanduser("~"))
+    if expanded.startswith(os.path.join(home, ".tokenclaw") + os.sep):
+        return "local-tokenclaw-home"
+    if expanded.startswith("/tmp/") or expanded.startswith("/var/tmp/"):
+        return "local-temp"
+    return "local-path"
+
+
+def _research_db_source_report(
+    *,
+    db_arg: str | None,
+    source: str,
+    status: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "tokenclaw.request_shape_research_source.v1",
+        "status": status,
+        "reason": reason,
+        "source": source,
+        "db_path_included": False,
+        "db_path_class": _research_db_path_class(db_arg),
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "absolute_paths_included": False,
+            "provider_bodies_included": False,
+            "raw_prompts_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+        },
+    }
+
+
+def _request_shape_source_unavailable_report(reason: str) -> dict[str, Any]:
+    privacy = {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "absolute_paths_included": False,
+        "provider_bodies_included": False,
+        "raw_prompts_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "cache_keys_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
+    follow_up = {
+        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
+        "status": "source-unavailable",
+        "summary": {
+            "rows_considered": 0,
+            "rollup_count": 0,
+            "ranked_candidate_count": 0,
+            "top_next_action": "restore-tokenclaw-db-source",
+            "top_local_action_family": "cohort-ranking",
+            "top_readiness_state": "blocked",
+            "no_source_traffic_reason": reason,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "policy_files_written": False,
+        },
+        "top_candidate": None,
+        "top_blocker_cohort": None,
+        "candidates": [],
+        "blocker_cohorts": [],
+        "missing_measurements": [reason],
+        "privacy": privacy,
+    }
+    return {
+        "schema": "tokenclaw.request_shape_rollups.v1",
+        "status": "source-unavailable",
+        "summary": {
+            "rows_considered": 0,
+            "rollup_count": 0,
+            "follow_up_candidate_count": 0,
+            "top_next_action": "restore-tokenclaw-db-source",
+            "top_local_action_family": "cohort-ranking",
+            "no_source_traffic_reason": reason,
+        },
+        "follow_up_candidates": follow_up,
+        "rollups": [],
+        "privacy": privacy,
+    }
 
 
 def evidence_to_activation_burndown_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:

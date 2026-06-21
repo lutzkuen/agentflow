@@ -12209,6 +12209,118 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         self.assertNotIn("raw response must not leak", rendered)
         self.assertNotIn("raw-session-id-must-not-leak", rendered)
 
+    def test_cli_uses_canonical_tokenclaw_db_when_stats_are_unavailable(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            store = SQLiteStore(db_path)
+            try:
+                store.log_call(
+                    id=str(uuid.uuid4()),
+                    created_at=utc_now(),
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=125,
+                    input_tokens_est=16_000,
+                    output_tokens_est=100,
+                    actual_input_tokens=16_000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.04,
+                    cost_baseline_usd=0.04,
+                    crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+                    routing_json=stable_json(
+                        {
+                            "category": "tool-result",
+                            "workflow_phase": "tool-execution",
+                            "text_chars": 64_000,
+                            "has_tools": True,
+                        }
+                    ),
+                    cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                    error=None,
+                    request_json=stable_json({"prompt": "raw prompt must not leak"}),
+                    response_json=stable_json({"content": "raw response must not leak"}),
+                    session_id="raw-session-id-must-not-leak",
+                    category="tool-result",
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    retry_count=0,
+                    thinking_output_tokens=0,
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    endpoint="messages",
+                    requested_model_family="claude-sonnet",
+                    routed_model_family="claude-sonnet",
+                )
+            finally:
+                store.conn.close()
+
+            issues_path = Path(tmp) / "issues.json"
+            stats_path = Path(tmp) / "stats.json"
+            issues_path.write_text(json.dumps([]), encoding="utf-8")
+            stats_path.write_text(json.dumps({"status": "unavailable"}), encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with patch.dict("os.environ", {"TOKENCLAW_DB": db_path}, clear=False):
+                code = cli.orchestrator_research_cli(
+                    ["--issues-json", str(issues_path), "--stats-json", str(stats_path), "--threshold", "3"],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        stats_summary = payload["evidence"]["stats_summary"]
+        source = stats_summary["request_shape_research_source"]
+        self.assertEqual(source["status"], "available")
+        self.assertEqual(source["source"], "environment")
+        self.assertFalse(source["db_path_included"])
+        signal = stats_summary["request_shape_rollup_candidates"]
+        self.assertEqual(signal["status"], "candidates-ranked")
+        self.assertEqual(signal["summary"]["rows_considered"], 1)
+        self.assertGreaterEqual(signal["summary"]["rollup_count"], 1)
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn(db_path, rendered)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("raw response must not leak", rendered)
+        self.assertNotIn("raw-session-id-must-not-leak", rendered)
+
+    def test_cli_reports_precise_source_reason_when_canonical_db_missing(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "missing-tokenclaw.sqlite3")
+            issues_path = Path(tmp) / "issues.json"
+            stats_path = Path(tmp) / "stats.json"
+            issues_path.write_text(json.dumps([]), encoding="utf-8")
+            stats_path.write_text(json.dumps({"status": "unavailable"}), encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with patch.dict("os.environ", {"TOKENCLAW_DB": db_path}, clear=False):
+                code = cli.orchestrator_research_cli(
+                    ["--issues-json", str(issues_path), "--stats-json", str(stats_path), "--threshold", "3"],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        stats_summary = payload["evidence"]["stats_summary"]
+        source = stats_summary["request_shape_research_source"]
+        self.assertEqual(source["status"], "unavailable")
+        self.assertEqual(source["reason"], "canonical-tokenclaw-db-missing")
+        self.assertFalse(source["db_path_included"])
+        signal = stats_summary["request_shape_rollup_candidates"]
+        self.assertEqual(signal["summary"]["no_source_traffic_reason"], "canonical-tokenclaw-db-missing")
+        self.assertEqual(signal["missing_measurements"], ["canonical-tokenclaw-db-missing"])
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn(db_path, rendered)
+
     def test_cli_rehydrates_request_shape_candidates_from_persisted_snapshot_when_live_rows_empty(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "tokenclaw.sqlite3")

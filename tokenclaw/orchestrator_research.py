@@ -2205,6 +2205,7 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
         "openai_routing_promotion_decision",
         "request_shape_cache_replay_evidence",
         "request_shape_cache_replay_policy_decision",
+        "request_shape_research_source",
         "crunch_savings_signal",
         "request_shape_rollup_candidates",
         "managed_recommendation_health",
