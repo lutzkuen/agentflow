@@ -285,6 +285,8 @@ def _cache_dependency_omission_reason(candidate: dict[str, Any]) -> str | None:
     if gate["status"] == "ready":
         return None
     reason = str(gate.get("reason") or "")
+    if "unsafe" in reason or "unsafe-tool-calls-without-invalidation" in _cache_reason_set(candidate):
+        return "cache-replay-unsafe-dependency"
     if gate.get("safety_outcome") == "stale-risk" or "stale" in reason or "changed" in reason or "invalidated" in reason:
         return "cache-replay-stale-dependency-risk"
     return "cache-replay-missing-invalidation-evidence"

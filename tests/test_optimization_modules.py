@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -752,6 +753,187 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(source_counts["activation_lifecycle_feedback"], 2)
         self.assertFalse(report["privacy"]["raw_prompts_included"])
         self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
+        self._assert_privacy_clean(report)
+
+    def test_promotion_report_collects_cache_and_pattern_canary_evidence_without_unsafe_cache_apply(self):
+        def policy_ref(value: str) -> str:
+            return f"policy:{hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]}"
+
+        def lifecycle_row(rule_id: str, family: str, cohort: str, *, count: int, **metrics):
+            return {
+                "policy_ref": policy_ref(rule_id),
+                "cohort_label": cohort,
+                "action_family": family,
+                "event_count": count,
+                "applied_count": count if cohort == "applied" else 0,
+                "holdout_count": count if cohort == "holdout" else 0,
+                "fallback_count": metrics.get("fallback_count", 0),
+                "error_count": metrics.get("error_count", 0),
+                "retry_count": metrics.get("retry_count", 0),
+                "safety_stop_count": metrics.get("safety_stop_count", 0),
+                "error_rate": metrics.get("error_rate", 0.0),
+                "savings_estimate_usd": metrics.get("savings_estimate_usd", 0.0),
+            }
+
+        plan = {
+            "schema": "tokenclaw.optimization_eval_plan.v1",
+            "plans": [
+                {
+                    "schema": "tokenclaw.optimization_eval_plan_row.v1",
+                    "candidate_id": "safe-cache-promotion-candidate",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "current_canary_count": 0,
+                    "holdout_count": 0,
+                    "sample_count": 10,
+                    "projected_savings_usd": 0.05,
+                    "blocker_reason_codes": [
+                        "insufficient-canary-applied-samples",
+                        "insufficient-canary-holdout-samples",
+                    ],
+                    "evidence": {
+                        "rule_id": "safe-cache-rule",
+                        "dependency_status": "stable",
+                        "canary_evidence": {},
+                    },
+                },
+                {
+                    "schema": "tokenclaw.optimization_eval_plan_row.v1",
+                    "candidate_id": "safe-pattern-promotion-candidate",
+                    "optimization_family": "managed_pattern_candidate",
+                    "action_family": "pattern",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "features_only",
+                    "current_canary_count": 0,
+                    "holdout_count": 0,
+                    "sample_count": 8,
+                    "projected_savings_usd": 0.03,
+                    "blocker_reason_codes": [
+                        "insufficient-canary-applied-samples",
+                        "insufficient-canary-holdout-samples",
+                    ],
+                    "evidence": {
+                        "rule_id": "safe-pattern-rule",
+                    },
+                },
+                {
+                    "schema": "tokenclaw.optimization_eval_plan_row.v1",
+                    "candidate_id": "unsafe-cache-promotion-candidate",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "features_only",
+                    "current_canary_count": 0,
+                    "holdout_count": 0,
+                    "sample_count": 12,
+                    "projected_savings_usd": 0.20,
+                    "blocker_reason_codes": ["unsafe-tool-calls-without-invalidation"],
+                    "evidence": {
+                        "rule_id": "unsafe-cache-rule",
+                        "dependency_status": "unsafe",
+                    },
+                },
+            ],
+        }
+        lifecycle = {
+            "schema": "tokenclaw.activation_staged_lifecycle_feedback_summary.v1",
+            "queue_rows": 4,
+            "family_event_count": 8,
+            "cohort_lifecycle_metadata": [
+                lifecycle_row("safe-cache-rule", "cache", "applied", count=3, retry_count=1, savings_estimate_usd=0.05),
+                lifecycle_row("safe-cache-rule", "cache", "holdout", count=2, fallback_count=1),
+                lifecycle_row("safe-pattern-rule", "pattern", "applied", count=2, savings_estimate_usd=0.03),
+                lifecycle_row("safe-pattern-rule", "pattern", "holdout", count=1),
+                lifecycle_row("unsafe-cache-rule", "cache", "applied", count=1, safety_stop_count=1),
+                lifecycle_row("unsafe-cache-rule", "cache", "holdout", count=1),
+            ],
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "raw_messages_included": False,
+                "request_ids_included": False,
+                "cache_keys_included": False,
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                for candidate_id, family in (
+                    ("safe-cache-promotion-candidate", "cache"),
+                    ("safe-pattern-promotion-candidate", "pattern"),
+                    ("unsafe-cache-promotion-candidate", "cache"),
+                ):
+                    store.log_optimization_eval_result(
+                        id=f"eval-{candidate_id}",
+                        run_id="cache-pattern-canary-evidence",
+                        created_at="2026-06-21T13:45:00+00:00",
+                        candidate_id=candidate_id,
+                        source_surface="anthropic_messages",
+                        optimization_family="cache_replayability" if family == "cache" else "managed_pattern_candidate",
+                        action_family=family,
+                        status_class="pass",
+                        reason_codes_json=stable_json(["offline-fixture-passed"]),
+                        score_json=stable_json({"output_similarity": 0.99, "quality_score": 0.98}),
+                        cost_json=stable_json({"projected_savings_usd": 0.01}),
+                        result_json=stable_json({"status": "pass"}),
+                    )
+                report = build_optimization_promotion_report(
+                    store,
+                    plan=plan,
+                    evidence_reports=[lifecycle],
+                    min_canary_applied_samples=2,
+                    min_canary_holdout_samples=1,
+                )
+            finally:
+                store.conn.close()
+
+        by_candidate = {row["candidate_id"]: row for row in report["candidates"]}
+        safe_cache = by_candidate["safe-cache-promotion-candidate"]
+        safe_pattern = by_candidate["safe-pattern-promotion-candidate"]
+        unsafe_cache = by_candidate["unsafe-cache-promotion-candidate"]
+
+        self.assertEqual(safe_cache["cohort_counts"]["canary_applied"], 3)
+        self.assertEqual(safe_cache["cohort_counts"]["canary_holdout"], 2)
+        self.assertEqual(safe_cache["canary_evidence_summary"]["retry_count"], 1)
+        self.assertEqual(safe_cache["canary_evidence_summary"]["fallback_count"], 1)
+        self.assertEqual(safe_cache["canary_evidence_summary"]["candidate_family"], "cache")
+        self.assertNotIn("insufficient-canary-applied-samples", safe_cache["reason_codes"])
+        self.assertNotIn("insufficient-canary-holdout-samples", safe_cache["reason_codes"])
+
+        self.assertEqual(safe_pattern["cohort_counts"]["canary_applied"], 2)
+        self.assertEqual(safe_pattern["cohort_counts"]["canary_holdout"], 1)
+        self.assertEqual(safe_pattern["canary_evidence_summary"]["candidate_family"], "pattern")
+        self.assertNotIn("insufficient-canary-applied-samples", safe_pattern["reason_codes"])
+        self.assertNotIn("insufficient-canary-holdout-samples", safe_pattern["reason_codes"])
+
+        self.assertEqual(unsafe_cache["cohort_counts"]["canary_applied"], 1)
+        self.assertEqual(unsafe_cache["cohort_counts"]["canary_holdout"], 1)
+        self.assertEqual(unsafe_cache["canary_evidence_summary"]["safety_stop_count"], 1)
+        self.assertEqual(unsafe_cache["cache_replay_safety"]["status"], "blocked")
+        self.assertTrue(unsafe_cache["cache_replay_safety"]["unsafe_or_missing_dependency_blocked"])
+        self.assertFalse(unsafe_cache["cache_replay_safety"]["emits_cache_apply_action"])
+        self.assertEqual(unsafe_cache["cache_replay_safety"]["cache_apply_action_count"], 0)
+        self.assertEqual(unsafe_cache["cache_replay_safety"]["cache_entries_written"], 0)
+
+        actions = build_optimization_promotion_actions(report)
+        unsafe_actions = [
+            item for item in actions["actions"]
+            if item["target_candidate_id"] == "unsafe-cache-promotion-candidate"
+        ]
+        self.assertTrue(all(item["action_type"] == "rollback" for item in unsafe_actions))
+        self.assertFalse(any(item["action_type"] == "widen" for item in unsafe_actions))
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
         self.assertFalse(report["privacy"]["cache_keys_included"])
         self._assert_privacy_clean(report)
 

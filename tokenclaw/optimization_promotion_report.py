@@ -553,6 +553,112 @@ def _promotion_action_family(value: Any) -> str:
     return text or "unknown"
 
 
+def _candidate_family(plan_row: dict[str, Any]) -> str:
+    action_family = _promotion_action_family(plan_row.get("action_family"))
+    optimization_family = str(plan_row.get("optimization_family") or "").strip().lower().replace("-", "_")
+    if action_family == "cache" or "cache" in optimization_family:
+        return "cache"
+    if "pattern" in optimization_family or action_family == "pattern":
+        return "pattern"
+    return action_family
+
+
+def _aggregate_canary_evidence(cohorts: dict[str, Any], *, plan_row: dict[str, Any]) -> dict[str, Any]:
+    applied = cohorts["cohorts"]["canary_applied"]
+    holdout = cohorts["cohorts"]["canary_holdout"]
+    bypassed = cohorts["cohorts"]["bypassed_or_disabled"]
+    fallback_count = (
+        _as_int(applied.get("fallback_count"))
+        + _as_int(holdout.get("fallback_count"))
+        + _as_int(bypassed.get("fallback_count"))
+    )
+    retry_count = (
+        _as_int(applied.get("retry_count"))
+        + _as_int(holdout.get("retry_count"))
+        + _as_int(bypassed.get("retry_count"))
+    )
+    error_count = (
+        _as_int(applied.get("error_count"))
+        + _as_int(holdout.get("error_count"))
+        + _as_int(bypassed.get("error_count"))
+    )
+    safety_stop_count = (
+        _as_int(applied.get("safety_stop_count"))
+        + _as_int(holdout.get("safety_stop_count"))
+        + _as_int(bypassed.get("safety_stop_count"))
+    )
+    applied_count = _as_int(applied.get("count"))
+    holdout_count = _as_int(holdout.get("count"))
+    bypassed_count = _as_int(bypassed.get("count"))
+    return {
+        "schema": "tokenclaw.optimization_promotion_canary_evidence_summary.v1",
+        "candidate_family": _candidate_family(plan_row),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "bypassed_or_disabled_count": bypassed_count,
+        "observed_count": applied_count + holdout_count + bypassed_count,
+        "fallback_count": fallback_count,
+        "retry_count": retry_count,
+        "error_count": error_count,
+        "safety_stop_count": safety_stop_count,
+        "applied_net_savings_usd": _round(applied.get("net_savings_usd"), 8),
+        "holdout_net_savings_usd": _round(holdout.get("net_savings_usd"), 8),
+        "privacy": _privacy_summary(),
+    }
+
+
+def _cache_replay_safety(plan_row: dict[str, Any], reasons: list[str]) -> dict[str, Any] | None:
+    if _candidate_family(plan_row) != "cache":
+        return None
+    evidence = plan_row.get("evidence") if isinstance(plan_row.get("evidence"), dict) else {}
+    reason_set = {str(reason or "").strip().lower().replace("_", "-") for reason in reasons}
+    reason_set.update(
+        str(reason or "").strip().lower().replace("_", "-")
+        for reason in plan_row.get("blocker_reason_codes") or []
+    )
+    for key in (
+        "dependency_status",
+        "file_dependency_status",
+        "dependency_evidence_state",
+        "dependency_evidence_decision",
+    ):
+        value = str(plan_row.get(key) or evidence.get(key) or "").strip().lower().replace("_", "-")
+        if value:
+            reason_set.add(value)
+    unsafe = bool(reason_set & {
+        "unsafe",
+        "unsafe-dependency-evidence",
+        "unsafe-tool-calls-without-invalidation",
+        "stale",
+        "stale-dependency-risk",
+        "missing",
+        "missing-dependency-evidence",
+        "file-dependency-missing",
+        "dependency-missing",
+        "dependency-audit-missing",
+        "dependency-freshness-missing",
+        "file-dependency-changed",
+        "dependency-changed",
+        "file-dependency-invalidated",
+        "stale-dependency-blocker",
+        "cache-replay-unsafe-dependency",
+        "cache-replay-stale-dependency-risk",
+        "cache-replay-missing-dependency-evidence",
+        "cache-replay-missing-safe-invalidation",
+    })
+    return {
+        "schema": "tokenclaw.cache_promotion_replay_safety.v1",
+        "status": "blocked" if unsafe else "eligible-for-evidence-review",
+        "reason_codes": sorted(reason_set),
+        "emits_cache_apply_action": False,
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
+        "policy_files_written": False,
+        "unsafe_or_missing_dependency_blocked": unsafe,
+        "privacy": _privacy_summary(),
+    }
+
+
 def _activation_lifecycle_report_evidence(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     lifecycle = report
     if report.get("schema") != "tokenclaw.activation_staged_lifecycle_feedback_summary.v1":
@@ -692,6 +798,7 @@ def _candidate_row(
         },
         "cohort_metrics": cohorts["cohorts"],
         "applied_vs_holdout_deltas": cohorts["deltas"],
+        "canary_evidence_summary": _aggregate_canary_evidence(cohorts, plan_row=plan_row),
         "eval_evidence": evals,
         "thresholds": thresholds,
         "verdict": verdict,
@@ -699,6 +806,25 @@ def _candidate_row(
         "next_action": next_action,
         "privacy": _privacy_summary(),
     }
+    cache_safety = _cache_replay_safety(plan_row, reasons)
+    if cache_safety is not None:
+        result["cache_replay_safety"] = cache_safety
+        evidence = plan_row.get("evidence") if isinstance(plan_row.get("evidence"), dict) else {}
+        for key in (
+            "dependency_status",
+            "file_dependency_status",
+            "dependency_health",
+            "dependency_gate_status",
+            "requires_dependency_evidence",
+            "safe_invalidation_evidence",
+            "safe_invalidation_required",
+            "file_dependency_evidence_available",
+            "file_dependency_fingerprint_available",
+        ):
+            if key in plan_row and plan_row.get(key) not in (None, ""):
+                result[key] = plan_row.get(key)
+            elif key in evidence and evidence.get(key) not in (None, ""):
+                result[key] = evidence.get(key)
     sources = extra.get("__evidence_sources") if isinstance(extra, dict) and isinstance(extra.get("__evidence_sources"), list) else []
     if sources:
         result["evidence_sources"] = sources
