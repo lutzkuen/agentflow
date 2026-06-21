@@ -222,7 +222,7 @@ def write_activation_config(config: dict[str, Any], config_dir: str | Path | Non
 
 def _config_file_paths_for_profile(profile: dict[str, Any], config_dir: str | Path | None = None) -> list[str]:
     paths = [str(activation_config_path(config_dir))]
-    for key in ("codex_config_path", "env_file_path", "desktop_file_path"):
+    for key in ("codex_config_path", "env_file_path", "systemd_env_file_path", "desktop_file_path"):
         value = profile.get(key)
         if isinstance(value, str) and value:
             paths.append(value)
@@ -259,7 +259,7 @@ def activation_status_from_config(
                     "last_activation_at": raw_profile.get("last_activation_at") or raw_profile.get("updated_at"),
                 }
             )
-            for key in ("codex_config_path", "env_file_path", "desktop_file_path"):
+            for key in ("codex_config_path", "env_file_path", "systemd_env_file_path", "desktop_file_path"):
                 if raw_profile.get(key):
                     status[key] = raw_profile.get(key)
         targets[name] = status
@@ -431,6 +431,7 @@ def claude_vscode_activation_profile(
     *,
     claude_profile: dict[str, Any],
     env_file_path: Path,
+    systemd_env_file_path: Path | None = None,
 ) -> dict[str, Any]:
     profile = {
         "id": "claude-vscode",
@@ -441,6 +442,7 @@ def claude_vscode_activation_profile(
         "local_base_url": str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL),
         "upstream_base_url": str(claude_profile.get("upstream_base_url") or DEFAULT_CLAUDE_UPSTREAM_BASE_URL),
         "env_file_path": str(env_file_path),
+        "systemd_env_file_path": str(systemd_env_file_path) if systemd_env_file_path is not None else None,
         "safe_env": {
             "ANTHROPIC_BASE_URL": str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL),
         },
@@ -448,6 +450,8 @@ def claude_vscode_activation_profile(
         "last_activation_at": utc_now(),
     }
     profile["updated_at"] = profile["last_activation_at"]
+    if profile["systemd_env_file_path"] is None:
+        del profile["systemd_env_file_path"]
     return profile
 
 
@@ -783,8 +787,15 @@ def activate_claude_vscode(
     shell_profile_has_source = _shell_profile_sources_env(existing_shell_profile, env_path)
     shell_profile_append = _shell_profile_append_block(env_path)
     shell_profile_changed = bool(shell_profile and not shell_profile_has_source)
+    systemd_env_path = default_claude_desktop_systemd_env_path()
+    existing_systemd_env = systemd_env_path.read_text(encoding="utf-8") if systemd_env_path.exists() else ""
+    updated_systemd_env, systemd_env_changed = update_claude_desktop_systemd_env_file(existing_systemd_env, local_base_url)
 
-    vscode_profile = claude_vscode_activation_profile(claude_profile=claude_profile, env_file_path=env_path)
+    vscode_profile = claude_vscode_activation_profile(
+        claude_profile=claude_profile,
+        env_file_path=env_path,
+        systemd_env_file_path=systemd_env_path,
+    )
     if shell_profile:
         vscode_profile["shell_profile_path"] = str(shell_profile_path)
     updated_config = apply_activation_profile(config, claude_profile, config_dir=config_dir)
@@ -799,6 +810,9 @@ def activate_claude_vscode(
             shell_profile_path.parent.mkdir(parents=True, exist_ok=True)
             prefix = "" if not existing_shell_profile or existing_shell_profile.endswith("\n") else "\n"
             shell_profile_path.write_text(existing_shell_profile + prefix + shell_profile_append, encoding="utf-8")
+        if systemd_env_changed:
+            systemd_env_path.parent.mkdir(parents=True, exist_ok=True)
+            systemd_env_path.write_text(updated_systemd_env, encoding="utf-8")
         config_path = write_activation_config(updated_config, config_dir)
 
     shell_exports = [f"export ANTHROPIC_BASE_URL={shlex.quote(local_base_url)}"]
@@ -812,6 +826,8 @@ def activate_claude_vscode(
         "config_path": str(config_path),
         "env_file_path": str(env_path),
         "env_file_changed": env_changed,
+        "systemd_env_file_path": str(systemd_env_path),
+        "systemd_env_file_changed": systemd_env_changed,
         "shell_profile_enabled": bool(shell_profile),
         "shell_profile_path": str(shell_profile_path) if shell_profile else None,
         "shell_profile_changed": shell_profile_changed,

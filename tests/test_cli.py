@@ -755,19 +755,25 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_claude_vscode_writes_env_file_and_default_claude_dependency(self):
         with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
             stdout = io.StringIO()
 
-            code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             config_path = Path(tmp) / "activation.json"
             env_path = Path(tmp) / "claude-vscode.env"
+            systemd_env_path = home / ".config" / "environment.d" / "tokenclaw.conf"
             config = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(sorted(config["targets"].keys()), ["claude", "claude-vscode"])
             self.assertEqual(config["targets"]["claude-vscode"]["depends_on"], "claude")
             self.assertEqual(config["targets"]["claude-vscode"]["local_base_url"], "http://127.0.0.1:4000")
             self.assertEqual(config["targets"]["claude-vscode"]["upstream_base_url"], "https://api.anthropic.com")
             self.assertEqual(config["targets"]["claude-vscode"]["env_file_path"], str(env_path))
+            self.assertEqual(config["targets"]["claude-vscode"]["systemd_env_file_path"], str(systemd_env_path))
+            self.assertIn(str(systemd_env_path), config["targets"]["claude-vscode"]["config_file_paths"])
             self.assertEqual(config["targets"]["claude-vscode"]["safe_env"], {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000"})
             self.assertEqual(
                 env_path.read_text(encoding="utf-8"),
@@ -775,14 +781,18 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 "# Keep Claude API keys in your shell or OS secret manager, not in this file.\n"
                 "ANTHROPIC_BASE_URL=http://127.0.0.1:4000\n",
             )
+            self.assertEqual(systemd_env_path.read_text(encoding="utf-8"), "ANTHROPIC_BASE_URL=http://127.0.0.1:4000\n")
             output = stdout.getvalue()
             self.assertIn("Claude VS Code local TokenClaw base URL: http://127.0.0.1:4000", output)
             self.assertIn("Upstream Anthropic base URL used by TokenClaw: https://api.anthropic.com", output)
+            self.assertIn(f"Systemd user env file: {systemd_env_path}", output)
+            self.assertIn("Systemd user env file changed: true", output)
             self.assertIn("Shell profile: skipped", output)
             self.assertIn("Shell profile changed: false", output)
             self.assertIn("Claude target was not configured; created the default Claude activation profile.", output)
             self.assertIn("export ANTHROPIC_BASE_URL=http://127.0.0.1:4000\ncode .", output)
-            self.assertIn("VS Code extensions usually inherit environment variables only from the VS Code process", output)
+            self.assertIn("log out and back in before launching VS Code from the desktop", output)
+            self.assertIn("For terminal-launched VS Code, open a new shell", output)
 
     def test_activate_claude_vscode_appends_shell_profile_source_line(self):
         with TemporaryDirectory() as tmp:
@@ -827,38 +837,74 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_claude_vscode_is_idempotent(self):
         with TemporaryDirectory() as tmp:
-            first = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
-            second_stdout = io.StringIO()
-            second = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=second_stdout)
+            home = Path(tmp) / "home"
+            home.mkdir()
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                first = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
+                second_stdout = io.StringIO()
+                second = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=second_stdout)
 
             self.assertEqual(first, 0)
             self.assertEqual(second, 0)
             self.assertIn("Env file changed: false", second_stdout.getvalue())
+            self.assertIn("Systemd user env file changed: false", second_stdout.getvalue())
             config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
             self.assertEqual(sorted(config["targets"].keys()), ["claude", "claude-vscode"])
 
     def test_activate_claude_vscode_uses_existing_claude_local_base_url(self):
         with TemporaryDirectory() as tmp:
-            cli.tokenclaw_cli(
-                ["activate", "claude", "--config-dir", tmp, "--local-base-url", "http://127.0.0.1:4998"],
-                stdout=io.StringIO(),
-            )
-            stdout = io.StringIO()
-
-            code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
+            home = Path(tmp) / "home"
+            home.mkdir()
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                cli.tokenclaw_cli(
+                    ["activate", "claude", "--config-dir", tmp, "--local-base-url", "http://127.0.0.1:4998"],
+                    stdout=io.StringIO(),
+                )
+                stdout = io.StringIO()
+                code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
             self.assertEqual(config["targets"]["claude-vscode"]["local_base_url"], "http://127.0.0.1:4998")
             self.assertEqual((Path(tmp) / "claude-vscode.env").read_text(encoding="utf-8").splitlines()[-1], "ANTHROPIC_BASE_URL=http://127.0.0.1:4998")
+            self.assertEqual(
+                (home / ".config" / "environment.d" / "tokenclaw.conf").read_text(encoding="utf-8"),
+                "ANTHROPIC_BASE_URL=http://127.0.0.1:4998\n",
+            )
             self.assertIn("Claude VS Code local TokenClaw base URL: http://127.0.0.1:4998", stdout.getvalue())
             self.assertIn("Upstream Anthropic base URL used by TokenClaw: https://api.anthropic.com", stdout.getvalue())
 
+    def test_activate_claude_vscode_updates_existing_systemd_env_file(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            systemd_env_path = home / ".config" / "environment.d" / "tokenclaw.conf"
+            systemd_env_path.parent.mkdir(parents=True)
+            systemd_env_path.write_text("OTHER_KEY=kept\nANTHROPIC_BASE_URL=http://old.example\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                cli.tokenclaw_cli(
+                    ["activate", "claude", "--config-dir", tmp, "--local-base-url", "http://127.0.0.1:4998"],
+                    stdout=io.StringIO(),
+                )
+                stdout = io.StringIO()
+                code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                systemd_env_path.read_text(encoding="utf-8"),
+                "OTHER_KEY=kept\nANTHROPIC_BASE_URL=http://127.0.0.1:4998\n",
+            )
+            self.assertIn("Systemd user env file changed: true", stdout.getvalue())
+
     def test_activate_claude_vscode_alias_claude_code(self):
         with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
             stdout = io.StringIO()
 
-            code = cli.tokenclaw_cli(["activate", "claude-code", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                code = cli.tokenclaw_cli(["activate", "claude-code", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
@@ -878,9 +924,11 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertFalse((Path(tmp) / "activation.json").exists())
             self.assertFalse((Path(tmp) / "claude-vscode.env").exists())
+            self.assertFalse((home / ".config" / "environment.d" / "tokenclaw.conf").exists())
             self.assertFalse(profile.exists())
             self.assertIn("Dry run: would configure TokenClaw target: claude-vscode", stdout.getvalue())
             self.assertIn("Env file changed: true", stdout.getvalue())
+            self.assertIn("Systemd user env file changed: true", stdout.getvalue())
             self.assertIn(f"Shell profile: {profile}", stdout.getvalue())
             self.assertIn("Shell profile changed: true", stdout.getvalue())
             self.assertIn("Shell profile append:\n# TokenClaw\nsource ", stdout.getvalue())
@@ -905,21 +953,25 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_claude_vscode_does_not_persist_secret_env_vars(self):
         with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
             stdout = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
+                    "HOME": str(home),
                     "ANTHROPIC_API_KEY": "sk-ant-secret",
                     "ANTHROPIC_AUTH_TOKEN": "sk-ant-token-secret",
                 },
-                clear=False,
+                clear=True,
             ):
                 code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             activation_raw = (Path(tmp) / "activation.json").read_text(encoding="utf-8")
             env_raw = (Path(tmp) / "claude-vscode.env").read_text(encoding="utf-8")
-            persisted = activation_raw + "\n" + env_raw
+            systemd_env_raw = (home / ".config" / "environment.d" / "tokenclaw.conf").read_text(encoding="utf-8")
+            persisted = activation_raw + "\n" + env_raw + "\n" + systemd_env_raw
             self.assertNotIn("ANTHROPIC_API_KEY", persisted)
             self.assertNotIn("ANTHROPIC_AUTH_TOKEN", persisted)
             self.assertNotIn("sk-ant-secret", persisted)
@@ -1498,10 +1550,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_tokenclaw_doctor_claude_vscode_reports_environment_uncertainty(self):
         with TemporaryDirectory() as tmp:
-            cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
+            home = Path(tmp) / "home"
+            home.mkdir()
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
             stdout = io.StringIO()
 
-            with patch.dict(os.environ, {}, clear=True):
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
                 code = cli.tokenclaw_cli(["doctor", "claude-vscode", "--config-dir", tmp, "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
@@ -1513,10 +1568,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_tokenclaw_doctor_claude_vscode_detects_shell_base_url_mismatch(self):
         with TemporaryDirectory() as tmp:
-            cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
+            home = Path(tmp) / "home"
+            home.mkdir()
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
             stdout = io.StringIO()
 
-            with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}, clear=True):
+            with patch.dict(os.environ, {"HOME": str(home), "ANTHROPIC_BASE_URL": "https://api.anthropic.com"}, clear=True):
                 code = cli.tokenclaw_cli(["doctor", "claude-vscode", "--config-dir", tmp, "--json"], stdout=stdout)
 
         self.assertEqual(code, 1)

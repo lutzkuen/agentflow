@@ -156,6 +156,8 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any], *, brand: str
         stdout.write(f"Upstream Anthropic base URL used by {brand}: {_redact_url(result['upstream_base_url'])}\n")
         stdout.write(f"{brand}-managed non-secret env file: {result['env_file_path']}\n")
         stdout.write(f"Env file changed: {str(result['env_file_changed']).lower()}\n")
+        stdout.write(f"Systemd user env file: {result['systemd_env_file_path']}\n")
+        stdout.write(f"Systemd user env file changed: {str(result['systemd_env_file_changed']).lower()}\n")
         stdout.write(f"Shell profile: {result.get('shell_profile_path') or 'skipped'}\n")
         stdout.write(f"Shell profile changed: {str(result.get('shell_profile_changed')).lower()}\n")
         if result.get("dry_run") and result.get("shell_profile_append"):
@@ -169,8 +171,11 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any], *, brand: str
         stdout.write(f"Run configured proxy: {result['run_command']}\n")
         stdout.write(f"Config file: {result['config_path']}\n")
         stdout.write(
-            "VS Code extensions usually inherit environment variables only from the VS Code process; "
-            "restart VS Code from that terminal if it was opened from the desktop.\n"
+            "GNOME and other graphical launchers read the systemd user env file at login; "
+            "log out and back in before launching VS Code from the desktop.\n"
+        )
+        stdout.write(
+            "For terminal-launched VS Code, open a new shell or source the shell profile before running code .\n"
         )
         stdout.write(f"{brand} does not store or print ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or token values.\n")
         return

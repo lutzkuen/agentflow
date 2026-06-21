@@ -241,9 +241,11 @@ provider/auth settings as machine-local.
 
 `tokenclaw activate claude-vscode` writes a TokenClaw-managed non-secret env file
 for the Claude base URL and adds a `source ~/.tokenclaw/claude-vscode.env` line to
-your shell profile (`~/.zshrc`, `~/.bashrc`, or `~/.profile`). It does not write
-`ANTHROPIC_API_KEY` or token values. Use `--no-shell-profile` if you manage shell
-startup files yourself.
+your shell profile (`~/.zshrc`, `~/.bashrc`, or `~/.profile`). On Linux desktops
+it also writes `~/.config/environment.d/tokenclaw.conf` so VS Code launched from
+GNOME or another graphical launcher can inherit `ANTHROPIC_BASE_URL` after your
+next login. It does not write `ANTHROPIC_API_KEY` or token values. Use
+`--no-shell-profile` if you manage shell startup files yourself.
 
 ```bash
 tokenclaw activate claude-vscode
@@ -264,9 +266,9 @@ export ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_API_KEY"
 code .
 ```
 
-If your extension does not inherit shell environment variables, configure the
-same variables in that extension's environment/wrapper. Keep secrets in your
-user environment, not in repository files.
+For VS Code launched from a graphical desktop, log out and back in before
+launching it from the desktop environment. Keep secrets in your user
+environment, not in repository files.
 
 ## Claude Desktop on Linux
 
