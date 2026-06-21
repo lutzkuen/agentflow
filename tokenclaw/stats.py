@@ -46,6 +46,7 @@ from tokenclaw.recommendations import (
     pattern_decision_summaries,
 )
 from tokenclaw.routing_experiments import build_post_fix_shadow_yield_report, build_routing_experiment_report
+from tokenclaw.savings_loop_bottlenecks import build_savings_loop_bottlenecks_report
 from tokenclaw.session_phase_memory import build_session_phase_memory
 from tokenclaw.store import utc_now
 
@@ -18251,6 +18252,13 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     active_crunch_rule_coverage = _active_crunch_rule_coverage()
     activation_burndown = await stats_local_activation_next_action_queue(limit=5, store_obj=store_obj)
     activation_successor_queue_health = build_activation_successor_queue_health(limit=5)
+    savings_loop_bottlenecks = build_savings_loop_bottlenecks_report(
+        store_obj,
+        db_path=getattr(store_obj, "path", None),
+        config_dir=os.getenv("TOKENCLAW_CONFIG_DIR") or os.getenv("TOKENCLAW_POLICY_CONFIG_DIR"),
+        activation_burndown=activation_burndown,
+        policy_scan_limit=1000,
+    )
 
     def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -19062,9 +19070,11 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "routing_experiment_promotion_reason_counts": routing_experiment_report_summary["promotion_reason_counts"],
             "routing_experiment_promotion_ready_candidates": routing_experiment_report_summary["promotion_ready_candidates"],
             "activation_burndown": activation_burndown.get("summary", {}),
+            "savings_loop_bottlenecks": savings_loop_bottlenecks.get("summary", {}),
             "activation_successor_queue_health": activation_successor_queue_health.get("summary", {}),
             "managed_preview_coverage": (activation_burndown.get("managed_preview_coverage") or {}).get("summary", {}),
         },
+        "savings_loop_bottlenecks": savings_loop_bottlenecks,
         "activation_burndown": activation_burndown,
         "activation_successor_queue_health": activation_successor_queue_health,
         "managed_preview_coverage": activation_burndown.get("managed_preview_coverage"),
@@ -21497,6 +21507,7 @@ def dashboard_html() -> str:
   .card .value{font-size:22px;font-weight:600;color:#f0f6fc}
   .card .sub{color:#8b949e;font-size:11px;line-height:1.35;margin-top:3px}
   .card.green .value{color:#3fb950}
+  .card.amber .value{color:#f0883e}
   .card.yellow .value{color:#d29922}
   .card.blue .value{color:#58a6ff}
   .product-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 18px}
@@ -21579,6 +21590,7 @@ def dashboard_html() -> str:
   <div class="card"><div class="label">Tokens today</div><div class="value" id="c-tokens-today">—</div><div class="sub" id="c-tokens-sub">— provider split</div><div class="sub" id="c-tokens-codex">— Codex telemetry</div></div>
   <div class="card"><div class="label">Calculated spend</div><div class="value" id="c-spend">—</div><div class="sub" id="c-spend-sub">— total</div></div>
   <div class="card green"><div class="label">Savings</div><div class="value" id="c-savings">—</div><div class="sub" id="c-savings-sub">— buckets</div></div>
+  <div class="card amber"><div class="label">Savings loop</div><div class="value" id="c-savings-loop">—</div><div class="sub" id="c-savings-loop-action">— next action</div><div class="sub" id="c-savings-loop-evidence">— evidence</div></div>
   <div class="card"><div class="label">Activation bottleneck</div><div class="value" id="c-activation-bottleneck">—</div><div class="sub" id="c-activation-action">— next action</div><div class="sub" id="c-activation-savings">— projected savings</div></div>
   <div class="card blue"><div class="label">Errors today</div><div class="value" id="c-health">—</div><div class="sub" id="c-health-sub">— latency</div><div class="sub" id="c-health-cooldown">— cooldowns</div></div>
 </div>
@@ -21778,6 +21790,17 @@ def dashboard_html() -> str:
 </div>
 
 <div class="tab-panel active" id="tab-activity">
+<div class="section">
+  <h2>Savings loop stalled</h2>
+  <div class="table-wrap">
+  <table class="activity-table" data-table-id="savings-loop-bottlenecks" data-filter-label="Filter savings loop bottlenecks">
+    <thead><tr>
+      <th data-sort-type="text">Signal</th><th data-sort-type="text">Status</th><th data-sort-type="text">Why stalled</th><th data-sort-type="text">Operator action</th><th data-sort-type="text">Command</th><th data-sort-type="number">Rows</th><th data-sort-type="number">Age</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="savings-loop-bottlenecks-tbody"></tbody>
+  </table>
+  </div>
+</div>
 <div class="section">
   <h2>Activation bottlenecks</h2>
   <div class="table-wrap">
@@ -23728,6 +23751,7 @@ async function refresh(){
     document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??tokenclawBuckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??tokenclawBuckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??tokenclawBuckets.exact_local_cache_usd??0,4);
     document.getElementById('c-health').textContent=(health.errors_today??health.errors??0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
+    renderSavingsLoopBottlenecks(d);
     renderActivationBottleneckCard(d);
     renderActivationBurndown(d);
 
@@ -25844,6 +25868,46 @@ function evidenceActivationPrivacyBadges(privacy){
     privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>',
     privacy.absolute_paths_included?'<span class="badge err">absolute paths</span>':'<span class="badge hit">paths omitted</span>'
   ].join(' ');
+}
+function savingsLoopStatusBadge(status){
+  if(status==='clear'||status==='alive')return'hit';
+  if(status==='blocked'||status==='stalled')return'err';
+  if(status==='unavailable')return'miss';
+  return'provider';
+}
+function renderSavingsLoopBottlenecks(d){
+  const report=d.savings_loop_bottlenecks||{};
+  const summary=report.summary||{};
+  const rows=report.rows||[];
+  const status=report.status||summary.top_status||'unknown';
+  const topCommand=summary.top_command||'none';
+  const sourceRows=summary.source_traffic_rows||0;
+  const stranded=summary.stranded_legacy_rows||0;
+  const rollups=summary.request_shape_rollup_count||0;
+  const stalePolicies=summary.stale_policy_rule_count||0;
+  const card=document.getElementById('c-savings-loop');
+  if(card){
+    card.textContent=status;
+    document.getElementById('c-savings-loop-action').textContent=`${summary.top_blocker_code||'none'} · ${topCommand}`;
+    document.getElementById('c-savings-loop-evidence').textContent=`source ${sourceRows.toLocaleString()} · stranded ${stranded.toLocaleString()} · rollups ${rollups.toLocaleString()} · stale policies ${stalePolicies.toLocaleString()}`;
+  }
+  const target=document.getElementById('savings-loop-bottlenecks-tbody');
+  if(!target)return;
+  target.innerHTML=rows.map(row=>{
+    const metrics=row.metrics||{};
+    const count=metrics.active_window_rows??metrics.stranded_legacy_rows??metrics.request_shape_rollup_count??metrics.stale_zero_traffic_rule_count??metrics.sample_count??'—';
+    const age=metrics.newest_evidence_age_hours??metrics.age_hours??'—';
+    return `<tr>
+      <td><span class="badge provider">${esc(row.kind||'unknown')}</span><div class="sub">${esc(row.blocker_code||'no blocker')}</div></td>
+      <td><span class="badge ${savingsLoopStatusBadge(row.status)}">${esc(row.status||'unknown')}</span></td>
+      <td class="flags">${esc(row.why||'—')}</td>
+      <td class="flags">${esc(row.operator_action||'—')}</td>
+      <td class="model">${esc(row.command||'none')}</td>
+      <td class="tokens">${typeof count==='number'?count.toLocaleString():esc(count)}</td>
+      <td class="tokens">${typeof age==='number'?age.toLocaleString()+'h':esc(age)}</td>
+      <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||{})}</td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="8" style="color:#8b949e">No savings-loop bottlenecks available</td></tr>';
 }
 function renderActivationBottleneckCard(d){
   const health=d.activation_successor_queue_health||{};

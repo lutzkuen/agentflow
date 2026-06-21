@@ -20,6 +20,7 @@ from tokenclaw.cli_common import (
     default_config_dir as _default_config_dir,
     default_db_path as _default_db_path,
     is_loopback_url as _is_loopback_url,
+    open_metadata_report_store_for_db as _open_metadata_report_store_for_db,
     open_store_for_db as _open_store_for_db,
     redact_secret as _redact_secret,
     write_json as _write_json,
@@ -410,6 +411,56 @@ def db_adopt_legacy_cli(argv: Sequence[str] | None = None, *, stdout: Any = None
     else:
         _write_json(stream, result)
     return 0 if result.get("ok") else 1
+
+
+def savings_loop_bottlenecks_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report local savings-loop stall bottlenecks from metadata-only evidence")
+    parser.add_argument(
+        "--db",
+        default=_default_db_path(),
+        help="Canonical TokenClaw SQLite DB path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
+    )
+    parser.add_argument(
+        "--legacy-db",
+        default=None,
+        help="Legacy AgentFlow SQLite DB path, default: sibling agentflow.sqlite3 next to the canonical DB.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR") or os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory containing local policy rule files, default: TOKENCLAW_CONFIG_DIR, TOKENCLAW_POLICY_CONFIG_DIR, or ~/.tokenclaw.",
+    )
+    parser.add_argument("--active-window-hours", type=float, default=24.0, help="Source traffic window, default: 24.")
+    parser.add_argument("--activation-min-source-rows", type=int, default=10, help="Minimum source rows before activation is considered alive, default: 10.")
+    parser.add_argument("--rollup-max-age-hours", type=float, default=72.0, help="Maximum rollup/snapshot evidence age, default: 72.")
+    parser.add_argument("--policy-max-age-hours", type=float, default=72.0, help="Maximum staged policy evidence age, default: 72.")
+    parser.add_argument("--policy-scan-limit", type=int, default=1000, help="Bounded recent metadata rows to inspect for policy traffic, default: 1000.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    args = parser.parse_args(argv)
+
+    from tokenclaw.savings_loop_bottlenecks import build_savings_loop_bottlenecks_report
+
+    stream = stdout or sys.stdout
+    store = _open_metadata_report_store_for_db(str(args.db))
+    try:
+        result = build_savings_loop_bottlenecks_report(
+            store,
+            db_path=str(args.db),
+            legacy_db=str(args.legacy_db) if args.legacy_db else None,
+            config_dir=args.config_dir,
+            active_window_hours=args.active_window_hours,
+            activation_min_source_rows=args.activation_min_source_rows,
+            rollup_max_age_hours=args.rollup_max_age_hours,
+            policy_max_age_hours=args.policy_max_age_hours,
+            policy_scan_limit=args.policy_scan_limit,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stream.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, result)
+    return 0
 
 
 
@@ -1931,6 +1982,10 @@ def sqlite_maintenance_main() -> None:
 
 def db_adopt_legacy_main() -> None:
     raise SystemExit(db_adopt_legacy_cli())
+
+
+def savings_loop_bottlenecks_main() -> None:
+    raise SystemExit(savings_loop_bottlenecks_cli())
 
 
 def orchestrator_research_main() -> None:

@@ -105,3 +105,15 @@ def open_store_for_db(db_arg: str) -> Any:
             os.environ.pop("TOKENCLAW_DATABASE_URL", None)
         else:
             os.environ["TOKENCLAW_DATABASE_URL"] = old_database_url
+
+
+def open_metadata_report_store_for_db(db_arg: str) -> Any:
+    old_warning = os.environ.get("TOKENCLAW_LEGACY_DB_WARNING")
+    try:
+        os.environ["TOKENCLAW_LEGACY_DB_WARNING"] = "0"
+        return open_store_for_db(db_arg)
+    finally:
+        if old_warning is None:
+            os.environ.pop("TOKENCLAW_LEGACY_DB_WARNING", None)
+        else:
+            os.environ["TOKENCLAW_LEGACY_DB_WARNING"] = old_warning

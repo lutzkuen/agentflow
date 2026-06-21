@@ -17,6 +17,7 @@ from tokenclaw.cli_common import (
     default_db_path,
     default_stats_url,
     is_loopback_url as _is_loopback_url,
+    open_metadata_report_store_for_db,
     open_store_for_db as _open_store_for_db,
     write_json as _write_json,
 )
@@ -487,6 +488,37 @@ def _onboarding_cli(
         default=argparse.SUPPRESS,
         help=config_help,
     )
+    savings_loop_parser = savings_subparsers.add_parser(
+        "loop-bottlenecks",
+        help="Report source-traffic, legacy DB, rollup freshness, and stale-policy blockers.",
+    )
+    savings_loop_parser.add_argument(
+        "--db",
+        default=None,
+        help="Canonical TokenClaw SQLite DB path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
+    )
+    savings_loop_parser.add_argument(
+        "--legacy-db",
+        default=None,
+        help="Legacy AgentFlow SQLite DB path, default: sibling agentflow.sqlite3 next to the canonical DB.",
+    )
+    savings_loop_parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Bounded recent metadata rows to inspect for policy traffic, default: 1000.",
+    )
+    savings_loop_parser.add_argument("--active-window-hours", type=float, default=24.0, help="Source traffic window, default: 24.")
+    savings_loop_parser.add_argument("--activation-min-source-rows", type=int, default=10, help="Minimum source rows before activation is considered alive, default: 10.")
+    savings_loop_parser.add_argument("--rollup-max-age-hours", type=float, default=72.0, help="Maximum rollup/snapshot evidence age, default: 72.")
+    savings_loop_parser.add_argument("--policy-max-age-hours", type=float, default=72.0, help="Maximum staged policy evidence age, default: 72.")
+    savings_loop_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    savings_loop_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    savings_loop_parser.add_argument(
+        "--config-dir",
+        default=argparse.SUPPRESS,
+        help=config_help,
+    )
 
     demo_parser = subparsers.add_parser(
         "demo",
@@ -688,6 +720,31 @@ def _onboarding_cli(
             return 0 if result.get("ok") else 1
 
     if args.command == "savings":
+        if args.savings_command == "loop-bottlenecks":
+            from tokenclaw.savings_loop_bottlenecks import build_savings_loop_bottlenecks_report
+
+            db_path = getattr(args, "db", None) or default_db_path()
+            store = open_metadata_report_store_for_db(db_path)
+            try:
+                result = build_savings_loop_bottlenecks_report(
+                    store,
+                    db_path=db_path,
+                    legacy_db=getattr(args, "legacy_db", None),
+                    config_dir=args.config_dir,
+                    active_window_hours=float(args.active_window_hours),
+                    activation_min_source_rows=int(args.activation_min_source_rows),
+                    rollup_max_age_hours=float(args.rollup_max_age_hours),
+                    policy_max_age_hours=float(args.policy_max_age_hours),
+                    policy_scan_limit=int(args.limit),
+                )
+            finally:
+                store.conn.close()
+            if args.pretty:
+                stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+            else:
+                _write_json(stdout, result)
+            return 0
+
         from tokenclaw.savings_report import build_savings_report
 
         try:
