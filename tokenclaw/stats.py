@@ -20761,6 +20761,260 @@ def _public_local_activation_queue_summary(summary: dict[str, Any], entry_count:
     return public
 
 
+def _activation_successor_health_empty(
+    *,
+    status: str,
+    status_reason: str,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.activation_successor_queue_health.v1",
+        "generated_at": utc_now(),
+        "status": status,
+        "status_reason": status_reason,
+        "source": source,
+        "summary": {
+            "queued_action_count": 0,
+            "successor_action_count": 0,
+            "successor_decision_count": 0,
+            "top_local_action_family": None,
+            "top_state": None,
+            "top_status": None,
+            "top_next_action": None,
+            "top_blocker": None,
+            "top_blocker_codes": [],
+            "top_preview_verification_status": None,
+            "top_preview_verification_decision": None,
+            "top_projected_savings_usd": 0.0,
+            "top_realized_savings_usd": 0.0,
+            "total_projected_savings_usd": 0.0,
+            "total_realized_savings_usd": 0.0,
+            "latest_preview_age_hours": None,
+            "local_action_family_counts": [],
+            "status_counts": [],
+            "preview_gate_status_counts": [],
+            "preview_gate_decision_counts": [],
+            "blocker_counts": [],
+            "next_action_counts": [],
+        },
+        "top_entries": [],
+        "privacy": _local_activation_queue_privacy(),
+    }
+
+
+def _count_activation_values(rows: list[dict[str, Any]], *keys: str) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        for key in keys:
+            value = row.get(key)
+            if isinstance(value, list):
+                counted = False
+                for item in value:
+                    text = str(item or "").strip()
+                    if text:
+                        counts[text] = counts.get(text, 0) + 1
+                        counted = True
+                if counted:
+                    break
+                continue
+            text = str(value or "").strip()
+            if text:
+                counts[text] = counts.get(text, 0) + 1
+                break
+    return _breakdown_from_counts(counts)
+
+
+def _activation_successor_preview_gate(row: dict[str, Any]) -> dict[str, Any]:
+    gate = row.get("managed_preview_gate") if isinstance(row.get("managed_preview_gate"), dict) else {}
+    health_gate = gate.get("health_gate") if isinstance(gate.get("health_gate"), dict) else {}
+    return {
+        "status": row.get("preview_verification_status")
+        or gate.get("status")
+        or health_gate.get("status"),
+        "decision": row.get("preview_verification_decision")
+        or gate.get("decision"),
+        "latest_preview_age_hours": row.get("latest_preview_age_hours")
+        if row.get("latest_preview_age_hours") is not None
+        else health_gate.get("latest_preview_age_hours"),
+    }
+
+
+def _activation_successor_top_entry(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return sorted(rows, key=lambda row: (_as_int(row.get("rank")) or 9999, _as_int(row.get("ledger_rank")) or 9999))[0]
+
+
+def _public_activation_successor_health_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    gate = _activation_successor_preview_gate(entry)
+    blocker_codes = entry.get("blocker_codes") if isinstance(entry.get("blocker_codes"), list) else []
+    public = {
+        "rank": _as_int(entry.get("rank")),
+        "ledger_rank": _as_int(entry.get("ledger_rank")),
+        "local_action_family": public_label(entry.get("local_action_family") or entry.get("lever") or "unknown", "unknown"),
+        "state": public_label(entry.get("state") or "", ""),
+        "current_status": public_label(entry.get("current_status") or entry.get("successor_status") or "", ""),
+        "next_action": public_label(
+            entry.get("next_action") or entry.get("recommended_next_action") or "",
+            "",
+        ),
+        "top_blocker": public_label(
+            blocker_codes[0] if blocker_codes else entry.get("unblock_reason") or "",
+            "",
+        ),
+        "blocker_codes": [public_label(code, "unknown") for code in blocker_codes],
+        "preview_verification_status": public_label(gate.get("status") or "", ""),
+        "preview_verification_decision": public_label(gate.get("decision") or "", ""),
+        "latest_preview_age_hours": gate.get("latest_preview_age_hours"),
+        "projected_savings_usd": round(_as_float(entry.get("projected_savings_usd") or entry.get("projected_saved_usd")), 8),
+        "realized_savings_usd": round(_as_float(entry.get("realized_savings_usd") or entry.get("actual_saved_cost_usd")), 8),
+        "sample_count": _as_int(entry.get("sample_count")),
+    }
+    return {key: value for key, value in public.items() if value not in (None, "", [])}
+
+
+def _activation_successor_health_from_queue(
+    queue: dict[str, Any],
+    *,
+    source: dict[str, Any],
+    plan_generated_at: Any = None,
+    limit: int = 5,
+) -> dict[str, Any]:
+    entries = [row for row in queue.get("entries") or [] if isinstance(row, dict)]
+    successor_actions = [row for row in queue.get("successor_actions") or [] if isinstance(row, dict)]
+    successor_decisions = [row for row in queue.get("successor_decisions") or [] if isinstance(row, dict)]
+    rows = entries or successor_actions
+    summary = queue.get("summary") if isinstance(queue.get("summary"), dict) else {}
+    top = _activation_successor_top_entry(rows)
+    top_gate = _activation_successor_preview_gate(top or {})
+    top_blocker_codes = top.get("blocker_codes") if isinstance(top, dict) and isinstance(top.get("blocker_codes"), list) else []
+    preview_ages = [
+        _as_float(_activation_successor_preview_gate(row).get("latest_preview_age_hours"))
+        for row in rows
+        if _activation_successor_preview_gate(row).get("latest_preview_age_hours") is not None
+    ]
+    gate_status_counts = summary.get("preview_gate_status_counts")
+    if not isinstance(gate_status_counts, list):
+        gate_status_counts = _count_activation_values(
+            [{**row, **_activation_successor_preview_gate(row)} for row in rows],
+            "status",
+        )
+    gate_decision_counts = summary.get("preview_gate_decision_counts")
+    if not isinstance(gate_decision_counts, list):
+        gate_decision_counts = _count_activation_values(
+            [{**row, **_activation_successor_preview_gate(row)} for row in rows],
+            "decision",
+        )
+    capped = max(1, min(int(limit or 5), 20))
+    return {
+        "schema": "agentflow.activation_successor_queue_health.v1",
+        "generated_at": utc_now(),
+        "status": "ranked" if rows else "empty",
+        "status_reason": "latest local activation successor queue health loaded" if rows else "latest queue has no entries",
+        "queue_schema": queue.get("schema"),
+        "queue_status": queue.get("status"),
+        "source_schema": queue.get("source_schema"),
+        "source": {**source, "plan_generated_at": plan_generated_at},
+        "summary": {
+            "queued_action_count": _as_int(summary.get("queued_action_count")) or len(entries),
+            "successor_action_count": _as_int(summary.get("successor_action_count")) or len(successor_actions),
+            "successor_decision_count": _as_int(summary.get("successor_decision_count")) or len(successor_decisions),
+            "top_local_action_family": public_label(
+                (top or {}).get("local_action_family") or (top or {}).get("lever") or summary.get("top_lever") or "",
+                "",
+            ),
+            "top_state": public_label((top or {}).get("state") or summary.get("top_state") or "", ""),
+            "top_status": public_label(
+                (top or {}).get("current_status") or (top or {}).get("successor_status") or summary.get("top_current_status") or "",
+                "",
+            ),
+            "top_next_action": public_label(
+                (top or {}).get("next_action") or (top or {}).get("recommended_next_action") or summary.get("top_next_action") or "",
+                "",
+            ),
+            "top_blocker": public_label(
+                top_blocker_codes[0] if top_blocker_codes else (top or {}).get("unblock_reason") or summary.get("top_unblock_reason") or "",
+                "",
+            ),
+            "top_blocker_codes": [public_label(code, "unknown") for code in top_blocker_codes],
+            "top_preview_verification_status": public_label(top_gate.get("status") or "", ""),
+            "top_preview_verification_decision": public_label(top_gate.get("decision") or "", ""),
+            "top_projected_savings_usd": round(
+                _as_float(summary.get("top_projected_savings_usd") or (top or {}).get("projected_savings_usd") or (top or {}).get("projected_saved_usd")),
+                8,
+            ),
+            "top_realized_savings_usd": round(
+                _as_float(summary.get("top_realized_savings_usd") or (top or {}).get("realized_savings_usd") or (top or {}).get("actual_saved_cost_usd")),
+                8,
+            ),
+            "total_projected_savings_usd": round(_as_float(summary.get("total_projected_savings_usd")), 8),
+            "total_realized_savings_usd": round(_as_float(summary.get("total_realized_savings_usd")), 8),
+            "latest_preview_age_hours": min(preview_ages) if preview_ages else None,
+            "local_action_family_counts": _count_activation_values(rows, "local_action_family", "lever"),
+            "status_counts": summary.get("status_counts") if isinstance(summary.get("status_counts"), list) else _count_activation_values(rows, "current_status", "successor_status", "state"),
+            "preview_gate_status_counts": gate_status_counts,
+            "preview_gate_decision_counts": gate_decision_counts,
+            "blocker_counts": _count_activation_values(rows, "blocker_codes", "unblock_reason"),
+            "next_action_counts": _count_activation_values(rows, "next_action", "recommended_next_action"),
+        },
+        "top_entries": [_public_activation_successor_health_entry(row) for row in rows[:capped]],
+        "privacy": _local_activation_queue_privacy(queue.get("privacy") if isinstance(queue.get("privacy"), dict) else {}),
+    }
+
+
+def build_activation_successor_queue_health(limit: int = 5) -> dict[str, Any]:
+    path = _evidence_to_activation_plan_path()
+    source: dict[str, Any] = {
+        "kind": "orchestrator-research-plan",
+        "configured": any(os.getenv(name) for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON")),
+        "path_class": _local_path_class(path),
+        "path_included": False,
+        "available": False,
+    }
+    try:
+        stat = path.stat()
+        source.update(
+            {
+                "available": True,
+                "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "size_bytes": stat.st_size,
+            }
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return _activation_successor_health_empty(
+            status="unavailable",
+            status_reason="latest research plan artifact was not found",
+            source=source,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        source["available"] = bool(path.exists())
+        return _activation_successor_health_empty(
+            status="invalid-artifact",
+            status_reason=f"latest research plan artifact could not be read: {type(exc).__name__}",
+            source=source,
+        )
+    if not isinstance(payload, dict):
+        return _activation_successor_health_empty(
+            status="invalid-artifact",
+            status_reason="latest research plan artifact is not a JSON object",
+            source=source,
+        )
+    queue = _extract_local_activation_queue_from_plan(payload)
+    if not isinstance(queue, dict):
+        return _activation_successor_health_empty(
+            status="no-queue",
+            status_reason="latest research plan does not contain a local activation next-action queue",
+            source={**source, "plan_generated_at": payload.get("generated_at")},
+        )
+    return _activation_successor_health_from_queue(
+        queue,
+        source=source,
+        plan_generated_at=payload.get("generated_at"),
+        limit=limit,
+    )
+
+
 def _activation_public_ref(value: Any, *, prefix: str) -> str | None:
     text = str(value or "").strip()
     if not text:

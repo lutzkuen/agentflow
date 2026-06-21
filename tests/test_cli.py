@@ -543,6 +543,189 @@ class AgentflowActivationCliTests(unittest.TestCase):
         for field in ("status", "configured", "local_base_url", "health_url", "upstream_base_url", "reasons"):
             self.assertIn(field, status)
 
+    def test_stats_json_includes_activation_successor_queue_health(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "config"
+            plan_path = Path(tmp) / "latest.plan.json"
+            config_dir.mkdir()
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "agentflow.orchestrator_research_plan.v1",
+                        "generated_at": "2026-06-20T22:40:11+00:00",
+                        "evidence": {
+                            "stats_summary": {
+                                "local_activation_next_action_queue": {
+                                    "schema": "agentflow.local_activation_next_action_queue.v1",
+                                    "status": "ranked",
+                                    "source_schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                                    "summary": {
+                                        "queued_action_count": 2,
+                                        "successor_action_count": 2,
+                                        "successor_decision_count": 2,
+                                        "top_projected_savings_usd": 0.075373,
+                                        "total_projected_savings_usd": 0.075373,
+                                        "preview_gate_status_counts": [
+                                            {"value": "no-data-preview-health", "count": 1},
+                                            {"value": "missing-preview", "count": 1},
+                                        ],
+                                        "preview_gate_decision_counts": [
+                                            {"value": "keep-blocked", "count": 1},
+                                            {"value": "preview-optional", "count": 1},
+                                        ],
+                                    },
+                                    "entries": [
+                                        {
+                                            "rank": 1,
+                                            "ledger_rank": 2,
+                                            "lever": "cache",
+                                            "local_action_family": "cache",
+                                            "state": "blocked",
+                                            "current_status": "blocked",
+                                            "next_action": "collect-cache-replay-canary-traffic",
+                                            "blocker_codes": ["evidence-older-than-max-age"],
+                                            "projected_savings_usd": 0.075373,
+                                            "sample_count": 36,
+                                            "managed_preview_gate": {
+                                                "status": "no-data-preview-health",
+                                                "decision": "keep-blocked",
+                                                "health_gate": {"latest_preview_age_hours": 119.562},
+                                            },
+                                            "raw_prompt": "raw prompt must not leak",
+                                            "request_id": "req-health-secret",
+                                            "session_id": "sess-health-secret",
+                                            "cache_key": "cache-health-secret",
+                                            "file_path": "/tmp/secret-health-project/file.py",
+                                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                                        },
+                                        {
+                                            "rank": 2,
+                                            "lever": "request-shape-rollups",
+                                            "local_action_family": "cohort-ranking",
+                                            "state": "missing-evidence",
+                                            "current_status": "blocked",
+                                            "next_action": "emit-request-shape-rollups",
+                                            "blocker_codes": ["ranked_request_shape_rollup"],
+                                            "managed_preview_gate": {
+                                                "status": "missing-preview",
+                                                "decision": "preview-optional",
+                                            },
+                                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                                        },
+                                    ],
+                                    "privacy": {
+                                        "metadata_only": True,
+                                        "aggregate_only": True,
+                                        "raw_prompts_included": False,
+                                        "provider_bodies_included": False,
+                                        "absolute_paths_included": False,
+                                        "request_ids_included": False,
+                                        "session_ids_included": False,
+                                        "cache_keys_included": False,
+                                        "individual_candidate_ids_included": False,
+                                    },
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cli.agentflow_cli(["activate", "openai", "--config-dir", str(config_dir)], stdout=io.StringIO())
+            stdout = io.StringIO()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path),
+                },
+                clear=False,
+            ):
+                code = cli.agentflow_cli(["stats", "--config-dir", str(config_dir), "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        health = result["activation_successor_queue_health"]
+        self.assertEqual(health["schema"], "agentflow.activation_successor_queue_health.v1")
+        self.assertEqual(health["status"], "ranked")
+        self.assertEqual(health["summary"]["top_blocker"], "evidence-older-than-max-age")
+        self.assertEqual(health["summary"]["top_next_action"], "collect-cache-replay-canary-traffic")
+        self.assertEqual(health["summary"]["top_projected_savings_usd"], 0.075373)
+        self.assertIn({"value": "no-data-preview-health", "count": 1}, health["summary"]["preview_gate_status_counts"])
+        self.assertIn({"value": "ranked_request_shape_rollup", "count": 1}, health["summary"]["blocker_counts"])
+        self.assertFalse(health["privacy"]["raw_prompts_included"])
+        self.assertFalse(health["privacy"]["provider_bodies_included"])
+        self.assertFalse(health["privacy"]["absolute_paths_included"])
+        self.assertFalse(health["privacy"]["request_ids_included"])
+        self.assertFalse(health["privacy"]["session_ids_included"])
+        self.assertFalse(health["privacy"]["cache_keys_included"])
+        self.assertFalse(health["privacy"]["individual_candidate_ids_included"])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn(str(plan_path), rendered)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("req-health-secret", rendered)
+        self.assertNotIn("sess-health-secret", rendered)
+        self.assertNotIn("cache-health-secret", rendered)
+        self.assertNotIn("/tmp/secret-health-project/file.py", rendered)
+
+    def test_doctor_json_includes_activation_successor_queue_health(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "config"
+            plan_path = Path(tmp) / "latest.plan.json"
+            config_dir.mkdir()
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "agentflow.orchestrator_research_plan.v1",
+                        "evidence": {
+                            "stats_summary": {
+                                "local_activation_next_action_queue": {
+                                    "schema": "agentflow.local_activation_next_action_queue.v1",
+                                    "status": "ranked",
+                                    "summary": {"queued_action_count": 1},
+                                    "entries": [
+                                        {
+                                            "rank": 1,
+                                            "local_action_family": "cohort-ranking",
+                                            "state": "missing-evidence",
+                                            "current_status": "blocked",
+                                            "next_action": "emit-request-shape-rollups",
+                                            "blocker_codes": ["ranked_request_shape_rollup"],
+                                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                                        }
+                                    ],
+                                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cli.agentflow_cli(["activate", "openai", "--config-dir", str(config_dir)], stdout=io.StringIO())
+            stdout = io.StringIO()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path),
+                },
+                clear=False,
+            ), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.get",
+                return_value=httpx.Response(200, json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"}),
+            ):
+                code = cli.agentflow_cli(["doctor", "openai", "--config-dir", str(config_dir), "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        health = result["activation_successor_queue_health"]
+        self.assertEqual(health["summary"]["top_blocker"], "ranked_request_shape_rollup")
+        self.assertEqual(health["summary"]["top_next_action"], "emit-request-shape-rollups")
+        self.assertFalse(health["privacy"]["raw_prompts_included"])
+
     def test_activate_openai_invalid_upstream_fails_actionably(self):
         with TemporaryDirectory() as tmp:
             stderr = io.StringIO()

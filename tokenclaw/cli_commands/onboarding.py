@@ -734,6 +734,7 @@ def _activation_stats_result(
         "target": target,
         "config_path": str(activation.activation_config_path(config_dir)),
         "targets": targets,
+        "activation_successor_queue_health": _activation_successor_queue_health(),
     }
 
 
@@ -770,7 +771,49 @@ def _activation_doctor_result(
         "target": target,
         "config_path": str(activation.activation_config_path(config_dir)),
         "targets": targets,
+        "activation_successor_queue_health": _activation_successor_queue_health(),
     }
+
+
+def _activation_successor_queue_health() -> dict[str, Any]:
+    try:
+        from tokenclaw.stats import build_activation_successor_queue_health
+
+        return build_activation_successor_queue_health(limit=5)
+    except Exception as exc:
+        return {
+            "schema": "agentflow.activation_successor_queue_health.v1",
+            "status": "unavailable",
+            "status_reason": f"activation successor queue health could not be loaded: {type(exc).__name__}",
+            "summary": {
+                "queued_action_count": 0,
+                "successor_action_count": 0,
+                "successor_decision_count": 0,
+                "top_blocker": None,
+                "top_next_action": None,
+                "preview_gate_status_counts": [],
+                "blocker_counts": [],
+                "next_action_counts": [],
+            },
+            "top_entries": [],
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "absolute_paths_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "tenant_ids_included": False,
+                "tool_payloads_included": False,
+                "cache_keys_included": False,
+                "file_paths_included": False,
+                "individual_candidate_ids_included": False,
+                "managed_server_calls_made": False,
+                "provider_calls_made": False,
+                "artifact_path_included": False,
+            },
+        }
 
 
 def _doctor_provider_target(base: dict[str, Any], profile: dict[str, Any], *, timeout: float) -> dict[str, Any]:
