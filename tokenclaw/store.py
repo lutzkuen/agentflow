@@ -610,6 +610,13 @@ class SQLiteStore:
         self._raw_conn.row_factory = sqlite3.Row
         self.conn: sqlite3.Connection | SQLiteConnection = self._raw_conn
         self._init()
+        if _env_bool("TOKENCLAW_LEGACY_DB_WARNING", True):
+            try:
+                from tokenclaw.db_adoption import maybe_warn_about_legacy_evidence
+
+                maybe_warn_about_legacy_evidence(path)
+            except Exception:
+                pass
         self.conn = SQLiteConnection(self._raw_conn, self._lock)
 
     def _init(self) -> None:

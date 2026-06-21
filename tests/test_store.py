@@ -5,8 +5,11 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 
+from tokenclaw.cli_commands.onboarding import tokenclaw_cli
+from tokenclaw.db_adoption import adopt_legacy_sqlite_evidence, detect_legacy_evidence_gap
 from tokenclaw.store import PostgresConnection, SQLiteStore, Store, stable_json, utc_now
 
 
@@ -17,11 +20,13 @@ class StoreBackendTest(unittest.TestCase):
         self.saved_wal = os.environ.get("TOKENCLAW_SQLITE_WAL")
         self.saved_retention_days = os.environ.get("TOKENCLAW_SQLITE_RETENTION_DAYS")
         self.saved_retention_enabled = os.environ.get("TOKENCLAW_SQLITE_RETENTION_ENABLED")
+        self.saved_legacy_db_warning = os.environ.get("TOKENCLAW_LEGACY_DB_WARNING")
         os.environ.pop("TOKENCLAW_DATABASE_URL", None)
         os.environ.pop("TOKENCLAW_SQLITE_BUSY_TIMEOUT_MS", None)
         os.environ.pop("TOKENCLAW_SQLITE_WAL", None)
         os.environ.pop("TOKENCLAW_SQLITE_RETENTION_DAYS", None)
         os.environ.pop("TOKENCLAW_SQLITE_RETENTION_ENABLED", None)
+        os.environ["TOKENCLAW_LEGACY_DB_WARNING"] = "0"
 
     def tearDown(self):
         if self.saved_database_url is None:
@@ -44,6 +49,235 @@ class StoreBackendTest(unittest.TestCase):
             os.environ.pop("TOKENCLAW_SQLITE_RETENTION_ENABLED", None)
         else:
             os.environ["TOKENCLAW_SQLITE_RETENTION_ENABLED"] = self.saved_retention_enabled
+        if self.saved_legacy_db_warning is None:
+            os.environ.pop("TOKENCLAW_LEGACY_DB_WARNING", None)
+        else:
+            os.environ["TOKENCLAW_LEGACY_DB_WARNING"] = self.saved_legacy_db_warning
+
+    def test_adopt_legacy_sqlite_evidence_is_idempotent_and_no_clobber(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical_db = root / "tokenclaw.sqlite3"
+            legacy_db = root / "agentflow.sqlite3"
+            legacy = Store(str(legacy_db))
+            canonical = Store(str(canonical_db))
+            try:
+                canonical.log_call(
+                    id="shared-call",
+                    created_at="2026-06-21T10:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="canonical-model",
+                    routed_model="canonical-model",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1,
+                    input_tokens_est=1,
+                    output_tokens_est=1,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.001,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"reason": "canonical"}),
+                    cache_json=stable_json({"status": "miss"}),
+                    category="chat",
+                )
+                legacy.log_call(
+                    id="shared-call",
+                    created_at="2026-06-20T10:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="legacy-model",
+                    routed_model="legacy-model",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=2,
+                    input_tokens_est=2,
+                    output_tokens_est=2,
+                    cost_est_usd=0.002,
+                    cost_baseline_usd=0.002,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"reason": "legacy"}),
+                    cache_json=stable_json({"status": "miss"}),
+                    category="chat",
+                )
+                legacy.log_call(
+                    id="legacy-only-call",
+                    created_at="2026-06-21T11:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="legacy-only-model",
+                    routed_model="legacy-only-model",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=3,
+                    input_tokens_est=3,
+                    output_tokens_est=3,
+                    cost_est_usd=0.003,
+                    cost_baseline_usd=0.003,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"reason": "legacy-only"}),
+                    cache_json=stable_json({"status": "miss"}),
+                    category="chat",
+                )
+                legacy.persist_request_shape_rollups(
+                    run_id="legacy-run",
+                    generated_at="2026-06-21T11:05:00+00:00",
+                    rows=[
+                        {
+                            "id": "legacy-rollup",
+                            "run_id": "legacy-run",
+                            "generated_at": "2026-06-21T11:05:00+00:00",
+                            "rollup_key": "surface:endpoint",
+                            "candidate_id": "candidate-1",
+                            "source_surface": "anthropic_messages",
+                            "endpoint": "messages",
+                            "provider_family": "anthropic",
+                            "requested_model_family": "sonnet",
+                            "routed_model_family": "sonnet",
+                            "category": "chat",
+                            "workflow_phase": "chat",
+                            "stream": 0,
+                            "has_tools": 0,
+                            "text_bucket": "2k_8k_chars",
+                            "token_bucket": "500_2k_tokens",
+                            "cache_status": "miss",
+                            "routing_status": "kept",
+                            "candidate_families_json": stable_json(["crunch"]),
+                            "blocker_codes_json": stable_json([]),
+                            "row_count": 7,
+                            "error_count": 0,
+                            "retry_count": 0,
+                            "cache_hit_count": 0,
+                            "cost_est_usd": 0.1,
+                            "baseline_cost_usd": 0.2,
+                            "observed_savings_usd": 0.1,
+                            "input_tokens": 100,
+                            "output_tokens": 10,
+                            "metadata_json": stable_json({"metadata_only": True}),
+                        }
+                    ],
+                )
+                legacy.persist_request_shape_rollup_snapshot(
+                    {
+                        "snapshot_id": "legacy-snapshot",
+                        "run_id": "legacy-run",
+                        "generated_at": "2026-06-21T11:05:00+00:00",
+                        "window": {"source": "test", "start": "2026-06-21T10:00:00+00:00", "end": "2026-06-21T11:00:00+00:00"},
+                        "summary": {
+                            "rows_considered": 2,
+                            "rollup_count": 1,
+                            "ranked_candidate_count": 1,
+                            "top_next_action": "rank",
+                            "top_local_action_family": "crunch",
+                            "top_readiness_state": "ready",
+                            "total_projected_savings_usd": 0.1,
+                        },
+                    }
+                )
+            finally:
+                legacy.conn.close()
+                canonical.conn.close()
+
+            dry_run = adopt_legacy_sqlite_evidence(canonical_db=canonical_db, legacy_db=legacy_db, dry_run=True)
+            self.assertTrue(dry_run["ok"])
+            self.assertEqual(dry_run["status"], "dry-run")
+            self.assertEqual(dry_run["summary"]["rows_inserted"], 3)
+            with sqlite3.connect(str(canonical_db)) as conn:
+                self.assertEqual(conn.execute("select count(*) from calls").fetchone()[0], 1)
+
+            result = adopt_legacy_sqlite_evidence(canonical_db=canonical_db, legacy_db=legacy_db)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["legacy_open_mode"], "ro")
+            self.assertEqual(result["summary"]["rows_inserted"], 3)
+            self.assertEqual(result["summary"]["rows_skipped"], 1)
+
+            second = adopt_legacy_sqlite_evidence(canonical_db=canonical_db, legacy_db=legacy_db)
+            self.assertEqual(second["summary"]["rows_inserted"], 0)
+            self.assertEqual(second["summary"]["rows_skipped"], 4)
+
+            with sqlite3.connect(str(canonical_db)) as conn:
+                self.assertEqual(conn.execute("select count(*) from calls").fetchone()[0], 2)
+                self.assertEqual(conn.execute("select count(*) from request_shape_rollups").fetchone()[0], 1)
+                self.assertEqual(conn.execute("select count(*) from request_shape_rollup_snapshots").fetchone()[0], 1)
+                row = conn.execute("select requested_model from calls where id = 'shared-call'").fetchone()
+                self.assertEqual(row[0], "canonical-model")
+
+    def test_detect_legacy_evidence_gap_reports_richer_sibling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical_db = root / "tokenclaw.sqlite3"
+            legacy_db = root / "agentflow.sqlite3"
+            canonical = Store(str(canonical_db))
+            legacy = Store(str(legacy_db))
+            try:
+                legacy.log_call(
+                    id="newer-legacy-call",
+                    created_at="2026-06-21T12:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-5",
+                    routed_model="claude-sonnet-4-5",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1,
+                    input_tokens_est=1,
+                    output_tokens_est=1,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.001,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"reason": "legacy"}),
+                    cache_json=stable_json({"status": "miss"}),
+                    category="chat",
+                )
+            finally:
+                canonical.conn.close()
+                legacy.conn.close()
+
+            detection = detect_legacy_evidence_gap(canonical_db=canonical_db)
+            self.assertTrue(detection["richer_legacy_detected"])
+            self.assertEqual(detection["status"], "richer-legacy-detected")
+            self.assertIn("legacy-has-more-calls", detection["reason_codes"])
+            self.assertEqual(detection["bottleneck_signal"]["blocker_code"], "stranded-legacy-agentflow-sqlite-evidence")
+
+    def test_tokenclaw_db_adopt_legacy_cli_outputs_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical_db = root / "tokenclaw.sqlite3"
+            legacy_db = root / "agentflow.sqlite3"
+            legacy = Store(str(legacy_db))
+            try:
+                legacy.log_call(
+                    id="legacy-cli-call",
+                    created_at="2026-06-21T12:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-5",
+                    routed_model="claude-sonnet-4-5",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1,
+                    input_tokens_est=1,
+                    output_tokens_est=1,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.001,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"reason": "legacy"}),
+                    cache_json=stable_json({"status": "miss"}),
+                    category="chat",
+                )
+            finally:
+                legacy.conn.close()
+
+            stdout = StringIO()
+            code = tokenclaw_cli(
+                ["db", "adopt-legacy", "--db", str(canonical_db), "--from", str(legacy_db)],
+                stdout=stdout,
+                stderr=StringIO(),
+            )
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["schema"], "tokenclaw.legacy_sqlite_evidence_adoption.v1")
+            self.assertEqual(payload["summary"]["rows_inserted"], 1)
 
     def test_store_uses_sqlite_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:

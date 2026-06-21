@@ -437,6 +437,29 @@ def _onboarding_cli(
     stats_parser.add_argument("--timeout", type=float, default=5.0, help=argparse.SUPPRESS)
     stats_parser.add_argument("--json", action="store_true", help="Print full stats JSON.")
 
+    db_parser = subparsers.add_parser(
+        "db",
+        help=f"Inspect or maintain local {brand} SQLite metadata.",
+    )
+    db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
+    adopt_legacy_parser = db_subparsers.add_parser(
+        "adopt-legacy",
+        help="Adopt legacy agentflow.sqlite3 evidence into the canonical tokenclaw.sqlite3 DB.",
+    )
+    adopt_legacy_parser.add_argument(
+        "--db",
+        default=default_db_path(),
+        help="Canonical TokenClaw SQLite DB path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
+    )
+    adopt_legacy_parser.add_argument(
+        "--from",
+        dest="legacy_db",
+        default=None,
+        help="Legacy AgentFlow SQLite DB path, default: sibling agentflow.sqlite3 next to the canonical DB.",
+    )
+    adopt_legacy_parser.add_argument("--dry-run", action="store_true", help="Report rows that would be adopted without writing.")
+    adopt_legacy_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+
     savings_parser = subparsers.add_parser(
         "savings",
         parents=[config_parent],
@@ -648,6 +671,21 @@ def _onboarding_cli(
         else:
             _write_json(stderr, result)
         return 0 if result["ok"] else 1
+
+    if args.command == "db":
+        if args.db_command == "adopt-legacy":
+            from tokenclaw.db_adoption import adopt_legacy_sqlite_evidence
+
+            result = adopt_legacy_sqlite_evidence(
+                canonical_db=args.db,
+                legacy_db=args.legacy_db,
+                dry_run=bool(args.dry_run),
+            )
+            if args.pretty:
+                stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+            else:
+                _write_json(stdout, result)
+            return 0 if result.get("ok") else 1
 
     if args.command == "savings":
         from tokenclaw.savings_report import build_savings_report

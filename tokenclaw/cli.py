@@ -380,6 +380,38 @@ def sqlite_maintenance_cli(argv: Sequence[str] | None = None, *, stdout: Any = N
     return 0
 
 
+def db_adopt_legacy_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    from tokenclaw.db_adoption import adopt_legacy_sqlite_evidence
+
+    parser = argparse.ArgumentParser(description="Adopt local legacy AgentFlow SQLite evidence into the canonical TokenClaw DB")
+    parser.add_argument(
+        "--db",
+        default=_default_db_path(),
+        help="Canonical TokenClaw SQLite DB path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
+    )
+    parser.add_argument(
+        "--from",
+        dest="legacy_db",
+        default=None,
+        help="Legacy AgentFlow SQLite DB path, default: sibling agentflow.sqlite3 next to the canonical DB.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Report rows that would be adopted without writing them.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    args = parser.parse_args(argv)
+
+    result = adopt_legacy_sqlite_evidence(
+        canonical_db=str(args.db),
+        legacy_db=str(args.legacy_db) if args.legacy_db else None,
+        dry_run=bool(args.dry_run),
+    )
+    stream = stdout or sys.stdout
+    if args.pretty:
+        stream.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, result)
+    return 0 if result.get("ok") else 1
+
+
 
 
 def _write_policy_rollback_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
@@ -1895,6 +1927,10 @@ def managed_feedback_flush_main() -> None:
 
 def sqlite_maintenance_main() -> None:
     raise SystemExit(sqlite_maintenance_cli())
+
+
+def db_adopt_legacy_main() -> None:
+    raise SystemExit(db_adopt_legacy_cli())
 
 
 def orchestrator_research_main() -> None:
