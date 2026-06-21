@@ -17,7 +17,7 @@ from tokenclaw.store import SQLiteStore, stable_json, utc_now
 class OpenAIOldContextSummaryDryRunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -26,7 +26,7 @@ class OpenAIOldContextSummaryDryRunTests(unittest.TestCase):
 
     def _feature(self, *, endpoint: str, source_surface: str, category: str = "chat", has_tools: bool = False) -> dict[str, object]:
         return {
-            "schema": "agentflow.openai_feature_summary.v1",
+            "schema": "tokenclaw.openai_feature_summary.v1",
             "provider": "openai",
             "source_surface": source_surface,
             "endpoint": endpoint,
@@ -173,7 +173,7 @@ class OpenAIOldContextSummaryDryRunTests(unittest.TestCase):
             summary_model="gpt-5-mini",
         )
 
-        self.assertEqual(result["schema"], "agentflow.openai_old_context_summary_dry_run.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_old_context_summary_dry_run.v1")
         self.assertEqual(result["summary"]["eligible_count"], 2)
         self.assertEqual(result["summary"]["blocked_count"], 0)
         self.assertGreater(result["summary"]["expected_tokens_saved"], 0)
@@ -228,7 +228,7 @@ class OpenAIOldContextSummaryDryRunTests(unittest.TestCase):
         self._log_openai_call(body=None)
         self._log_openai_call(body=file_body)
 
-        with mock.patch.dict(os.environ, {"AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_COST_USD": "0.00000001"}):
+        with mock.patch.dict(os.environ, {"TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_COST_USD": "0.00000001"}):
             result = build_openai_old_context_summary_dry_run(
                 self.store,
                 limit=10,
@@ -252,7 +252,7 @@ class OpenAIOldContextSummaryDryRunTests(unittest.TestCase):
     def test_cli_emits_dry_run(self) -> None:
         self._log_openai_call(body=self._responses_body())
 
-        with mock.patch.dict(os.environ, {"AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED": "1"}):
+        with mock.patch.dict(os.environ, {"TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED": "1"}):
             output = io.StringIO()
             exit_code = cli.openai_old_context_summary_dry_run_cli(
                 ["--db", self.db_path, "--limit", "10"],
@@ -261,7 +261,7 @@ class OpenAIOldContextSummaryDryRunTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.openai_old_context_summary_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_old_context_summary_dry_run.v1")
         self.assertEqual(payload["summary"]["eligible_count"], 1)
         self.assertNotIn("secret-openai-session", output.getvalue())
 

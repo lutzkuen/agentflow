@@ -66,19 +66,19 @@ class _NoQueueStore:
 
 class RecommendationTest(unittest.TestCase):
     ENV_KEYS = (
-        "AGENTFLOW_RECOMMENDATION_ENABLED",
-        "AGENTFLOW_RECOMMENDATIONS_ENABLED",
-        "AGENTFLOW_RECOMMENDATION_SERVER_URL",
-        "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
-        "AGENTFLOW_RECOMMENDATION_FAILURE_MODE",
-        "AGENTFLOW_MANAGED_API_KEY",
-        "AGENTFLOW_POLICY_DECISION_ENABLED",
-        "AGENTFLOW_POLICY_DECISIONS_ENABLED",
-        "AGENTFLOW_POLICY_DECISION_MIN_CONFIDENCE",
-        "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION",
-        "AGENTFLOW_POLICY_DECISION_CANARY_SALT",
-        "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS",
-        "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS",
+        "TOKENCLAW_RECOMMENDATION_ENABLED",
+        "TOKENCLAW_RECOMMENDATIONS_ENABLED",
+        "TOKENCLAW_RECOMMENDATION_SERVER_URL",
+        "TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS",
+        "TOKENCLAW_RECOMMENDATION_FAILURE_MODE",
+        "TOKENCLAW_MANAGED_API_KEY",
+        "TOKENCLAW_POLICY_DECISION_ENABLED",
+        "TOKENCLAW_POLICY_DECISIONS_ENABLED",
+        "TOKENCLAW_POLICY_DECISION_MIN_CONFIDENCE",
+        "TOKENCLAW_POLICY_DECISION_CANARY_FRACTION",
+        "TOKENCLAW_POLICY_DECISION_CANARY_SALT",
+        "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS",
+        "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS",
     )
 
     def setUp(self):
@@ -140,10 +140,10 @@ class RecommendationTest(unittest.TestCase):
         self.assertIsNone(FakeAsyncClient.last_url)
 
     def test_success_path_posts_feature_unit_with_auth_and_applies_target_model(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
-        os.environ["AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"] = "0.25"
-        os.environ["AGENTFLOW_MANAGED_API_KEY"] = "managed-secret"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS"] = "0.25"
+        os.environ["TOKENCLAW_MANAGED_API_KEY"] = "managed-secret"
         FakeAsyncClient.response = FakeResponse(body={
             "target_model": "claude-haiku-4-5-20251001",
             "replacement_prompt": None,
@@ -204,7 +204,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(FakeAsyncClient.last_json["candidate_target_model"], "claude-sonnet-4-6")
         pattern_features = FakeAsyncClient.last_json["input_features"]["pattern_features"]
         self.assertEqual(FakeAsyncClient.last_json["pattern_features"], pattern_features)
-        self.assertEqual(pattern_features["schema"], "agentflow.pattern_features.v1")
+        self.assertEqual(pattern_features["schema"], "tokenclaw.pattern_features.v1")
         self.assertEqual(pattern_features["hash_basis"], "normalized-structure-and-size-buckets")
         self.assertEqual(pattern_features["text_bucket"], "lt_2k_chars")
         self.assertEqual(pattern_features["token_bucket"], "lt_1k_tokens")
@@ -407,8 +407,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("raw-content-hash-should-not-define-pattern", str(unit))
 
     def test_valid_noop_recommendation_records_received_without_changing_model(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.response = FakeResponse(body={
             "target_model": "claude-sonnet-4-6",
             "replacement_prompt": None,
@@ -440,8 +440,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(body["model"], "claude-sonnet-4-6")
 
     def test_empty_server_url_is_not_configured_and_does_not_call_network(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = ""
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = ""
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
             meta = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
@@ -452,8 +452,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertIsNone(FakeAsyncClient.last_url)
 
     def test_recommendation_egress_guard_blocks_raw_payload_before_network(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
         unsafe_unit = {
             "feature_schema_version": recommendations.FEATURE_SCHEMA_VERSION,
             "requested_model": "claude-sonnet-4-6",
@@ -482,9 +482,9 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("/home/lutz/private/project/app.py", str(meta))
 
     def test_timeout_records_bounded_fallback_metadata(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
-        os.environ["AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"] = "0.1"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS"] = "0.1"
         FakeAsyncClient.error = httpx.TimeoutException("too slow")
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -496,8 +496,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["fallback"], "local-policy")
 
     def test_unreachable_records_fallback_metadata(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = httpx.ConnectError("connection refused")
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -508,8 +508,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["fallback"], "local-policy")
 
     def test_invalid_json_and_schema_record_fallback_metadata(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.response = FakeResponse(json_error=ValueError("not json"))
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -528,11 +528,11 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(invalid_schema["fallback"], "local-policy")
 
     def test_policy_decision_fetch_posts_strict_feature_snapshot_and_preserves_predictor_fields(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.response = FakeResponse(body={
-            "schema": "agentflow.policy_decision.v1",
+            "schema": "tokenclaw.policy_decision.v1",
             "optimization_unit_id": 99,
             "policy_id": "feature-policy-decision:anthropic:99",
             "confidence": 0.91,
@@ -554,7 +554,7 @@ class RecommendationTest(unittest.TestCase):
             },
         })
         unit = {
-            "schema": "agentflow.openai_preflight_feature_unit.v1",
+            "schema": "tokenclaw.openai_preflight_feature_unit.v1",
             "feature_schema_version": recommendations.FEATURE_SCHEMA_VERSION,
             "source_surface": "anthropic_messages",
             "granularity": "provider_request",
@@ -580,7 +580,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(FakeAsyncClient.last_url, "http://127.0.0.1:4100/v1/policy-decision")
         self.assertNotIn("authorization", FakeAsyncClient.last_headers)
         sent = FakeAsyncClient.last_json
-        self.assertEqual(sent["schema"], "agentflow.policy_decision_preflight.v1")
+        self.assertEqual(sent["schema"], "tokenclaw.policy_decision_preflight.v1")
         self.assertEqual(sent["replayability_level"], "features_only")
         self.assertEqual(sent["input_features"]["api_endpoint"], "v1_messages")
         self.assertNotIn("path", sent["input_features"])
@@ -591,7 +591,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertTrue(meta["auth_configured"])
         self.assertEqual(meta["auth_source"], "loopback-unauthenticated-dev")
         self.assertTrue(meta["loopback_unauthenticated_allowed"])
-        self.assertEqual(meta["policy_decision_schema"], "agentflow.policy_decision.v1")
+        self.assertEqual(meta["policy_decision_schema"], "tokenclaw.policy_decision.v1")
         self.assertEqual(meta["target_model"], "claude-haiku-4-5-20251001")
         self.assertEqual(meta["recommended_mode"], "shadow")
         self.assertEqual(meta["route_down_probability"], 0.93)
@@ -599,11 +599,11 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["predictor_rule_id"], "routing-evidence:anthropic:sonnet->haiku")
 
     def test_policy_decision_fetch_omits_openai_non_feature_input_diagnostics(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.response = FakeResponse(body={
-            "schema": "agentflow.policy_decision.v1",
+            "schema": "tokenclaw.policy_decision.v1",
             "policy_id": "feature-policy-decision:openai:1",
             "confidence": 0.91,
             "provider_forwarding": False,
@@ -660,9 +660,9 @@ class RecommendationTest(unittest.TestCase):
         self.assertIn("prompt_difficulty_features", sent["input_features"])
 
     def test_policy_decision_fetch_fails_closed_on_timeout_and_schema_mismatch(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = httpx.TimeoutException("too slow")
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -678,7 +678,7 @@ class RecommendationTest(unittest.TestCase):
 
         FakeAsyncClient.error = None
         FakeAsyncClient.response = FakeResponse(body={
-            "schema": "agentflow.unexpected.v1",
+            "schema": "tokenclaw.unexpected.v1",
             "routing": {"status": "recommended", "target_model": "claude-haiku-4-5-20251001"},
         })
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -701,8 +701,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(schema_meta["fallback"], "local-policy")
 
     def test_policy_decision_enabled_without_server_url_fails_closed_locally(self):
-        os.environ["AGENTFLOW_RECOMMENDATIONS_ENABLED"] = "1"
-        os.environ["AGENTFLOW_POLICY_DECISIONS_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATIONS_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISIONS_ENABLED"] = "1"
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
             meta = asyncio.run(recommendations.fetch_policy_decision({
@@ -722,11 +722,11 @@ class RecommendationTest(unittest.TestCase):
         self.assertIsNone(FakeAsyncClient.last_url)
 
     def test_policy_decision_normalizes_route_to_and_applies_after_local_gate(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.response = FakeResponse(body={
-            "schema": "agentflow.policy_decision.v1",
+            "schema": "tokenclaw.policy_decision.v1",
             "policy_id": "feature-policy-decision:anthropic:route-to",
             "confidence": 0.94,
             "route_to": "claude-haiku-4-5-20251001",
@@ -777,7 +777,7 @@ class RecommendationTest(unittest.TestCase):
     def test_policy_decision_application_observes_shadow_and_canary_gates_before_mutating(self):
         base_meta = {
             "status": "received",
-            "policy_decision_schema": "agentflow.policy_decision.v1",
+            "policy_decision_schema": "tokenclaw.policy_decision.v1",
             "routing_status": "recommended",
             "target_model": "claude-haiku-4-5-20251001",
             "confidence": 0.92,
@@ -811,7 +811,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(skipped["apply_reason"], "routing-predictor-model-version-missing")
         self.assertEqual(body["model"], "claude-sonnet-4-6")
 
-        os.environ["AGENTFLOW_POLICY_DECISION_CANARY_FRACTION"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_CANARY_FRACTION"] = "1"
         applied = recommendations.apply_recommendation_to_body(
             provider="anthropic",
             body=body,
@@ -824,12 +824,12 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(body["model"], "claude-haiku-4-5-20251001")
 
     def test_policy_decision_plural_env_and_routing_action_apply_live_route(self):
-        os.environ["AGENTFLOW_RECOMMENDATIONS_ENABLED"] = "1"
-        os.environ["AGENTFLOW_POLICY_DECISIONS_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
-        os.environ["AGENTFLOW_POLICY_DECISION_MIN_CONFIDENCE"] = "0.8"
+        os.environ["TOKENCLAW_RECOMMENDATIONS_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISIONS_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_POLICY_DECISION_MIN_CONFIDENCE"] = "0.8"
         FakeAsyncClient.response = FakeResponse(body={
-            "schema": "agentflow.policy_decision.v1",
+            "schema": "tokenclaw.policy_decision.v1",
             "policy_id": "managed-route-1",
             "provider_forwarding": False,
             "server_content_processing": False,
@@ -903,8 +903,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("raw replacement", str(applied))
 
     def test_server_failure_records_metadata_and_keeps_local_model(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = RuntimeError("server unavailable")
         routing_meta = {"routed_model": "claude-sonnet-4-6"}
 
@@ -945,8 +945,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(body["model"], "claude-sonnet-4-6")
 
     def test_outcome_feedback_posts_sanitized_metadata_to_unit_endpoint(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         recommendation_meta = {"optimization_unit_id": 42}
         outcome = recommendations.build_outcome_feedback(
             provider="anthropic",
@@ -1003,7 +1003,7 @@ class RecommendationTest(unittest.TestCase):
                 ),
                 "routing_experiment": {
                     "optimization_feedback": {
-                        "schema": "agentflow.routing_experiment_feedback.v1",
+                        "schema": "tokenclaw.routing_experiment_feedback.v1",
                         "experiment_id": "exp-1",
                         "sampled": True,
                         "primary_model": "claude-haiku-4-5-20251001",
@@ -1134,7 +1134,7 @@ class RecommendationTest(unittest.TestCase):
         )
 
         summary = outcome["old_context_summarization"]
-        self.assertEqual(summary["schema"], "agentflow.old_context_summary_outcome_feedback.v1")
+        self.assertEqual(summary["schema"], "tokenclaw.old_context_summary_outcome_feedback.v1")
         self.assertEqual(summary["outcome"], "applied")
         self.assertEqual(summary["summary_policy_id"], "summary-rule-1")
         self.assertEqual(summary["canary_cohort"], "canary_applied")
@@ -1151,10 +1151,10 @@ class RecommendationTest(unittest.TestCase):
         self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(outcome)))
 
     def test_old_context_summary_outcome_event_posts_to_policy_events(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         outcome = {
-            "schema": "agentflow.old_context_summary_outcome_feedback.v1",
+            "schema": "tokenclaw.old_context_summary_outcome_feedback.v1",
             "source_surface": "anthropic_messages",
             "category": "chat",
             "outcome": "holdout",
@@ -1232,7 +1232,7 @@ class RecommendationTest(unittest.TestCase):
             error=None,
         )
 
-        self.assertEqual(outcome["schema"], "agentflow.phase_routing_outcome_feedback.v1")
+        self.assertEqual(outcome["schema"], "tokenclaw.phase_routing_outcome_feedback.v1")
         self.assertEqual(outcome["outcome"], "applied")
         self.assertEqual(outcome["policy_id"], "phase-canary-1")
         self.assertEqual(outcome["cohort"], "applied")
@@ -1245,9 +1245,9 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("raw provider response", rendered)
         self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(outcome)))
 
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
-        os.environ["AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS"] = "3"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS"] = "3"
         FakeAsyncClient.error = RuntimeError("managed unavailable")
         event = recommendations.build_phase_routing_outcome_event(outcome)
 
@@ -1356,7 +1356,7 @@ class RecommendationTest(unittest.TestCase):
                             "reason": "canary_holdout",
                             "matched_hashes": [pattern_hash],
                             "canary": {
-                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "schema": "tokenclaw.pattern_canary_decision.v1",
                                 "enabled": True,
                                 "selected": False,
                                 "status": "holdout",
@@ -1382,7 +1382,7 @@ class RecommendationTest(unittest.TestCase):
                             "applied_count": 1,
                             "saved_chars": 400,
                             "canary": {
-                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "schema": "tokenclaw.pattern_canary_decision.v1",
                                 "enabled": True,
                                 "selected": True,
                                 "status": "applied",
@@ -1413,15 +1413,15 @@ class RecommendationTest(unittest.TestCase):
     def test_pattern_policy_evidence_queues_metadata_only_outcomes(self):
         from tokenclaw.store import Store, stable_json
 
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
         FakeAsyncClient.error = RuntimeError("feedback unavailable")
         pattern_hash = "sha256:" + "c" * 64
         routing_meta = {
             "category": "tool-result",
             "managed_recommendation": {"optimization_unit_id": 7, "policy_id": "routing-candidate"},
             "managed_pattern_features": {
-                "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                "schema": "tokenclaw.managed_pattern_feature_diagnostics.v1",
                 "present": True,
                 "pattern_hash": pattern_hash,
                 "normalized_pattern_hash": pattern_hash,
@@ -1546,8 +1546,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("raw pattern text", rendered)
 
     def test_outcome_feedback_failure_is_non_fatal_metadata(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = RuntimeError("feedback unavailable")
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -1558,8 +1558,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertIn("feedback unavailable", meta["error"])
 
     def test_outcome_feedback_egress_guard_blocks_raw_payload_before_network(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
             meta = asyncio.run(
@@ -1608,9 +1608,9 @@ class RecommendationTest(unittest.TestCase):
     def test_queued_provider_outcome_feedback_records_retryable_sanitized_payload(self):
         from tokenclaw.store import Store
 
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
-        os.environ["AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS"] = "3"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS"] = "3"
         FakeAsyncClient.error = RuntimeError("feedback unavailable")
 
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
@@ -1627,7 +1627,7 @@ class RecommendationTest(unittest.TestCase):
                                 "quality_signals": {"status": "success"},
                                 "pattern_decisions": [
                                     {
-                                        "schema": "agentflow.pattern_decision_summary.v1",
+                                        "schema": "tokenclaw.pattern_decision_summary.v1",
                                         "decision_type": "routing",
                                         "status": "applied",
                                         "policy_source": "managed-recommended",
@@ -1657,8 +1657,8 @@ class RecommendationTest(unittest.TestCase):
     def test_queued_provider_outcome_feedback_egress_guard_does_not_enqueue_raw_payload(self):
         from tokenclaw.store import Store
 
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
 
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
             store = Store(tmp.name)
@@ -1692,14 +1692,14 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("req-secret", str(meta))
 
     def test_policy_event_egress_guard_blocks_raw_payload_before_network(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
         event = {
             "event_type": "applied",
             "recommendation_id": "policy-1",
             "policy_sections": ["routing"],
             "metadata": {
-                "schema": "agentflow.policy_lifecycle_metadata.v1",
+                "schema": "tokenclaw.policy_lifecycle_metadata.v1",
                 "messages": [{"content": "raw prompt must stay local"}],
                 "summary_text": "raw summary must stay local",
                 "workspace_path": "/home/lutz/private/project",
@@ -1720,15 +1720,15 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("/home/lutz/private/project", str(meta))
 
     def test_policy_event_lifecycle_command_enum_is_allowed(self):
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
         FakeAsyncClient.response = FakeResponse(body={"accepted": True})
         event = {
             "event_type": "dry_run",
             "recommendation_id": "phase-routing:test",
             "policy_sections": ["routing"],
             "metadata": {
-                "schema": "agentflow.phase_routing_lifecycle_metadata.v1",
+                "schema": "tokenclaw.phase_routing_lifecycle_metadata.v1",
                 "command": "phase-routing-dry-run",
                 "privacy": {
                     "metadata_only": True,

@@ -230,7 +230,7 @@ def summarize_recommendation_health(bundle: Any) -> dict[str, Any]:
     warning_codes = sorted({HEALTH_WARNING_CODES.get(row["kind"], f"managed-recommendation-{row['kind']}") for row in deduped})
     status = "warning" if warning_codes else ("available" if _health_sources(bundle) else "missing")
     return {
-        "schema": "agentflow.recommendation_health.v1",
+        "schema": "tokenclaw.recommendation_health.v1",
         "status": status,
         "generated_at": generated_at,
         "min_samples": min_samples,

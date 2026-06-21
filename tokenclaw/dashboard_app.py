@@ -22,7 +22,7 @@ def _store(store_source: StoreSource) -> Any:
 
 
 def _full_stats_ttl_s() -> float:
-    raw = os.getenv("AGENTFLOW_DASHBOARD_FULL_STATS_TTL_SECONDS", "5")
+    raw = os.getenv("TOKENCLAW_DASHBOARD_FULL_STATS_TTL_SECONDS", "5")
     try:
         return max(0.0, float(raw))
     except ValueError:
@@ -30,7 +30,7 @@ def _full_stats_ttl_s() -> float:
 
 
 def _expensive_stats_ttl_s() -> float:
-    raw = os.getenv("AGENTFLOW_DASHBOARD_EXPENSIVE_STATS_TTL_SECONDS", "60")
+    raw = os.getenv("TOKENCLAW_DASHBOARD_EXPENSIVE_STATS_TTL_SECONDS", "60")
     try:
         return max(0.0, float(raw))
     except ValueError:
@@ -38,7 +38,7 @@ def _expensive_stats_ttl_s() -> float:
 
 
 def _stats_timing_log_threshold_ms() -> float:
-    raw = os.getenv("AGENTFLOW_DASHBOARD_STATS_LOG_MS", "250")
+    raw = os.getenv("TOKENCLAW_DASHBOARD_STATS_LOG_MS", "250")
     try:
         return max(0.0, float(raw))
     except ValueError:
@@ -82,10 +82,10 @@ def create_dashboard_router(
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            print(f"agentflow_dashboard_full_stats_refresh_error: {exc}", file=sys.stderr)
+            print(f"tokenclaw_dashboard_full_stats_refresh_error: {exc}", file=sys.stderr)
             return
         if exc is not None:
-            print(f"agentflow_dashboard_full_stats_refresh_error: {exc}", file=sys.stderr)
+            print(f"tokenclaw_dashboard_full_stats_refresh_error: {exc}", file=sys.stderr)
 
     def consume_cached_stats_exception(endpoint: str, task: asyncio.Task[dict[str, Any]]) -> None:
         try:
@@ -93,10 +93,10 @@ def create_dashboard_router(
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            print(f"agentflow_dashboard_stats_refresh_error endpoint={endpoint}: {exc}", file=sys.stderr)
+            print(f"tokenclaw_dashboard_stats_refresh_error endpoint={endpoint}: {exc}", file=sys.stderr)
             return
         if exc is not None:
-            print(f"agentflow_dashboard_stats_refresh_error endpoint={endpoint}: {exc}", file=sys.stderr)
+            print(f"tokenclaw_dashboard_stats_refresh_error endpoint={endpoint}: {exc}", file=sys.stderr)
 
     async def load_cached_stats(
         endpoint: str,
@@ -109,7 +109,7 @@ def create_dashboard_router(
         finally:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             if elapsed_ms >= stats_timing_log_threshold_ms:
-                print(f"agentflow_dashboard_stats_timing endpoint={endpoint} ms={elapsed_ms:.1f}", file=sys.stderr)
+                print(f"tokenclaw_dashboard_stats_timing endpoint={endpoint} ms={elapsed_ms:.1f}", file=sys.stderr)
         cached_stats[key] = result
         cached_stats_at[key] = time.monotonic()
         return result
@@ -147,7 +147,7 @@ def create_dashboard_router(
             return stale
         return await task
 
-    @router.get("/agentflow/stats")
+    @router.get("/tokenclaw/stats")
     async def stats() -> dict[str, Any]:
         return await stats_views.stats(_store(store_obj), default_db)
 
@@ -155,15 +155,15 @@ def create_dashboard_router(
     async def tokenclaw_stats() -> dict[str, Any]:
         return await stats()
 
-    @router.get("/agentflow/stats/activity")
+    @router.get("/tokenclaw/stats/activity")
     async def stats_activity(limit: int = 100) -> dict[str, Any]:
         return await stats_views.stats_activity(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/quality-signals")
+    @router.get("/tokenclaw/stats/quality-signals")
     async def stats_quality_signals(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_quality_signals(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/provider-adoption-health")
+    @router.get("/tokenclaw/stats/provider-adoption-health")
     async def stats_provider_adoption_health(limit: int = 5000) -> dict[str, Any]:
         return await cached_expensive_stats(
             "provider-adoption-health",
@@ -171,7 +171,7 @@ def create_dashboard_router(
             lambda: stats_views.stats_provider_adoption_health(_store(store_obj), limit=limit),
         )
 
-    @router.get("/agentflow/stats/full")
+    @router.get("/tokenclaw/stats/full")
     async def stats_full() -> dict[str, Any]:
         nonlocal full_stats_cache, full_stats_cache_at, full_stats_task
         if stats_ttl_s <= 0:
@@ -199,47 +199,47 @@ def create_dashboard_router(
     async def tokenclaw_stats_full() -> dict[str, Any]:
         return await stats_full()
 
-    @router.get("/agentflow/stats/usage")
+    @router.get("/tokenclaw/stats/usage")
     async def stats_usage() -> dict[str, Any]:
         return await stats_views.stats_usage_by_owner(_store(store_obj))
 
-    @router.get("/agentflow/stats/limiter")
+    @router.get("/tokenclaw/stats/limiter")
     async def stats_limiter() -> dict[str, Any]:
         return await stats_views.stats_limiter(_store(store_obj), limiter_status, limiter_config)
 
-    @router.get("/agentflow/stats/codex-effectiveness")
+    @router.get("/tokenclaw/stats/codex-effectiveness")
     async def stats_codex_effectiveness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_codex_effectiveness(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/codex-readiness")
+    @router.get("/tokenclaw/stats/codex-readiness")
     async def stats_codex_readiness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_codex_readiness(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/openai-codex-readiness")
+    @router.get("/tokenclaw/stats/openai-codex-readiness")
     async def stats_openai_codex_readiness(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_codex_readiness(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/codex-canary-impact")
+    @router.get("/tokenclaw/stats/codex-canary-impact")
     async def stats_codex_canary_impact(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_codex_canary_impact(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/cache-replayability")
+    @router.get("/tokenclaw/stats/cache-replayability")
     async def stats_cache_replayability(limit: int = 25) -> dict[str, Any]:
         return await stats_views.stats_cache_replayability(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/cache-replay-cohorts")
+    @router.get("/tokenclaw/stats/cache-replay-cohorts")
     async def stats_cache_replay_cohorts(limit: int = 25, scan_limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_cache_replay_cohort_ranking(_store(store_obj), limit=limit, row_limit=scan_limit)
 
-    @router.get("/agentflow/stats/cache-replay-confidence")
+    @router.get("/tokenclaw/stats/cache-replay-confidence")
     async def stats_cache_replay_confidence(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_cache_replay_confidence(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/cache-replay-readiness")
+    @router.get("/tokenclaw/stats/cache-replay-readiness")
     async def stats_cache_replay_readiness(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_cache_replay_readiness(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/cache-replay-activation-health")
+    @router.get("/tokenclaw/stats/cache-replay-activation-health")
     async def stats_cache_replay_activation_health(limit: int = 1000, scan_limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_cache_replay_activation_health(
             _store(store_obj),
@@ -247,7 +247,7 @@ def create_dashboard_router(
             scan_limit=scan_limit,
         )
 
-    @router.get("/agentflow/stats/streaming-cache-hit-recovery")
+    @router.get("/tokenclaw/stats/streaming-cache-hit-recovery")
     async def stats_streaming_cache_hit_recovery(limit: int = 1000, scan_limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_streaming_cache_hit_recovery(
             _store(store_obj),
@@ -255,59 +255,59 @@ def create_dashboard_router(
             scan_limit=scan_limit,
         )
 
-    @router.get("/agentflow/stats/cache-effectiveness")
+    @router.get("/tokenclaw/stats/cache-effectiveness")
     async def stats_cache_effectiveness(limit: int = 10, scan_limit: int = 5000) -> dict[str, Any]:
         return await stats_views.stats_cache_effectiveness(_store(store_obj), limit=limit, scan_limit=scan_limit)
 
-    @router.get("/agentflow/stats/old-context-summary")
+    @router.get("/tokenclaw/stats/old-context-summary")
     async def stats_old_context_summary() -> dict[str, Any]:
         return await stats_views.stats_old_context_summary(_store(store_obj))
 
-    @router.get("/agentflow/stats/phase-routing")
+    @router.get("/tokenclaw/stats/phase-routing")
     async def stats_phase_routing(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_phase_routing(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/session-phase-memory")
+    @router.get("/tokenclaw/stats/session-phase-memory")
     async def stats_session_phase_memory(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_session_phase_memory(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/policies")
+    @router.get("/tokenclaw/stats/policies")
     async def stats_policies() -> dict[str, Any]:
         return await stats_views.stats_policies()
 
-    @router.get("/agentflow/stats/policy-workbench")
+    @router.get("/tokenclaw/stats/policy-workbench")
     async def stats_policy_workbench() -> dict[str, Any]:
         return await stats_views.stats_policy_workbench_readiness()
 
-    @router.get("/agentflow/stats/policy-events")
+    @router.get("/tokenclaw/stats/policy-events")
     async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
         return await stats_views.stats_policy_events(limit=limit)
 
-    @router.get("/agentflow/stats/sqlite-maintenance")
+    @router.get("/tokenclaw/stats/sqlite-maintenance")
     async def stats_sqlite_maintenance() -> dict[str, Any]:
         return await stats_views.stats_sqlite_maintenance(_store(store_obj))
 
-    @router.get("/agentflow/stats/managed-recommendations")
+    @router.get("/tokenclaw/stats/managed-recommendations")
     async def stats_managed_recommendations(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_managed_recommendations(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/openai-scoreboard")
+    @router.get("/tokenclaw/stats/openai-scoreboard")
     async def stats_openai_scoreboard(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_scoreboard(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/openai-optimization-readiness")
+    @router.get("/tokenclaw/stats/openai-optimization-readiness")
     async def stats_openai_optimization_readiness(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_optimization_readiness(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/managed-openai-activation")
+    @router.get("/tokenclaw/stats/managed-openai-activation")
     async def stats_managed_openai_activation(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_managed_openai_activation(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/openai-canary-readiness")
+    @router.get("/tokenclaw/stats/openai-canary-readiness")
     async def stats_openai_canary_readiness(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_canary_readiness(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/routing-coverage")
+    @router.get("/tokenclaw/stats/routing-coverage")
     async def stats_routing_coverage(limit: int = 5000) -> dict[str, Any]:
         return await cached_expensive_stats(
             "routing-coverage",
@@ -315,27 +315,27 @@ def create_dashboard_router(
             lambda: stats_views.stats_routing_coverage_report(_store(store_obj), limit=limit),
         )
 
-    @router.get("/agentflow/stats/claude-canary-impact")
+    @router.get("/tokenclaw/stats/claude-canary-impact")
     async def stats_claude_canary_impact(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_claude_canary_impact(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/claude-routing-promotion-funnel")
+    @router.get("/tokenclaw/stats/claude-routing-promotion-funnel")
     async def stats_claude_routing_promotion_funnel(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_claude_routing_promotion_funnel(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/openai-old-context-summary")
+    @router.get("/tokenclaw/stats/openai-old-context-summary")
     async def stats_openai_old_context_summary(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_old_context_summary_report(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/openai-cache-replay")
+    @router.get("/tokenclaw/stats/openai-cache-replay")
     async def stats_openai_cache_replay(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_cache_replay_report(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/openai-cache-replay-impact")
+    @router.get("/tokenclaw/stats/openai-cache-replay-impact")
     async def stats_openai_cache_replay_impact(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_openai_cache_replay_impact(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/openai-cache-replay-readiness")
+    @router.get("/tokenclaw/stats/openai-cache-replay-readiness")
     async def stats_openai_cache_replay_readiness(
         opportunity_limit: int = 1000,
         impact_limit: int = 500,
@@ -350,7 +350,7 @@ def create_dashboard_router(
             ),
         )
 
-    @router.get("/agentflow/stats/openai-tool-cache-invalidation-burndown")
+    @router.get("/tokenclaw/stats/openai-tool-cache-invalidation-burndown")
     async def stats_openai_tool_cache_invalidation_burndown(
         opportunity_limit: int = 1000,
         impact_limit: int = 500,
@@ -367,7 +367,7 @@ def create_dashboard_router(
             ),
         )
 
-    @router.get("/agentflow/stats/repeated-scaffold-opportunity")
+    @router.get("/tokenclaw/stats/repeated-scaffold-opportunity")
     async def stats_repeated_scaffold_opportunity(
         limit: int = 1000,
         min_repeated_rows: int = 2,
@@ -382,7 +382,7 @@ def create_dashboard_router(
             ),
         )
 
-    @router.get("/agentflow/stats/instruction-dedup-opportunity")
+    @router.get("/tokenclaw/stats/instruction-dedup-opportunity")
     async def stats_instruction_dedup_opportunity(
         limit: int = 1000,
         min_repeated_rows: int = 2,
@@ -393,7 +393,7 @@ def create_dashboard_router(
             min_repeated_rows=min_repeated_rows,
         )
 
-    @router.get("/agentflow/stats/instruction-dedup-impact")
+    @router.get("/tokenclaw/stats/instruction-dedup-impact")
     async def stats_instruction_dedup_impact(
         limit: int = 500,
         since: str | None = None,
@@ -404,7 +404,7 @@ def create_dashboard_router(
             since=since,
         )
 
-    @router.get("/agentflow/stats/terminal-output-compaction")
+    @router.get("/tokenclaw/stats/terminal-output-compaction")
     async def stats_terminal_output_compaction(
         opportunity_limit: int = 1000,
         impact_limit: int = 500,
@@ -426,7 +426,7 @@ def create_dashboard_router(
             ),
         )
 
-    @router.get("/agentflow/stats/terminal-output-compaction-activation")
+    @router.get("/tokenclaw/stats/terminal-output-compaction-activation")
     async def stats_terminal_output_compaction_activation(
         opportunity_limit: int = 1000,
         impact_limit: int = 500,
@@ -444,7 +444,7 @@ def create_dashboard_router(
             ),
         )
 
-    @router.get("/agentflow/stats/anthropic-thinking-compaction-impact")
+    @router.get("/tokenclaw/stats/anthropic-thinking-compaction-impact")
     async def stats_anthropic_thinking_compaction_impact(
         limit: int = 500,
         since: str | None = None,
@@ -459,7 +459,7 @@ def create_dashboard_router(
             ),
         )
 
-    @router.get("/agentflow/stats/repeated-scaffold-impact")
+    @router.get("/tokenclaw/stats/repeated-scaffold-impact")
     async def stats_repeated_scaffold_impact(limit: int = 500) -> dict[str, Any]:
         return await cached_expensive_stats(
             "repeated-scaffold-impact",
@@ -467,7 +467,7 @@ def create_dashboard_router(
             lambda: stats_views.stats_repeated_scaffold_impact(_store(store_obj), limit=limit),
         )
 
-    @router.get("/agentflow/stats/repeated-scaffold-activation")
+    @router.get("/tokenclaw/stats/repeated-scaffold-activation")
     async def stats_repeated_scaffold_activation(limit: int = 500) -> dict[str, Any]:
         return await cached_expensive_stats(
             "repeated-scaffold-activation",
@@ -475,7 +475,7 @@ def create_dashboard_router(
             lambda: stats_views.stats_repeated_scaffold_activation(_store(store_obj), limit=limit),
         )
 
-    @router.get("/agentflow/stats/scaffold-rollout-health")
+    @router.get("/tokenclaw/stats/scaffold-rollout-health")
     async def stats_scaffold_rollout_health(limit: int = 500) -> dict[str, Any]:
         return await cached_expensive_stats(
             "scaffold-rollout-health",
@@ -483,11 +483,11 @@ def create_dashboard_router(
             lambda: stats_views.stats_scaffold_rollout_health(_store(store_obj), limit=limit),
         )
 
-    @router.get("/agentflow/stats/shadow-routing-promotion-readiness")
+    @router.get("/tokenclaw/stats/shadow-routing-promotion-readiness")
     async def stats_shadow_routing_promotion_readiness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_shadow_routing_promotion_readiness(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/post-fix-shadow-yield")
+    @router.get("/tokenclaw/stats/post-fix-shadow-yield")
     async def stats_post_fix_shadow_yield(
         limit: int = 50,
         since: str | None = None,
@@ -500,11 +500,11 @@ def create_dashboard_router(
             window_hours=window_hours,
         )
 
-    @router.get("/agentflow/stats/optimization-eval-queue")
+    @router.get("/tokenclaw/stats/optimization-eval-queue")
     async def stats_optimization_eval_queue(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_optimization_eval_queue(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/optimization-coordinator")
+    @router.get("/tokenclaw/stats/optimization-coordinator")
     async def stats_optimization_coordinator(limit: int = 1000) -> dict[str, Any]:
         return await cached_expensive_stats(
             "optimization-coordinator",
@@ -512,11 +512,11 @@ def create_dashboard_router(
             lambda: stats_views.stats_optimization_coordinator_dashboard(_store(store_obj), limit=limit),
         )
 
-    @router.get("/agentflow/stats/optimization-promotion-funnel")
+    @router.get("/tokenclaw/stats/optimization-promotion-funnel")
     async def stats_optimization_promotion_funnel(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_optimization_promotion_funnel(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/optimization-promotion-actions")
+    @router.get("/tokenclaw/stats/optimization-promotion-actions")
     async def stats_optimization_promotion_actions(limit: int = 50) -> dict[str, Any]:
         return await cached_expensive_stats(
             "optimization-promotion-actions",
@@ -524,11 +524,11 @@ def create_dashboard_router(
             lambda: stats_views.stats_optimization_promotion_actions(_store(store_obj), limit=limit),
         )
 
-    @router.get("/agentflow/stats/promotion-blocker-next-actions")
+    @router.get("/tokenclaw/stats/promotion-blocker-next-actions")
     async def stats_promotion_blocker_next_actions(limit: int = 20) -> dict[str, Any]:
         return await stats_views.stats_promotion_blocker_next_actions(limit=limit)
 
-    @router.get("/agentflow/stats/evidence-to-activation-next-actions")
+    @router.get("/tokenclaw/stats/evidence-to-activation-next-actions")
     async def stats_evidence_to_activation_next_actions(limit: int = 20) -> dict[str, Any]:
         return await cached_expensive_stats(
             "evidence-to-activation-next-actions",
@@ -536,7 +536,7 @@ def create_dashboard_router(
             lambda: stats_views.stats_evidence_to_activation_next_actions(limit=limit),
         )
 
-    @router.get("/agentflow/stats/local-activation-next-action-queue")
+    @router.get("/tokenclaw/stats/local-activation-next-action-queue")
     async def stats_local_activation_next_action_queue(limit: int = 20) -> dict[str, Any]:
         return await cached_expensive_stats(
             "local-activation-next-action-queue",
@@ -544,7 +544,7 @@ def create_dashboard_router(
             lambda: stats_views.stats_local_activation_next_action_queue(limit=limit, store_obj=_store(store_obj)),
         )
 
-    @router.get("/agentflow/stats/preview-gated-activation-issue-queue")
+    @router.get("/tokenclaw/stats/preview-gated-activation-issue-queue")
     async def stats_preview_gated_activation_issue_queue(limit: int = 20) -> dict[str, Any]:
         return await cached_expensive_stats(
             "preview-gated-activation-issue-queue",
@@ -552,7 +552,7 @@ def create_dashboard_router(
             lambda: stats_views.stats_preview_gated_activation_issue_queue(limit=limit, store_obj=_store(store_obj)),
         )
 
-    @router.get("/agentflow/stats/post-promotion-deltas")
+    @router.get("/tokenclaw/stats/post-promotion-deltas")
     async def stats_post_promotion_deltas(limit: int = 1000) -> dict[str, Any]:
         return await cached_expensive_stats(
             "post-promotion-deltas",
@@ -560,15 +560,15 @@ def create_dashboard_router(
             lambda: stats_views.stats_post_promotion_deltas(_store(store_obj), limit=limit),
         )
 
-    @router.get("/agentflow/stats/post-promotion-priority-handoff")
+    @router.get("/tokenclaw/stats/post-promotion-priority-handoff")
     async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
         return await stats_views.stats_post_promotion_priority_handoff()
 
-    @router.get("/agentflow/stats/rollout-actions/readiness")
+    @router.get("/tokenclaw/stats/rollout-actions/readiness")
     async def stats_rollout_actions_readiness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_rollout_actions_readiness(_store(store_obj), limit=limit)
 
-    @router.get("/agentflow/stats/local-pattern-coverage")
+    @router.get("/tokenclaw/stats/local-pattern-coverage")
     async def stats_local_pattern_coverage(limit: int = 1000) -> dict[str, Any]:
         return await cached_expensive_stats(
             "local-pattern-coverage",
@@ -576,7 +576,7 @@ def create_dashboard_router(
             lambda: stats_views.stats_local_pattern_coverage(_store(store_obj), limit=limit),
         )
 
-    @router.get("/agentflow/stats/safety")
+    @router.get("/tokenclaw/stats/safety")
     async def stats_safety() -> dict[str, Any]:
         return await stats_views.stats_safety(
             store_obj=_store(store_obj),
@@ -586,15 +586,15 @@ def create_dashboard_router(
             dashboard_read_only=dashboard_read_only,
         )
 
-    @router.get("/agentflow/stats/weekly")
+    @router.get("/tokenclaw/stats/weekly")
     async def stats_weekly() -> dict[str, Any]:
         return await stats_views.stats_weekly(_store(store_obj))
 
-    @router.get("/agentflow/stats/sessions")
+    @router.get("/tokenclaw/stats/sessions")
     async def stats_sessions() -> dict[str, Any]:
         return await stats_views.stats_sessions(_store(store_obj))
 
-    @router.get("/agentflow/dashboard", response_class=HTMLResponse)
+    @router.get("/tokenclaw/dashboard", response_class=HTMLResponse)
     async def dashboard() -> str:
         return stats_views.dashboard_html()
 

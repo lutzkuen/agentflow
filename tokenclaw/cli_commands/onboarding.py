@@ -486,7 +486,7 @@ def _onboarding_cli(
         try:
             config = activation.load_activation_config(args.config_dir)
         except activation.ActivationConfigError as exc:
-            result = _activation_config_error_result("agentflow.activation_doctor.v1", args.config_dir, args.target, exc)
+            result = _activation_config_error_result("tokenclaw.activation_doctor.v1", args.config_dir, args.target, exc)
             if args.json:
                 _write_json(stdout, result)
             else:
@@ -503,7 +503,7 @@ def _onboarding_cli(
         try:
             config = activation.load_activation_config(args.config_dir)
         except activation.ActivationConfigError as exc:
-            result = _activation_config_error_result("agentflow.activation_stats.v1", args.config_dir, args.target, exc)
+            result = _activation_config_error_result("tokenclaw.activation_stats.v1", args.config_dir, args.target, exc)
         else:
             result = _activation_stats_result(config, config_dir=args.config_dir, target=args.target)
         if args.json:
@@ -520,7 +520,7 @@ def _onboarding_cli(
         try:
             config = activation.load_activation_config(args.config_dir)
         except activation.ActivationConfigError as exc:
-            result = _activation_config_error_result("agentflow.savings_report.v1", args.config_dir, None, exc)
+            result = _activation_config_error_result("tokenclaw.savings_report.v1", args.config_dir, None, exc)
             _write_json(stderr, result)
             return 1
 
@@ -545,7 +545,7 @@ def _onboarding_cli(
         if args.json:
             _write_json(stdout, result)
         else:
-            summary_brand = "AgentFlow" if command_name == "agentflow" else brand
+            summary_brand = "AgentFlow" if command_name == "tokenclaw" else brand
             _write_savings_report_summary(stdout, result, brand=summary_brand)
         return 0 if result.get("ok") else 1
 
@@ -557,7 +557,7 @@ def _onboarding_cli(
             if args.json:
                 _write_json(stdout, result)
             else:
-                demo_brand = "AgentFlow" if command_name == "agentflow" else brand
+                demo_brand = "AgentFlow" if command_name == "tokenclaw" else brand
                 stdout.write(
                     f"{demo_brand} local savings rule drill: "
                     f"{result.get('status')} "
@@ -593,14 +593,14 @@ def _onboarding_cli(
         if args.json:
             _write_json(stdout, result)
         else:
-            demo_brand = "AgentFlow" if command_name == "agentflow" else brand
+            demo_brand = "AgentFlow" if command_name == "tokenclaw" else brand
             heading = f"{demo_brand} savings demo" if args.demo_command == "savings" else f"{demo_brand} golden path"
-            savings_label = "agentflow_saved" if command_name == "agentflow" else "tokenclaw_saved"
+            savings_label = "tokenclaw_saved" if command_name == "tokenclaw" else "tokenclaw_saved"
             stdout.write(
                 f"{heading}: "
                 f"{result.get('decision_status')} "
                 f"{result.get('local_action_family')} "
-                f"{savings_label}=${float(result.get('estimated_agentflow_savings_usd') or 0.0):.6f} "
+                f"{savings_label}=${float(result.get('estimated_tokenclaw_savings_usd') or 0.0):.6f} "
                 f"provider_prompt_cache_discount=${float(result.get('provider_prompt_cache_discount_usd') or 0.0):.6f} "
                 f"managed_server_required={str(bool(result.get('managed_server_required'))).lower()}\n"
             )
@@ -608,7 +608,7 @@ def _onboarding_cli(
 
     if args.command == "version":
         result = {
-            "schema": "agentflow.version.v1",
+            "schema": "tokenclaw.version.v1",
             "ok": True,
             "version": __version__,
             "package": "tokenclaw",
@@ -633,13 +633,13 @@ def tokenclaw_cli(
     return _onboarding_cli(argv, stdout=stdout, stderr=stderr, command_name="tokenclaw", brand="TokenClaw")
 
 
-def agentflow_cli(
+def tokenclaw_cli(
     argv: Sequence[str] | None = None,
     *,
     stdout: Any = None,
     stderr: Any = None,
 ) -> int:
-    return _onboarding_cli(argv, stdout=stdout, stderr=stderr, command_name="agentflow", brand="TokenClaw")
+    return _onboarding_cli(argv, stdout=stdout, stderr=stderr, command_name="tokenclaw", brand="TokenClaw")
 
 
 _CODEX_OPENAI_BASE_URL_RE = re.compile(r'^(\s*openai_base_url\s*=\s*)(".*?"|\'.*?\'|[^#\n]*?)(\s+#.*)?(\r?\n)?$')
@@ -733,7 +733,7 @@ def _activation_stats_result(
         for name in _selected_activation_targets(target)
     }
     return {
-        "schema": "agentflow.activation_stats.v1",
+        "schema": "tokenclaw.activation_stats.v1",
         "ok": True,
         "target": target,
         "config_path": str(activation.activation_config_path(config_dir)),
@@ -770,7 +770,7 @@ def _activation_doctor_result(
             checked["reasons"].append("unknown-target")
         targets[name] = checked
     return {
-        "schema": "agentflow.activation_doctor.v1",
+        "schema": "tokenclaw.activation_doctor.v1",
         "ok": all(bool(item.get("ok")) for item in targets.values()),
         "target": target,
         "config_path": str(activation.activation_config_path(config_dir)),
@@ -786,7 +786,7 @@ def _activation_successor_queue_health() -> dict[str, Any]:
         return build_activation_successor_queue_health(limit=5)
     except Exception as exc:
         return {
-            "schema": "agentflow.activation_successor_queue_health.v1",
+            "schema": "tokenclaw.activation_successor_queue_health.v1",
             "status": "unavailable",
             "status_reason": f"activation successor queue health could not be loaded: {type(exc).__name__}",
             "summary": {
@@ -1108,9 +1108,9 @@ def _write_savings_report_summary(stdout: Any, result: dict[str, Any], *, brand:
         stdout.write(", ".join(parts) + "\n")
 
 
-def _fetch_agentflow_stats(*, url: str = DEFAULT_STATS_URL, timeout: float = 5.0, target: str | None = None) -> dict[str, Any]:
+def _fetch_tokenclaw_stats(*, url: str = DEFAULT_STATS_URL, timeout: float = 5.0, target: str | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {
-        "schema": "agentflow.stats_cli.v1",
+        "schema": "tokenclaw.stats_cli.v1",
         "ok": False,
         "target": target,
         "url": url,
@@ -1177,7 +1177,7 @@ def _doctor_activation_target(profile: dict[str, Any], *, timeout: float = 5.0) 
     configured_upstream = _redact_url(str(profile.get("upstream_base_url") or ""))
     health_url = str(profile.get("health_url") or "")
     result: dict[str, Any] = {
-        "schema": "agentflow.activation_doctor.v1",
+        "schema": "tokenclaw.activation_doctor.v1",
         "target": profile.get("id"),
         "ok": False,
         "configured": True,

@@ -8,7 +8,7 @@ from tokenclaw.anthropic_routing_canary_stage import build_anthropic_routing_can
 
 def _pass_through_report() -> dict:
     return {
-        "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+        "schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
         "generated_at": "2026-06-14T19:30:00+00:00",
         "buckets": [
             {
@@ -73,7 +73,7 @@ def _pass_through_report_with_blocked_lifecycle() -> dict:
     bucket = report["buckets"][0]
     bucket["sample_count"] = 1250
     bucket["anthropic_canary_lifecycle_evidence"] = {
-        "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+        "schema": "tokenclaw.anthropic_routing_canary_lifecycle_evidence.v1",
         "status": "matched",
         "matched_count": 1250,
         "observed_count": 492,
@@ -137,7 +137,7 @@ def _pass_through_report_with_guard_ready_lifecycle() -> dict:
     bucket = report["buckets"][0]
     bucket["sample_count"] = 120
     bucket["anthropic_canary_lifecycle_evidence"] = {
-        "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+        "schema": "tokenclaw.anthropic_routing_canary_lifecycle_evidence.v1",
         "status": "matched",
         "matched_count": 120,
         "observed_count": 54,
@@ -203,7 +203,7 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["schema"], "agentflow.anthropic_routing_canary_stage.v1")
+        self.assertEqual(result["schema"], "tokenclaw.anthropic_routing_canary_stage.v1")
         self.assertEqual(result["summary"]["candidate_count"], 3)
         self.assertEqual(result["summary"]["eligible_candidate_count"], 1)
         self.assertEqual(result["summary"]["staged_count"], 1)
@@ -214,7 +214,7 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertTrue(result["summary"]["acceptance_met"])
 
         acceptance = result["acceptance"]
-        self.assertEqual(acceptance["schema"], "agentflow.anthropic_routing_canary_stage_acceptance.v1")
+        self.assertEqual(acceptance["schema"], "tokenclaw.anthropic_routing_canary_stage_acceptance.v1")
         self.assertEqual(acceptance["status"], "met")
         self.assertTrue(acceptance["tool_result_sonnet_to_haiku_candidate_reported"])
         self.assertTrue(acceptance["holdout_coverage_projected"])
@@ -337,7 +337,7 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertFalse(blocked["active_policy_changed"])
         self.assertFalse(blocked["wrote_active_policy_files"])
         guard = blocked["executor_guard_dry_run"]
-        self.assertEqual(guard["schema"], "agentflow.anthropic_routing_executor_guard_dry_run.v1")
+        self.assertEqual(guard["schema"], "tokenclaw.anthropic_routing_executor_guard_dry_run.v1")
         self.assertEqual(guard["status"], "keep-blocked")
         self.assertFalse(guard["stage_allowed"])
         self.assertFalse(guard["promotion_allowed"])
@@ -387,7 +387,7 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertTrue(result["acceptance"]["executor_guard_ready_without_activation"])
 
         guard = result["executor_guard_dry_runs"][0]
-        self.assertEqual(guard["schema"], "agentflow.anthropic_routing_executor_guard_dry_run.v1")
+        self.assertEqual(guard["schema"], "tokenclaw.anthropic_routing_executor_guard_dry_run.v1")
         self.assertEqual(guard["status"], "guard-ready")
         self.assertTrue(guard["guard_ready"])
         self.assertTrue(guard["stage_allowed"])
@@ -422,14 +422,14 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         _assert_privacy_clean(self, result)
 
     def test_cli_extracts_nested_research_plan_report(self) -> None:
-        plan = {"schema": "agentflow.orchestrator_research_plan.v1", "evidence": {"pass_through_routing_report": _pass_through_report()}}
+        plan = {"schema": "tokenclaw.orchestrator_research_plan.v1", "evidence": {"pass_through_routing_report": _pass_through_report()}}
         stdout = io.StringIO()
 
         code = cli.anthropic_routing_canary_stage_cli(["-", "--draft-id", "anthropic-stage-test"], stdin=io.StringIO(json.dumps(plan)), stdout=stdout)
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.anthropic_routing_canary_stage.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.anthropic_routing_canary_stage.v1")
         self.assertEqual(payload["staged_drafts"][0]["draft_id"], "anthropic-stage-test")
         self.assertEqual(payload["summary"]["projected_canary_applied_count"], 56)
         self.assertTrue(payload["acceptance"]["acceptance_met"])

@@ -45,7 +45,7 @@ FORBIDDEN_VALUES = (
 class InstructionDedupImpactTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = Store(self.db_path)
 
     def tearDown(self) -> None:
@@ -64,7 +64,7 @@ class InstructionDedupImpactTests(unittest.TestCase):
         extra: dict[str, object] | None = None,
     ) -> dict[str, object]:
         meta: dict[str, object] = {
-            "schema": "agentflow.instruction_section_deduplication.v1",
+            "schema": "tokenclaw.instruction_section_deduplication.v1",
             "enabled": True,
             "status": status,
             "reason": reason,
@@ -197,7 +197,7 @@ class InstructionDedupImpactTests(unittest.TestCase):
 
         report = build_instruction_dedup_impact_report(self.store, limit=20, min_applied_samples=2, min_holdout_samples=1)
 
-        self.assertEqual(report["schema"], "agentflow.instruction_dedup_impact.v1")
+        self.assertEqual(report["schema"], "tokenclaw.instruction_dedup_impact.v1")
         self.assertEqual(report["summary"]["applied_count"], 2)
         self.assertEqual(report["summary"]["holdout_count"], 1)
         self.assertEqual(report["summary"]["saved_tokens_est"], 400)
@@ -229,7 +229,7 @@ class InstructionDedupImpactTests(unittest.TestCase):
         self.assertEqual(candidate["next_action"], "rollback")
         self.assertGreater(report["summary"]["rollback_action_count"], 0)
         self.assertIn("rollback-absolute-error-rate", candidate["reason_codes"])
-        self.assertEqual(report["rollback_actions"][0]["schema"], "agentflow.instruction_dedup_rollback_action.v1")
+        self.assertEqual(report["rollback_actions"][0]["schema"], "tokenclaw.instruction_dedup_rollback_action.v1")
         self._assert_private(report)
 
     def test_stats_wrapper_and_cli_include_feedback_queue_status_without_payloads(self) -> None:
@@ -238,16 +238,16 @@ class InstructionDedupImpactTests(unittest.TestCase):
         self._log_call(status="applied", reason="instruction-section-dedup-applied")
 
         result = asyncio.run(stats_instruction_dedup_impact(self.store, limit=20))
-        self.assertEqual(result["schema"], "agentflow.instruction_dedup_impact.v1")
+        self.assertEqual(result["schema"], "tokenclaw.instruction_dedup_impact.v1")
         self.assertIn("managed_lifecycle_feedback_queue", result)
         self.assertFalse(result["managed_lifecycle_feedback_queue"]["privacy"]["payload_json_included"])
 
         output = io.StringIO()
-        with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "0"}, clear=False):
+        with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "0"}, clear=False):
             code = cli.instruction_dedup_impact_cli(["--db", self.db_path, "--limit", "20"], stdout=output)
         self.assertEqual(code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.instruction_dedup_impact.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.instruction_dedup_impact.v1")
         self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "queued")
         self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
         self.assertEqual(payload["managed_lifecycle_feedback_queue"]["summary"]["queued"], 1)
@@ -314,7 +314,7 @@ class InstructionDedupImpactTests(unittest.TestCase):
         self._log_call(status="applied", reason="instruction-section-dedup-applied")
         report = build_instruction_dedup_impact_report(self.store, limit=20, min_applied_samples=1, min_holdout_samples=0)
 
-        with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "0"}, clear=False):
+        with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "0"}, clear=False):
             meta = asyncio.run(queue_instruction_dedup_lifecycle_feedback(self.store, report, flush_immediately=False))
 
         self.assertEqual(meta["status"], "queued")

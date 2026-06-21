@@ -66,9 +66,9 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         self.saved_env = {
             key: os.environ.get(key)
             for key in (
-                "AGENTFLOW_RECOMMENDATION_ENABLED",
-                "AGENTFLOW_RECOMMENDATION_SERVER_URL",
-                "AGENTFLOW_MANAGED_API_KEY",
+                "TOKENCLAW_RECOMMENDATION_ENABLED",
+                "TOKENCLAW_RECOMMENDATION_SERVER_URL",
+                "TOKENCLAW_MANAGED_API_KEY",
             )
         }
         for key in self.saved_env:
@@ -77,7 +77,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         RepeatedScaffoldFeedbackClient.status_code = 200
         RepeatedScaffoldFeedbackClient.text = '{"ok":true}'
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -142,7 +142,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         crunch = {
             "changed": applied,
             "repeated_provider_scaffolding": {
-                "schema": "agentflow.repeated_provider_scaffolding.v1",
+                "schema": "tokenclaw.repeated_provider_scaffolding.v1",
                 "enabled": True,
                 "status": "applied" if applied else "skipped",
                 "reason": "repeated-provider-scaffolding-crunched" if applied else "canary_holdout",
@@ -245,7 +245,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
             if repeated_status == "safety_stop":
                 rule["skip_reasons"] = [{"reason": "safety_stop_error_rate", "count": 1}]
             provider_meta = {
-                "schema": "agentflow.repeated_provider_scaffolding.v1",
+                "schema": "tokenclaw.repeated_provider_scaffolding.v1",
                 "enabled": True,
                 "status": repeated_status,
                 "reason": repeated_reason or repeated_status,
@@ -308,7 +308,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
 
         report = build_repeated_scaffold_impact_report(self.store, limit=20)
 
-        self.assertEqual(report["schema"], "agentflow.repeated_scaffold_impact.v1")
+        self.assertEqual(report["schema"], "tokenclaw.repeated_scaffold_impact.v1")
         self.assertEqual(report["summary"]["observed_repeated_scaffold_metadata_row_count"], 3)
         self.assertEqual(report["candidates"][0]["verdict"], "promote")
         self.assertEqual(report["candidates"][0]["next_action"], "widen_repeated_scaffold_crunch_canary")
@@ -321,7 +321,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         exit_code = cli.repeated_scaffold_impact_cli(["--db", self.db_path, "--limit", "20"], stdout=output)
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.repeated_scaffold_impact.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.repeated_scaffold_impact.v1")
 
         rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("prompt must not leak", rendered)
@@ -463,7 +463,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
 
         report = build_repeated_scaffold_activation_report(self.store, limit=20)
 
-        self.assertEqual(report["schema"], "agentflow.repeated_scaffold_activation.v1")
+        self.assertEqual(report["schema"], "tokenclaw.repeated_scaffold_activation.v1")
         self.assertEqual(report["status"], "matched")
         summary = report["summary"]
         self.assertEqual(summary["sampled_call_count"], 6)
@@ -532,7 +532,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
 
         status = build_repeated_scaffold_lifecycle_feedback_status(self.store, sample_limit=10)
 
-        self.assertEqual(status["schema"], "agentflow.repeated_scaffold_lifecycle_feedback_queue_status.v1")
+        self.assertEqual(status["schema"], "tokenclaw.repeated_scaffold_lifecycle_feedback_queue_status.v1")
         self.assertEqual(status["summary"]["retryable_error"], 1)
         self.assertEqual(status["summary"]["due"], 1)
         self.assertEqual(status["due_samples"][0]["payload_included"], False)
@@ -588,8 +588,8 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
             })
 
     def test_enabled_cli_queues_lifecycle_feedback_without_payload_leakage(self) -> None:
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
         self._log_call(cohort="canary_applied", tokens_saved=1000)
         self._log_call(cohort="canary_applied", tokens_saved=1200)
         self._log_call(cohort="canary_holdout", tokens_saved=0)
@@ -624,8 +624,8 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         self.assertNotIn("raw-session-must-not-leak", queued_text)
 
     def test_cli_flushes_repeated_scaffold_lifecycle_feedback_with_redacted_queue_audit(self) -> None:
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
         self._log_call(cohort="canary_applied", tokens_saved=1000)
         self._log_call(cohort="canary_applied", tokens_saved=1200)
         self._log_call(cohort="canary_holdout", tokens_saved=0)
@@ -689,7 +689,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
         flush = payload["managed_lifecycle_feedback_flush"]
-        self.assertEqual(flush["schema"], "agentflow.repeated_scaffold_lifecycle_feedback_flush.v1")
+        self.assertEqual(flush["schema"], "tokenclaw.repeated_scaffold_lifecycle_feedback_flush.v1")
         self.assertEqual(flush["flush"]["sent"], 1)
         self.assertEqual(flush["before"]["queued"], 1)
         self.assertEqual(flush["before"]["due"], 1)
@@ -728,8 +728,8 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         self.assertFalse(flush["privacy"]["payload_json_included"])
 
     def test_cli_feedback_dry_run_reports_due_repeated_scaffold_rows_without_claiming(self) -> None:
-        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
         self._log_call(cohort="canary_applied", tokens_saved=1000)
         self._log_call(cohort="canary_applied", tokens_saved=1200)
         self._log_call(cohort="canary_holdout", tokens_saved=0)

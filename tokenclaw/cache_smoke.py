@@ -11,7 +11,7 @@ from tokenclaw.policy_files import utc_now
 from tokenclaw.public_metadata import public_label
 from tokenclaw.store import SQLiteStore
 
-HIT_RECOVERY_SMOKE_SCHEMA = "agentflow.cache_replay_hit_recovery_smoke.v1"
+HIT_RECOVERY_SMOKE_SCHEMA = "tokenclaw.cache_replay_hit_recovery_smoke.v1"
 _TARGET_OPENAI_CACHE_REPLAY_RULE_ID = "local-openai-cache-replay-canary-ae8404ee817f89f4"
 
 
@@ -252,7 +252,7 @@ def _synthetic_openai_cache_replay_body() -> dict[str, Any]:
 
 def _synthetic_openai_cache_replay_response() -> dict[str, Any]:
     return {
-        "id": "resp_agentflow_cache_replay_hit_recovery_smoke",
+        "id": "resp_tokenclaw_cache_replay_hit_recovery_smoke",
         "object": "response",
         "output": [
             {
@@ -334,7 +334,7 @@ def _select_synthetic_openai_canary_applied_lookup(
     max_attempts: int = 4096,
 ) -> tuple[str | None, bool, bool, dict[str, Any]]:
     for index in range(max(1, max_attempts)):
-        request_fingerprint = f"agentflow-cache-replay-hit-recovery-smoke-{index}"
+        request_fingerprint = f"tokenclaw-cache-replay-hit-recovery-smoke-{index}"
         can_exact, can_semantic, meta = cache_module.cache_lookup_meta(
             has_tool_blocks=False,
             pattern_features=_synthetic_openai_cache_replay_features(request_fingerprint),
@@ -370,7 +370,7 @@ def build_cache_replay_hit_recovery_smoke(
             detail={"cache_status": lookup_meta.get("status"), "cache_reason": lookup_meta.get("reason")},
         )
 
-    session_id = "agentflow-cache-replay-hit-recovery-smoke-session"
+    session_id = "tokenclaw-cache-replay-hit-recovery-smoke-session"
     replay_scope, replay_scope_id, replay_pattern_rule = cache_module.cache_replay_scope_for_meta(lookup_meta, session_id)
     if replay_pattern_rule is None:
         return _failure_result("cache-replay-pattern-rule-missing", blockers=["pattern-rule-missing"])
@@ -489,7 +489,7 @@ def build_cache_replay_hit_recovery_smoke(
 
 def build_isolated_cache_replay_hit_recovery_smoke() -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as tmp:
-        store_obj = SQLiteStore(str(Path(tmp) / "agentflow-cache-hit-recovery-smoke.sqlite3"))
+        store_obj = SQLiteStore(str(Path(tmp) / "tokenclaw-cache-hit-recovery-smoke.sqlite3"))
         try:
             return build_cache_replay_hit_recovery_smoke(store_obj)
         finally:
@@ -587,7 +587,7 @@ def build_cache_smoke_diagnostic(
             no_hit_reasons.append("cache rows exist but scanned calls did not recompute a matching exact key")
 
     return {
-        "schema": "agentflow.cache_smoke_diagnostic.v1",
+        "schema": "tokenclaw.cache_smoke_diagnostic.v1",
         "generated_at": utc_now(),
         "summary": {
             "cache_rows": cache_count,

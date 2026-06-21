@@ -10,15 +10,15 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.local_activation_outcome_summary.v1"
-OUTCOME_SCHEMA = "agentflow.local_activation_outcome_summary_row.v1"
-OUTCOME_LEDGER_ENTRY_SCHEMA = "agentflow.local_activation_outcome_ledger_entry.v1"
-PRIVACY_SCHEMA = "agentflow.local_activation_outcome_summary_privacy.v1"
-CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
-CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "agentflow.request_shape_crunch_activation_evidence.v1"
-FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA = "agentflow.full_rollout_crunch_keep_active_regression_gate.v1"
-CACHE_REPLAY_POLICY_DECISION_SCHEMA = "agentflow.request_shape_cache_replay_policy_decision.v1"
-CACHE_REPLAY_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_replay_evidence.v1"
+SCHEMA = "tokenclaw.local_activation_outcome_summary.v1"
+OUTCOME_SCHEMA = "tokenclaw.local_activation_outcome_summary_row.v1"
+OUTCOME_LEDGER_ENTRY_SCHEMA = "tokenclaw.local_activation_outcome_ledger_entry.v1"
+PRIVACY_SCHEMA = "tokenclaw.local_activation_outcome_summary_privacy.v1"
+CRUNCH_POLICY_DECISION_SCHEMA = "tokenclaw.request_shape_crunch_policy_decision.v1"
+CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "tokenclaw.request_shape_crunch_activation_evidence.v1"
+FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA = "tokenclaw.full_rollout_crunch_keep_active_regression_gate.v1"
+CACHE_REPLAY_POLICY_DECISION_SCHEMA = "tokenclaw.request_shape_cache_replay_policy_decision.v1"
+CACHE_REPLAY_EVIDENCE_SCHEMA = "tokenclaw.request_shape_cache_replay_evidence.v1"
 
 RULE_FILES = {
     "routing": "routing_rules.yaml",
@@ -174,7 +174,7 @@ def _full_rollout_crunch_keep_active_gate(
         "target_local_policy_section": public_label(target_local_policy_section, "crunch.rules"),
         "target_local_rule_file": public_label(target_local_rule_file, "crunch_rules.yaml"),
         "regression_counters": {
-            "schema": "agentflow.full_rollout_crunch_keep_active_regression_counters.v1",
+            "schema": "tokenclaw.full_rollout_crunch_keep_active_regression_counters.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "applied_count": applied_count,
@@ -412,7 +412,7 @@ def _activation_keep_active_duplicate_suppression(
         if part
     )
     return {
-        "schema": "agentflow.local_activation_keep_active_duplicate_suppression.v1",
+        "schema": "tokenclaw.local_activation_keep_active_duplicate_suppression.v1",
         "suppresses_new_activation_issue": True,
         "suppresses_generic_crunch_activation_issue": True,
         "reason": "repeated-context-crunch-active-at-max-rollout",
@@ -431,7 +431,7 @@ def _safe_local_duplicate_suppression(value: Any) -> dict[str, Any]:
     if not value:
         return {}
     result: dict[str, Any] = {
-        "schema": public_label(value.get("schema"), "agentflow.local_activation_keep_active_duplicate_suppression.v1"),
+        "schema": public_label(value.get("schema"), "tokenclaw.local_activation_keep_active_duplicate_suppression.v1"),
         "suppresses_new_activation_issue": bool(value.get("suppresses_new_activation_issue")),
         "suppresses_generic_crunch_activation_issue": bool(value.get("suppresses_generic_crunch_activation_issue")),
         "reason": public_label(value.get("reason"), "unknown"),
@@ -510,7 +510,7 @@ def _apply_crunch_policy_decision_report(row: dict[str, Any], blockers: Counter[
     row["graduation_decision"] = public_label(top.get("graduation_decision") or report.get("graduation_decision"), "unknown")
     row["safety_stop_state"] = public_label(top.get("safety_stop_state") or summary.get("safety_stop_state"), "none")
     row["coverage"] = {
-        "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+        "schema": "tokenclaw.local_activation_outcome_decision_coverage.v1",
         "source_schema": public_label(coverage.get("schema"), "unknown"),
         "metadata_only": True,
         "aggregate_only": True,
@@ -669,7 +669,7 @@ def _apply_crunch_activation_evidence_report(row: dict[str, Any], blockers: Coun
         target_local_rule_file=target_rule_file,
     )
     row["coverage"] = {
-        "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+        "schema": "tokenclaw.local_activation_outcome_decision_coverage.v1",
         "source_schema": CRUNCH_ACTIVATION_EVIDENCE_SCHEMA,
         "metadata_only": True,
         "aggregate_only": True,
@@ -747,7 +747,7 @@ def _apply_cache_policy_decision_report(row: dict[str, Any], blockers: Counter[s
     row["source_decision"] = public_label(top.get("decision") or report.get("decision"), "unknown")
     row["graduation_decision"] = row["source_decision"]
     row["coverage"] = {
-        "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+        "schema": "tokenclaw.local_activation_outcome_decision_coverage.v1",
         "source_schema": public_label(coverage.get("schema"), "unknown"),
         "metadata_only": True,
         "aggregate_only": True,
@@ -875,7 +875,7 @@ def _apply_cache_replay_evidence_report(row: dict[str, Any], blockers: Counter[s
         blockers[value] += count
     row["miss_reason_breakdown"] = miss_breakdown
     row["coverage"] = {
-        "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+        "schema": "tokenclaw.local_activation_outcome_decision_coverage.v1",
         "source_schema": CACHE_REPLAY_EVIDENCE_SCHEMA,
         "metadata_only": True,
         "aggregate_only": True,
@@ -1197,7 +1197,7 @@ def build_local_activation_outcome_summary(
         )
     violations = managed_egress_violations(result)
     result["egress_guard"] = {
-        "schema": "agentflow.managed_egress_guard.v1",
+        "schema": "tokenclaw.managed_egress_guard.v1",
         "status": "passed" if not violations else "blocked",
         "blocked": bool(violations),
         "violation_count": len(violations),

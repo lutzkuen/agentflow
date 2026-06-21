@@ -22,8 +22,8 @@ from tokenclaw.public_metadata import public_label
 from tokenclaw.store import stable_json, utc_now
 
 
-SCHEMA = "agentflow.anthropic_thinking_compaction_dry_run.v1"
-PLAN_SCHEMA = "agentflow.anthropic_thinking_compaction_plan.v1"
+SCHEMA = "tokenclaw.anthropic_thinking_compaction_dry_run.v1"
+PLAN_SCHEMA = "tokenclaw.anthropic_thinking_compaction_plan.v1"
 ACTION_FAMILY = "anthropic_thinking_history_compaction"
 _THINKING_BLOCK_TYPES = {"thinking", "redacted_thinking"}
 
@@ -68,7 +68,7 @@ def _staged_policy_metadata() -> dict[str, Any]:
         if isinstance(rule, dict)
     ]
     return {
-        "schema": "agentflow.anthropic_thinking_compaction_staged_local_canary.v1",
+        "schema": "tokenclaw.anthropic_thinking_compaction_staged_local_canary.v1",
         "enabled": bool(policy.get("enabled")),
         "runtime_mutation_enabled": bool(policy.get("enabled")),
         "default_apply": False,
@@ -82,7 +82,7 @@ def _staged_policy_metadata() -> dict[str, Any]:
             "emits_applied": True,
             "emits_holdout": True,
             "emits_safety_stop": True,
-            "impact_report": "agentflow.anthropic_thinking_compaction_impact.v1",
+            "impact_report": "tokenclaw.anthropic_thinking_compaction_impact.v1",
         },
         "privacy": {
             "metadata_only_output": True,
@@ -844,7 +844,7 @@ def build_anthropic_thinking_compaction_dry_run(
             "policy_files_changed": False,
         },
         "policy": {
-            "schema": "agentflow.anthropic_thinking_compaction_dry_run_policy.v1",
+            "schema": "tokenclaw.anthropic_thinking_compaction_dry_run_policy.v1",
             "enabled": True,
             "runtime_mutation_enabled": False,
             "default_apply": False,

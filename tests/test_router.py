@@ -86,7 +86,7 @@ class RouterTest(unittest.TestCase):
     def _reload_with_routing_yaml(self, tmp: str, yaml_text: str, extra_env: dict[str, str] | None = None):
         rules_path = Path(tmp) / "routing_rules.yaml"
         rules_path.write_text(yaml_text, encoding="utf-8")
-        env = {"AGENTFLOW_ROUTING_RULES": str(rules_path)}
+        env = {"TOKENCLAW_ROUTING_RULES": str(rules_path)}
         env.update(extra_env or {})
         return patch.dict(os.environ, env)
 
@@ -276,7 +276,7 @@ rules:
                 encoding="utf-8",
             )
             try:
-                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}):
+                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}):
                     manual_router = importlib.reload(router_module)
                     body = {
                         "model": manual_router.SONNET_DEFAULT,
@@ -314,7 +314,7 @@ rules:
                 encoding="utf-8",
             )
             try:
-                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}):
+                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}):
                     manual_router = importlib.reload(router_module)
                     body = {
                         "model": manual_router.SONNET_DEFAULT,
@@ -345,7 +345,7 @@ rules:
                 encoding="utf-8",
             )
             try:
-                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}):
+                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}):
                     manual_router = importlib.reload(router_module)
                     body = {
                         "model": manual_router.SONNET_DEFAULT,
@@ -458,7 +458,7 @@ rules:
 
     def test_openai_routing_stays_inside_openai_models(self):
         try:
-            with patch.dict(os.environ, {"AGENTFLOW_OPENAI_ROUTING": "1"}):
+            with patch.dict(os.environ, {"TOKENCLAW_OPENAI_ROUTING": "1"}):
                 manual_router = importlib.reload(router_module)
 
                 routed, meta = manual_router.route_openai_model({
@@ -503,7 +503,7 @@ rules: []
                 encoding="utf-8",
             )
             try:
-                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}, clear=False):
+                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}, clear=False):
                     manual_router = importlib.reload(router_module)
 
                     routed, meta = manual_router.route_openai_model({
@@ -547,7 +547,7 @@ rules: []
                 encoding="utf-8",
             )
             try:
-                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}, clear=False):
+                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}, clear=False):
                     manual_router = importlib.reload(router_module)
 
                     routed_1, meta_1 = manual_router.route_openai_model({
@@ -591,7 +591,7 @@ rules: []
                 encoding="utf-8",
             )
             try:
-                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}, clear=False):
+                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}, clear=False):
                     manual_router = importlib.reload(router_module)
 
                     routed, meta = manual_router.route_openai_model({
@@ -636,7 +636,7 @@ rules: []
                 encoding="utf-8",
             )
             try:
-                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}, clear=False):
+                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}, clear=False):
                     manual_router = importlib.reload(router_module)
 
                     routed_1, meta_1 = manual_router.route_openai_model({
@@ -701,18 +701,18 @@ rules: []
                 encoding="utf-8",
             )
             try:
-                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}, clear=False):
+                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}, clear=False):
                     manual_router = importlib.reload(router_module)
 
                     _, codex_meta = manual_router.route_openai_model({
                         "model": "gpt-5.5",
-                        "_agentflow_app_family": "codex",
+                        "_tokenclaw_app_family": "codex",
                         "input": "Inspect tool output.",
                         "tools": [{"type": "function", "name": "read_file"}],
                     })
                     _, generic_meta = manual_router.route_openai_model({
                         "model": "gpt-5.5",
-                        "_agentflow_app_family": "generic_openai",
+                        "_tokenclaw_app_family": "generic_openai",
                         "input": "Inspect tool output.",
                         "tools": [{"type": "function", "name": "read_file"}],
                     })
@@ -797,8 +797,8 @@ rules: []
                 with patch.dict(
                     os.environ,
                     {
-                        "AGENTFLOW_ROUTING_RULES": str(rules_path),
-                        "AGENTFLOW_DATABASE_URL": f"sqlite:///{db_path}",
+                        "TOKENCLAW_ROUTING_RULES": str(rules_path),
+                        "TOKENCLAW_DATABASE_URL": f"sqlite:///{db_path}",
                     },
                     clear=False,
                 ):
@@ -855,7 +855,7 @@ rules: []
             "messages": [{"role": "user", "content": "summarize this report\n" + ("a" * 11900)}],
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_ROUTE_MIDSIZE": "1"}):
             routed, meta = route_model(body)
 
         self.assertEqual(routed, HAIKU_DEFAULT)
@@ -881,7 +881,7 @@ rules: []
             "messages": [{"role": "user", "content": "```python\n" + ("print('x')\n" * 1200) + "```"}],
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_ROUTE_MIDSIZE": "1"}):
             routed, meta = route_model(body)
 
         self.assertEqual(routed, SONNET_DEFAULT)
@@ -894,7 +894,7 @@ rules: []
             "messages": [{"role": "user", "content": "summarize all of this\n" + ("a" * 31000)}],
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_ROUTE_MIDSIZE": "1"}):
             routed, meta = route_model(body)
 
         self.assertEqual(routed, SONNET_DEFAULT)
@@ -908,7 +908,7 @@ rules: []
             "messages": [{"role": "user", "content": "read the files\n" + ("a" * 11900)}],
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_ROUTE_MIDSIZE": "1"}):
             routed, meta = route_model(body)
 
         self.assertEqual(routed, HAIKU_DEFAULT)
@@ -922,7 +922,7 @@ rules: []
             "messages": [{"role": "user", "content": "think about this\n" + ("a" * 11900)}],
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_ROUTE_MIDSIZE": "1"}):
             routed, meta = route_model(body)
 
         self.assertEqual(routed, SONNET_DEFAULT)
@@ -1235,7 +1235,7 @@ phase_canary:
   excluded_categories: []
 rules: []
 """,
-                    {"AGENTFLOW_DB": str(Path(tmp) / "missing.sqlite3")},
+                    {"TOKENCLAW_DB": str(Path(tmp) / "missing.sqlite3")},
                 ):
                     manual_router = importlib.reload(router_module)
                     body = {
@@ -1389,7 +1389,7 @@ rules:
 
     def test_phase_canary_safety_stop_prevents_downgrade_after_errors(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             for index in range(2):
                 store.log_call(
@@ -1432,7 +1432,7 @@ phase_canary:
     max_fallback_rate: 1.0
 rules: []
 """,
-                    {"AGENTFLOW_DB": db_path},
+                    {"TOKENCLAW_DB": db_path},
                 ):
                     manual_router = importlib.reload(router_module)
                     body = {
@@ -1490,7 +1490,7 @@ rules:
 
     def test_session_memory_rule_routes_stable_tool_execution_window(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 for index in range(1, 4):
@@ -1521,7 +1521,7 @@ rules:
       route_to: haiku
       reason: stable tool execution memory routed to Haiku
 """,
-                    {"AGENTFLOW_DB": db_path},
+                    {"TOKENCLAW_DB": db_path},
                 ):
                     manual_router = importlib.reload(router_module)
                     body = {
@@ -1562,7 +1562,7 @@ rules:
             "secret-session-router",
         )
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 for index in range(1, 4):
@@ -1588,7 +1588,7 @@ rules:
       route_to: haiku
       reason: stable unknown memory route
 """,
-                    {"AGENTFLOW_DB": db_path},
+                    {"TOKENCLAW_DB": db_path},
                 ):
                     manual_router = importlib.reload(router_module)
                     body = {
@@ -1617,7 +1617,7 @@ rules:
 
     def test_session_memory_rule_blocks_missing_memory(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             store.conn.close()
             try:
@@ -1636,7 +1636,7 @@ rules:
       route_to: haiku
       reason: stable memory route
 """,
-                    {"AGENTFLOW_DB": db_path},
+                    {"TOKENCLAW_DB": db_path},
                 ):
                     manual_router = importlib.reload(router_module)
                     body = {
@@ -1660,7 +1660,7 @@ rules:
 
     def test_session_memory_rule_blocks_recent_errors_retries_and_fallbacks(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_memory_call(store, 1)
@@ -1688,7 +1688,7 @@ rules:
       route_to: haiku
       reason: stable memory route
 """,
-                    {"AGENTFLOW_DB": db_path},
+                    {"TOKENCLAW_DB": db_path},
                 ):
                     manual_router = importlib.reload(router_module)
                     body = {
@@ -1713,7 +1713,7 @@ rules:
 
     def test_session_memory_rule_blocks_thinking_and_planning_windows(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_memory_call(store, 1, phase="planning", category="tool-light")
@@ -1740,7 +1740,7 @@ rules:
       route_to: haiku
       reason: stable memory route
 """,
-                    {"AGENTFLOW_DB": db_path},
+                    {"TOKENCLAW_DB": db_path},
                 ):
                     manual_router = importlib.reload(router_module)
                     body = {
@@ -1765,7 +1765,7 @@ rules:
 
     def test_session_memory_rule_routes_stable_summary_when_per_call_rule_agrees(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 for index in range(1, 4):
@@ -1793,7 +1793,7 @@ rules:
       route_to: haiku
       reason: stable summary memory routed to Haiku
 """,
-                    {"AGENTFLOW_DB": db_path},
+                    {"TOKENCLAW_DB": db_path},
                 ):
                     manual_router = importlib.reload(router_module)
                     body = {

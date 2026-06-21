@@ -12,9 +12,9 @@ from tokenclaw.claude_canary_impact import SCHEMA as CLAUDE_IMPACT_SCHEMA
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.claude_canary_rollout_actions.v1"
-ACTION_SCHEMA = "agentflow.claude_canary_rollout_action.v1"
-APPLY_SCHEMA = "agentflow.claude_canary_rollout_actions_apply.v1"
+SCHEMA = "tokenclaw.claude_canary_rollout_actions.v1"
+ACTION_SCHEMA = "tokenclaw.claude_canary_rollout_action.v1"
+APPLY_SCHEMA = "tokenclaw.claude_canary_rollout_actions_apply.v1"
 
 _ROUTING_FILE = "routing_rules.yaml"
 _ACTION_TYPES = {"widen", "hold", "rollback", "more-samples"}
@@ -359,9 +359,9 @@ def _action(
         },
         "local_review": {
             "required": True,
-            "review_command": "agentflow-claude-canary-actions",
-            "apply_preview_command": "agentflow-claude-canary-actions-apply --dry-run",
-            "apply_write_command": "agentflow-claude-canary-actions-apply --write",
+            "review_command": "tokenclaw-claude-canary-actions",
+            "apply_preview_command": "tokenclaw-claude-canary-actions-apply --dry-run",
+            "apply_write_command": "tokenclaw-claude-canary-actions-apply --write",
         },
         "privacy": _privacy_summary(),
     }

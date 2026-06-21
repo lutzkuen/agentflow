@@ -9,9 +9,9 @@ from typing import Any
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.crunch_promotion_draft_dry_run.v1"
-RULE_DRAFT_SCHEMA = "agentflow.crunch_promotion_rule_draft.v1"
-OMISSION_SCHEMA = "agentflow.crunch_promotion_draft_omission.v1"
+SCHEMA = "tokenclaw.crunch_promotion_draft_dry_run.v1"
+RULE_DRAFT_SCHEMA = "tokenclaw.crunch_promotion_rule_draft.v1"
+OMISSION_SCHEMA = "tokenclaw.crunch_promotion_draft_omission.v1"
 
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,95}$")
 _FORBIDDEN_KEYS = {
@@ -316,7 +316,7 @@ def _min_text_chars(candidate: dict[str, Any]) -> int:
 
 def _evidence_summary(report: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "agentflow.crunch_promotion_evidence_summary.v1",
+        "schema": "tokenclaw.crunch_promotion_evidence_summary.v1",
         "source_report_schema": report.get("schema"),
         "source_report_generated_at": report.get("generated_at"),
         "source_evidence_schema": candidate.get("source_evidence_schema"),
@@ -412,14 +412,14 @@ def _draft_rule(
             "max_error_rate_delta": 0.05,
         },
         "promotion": {
-            "schema": "agentflow.crunch_promotion_local_draft_metadata.v1",
+            "schema": "tokenclaw.crunch_promotion_local_draft_metadata.v1",
             "source": "local_promotion_candidates",
             "target_candidate_id": candidate_id,
             "target_local_rule_file": "crunch_rules.yaml",
             "target_local_policy_section": "anthropic_thinking_history_compaction.rules",
             "evidence_summary": evidence,
             "dry_run_impact_estimate": {
-                "schema": "agentflow.crunch_promotion_dry_run_impact_estimate.v1",
+                "schema": "tokenclaw.crunch_promotion_dry_run_impact_estimate.v1",
                 "sample_count": evidence["sample_count"],
                 "applied_count": evidence["applied_count"],
                 "holdout_count": evidence["holdout_count"],

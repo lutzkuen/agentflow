@@ -15,8 +15,8 @@ from tokenclaw.stats import (
 )
 from tokenclaw.store import utc_now
 
-SCHEMA = "agentflow.optimization_eval_plan.v1"
-ROW_SCHEMA = "agentflow.optimization_eval_plan_row.v1"
+SCHEMA = "tokenclaw.optimization_eval_plan.v1"
+ROW_SCHEMA = "tokenclaw.optimization_eval_plan_row.v1"
 _RAW_FIELD_NAMES = {
     "api_key",
     "body",

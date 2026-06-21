@@ -12,8 +12,8 @@ from tokenclaw.claude_canary_impact import SCHEMA as CLAUDE_IMPACT_SCHEMA
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.routing_canary_promotion_plan.v1"
-APPLY_SCHEMA = "agentflow.routing_canary_promotion_apply.v1"
+SCHEMA = "tokenclaw.routing_canary_promotion_plan.v1"
+APPLY_SCHEMA = "tokenclaw.routing_canary_promotion_apply.v1"
 _ROUTING_FILE = "routing_rules.yaml"
 _CANARY_FILE = "routing_canary_policy.yaml"
 _RAW_LIKE_KEY_PARTS = (

@@ -16,7 +16,7 @@ def _promotion_report(*, ready: bool = True) -> dict:
     report = build_local_promotion_candidates_from_reports(
         {
             "anthropic_thinking_compaction_impact": {
-                "schema": "agentflow.anthropic_thinking_compaction_impact.v1",
+                "schema": "tokenclaw.anthropic_thinking_compaction_impact.v1",
                 "status": "matched",
                 "candidates": [
                     {

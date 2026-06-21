@@ -17,15 +17,15 @@ class ManagedRoutingPathwayOutcomeFeedbackTests(unittest.TestCase):
     def _source(self) -> dict[str, object]:
         generated_at = "2026-06-20T01:00:00+00:00"
         return {
-            "schema": "agentflow.policy_decision.v1",
+            "schema": "tokenclaw.policy_decision.v1",
             "generated_at": generated_at,
             "routing_pathway_matrix": {
-                "schema": "agentflow.routing_pathway_matrix.v1",
+                "schema": "tokenclaw.routing_pathway_matrix.v1",
                 "generated_at": generated_at,
                 "status": "recommended",
                 "pathways": [
                     {
-                        "schema": "agentflow.routing_pathway_matrix_entry.v1",
+                        "schema": "tokenclaw.routing_pathway_matrix_entry.v1",
                         "rank": 1,
                         "pathway_id": "pathway-openai-tool-light",
                         "pathway_type": "adjacent_downroute",
@@ -43,7 +43,7 @@ class ManagedRoutingPathwayOutcomeFeedbackTests(unittest.TestCase):
                         "activation_recommendation": True,
                     },
                     {
-                        "schema": "agentflow.routing_pathway_matrix_entry.v1",
+                        "schema": "tokenclaw.routing_pathway_matrix_entry.v1",
                         "rank": 2,
                         "pathway_id": "pathway-codex-summary",
                         "pathway_type": "adjacent_downroute",
@@ -134,7 +134,7 @@ class ManagedRoutingPathwayOutcomeFeedbackTests(unittest.TestCase):
 
     def test_report_records_openai_and_codex_pathway_outcomes_without_raw_metadata(self) -> None:
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 self._log_openai_canary_call(
                     store,
@@ -175,7 +175,7 @@ class ManagedRoutingPathwayOutcomeFeedbackTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["schema"], "agentflow.local_routing_pathway_outcome_feedback.v1")
+        self.assertEqual(report["schema"], "tokenclaw.local_routing_pathway_outcome_feedback.v1")
         self.assertEqual(report["status"], "tracked")
         self.assertEqual(report["summary"]["outcome_count"], 2)
         self.assertEqual(report["summary"]["applied_count"], 1)
@@ -205,7 +205,7 @@ class ManagedRoutingPathwayOutcomeFeedbackTests(unittest.TestCase):
 
     def test_cli_reads_matrix_json_and_local_db(self) -> None:
         with TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "agentflow.sqlite3"
+            db_path = Path(tmp) / "tokenclaw.sqlite3"
             source_path = Path(tmp) / "decision.json"
             source_path.write_text(json.dumps(self._source()), encoding="utf-8")
             store = Store(str(db_path))

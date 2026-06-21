@@ -9,16 +9,16 @@ from uuid import uuid4
 from tokenclaw.store import utc_now
 
 
-POLICY_EVENT_SCHEMA = "agentflow.policy_event.v1"
-POLICY_EVENTS_SCHEMA = "agentflow.policy_events.v1"
+POLICY_EVENT_SCHEMA = "tokenclaw.policy_event.v1"
+POLICY_EVENTS_SCHEMA = "tokenclaw.policy_events.v1"
 
 
 def policy_events_enabled() -> bool:
-    return os.getenv("AGENTFLOW_POLICY_EVENTS", "1") != "0"
+    return os.getenv("TOKENCLAW_POLICY_EVENTS", "1") != "0"
 
 
 def policy_events_log_path() -> Path:
-    return Path(os.getenv("AGENTFLOW_POLICY_EVENTS_LOG", "~/.agentflow/policy_events.jsonl")).expanduser()
+    return Path(os.getenv("TOKENCLAW_POLICY_EVENTS_LOG", "~/.tokenclaw/policy_events.jsonl")).expanduser()
 
 
 def summarize_policy_state(policies: Any) -> dict[str, Any]:

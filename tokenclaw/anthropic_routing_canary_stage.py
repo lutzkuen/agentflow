@@ -8,14 +8,14 @@ from typing import Any
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.anthropic_routing_canary_stage.v1"
-OMISSION_SCHEMA = "agentflow.anthropic_routing_canary_stage_omission.v1"
-STAGED_SCHEMA = "agentflow.anthropic_routing_canary_staged_draft.v1"
-PROJECTED_LIFECYCLE_SCHEMA = "agentflow.anthropic_routing_canary_projected_lifecycle_coverage.v1"
-BLOCKED_REVIEW_SCHEMA = "agentflow.anthropic_routing_canary_blocked_review.v1"
-ACCEPTANCE_SCHEMA = "agentflow.anthropic_routing_canary_stage_acceptance.v1"
-EXECUTOR_GUARD_DRY_RUN_SCHEMA = "agentflow.anthropic_routing_executor_guard_dry_run.v1"
-PASS_THROUGH_SCHEMA = "agentflow.pass_through_routing_activation_candidates.v1"
+SCHEMA = "tokenclaw.anthropic_routing_canary_stage.v1"
+OMISSION_SCHEMA = "tokenclaw.anthropic_routing_canary_stage_omission.v1"
+STAGED_SCHEMA = "tokenclaw.anthropic_routing_canary_staged_draft.v1"
+PROJECTED_LIFECYCLE_SCHEMA = "tokenclaw.anthropic_routing_canary_projected_lifecycle_coverage.v1"
+BLOCKED_REVIEW_SCHEMA = "tokenclaw.anthropic_routing_canary_blocked_review.v1"
+ACCEPTANCE_SCHEMA = "tokenclaw.anthropic_routing_canary_stage_acceptance.v1"
+EXECUTOR_GUARD_DRY_RUN_SCHEMA = "tokenclaw.anthropic_routing_executor_guard_dry_run.v1"
+PASS_THROUGH_SCHEMA = "tokenclaw.pass_through_routing_activation_candidates.v1"
 SUPPORTED_EXECUTORS = {"anthropic-routing-rules", "claude-phase-routing-canary", "phase-canary"}
 
 PRIVACY = {
@@ -495,7 +495,7 @@ def _normalize_lifecycle_evidence(candidate: dict[str, Any], lifecycle: dict[str
             for key in ("canary_applied", "canary_holdout", "safety_stopped", "skipped", "bypassed_or_disabled", "unknown")
         )
     return {
-        "schema": lifecycle.get("schema") or "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+        "schema": lifecycle.get("schema") or "tokenclaw.anthropic_routing_canary_lifecycle_evidence.v1",
         "status": lifecycle.get("status") or ("blocked" if blockers else "matched"),
         "matched_count": matched,
         "observed_count": observed,
@@ -710,7 +710,7 @@ def _stage_review_intent(canary: dict[str, Any]) -> dict[str, Any]:
     lifecycle = promotion.get("projected_anthropic_canary_lifecycle_evidence") if isinstance(promotion.get("projected_anthropic_canary_lifecycle_evidence"), dict) else {}
     counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
     return {
-        "schema": "agentflow.anthropic_routing_canary_stage_review_intent.v1",
+        "schema": "tokenclaw.anthropic_routing_canary_stage_review_intent.v1",
         "status": "ready-for-operator-review",
         "routing_change_mode": "draft-only",
         "active_policy_changed": False,
@@ -981,7 +981,7 @@ def _candidate_payload(
             "reason_codes": ["rate_limited", "upstream_error", "local-canary-safety-stop", "operator-rollback"],
         },
         "promotion": {
-            "schema": "agentflow.anthropic_routing_canary_stage_metadata.v1",
+            "schema": "tokenclaw.anthropic_routing_canary_stage_metadata.v1",
             "source": "pass_through_routing_report" if report.get("schema") == PASS_THROUGH_SCHEMA else "anthropic_routing_report",
             "source_report_schema": report.get("schema"),
             "source_report_generated_at": report.get("generated_at"),
@@ -1010,7 +1010,7 @@ def _candidate_payload(
             "aggregate_inference": candidate.get("aggregate_inference") or {},
             "reason_codes": ["eligible-anthropic-sonnet-to-haiku", "tool-result-phase-canary"],
             "rollback_metadata": {
-                "schema": "agentflow.anthropic_routing_canary_rollback.v1",
+                "schema": "tokenclaw.anthropic_routing_canary_rollback.v1",
                 "rollback_action_type": "disable_phase_canary",
                 "rollback_canary_fraction": 0.0,
                 "rollback_holdout_fraction": 0.0,

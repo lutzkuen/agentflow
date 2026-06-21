@@ -13,8 +13,8 @@ from tokenclaw.public_metadata import public_id
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.optimization_promotion_report.v1"
-VERDICT_SCHEMA = "agentflow.optimization_promotion_verdict.v1"
+SCHEMA = "tokenclaw.optimization_promotion_report.v1"
+VERDICT_SCHEMA = "tokenclaw.optimization_promotion_verdict.v1"
 
 _REASON_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")
 
@@ -555,10 +555,10 @@ def _promotion_action_family(value: Any) -> str:
 
 def _activation_lifecycle_report_evidence(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     lifecycle = report
-    if report.get("schema") != "agentflow.activation_staged_lifecycle_feedback_summary.v1":
+    if report.get("schema") != "tokenclaw.activation_staged_lifecycle_feedback_summary.v1":
         nested = report.get("activation_lifecycle_feedback")
         lifecycle = nested if isinstance(nested, dict) else {}
-    if lifecycle.get("schema") != "agentflow.activation_staged_lifecycle_feedback_summary.v1":
+    if lifecycle.get("schema") != "tokenclaw.activation_staged_lifecycle_feedback_summary.v1":
         return {}
 
     grouped: dict[tuple[str, str], dict[str, Any]] = {}

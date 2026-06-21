@@ -11,8 +11,8 @@ from tokenclaw.store import stable_json, utc_now
 from tokenclaw.terminal_features import terminal_log_features_from_text
 
 
-TERMINAL_OUTPUT_COMPACTION_DRY_RUN_SCHEMA = "agentflow.terminal_output_compaction_dry_run.v1"
-TERMINAL_OUTPUT_COMPACTION_PLAN_SCHEMA = "agentflow.terminal_output_compaction_plan.v1"
+TERMINAL_OUTPUT_COMPACTION_DRY_RUN_SCHEMA = "tokenclaw.terminal_output_compaction_dry_run.v1"
+TERMINAL_OUTPUT_COMPACTION_PLAN_SCHEMA = "tokenclaw.terminal_output_compaction_plan.v1"
 TOKEN_CHARS = 4
 DEFAULT_KEEP_RECENT_TURNS = 2
 DEFAULT_MIN_BLOCK_CHARS = 2_000
@@ -233,7 +233,7 @@ def _compact_terminal_text(
     preserved_lines = [lines[index] for index in ordered]
     omitted_lines = max(0, len(lines) - len(ordered))
     marker = (
-        "[agentflow terminal-output compaction dry-run: "
+        "[tokenclaw terminal-output compaction dry-run: "
         f"preserved {len(ordered)} of {len(lines)} lines; omitted {omitted_lines} repetitive terminal/log lines]"
     )
     replacement_lines = [marker, *preserved_lines]
@@ -662,7 +662,7 @@ def build_terminal_output_compaction_dry_run(
         "generated_at": utc_now(),
         "lookback_call_limit": capped_limit,
         "policy": {
-            "schema": "agentflow.terminal_output_compaction_policy.v1",
+            "schema": "tokenclaw.terminal_output_compaction_policy.v1",
             "policy_source": "local-default",
             "rule_id": "local-terminal-output-compaction-dry-run",
             "default_apply": False,

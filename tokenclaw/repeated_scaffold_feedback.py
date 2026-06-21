@@ -10,10 +10,10 @@ from tokenclaw.managed_egress import assert_managed_egress_safe
 from tokenclaw.store import utc_now
 
 
-FEEDBACK_SCHEMA = "agentflow.repeated_scaffold_lifecycle_feedback.v1"
+FEEDBACK_SCHEMA = "tokenclaw.repeated_scaffold_lifecycle_feedback.v1"
 SOURCE_SURFACE = "repeated_scaffold_lifecycle"
-STATUS_SCHEMA = "agentflow.repeated_scaffold_lifecycle_feedback_queue_status.v1"
-FLUSH_SCHEMA = "agentflow.repeated_scaffold_lifecycle_feedback_flush.v1"
+STATUS_SCHEMA = "tokenclaw.repeated_scaffold_lifecycle_feedback_queue_status.v1"
+FLUSH_SCHEMA = "tokenclaw.repeated_scaffold_lifecycle_feedback_flush.v1"
 
 _ERROR_CLASS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 

@@ -12,8 +12,8 @@ from tokenclaw.crunch_blocker_outcomes import build_crunch_blocker_outcomes_repo
 from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
-_BLOCKER_REVIEW_SCHEMA = "agentflow.promotion_blocker_recommendation_review.v1"
-_CANDIDATE_SCHEMA = "agentflow.promotion_blocker_review_candidate.v1"
+_BLOCKER_REVIEW_SCHEMA = "tokenclaw.promotion_blocker_recommendation_review.v1"
+_CANDIDATE_SCHEMA = "tokenclaw.promotion_blocker_review_candidate.v1"
 
 
 def _privacy_clean() -> dict:
@@ -117,7 +117,7 @@ def _fixture_promotion_blocker_review() -> dict:
 class CrunchBlockerOutcomesTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -192,7 +192,7 @@ class CrunchBlockerOutcomesTests(unittest.TestCase):
             promotion_blocker_review=review,
         )
 
-        self.assertEqual(report["schema"], "agentflow.crunch_blocker_outcomes.v1")
+        self.assertEqual(report["schema"], "tokenclaw.crunch_blocker_outcomes.v1")
         summary = report["summary"]
         self.assertGreaterEqual(summary["dry_run_count"], 1)
         self.assertGreaterEqual(summary["canary_count"], 1)
@@ -263,7 +263,7 @@ class CrunchBlockerOutcomesTests(unittest.TestCase):
 
     def test_crunch_blocker_outcomes_empty_store_returns_no_crunch_outcomes(self) -> None:
         report = build_crunch_blocker_outcomes_report(self.store, rollup_limit=20)
-        self.assertEqual(report["schema"], "agentflow.crunch_blocker_outcomes.v1")
+        self.assertEqual(report["schema"], "tokenclaw.crunch_blocker_outcomes.v1")
         self.assertEqual(report["status"], "no-crunch-outcomes")
         self.assertEqual(report["summary"]["outcome_count"], 0)
 
@@ -312,7 +312,7 @@ class CrunchBlockerOutcomesTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 0)
         result = json.loads(output.getvalue())
-        self.assertEqual(result["schema"], "agentflow.crunch_blocker_outcomes.v1")
+        self.assertEqual(result["schema"], "tokenclaw.crunch_blocker_outcomes.v1")
 
     def test_crunch_blocker_outcomes_candidate_without_savings_does_not_contribute_projected(self) -> None:
         review = {

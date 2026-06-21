@@ -272,7 +272,7 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         summary = openai_features.summarize_openai_request_feature_unit(unit)
         rendered = json.dumps(unit, sort_keys=True)
 
-        self.assertEqual(unit["schema"], "agentflow.openai_preflight_feature_unit.v1")
+        self.assertEqual(unit["schema"], "tokenclaw.openai_preflight_feature_unit.v1")
         self.assertEqual(unit["source_surface"], "openai_responses")
         self.assertEqual(unit["candidate_target_model"], None)
         self.assertEqual(unit["grouping_identifiers"], {})
@@ -283,11 +283,11 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertFalse(unit["input_features"]["cache_eligibility"]["raw_cache_key_included"])
         terminal_features = unit["input_features"]["terminal_log_features"]
         difficulty_features = unit["input_features"]["prompt_difficulty_features"]
-        self.assertEqual(terminal_features["schema"], "agentflow.terminal_log_features.v1")
+        self.assertEqual(terminal_features["schema"], "tokenclaw.terminal_log_features.v1")
         self.assertEqual(terminal_features["log_line_fraction_bucket"], "25_50pct")
         self.assertEqual(terminal_features["error_line_count_bucket"], "one")
         self.assertFalse(terminal_features["privacy"]["raw_log_text_included"])
-        self.assertEqual(difficulty_features["schema"], "agentflow.prompt_difficulty_features.v1")
+        self.assertEqual(difficulty_features["schema"], "tokenclaw.prompt_difficulty_features.v1")
         self.assertEqual(difficulty_features["downgrade_risk"], "block")
         self.assertEqual(difficulty_features["external_source_dependency"], "logs")
         self.assertEqual(summary["local_mutation_stage"], "preflight")
@@ -318,7 +318,7 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
 
         self.assertEqual(parsed.stage, "parse_request")
         self.assertEqual(preflight.stage, "extract_preflight_features")
-        self.assertEqual(preflight.feature_unit["schema"], "agentflow.openai_preflight_feature_unit.v1")
+        self.assertEqual(preflight.feature_unit["schema"], "tokenclaw.openai_preflight_feature_unit.v1")
         self.assertEqual(preflight.feature_summary["local_mutation_stage"], "preflight")
         self.assertEqual(managed_egress_violations(preflight.feature_unit), [])
         self.assertEqual(managed_egress_violations(preflight.feature_summary), [])
@@ -376,7 +376,7 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
             }
 
         decision = {
-            "schema": "agentflow.openai_managed_recommendation_decision.v1",
+            "schema": "tokenclaw.openai_managed_recommendation_decision.v1",
             "status": "selected",
             "apply_reason": "live-route-selected",
             "selected_for_local_application": True,
@@ -482,12 +482,12 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
                 "managed_recommendation": {"status": "applied"},
                 "openai_feature_unit": {
                     "terminal_log_features": {
-                        "schema": "agentflow.terminal_log_features.v1",
+                        "schema": "tokenclaw.terminal_log_features.v1",
                         "terminal_output_char_fraction_bucket": "gte_75pct",
                         "raw_log_text_included": False,
                     },
                     "prompt_difficulty_features": {
-                        "schema": "agentflow.prompt_difficulty_features.v1",
+                        "schema": "tokenclaw.prompt_difficulty_features.v1",
                         "task_intent": "data_lookup",
                         "downgrade_risk": "block",
                         "privacy": {"metadata_only": True},
@@ -499,7 +499,7 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
             error=None,
         )
 
-        self.assertEqual(summary["schema"], "agentflow.openai_outcome_summary.v1")
+        self.assertEqual(summary["schema"], "tokenclaw.openai_outcome_summary.v1")
         self.assertEqual(summary["status_code"], 200)
         self.assertEqual(summary["terminal_log_features"]["terminal_output_char_fraction_bucket"], "gte_75pct")
         self.assertEqual(summary["prompt_difficulty_features"]["downgrade_risk"], "block")
@@ -520,19 +520,19 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.old_openai_upstream = server.OPENAI_UPSTREAM
         self.old_openai_auth_mode = server.OPENAI_AUTH_MODE
         self.old_log_bodies = server.LOG_BODIES
-        self.saved_recommendation_enabled = os.environ.get("AGENTFLOW_RECOMMENDATION_ENABLED")
-        self.saved_policy_decision_enabled = os.environ.get("AGENTFLOW_POLICY_DECISION_ENABLED")
-        self.saved_policy_decision_canary_fraction = os.environ.get("AGENTFLOW_POLICY_DECISION_CANARY_FRACTION")
-        self.saved_routing_rules = os.environ.get("AGENTFLOW_ROUTING_RULES")
-        self.saved_crunch_rules = os.environ.get("AGENTFLOW_CRUNCH_RULES")
-        self.saved_routing_experiments = os.environ.get("AGENTFLOW_ROUTING_EXPERIMENTS")
-        self.saved_openai_summary_enabled = os.environ.get("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED")
-        self.saved_agentflow_db = os.environ.get("AGENTFLOW_DB")
-        os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
-        os.environ.pop("AGENTFLOW_POLICY_DECISION_ENABLED", None)
-        os.environ.pop("AGENTFLOW_POLICY_DECISION_CANARY_FRACTION", None)
-        os.environ.pop("AGENTFLOW_ROUTING_EXPERIMENTS", None)
-        os.environ.pop("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", None)
+        self.saved_recommendation_enabled = os.environ.get("TOKENCLAW_RECOMMENDATION_ENABLED")
+        self.saved_policy_decision_enabled = os.environ.get("TOKENCLAW_POLICY_DECISION_ENABLED")
+        self.saved_policy_decision_canary_fraction = os.environ.get("TOKENCLAW_POLICY_DECISION_CANARY_FRACTION")
+        self.saved_routing_rules = os.environ.get("TOKENCLAW_ROUTING_RULES")
+        self.saved_crunch_rules = os.environ.get("TOKENCLAW_CRUNCH_RULES")
+        self.saved_routing_experiments = os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS")
+        self.saved_openai_summary_enabled = os.environ.get("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED")
+        self.saved_tokenclaw_db = os.environ.get("TOKENCLAW_DB")
+        os.environ.pop("TOKENCLAW_RECOMMENDATION_ENABLED", None)
+        os.environ.pop("TOKENCLAW_POLICY_DECISION_ENABLED", None)
+        os.environ.pop("TOKENCLAW_POLICY_DECISION_CANARY_FRACTION", None)
+        os.environ.pop("TOKENCLAW_ROUTING_EXPERIMENTS", None)
+        os.environ.pop("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", None)
         importlib.reload(routing_experiments_module)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
@@ -555,37 +555,37 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
 
     def tearDown(self):
         if self.saved_recommendation_enabled is None:
-            os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
+            os.environ.pop("TOKENCLAW_RECOMMENDATION_ENABLED", None)
         else:
-            os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = self.saved_recommendation_enabled
+            os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = self.saved_recommendation_enabled
         if self.saved_policy_decision_enabled is None:
-            os.environ.pop("AGENTFLOW_POLICY_DECISION_ENABLED", None)
+            os.environ.pop("TOKENCLAW_POLICY_DECISION_ENABLED", None)
         else:
-            os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = self.saved_policy_decision_enabled
+            os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = self.saved_policy_decision_enabled
         if self.saved_policy_decision_canary_fraction is None:
-            os.environ.pop("AGENTFLOW_POLICY_DECISION_CANARY_FRACTION", None)
+            os.environ.pop("TOKENCLAW_POLICY_DECISION_CANARY_FRACTION", None)
         else:
-            os.environ["AGENTFLOW_POLICY_DECISION_CANARY_FRACTION"] = self.saved_policy_decision_canary_fraction
+            os.environ["TOKENCLAW_POLICY_DECISION_CANARY_FRACTION"] = self.saved_policy_decision_canary_fraction
         if self.saved_routing_rules is None:
-            os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
+            os.environ.pop("TOKENCLAW_ROUTING_RULES", None)
         else:
-            os.environ["AGENTFLOW_ROUTING_RULES"] = self.saved_routing_rules
+            os.environ["TOKENCLAW_ROUTING_RULES"] = self.saved_routing_rules
         if self.saved_crunch_rules is None:
-            os.environ.pop("AGENTFLOW_CRUNCH_RULES", None)
+            os.environ.pop("TOKENCLAW_CRUNCH_RULES", None)
         else:
-            os.environ["AGENTFLOW_CRUNCH_RULES"] = self.saved_crunch_rules
+            os.environ["TOKENCLAW_CRUNCH_RULES"] = self.saved_crunch_rules
         if self.saved_routing_experiments is None:
-            os.environ.pop("AGENTFLOW_ROUTING_EXPERIMENTS", None)
+            os.environ.pop("TOKENCLAW_ROUTING_EXPERIMENTS", None)
         else:
-            os.environ["AGENTFLOW_ROUTING_EXPERIMENTS"] = self.saved_routing_experiments
+            os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = self.saved_routing_experiments
         if self.saved_openai_summary_enabled is None:
-            os.environ.pop("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", None)
+            os.environ.pop("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", None)
         else:
-            os.environ["AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED"] = self.saved_openai_summary_enabled
-        if self.saved_agentflow_db is None:
-            os.environ.pop("AGENTFLOW_DB", None)
+            os.environ["TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED"] = self.saved_openai_summary_enabled
+        if self.saved_tokenclaw_db is None:
+            os.environ.pop("TOKENCLAW_DB", None)
         else:
-            os.environ["AGENTFLOW_DB"] = self.saved_agentflow_db
+            os.environ["TOKENCLAW_DB"] = self.saved_tokenclaw_db
         importlib.reload(router_module)
         importlib.reload(routing_experiments_module)
         os.chdir(self.old_cwd)
@@ -642,7 +642,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "",
         ]))
         policy_file.close()
-        os.environ["AGENTFLOW_ROUTING_RULES"] = policy_file.name
+        os.environ["TOKENCLAW_ROUTING_RULES"] = policy_file.name
         importlib.reload(router_module)
         self.addCleanup(lambda: os.path.exists(policy_file.name) and os.unlink(policy_file.name))
         return policy_file.name
@@ -729,7 +729,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     "replayability_levels": replayability_levels or ["local-exact-response"],
                 },
                 "rollout": {
-                    "schema": "agentflow.pattern_policy_rollout.v1",
+                    "schema": "tokenclaw.pattern_policy_rollout.v1",
                     "recommendation_mode": "canary-only",
                     "canary_enabled": True,
                     "canary_fraction": canary_fraction,
@@ -771,7 +771,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                 "replayability_levels": ["features_only", "local-exact-response"],
             },
             "rollout": {
-                "schema": "agentflow.pattern_policy_rollout.v1",
+                "schema": "tokenclaw.pattern_policy_rollout.v1",
                 "recommendation_mode": "openai-cache-replay-request-shape-canary",
                 "canary_enabled": True,
                 "canary_fraction": canary_fraction,
@@ -789,8 +789,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                 "ttl_seconds": 3600,
             },
             "graduation": {
-                "schema": "agentflow.request_shape_cache_replay_shape_activation.v1",
-                "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                "schema": "tokenclaw.request_shape_cache_replay_shape_activation.v1",
+                "source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                 "source_reason": "replay-ready-exact-non-tool-shape",
                 "cohort_id": "request-shape-cache-replay-test-cohort",
                 "source_surface": "openai_responses",
@@ -827,7 +827,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     "stream": False,
                 },
                 "rollout": {
-                    "schema": "agentflow.pattern_policy_rollout.v1",
+                    "schema": "tokenclaw.pattern_policy_rollout.v1",
                     "recommendation_mode": "canary-only",
                     "canary_enabled": True,
                     "canary_fraction": 1.0,
@@ -841,8 +841,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     "scope": "session",
                 },
                 "graduation": {
-                    "schema": "agentflow.openai_cache_replay_shape_activation.v1",
-                    "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                    "schema": "tokenclaw.openai_cache_replay_shape_activation.v1",
+                    "source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                     "source_reason": "replay-ready-exact-non-tool-shape",
                     "projected_hits": 3,
                     "projected_savings_usd": 0.09,
@@ -855,7 +855,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
 
         self.assertEqual(rules[0]["graduation"]["projected_hits"], 3)
         self.assertEqual(rules[0]["graduation"]["sample_count"], 4)
-        self.assertEqual(rules[0]["graduation"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(rules[0]["graduation"]["source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         rendered = json.dumps(rules, sort_keys=True)
         self.assertNotIn("raw normalized projection must not leak", rendered)
         self.assertFalse(rules[0]["graduation"]["raw_prompts_included"])
@@ -933,8 +933,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             has_tools=False,
             replayability_levels=["features_only", "local-exact-response"],
             graduation={
-                "schema": "agentflow.openai_cache_replay_shape_activation.v1",
-                "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                "schema": "tokenclaw.openai_cache_replay_shape_activation.v1",
+                "source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                 "source_reason": "replay-ready-exact-non-tool-shape",
                 "cohort_bucket": "openai_responses/responses/chat/chat/2k_8k_chars/500_2k_tokens",
                 "source_surface": "openai_responses",
@@ -993,7 +993,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(hit_cache["status"], "hit")
         self.assertEqual(hit_cache["reason"], "exact-match")
         self.assertEqual(hit_cache["cache_replay_canary"]["status"], "applied")
-        self.assertEqual(hit_cache["cache_replay_canary"]["projection"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(hit_cache["cache_replay_canary"]["projection"]["source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(hit_cache["pattern_rule"]["allow_tool_calls"], False)
         self.assertEqual(hit_cache["pattern_rule"]["safe_invalidation"], False)
         rendered = json.dumps({"seed": seed_cache, "hit": hit_cache}, sort_keys=True)
@@ -1015,7 +1015,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     "stream": False,
                 },
                 "rollout": {
-                    "schema": "agentflow.pattern_policy_rollout.v1",
+                    "schema": "tokenclaw.pattern_policy_rollout.v1",
                     "recommendation_mode": "canary-only",
                     "canary_enabled": True,
                     "canary_fraction": 1.0,
@@ -1029,8 +1029,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     "scope": "session",
                 },
                 "graduation": {
-                "schema": "agentflow.openai_cache_replay_shape_activation.v1",
-                "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                "schema": "tokenclaw.openai_cache_replay_shape_activation.v1",
+                "source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                 "source_reason": "replay-ready-exact-non-tool-shape",
                 "cohort_bucket": "openai_responses/responses/chat/chat/2k_8k_chars/500_2k_tokens",
                 "source_surface": "openai_responses",
@@ -1049,7 +1049,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         ])[0]
         rule["rule_id"] = rule["id"]
         rule["canary"] = {
-            "schema": "agentflow.pattern_canary_decision.v1",
+            "schema": "tokenclaw.pattern_canary_decision.v1",
             "enabled": True,
             "selected": True,
             "status": "applied",
@@ -1070,7 +1070,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(canary["policy_source"], "managed-recommended")
         self.assertEqual(canary["cohort_bucket"], "openai_responses/responses/chat/chat/2k_8k_chars/500_2k_tokens")
         self.assertEqual(canary["projected_hits"], 55)
-        self.assertEqual(canary["projection"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(canary["projection"]["source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertFalse(canary["projection"]["raw_request_bodies_included"])
         self.assertFalse(canary["projection"]["cache_keys_included"])
         rendered = json.dumps(canary, sort_keys=True)
@@ -1104,7 +1104,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(applied_cache["reason"], "exact-pattern-miss")
         self.assertEqual(applied_cache["cache_replay_canary"]["status"], "applied")
         self.assertEqual(applied_cache["cache_replay_canary"]["canary_cohort"], "canary_applied")
-        self.assertEqual(applied_cache["cache_replay_canary"]["projection"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(applied_cache["cache_replay_canary"]["projection"]["source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(applied_cache["pattern_rule"]["rule_id"], "request-shape-cache-replay-test-policy")
         self.assertEqual(applied_routing["managed_pattern_features"]["token_bucket"], "1k_4k_tokens")
         self.assertNotIn("canary-rule-not-active", json.dumps(applied_cache, sort_keys=True))
@@ -1347,7 +1347,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(cache["file_dependency_count_bucket"], "1")
         self.assertTrue(cache["file_dependency_fingerprint_available"])
         self.assertTrue(cache["file_dependency_fingerprint_sha256"].startswith("sha256:"))
-        self.assertEqual(cache["file_dependency_fingerprint"]["schema"], "agentflow.cache_file_dependency_fingerprint.v1")
+        self.assertEqual(cache["file_dependency_fingerprint"]["schema"], "tokenclaw.cache_file_dependency_fingerprint.v1")
         self.assertFalse(cache["file_dependency_fingerprint"]["paths_included"])
         self.assertFalse(cache["file_dependency_fingerprint"]["path_hashes_included"])
         self.assertFalse(cache["file_dependency_audit"]["paths_included"])
@@ -1399,7 +1399,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         async def fake_fetch(unit):
             events.append("fetch")
             self.assertNotIn("crunch", events)
-            self.assertEqual(unit["schema"], "agentflow.openai_preflight_feature_unit.v1")
+            self.assertEqual(unit["schema"], "tokenclaw.openai_preflight_feature_unit.v1")
             self.assertEqual(unit["input_features"]["local_mutation_stage"], "preflight")
             rendered = json.dumps(unit, sort_keys=True)
             self.assertNotIn("raw openai prompt", rendered)
@@ -1416,8 +1416,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             }
 
         with patch.dict(os.environ, {
-            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "dry-run",
-            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "dry-run",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
         }):
             with patch.object(openai_proxy, "crunch_body", fake_crunch):
                 with patch(
@@ -1442,7 +1442,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "input": "short prompt",
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "1"}, clear=False):
+        with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "1"}, clear=False):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                 side_effect=AssertionError("observe-only must not fetch managed recommendations"),
@@ -1471,12 +1471,12 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         async def fake_policy_decision(unit):
             seen["unit"] = copy.deepcopy(unit)
             rendered = json.dumps(unit, sort_keys=True)
-            self.assertEqual(unit["schema"], "agentflow.openai_preflight_feature_unit.v1")
+            self.assertEqual(unit["schema"], "tokenclaw.openai_preflight_feature_unit.v1")
             self.assertNotIn("raw openai prompt secret", rendered)
             return {
                 "enabled": True,
                 "status": "received",
-                "policy_decision_schema": "agentflow.policy_decision.v1",
+                "policy_decision_schema": "tokenclaw.policy_decision.v1",
                 "routing_status": "recommended",
                 "target_model": "gpt-5-mini",
                 "confidence": 0.91,
@@ -1491,8 +1491,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             }
 
         with patch.dict(os.environ, {
-            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-            "AGENTFLOW_POLICY_DECISION_ENABLED": "1",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_POLICY_DECISION_ENABLED": "1",
         }):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
@@ -1524,12 +1524,12 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         async def fake_policy_decision(unit):
             seen["unit"] = copy.deepcopy(unit)
             rendered = json.dumps(unit, sort_keys=True)
-            self.assertEqual(unit["schema"], "agentflow.openai_preflight_feature_unit.v1")
+            self.assertEqual(unit["schema"], "tokenclaw.openai_preflight_feature_unit.v1")
             self.assertNotIn("raw canary prompt secret", rendered)
             return {
                 "enabled": True,
                 "status": "received",
-                "policy_decision_schema": "agentflow.policy_decision.v1",
+                "policy_decision_schema": "tokenclaw.policy_decision.v1",
                 "routing_status": "recommended",
                 "target_model": "gpt-5-mini",
                 "confidence": 0.91,
@@ -1544,9 +1544,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             }
 
         with patch.dict(os.environ, {
-            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-            "AGENTFLOW_POLICY_DECISION_ENABLED": "1",
-            "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION": "1",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_POLICY_DECISION_ENABLED": "1",
+            "TOKENCLAW_POLICY_DECISION_CANARY_FRACTION": "1",
         }):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
@@ -1588,7 +1588,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             return {
                 "enabled": True,
                 "status": "received",
-                "policy_decision_schema": "agentflow.policy_decision.v1",
+                "policy_decision_schema": "tokenclaw.policy_decision.v1",
                 "routing_status": "recommended",
                 "target_model": "gpt-5-mini",
                 "confidence": 0.91,
@@ -1603,9 +1603,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             }
 
         with patch.dict(os.environ, {
-            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-            "AGENTFLOW_POLICY_DECISION_ENABLED": "1",
-            "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION": "0",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_POLICY_DECISION_ENABLED": "1",
+            "TOKENCLAW_POLICY_DECISION_CANARY_FRACTION": "0",
         }):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
@@ -1646,7 +1646,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "policy_source": "managed-recommended",
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "dry-run"}):
+        with patch.dict(os.environ, {"TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "dry-run"}):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
                 return_value=recommendation,
@@ -1688,8 +1688,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, {
-            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
@@ -1734,8 +1734,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, {
-            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
@@ -1769,7 +1769,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             ],
         }
         recommendation = {
-            "schema": "agentflow.policy_decision.v1",
+            "schema": "tokenclaw.policy_decision.v1",
             "enabled": True,
             "status": "received",
             "provider": "openai",
@@ -1777,7 +1777,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "confidence": 0.94,
             "policy_id": "managed-local-actions",
             "reason": "feature-only policy decision",
-            "policy_decision_schema": "agentflow.policy_decision.v1",
+            "policy_decision_schema": "tokenclaw.policy_decision.v1",
             "routing_status": "recommended",
             "recommended_mode": "live",
             "route_down_probability": 0.9,
@@ -1791,9 +1791,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, {
-            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
@@ -1871,7 +1871,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "usage": {"input_tokens": 40, "output_tokens": 8},
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_CRUNCH_RULES": policy_file.name}, clear=False):
+        with patch.dict(os.environ, {"TOKENCLAW_CRUNCH_RULES": policy_file.name}, clear=False):
             with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
                 response = TestClient(server.app).post("/v1/responses", json=request_body)
 
@@ -1904,7 +1904,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
     def test_openai_policy_decision_rejects_raw_like_unsafe_actions(self):
         request_body = {"model": "gpt-5-codex", "input": "short prompt"}
         recommendation = {
-            "schema": "agentflow.policy_decision.v1",
+            "schema": "tokenclaw.policy_decision.v1",
             "enabled": True,
             "status": "received",
             "provider": "openai",
@@ -1918,9 +1918,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, {
-            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
@@ -1946,7 +1946,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             ],
         }
         recommendation = {
-            "schema": "agentflow.policy_decision.v1",
+            "schema": "tokenclaw.policy_decision.v1",
             "enabled": True,
             "status": "received",
             "provider": "openai",
@@ -1969,9 +1969,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, {
-            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
@@ -1996,7 +1996,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         cases = [
             (
                 {
-                    "schema": "agentflow.policy_decision.v1",
+                    "schema": "tokenclaw.policy_decision.v1",
                     "enabled": True,
                     "status": "received",
                     "provider": "openai",
@@ -2011,7 +2011,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             ),
             (
                 {
-                    "schema": "agentflow.policy_decision.v1",
+                    "schema": "tokenclaw.policy_decision.v1",
                     "enabled": True,
                     "status": "received",
                     "provider": "anthropic",
@@ -2025,7 +2025,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             ),
             (
                 {
-                    "schema": "agentflow.policy_decision.v1",
+                    "schema": "tokenclaw.policy_decision.v1",
                     "enabled": True,
                     "status": "received",
                     "provider": "openai",
@@ -2043,9 +2043,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             CapturingOpenAIClient.calls = []
             with self.subTest(expected=expected):
                 with patch.dict(os.environ, {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
-                    "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
+                    "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
                 }):
                     with patch(
                         "tokenclaw.optimization.openai_recommendations.fetch_recommendation",
@@ -2078,10 +2078,10 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
 
     def test_openai_policy_decision_falls_back_when_managed_disabled(self):
         with patch.dict(os.environ, {
-            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
         }, clear=False):
-            os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
+            os.environ.pop("TOKENCLAW_RECOMMENDATION_ENABLED", None)
             with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
                 response = TestClient(server.app).post(
                     "/v1/responses",
@@ -2156,7 +2156,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(canary["actual_forwarded_model"], "gpt-5-codex")
 
     def test_openai_gpt54_canary_sequence_restores_applied_and_holdout_report_coverage(self):
-        os.environ["AGENTFLOW_DB"] = self.tmp.name
+        os.environ["TOKENCLAW_DB"] = self.tmp.name
         self._enable_openai_canary(
             canary_fraction=0.15,
             holdout_fraction=0.10,
@@ -2303,7 +2303,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             ]))
             policy_path = policy_file.name
         self.addCleanup(lambda: os.path.exists(policy_path) and os.unlink(policy_path))
-        os.environ["AGENTFLOW_ROUTING_EXPERIMENTS"] = policy_path
+        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = policy_path
         importlib.reload(routing_experiments_module)
         CapturingOpenAIClient.calls = []
         CapturingOpenAIClient.status_code = 200
@@ -2396,7 +2396,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             ]))
             policy_path = policy_file.name
         self.addCleanup(lambda: os.path.exists(policy_path) and os.unlink(policy_path))
-        os.environ["AGENTFLOW_ROUTING_EXPERIMENTS"] = policy_path
+        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = policy_path
         importlib.reload(routing_experiments_module)
         CapturingOpenAIClient.calls = []
         CapturingOpenAIClient.status_code = 200

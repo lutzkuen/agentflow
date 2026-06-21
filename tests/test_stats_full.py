@@ -95,7 +95,7 @@ class StatsFullTest(unittest.TestCase):
 enabled: true
 request_shape_repeated_context_canaries:
   enabled: true
-  schema: agentflow.request_shape_repeated_context_canaries.v1
+  schema: tokenclaw.request_shape_repeated_context_canaries.v1
   rules:
     - id: raw-policy-secret-should-not-leak
       enabled: true
@@ -106,7 +106,7 @@ request_shape_repeated_context_canaries:
         canary_fraction: 0.2
         holdout_fraction: 0.1
       policy_decision:
-        schema: agentflow.request_shape_crunch_policy_decision_rule_metadata.v1
+        schema: tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1
         decision: widen
         graduation_decision: widen
         applied_count: 7
@@ -120,11 +120,11 @@ request_shape_repeated_context_canaries:
         aggregate_only: true
 """
                 )
-            with patch.dict(os.environ, {"AGENTFLOW_CRUNCH_RULES": rules_path}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_CRUNCH_RULES": rules_path}, clear=False):
                 result = asyncio.run(stats_views.stats_full(server.store))
 
         coverage = result["active_crunch_rule_coverage"]
-        self.assertEqual(coverage["schema"], "agentflow.active_crunch_rule_coverage.v1")
+        self.assertEqual(coverage["schema"], "tokenclaw.active_crunch_rule_coverage.v1")
         self.assertEqual(coverage["status"], "observed")
         self.assertEqual(coverage["rule_file"], "crunch_rules.yaml")
         self.assertFalse(coverage["rules_path_included"])
@@ -439,8 +439,8 @@ request_shape_repeated_context_canaries:
         with patch.dict(
             os.environ,
             {
-                "AGENTFLOW_CODEX_APP_OPTIMIZE": "1",
-                "AGENTFLOW_CODEX_APP_CACHE": "0",
+                "TOKENCLAW_CODEX_APP_OPTIMIZE": "1",
+                "TOKENCLAW_CODEX_APP_CACHE": "0",
             },
             clear=False,
         ):
@@ -453,7 +453,7 @@ request_shape_repeated_context_canaries:
         self.assertTrue(surface["optimization"]["enabled"])
         self.assertFalse(surface["cache"]["enabled"])
         self.assertFalse(surface["cache"]["exact_cache"]["enabled"])
-        self.assertEqual(surface["cache"]["disabled_reason"], "AGENTFLOW_CODEX_APP_CACHE is not 1")
+        self.assertEqual(surface["cache"]["disabled_reason"], "TOKENCLAW_CODEX_APP_CACHE is not 1")
         self.assertIn("input", surface["safe_turn_params"]["allowed_keys"])
         self.assertEqual(surface["action_like_skip_behavior"]["reason"], "action-like-params")
         self.assertEqual(surface["routing"]["policy_source"], result["routing"]["policy_source"])
@@ -470,9 +470,9 @@ request_shape_repeated_context_canaries:
         with patch.dict(
             os.environ,
             {
-                "AGENTFLOW_CODEX_APP_OPTIMIZE": "0",
-                "AGENTFLOW_CODEX_APP_CACHE": "1",
-                "AGENTFLOW_CODEX_APP_CACHE_NAMESPACE": "codex-test",
+                "TOKENCLAW_CODEX_APP_OPTIMIZE": "0",
+                "TOKENCLAW_CODEX_APP_CACHE": "1",
+                "TOKENCLAW_CODEX_APP_CACHE_NAMESPACE": "codex-test",
             },
             clear=False,
         ):
@@ -489,7 +489,7 @@ request_shape_repeated_context_canaries:
 
     def test_codex_canary_impact_reports_rule_candidate_counts_and_privacy(self):
         rule_meta = {
-            "schema": "agentflow.codex_app_rule_execution.v1",
+            "schema": "tokenclaw.codex_app_rule_execution.v1",
             "rule_id": "codex-rule-a",
             "candidate_id": "candidate-a",
             "policy_id": "policy-a",
@@ -602,7 +602,7 @@ request_shape_repeated_context_canaries:
 
         result = asyncio.run(stats_views.stats_codex_canary_impact(server.store, limit=10))
 
-        self.assertEqual(result["schema"], "agentflow.codex_app_canary_impact_by_rule.v1")
+        self.assertEqual(result["schema"], "tokenclaw.codex_app_canary_impact_by_rule.v1")
         self.assertEqual(result["summary"]["rule_candidate_count"], 2)
         self.assertEqual(result["summary"]["applied_count"], 3)
         self.assertEqual(result["summary"]["holdout_count"], 2)
@@ -697,7 +697,7 @@ request_shape_repeated_context_canaries:
         result = asyncio.run(stats_views.stats_full(server.store))
         executive = result["executive_summary"]
 
-        self.assertEqual(executive["schema"], "agentflow.executive_summary.v1")
+        self.assertEqual(executive["schema"], "tokenclaw.executive_summary.v1")
         self.assertEqual(executive["tokens_today"]["provider_input_tokens"], 3_000)
         self.assertEqual(executive["tokens_today"]["provider_output_tokens"], 100)
         self.assertEqual(executive["tokens_today"]["provider_total_tokens"], 3_100)
@@ -725,17 +725,17 @@ request_shape_repeated_context_canaries:
         self.assertGreater(executive["spend"]["thinking_cost_today_usd"], 0)
         savings = executive["savings"]
         buckets = savings["today_buckets"]
-        agentflow_buckets = savings["today_agentflow_generated_buckets"]
+        tokenclaw_buckets = savings["today_tokenclaw_generated_buckets"]
         self.assertIn("routing_usd", buckets)
         self.assertIn("crunching_usd", buckets)
         self.assertAlmostEqual(buckets["exact_local_cache_usd"], 0.003, places=6)
         self.assertIn("provider_prompt_cache_discount_usd", buckets)
-        # New split fields: provider prompt-cache is not in agentflow_generated_buckets
-        self.assertNotIn("provider_prompt_cache_discount_usd", agentflow_buckets)
-        self.assertIn("routing_usd", agentflow_buckets)
-        self.assertIn("crunching_usd", agentflow_buckets)
-        self.assertAlmostEqual(agentflow_buckets["exact_local_cache_usd"], 0.003, places=6)
-        self.assertIn("today_agentflow_generated_savings_usd", savings)
+        # New split fields: provider prompt-cache is not in tokenclaw_generated_buckets
+        self.assertNotIn("provider_prompt_cache_discount_usd", tokenclaw_buckets)
+        self.assertIn("routing_usd", tokenclaw_buckets)
+        self.assertIn("crunching_usd", tokenclaw_buckets)
+        self.assertAlmostEqual(tokenclaw_buckets["exact_local_cache_usd"], 0.003, places=6)
+        self.assertIn("today_tokenclaw_generated_savings_usd", savings)
         self.assertIn("provider_prompt_cache_discount_usd", savings)
         self.assertIn("provider_prompt_cache_economics", savings)
         self.assertFalse(executive["hard_floor"]["excludes_unknown_codex_app_cost"])
@@ -822,7 +822,7 @@ request_shape_repeated_context_canaries:
 
         result = asyncio.run(stats_views.stats_weekly(server.store))
 
-        self.assertEqual(result["schema"], "agentflow.weekly_activity.v1")
+        self.assertEqual(result["schema"], "tokenclaw.weekly_activity.v1")
         self.assertIn("generated_at", result)
         self.assertEqual([row["day"] for row in result["days"]], days)
         self.assertEqual(len(result["days"]), 7)
@@ -877,10 +877,10 @@ request_shape_repeated_context_canaries:
         self.assertIn("row.codex_tokens_est", html)
 
     def test_managed_recommendation_stats_cover_recent_statuses_and_feedback(self):
-        saved_enabled = os.environ.get("AGENTFLOW_RECOMMENDATION_ENABLED")
-        saved_url = os.environ.get("AGENTFLOW_RECOMMENDATION_SERVER_URL")
-        os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
-        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.local"
+        saved_enabled = os.environ.get("TOKENCLAW_RECOMMENDATION_ENABLED")
+        saved_url = os.environ.get("TOKENCLAW_RECOMMENDATION_SERVER_URL")
+        os.environ.pop("TOKENCLAW_RECOMMENDATION_ENABLED", None)
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.local"
 
         def log_call(created_at, routing_json):
             server.store.log_call(
@@ -984,16 +984,16 @@ request_shape_repeated_context_canaries:
             result = asyncio.run(stats_views.stats_managed_recommendations(server.store, limit=20))
         finally:
             if saved_enabled is None:
-                os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
+                os.environ.pop("TOKENCLAW_RECOMMENDATION_ENABLED", None)
             else:
-                os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = saved_enabled
+                os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = saved_enabled
             if saved_url is None:
-                os.environ.pop("AGENTFLOW_RECOMMENDATION_SERVER_URL", None)
+                os.environ.pop("TOKENCLAW_RECOMMENDATION_SERVER_URL", None)
             else:
-                os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = saved_url
+                os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = saved_url
 
         summary = result["summary"]
-        self.assertEqual(result["schema"], "agentflow.managed_recommendations.v1")
+        self.assertEqual(result["schema"], "tokenclaw.managed_recommendations.v1")
         self.assertFalse(result["current_config"]["enabled"])
         self.assertIn("local policy remains authoritative", result["current_config"]["offline_state"])
         self.assertFalse(result["privacy"]["raw_prompts_included"])
@@ -1052,7 +1052,7 @@ request_shape_repeated_context_canaries:
             crunch_json=stable_json({"changed": False}),
             routing_json=stable_json({"reason": "managed route"}),
             managed_routing_json=stable_json({
-                "schema": "agentflow.managed_policy_decision_evaluation.v1",
+                "schema": "tokenclaw.managed_policy_decision_evaluation.v1",
                 "enabled": True,
                 "server_url": "http://managed.local",
                 "status": "received",
@@ -1084,11 +1084,11 @@ request_shape_repeated_context_canaries:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
             {
-                "AGENTFLOW_POLICY_EVENTS_LOG": os.path.join(tmp, "policy_events.jsonl"),
-                "AGENTFLOW_RECOMMENDATIONS_ENABLED": "0",
-                "AGENTFLOW_RECOMMENDATION_ENABLED": "0",
-                "AGENTFLOW_POLICY_DECISIONS_ENABLED": "0",
-                "AGENTFLOW_POLICY_DECISION_ENABLED": "0",
+                "TOKENCLAW_POLICY_EVENTS_LOG": os.path.join(tmp, "policy_events.jsonl"),
+                "TOKENCLAW_RECOMMENDATIONS_ENABLED": "0",
+                "TOKENCLAW_RECOMMENDATION_ENABLED": "0",
+                "TOKENCLAW_POLICY_DECISIONS_ENABLED": "0",
+                "TOKENCLAW_POLICY_DECISION_ENABLED": "0",
             },
             clear=False,
         ):
@@ -1100,7 +1100,7 @@ request_shape_repeated_context_canaries:
                 details={
                     "source": "cli",
                     "recommendation_health": {
-                        "schema": "agentflow.recommendation_health.v1",
+                        "schema": "tokenclaw.recommendation_health.v1",
                         "status": "warning",
                         "warning_count": 1,
                         "rows": [
@@ -1126,10 +1126,10 @@ request_shape_repeated_context_canaries:
             )
             client = TestClient(app)
 
-            stats_response = client.get("/agentflow/stats/managed-recommendations")
+            stats_response = client.get("/tokenclaw/stats/managed-recommendations")
             self.assertEqual(stats_response.status_code, 200)
             payload = stats_response.json()
-            self.assertEqual(payload["schema"], "agentflow.managed_recommendations.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.managed_recommendations.v1")
             self.assertEqual(payload["current_config"]["mode"], "local-only")
             self.assertFalse(payload["current_config"]["enabled"])
             self.assertEqual(
@@ -1141,11 +1141,11 @@ request_shape_repeated_context_canaries:
                 "candidate-route-chat",
             )
 
-            html = client.get("/agentflow/dashboard")
+            html = client.get("/tokenclaw/dashboard")
             self.assertEqual(html.status_code, 200)
             self.assertIn("Managed recommendation status", html.text)
             self.assertIn("Managed recommendation health", html.text)
-            self.assertIn("/agentflow/stats/managed-recommendations", html.text)
+            self.assertIn("/tokenclaw/stats/managed-recommendations", html.text)
             self.assertIn("managed-summary-tbody", html.text)
             self.assertIn("managed-health-tbody", html.text)
 
@@ -1278,7 +1278,7 @@ request_shape_repeated_context_canaries:
 
         result = asyncio.run(stats_views.stats_openai_scoreboard(server.store, limit=20))
 
-        self.assertEqual(result["schema"], "agentflow.openai_optimization_scoreboard.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_optimization_scoreboard.v1")
         self.assertEqual(result["answer"], "helping")
         self.assertEqual(result["summary"]["openai_call_count"], 5)
         self.assertEqual(result["summary"]["retry_count"], 1)
@@ -1379,17 +1379,17 @@ request_shape_repeated_context_canaries:
         )
         client = TestClient(app)
 
-        stats_response = client.get("/agentflow/stats/openai-scoreboard")
+        stats_response = client.get("/tokenclaw/stats/openai-scoreboard")
         self.assertEqual(stats_response.status_code, 200)
         payload = stats_response.json()
-        self.assertEqual(payload["schema"], "agentflow.openai_optimization_scoreboard.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_optimization_scoreboard.v1")
         self.assertEqual(payload["summary"]["openai_call_count"], 1)
         self.assertFalse(payload["privacy"]["provider_calls_made"])
 
-        html = client.get("/agentflow/dashboard")
+        html = client.get("/tokenclaw/dashboard")
         self.assertEqual(html.status_code, 200)
         self.assertIn("OpenAI optimization scoreboard", html.text)
-        self.assertIn("/agentflow/stats/openai-scoreboard", html.text)
+        self.assertIn("/tokenclaw/stats/openai-scoreboard", html.text)
         self.assertIn("openai-scoreboard-summary-tbody", html.text)
         self.assertIn("openai-scoreboard-candidates-tbody", html.text)
         self.assertIn("Claude recommendation traffic state", html.text)
@@ -1400,7 +1400,7 @@ request_shape_repeated_context_canaries:
         exit_code = cli.openai_scoreboard_cli(["--db", self.tmp.name, "--limit", "10"], stdout=output)
         self.assertEqual(exit_code, 0)
         cli_payload = json.loads(output.getvalue())
-        self.assertEqual(cli_payload["schema"], "agentflow.openai_optimization_scoreboard.v1")
+        self.assertEqual(cli_payload["schema"], "tokenclaw.openai_optimization_scoreboard.v1")
         self.assertEqual(cli_payload["summary"]["openai_call_count"], 1)
         self.assertNotIn("hidden-session", output.getvalue())
 
@@ -1431,7 +1431,7 @@ request_shape_repeated_context_canaries:
             },
         }
         summary = {
-            "schema": "agentflow.openai_old_context_summary.v1",
+            "schema": "tokenclaw.openai_old_context_summary.v1",
             "enabled": True,
             "status": "applied",
             "applied": True,
@@ -1504,7 +1504,7 @@ request_shape_repeated_context_canaries:
 
         result = asyncio.run(stats_views.stats_openai_optimization_readiness(server.store, limit=20))
 
-        self.assertEqual(result["schema"], "agentflow.openai_optimization_readiness.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_optimization_readiness.v1")
         self.assertTrue(result["read_only"])
         self.assertEqual(result["state"], "conflicts-observed")
         self.assertEqual(result["summary"]["openai_call_count"], 1)
@@ -1556,13 +1556,13 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         client = TestClient(app)
-        stats_response = client.get("/agentflow/stats/openai-optimization-readiness?limit=20")
+        stats_response = client.get("/tokenclaw/stats/openai-optimization-readiness?limit=20")
         self.assertEqual(stats_response.status_code, 200)
         self.assertEqual(stats_response.json()["summary"]["conflicting_call_count"], 1)
-        html = client.get("/agentflow/dashboard")
+        html = client.get("/tokenclaw/dashboard")
         self.assertEqual(html.status_code, 200)
         self.assertIn("OpenAI optimization readiness", html.text)
-        self.assertIn("/agentflow/stats/openai-optimization-readiness", html.text)
+        self.assertIn("/tokenclaw/stats/openai-optimization-readiness", html.text)
         self.assertIn("openai-optimization-readiness-summary-tbody", html.text)
         self.assertIn("openai-optimization-readiness-families-tbody", html.text)
         self.assertIn("openai-optimization-readiness-conflicts-tbody", html.text)
@@ -1657,7 +1657,7 @@ request_shape_repeated_context_canaries:
         ):
             result = asyncio.run(stats_views.stats_openai_canary_readiness(server.store, limit=10))
 
-        self.assertEqual(result["schema"], "agentflow.openai_canary_readiness.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_canary_readiness.v1")
         self.assertEqual(result["state"], "ready_to_widen")
         self.assertTrue(result["read_only"])
         self.assertFalse(result["provider_calls_made"])
@@ -1756,7 +1756,7 @@ request_shape_repeated_context_canaries:
 
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
-            {"AGENTFLOW_POLICY_EVENTS_LOG": os.path.join(tmp, "policy_events.jsonl")},
+            {"TOKENCLAW_POLICY_EVENTS_LOG": os.path.join(tmp, "policy_events.jsonl")},
             clear=False,
         ):
             from tokenclaw.policy_events import log_policy_event
@@ -1796,7 +1796,7 @@ request_shape_repeated_context_canaries:
 
         adoption = result["adoption"]
         funnel = {row["stage"]: row["count"] for row in adoption["funnel"]}
-        self.assertEqual(adoption["schema"], "agentflow.managed_pattern_adoption.v1")
+        self.assertEqual(adoption["schema"], "tokenclaw.managed_pattern_adoption.v1")
         self.assertGreaterEqual(funnel["received"], 4)
         self.assertEqual(funnel["reviewed"], 1)
         self.assertEqual(funnel["dry_run"], 1)
@@ -2141,7 +2141,7 @@ request_shape_repeated_context_canaries:
         result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=20))
         summary = result["summary"]
 
-        self.assertEqual(result["schema"], "agentflow.codex_app_effectiveness.v1")
+        self.assertEqual(result["schema"], "tokenclaw.codex_app_effectiveness.v1")
         self.assertFalse(result["privacy"]["raw_prompts_included"])
         self.assertFalse(result["privacy"]["raw_params_included"])
         self.assertFalse(result["privacy"]["raw_responses_included"])
@@ -2410,7 +2410,7 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         with TestClient(app) as client:
-            response = client.get("/agentflow/stats/codex-effectiveness?limit=10")
+            response = client.get("/tokenclaw/stats/codex-effectiveness?limit=10")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["summary_model_hint"]["summary"]["turns"], 4)
         html = stats_views.dashboard_html()
@@ -2561,7 +2561,7 @@ request_shape_repeated_context_canaries:
             latency_ms=None,
             session_id="codex-readiness-session-secret",
             metadata_json=stable_json({
-                "schema": "agentflow.codex_app_metadata.v1",
+                "schema": "tokenclaw.codex_app_metadata.v1",
                 "kind": "token_usage",
                 "method": "thread/tokenUsage/updated",
                 "token_usage": {
@@ -2577,7 +2577,7 @@ request_shape_repeated_context_canaries:
 
         result = asyncio.run(stats_views.stats_codex_readiness(server.store, limit=20))
 
-        self.assertEqual(result["schema"], "agentflow.codex_optimization_readiness.v1")
+        self.assertEqual(result["schema"], "tokenclaw.codex_optimization_readiness.v1")
         self.assertEqual(result["source_surface"], "codex_turn")
         self.assertEqual(result["summary"]["turn_start_rows"], 4)
         self.assertEqual(result["summary"]["phase_known_rate"], 1.0)
@@ -2616,11 +2616,11 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         with TestClient(app) as client:
-            response = client.get("/agentflow/stats/codex-readiness?limit=20")
+            response = client.get("/tokenclaw/stats/codex-readiness?limit=20")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["summary"]["turn_start_rows"], 4)
         html = stats_views.dashboard_html()
-        self.assertIn("/agentflow/stats/codex-readiness", html)
+        self.assertIn("/tokenclaw/stats/codex-readiness", html)
         self.assertIn("Codex optimization readiness", html)
         self.assertIn("codex-readiness-tbody", html)
         self.assertIn("codex-cache-readiness-tbody", html)
@@ -2633,13 +2633,13 @@ request_shape_repeated_context_canaries:
     def test_openai_codex_readiness_card_reports_demo_only_without_live_evidence(self):
         result = asyncio.run(stats_views.stats_openai_codex_readiness(server.store, limit=20))
 
-        self.assertEqual(result["schema"], "agentflow.openai_codex_savings_readiness.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_codex_savings_readiness.v1")
         self.assertEqual(result["vertical"], "openai_codex_savings")
         self.assertEqual(result["state"], "demo_only")
         self.assertEqual(result["active_surface"], "none")
         self.assertEqual(result["active_action_family"], "none")
-        self.assertGreater(result["agentflow_generated_savings_usd"], 0)
-        self.assertEqual(result["live_agentflow_generated_savings_usd"], 0.0)
+        self.assertGreater(result["tokenclaw_generated_savings_usd"], 0)
+        self.assertEqual(result["live_tokenclaw_generated_savings_usd"], 0.0)
         self.assertEqual(result["provider_prompt_cache_discount_usd"], 0.0)
         self.assertEqual(result["top_blocker_reason"], "no-live-openai-or-codex-savings-evidence")
         self.assertFalse(result["managed_server_required"])
@@ -2655,16 +2655,16 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         with TestClient(app) as client:
-            response = client.get("/agentflow/stats/openai-codex-readiness?limit=20")
+            response = client.get("/tokenclaw/stats/openai-codex-readiness?limit=20")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["state"], "demo_only")
 
         html = stats_views.dashboard_html()
-        self.assertIn("/agentflow/stats/openai-codex-readiness", html)
+        self.assertIn("/tokenclaw/stats/openai-codex-readiness", html)
         self.assertIn("OpenAI/Codex savings readiness", html)
         self.assertIn("openai-codex-readiness-card", html)
 
-    def test_openai_codex_readiness_card_separates_live_agentflow_and_provider_cache_savings(self):
+    def test_openai_codex_readiness_card_separates_live_tokenclaw_and_provider_cache_savings(self):
         secret = "raw openai codex readiness secret must not leak"
         server.store.log_call(
             id="openai-codex-live-call",
@@ -2715,14 +2715,14 @@ request_shape_repeated_context_canaries:
         self.assertEqual(result["state"], "active")
         self.assertEqual(result["active_surface"], "openai_responses")
         self.assertEqual(result["active_action_family"], "routing")
-        self.assertGreater(result["live_agentflow_generated_savings_usd"], 0)
+        self.assertGreater(result["live_tokenclaw_generated_savings_usd"], 0)
         self.assertEqual(
-            result["agentflow_generated_savings_usd"],
-            result["live_agentflow_generated_savings_usd"],
+            result["tokenclaw_generated_savings_usd"],
+            result["live_tokenclaw_generated_savings_usd"],
         )
         self.assertGreater(result["provider_prompt_cache_discount_usd"], 0)
         self.assertNotEqual(
-            result["agentflow_generated_savings_usd"],
+            result["tokenclaw_generated_savings_usd"],
             result["provider_prompt_cache_discount_usd"],
         )
         self.assertTrue(result["rollback_available"])
@@ -2787,7 +2787,7 @@ request_shape_repeated_context_canaries:
                 "cache_key": raw_cache_key,
             }),
             event_window_json=stable_json({
-                "schema": "agentflow.codex_app_event_window.v1",
+                "schema": "tokenclaw.codex_app_event_window.v1",
                 "workflow_phase": "tool_execution",
                 "input_text_chars": 40_000,
                 "method_counts": {"turn/start": 1, "item/commandExecution/outputDelta": 10},
@@ -2825,7 +2825,7 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         with TestClient(app) as client:
-            response = client.get("/agentflow/stats/codex-effectiveness?limit=5")
+            response = client.get("/tokenclaw/stats/codex-effectiveness?limit=5")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
 
@@ -2907,7 +2907,7 @@ request_shape_repeated_context_canaries:
             latency_ms=None,
             session_id="codex-quota",
             metadata_json=stable_json({
-                "schema": "agentflow.codex_app_metadata.v1",
+                "schema": "tokenclaw.codex_app_metadata.v1",
                 "kind": "token_usage",
                 "method": "thread/tokenUsage/updated",
                 "token_usage": {
@@ -2938,7 +2938,7 @@ request_shape_repeated_context_canaries:
             latency_ms=None,
             session_id="codex-quota",
             metadata_json=stable_json({
-                "schema": "agentflow.codex_app_metadata.v1",
+                "schema": "tokenclaw.codex_app_metadata.v1",
                 "kind": "rate_limits",
                 "method": "account/rateLimits/updated",
                 "rate_limits": {
@@ -2968,11 +2968,11 @@ request_shape_repeated_context_canaries:
         self.assertEqual(quota["latest_rate_limits"]["pressure"], "high")
         self.assertEqual(quota["latest_rate_limits"]["scopes"][0]["remaining_bucket"], "10_99")
         self.assertEqual(quota["token_usage_totals"]["total_tokens"], 1550)
-        self.assertEqual(quota["agentflow_estimated_totals"]["total_tokens_est"], 1100)
+        self.assertEqual(quota["tokenclaw_estimated_totals"]["total_tokens_est"], 1100)
         self.assertEqual(quota["reconciliation"]["total_drift_tokens"], 450)
         self.assertEqual(quota["reconciliation"]["total_drift_bucket"], "reconciled")
         self.assertEqual(quota["reconciliation"]["total_drift_size_bucket"], "100_999")
-        self.assertEqual(quota["matched_agentflow_estimated_totals"]["total_tokens_est"], 1100)
+        self.assertEqual(quota["matched_tokenclaw_estimated_totals"]["total_tokens_est"], 1100)
         self.assertEqual(quota["latest_token_usage_delta"]["total_tokens"], 1550)
         self.assertGreater(quota["reconciled_cost_usd"], 0)
         self.assertEqual(quota["by_workflow_phase"][0]["workflow_phase"], "unknown")
@@ -3056,7 +3056,7 @@ request_shape_repeated_context_canaries:
                 latency_ms=None,
                 session_id=session_id,
                 metadata_json=stable_json({
-                    "schema": "agentflow.codex_app_metadata.v1",
+                    "schema": "tokenclaw.codex_app_metadata.v1",
                     "kind": "token_usage",
                     "method": "thread/tokenUsage/updated",
                     "token_usage": {
@@ -3126,7 +3126,7 @@ request_shape_repeated_context_canaries:
         self.assertEqual(status_tokens["stale"], 10)
         self.assertEqual(quota["token_usage_totals"]["total_tokens"], 283)
         self.assertEqual(quota["raw_counter_totals"]["total_tokens"], 433)
-        self.assertEqual(quota["matched_agentflow_estimated_totals"]["total_tokens_est"], 260)
+        self.assertEqual(quota["matched_tokenclaw_estimated_totals"]["total_tokens_est"], 260)
         self.assertEqual(quota["reconciliation"]["total_drift_bucket"], "reset")
         self.assertEqual(result["summary"]["token_usage_reconciliation_drift_bucket"], "reset")
         phase_tokens = {row["workflow_phase"]: row["total_tokens"] for row in quota["by_workflow_phase"]}
@@ -3165,7 +3165,7 @@ request_shape_repeated_context_canaries:
                 None,
                 None,
                 stable_json({
-                    "schema": "agentflow.codex_app_event_window.v1",
+                    "schema": "tokenclaw.codex_app_event_window.v1",
                     "event_count": 1,
                     "method_counts": {"turn/start": 1},
                     "direction_counts": {"client_to_server": 1},
@@ -3365,7 +3365,7 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         with TestClient(app) as client:
-            response = client.get("/agentflow/stats/codex-effectiveness?limit=20")
+            response = client.get("/tokenclaw/stats/codex-effectiveness?limit=20")
         self.assertEqual(response.status_code, 200)
         endpoint_payload = response.json()
         endpoint_phases = {row["phase"] for row in endpoint_payload["workflow_phase_breakdown"]}
@@ -3414,7 +3414,7 @@ request_shape_repeated_context_canaries:
                     "policy_source": "local-default",
                 }),
                 event_window_json=stable_json({
-                    "schema": "agentflow.codex_app_event_window.v1",
+                    "schema": "tokenclaw.codex_app_event_window.v1",
                     "event_count": 3,
                     "method_counts": {"turn/start": 1, "item/agentMessage/delta": 2},
                     "direction_counts": {"client_to_server": 1, "server_to_client": 2},
@@ -3488,7 +3488,7 @@ request_shape_repeated_context_canaries:
             crunch_json=stable_json({"status": "skipped", "reason": "no-change", "applied": False, "changed": False}),
             cache_json=stable_json({"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False}),
             event_window_json=stable_json({
-                "schema": "agentflow.codex_app_event_window.v1",
+                "schema": "tokenclaw.codex_app_event_window.v1",
                 "start_event_id": "start-window",
                 "created_at": "2026-06-08T10:00:00+00:00",
                 "session_id": "session-window",
@@ -3563,7 +3563,7 @@ request_shape_repeated_context_canaries:
                 "workflow_phase": "unknown",
             }),
             event_window_json=stable_json({
-                "schema": "agentflow.codex_app_event_window.v1",
+                "schema": "tokenclaw.codex_app_event_window.v1",
                 "event_count": 3,
                 "method_counts": {
                     "turn/start": 1,
@@ -3776,8 +3776,8 @@ request_shape_repeated_context_canaries:
             limiter_config={},
         )
         with TestClient(app) as client:
-            payload = client.get("/agentflow/stats/old-context-summary").json()
-            html = client.get("/agentflow/dashboard").text
+            payload = client.get("/tokenclaw/stats/old-context-summary").json()
+            html = client.get("/tokenclaw/dashboard").text
 
         self.assertEqual(payload["summary"]["skipped_rows"], 1)
         self.assertIn("Old-context summarization opportunity", html)
@@ -3923,8 +3923,8 @@ request_shape_repeated_context_canaries:
             limiter_config={},
         )
         with TestClient(app) as client:
-            payload = client.get("/agentflow/stats/old-context-summary").json()
-            html = client.get("/agentflow/dashboard").text
+            payload = client.get("/tokenclaw/stats/old-context-summary").json()
+            html = client.get("/tokenclaw/dashboard").text
 
         readiness_counts = {row["value"]: row["count"] for row in payload["readiness"]["state_breakdown"]}
         self.assertEqual(readiness_counts["disabled"], 1)
@@ -4140,7 +4140,7 @@ request_shape_repeated_context_canaries:
             limiter_config={},
         )
         with TestClient(app) as client:
-            html = client.get("/agentflow/dashboard").text
+            html = client.get("/tokenclaw/dashboard").text
 
         self.assertIn("Old-context summary quality gates", html)
         self.assertIn("old-context-summary-quality-tbody", html)
@@ -4172,7 +4172,7 @@ request_shape_repeated_context_canaries:
         payload = asyncio.run(stats_views.stats_old_context_summary(server.store))
         health = payload["rollout_health"]
 
-        self.assertEqual(health["schema"], "agentflow.old_context_summary_rollout_health.v1")
+        self.assertEqual(health["schema"], "tokenclaw.old_context_summary_rollout_health.v1")
         self.assertEqual(health["status"], "canary-observed")
         self.assertEqual(health["latest"]["candidate_id"], "candidate-rollout-health")
         self.assertEqual(health["rollout_counts"]["canary_applied_rows"], 2)
@@ -4199,7 +4199,7 @@ request_shape_repeated_context_canaries:
             limiter_config={},
         )
         with TestClient(app) as client:
-            dashboard = client.get("/agentflow/dashboard")
+            dashboard = client.get("/tokenclaw/dashboard")
 
         html = dashboard.text
         self.assertIn("Old-context summary", html)
@@ -4217,7 +4217,7 @@ request_shape_repeated_context_canaries:
 
         async def seeded_policy_state():
             return {
-                "schema": "agentflow.policy_state.v1",
+                "schema": "tokenclaw.policy_state.v1",
                 "routing": {
                     "enabled": True,
                     "policy_source": "managed-recommended",
@@ -4354,7 +4354,7 @@ request_shape_repeated_context_canaries:
                 "event_type": "dry-run",
                 "recommendation_id": "phase-routing:secret-id",
                 "metadata": {
-                    "schema": "agentflow.phase_routing_lifecycle_metadata.v1",
+                    "schema": "tokenclaw.phase_routing_lifecycle_metadata.v1",
                     "command": "phase-routing-dry-run",
                     "local_result_status": "ok",
                     "dry_run": True,
@@ -4385,10 +4385,10 @@ request_shape_repeated_context_canaries:
                 full_stats_ttl_s=0,
             )
             with TestClient(app) as client:
-                endpoint = client.get("/agentflow/stats/phase-routing?limit=50")
-                html = client.get("/agentflow/dashboard").text
+                endpoint = client.get("/tokenclaw/stats/phase-routing?limit=50")
+                html = client.get("/tokenclaw/dashboard").text
 
-        self.assertEqual(payload["schema"], "agentflow.phase_routing_dashboard.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.phase_routing_dashboard.v1")
         self.assertEqual(payload["status"], "safety-stopped")
         self.assertEqual(payload["summary"]["canary_applied_rows"], 1)
         self.assertEqual(payload["summary"]["canary_holdout_rows"], 1)
@@ -4402,7 +4402,7 @@ request_shape_repeated_context_canaries:
         self.assertFalse(payload["privacy"]["local_session_ids_included"])
         self.assertFalse(payload["privacy"]["queue_payload_json_included"])
         self.assertEqual(endpoint.status_code, 200)
-        self.assertEqual(endpoint.json()["schema"], "agentflow.phase_routing_dashboard.v1")
+        self.assertEqual(endpoint.json()["schema"], "tokenclaw.phase_routing_dashboard.v1")
         self.assertIn("Phase-routing rollout health", html)
         self.assertIn("phase-routing-opportunity-tbody", html)
         self.assertIn("phase-routing-canary-tbody", html)
@@ -4745,7 +4745,7 @@ request_shape_repeated_context_canaries:
         ladder = ladder_payload["ladder"]
         by_code = {row["blocker_code"]: row for row in ladder}
 
-        self.assertEqual(ladder_payload["schema"], "agentflow.cache_zero_hit_blocker_ladder.v1")
+        self.assertEqual(ladder_payload["schema"], "tokenclaw.cache_zero_hit_blocker_ladder.v1")
         self.assertTrue(ladder_payload["summary"]["zero_hit_window"])
         self.assertEqual(ladder[0]["blocker_code"], "skipped-streaming")
         self.assertEqual(ladder[0]["provider"], "openai")
@@ -4868,7 +4868,7 @@ request_shape_repeated_context_canaries:
         result = asyncio.run(stats_views.stats_cache_effectiveness(server.store, scan_limit=20))
         summary = result["summary"]
 
-        self.assertEqual(result["schema"], "agentflow.cache_smoke_diagnostic.v1")
+        self.assertEqual(result["schema"], "tokenclaw.cache_smoke_diagnostic.v1")
         self.assertEqual(summary["exact_cache_rows"], 1)
         self.assertEqual(summary["semantic_cache_rows"], 1)
         self.assertEqual(summary["exact_lookup_count"], 2)
@@ -4889,9 +4889,9 @@ request_shape_repeated_context_canaries:
                 limiter_config={},
             )
         )
-        endpoint = client.get("/agentflow/stats/cache-effectiveness?scan_limit=20")
-        full = client.get("/agentflow/stats/full")
-        html = client.get("/agentflow/dashboard").text
+        endpoint = client.get("/tokenclaw/stats/cache-effectiveness?scan_limit=20")
+        full = client.get("/tokenclaw/stats/full")
+        html = client.get("/tokenclaw/dashboard").text
 
         self.assertEqual(endpoint.status_code, 200)
         self.assertEqual(endpoint.json()["summary"]["exact_hit_count"], 1)
@@ -5080,7 +5080,7 @@ request_shape_repeated_context_canaries:
                             "applied_count": 1,
                             "saved_chars": 1200,
                             "canary": {
-                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "schema": "tokenclaw.pattern_canary_decision.v1",
                                 "enabled": True,
                                 "selected": True,
                                 "status": "applied",
@@ -5137,7 +5137,7 @@ request_shape_repeated_context_canaries:
                             "reason": "canary_holdout",
                             "matched_hashes": [cache_hash],
                             "canary": {
-                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "schema": "tokenclaw.pattern_canary_decision.v1",
                                 "enabled": True,
                                 "selected": False,
                                 "status": "holdout",
@@ -5229,7 +5229,7 @@ request_shape_repeated_context_canaries:
                             "applied_count": 1,
                             "saved_chars": 400,
                             "canary": {
-                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "schema": "tokenclaw.pattern_canary_decision.v1",
                                 "enabled": True,
                                 "selected": True,
                                 "status": "applied",
@@ -5282,7 +5282,7 @@ request_shape_repeated_context_canaries:
                     "policy_source": "managed-recommended",
                     "matched_hashes": [codex_hash],
                     "canary": {
-                        "schema": "agentflow.pattern_canary_decision.v1",
+                        "schema": "tokenclaw.pattern_canary_decision.v1",
                         "enabled": True,
                         "selected": True,
                         "status": "applied",
@@ -5821,7 +5821,7 @@ request_shape_repeated_context_canaries:
         result = asyncio.run(stats_views.stats_cache_replayability(server.store, limit=10))
         groups = {(row["cache_reason"], row["category"], row["cacheability_bucket"]): row for row in result["groups"]}
 
-        self.assertEqual(result["schema"], "agentflow.cache_replayability.v1")
+        self.assertEqual(result["schema"], "tokenclaw.cache_replayability.v1")
         self.assertFalse(result["privacy"]["raw_prompts_included"])
         self.assertFalse(result["privacy"]["file_paths_included"])
         self.assertEqual(result["summary"]["repeated_shape_groups"], 3)
@@ -5875,7 +5875,7 @@ request_shape_repeated_context_canaries:
     def test_cache_replayability_burn_down_empty_dataset(self):
         result = asyncio.run(stats_views.stats_cache_replayability(server.store, limit=10))
 
-        self.assertEqual(result["schema"], "agentflow.cache_replayability.v1")
+        self.assertEqual(result["schema"], "tokenclaw.cache_replayability.v1")
         self.assertEqual(result["summary"]["candidate_rows"], 0)
         self.assertEqual(result["summary"]["blocker_burn_down_rows"], 0)
         self.assertEqual(result["summary"]["top_blocker_burn_down_projected_cost_usd"], 0.0)
@@ -5924,13 +5924,13 @@ request_shape_repeated_context_canaries:
         )
 
         with TestClient(app) as client:
-            response = client.get("/agentflow/stats/cache-replayability?limit=5")
+            response = client.get("/tokenclaw/stats/cache-replayability?limit=5")
             self.assertEqual(response.status_code, 200)
             data = response.json()
-            self.assertEqual(data["schema"], "agentflow.cache_replayability.v1")
+            self.assertEqual(data["schema"], "tokenclaw.cache_replayability.v1")
             self.assertFalse(data["privacy"]["raw_prompts_included"])
             self.assertNotIn("private request body", json.dumps(data))
-            html = client.get("/agentflow/dashboard").text
+            html = client.get("/tokenclaw/dashboard").text
             self.assertIn("Cache blocker burn-down", html)
             self.assertIn("cache-blocker-burn-down-tbody", html)
             self.assertIn("Skipped cache replayability", html)
@@ -5968,7 +5968,7 @@ request_shape_repeated_context_canaries:
                 "candidate_id": "raw candidate id request-id-secret",
                 "session_memory_hints": {
                     "dry_run_replay_proposal": {
-                        "schema": "agentflow.session_memory_cache_replay_proposal.v1",
+                        "schema": "tokenclaw.session_memory_cache_replay_proposal.v1",
                         "status": "raw status prompt",
                         "reason": "cache-key-secret reason",
                         "proposal_id": "raw proposal id must not leak",
@@ -6003,9 +6003,9 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         with TestClient(app) as client:
-            payload = client.get("/agentflow/stats/cache-replayability?limit=10").json()
-            readiness = client.get("/agentflow/stats/cache-replay-readiness?limit=10").json()
-            html = client.get("/agentflow/dashboard").text
+            payload = client.get("/tokenclaw/stats/cache-replayability?limit=10").json()
+            readiness = client.get("/tokenclaw/stats/cache-replay-readiness?limit=10").json()
+            html = client.get("/tokenclaw/dashboard").text
 
         rendered = json.dumps({"payload": payload, "readiness": readiness}, sort_keys=True) + html
         for forbidden in (
@@ -6192,10 +6192,10 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         with TestClient(app) as client:
-            payload = client.get("/agentflow/stats/cache-replayability?limit=10").json()
-            readiness = client.get("/agentflow/stats/cache-replay-readiness?limit=10").json()
+            payload = client.get("/tokenclaw/stats/cache-replayability?limit=10").json()
+            readiness = client.get("/tokenclaw/stats/cache-replay-readiness?limit=10").json()
 
-        self.assertEqual(payload["session_memory_replay_proposals"][0]["schema"], "agentflow.session_memory_cache_replay_proposal.v1")
+        self.assertEqual(payload["session_memory_replay_proposals"][0]["schema"], "tokenclaw.session_memory_cache_replay_proposal.v1")
         self.assertEqual(readiness["summary"]["session_memory_replay_proposal_count"], 2)
         rendered = json.dumps({"payload": payload, "readiness": readiness}, sort_keys=True)
         for forbidden in (
@@ -6374,7 +6374,7 @@ request_shape_repeated_context_canaries:
         )
 
         result = asyncio.run(stats_views.stats_cache_replay_confidence(server.store, limit=10))
-        self.assertEqual(result["schema"], "agentflow.cache_replay_confidence.v1")
+        self.assertEqual(result["schema"], "tokenclaw.cache_replay_confidence.v1")
         self.assertEqual(result["summary"]["hit_rows"], 1)
         self.assertEqual(result["summary"]["miss_rows"], 1)
         self.assertEqual(result["summary"]["holdout_rows"], 1)
@@ -6419,11 +6419,11 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         with TestClient(app) as client:
-            response = client.get("/agentflow/stats/cache-replay-confidence?limit=10")
+            response = client.get("/tokenclaw/stats/cache-replay-confidence?limit=10")
             self.assertEqual(response.status_code, 200)
             data = response.json()
             self.assertEqual(data["summary"]["hit_rows"], 1)
-            html = client.get("/agentflow/dashboard").text
+            html = client.get("/tokenclaw/dashboard").text
             self.assertIn("Cache replay confidence", html)
             self.assertIn("cache-replay-confidence-tbody", html)
             self.assertNotIn("private replay prompt", html)
@@ -6599,7 +6599,7 @@ request_shape_repeated_context_canaries:
         finally:
             cache_module.CACHE_PATTERN_RULES = original_rules
 
-        self.assertEqual(result["schema"], "agentflow.cache_replay_readiness.v1")
+        self.assertEqual(result["schema"], "tokenclaw.cache_replay_readiness.v1")
         self.assertTrue(result["summary"]["safety_stop_active"])
         self.assertEqual(result["summary"]["ready_rule_count"], 1)
         self.assertGreaterEqual(result["summary"]["invalidation_rows"], 1)
@@ -6643,11 +6643,11 @@ request_shape_repeated_context_canaries:
         )
         try:
             with TestClient(app) as client:
-                response = client.get("/agentflow/stats/cache-replay-readiness?limit=20")
+                response = client.get("/tokenclaw/stats/cache-replay-readiness?limit=20")
                 self.assertEqual(response.status_code, 200)
                 payload = response.json()
-                self.assertEqual(payload["schema"], "agentflow.cache_replay_readiness.v1")
-                dashboard = client.get("/agentflow/dashboard")
+                self.assertEqual(payload["schema"], "tokenclaw.cache_replay_readiness.v1")
+                dashboard = client.get("/tokenclaw/dashboard")
                 self.assertEqual(dashboard.status_code, 200)
                 self.assertIn("Cache canary cohorts", dashboard.text)
                 self.assertIn("cache-canary-cohorts-tbody", dashboard.text)
@@ -6771,7 +6771,7 @@ request_shape_repeated_context_canaries:
                 "projected_saved_cost_usd": 0.03,
                 "pattern_rule": healthy_rule,
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": "healthy-cache-replay",
                     "candidate_id": "candidate-healthy-cache-replay",
                     "policy_source": "managed-recommended",
@@ -6795,7 +6795,7 @@ request_shape_repeated_context_canaries:
                 "projected_saved_cost_usd": 0.02,
                 "pattern_rule": healthy_rule,
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": "healthy-cache-replay",
                     "candidate_id": "candidate-healthy-cache-replay",
                     "policy_source": "managed-recommended",
@@ -6815,7 +6815,7 @@ request_shape_repeated_context_canaries:
                 "policy_source": "managed-recommended",
                 "pattern_rules": {"skip_reasons": [holdout_rule]},
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": "healthy-cache-replay",
                     "candidate_id": "candidate-healthy-cache-replay",
                     "policy_source": "managed-recommended",
@@ -6836,7 +6836,7 @@ request_shape_repeated_context_canaries:
                 "policy_source": "managed-recommended",
                 "pattern_rule": blocked_rule,
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": "blocked-tool-cache-replay",
                     "candidate_id": "candidate-blocked-cache-replay",
                     "policy_source": "managed-recommended",
@@ -6860,7 +6860,7 @@ request_shape_repeated_context_canaries:
         )
 
         result = asyncio.run(stats_views.stats_cache_replay_activation_health(server.store, limit=20, scan_limit=20))
-        self.assertEqual(result["schema"], "agentflow.cache_replay_activation_health.v1")
+        self.assertEqual(result["schema"], "tokenclaw.cache_replay_activation_health.v1")
         self.assertTrue(result["read_only"])
         self.assertGreaterEqual(result["summary"]["healthy_canary_count"], 1)
         self.assertGreaterEqual(result["summary"]["blocked_or_hold_count"], 1)
@@ -6897,11 +6897,11 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         with TestClient(app) as client:
-            response = client.get("/agentflow/stats/cache-replay-activation-health?limit=20&scan_limit=20")
+            response = client.get("/tokenclaw/stats/cache-replay-activation-health?limit=20&scan_limit=20")
             self.assertEqual(response.status_code, 200)
             payload = response.json()
             self.assertEqual(payload["summary"]["widen_candidate_count"], 1)
-            dashboard = client.get("/agentflow/dashboard")
+            dashboard = client.get("/tokenclaw/dashboard")
             self.assertEqual(dashboard.status_code, 200)
             self.assertIn("Cache replay activation health", dashboard.text)
             self.assertIn("cache-replay-activation-health-tbody", dashboard.text)
@@ -6948,7 +6948,7 @@ request_shape_repeated_context_canaries:
                     "policy_source": "managed-recommended",
                     "pattern_rule": rule,
                     "cache_replay_canary": {
-                        "schema": "agentflow.cache_replay_canary_decision.v1",
+                        "schema": "tokenclaw.cache_replay_canary_decision.v1",
                         "rule_id": rule["rule_id"],
                         "candidate_id": rule["candidate_id"],
                         "policy_source": "managed-recommended",
@@ -6975,7 +6975,7 @@ request_shape_repeated_context_canaries:
 
         result = asyncio.run(stats_views.stats_streaming_cache_hit_recovery(server.store, limit=10, scan_limit=10))
 
-        self.assertEqual(result["schema"], "agentflow.streaming_cache_hit_recovery.v1")
+        self.assertEqual(result["schema"], "tokenclaw.streaming_cache_hit_recovery.v1")
         self.assertTrue(result["read_only"])
         self.assertEqual(result["summary"]["recovery_verdict"], "store-missing")
         self.assertEqual(result["summary"]["eligible_calls"], 2)
@@ -7035,7 +7035,7 @@ request_shape_repeated_context_canaries:
                     "policy_source": "managed-recommended",
                     "pattern_rule": rule,
                     "cache_replay_canary": {
-                        "schema": "agentflow.cache_replay_canary_decision.v1",
+                        "schema": "tokenclaw.cache_replay_canary_decision.v1",
                         "rule_id": rule["rule_id"],
                         "candidate_id": rule["candidate_id"],
                         "policy_source": "managed-recommended",
@@ -7109,7 +7109,7 @@ request_shape_repeated_context_canaries:
             )
 
         base_audit = {
-            "schema": "agentflow.cache_file_dependency_audit.v1",
+            "schema": "tokenclaw.cache_file_dependency_audit.v1",
             "file_watch_enabled": True,
             "snapshot_root_policy": "cwd-relative",
             "root_path_included": False,
@@ -7359,7 +7359,7 @@ request_shape_repeated_context_canaries:
                             "stream": False,
                         },
                         "rollout": {
-                            "schema": "agentflow.pattern_policy_rollout.v1",
+                            "schema": "tokenclaw.pattern_policy_rollout.v1",
                             "canary_enabled": True,
                             "canary_fraction": 0.0,
                             "canary_salt": "dry-run-test",
@@ -7372,7 +7372,7 @@ request_shape_repeated_context_canaries:
 
         result = asyncio.run(stats_views.stats_cache_replay_dry_run(server.store, proposed, limit=20))
 
-        self.assertEqual(result["schema"], "agentflow.cache_replay_dry_run.v1")
+        self.assertEqual(result["schema"], "tokenclaw.cache_replay_dry_run.v1")
         self.assertFalse(result["summary"]["cache_table_mutated"])
         self.assertEqual(result["summary"]["cache_rows_before"], 1)
         self.assertEqual(result["summary"]["cache_rows_after"], 1)
@@ -7418,7 +7418,7 @@ request_shape_repeated_context_canaries:
 
         def audit(*, reason=None, safe=False):
             return {
-                "schema": "agentflow.cache_file_dependency_audit.v1",
+                "schema": "tokenclaw.cache_file_dependency_audit.v1",
                 "file_watch_enabled": True,
                 "snapshot_root_policy": "stored-local-paths",
                 "root_path": "/tmp/private",
@@ -7583,7 +7583,7 @@ request_shape_repeated_context_canaries:
                     "applied": False,
                 }),
                 stable_json({
-                    "schema": "agentflow.codex_app_event_window.v1",
+                    "schema": "tokenclaw.codex_app_event_window.v1",
                     "event_count": 2,
                     "method_counts": {"turn/start": 1, "initialize": 1},
                     "direction_counts": {"client_to_server": 2},
@@ -7991,10 +7991,10 @@ request_shape_repeated_context_canaries:
                 full_stats_ttl_s=0,
             )
             client = TestClient(app)
-            endpoint = client.get("/agentflow/stats/shadow-routing-promotion-readiness?limit=20")
-            html = client.get("/agentflow/dashboard")
+            endpoint = client.get("/tokenclaw/stats/shadow-routing-promotion-readiness?limit=20")
+            html = client.get("/tokenclaw/dashboard")
 
-        self.assertEqual(result["schema"], "agentflow.shadow_routing_promotion_readiness.v1")
+        self.assertEqual(result["schema"], "tokenclaw.shadow_routing_promotion_readiness.v1")
         self.assertTrue(result["read_only"])
         self.assertFalse(result["wrote_local_files"])
         self.assertFalse(result["provider_calls_made"])
@@ -8019,7 +8019,7 @@ request_shape_repeated_context_canaries:
         endpoint_verdicts = {row["promotion_verdict"] for row in endpoint.json()["candidates"]}
         self.assertEqual(endpoint_verdicts, verdicts)
         self.assertEqual(html.status_code, 200)
-        self.assertIn("/agentflow/stats/shadow-routing-promotion-readiness", html.text)
+        self.assertIn("/tokenclaw/stats/shadow-routing-promotion-readiness", html.text)
         self.assertIn("Shadow-routing promotion readiness", html.text)
         self.assertIn("shadow-routing-promotion-candidates-tbody", html.text)
         rendered = json.dumps(endpoint.json(), sort_keys=True) + html.text
@@ -8074,8 +8074,8 @@ request_shape_repeated_context_canaries:
                 full_stats_ttl_s=0,
             )
             client = TestClient(app)
-            endpoint = client.get("/agentflow/stats/shadow-routing-promotion-readiness?limit=20")
-            html = client.get("/agentflow/dashboard")
+            endpoint = client.get("/tokenclaw/stats/shadow-routing-promotion-readiness?limit=20")
+            html = client.get("/tokenclaw/dashboard")
 
         self.assertEqual(endpoint.status_code, 200)
         self.assertEqual(html.status_code, 200)
@@ -8382,7 +8382,7 @@ request_shape_repeated_context_canaries:
             limiter_config={},
             full_stats_ttl_s=0,
         )
-        response = TestClient(app).get("/agentflow/stats/sessions")
+        response = TestClient(app).get("/tokenclaw/stats/sessions")
 
         self.assertEqual(response.status_code, 200)
         result = response.json()
@@ -8543,7 +8543,7 @@ request_shape_repeated_context_canaries:
         self.assertAlmostEqual(by_provider["anthropic"]["actual_cached_read_cost_usd"], 0.0006, places=8)
         self.assertAlmostEqual(by_provider["anthropic"]["creation_cost_usd"], 0.00375, places=8)
         self.assertAlmostEqual(by_provider["anthropic"]["creation_premium_usd"], 0.00075, places=8)
-        self.assertEqual(by_provider["anthropic"]["pricing_source"], "embedded-agentflow-defaults")
+        self.assertEqual(by_provider["anthropic"]["pricing_source"], "embedded-tokenclaw-defaults")
         self.assertEqual(by_provider["anthropic"]["pricing_version"], "2026-06-08")
         self.assertAlmostEqual(by_provider["openai"]["read_discount_usd"], 0.00225, places=8)
         self.assertAlmostEqual(by_provider["openai"]["actual_cached_read_cost_usd"], 0.00025, places=8)
@@ -8556,19 +8556,19 @@ request_shape_repeated_context_canaries:
         self.assertAlmostEqual(savings[("openai_responses", "provider_prompt_cache")], 0.00225, places=8)
         # Acceptance criteria: provider prompt-cache discount must NOT be in AgentFlow headline savings
         exec_savings = result["executive_summary"]["savings"]
-        self.assertAlmostEqual(exec_savings["today_agentflow_generated_savings_usd"], 0.0, places=6,
+        self.assertAlmostEqual(exec_savings["today_tokenclaw_generated_savings_usd"], 0.0, places=6,
                                msg="provider prompt-cache discount must not inflate AgentFlow headline savings")
         self.assertGreater(exec_savings["today_provider_prompt_cache_discount_usd"], 0.0,
                            msg="provider prompt-cache discount must appear in separate provider section")
         ppc = exec_savings["provider_prompt_cache_economics"]
         self.assertGreater(ppc["today_read_discount_usd"], 0.0)
         self.assertIn("provider billing efficiency", ppc["label"])
-        self.assertNotIn("provider_prompt_cache_discount_usd", exec_savings["today_agentflow_generated_buckets"])
+        self.assertNotIn("provider_prompt_cache_discount_usd", exec_savings["today_tokenclaw_generated_buckets"])
         json.dumps(result)
 
-    def test_agentflow_generated_savings_excludes_provider_prompt_cache(self):
+    def test_tokenclaw_generated_savings_excludes_provider_prompt_cache(self):
         # A call with routing+crunch savings AND provider prompt-cache reads.
-        # agentflow_generated_savings_usd must equal only routing+crunch+cache, not prompt-cache.
+        # tokenclaw_generated_savings_usd must equal only routing+crunch+cache, not prompt-cache.
         server.store.log_call(
             id=str(uuid.uuid4()),
             created_at=utc_now(),
@@ -8601,20 +8601,20 @@ request_shape_repeated_context_canaries:
         )
         result = asyncio.run(stats_views.stats_full(server.store))
         exec_savings = result["executive_summary"]["savings"]
-        agentflow_total = exec_savings["today_agentflow_generated_savings_usd"]
+        tokenclaw_total = exec_savings["today_tokenclaw_generated_savings_usd"]
         ppc_discount = exec_savings["today_provider_prompt_cache_discount_usd"]
         # prompt-cache discount > 0 (1000 cache read tokens for claude-sonnet at 0.3/MTok = $0.0003)
         self.assertGreater(ppc_discount, 0.0)
         # routing savings > 0 (routing from opus to haiku cuts baseline by 9x)
-        self.assertGreater(exec_savings["today_agentflow_generated_buckets"]["routing_usd"], 0.0)
-        # agentflow total must not include the ppc_discount
-        self.assertAlmostEqual(agentflow_total, exec_savings["today_agentflow_generated_buckets"]["routing_usd"] + exec_savings["today_agentflow_generated_buckets"]["crunching_usd"] + exec_savings["today_agentflow_generated_buckets"]["exact_local_cache_usd"], places=6)
-        self.assertNotIn("provider_prompt_cache_discount_usd", exec_savings["today_agentflow_generated_buckets"])
+        self.assertGreater(exec_savings["today_tokenclaw_generated_buckets"]["routing_usd"], 0.0)
+        # tokenclaw total must not include the ppc_discount
+        self.assertAlmostEqual(tokenclaw_total, exec_savings["today_tokenclaw_generated_buckets"]["routing_usd"] + exec_savings["today_tokenclaw_generated_buckets"]["crunching_usd"] + exec_savings["today_tokenclaw_generated_buckets"]["exact_local_cache_usd"], places=6)
+        self.assertNotIn("provider_prompt_cache_discount_usd", exec_savings["today_tokenclaw_generated_buckets"])
         self.assertIn("today_provider_prompt_cache_discount_usd", exec_savings)
 
     def test_stats_full_exposes_cache_replay_cohort_ranking_for_research_handoff(self):
         dependency_audit = {
-            "schema": "agentflow.cache_file_dependency_audit.v1",
+            "schema": "tokenclaw.cache_file_dependency_audit.v1",
             "file_watch_enabled": True,
             "snapshot_root_policy": "stored-local-paths",
             "root_path_included": False,
@@ -8691,7 +8691,7 @@ request_shape_repeated_context_canaries:
         result = asyncio.run(stats_views.stats_full(server.store))
         ranking = result["cache_replay_cohort_ranking"]
 
-        self.assertEqual(ranking["schema"], "agentflow.cache_replay_plateau_cohort_ranking.v1")
+        self.assertEqual(ranking["schema"], "tokenclaw.cache_replay_plateau_cohort_ranking.v1")
         self.assertEqual(ranking["summary"]["activation_ready_count"], 1)
         self.assertEqual(ranking["summary"]["projected_ready_hits"], 1)
         self.assertGreaterEqual(ranking["summary"]["projected_ready_saved_cost_usd"], 0.02)
@@ -8796,7 +8796,7 @@ request_shape_repeated_context_canaries:
         provider = units[f"provider_call:{provider_id}"]
         codex = units[f"codex_turn:{start_id}"]
 
-        self.assertEqual(result["schema"], "agentflow.optimization_activity.v1")
+        self.assertEqual(result["schema"], "tokenclaw.optimization_activity.v1")
         self.assertEqual(provider["source_surface"], "anthropic_messages")
         self.assertEqual(provider["granularity"], "provider_request")
         self.assertEqual(provider["app_family"], "claude_code")
@@ -8813,7 +8813,7 @@ request_shape_repeated_context_canaries:
         self.assertEqual(provider["replayability_level"], "features_only")
         self.assertEqual(provider["local_ids"]["calls_id"], provider_id)
 
-        self.assertEqual(codex["schema"], "agentflow.optimization_unit.v1")
+        self.assertEqual(codex["schema"], "tokenclaw.optimization_unit.v1")
         self.assertEqual(codex["source_surface"], "codex_turn")
         self.assertEqual(codex["granularity"], "agent_turn")
         self.assertEqual(codex["app_family"], "codex")
@@ -9006,7 +9006,7 @@ request_shape_repeated_context_canaries:
         summary = activity["summary"]["quality_signal_summary"]
         by_status = {row["status"]: row["count"] for row in summary["by_status"]}
         by_signal = {row["signal"]: row["count"] for row in summary["by_signal"]}
-        self.assertEqual(quality["schema"], "agentflow.quality_signal_report.v1")
+        self.assertEqual(quality["schema"], "tokenclaw.quality_signal_report.v1")
         self.assertFalse(quality["privacy"]["raw_prompts_included"])
         self.assertEqual(quality["summary"], summary)
         self.assertGreaterEqual(by_status["success"], 1)
@@ -9177,7 +9177,7 @@ request_shape_repeated_context_canaries:
         payload = asyncio.run(stats_views.stats_provider_adoption_health(server.store, limit=20))
         rendered = json.dumps(payload, sort_keys=True)
 
-        self.assertEqual(payload["schema"], "agentflow.provider_adoption_dashboard_health.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.provider_adoption_dashboard_health.v1")
         self.assertEqual(payload["summary"]["window_count"], 3)
         self.assertEqual(payload["summary"]["fulfilled_count"], 2)
         cohorts = {
@@ -9279,15 +9279,15 @@ request_shape_repeated_context_canaries:
             limiter_config={},
         )
         client = TestClient(app)
-        endpoint = client.get("/agentflow/stats/provider-adoption-health?limit=20")
-        dashboard = client.get("/agentflow/dashboard")
+        endpoint = client.get("/tokenclaw/stats/provider-adoption-health?limit=20")
+        dashboard = client.get("/tokenclaw/dashboard")
         rendered = json.dumps(endpoint.json(), sort_keys=True) + dashboard.text
 
         self.assertEqual(endpoint.status_code, 200)
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn("Provider adoption quality health", dashboard.text)
         self.assertIn("provider-adoption-cohorts-tbody", dashboard.text)
-        self.assertIn("fetch('/agentflow/stats/provider-adoption-health?limit=1000')", dashboard.text)
+        self.assertIn("fetch('/tokenclaw/stats/provider-adoption-health?limit=1000')", dashboard.text)
         self.assertNotIn("provider-adoption-dashboard-call-secret", rendered)
         self.assertNotIn("provider-adoption-dashboard-window-secret", rendered)
         self.assertNotIn("provider-adoption-dashboard-session-secret", rendered)
@@ -9297,10 +9297,10 @@ request_shape_repeated_context_canaries:
         self.assertNotIn("contenteditable", dashboard.text.lower())
 
     def test_usage_by_owner_groups_provider_calls_and_codex_turns(self):
-        old_engineer = os.environ.get("AGENTFLOW_ENGINEER")
-        old_app = os.environ.get("AGENTFLOW_APP")
-        os.environ["AGENTFLOW_ENGINEER"] = "ada"
-        os.environ["AGENTFLOW_APP"] = "code-workbench"
+        old_engineer = os.environ.get("TOKENCLAW_ENGINEER")
+        old_app = os.environ.get("TOKENCLAW_APP")
+        os.environ["TOKENCLAW_ENGINEER"] = "ada"
+        os.environ["TOKENCLAW_APP"] = "code-workbench"
         try:
             server.store.log_call(
                 id=str(uuid.uuid4()),
@@ -9400,15 +9400,15 @@ request_shape_repeated_context_canaries:
             result = asyncio.run(stats_views.stats_usage_by_owner(server.store))
         finally:
             if old_engineer is None:
-                os.environ.pop("AGENTFLOW_ENGINEER", None)
+                os.environ.pop("TOKENCLAW_ENGINEER", None)
             else:
-                os.environ["AGENTFLOW_ENGINEER"] = old_engineer
+                os.environ["TOKENCLAW_ENGINEER"] = old_engineer
             if old_app is None:
-                os.environ.pop("AGENTFLOW_APP", None)
+                os.environ.pop("TOKENCLAW_APP", None)
             else:
-                os.environ["AGENTFLOW_APP"] = old_app
+                os.environ["TOKENCLAW_APP"] = old_app
 
-        self.assertEqual(result["schema"], "agentflow.usage_by_owner.v1")
+        self.assertEqual(result["schema"], "tokenclaw.usage_by_owner.v1")
         self.assertEqual(result["summary"]["buckets"], 1)
         self.assertFalse(result["summary"]["codex_cost_unknown"])
         self.assertEqual(result["summary"]["cost_basis"], "provider-reported + codex-estimated-from-chars")
@@ -9461,7 +9461,7 @@ request_shape_repeated_context_canaries:
         self.assertIn("large_tool_result_context", hint_codes)
         self.assertFalse(result["grouping"]["raw_prompt_logging"])
         self.assertEqual(result["grouping"]["display_name"], "By source")
-        self.assertEqual(result["grouping"]["primary_fields"], ["AGENTFLOW_ENGINEER", "AGENTFLOW_APP", "app_family"])
+        self.assertEqual(result["grouping"]["primary_fields"], ["TOKENCLAW_ENGINEER", "TOKENCLAW_APP", "app_family"])
         self.assertEqual(result["grouping"]["fallback_fields"], ["session_id"])
         json.dumps(result)
 
@@ -9471,7 +9471,7 @@ request_shape_repeated_context_canaries:
         self.assertIn(">Recent calls</button>", html)
         self.assertIn("<h2>Recent calls</h2>", html)
         self.assertIn("id=\"activity-tbody\"", html)
-        self.assertIn("fetch('/agentflow/stats/activity?limit=100')", html)
+        self.assertIn("fetch('/tokenclaw/stats/activity?limit=100')", html)
         self.assertIn('<th data-sort-type="text">Surface</th>', html)
         self.assertIn('<th data-sort-type="text">Granularity</th>', html)
         self.assertIn('<th data-sort-type="text">App family</th>', html)
@@ -9493,7 +9493,7 @@ request_shape_repeated_context_canaries:
         self.assertIn("renderActivationBurndown(d)", html)
         self.assertIn(">Activation next actions</button>", html)
         self.assertIn("id=\"evidence-activation-summary-tbody\"", html)
-        self.assertIn("fetch('/agentflow/stats/evidence-to-activation-next-actions?limit=20')", html)
+        self.assertIn("fetch('/tokenclaw/stats/evidence-to-activation-next-actions?limit=20')", html)
 
     def test_dashboard_exposes_terminal_output_compaction_readiness_panel(self):
         html = stats_views.dashboard_html()
@@ -9504,7 +9504,7 @@ request_shape_repeated_context_canaries:
         self.assertIn("id=\"terminal-compaction-policy-tbody\"", html)
         self.assertIn("id=\"terminal-compaction-candidates-tbody\"", html)
         self.assertIn("id=\"terminal-compaction-impact-tbody\"", html)
-        self.assertIn("fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=250&impact_limit=100')", html)
+        self.assertIn("fetch('/tokenclaw/stats/terminal-output-compaction?opportunity_limit=250&impact_limit=100')", html)
         self.assertIn("terminal text omitted", html)
         self.assertIn("policy contents omitted", html)
 
@@ -9515,7 +9515,7 @@ request_shape_repeated_context_canaries:
         self.assertIn("<h2>Codex quota and token usage</h2>", html)
         self.assertIn("id=\"codex-quota-tbody\"", html)
         self.assertIn("id=\"codex-rate-scopes-tbody\"", html)
-        self.assertIn("fetch('/agentflow/stats/codex-effectiveness?limit=500')", html)
+        self.assertIn("fetch('/tokenclaw/stats/codex-effectiveness?limit=500')", html)
         self.assertIn("quota_and_token_usage", html)
         self.assertIn("raw commands omitted", html)
         self.assertIn("raw transcripts omitted", html)
@@ -9534,11 +9534,11 @@ request_shape_repeated_context_canaries:
         self.assertIn(">By source</button>", html)
         self.assertIn("<h2>Usage by source</h2>", html)
         self.assertIn("id=\"usage-tbody\"", html)
-        self.assertIn("fetch('/agentflow/stats/usage')", html)
+        self.assertIn("fetch('/tokenclaw/stats/usage')", html)
         self.assertIn('<th data-sort-type="text">Source</th>', html)
         self.assertIn('<th data-sort-type="text">Grouped by</th>', html)
         self.assertIn('<th data-sort-type="text">Surfaces</th>', html)
-        self.assertIn("AGENTFLOW_ENGINEER + AGENTFLOW_APP", html)
+        self.assertIn("TOKENCLAW_ENGINEER + TOKENCLAW_APP", html)
         self.assertIn("app_family + session_id", html)
         self.assertIn('<th data-sort-type="number">Turns</th>', html)
         self.assertIn('<th data-sort-type="number">Provider calls</th>', html)
@@ -9602,16 +9602,16 @@ request_shape_repeated_context_canaries:
             limiter_config={},
         )
         client = TestClient(app)
-        endpoint = client.get("/agentflow/stats/sqlite-maintenance")
+        endpoint = client.get("/tokenclaw/stats/sqlite-maintenance")
 
-        self.assertEqual(result["schema"], "agentflow.sqlite_maintenance_dashboard.v1")
+        self.assertEqual(result["schema"], "tokenclaw.sqlite_maintenance_dashboard.v1")
         self.assertEqual(result["summary"]["retention_days"], 7)
         self.assertTrue(result["privacy"]["metadata_only"])
         self.assertEqual(endpoint.status_code, 200)
         self.assertEqual(endpoint.json()["summary"]["retention_days"], 7)
         self.assertIn("SQLite maintenance", html)
         self.assertIn("sqlite-maintenance-tbody", html)
-        self.assertIn("fetch('/agentflow/stats/sqlite-maintenance')", html)
+        self.assertIn("fetch('/tokenclaw/stats/sqlite-maintenance')", html)
         rendered = json.dumps(endpoint.json(), sort_keys=True)
         self.assertNotIn("request_json", rendered)
         self.assertNotIn("response_json", rendered)
@@ -9653,7 +9653,7 @@ request_shape_repeated_context_canaries:
     def test_dashboard_coalesces_full_stats_loading(self):
         html = stats_views.dashboard_html()
 
-        self.assertEqual(html.count("fetch('/agentflow/stats/full')"), 1)
+        self.assertEqual(html.count("fetch('/tokenclaw/stats/full')"), 1)
         self.assertIn("const FULL_STATS_TTL_MS=5000", html)
         self.assertIn("let fullStatsInFlight=null", html)
         self.assertIn("if(fullStatsInFlight)return fullStatsInFlight", html)
@@ -9687,14 +9687,14 @@ request_shape_repeated_context_canaries:
             "cache:[refreshCache,refreshOpenAICacheReplayReadiness,refreshOpenAIToolCacheInvalidationBurndown]",
             html,
         )
-        self.assertIn("fetch('/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=250&impact_limit=100')", html)
+        self.assertIn("fetch('/tokenclaw/stats/openai-cache-replay-readiness?opportunity_limit=250&impact_limit=100')", html)
         self.assertIn(
-            "fetch('/agentflow/stats/openai-tool-cache-invalidation-burndown?opportunity_limit=250&impact_limit=100&row_limit=25')",
+            "fetch('/tokenclaw/stats/openai-tool-cache-invalidation-burndown?opportunity_limit=250&impact_limit=100&row_limit=25')",
             html,
         )
-        self.assertIn("fetch('/agentflow/stats/repeated-scaffold-opportunity?limit=250&min_repeated_rows=2')", html)
-        self.assertIn("fetch('/agentflow/stats/optimization-coordinator?limit=250')", html)
-        self.assertIn("fetch('/agentflow/stats/local-pattern-coverage?limit=250')", html)
+        self.assertIn("fetch('/tokenclaw/stats/repeated-scaffold-opportunity?limit=250&min_repeated_rows=2')", html)
+        self.assertIn("fetch('/tokenclaw/stats/optimization-coordinator?limit=250')", html)
+        self.assertIn("fetch('/tokenclaw/stats/local-pattern-coverage?limit=250')", html)
 
     def test_dashboard_expensive_stats_endpoint_uses_short_ttl_cache(self):
         calls = 0
@@ -9703,7 +9703,7 @@ request_shape_repeated_context_canaries:
             nonlocal calls
             calls += 1
             return {
-                "schema": "agentflow.provider_adoption_dashboard_health.v1",
+                "schema": "tokenclaw.provider_adoption_dashboard_health.v1",
                 "call_count": calls,
                 "limit": limit,
             }
@@ -9718,9 +9718,9 @@ request_shape_repeated_context_canaries:
         client = TestClient(app)
 
         with patch("tokenclaw.dashboard_app.stats_views.stats_provider_adoption_health", side_effect=fake_provider_adoption_health):
-            first = client.get("/agentflow/stats/provider-adoption-health?limit=20")
-            second = client.get("/agentflow/stats/provider-adoption-health?limit=20")
-            different_query = client.get("/agentflow/stats/provider-adoption-health?limit=21")
+            first = client.get("/tokenclaw/stats/provider-adoption-health?limit=20")
+            second = client.get("/tokenclaw/stats/provider-adoption-health?limit=20")
+            different_query = client.get("/tokenclaw/stats/provider-adoption-health?limit=21")
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
@@ -9731,7 +9731,7 @@ request_shape_repeated_context_canaries:
         self.assertEqual(calls, 2)
 
     def test_proxy_dashboard_router_uses_current_store(self):
-        response = TestClient(server.app).get("/agentflow/stats")
+        response = TestClient(server.app).get("/tokenclaw/stats")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["calls"], 0)
@@ -9894,12 +9894,12 @@ request_shape_repeated_context_canaries:
             full_stats_ttl_s=0,
         )
         client = TestClient(app)
-        response = client.get("/agentflow/stats/session-phase-memory")
-        dashboard = client.get("/agentflow/dashboard")
+        response = client.get("/tokenclaw/stats/session-phase-memory")
+        dashboard = client.get("/tokenclaw/dashboard")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["schema"], "agentflow.session_phase_memory_dashboard.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.session_phase_memory_dashboard.v1")
         self.assertEqual(payload["summary"]["memory_ready_session_count"], 1)
         self.assertEqual(payload["summary"]["blocked_session_count"], 1)
         self.assertEqual(payload["summary"]["decision_usage"]["decision_count"], 1)
@@ -9920,7 +9920,7 @@ request_shape_repeated_context_canaries:
 
         rendered = json.dumps(payload, sort_keys=True) + dashboard.text
         self.assertEqual(dashboard.status_code, 200)
-        self.assertIn("/agentflow/stats/session-phase-memory", dashboard.text)
+        self.assertIn("/tokenclaw/stats/session-phase-memory", dashboard.text)
         self.assertIn("Session phase memory readiness", dashboard.text)
         self.assertIn("session-phase-memory-summary-tbody", dashboard.text)
         self.assertIn("session-phase-memory-sessions-tbody", dashboard.text)

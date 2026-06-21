@@ -27,8 +27,8 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.instruction_dedup_dry_run.v1"
-PLAN_SCHEMA = "agentflow.instruction_dedup_plan.v1"
+SCHEMA = "tokenclaw.instruction_dedup_dry_run.v1"
+PLAN_SCHEMA = "tokenclaw.instruction_dedup_plan.v1"
 TOKEN_CHARS = 4
 
 

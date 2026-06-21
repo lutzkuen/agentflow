@@ -23,8 +23,8 @@ from tokenclaw.cli_commands.policy_bundle import (
 from tokenclaw.upstream_url import redact_url as _redact_url
 
 
-POLICY_BUNDLE_RECOMMENDATION_URL_ENV = "AGENTFLOW_POLICY_BUNDLE_RECOMMENDATION_URL"
-MANAGED_POLICY_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
+POLICY_BUNDLE_RECOMMENDATION_URL_ENV = "TOKENCLAW_POLICY_BUNDLE_RECOMMENDATION_URL"
+MANAGED_POLICY_API_KEY_ENV = "TOKENCLAW_MANAGED_API_KEY"
 
 
 def _policy_fetch_review_error_result(
@@ -47,7 +47,7 @@ def _policy_fetch_review_error_result(
     if body is not None:
         fetch["body"] = body[:500]
     return {
-        "schema": "agentflow.policy_bundle_fetch_review.v1",
+        "schema": "tokenclaw.policy_bundle_fetch_review.v1",
         "ok": False,
         "applied": False,
         "wrote_local_files": False,
@@ -73,9 +73,9 @@ def _managed_policy_auth(args: argparse.Namespace) -> tuple[dict[str, str], bool
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
     if args.tenant:
-        headers["x-agentflow-tenant"] = args.tenant
+        headers["x-tokenclaw-tenant"] = args.tenant
     if args.account:
-        headers["x-agentflow-account"] = args.account
+        headers["x-tokenclaw-account"] = args.account
     if api_key:
         return headers, True, source
     if args.allow_unauthenticated:
@@ -139,8 +139,8 @@ def _managed_policy_capability_headers(args: argparse.Namespace) -> dict[str, st
 
     families = _supported_openai_optimization_action_families(args)
     return {
-        "x-agentflow-local-version": __version__,
-        "x-agentflow-supported-local-action-families": ",".join(families),
+        "x-tokenclaw-local-version": __version__,
+        "x-tokenclaw-supported-local-action-families": ",".join(families),
     }
 
 
@@ -183,11 +183,11 @@ def _openai_review_action_summary(action: Any) -> dict[str, Any]:
 
 def _openai_optimization_review_summary(bundle: Any) -> dict[str, Any]:
     if not isinstance(bundle, dict):
-        return {"schema": "agentflow.openai_optimization_review_summary.v1", "status": "missing"}
+        return {"schema": "tokenclaw.openai_optimization_review_summary.v1", "status": "missing"}
     openai_review = bundle.get("openai_optimization") if isinstance(bundle.get("openai_optimization"), dict) else {}
     recommendation = bundle.get("recommendation") if isinstance(bundle.get("recommendation"), dict) else {}
     if not openai_review:
-        return {"schema": "agentflow.openai_optimization_review_summary.v1", "status": "missing"}
+        return {"schema": "tokenclaw.openai_optimization_review_summary.v1", "status": "missing"}
     selected = openai_review.get("selected_actions") if isinstance(openai_review.get("selected_actions"), list) else []
     suppressed = openai_review.get("suppressed_actions") if isinstance(openai_review.get("suppressed_actions"), list) else []
     omitted = openai_review.get("omitted_actions") if isinstance(openai_review.get("omitted_actions"), list) else []
@@ -213,7 +213,7 @@ def _openai_optimization_review_summary(bundle: Any) -> dict[str, Any]:
                 "reason_codes": sorted(set(reason_codes)),
             })
     return {
-        "schema": "agentflow.openai_optimization_review_summary.v1",
+        "schema": "tokenclaw.openai_optimization_review_summary.v1",
         "status": "present",
         "review_bundle_schema": openai_review.get("schema") or recommendation.get("openai_optimization_schema"),
         "selected_action_count": len(selected),
@@ -365,8 +365,8 @@ def policy_fetch_review_cli(
         action="store_true",
         help="Fetch without an API key. Intended only for local/dev managed servers.",
     )
-    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
-    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--tenant", help="Optional x-tokenclaw-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-tokenclaw-account header for account metadata.")
     parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request.")
     parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request.")
     parser.add_argument("--limit", type=int, default=50, help="Maximum candidates to request.")
@@ -392,13 +392,13 @@ def policy_fetch_review_cli(
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
         help="HTTP timeout in seconds, default: 10.",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="SQLite metadata database path for local impact simulation, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="SQLite metadata database path for local impact simulation, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
     )
     parser.add_argument(
         "--impact-limit",
@@ -546,15 +546,15 @@ def policy_fetch_review_cli(
     review = review_policy_bundle(current, bundle, impact_db_path=args.db, impact_limit=max(0, args.impact_limit))
     recommendation = _managed_recommendation_summary(bundle)
     openai_review = _openai_optimization_review_summary(bundle)
-    next_manual_commands = ["agentflow-policy-apply reviewed-bundle.json --dry-run --pretty"]
+    next_manual_commands = ["tokenclaw-policy-apply reviewed-bundle.json --dry-run --pretty"]
     if openai_review.get("status") == "present":
         next_manual_commands = [
-            "agentflow-policy-draft-stage reviewed-bundle.json --pretty",
-            "agentflow-policy-draft-validate <draft-id> --pretty",
+            "tokenclaw-policy-draft-stage reviewed-bundle.json --pretty",
+            "tokenclaw-policy-draft-validate <draft-id> --pretty",
         ]
     ok = bool(validation["ok"] and review["ok"])
     result = {
-        "schema": "agentflow.policy_bundle_fetch_review.v1",
+        "schema": "tokenclaw.policy_bundle_fetch_review.v1",
         "ok": ok,
         "applied": False,
         "wrote_local_files": False,
@@ -615,7 +615,7 @@ def policy_fetch_review_cli(
 
 def _policy_apply_read_error_result(read_error: dict[str, Any], *, config_dir: str, dry_run: bool) -> dict[str, Any]:
     return {
-        "schema": "agentflow.policy_bundle_apply.v1",
+        "schema": "tokenclaw.policy_bundle_apply.v1",
         "ok": False,
         "dry_run": bool(dry_run),
         "config_dir": config_dir,
@@ -644,8 +644,8 @@ def policy_apply_cli(
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local rule files, default: ~/.agentflow",
+        default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local rule files, default: ~/.tokenclaw",
     )
     parser.add_argument(
         "--section",
@@ -743,8 +743,8 @@ def policy_draft_stage_cli(
     )
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
-        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+        default=os.getenv("TOKENCLAW_POLICY_DRAFT_DIR", str(Path.home() / ".tokenclaw" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.tokenclaw/policy_drafts.",
     )
     parser.add_argument(
         "--pretty",
@@ -763,7 +763,7 @@ def policy_draft_stage_cli(
             raw = Path(args.path).read_text(encoding="utf-8")
         except OSError as exc:
             result = {
-                "schema": "agentflow.policy_draft_stage.v1",
+                "schema": "tokenclaw.policy_draft_stage.v1",
                 "ok": False,
                 "draft": None,
                 "draft_id": args.draft_id,
@@ -793,7 +793,7 @@ def policy_draft_stage_cli(
     payload, parse_error = parse_policy_payload(raw)
     if parse_error:
         result = {
-            "schema": "agentflow.policy_draft_stage.v1",
+            "schema": "tokenclaw.policy_draft_stage.v1",
             "ok": False,
             "draft": None,
             "draft_id": args.draft_id,
@@ -858,17 +858,17 @@ def policy_draft_validate_cli(
     )
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
-        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+        default=os.getenv("TOKENCLAW_POLICY_DRAFT_DIR", str(Path.home() / ".tokenclaw" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.tokenclaw/policy_drafts.",
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local rule files used by the dry-run apply projection, default: ~/.agentflow.",
+        default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local rule files used by the dry-run apply projection, default: ~/.tokenclaw.",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
         help="Local SQLite DB path for metadata-only impact simulation.",
     )
     parser.add_argument(
@@ -951,17 +951,17 @@ def managed_activation_bundle_stage_cli(
     )
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
-        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+        default=os.getenv("TOKENCLAW_POLICY_DRAFT_DIR", str(Path.home() / ".tokenclaw" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.tokenclaw/policy_drafts.",
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR"),
-        help="Config directory used for validation dry-runs. Default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR"),
+        help="Config directory used for validation dry-runs. Default: TOKENCLAW_CONFIG_DIR or ~/.tokenclaw.",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB"),
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB"),
         help="Optional SQLite metadata database path for validation impact review.",
     )
     parser.add_argument(
@@ -986,7 +986,7 @@ def managed_activation_bundle_stage_cli(
             raw = Path(args.path).read_text(encoding="utf-8")
         except OSError as exc:
             result = {
-                "schema": "agentflow.managed_activation_bundle_import.v1",
+                "schema": "tokenclaw.managed_activation_bundle_import.v1",
                 "ok": False,
                 "status": "rejected",
                 "dry_run": True,
@@ -1017,7 +1017,7 @@ def managed_activation_bundle_stage_cli(
     payload, parse_error = parse_policy_payload(raw)
     if parse_error:
         result = {
-            "schema": "agentflow.managed_activation_bundle_import.v1",
+            "schema": "tokenclaw.managed_activation_bundle_import.v1",
             "ok": False,
             "status": "rejected",
             "dry_run": True,
@@ -1083,17 +1083,17 @@ def managed_activation_bundle_apply_cli(
     )
     parser.add_argument(
         "draft",
-        help="Staged draft ID, draft directory, draft.json path, or policy_bundle.json path created by agentflow-managed-activation-bundle-stage.",
+        help="Staged draft ID, draft directory, draft.json path, or policy_bundle.json path created by tokenclaw-managed-activation-bundle-stage.",
     )
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
-        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+        default=os.getenv("TOKENCLAW_POLICY_DRAFT_DIR", str(Path.home() / ".tokenclaw" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.tokenclaw/policy_drafts.",
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local rule files, default: ~/.agentflow.",
+        default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local rule files, default: ~/.tokenclaw.",
     )
     parser.add_argument(
         "--action-id",
@@ -1192,17 +1192,17 @@ def policy_draft_apply_cli(
     )
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
-        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+        default=os.getenv("TOKENCLAW_POLICY_DRAFT_DIR", str(Path.home() / ".tokenclaw" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.tokenclaw/policy_drafts.",
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local rule files, default: ~/.agentflow.",
+        default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local rule files, default: ~/.tokenclaw.",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
         help="Local SQLite DB path for metadata-only impact simulation.",
     )
     parser.add_argument(
@@ -1213,13 +1213,13 @@ def policy_draft_apply_cli(
     )
     parser.add_argument(
         "--reload-url",
-        default=os.getenv("AGENTFLOW_ADMIN_URL", _default_policy_reload_url()),
+        default=os.getenv("TOKENCLAW_ADMIN_URL", _default_policy_reload_url()),
         help=f"Admin reload URL, default: {_default_policy_reload_url()}",
     )
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_ADMIN_TIMEOUT", "10")),
+        default=float(os.getenv("TOKENCLAW_ADMIN_TIMEOUT", "10")),
         help="HTTP timeout in seconds for the loopback reload call, default: 10.",
     )
     parser.add_argument(

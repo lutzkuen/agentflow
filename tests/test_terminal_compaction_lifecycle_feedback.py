@@ -78,7 +78,7 @@ class TerminalOutputCompactionLifecycleFeedbackTests(unittest.TestCase):
 
     def test_reviewed_and_rejected_events_are_metadata_only(self):
         reviewed = {
-            "schema": "agentflow.terminal_output_compaction_dry_run.v1",
+            "schema": "tokenclaw.terminal_output_compaction_dry_run.v1",
             "ok": True,
             "dry_run": True,
             "read_only": True,
@@ -119,7 +119,7 @@ class TerminalOutputCompactionLifecycleFeedbackTests(unittest.TestCase):
 
     def test_applied_holdout_canary_safety_stop_and_rollback_events_are_metadata_only(self):
         apply_result = {
-            "schema": "agentflow.pattern_rollout_actions_apply.v1",
+            "schema": "tokenclaw.pattern_rollout_actions_apply.v1",
             "ok": True,
             "dry_run": False,
             "actions": [
@@ -153,7 +153,7 @@ class TerminalOutputCompactionLifecycleFeedbackTests(unittest.TestCase):
             ("rollback", {"rollback_action_count": 1, "applied_count": 2, "holdout_count": 1}, _candidate(verdict="rollback", applied=2, holdout=1)),
         ):
             impact_result = {
-                "schema": "agentflow.terminal_output_compaction_impact.v1",
+                "schema": "tokenclaw.terminal_output_compaction_impact.v1",
                 "ok": True,
                 "read_only": True,
                 "summary": summary,
@@ -164,7 +164,7 @@ class TerminalOutputCompactionLifecycleFeedbackTests(unittest.TestCase):
 
     def test_lifecycle_feedback_queues_offline_and_status_is_payload_free(self):
         result = {
-            "schema": "agentflow.terminal_output_compaction_impact.v1",
+            "schema": "tokenclaw.terminal_output_compaction_impact.v1",
             "ok": True,
             "read_only": True,
             "summary": {"applied_count": 1, "holdout_count": 1},
@@ -173,9 +173,9 @@ class TerminalOutputCompactionLifecycleFeedbackTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
-                with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "0"}, clear=False):
+                with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "0"}, clear=False):
                     meta = asyncio.run(
                         queue_terminal_output_compaction_lifecycle_feedback(
                             store,
@@ -195,7 +195,7 @@ class TerminalOutputCompactionLifecycleFeedbackTests(unittest.TestCase):
         self.assertEqual(meta["status"], "queued")
         self.assertEqual(meta["reason"], "queued-managed-disabled")
         lifecycle = status["terminal_output_compaction_lifecycle"]
-        self.assertEqual(lifecycle["schema"], "agentflow.terminal_output_compaction_lifecycle_queue_status.v1")
+        self.assertEqual(lifecycle["schema"], "tokenclaw.terminal_output_compaction_lifecycle_queue_status.v1")
         self.assertEqual(lifecycle["queue_rows"], 1)
         self.assertEqual(lifecycle["event_type_breakdown"], [{"value": "canary-applied", "count": 1}])
         self.assertFalse(lifecycle["payload_json_included"])

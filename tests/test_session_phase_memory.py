@@ -99,7 +99,7 @@ def _adversarial_raw_fields():
 class SessionPhaseMemoryTests(unittest.TestCase):
     def test_builds_metadata_only_rollups_with_phases_plateaus_and_blockers(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(store, "01", text_chars=40_000)
                 _log_call(store, "02", text_chars=40_800)
@@ -136,7 +136,7 @@ class SessionPhaseMemoryTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(result["schema"], "agentflow.session_phase_memory.v1")
+        self.assertEqual(result["schema"], "tokenclaw.session_phase_memory.v1")
         self.assertEqual(result["lookback"]["sampled_call_count"], 5)
         self.assertEqual(result["summary"]["session_count"], 3)
         self.assertEqual(result["summary"]["unknown_session_call_count"], 1)
@@ -180,7 +180,7 @@ class SessionPhaseMemoryTests(unittest.TestCase):
     def test_adversarial_metadata_rows_are_bucketed_before_memory_output(self):
         raw_fields = _adversarial_raw_fields()
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for index in range(1, 4):
                     store.log_call(
@@ -245,7 +245,7 @@ class SessionPhaseMemoryTests(unittest.TestCase):
 
     def test_cli_reads_seeded_db(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_call(
@@ -264,7 +264,7 @@ class SessionPhaseMemoryTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.session_phase_memory.v1")
+        self.assertEqual(result["schema"], "tokenclaw.session_phase_memory.v1")
         self.assertEqual(result["summary"]["hashed_session_count"], 1)
         self.assertEqual(result["sessions"][0]["dominant_phase"], "summary")
         self.assertNotIn("secret-session-cli", stdout.getvalue())

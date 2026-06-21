@@ -9,7 +9,7 @@ from tokenclaw.store import utc_now
 from tokenclaw.terminal_features import terminal_log_features_from_text
 
 
-SCHEMA = "agentflow.terminal_output_compaction_opportunity.v1"
+SCHEMA = "tokenclaw.terminal_output_compaction_opportunity.v1"
 TOKEN_CHARS = 4
 
 
@@ -429,7 +429,7 @@ def build_terminal_output_compaction_opportunity_report(
             "projected_saved_usd": round(sum(_as_float(item.get("projected_saved_usd")) for item in candidates), 6),
         },
         "projection_policy": {
-            "schema": "agentflow.terminal_output_compaction_projection_policy.v1",
+            "schema": "tokenclaw.terminal_output_compaction_projection_policy.v1",
             "provider_calls_made": False,
             "managed_server_calls_made": False,
             "raw_body_required": False,

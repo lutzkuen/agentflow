@@ -15,7 +15,7 @@ from tokenclaw.provider_adoption_gate import (
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.optimization_promotion_impact.v1"
+SCHEMA = "tokenclaw.optimization_promotion_impact.v1"
 
 _RAW_LIKE_KEY_PARTS = (
     "api_key",

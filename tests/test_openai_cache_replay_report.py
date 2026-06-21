@@ -51,7 +51,7 @@ def _reload_cache_module_for_test():
 class OpenAICacheReplayReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -60,7 +60,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
 
     def _audit(self, *, reason: str | None = None, safe: bool = False) -> dict[str, object]:
         return {
-            "schema": "agentflow.cache_file_dependency_audit.v1",
+            "schema": "tokenclaw.cache_file_dependency_audit.v1",
             "file_watch_enabled": True,
             "snapshot_root_policy": "stored-local-paths",
             "root_path_included": False,
@@ -205,7 +205,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 "pattern_hashes": ["sha256:" + "f" * 64],
             },
             "graduation": {
-                "source_schema": "agentflow.openai_cache_replay_opportunity.v1",
+                "source_schema": "tokenclaw.openai_cache_replay_opportunity.v1",
                 "projected_hits": 10,
                 "projected_savings_usd": projected,
                 "sample_count": 10,
@@ -215,7 +215,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             "pattern_rule": rule,
             "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
             "cache_replay_canary": {
-                "schema": "agentflow.cache_replay_canary_decision.v1",
+                "schema": "tokenclaw.cache_replay_canary_decision.v1",
                 "rule_id": rule_id,
                 "candidate_id": candidate_id,
                 "policy_source": "local-manual",
@@ -231,10 +231,10 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
     def test_openai_cache_replay_impact_recommends_stage_when_canary_evidence_is_missing(self) -> None:
         report = build_openai_cache_replay_impact_report(self.store, limit=20)
 
-        self.assertEqual(report["schema"], "agentflow.openai_cache_replay_impact.v1")
+        self.assertEqual(report["schema"], "tokenclaw.openai_cache_replay_impact.v1")
         self.assertEqual(report["status"], "no-openai-cache-replay-metadata")
         evidence = report["local_promotion_evidence"]
-        self.assertEqual(evidence["schema"], "agentflow.openai_cache_replay_local_promotion_evidence.v1")
+        self.assertEqual(evidence["schema"], "tokenclaw.openai_cache_replay_local_promotion_evidence.v1")
         self.assertEqual(evidence["status"], "missing-canary-evidence")
         self.assertEqual(evidence["recommended_local_action"]["action"], "stage-cache-replay-canary")
         self.assertEqual(evidence["top_blocker"], "missing-cache-replay-canary-lifecycle-evidence")
@@ -263,7 +263,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
         decision = report["promotion_decision"]
 
-        self.assertEqual(decision["schema"], "agentflow.openai_cache_replay_promotion_decision.v1")
+        self.assertEqual(decision["schema"], "tokenclaw.openai_cache_replay_promotion_decision.v1")
         self.assertEqual(decision["decision"], "keep-staged")
         self.assertTrue(decision["keep_staged"])
         self.assertFalse(decision["promotion_allowed"])
@@ -312,7 +312,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         decision = report["promotion_decision"]
         blockers = {row["value"]: row["count"] for row in decision["applied_miss_blocker_breakdown"]}
 
-        self.assertEqual(decision["schema"], "agentflow.openai_cache_replay_promotion_decision.v1")
+        self.assertEqual(decision["schema"], "tokenclaw.openai_cache_replay_promotion_decision.v1")
         self.assertEqual(decision["decision"], "keep-staged")
         self.assertEqual(decision["reason"], "cache-warmup-miss")
         self.assertEqual(decision["recommended_next_action"], "keep-openai-exact-cache-replay-canary-staged")
@@ -324,14 +324,14 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(decision["coverage"]["observed_hits"], 0)
         self.assertEqual(decision["summary"]["top_applied_miss_blocker"], "cache-warmup-miss")
         self.assertEqual(blockers["cache-warmup-miss"], 24)
-        self.assertEqual(decision["hit_recovery"]["schema"], "agentflow.openai_cache_replay_hit_recovery.v1")
+        self.assertEqual(decision["hit_recovery"]["schema"], "tokenclaw.openai_cache_replay_hit_recovery.v1")
         self.assertEqual(decision["hit_recovery"]["status"], "awaiting-live-hit")
         self.assertEqual(decision["hit_recovery"]["applied_count"], 24)
         self.assertEqual(decision["hit_recovery"]["holdout_count"], 16)
         self.assertEqual(decision["hit_recovery"]["observed_hits"], 0)
         self.assertEqual(
             decision["invalidation_safety"]["schema"],
-            "agentflow.openai_cache_replay_invalidation_safety.v1",
+            "tokenclaw.openai_cache_replay_invalidation_safety.v1",
         )
         self.assertEqual(decision["invalidation_safety"]["status"], "passed")
         self.assertTrue(decision["invalidation_safety"]["safe_for_promotion"])
@@ -705,7 +705,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
 
         report = build_openai_cache_replay_report(self.store, limit=20)
 
-        self.assertEqual(report["schema"], "agentflow.openai_cache_replay_opportunity.v1")
+        self.assertEqual(report["schema"], "tokenclaw.openai_cache_replay_opportunity.v1")
         self.assertEqual(report["summary"]["openai_call_count"], 7)
         self.assertEqual(report["summary"]["request_fingerprint_rows"], 3)
         self.assertEqual(report["summary"]["request_body_rows_present_but_not_read"], 7)
@@ -794,13 +794,13 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self._log_openai_call(request_fingerprint="raw-cli-request-fingerprint")
 
         result = asyncio.run(stats_openai_cache_replay_report(self.store, limit=10))
-        self.assertEqual(result["schema"], "agentflow.openai_cache_replay_opportunity.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_cache_replay_opportunity.v1")
 
         output = io.StringIO()
         exit_code = cli.openai_cache_replay_report_cli(["--db", self.db_path, "--limit", "10"], stdout=output)
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.openai_cache_replay_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_cache_replay_opportunity.v1")
         self.assertEqual(payload["summary"]["openai_call_count"], 2)
         self.assertNotIn("raw-cli-request-fingerprint", output.getvalue())
 
@@ -921,7 +921,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 "pattern_rule": rule,
                 "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": rule_id,
                     "candidate_id": candidate_id,
                     "policy_source": "managed-recommended",
@@ -1163,8 +1163,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             min_cache_hit_rate=0.01,
         )
 
-        self.assertEqual(report["schema"], "agentflow.openai_cache_replay_impact.v1")
-        self.assertEqual(report["quality_gate"]["schema"], "agentflow.openai_cache_replay_quality_gate.v1")
+        self.assertEqual(report["schema"], "tokenclaw.openai_cache_replay_impact.v1")
+        self.assertEqual(report["quality_gate"]["schema"], "tokenclaw.openai_cache_replay_quality_gate.v1")
         self.assertEqual(report["summary"]["applied_count"], 10)
         self.assertEqual(report["summary"]["holdout_count"], 5)
         self.assertEqual(report["summary"]["blocked_count"], 1)
@@ -1176,7 +1176,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertAlmostEqual(by_verdict["widen"]["observed_savings_usd"], 0.07)
         self.assertEqual(by_verdict["widen"]["provider_adoption_gate"]["status"], "passed")
         promotion = report["local_promotion_evidence"]
-        self.assertEqual(promotion["schema"], "agentflow.openai_cache_replay_local_promotion_evidence.v1")
+        self.assertEqual(promotion["schema"], "tokenclaw.openai_cache_replay_local_promotion_evidence.v1")
         self.assertEqual(promotion["coverage"]["applied_count"], 10)
         self.assertEqual(promotion["coverage"]["holdout_count"], 5)
         self.assertEqual(promotion["outcomes"]["observed_hits"], 10)
@@ -1219,7 +1219,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertFalse(report["privacy"]["session_ids_included"])
 
         stats_result = asyncio.run(stats_openai_cache_replay_impact(self.store, limit=20))
-        self.assertEqual(stats_result["schema"], "agentflow.openai_cache_replay_impact.v1")
+        self.assertEqual(stats_result["schema"], "tokenclaw.openai_cache_replay_impact.v1")
 
         sent: dict[str, object] = {}
 
@@ -1244,7 +1244,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "sent")
         self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
-        self.assertEqual(sent["payload"]["schema"], "agentflow.openai_cache_replay_lifecycle_feedback.v1")
+        self.assertEqual(sent["payload"]["schema"], "tokenclaw.openai_cache_replay_lifecycle_feedback.v1")
         self.assertEqual(sent["payload"]["lifecycle_kind"], "openai_cache_replay")
         rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("raw prompt must not leak", rendered)
@@ -1283,8 +1283,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             reason: str,
         ) -> dict[str, object]:
             graduation = {
-                "schema": "agentflow.openai_cache_replay_shape_activation.v1",
-                "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                "schema": "tokenclaw.openai_cache_replay_shape_activation.v1",
+                "source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                 "source_reason": "replay-ready-exact-non-tool-shape",
                 "projected_hits": projected_hits,
                 "projected_savings_usd": projected_savings,
@@ -1312,7 +1312,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 "pattern_rule": rule,
                 "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": rule_id,
                     "candidate_id": candidate_id,
                     "policy_source": "managed-recommended",
@@ -1409,7 +1409,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(report["summary"]["skipped_cohort_count"], 1)
         self.assertAlmostEqual(report["summary"]["actual_saved_cost_usd"], 0.03)
         aggregate_measurement = report["summary"]["canary_hit_measurement"]
-        self.assertEqual(aggregate_measurement["schema"], "agentflow.openai_cache_replay_canary_hit_measurement.v1")
+        self.assertEqual(aggregate_measurement["schema"], "tokenclaw.openai_cache_replay_canary_hit_measurement.v1")
         self.assertEqual(report["summary"]["first_real_hit_status"], "observed-hit")
         self.assertTrue(report["summary"]["first_real_hit_observed"])
         self.assertEqual(report["summary"]["first_real_hit_candidate_count"], 1)
@@ -1429,7 +1429,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         by_id = {row["candidate_id"]: row for row in report["candidates"]}
         replay_ready = by_id["openai-cache-projected-cohort"]
         self.assertEqual(replay_ready["readiness"], "replay-ready")
-        self.assertEqual(replay_ready["replay_source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(replay_ready["replay_source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(replay_ready["projected_hits"], 3)
         self.assertAlmostEqual(replay_ready["projected_saved_usd"], 0.09)
         self.assertAlmostEqual(replay_ready["dry_run_projected_savings_usd"], 0.09)
@@ -1511,7 +1511,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 "pattern_rule": rule,
                 "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": rule_id,
                     "candidate_id": candidate_id,
                     "policy_source": "managed-recommended",
@@ -1642,7 +1642,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         )
 
         report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
-        self.assertEqual(report["schema"], "agentflow.openai_cache_replay_readiness.v1")
+        self.assertEqual(report["schema"], "tokenclaw.openai_cache_replay_readiness.v1")
         self.assertEqual(report["state"], "saving")
         self.assertEqual(report["summary"]["applied_count"], 2)
         self.assertEqual(report["summary"]["holdout_count"], 2)
@@ -1657,7 +1657,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertFalse(report["privacy"]["session_ids_included"])
 
         stats_result = asyncio.run(stats_openai_cache_replay_readiness(self.store, opportunity_limit=20, impact_limit=20))
-        self.assertEqual(stats_result["schema"], "agentflow.openai_cache_replay_readiness.v1")
+        self.assertEqual(stats_result["schema"], "tokenclaw.openai_cache_replay_readiness.v1")
         burndown = asyncio.run(
             stats_openai_tool_cache_invalidation_burndown(
                 self.store,
@@ -1666,7 +1666,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 row_limit=10,
             )
         )
-        self.assertEqual(burndown["schema"], "agentflow.openai_tool_cache_invalidation_burndown.v1")
+        self.assertEqual(burndown["schema"], "tokenclaw.openai_tool_cache_invalidation_burndown.v1")
         self.assertGreaterEqual(burndown["summary"]["missing_dependency_evidence_count"], 1)
         self.assertGreaterEqual(burndown["summary"]["safe_dependency_evidence_count"], 1)
         self.assertGreaterEqual(burndown["summary"]["stale_dependency_count"], 1)
@@ -1706,25 +1706,25 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             },
         )
         with TestClient(app) as client:
-            api_response = client.get("/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=20&impact_limit=20")
+            api_response = client.get("/tokenclaw/stats/openai-cache-replay-readiness?opportunity_limit=20&impact_limit=20")
             burndown_response = client.get(
-                "/agentflow/stats/openai-tool-cache-invalidation-burndown?opportunity_limit=20&impact_limit=20&row_limit=10"
+                "/tokenclaw/stats/openai-tool-cache-invalidation-burndown?opportunity_limit=20&impact_limit=20&row_limit=10"
             )
-            dashboard = client.get("/agentflow/dashboard")
+            dashboard = client.get("/tokenclaw/dashboard")
         self.assertEqual(api_response.status_code, 200)
         self.assertEqual(api_response.json()["state"], "saving")
         self.assertEqual(burndown_response.status_code, 200)
         self.assertEqual(
             burndown_response.json()["schema"],
-            "agentflow.openai_tool_cache_invalidation_burndown.v1",
+            "tokenclaw.openai_tool_cache_invalidation_burndown.v1",
         )
         self.assertGreaterEqual(burndown_response.json()["summary"]["missing_dependency_evidence_count"], 1)
         self.assertGreaterEqual(burndown_response.json()["summary"]["unsafe_dependency_count"], 1)
         self.assertGreaterEqual(burndown_response.json()["summary"]["unknown_dependency_count"], 1)
         self.assertEqual(burndown_response.json()["summary"]["cache_apply_action_count"], 0)
         self.assertEqual(dashboard.status_code, 200)
-        self.assertIn("/agentflow/stats/openai-cache-replay-readiness", dashboard.text)
-        self.assertIn("/agentflow/stats/openai-tool-cache-invalidation-burndown", dashboard.text)
+        self.assertIn("/tokenclaw/stats/openai-cache-replay-readiness", dashboard.text)
+        self.assertIn("/tokenclaw/stats/openai-tool-cache-invalidation-burndown", dashboard.text)
         self.assertIn("OpenAI cache replay readiness", dashboard.text)
         self.assertIn("openai-cache-replay-readiness-tbody", dashboard.text)
         self.assertIn("OpenAI tool-cache invalidation burndown", dashboard.text)
@@ -1739,7 +1739,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             stdout=output,
         )
         self.assertEqual(exit_code, 0)
-        self.assertEqual(json.loads(output.getvalue())["schema"], "agentflow.openai_cache_replay_readiness.v1")
+        self.assertEqual(json.loads(output.getvalue())["schema"], "tokenclaw.openai_cache_replay_readiness.v1")
 
         rendered_outputs = [
             json.dumps(report, sort_keys=True),
@@ -1769,7 +1769,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self._log_openai_call(request_fingerprint="raw-readiness-request-fingerprint")
         self._log_openai_call(request_fingerprint="raw-readiness-request-fingerprint")
 
-        with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(Path(self.tmpdir.name) / "missing.yaml")}):
+        with patch.dict(os.environ, {"TOKENCLAW_CACHE_CANARY_POLICY": str(Path(self.tmpdir.name) / "missing.yaml")}):
             report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
 
         self.assertEqual(report["state"], "blocked")
@@ -1813,7 +1813,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 "pattern_rule": rule,
                 "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": rule_id,
                     "candidate_id": candidate_id,
                     "policy_source": "managed-recommended",
@@ -1887,14 +1887,14 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             ),
         )
 
-        with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(Path(self.tmpdir.name) / "missing.yaml")}):
+        with patch.dict(os.environ, {"TOKENCLAW_CACHE_CANARY_POLICY": str(Path(self.tmpdir.name) / "missing.yaml")}):
             report = build_openai_cache_replay_blocker_outcomes_report(
                 self.store,
                 opportunity_limit=20,
                 impact_limit=20,
             )
 
-        self.assertEqual(report["schema"], "agentflow.openai_cache_replay_blocker_outcomes.v1")
+        self.assertEqual(report["schema"], "tokenclaw.openai_cache_replay_blocker_outcomes.v1")
         self.assertEqual(report["top_next_action"], "stage-local-cache-replay-canary")
         self.assertGreaterEqual(report["summary"]["replay_ready_count"], 2)
         self.assertGreaterEqual(report["summary"]["stale_dependency_count"], 1)
@@ -1947,7 +1947,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(
             json.loads(output.getvalue())["schema"],
-            "agentflow.openai_cache_replay_blocker_outcomes.v1",
+            "tokenclaw.openai_cache_replay_blocker_outcomes.v1",
         )
 
         rendered = json.dumps(report, sort_keys=True) + output.getvalue()
@@ -1968,7 +1968,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
     def test_openai_cache_replay_readiness_diagnoses_staged_policy_can_run(self) -> None:
         pattern_hash = "sha256:" + "d" * 64
         policy = {
-            "schema": "agentflow.openai_cache_replay_canary_policy.v1",
+            "schema": "tokenclaw.openai_cache_replay_canary_policy.v1",
             "policy_source": "managed-recommended",
             "pattern_rules": [
                 {
@@ -2009,7 +2009,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         from tokenclaw import cache as cache_module
 
         try:
-            with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(policy_path)}):
+            with patch.dict(os.environ, {"TOKENCLAW_CACHE_CANARY_POLICY": str(policy_path)}):
                 _reload_cache_module_for_test()
                 report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
         finally:
@@ -2064,7 +2064,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 "pattern_rule": rule,
                 "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": rule_id,
                     "candidate_id": candidate_id,
                     "policy_source": "managed-recommended",
@@ -2144,7 +2144,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.openai_cache_replay_apply.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_cache_replay_apply.v1")
         self.assertTrue(payload["wrote_policy_files"])
         self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
         self.assertFalse(payload["privacy"]["pattern_hashes_included"])
@@ -2155,7 +2155,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
 
         policy_path = config_dir / "cache_canary_policy.yaml"
         policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
-        self.assertEqual(policy["schema"], "agentflow.openai_cache_replay_canary_policy.v1")
+        self.assertEqual(policy["schema"], "tokenclaw.openai_cache_replay_canary_policy.v1")
         self.assertEqual(policy["pattern_rules"][0]["id"], rule_id)
         self.assertEqual(policy["pattern_rules"][0]["candidate_id"], candidate_id)
         self.assertEqual(policy["pattern_rules"][0]["conditions"]["pattern_hashes"], [pattern_hash])
@@ -2165,7 +2165,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         from tokenclaw import cache as cache_module
 
         try:
-            with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(policy_path)}):
+            with patch.dict(os.environ, {"TOKENCLAW_CACHE_CANARY_POLICY": str(policy_path)}):
                 reloaded = _reload_cache_module_for_test()
                 loaded = [rule for rule in reloaded.CACHE_PATTERN_RULES if rule.get("candidate_id") == candidate_id]
                 self.assertEqual(len(loaded), 1)
@@ -2194,7 +2194,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         canary_path.write_text(
             yaml.safe_dump(
                 {
-                    "schema": "agentflow.openai_cache_replay_canary_policy.v1",
+                    "schema": "tokenclaw.openai_cache_replay_canary_policy.v1",
                     "policy_source": "local-manual",
                     "pattern_rules": [
                         {
@@ -2202,7 +2202,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                             "enabled": True,
                             "policy_source": "local-manual",
                             "target_cache_policy": {
-                                "schema": "agentflow.request_shape_cache_replay_target_policy.v1",
+                                "schema": "tokenclaw.request_shape_cache_replay_target_policy.v1",
                                 "policy_section": "cache.pattern_rules",
                                 "target_local_policy": "cache_rules",
                                 "target_local_rule_file": "cache_rules.yaml",
@@ -2227,7 +2227,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                                 "ttl_seconds": 3600,
                             },
                             "rollout": {
-                                "schema": "agentflow.pattern_policy_rollout.v1",
+                                "schema": "tokenclaw.pattern_policy_rollout.v1",
                                 "recommendation_mode": "openai-cache-replay-request-shape-canary",
                                 "canary_enabled": True,
                                 "canary_fraction": 0.1,
@@ -2236,8 +2236,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                                 "canary_unit": "request_fingerprint",
                             },
                             "graduation": {
-                                "schema": "agentflow.request_shape_cache_replay_shape_activation.v1",
-                                "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                                "schema": "tokenclaw.request_shape_cache_replay_shape_activation.v1",
+                                "source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                                 "source_reason": "replay-ready-exact-non-tool-shape",
                                 **shape,
                                 "projected_hits": 35,
@@ -2293,8 +2293,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                                 "ttl_seconds": 3600,
                             },
                             "graduation": {
-                                "schema": "agentflow.request_shape_cache_replay_policy_graduation.v1",
-                                "source_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                                "schema": "tokenclaw.request_shape_cache_replay_policy_graduation.v1",
+                                "source_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
                             },
                         }
                     ],
@@ -2396,7 +2396,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         accepted = [
             row
             for row in plan["accepted_candidates"]
-            if row.get("source_schema") == "agentflow.request_shape_cache_replayability_dry_run.v1"
+            if row.get("source_schema") == "tokenclaw.request_shape_cache_replayability_dry_run.v1"
         ]
         self.assertEqual(len(accepted), 1)
         self.assertGreaterEqual(accepted[0]["projected_hits"], 1)
@@ -2430,7 +2430,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             self.assertEqual(row["matched_pattern_hash_count"], 0)
             self.assertFalse(row["matched_pattern_hashes_included"])
             self.assertEqual(row["projection"]["projected_hits"], accepted[0]["projected_hits"])
-            self.assertEqual(row["projection"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+            self.assertEqual(row["projection"]["source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
             self.assertFalse(row["projection"]["raw_request_bodies_included"])
             self.assertFalse(row["projection"]["cache_keys_included"])
 
@@ -2511,7 +2511,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         accepted = [
             row
             for row in plan["accepted_candidates"]
-            if row.get("source_schema") == "agentflow.openai_cache_replay_blocker_outcomes.v1"
+            if row.get("source_schema") == "tokenclaw.openai_cache_replay_blocker_outcomes.v1"
         ]
         self.assertEqual(len(accepted), 1)
         self.assertTrue(accepted[0]["allow_tool_calls"])
@@ -2529,7 +2529,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         skipped_reasons = {
             reason
             for row in plan["skipped_candidates"]
-            if row.get("source_schema") == "agentflow.openai_cache_replay_blocker_outcomes.v1"
+            if row.get("source_schema") == "tokenclaw.openai_cache_replay_blocker_outcomes.v1"
             for reason in row.get("reason_codes") or []
         }
         self.assertIn("stale-dependency", skipped_reasons)
@@ -2537,14 +2537,14 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertTrue(all(
             not row.get("emits_cache_apply_action")
             for row in plan["skipped_candidates"]
-            if row.get("source_schema") == "agentflow.openai_cache_replay_blocker_outcomes.v1"
+            if row.get("source_schema") == "tokenclaw.openai_cache_replay_blocker_outcomes.v1"
         ))
 
         policy = plan["policy"]
         tool_rules = [
             rule
             for rule in policy["pattern_rules"]
-            if (rule.get("graduation") or {}).get("source_schema") == "agentflow.openai_cache_replay_blocker_outcomes.v1"
+            if (rule.get("graduation") or {}).get("source_schema") == "tokenclaw.openai_cache_replay_blocker_outcomes.v1"
         ]
         self.assertEqual(len(tool_rules), 1)
         rule = tool_rules[0]
@@ -2565,7 +2565,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(rule["rollback_metadata"]["target_local_rule_file"], "cache_rules.yaml")
         self.assertEqual(rule["promotion"]["rollback_metadata"]["disable_patch"]["pattern_rules"][0]["id"], rule["id"])
 
-        self.assertEqual(plan["blocker_outcome_evidence"]["schema"], "agentflow.openai_cache_replay_blocker_outcomes.v1")
+        self.assertEqual(plan["blocker_outcome_evidence"]["schema"], "tokenclaw.openai_cache_replay_blocker_outcomes.v1")
         rendered = json.dumps(plan, sort_keys=True)
         for forbidden in (
             "raw prompt must not leak",
@@ -2600,13 +2600,13 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.openai_cache_replay_apply.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_cache_replay_apply.v1")
         self.assertTrue(payload["dry_run"])
         self.assertFalse(payload["wrote_policy_files"])
         cli_accepted = [
             row
             for row in payload["accepted_candidates"]
-            if row.get("source_schema") == "agentflow.openai_cache_replay_blocker_outcomes.v1"
+            if row.get("source_schema") == "tokenclaw.openai_cache_replay_blocker_outcomes.v1"
         ]
         self.assertEqual(len(cli_accepted), 1)
         self.assertTrue(cli_accepted[0]["allow_tool_calls"])
@@ -2671,7 +2671,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
 
         result = build_openai_cache_replay_dry_run(self.store, policy, limit=20)
 
-        self.assertEqual(result["schema"], "agentflow.openai_cache_replay_dry_run.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_cache_replay_dry_run.v1")
         self.assertEqual(result["summary"]["openai_rows_considered"], 3)
         self.assertEqual(result["summary"]["projected_applied_rows"], 2)
         self.assertEqual(result["summary"]["invalidation_required_rows"], 1)
@@ -2762,7 +2762,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["schema"], "agentflow.openai_cache_replay_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_cache_replay_dry_run.v1")
         self.assertEqual(payload["summary"]["cache_rows_before"], 1)
         self.assertEqual(payload["summary"]["cache_rows_after"], 1)
         self.assertFalse(payload["summary"]["cache_table_mutated"])

@@ -7,7 +7,7 @@ from typing import Any
 from tokenclaw.store import stable_json
 
 
-MANAGED_LOCAL_ACTIONS_SCHEMA = "agentflow.managed_local_actions.v1"
+MANAGED_LOCAL_ACTIONS_SCHEMA = "tokenclaw.managed_local_actions.v1"
 
 SUPPORTED_CRUNCH_PROFILES = {
     "default",
@@ -238,7 +238,7 @@ def _enhanced_crunch_hint(section: dict[str, Any], summary: dict[str, Any]) -> d
     )
     state = "configured" if provider_meta.get("configured") else "fallback-not-configured"
     return {
-        "schema": "agentflow.managed_enhanced_crunch_hint.v1",
+        "schema": "tokenclaw.managed_enhanced_crunch_hint.v1",
         "state": state,
         "recommended": True,
         "configured": bool(provider_meta.get("configured")),

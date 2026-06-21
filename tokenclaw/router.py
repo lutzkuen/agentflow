@@ -12,7 +12,7 @@ from typing import Any
 
 from tokenclaw.env import env, env_int
 from tokenclaw.policy_files import policy_file_snapshot, utc_now
-from tokenclaw.paths import agentflow_config_path, default_db_path, safe_expanduser
+from tokenclaw.paths import tokenclaw_config_path, default_db_path, safe_expanduser
 from tokenclaw.pricing import estimate_cost
 from tokenclaw.session_phase_memory import build_session_phase_memory_for_session
 from tokenclaw.store import stable_json
@@ -26,12 +26,12 @@ OPENAI_TINY_DEFAULT = env("TOKENCLAW_OPENAI_TINY_MODEL", "gpt-5-nano")
 
 ROUTING_ENABLED = env("TOKENCLAW_ROUTING", "1") != "0"
 OPENAI_ROUTING_ENABLED = env("TOKENCLAW_OPENAI_ROUTING", "0") == "1"
-ROUTING_RULES_PATH = env("TOKENCLAW_ROUTING_RULES", str(agentflow_config_path("routing_rules.yaml")))
+ROUTING_RULES_PATH = env("TOKENCLAW_ROUTING_RULES", str(tokenclaw_config_path("routing_rules.yaml")))
 STRIP_THINKING_HISTORY = env("TOKENCLAW_STRIP_THINKING_HISTORY", "0") == "1"
 
 
 def _env_flag_enabled(name: str) -> bool:
-    new_name = name.replace("AGENTFLOW_", "TOKENCLAW_", 1) if name.startswith("AGENTFLOW_") else name
+    new_name = name.replace("TOKENCLAW_", "TOKENCLAW_", 1) if name.startswith("TOKENCLAW_") else name
     return env(new_name, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -304,7 +304,7 @@ def _default_phase_canary_policy() -> dict[str, Any]:
         "max_text_chars": 30000,
         "canary_fraction": 0.0,
         "holdout_fraction": 0.0,
-        "salt": "agentflow-phase-routing-canary-v1",
+        "salt": "tokenclaw-phase-routing-canary-v1",
         "cohort_unit": "request_features",
         "safety_gates": {
             "block_thinking_history": True,
@@ -349,7 +349,7 @@ def _default_openai_canary_policy() -> dict[str, Any]:
         "max_input_tokens_est": 4000,
         "canary_fraction": 0.15,
         "holdout_fraction": 0.10,
-        "salt": "agentflow-openai-routing-canary-v1",
+        "salt": "tokenclaw-openai-routing-canary-v1",
         "cohort_unit": "request_features_sequence",
         "safety_stop": {
             "enabled": True,
@@ -572,7 +572,7 @@ def _load_routing_rules() -> tuple[list[dict], dict[str, Any], list[dict[str, An
             openai_canaries = _openai_canaries_from_yaml(data)
             return _rules_list(data), canary, openai_canaries, "local-manual", str(p)
 
-    local_path = agentflow_config_path("routing_rules.yaml")
+    local_path = tokenclaw_config_path("routing_rules.yaml")
     local = _load_routing_yaml(local_path)
     if local is not None:
         canary = _phase_canary_from_yaml(local, missing_enabled=False)
@@ -1566,7 +1566,7 @@ def _openai_canary_policy_preflight(
     selection_payload = _openai_canary_selection_payload(meta)
     selection_hash, selection_score = _cohort_score(
         selection_payload,
-        "agentflow-openai-routing-canary-candidate-selection-v1",
+        "tokenclaw-openai-routing-canary-candidate-selection-v1",
     )
     meta.update({
         "status": "eligible",
@@ -2110,13 +2110,13 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     stream = bool(body.get("stream"))
     category = categorize_request(body)
     input_tokens_est = _input_tokens_est(text_chars)
-    source_surface = str(body.get("source_surface") or body.get("_agentflow_source_surface") or "openai_responses")
-    endpoint = str(body.get("endpoint") or body.get("_agentflow_endpoint") or "responses")
-    app_family = str(body.get("app_family") or body.get("_agentflow_app_family") or "generic_openai")
-    workflow_phase = str(body.get("workflow_phase") or body.get("_agentflow_workflow_phase") or category)
+    source_surface = str(body.get("source_surface") or body.get("_tokenclaw_source_surface") or "openai_responses")
+    endpoint = str(body.get("endpoint") or body.get("_tokenclaw_endpoint") or "responses")
+    app_family = str(body.get("app_family") or body.get("_tokenclaw_app_family") or "generic_openai")
+    workflow_phase = str(body.get("workflow_phase") or body.get("_tokenclaw_workflow_phase") or category)
     workflow_phase_confidence = str(
         body.get("workflow_phase_confidence")
-        or body.get("_agentflow_workflow_phase_confidence")
+        or body.get("_tokenclaw_workflow_phase_confidence")
         or "medium"
     )
     openai_canary_enabled = any(bool(policy.get("enabled")) for policy in ROUTING_OPENAI_CANARIES if isinstance(policy, dict))

@@ -33,11 +33,11 @@ from tokenclaw.cli_commands.policy_workbench import (
     _write_policy_draft_apply_result,
 )
 
-PATTERN_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_PATTERN_ROLLOUT_ACTIONS_URL"
-OPTIMIZATION_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_OPTIMIZATION_ROLLOUT_ACTIONS_URL"
-SCAFFOLD_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_SCAFFOLD_ROLLOUT_ACTIONS_URL"
-PROMOTION_BLOCKER_RECOMMENDATIONS_URL_ENV = "AGENTFLOW_PROMOTION_BLOCKER_RECOMMENDATIONS_URL"
-POST_PROMOTION_PRIORITY_DELTAS_URL_ENV = "AGENTFLOW_POST_PROMOTION_PRIORITY_DELTAS_URL"
+PATTERN_ROLLOUT_ACTIONS_URL_ENV = "TOKENCLAW_PATTERN_ROLLOUT_ACTIONS_URL"
+OPTIMIZATION_ROLLOUT_ACTIONS_URL_ENV = "TOKENCLAW_OPTIMIZATION_ROLLOUT_ACTIONS_URL"
+SCAFFOLD_ROLLOUT_ACTIONS_URL_ENV = "TOKENCLAW_SCAFFOLD_ROLLOUT_ACTIONS_URL"
+PROMOTION_BLOCKER_RECOMMENDATIONS_URL_ENV = "TOKENCLAW_PROMOTION_BLOCKER_RECOMMENDATIONS_URL"
+POST_PROMOTION_PRIORITY_DELTAS_URL_ENV = "TOKENCLAW_POST_PROMOTION_PRIORITY_DELTAS_URL"
 
 
 def openai_optimization_draft_dry_run_cli(
@@ -54,12 +54,12 @@ def openai_optimization_draft_dry_run_cli(
     )
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
-        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+        default=os.getenv("TOKENCLAW_POLICY_DRAFT_DIR", str(Path.home() / ".tokenclaw" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.tokenclaw/policy_drafts.",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
         help="Local SQLite DB path for metadata-only OpenAI dry-run rows.",
     )
     parser.add_argument("--limit", type=int, default=1000, help="Recent local call metadata rows to inspect, default: 1000.")
@@ -151,17 +151,17 @@ def openai_optimization_draft_apply_cli(
     parser.add_argument("draft", help="Staged OpenAI optimization draft ID, draft directory, draft.json path, or policy_bundle.json path.")
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
-        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+        default=os.getenv("TOKENCLAW_POLICY_DRAFT_DIR", str(Path.home() / ".tokenclaw" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.tokenclaw/policy_drafts.",
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local rule files, default: ~/.agentflow.",
+        default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local rule files, default: ~/.tokenclaw.",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
         help="Local SQLite DB path for metadata-only dry-run projection and lifecycle feedback.",
     )
     parser.add_argument("--section", action="append", choices=["routing", "crunch", "cache"], help="Apply only one policy section. Repeat to apply multiple sections.")
@@ -217,7 +217,7 @@ async def _queue_codex_app_dry_run_lifecycle_events(store: Any, result: dict[str
     from tokenclaw.recommendations import queue_policy_event_feedback
 
     queued: dict[str, Any] = {
-        "schema": "agentflow.codex_app_canary_lifecycle_queue_meta.v1",
+        "schema": "tokenclaw.codex_app_canary_lifecycle_queue_meta.v1",
         "source_surface": "codex_app_canary_lifecycle",
         "event_phase": "dry_run",
         "results": {},
@@ -230,7 +230,7 @@ async def _queue_codex_app_dry_run_lifecycle_events(store: Any, result: dict[str
         rule_id = str(candidate.get("rule_id") or candidate.get("candidate_id") or "unknown-codex-app-rule")
         candidate_id = str(candidate.get("candidate_id") or rule_id)
         event = {
-            "schema": "agentflow.codex_app_canary_lifecycle_feedback.v1",
+            "schema": "tokenclaw.codex_app_canary_lifecycle_feedback.v1",
             "event_type": "codex_app_canary_lifecycle",
             "occurred_at": datetime.now(timezone.utc).isoformat(),
             "source_surface": "codex_turn",
@@ -317,8 +317,8 @@ def codex_app_policy_dry_run_cli(
         help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
     )
     parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
-    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
-    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--tenant", help="Optional x-tokenclaw-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-tokenclaw-account header for account metadata.")
     parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request when fetching.")
     parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request when fetching.")
     parser.add_argument("--limit", type=int, default=50, help="Maximum candidates to request when fetching.")
@@ -328,13 +328,13 @@ def codex_app_policy_dry_run_cli(
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
         help="HTTP timeout in seconds, default: 10.",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="SQLite metadata database path for recent Codex turn windows, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="SQLite metadata database path for recent Codex turn windows, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
     )
     parser.add_argument("--recent-limit", type=int, default=200, help="Maximum recent Codex turn/start rows to project, default: 200.")
     parser.add_argument("--fixture", help="Optional JSON fixture rows/features to include in the projection.")
@@ -357,7 +357,7 @@ def codex_app_policy_dry_run_cli(
         managed_server_calls_made = fetch.get("status") not in {"skipped", None} if isinstance(fetch, dict) else False
         if fetch_exit is not None:
             result = {
-                "schema": "agentflow.codex_app_policy_dry_run.v1",
+                "schema": "tokenclaw.codex_app_policy_dry_run.v1",
                 "ok": False,
                 "dry_run": True,
                 "applied": False,
@@ -375,7 +375,7 @@ def codex_app_policy_dry_run_cli(
         fetch = {"status": "skipped", "reason": "local-input"}
         if read_error:
             result = {
-                "schema": "agentflow.codex_app_policy_dry_run.v1",
+                "schema": "tokenclaw.codex_app_policy_dry_run.v1",
                 "ok": False,
                 "dry_run": True,
                 "applied": False,
@@ -398,7 +398,7 @@ def codex_app_policy_dry_run_cli(
     validation = validate_policy_bundle(bundle)
     if not validation["ok"]:
         result = {
-            "schema": "agentflow.codex_app_policy_dry_run.v1",
+            "schema": "tokenclaw.codex_app_policy_dry_run.v1",
             "ok": False,
             "dry_run": True,
             "applied": False,
@@ -548,8 +548,8 @@ def managed_rollout_actions_review_cli(
         help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
     )
     parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
-    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
-    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--tenant", help="Optional x-tokenclaw-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-tokenclaw-account header for account metadata.")
     parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request when fetching.")
     parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request when fetching.")
     parser.add_argument("--limit", type=int, default=50, help="Maximum actions to request when fetching.")
@@ -559,18 +559,18 @@ def managed_rollout_actions_review_cli(
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
         help="HTTP timeout in seconds, default: 10.",
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local rule files, default: ~/.agentflow",
+        default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local rule files, default: ~/.tokenclaw",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--section",
@@ -592,7 +592,7 @@ def managed_rollout_actions_review_cli(
             from tokenclaw.policy_events import log_policy_event
 
             result = {
-                "schema": "agentflow.pattern_rollout_actions_fetch_review.v1",
+                "schema": "tokenclaw.pattern_rollout_actions_fetch_review.v1",
                 "ok": False,
                 "fetch": fetch,
                 "review": None,
@@ -613,7 +613,7 @@ def managed_rollout_actions_review_cli(
 
     from tokenclaw.policy_events import log_policy_event
 
-    if isinstance(bundle, dict) and bundle.get("schema") == "agentflow.openai_cache_replay_rollout_actions.v1":
+    if isinstance(bundle, dict) and bundle.get("schema") == "tokenclaw.openai_cache_replay_rollout_actions.v1":
         from tokenclaw.openai_cache_replay_rollout_actions import review_openai_cache_replay_rollout_actions
 
         review = review_openai_cache_replay_rollout_actions(bundle, config_dir=args.config_dir)
@@ -676,8 +676,8 @@ def optimization_rollout_actions_review_cli(
         help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
     )
     parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
-    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
-    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--tenant", help="Optional x-tokenclaw-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-tokenclaw-account header for account metadata.")
     parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request when fetching.")
     parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request when fetching.")
     parser.add_argument("--limit", type=int, default=50, help="Maximum actions to request when fetching.")
@@ -687,7 +687,7 @@ def optimization_rollout_actions_review_cli(
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
         help="HTTP timeout in seconds, default: 10.",
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print review JSON instead of emitting one compact line.")
@@ -704,7 +704,7 @@ def optimization_rollout_actions_review_cli(
             from tokenclaw.policy_events import log_policy_event
 
             result = {
-                "schema": "agentflow.optimization_rollout_actions_fetch_review.v1",
+                "schema": "tokenclaw.optimization_rollout_actions_fetch_review.v1",
                 "ok": False,
                 "fetch": fetch,
                 "review": None,
@@ -777,8 +777,8 @@ def optimization_rollout_actions_apply_cli(
         help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
     )
     parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
-    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
-    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--tenant", help="Optional x-tokenclaw-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-tokenclaw-account header for account metadata.")
     parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request when fetching.")
     parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request when fetching.")
     parser.add_argument("--limit", type=int, default=50, help="Maximum actions to request when fetching.")
@@ -788,18 +788,18 @@ def optimization_rollout_actions_apply_cli(
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
         help="HTTP timeout in seconds, default: 10.",
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory containing local AgentFlow YAML policy files, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory containing local AgentFlow YAML policy files, default: TOKENCLAW_CONFIG_DIR or ~/.tokenclaw",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--section",
@@ -823,7 +823,7 @@ def optimization_rollout_actions_apply_cli(
         bundle, fetch, fetch_exit = _read_rollout_actions_from_url(args)
         if fetch_exit is not None:
             result = {
-                "schema": "agentflow.optimization_rollout_actions_apply.v1",
+                "schema": "tokenclaw.optimization_rollout_actions_apply.v1",
                 "ok": False,
                 "dry_run": bool(args.dry_run),
                 "fetch": fetch,
@@ -850,8 +850,8 @@ def optimization_rollout_actions_apply_cli(
         dry_run=args.dry_run,
         sections=args.section,
     )
-    result["schema"] = "agentflow.optimization_rollout_actions_apply.v1"
-    result["source_command"] = "agentflow-optimization-rollout-actions-apply"
+    result["schema"] = "tokenclaw.optimization_rollout_actions_apply.v1"
+    result["source_command"] = "tokenclaw-optimization-rollout-actions-apply"
     if fetch:
         result["fetch"] = fetch
     _attach_optimization_promotion_lifecycle_feedback(
@@ -911,8 +911,8 @@ def scaffold_rollout_actions_review_cli(
         help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
     )
     parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
-    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
-    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--tenant", help="Optional x-tokenclaw-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-tokenclaw-account header for account metadata.")
     parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request when fetching.")
     parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request when fetching.")
     parser.add_argument("--limit", type=int, default=50, help="Maximum actions to request when fetching.")
@@ -922,7 +922,7 @@ def scaffold_rollout_actions_review_cli(
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
         help="HTTP timeout in seconds, default: 10.",
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print review JSON instead of emitting one compact line.")
@@ -939,7 +939,7 @@ def scaffold_rollout_actions_review_cli(
             from tokenclaw.policy_events import log_policy_event
 
             result = {
-                "schema": "agentflow.scaffold_rollout_actions_fetch_review.v1",
+                "schema": "tokenclaw.scaffold_rollout_actions_fetch_review.v1",
                 "ok": False,
                 "fetch": fetch,
                 "review": None,
@@ -1014,8 +1014,8 @@ def scaffold_rollout_actions_apply_cli(
         help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
     )
     parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
-    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
-    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--tenant", help="Optional x-tokenclaw-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-tokenclaw-account header for account metadata.")
     parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request when fetching.")
     parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request when fetching.")
     parser.add_argument("--limit", type=int, default=50, help="Maximum actions to request when fetching.")
@@ -1025,13 +1025,13 @@ def scaffold_rollout_actions_apply_cli(
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
         help="HTTP timeout in seconds, default: 10.",
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local AgentFlow policy overlays, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR") or os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local AgentFlow policy overlays, default: TOKENCLAW_CONFIG_DIR, TOKENCLAW_POLICY_CONFIG_DIR, or ~/.tokenclaw",
     )
     parser.add_argument("--dry-run", action="store_true", help="Preview the scaffold overlay without writing YAML.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print apply JSON instead of emitting one compact line.")
@@ -1048,7 +1048,7 @@ def scaffold_rollout_actions_apply_cli(
         bundle, fetch, fetch_exit = _read_rollout_actions_from_url(args)
         if fetch_exit is not None:
             result = {
-                "schema": "agentflow.scaffold_rollout_actions_apply.v1",
+                "schema": "tokenclaw.scaffold_rollout_actions_apply.v1",
                 "ok": False,
                 "dry_run": bool(args.dry_run),
                 "fetch": fetch,
@@ -1114,13 +1114,13 @@ def managed_rollout_actions_apply_cli(
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local rule files, default: ~/.agentflow",
+        default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local rule files, default: ~/.tokenclaw",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--section",
@@ -1138,7 +1138,7 @@ def managed_rollout_actions_apply_cli(
     bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
     if read_error:
         result = {
-            "schema": "agentflow.pattern_rollout_actions_apply.v1",
+            "schema": "tokenclaw.pattern_rollout_actions_apply.v1",
             "ok": False,
             "dry_run": bool(args.dry_run),
             "config_dir": args.config_dir,
@@ -1148,7 +1148,7 @@ def managed_rollout_actions_apply_cli(
             "actions": [],
         }
     else:
-        if isinstance(bundle, dict) and bundle.get("schema") == "agentflow.openai_cache_replay_rollout_actions.v1":
+        if isinstance(bundle, dict) and bundle.get("schema") == "tokenclaw.openai_cache_replay_rollout_actions.v1":
             from tokenclaw.openai_cache_replay_rollout_actions import apply_openai_cache_replay_rollout_actions
 
             result = apply_openai_cache_replay_rollout_actions(
@@ -1213,13 +1213,13 @@ def managed_rollout_actions_dry_run_cli(
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local rule files, default: ~/.agentflow",
+        default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local rule files, default: ~/.tokenclaw",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="Local AgentFlow SQLite DB path, default: ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="Local AgentFlow SQLite DB path, default: ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Recent provider calls and Codex turns to inspect, default: 500.")
     parser.add_argument(
@@ -1237,7 +1237,7 @@ def managed_rollout_actions_dry_run_cli(
     bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
     if read_error:
         result = {
-            "schema": "agentflow.pattern_rollout_actions_dry_run.v1",
+            "schema": "tokenclaw.pattern_rollout_actions_dry_run.v1",
             "ok": False,
             "dry_run": True,
             "read_only": True,
@@ -1248,7 +1248,7 @@ def managed_rollout_actions_dry_run_cli(
             "actions": [],
         }
     else:
-        if isinstance(bundle, dict) and bundle.get("schema") == "agentflow.openai_cache_replay_rollout_actions.v1":
+        if isinstance(bundle, dict) and bundle.get("schema") == "tokenclaw.openai_cache_replay_rollout_actions.v1":
             from tokenclaw.openai_cache_replay_rollout_actions import dry_run_openai_cache_replay_rollout_actions
 
             result = dry_run_openai_cache_replay_rollout_actions(bundle, config_dir=args.config_dir)
@@ -1307,8 +1307,8 @@ def old_context_summary_dry_run_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="Local AgentFlow SQLite DB path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+        default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="Local AgentFlow SQLite DB path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
     )
     parser.add_argument("--limit", type=int, default=500, help="Recent provider calls to inspect, default: 500.")
     parser.add_argument(
@@ -1396,8 +1396,8 @@ def old_context_summary_impact_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="Local AgentFlow SQLite DB path, default: ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="Local AgentFlow SQLite DB path, default: ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Recent provider calls to inspect, default: 500.")
     parser.add_argument(
@@ -1496,8 +1496,8 @@ def old_context_summary_quality_gate_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="Local AgentFlow SQLite DB path, default: ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="Local AgentFlow SQLite DB path, default: ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Recent provider calls to inspect, default: 500.")
     parser.add_argument(
@@ -1668,7 +1668,7 @@ def old_context_summary_rollout_actions_review_cli(
 ) -> int:
     parser = argparse.ArgumentParser(description="Review managed old-context summary rollout actions against local crunch rules")
     parser.add_argument("path", nargs="?", default="-", help="Old-context summary rollout action bundle JSON path, or '-' for stdin.")
-    parser.add_argument("--config-dir", default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")))
+    parser.add_argument("--config-dir", default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")))
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args(argv)
     stdin = stdin if stdin is not None else sys.stdin
@@ -1677,7 +1677,7 @@ def old_context_summary_rollout_actions_review_cli(
     bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
     if read_error:
         result = {
-            "schema": "agentflow.old_context_summary_rollout_actions_review.v1",
+            "schema": "tokenclaw.old_context_summary_rollout_actions_review.v1",
             "ok": False,
             "config_dir": args.config_dir,
             "validation": read_error,
@@ -1707,7 +1707,7 @@ def old_context_summary_rollout_actions_apply_cli(
 ) -> int:
     parser = argparse.ArgumentParser(description="Apply managed old-context summary rollout actions to local crunch rules")
     parser.add_argument("path", nargs="?", default="-", help="Old-context summary rollout action bundle JSON path, or '-' for stdin.")
-    parser.add_argument("--config-dir", default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")))
+    parser.add_argument("--config-dir", default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args(argv)
@@ -1716,7 +1716,7 @@ def old_context_summary_rollout_actions_apply_cli(
     bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
     if read_error:
         result = {
-            "schema": "agentflow.old_context_summary_rollout_actions_apply.v1",
+            "schema": "tokenclaw.old_context_summary_rollout_actions_apply.v1",
             "ok": False,
             "dry_run": bool(args.dry_run),
             "config_dir": args.config_dir,
@@ -1748,8 +1748,8 @@ def old_context_summary_rollout_actions_dry_run_cli(
 ) -> int:
     parser = argparse.ArgumentParser(description="Dry-run managed old-context summary rollout actions against recent local metadata")
     parser.add_argument("path", nargs="?", default="-", help="Old-context summary rollout action bundle JSON path, or '-' for stdin.")
-    parser.add_argument("--config-dir", default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")))
-    parser.add_argument("--db", default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")))
+    parser.add_argument("--config-dir", default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")))
+    parser.add_argument("--db", default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")))
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args(argv)
@@ -1758,7 +1758,7 @@ def old_context_summary_rollout_actions_dry_run_cli(
     bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
     if read_error:
         result = {
-            "schema": "agentflow.old_context_summary_rollout_actions_dry_run.v1",
+            "schema": "tokenclaw.old_context_summary_rollout_actions_dry_run.v1",
             "ok": False,
             "dry_run": True,
             "read_only": True,
@@ -1801,7 +1801,7 @@ def old_context_summary_rollout_actions_impact_cli(
 ) -> int:
     parser = argparse.ArgumentParser(description="Measure post-apply old-context summary rollout-action impact against a dry-run projection")
     parser.add_argument("path", nargs="?", default="-", help="Old-context summary rollout action dry-run JSON path, or '-' for stdin.")
-    parser.add_argument("--db", default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")))
+    parser.add_argument("--db", default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")))
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--since")
     parser.add_argument("--pretty", action="store_true")
@@ -1811,7 +1811,7 @@ def old_context_summary_rollout_actions_impact_cli(
     report, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
     if read_error:
         result = {
-            "schema": "agentflow.old_context_summary_rollout_actions_impact.v1",
+            "schema": "tokenclaw.old_context_summary_rollout_actions_impact.v1",
             "ok": False,
             "read_only": True,
             "validation": read_error,
@@ -1852,8 +1852,8 @@ def managed_rollout_actions_impact_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="Local AgentFlow SQLite DB path, default: ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="Local AgentFlow SQLite DB path, default: ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Recent provider calls and Codex turns to inspect, default: 500.")
     parser.add_argument(
@@ -1869,7 +1869,7 @@ def managed_rollout_actions_impact_cli(
     dry_run_report, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
     if read_error:
         result = {
-            "schema": "agentflow.pattern_rollout_actions_impact.v1",
+            "schema": "tokenclaw.pattern_rollout_actions_impact.v1",
             "ok": False,
             "read_only": True,
             "validation": read_error,
@@ -1932,7 +1932,7 @@ def managed_rollout_actions_impact_cli(
 
 
 def _phase_routing_lifecycle_payload(command: str, result: dict[str, Any]) -> dict[str, Any] | None:
-    if command != "dry-run" or not isinstance(result, dict) or result.get("schema") != "agentflow.phase_routing_dry_run.v1":
+    if command != "dry-run" or not isinstance(result, dict) or result.get("schema") != "tokenclaw.phase_routing_dry_run.v1":
         return None
     from tokenclaw import __version__
 
@@ -1957,7 +1957,7 @@ def _phase_routing_lifecycle_payload(command: str, result: dict[str, Any]) -> di
             reason = str(item.get("reason") or "unknown")
             excluded[reason] = excluded.get(reason, 0) + int(item.get("count") or 0)
     metadata = {
-        "schema": "agentflow.phase_routing_lifecycle_metadata.v1",
+        "schema": "tokenclaw.phase_routing_lifecycle_metadata.v1",
         "lifecycle_kind": "phase_routing",
         "command": "phase-routing-dry-run",
         "local_result_status": "ok",
@@ -2056,8 +2056,8 @@ def codex_diagnose_cli(argv: Sequence[str] | None = None, *, stdout: Any = None)
     parser = argparse.ArgumentParser(description="Report Codex turn routing, crunching, and cache effectiveness from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -2092,8 +2092,8 @@ def codex_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = 
     parser = argparse.ArgumentParser(description="Report managed Codex app canary impact and lifecycle evidence by rule")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3.",
     )
     parser.add_argument(
         "--limit",
@@ -2134,8 +2134,8 @@ def openai_routing_report_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     parser = argparse.ArgumentParser(description="Measure OpenAI local routing opportunity and blockers from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -2192,8 +2192,8 @@ def routing_coverage_report_cli(argv: Sequence[str] | None = None, *, stdout: An
     parser = argparse.ArgumentParser(description="Explain AgentFlow local routing coverage by provider and client surface")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -2243,15 +2243,15 @@ def openai_routing_canary_stage_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh report, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=1000, help="Recent OpenAI provider calls to inspect when building a fresh report, default: 1000.")
     parser.add_argument("--draft-id", help="Optional local draft ID. When multiple candidates are staged, a numeric suffix is added.")
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
-        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+        default=os.getenv("TOKENCLAW_POLICY_DRAFT_DIR", str(Path.home() / ".tokenclaw" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.tokenclaw/policy_drafts.",
     )
     parser.add_argument("--canary-fraction", type=float, default=0.15, help="Proposed deterministic canary fraction, default: 0.15.")
     parser.add_argument("--holdout-fraction", type=float, default=0.10, help="Proposed deterministic holdout fraction, default: 0.10.")
@@ -2269,7 +2269,7 @@ def openai_routing_canary_stage_cli(
             stdout,
             {
                 "ok": False,
-                "schema": "agentflow.openai_routing_canary_stage_error.v1",
+                "schema": "tokenclaw.openai_routing_canary_stage_error.v1",
                 "error": {
                     "type": "conflicting_inputs",
                     "message": "routing_report and --promotion-blocker-review are mutually exclusive",
@@ -2285,7 +2285,7 @@ def openai_routing_canary_stage_cli(
         from tokenclaw.promotion_blocker_review import build_promotion_blocker_recommendation_review
 
         report = _read_json_input(str(args.promotion_blocker_review), stdin=stdin)
-        if report.get("schema") != "agentflow.promotion_blocker_recommendation_review.v1":
+        if report.get("schema") != "tokenclaw.promotion_blocker_recommendation_review.v1":
             report = build_promotion_blocker_recommendation_review(report, limit=int(args.limit or 25))
     elif args.routing_report:
         report = _read_json_input(str(args.routing_report), stdin=stdin)
@@ -2429,8 +2429,8 @@ def openai_routing_narrow_canary_review_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh report, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=1000, help="Recent OpenAI provider calls to inspect when building a fresh report, default: 1000.")
     parser.add_argument("--canary-fraction", type=float, default=0.05, help="Proposed review-only canary fraction, default: 0.05.")
@@ -2500,8 +2500,8 @@ def openai_old_context_summary_report_cli(argv: Sequence[str] | None = None, *, 
     parser = argparse.ArgumentParser(description="Measure OpenAI old-context summary opportunity and blockers from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -2537,8 +2537,8 @@ def openai_cache_replay_report_cli(argv: Sequence[str] | None = None, *, stdout:
     parser = argparse.ArgumentParser(description="Measure OpenAI cache replay opportunity and blockers from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -2574,8 +2574,8 @@ def openai_cache_replay_blocker_outcomes_cli(argv: Sequence[str] | None = None, 
     parser = argparse.ArgumentParser(description="Export aggregate OpenAI cache replay blocker outcomes after local dependency checks")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--opportunity-limit",
@@ -2616,8 +2616,8 @@ def crunch_blocker_outcomes_cli(argv: Sequence[str] | None = None, *, stdout: An
     parser = argparse.ArgumentParser(description="Export aggregate crunch lifecycle outcomes from local opportunity and promotion blocker data")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--rollup-limit",
@@ -2651,8 +2651,8 @@ def activation_safety_stop_burndown_cli(argv: Sequence[str] | None = None, *, st
     parser = argparse.ArgumentParser(description="Export aggregate activation safety-stop burn-down groups from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--plan-json",
@@ -2700,8 +2700,8 @@ def anthropic_routing_safety_stop_unblock_drill_cli(argv: Sequence[str] | None =
     parser = argparse.ArgumentParser(description="Emit a no-traffic Anthropic routing safety-stop unblock drill")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--plan-json",
@@ -2754,8 +2754,8 @@ def optimization_action_ledger_cli(argv: Sequence[str] | None = None, *, stdout:
     parser = argparse.ArgumentParser(description="Summarize cross-family optimization eligibility from local call metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -2802,8 +2802,8 @@ def optimization_coordinator_dry_run_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -2831,7 +2831,7 @@ def optimization_coordinator_dry_run_cli(
         rollout_actions, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
         if read_error:
             result = {
-                "schema": "agentflow.optimization_coordinator_dry_run.v1",
+                "schema": "tokenclaw.optimization_coordinator_dry_run.v1",
                 "ok": False,
                 "dry_run": True,
                 "read_only": True,
@@ -2904,8 +2904,8 @@ def repeated_scaffold_opportunity_cli(argv: Sequence[str] | None = None, *, stdo
     parser = argparse.ArgumentParser(description="Measure repeated provider-message scaffolding crunch opportunity")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -2951,8 +2951,8 @@ def instruction_dedup_opportunity_cli(argv: Sequence[str] | None = None, *, stdo
     parser = argparse.ArgumentParser(description="Measure instruction-section deduplication opportunity")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -2998,8 +2998,8 @@ def instruction_dedup_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: 
     parser = argparse.ArgumentParser(description="Dry-run instruction-section deduplication plans")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3051,8 +3051,8 @@ def instruction_dedup_impact_cli(argv: Sequence[str] | None = None, *, stdout: A
     parser = argparse.ArgumentParser(description="Report instruction-section deduplication canary impact and lifecycle gates")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Recent provider calls to inspect, default: 500, max: 10000")
     parser.add_argument("--since", help="Only inspect calls at or after this ISO timestamp.")
@@ -3117,8 +3117,8 @@ def terminal_output_compaction_opportunity_cli(argv: Sequence[str] | None = None
     parser = argparse.ArgumentParser(description="Measure terminal-output compaction opportunity for plateaued tool-result sessions")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3171,8 +3171,8 @@ def codex_terminal_transcript_opportunity_cli(argv: Sequence[str] | None = None,
     parser = argparse.ArgumentParser(description="Measure Codex terminal-transcript compaction opportunity from local event windows")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3232,8 +3232,8 @@ def anthropic_thinking_compaction_opportunity_cli(argv: Sequence[str] | None = N
     parser = argparse.ArgumentParser(description="Measure Anthropic thinking-session compaction opportunity from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3300,8 +3300,8 @@ def anthropic_thinking_compaction_impact_cli(argv: Sequence[str] | None = None, 
     parser = argparse.ArgumentParser(description="Measure Anthropic thinking-history compaction canary impact from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3342,8 +3342,8 @@ def anthropic_thinking_compaction_dry_run_cli(argv: Sequence[str] | None = None,
     parser = argparse.ArgumentParser(description="Dry-run Anthropic thinking-history compaction plans from local request metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3424,8 +3424,8 @@ def codex_terminal_transcript_dry_run_cli(argv: Sequence[str] | None = None, *, 
     parser = argparse.ArgumentParser(description="Dry-run Codex terminal-transcript compaction plans from local event windows")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3464,8 +3464,8 @@ def codex_terminal_transcript_impact_cli(argv: Sequence[str] | None = None, *, s
     parser = argparse.ArgumentParser(description="Report Codex terminal-transcript compaction canary impact and lifecycle gates")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3524,8 +3524,8 @@ def terminal_output_compaction_dry_run_cli(argv: Sequence[str] | None = None, *,
     parser = argparse.ArgumentParser(description="Dry-run terminal-output compaction plans for Anthropic tool-result history")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3593,8 +3593,8 @@ def terminal_output_compaction_impact_cli(argv: Sequence[str] | None = None, *, 
     parser = argparse.ArgumentParser(description="Report terminal-output compaction canary impact and rollback gates")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3655,8 +3655,8 @@ def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: A
     parser = argparse.ArgumentParser(description="Report repeated-scaffold crunch canary impact and rollback gates")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -3745,8 +3745,8 @@ def repeated_scaffold_activation_cli(argv: Sequence[str] | None = None, *, stdou
     parser = argparse.ArgumentParser(description="Report Anthropic repeated-scaffold policy-decision activation coverage")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -4002,8 +4002,8 @@ def openai_cache_replay_impact_cli(argv: Sequence[str] | None = None, *, stdout:
     parser = argparse.ArgumentParser(description="Report OpenAI cache replay canary impact and safety gates from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Maximum recent OpenAI calls to scan, default: 500, max: 10000.")
     parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp.")
@@ -4057,8 +4057,8 @@ def openai_cache_replay_readiness_cli(argv: Sequence[str] | None = None, *, stdo
     parser = argparse.ArgumentParser(description="Show OpenAI cache replay readiness from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--opportunity-limit",
@@ -4099,8 +4099,8 @@ def local_promotion_candidates_cli(argv: Sequence[str] | None = None, *, stdout:
     parser = argparse.ArgumentParser(description="Rank local promotion candidates from measured cache, crunch, and routing canaries")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -4149,8 +4149,8 @@ def crunch_promotion_draft_dry_run_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh report, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -4225,8 +4225,8 @@ def cache_promotion_draft_dry_run_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh report, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -4315,8 +4315,8 @@ def routing_promotion_draft_dry_run_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh report, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -4381,13 +4381,13 @@ def openai_cache_replay_apply_cli(argv: Sequence[str] | None = None, *, stdout: 
     parser = argparse.ArgumentParser(description="Graduate ready OpenAI cache replay candidates into a local cache canary overlay")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local AgentFlow policy overlays, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR") or os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local AgentFlow policy overlays, default: TOKENCLAW_CONFIG_DIR, TOKENCLAW_POLICY_CONFIG_DIR, or ~/.tokenclaw",
     )
     parser.add_argument(
         "--opportunity-limit",
@@ -4460,7 +4460,7 @@ def openai_cache_replay_apply_cli(argv: Sequence[str] | None = None, *, stdout: 
 
 def _openai_cache_replay_dry_run_read_error_result(read_error: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "agentflow.openai_cache_replay_dry_run.v1",
+        "schema": "tokenclaw.openai_cache_replay_dry_run.v1",
         "ok": False,
         "summary": {
             "openai_rows_considered": 0,
@@ -4500,8 +4500,8 @@ def openai_cache_replay_dry_run_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -4547,8 +4547,8 @@ def openai_old_context_summary_dry_run_cli(argv: Sequence[str] | None = None, *,
     parser = argparse.ArgumentParser(description="Dry-run OpenAI old-context summary plans with protocol preservation checks")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -4584,8 +4584,8 @@ def openai_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any =
     parser = argparse.ArgumentParser(description="Report OpenAI local routing canary impact and promotion verdicts from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Maximum recent OpenAI calls to scan, default: 500, max: 10000.")
     parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp.")
@@ -4633,7 +4633,7 @@ def openai_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any =
 
 
 def _extract_anthropic_routing_report(payload: dict[str, Any]) -> dict[str, Any]:
-    if payload.get("schema") == "agentflow.pass_through_routing_activation_candidates.v1":
+    if payload.get("schema") == "tokenclaw.pass_through_routing_activation_candidates.v1":
         return payload
     evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
     report = evidence.get("pass_through_routing_report")
@@ -4680,7 +4680,7 @@ def anthropic_routing_canary_stage_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.anthropic_routing_canary_stage_error.v1",
+                "schema": "tokenclaw.anthropic_routing_canary_stage_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,
@@ -4710,8 +4710,8 @@ def claude_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any =
     parser = argparse.ArgumentParser(description="Report Claude local routing canary impact and promotion verdicts from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Maximum recent Claude calls to scan, default: 500, max: 10000.")
     parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp.")
@@ -4764,8 +4764,8 @@ def anthropic_routing_lifecycle_report_cli(argv: Sequence[str] | None = None, *,
     parser = argparse.ArgumentParser(description="Report Anthropic routing canary lifecycle evidence from local phase_canary metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Maximum recent Anthropic calls to scan, default: 500, max: 10000.")
     parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp.")
@@ -4809,8 +4809,8 @@ def claude_canary_actions_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path when building a fresh impact report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh impact report, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Maximum recent Claude calls to scan when building a fresh report, default: 500.")
     parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp when building a fresh report.")
@@ -4850,7 +4850,7 @@ def claude_canary_actions_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.claude_canary_rollout_actions_error.v1",
+                "schema": "tokenclaw.claude_canary_rollout_actions_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,
@@ -4890,8 +4890,8 @@ def claude_canary_actions_apply_cli(
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory containing local AgentFlow YAML policy files, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory containing local AgentFlow YAML policy files, default: TOKENCLAW_CONFIG_DIR or ~/.tokenclaw",
     )
     parser.add_argument("--dry-run", action="store_true", default=True, help="Preview changes without writing local YAML files.")
     parser.add_argument("--write", dest="dry_run", action="store_false", help="Write reviewed Claude canary edits to the local routing YAML file.")
@@ -4909,7 +4909,7 @@ def claude_canary_actions_apply_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.claude_canary_rollout_actions_apply_error.v1",
+                "schema": "tokenclaw.claude_canary_rollout_actions_apply_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,
@@ -4976,13 +4976,13 @@ def routing_canary_promote_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path when building a fresh impact report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh impact report, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory containing local AgentFlow YAML policy files, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory containing local AgentFlow YAML policy files, default: TOKENCLAW_CONFIG_DIR or ~/.tokenclaw",
     )
     parser.add_argument("--limit", type=int, default=500, help="Maximum recent Claude calls to scan when building a fresh report, default: 500.")
     parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp when building a fresh report.")
@@ -5026,7 +5026,7 @@ def routing_canary_promote_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.routing_canary_promotion_error.v1",
+                "schema": "tokenclaw.routing_canary_promotion_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,
@@ -5101,8 +5101,8 @@ def routing_experiment_report_cli(argv: Sequence[str] | None = None, *, stdout: 
     parser = argparse.ArgumentParser(description="Report local budgeted routing A/B experiment results from metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=20, help="Maximum candidate rows to include, default: 20.")
     parser.add_argument("--since", help="Only include post-fix shadow yield rows at or after this ISO timestamp.")
@@ -5150,8 +5150,8 @@ def routing_promotion_draft_stage_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh report, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=20, help="Maximum candidate rows when building a fresh report, default: 20.")
     parser.add_argument(
@@ -5160,8 +5160,8 @@ def routing_promotion_draft_stage_cli(
     )
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
-        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+        default=os.getenv("TOKENCLAW_POLICY_DRAFT_DIR", str(Path.home() / ".tokenclaw" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.tokenclaw/policy_drafts.",
     )
     parser.add_argument(
         "--initial-canary-fraction",
@@ -5233,8 +5233,8 @@ def cache_replayability_report_cli(argv: Sequence[str] | None = None, *, stdout:
     parser = argparse.ArgumentParser(description="Measure replay-safe cache opportunity and blockers from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -5269,8 +5269,8 @@ def request_shape_rollups_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     parser = argparse.ArgumentParser(description="Build and persist privacy-safe request-shape rollups from local call metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -5339,8 +5339,8 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
     parser = argparse.ArgumentParser(description="Stage a read-only repeated-context crunch canary action from request-shape metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -5391,7 +5391,7 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
     )
     parser.add_argument(
         "--rules-path",
-        help="Crunch rules YAML file used for duplicate suppression and updated when --apply is used. Defaults to AGENTFLOW_CRUNCH_RULES, config/crunch_rules.yaml, ~/.agentflow/crunch_rules.yaml, then bundled defaults.",
+        help="Crunch rules YAML file used for duplicate suppression and updated when --apply is used. Defaults to TOKENCLAW_CRUNCH_RULES, config/crunch_rules.yaml, ~/.tokenclaw/crunch_rules.yaml, then bundled defaults.",
     )
     parser.add_argument(
         "--pretty",
@@ -5416,7 +5416,7 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
     }
     cohort_filter = {key: value for key, value in cohort_filter.items() if value is not None}
 
-    from tokenclaw.paths import agentflow_config_path
+    from tokenclaw.paths import tokenclaw_config_path
     from tokenclaw.request_shape_rollups import (
         apply_request_shape_crunch_canary_action,
         apply_request_shape_crunch_canary_actions,
@@ -5439,12 +5439,12 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
     finally:
         store.conn.close()
     if args.apply:
-        rules_path = Path(args.rules_path or os.getenv("AGENTFLOW_CRUNCH_RULES") or agentflow_config_path("crunch_rules.yaml"))
+        rules_path = Path(args.rules_path or os.getenv("TOKENCLAW_CRUNCH_RULES") or tokenclaw_config_path("crunch_rules.yaml"))
         actions = [action for action in result.get("stage_actions") or [] if isinstance(action, dict)]
         if not actions:
             if result.get("status") == "already-staged":
                 apply_result = {
-                    "schema": "agentflow.request_shape_crunch_canary_apply.v1",
+                    "schema": "tokenclaw.request_shape_crunch_canary_apply.v1",
                     "ok": True,
                     "dry_run": False,
                     "wrote_policy_files": False,
@@ -5456,7 +5456,7 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
                 }
             else:
                 apply_result = {
-                    "schema": "agentflow.request_shape_crunch_canary_apply.v1",
+                    "schema": "tokenclaw.request_shape_crunch_canary_apply.v1",
                     "ok": False,
                     "dry_run": False,
                     "wrote_policy_files": False,
@@ -5486,8 +5486,8 @@ def request_shape_crunch_canary_impact_cli(argv: Sequence[str] | None = None, *,
     parser = argparse.ArgumentParser(description="Measure request-shape repeated-context crunch canary impact from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -5565,8 +5565,8 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
     parser = argparse.ArgumentParser(description="Decide widen, rollback, keep-staged, or blocked for repeated-context crunch canaries")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -5597,7 +5597,7 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
     )
     parser.add_argument(
         "--rules-path",
-        help="Crunch rules YAML file to update when --apply is used. Defaults to AGENTFLOW_CRUNCH_RULES or ~/.agentflow/crunch_rules.yaml.",
+        help="Crunch rules YAML file to update when --apply is used. Defaults to TOKENCLAW_CRUNCH_RULES or ~/.tokenclaw/crunch_rules.yaml.",
     )
     parser.add_argument(
         "--decision-id",
@@ -5624,7 +5624,7 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
 
     stdout = stdout if stdout is not None else sys.stdout
 
-    from tokenclaw.paths import agentflow_config_path
+    from tokenclaw.paths import tokenclaw_config_path
     from tokenclaw.request_shape_rollups import (
         apply_request_shape_crunch_policy_decision,
         build_request_shape_crunch_canary_impact_report,
@@ -5658,7 +5658,7 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
     finally:
         store.conn.close()
     if args.apply:
-        rules_path = Path(args.rules_path or os.getenv("AGENTFLOW_CRUNCH_RULES") or agentflow_config_path("crunch_rules.yaml"))
+        rules_path = Path(args.rules_path or os.getenv("TOKENCLAW_CRUNCH_RULES") or tokenclaw_config_path("crunch_rules.yaml"))
         apply_result = apply_request_shape_crunch_policy_decision(
             result,
             rules_path=rules_path,
@@ -5711,8 +5711,8 @@ def request_shape_cache_replay_canary_stage_cli(argv: Sequence[str] | None = Non
     parser = argparse.ArgumentParser(description="Stage a read-only OpenAI Responses exact-cache replay canary action from request-shape metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -5728,8 +5728,8 @@ def request_shape_cache_replay_canary_stage_cli(argv: Sequence[str] | None = Non
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory for local AgentFlow policy overlays when --apply is used, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR") or os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory for local AgentFlow policy overlays when --apply is used, default: TOKENCLAW_CONFIG_DIR, TOKENCLAW_POLICY_CONFIG_DIR, or ~/.tokenclaw",
     )
     parser.add_argument(
         "--apply",
@@ -5801,8 +5801,8 @@ def request_shape_cache_replay_evidence_cli(argv: Sequence[str] | None = None, *
     parser = argparse.ArgumentParser(description="Report aggregate local evidence for staged request-shape cache replay canaries")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -5812,8 +5812,8 @@ def request_shape_cache_replay_evidence_cli(argv: Sequence[str] | None = None, *
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory containing cache_canary_policy.yaml, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR") or os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory containing cache_canary_policy.yaml, default: TOKENCLAW_CONFIG_DIR, TOKENCLAW_POLICY_CONFIG_DIR, or ~/.tokenclaw",
     )
     parser.add_argument(
         "--rules-path",
@@ -5858,8 +5858,8 @@ def request_shape_cache_replay_policy_decision_cli(argv: Sequence[str] | None = 
     parser = argparse.ArgumentParser(description="Decide widen, rollback, keep-staged, or keep-blocked for OpenAI exact-cache replay canaries")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -5869,8 +5869,8 @@ def request_shape_cache_replay_policy_decision_cli(argv: Sequence[str] | None = 
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory containing cache_canary_policy.yaml, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR") or os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory containing cache_canary_policy.yaml, default: TOKENCLAW_CONFIG_DIR, TOKENCLAW_POLICY_CONFIG_DIR, or ~/.tokenclaw",
     )
     parser.add_argument(
         "--rules-path",
@@ -5938,8 +5938,8 @@ def managed_recommendation_handoff_cli(argv: Sequence[str] | None = None, *, std
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -6000,8 +6000,8 @@ def local_activation_outcome_summary_cli(argv: Sequence[str] | None = None, *, s
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -6011,8 +6011,8 @@ def local_activation_outcome_summary_cli(argv: Sequence[str] | None = None, *, s
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory containing local AgentFlow policy rule files, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR") or os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory containing local AgentFlow policy rule files, default: TOKENCLAW_CONFIG_DIR, TOKENCLAW_POLICY_CONFIG_DIR, or ~/.tokenclaw",
     )
     parser.add_argument(
         "--policy-event-limit",
@@ -6112,8 +6112,8 @@ def cache_replay_cohorts_cli(argv: Sequence[str] | None = None, *, stdout: Any =
     parser = argparse.ArgumentParser(description="Rank replay-ready plateau cohorts from local cache metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--scan-limit",
@@ -6160,8 +6160,8 @@ def cache_smoke_diagnostic_cli(argv: Sequence[str] | None = None, *, stdout: Any
     parser = argparse.ArgumentParser(description="Diagnose whether the local exact cache can serve hits from metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -6200,7 +6200,7 @@ def cache_smoke_diagnostic_cli(argv: Sequence[str] | None = None, *, stdout: Any
 
 def _cache_replay_dry_run_read_error_result(read_error: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "agentflow.cache_replay_dry_run.v1",
+        "schema": "tokenclaw.cache_replay_dry_run.v1",
         "ok": False,
         "summary": {
             "rows_considered": 0,
@@ -6238,8 +6238,8 @@ def cache_replay_dry_run_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--scan-limit",
@@ -6298,8 +6298,8 @@ def phase_routing_report_cli(argv: Sequence[str] | None = None, *, stdout: Any =
     parser = argparse.ArgumentParser(description="Measure or dry-run Anthropic phase-routing policy from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -6379,8 +6379,8 @@ def session_phase_memory_cli(argv: Sequence[str] | None = None, *, stdout: Any =
     parser = argparse.ArgumentParser(description="Build metadata-only session phase memory rollups from local calls")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -6425,8 +6425,8 @@ def managed_pattern_rollups_cli(argv: Sequence[str] | None = None, *, stdout: An
     parser = argparse.ArgumentParser(description="Export metadata-only managed pattern canary cohort outcome rollups")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -6467,8 +6467,8 @@ def optimization_eval_plan_cli(argv: Sequence[str] | None = None, *, stdout: Any
     parser = argparse.ArgumentParser(description="Export family-agnostic optimization eval plans from local metadata")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -6533,8 +6533,8 @@ def optimization_shadow_eval_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path for result records, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path for result records, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--results-jsonl",
@@ -6578,7 +6578,7 @@ def optimization_shadow_eval_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.optimization_shadow_eval_error.v1",
+                "schema": "tokenclaw.optimization_shadow_eval_error.v1",
                 "error": {
                     "type": "missing_budget_cap",
                     "message": "--execute requires --budget-usd greater than 0",
@@ -6598,7 +6598,7 @@ def optimization_shadow_eval_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.optimization_shadow_eval_error.v1",
+                "schema": "tokenclaw.optimization_shadow_eval_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "wrote_local_policy_files": False,
@@ -6637,8 +6637,8 @@ def optimization_eval_queue_cli(
     parser = argparse.ArgumentParser(description="Run a bounded batch from the local optimization eval queue")
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path for queue selection and result records, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path for queue selection and result records, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--family",
@@ -6717,7 +6717,7 @@ def optimization_eval_queue_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.optimization_eval_queue_error.v1",
+                "schema": "tokenclaw.optimization_eval_queue_error.v1",
                 "error": {
                     "type": "missing_budget_cap",
                     "message": "--execute requires --budget-usd greater than 0",
@@ -6733,7 +6733,7 @@ def optimization_eval_queue_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.optimization_eval_queue_error.v1",
+                "schema": "tokenclaw.optimization_eval_queue_error.v1",
                 "error": {
                     "type": "conflicting_inputs",
                     "message": "--promotion-report and --promotion-blocker-review are mutually exclusive",
@@ -6755,7 +6755,7 @@ def optimization_eval_queue_cli(
                 stderr,
                 {
                     "ok": False,
-                    "schema": "agentflow.optimization_promotion_eval_backfill_error.v1",
+                    "schema": "tokenclaw.optimization_promotion_eval_backfill_error.v1",
                     "error": {"type": exc.__class__.__name__, "message": str(exc)},
                     "provider_calls_made": False,
                     "wrote_local_policy_files": False,
@@ -6793,7 +6793,7 @@ def optimization_eval_queue_cli(
                 stderr,
                 {
                     "ok": False,
-                    "schema": "agentflow.promotion_recommendation_eval_queue_error.v1",
+                    "schema": "tokenclaw.promotion_recommendation_eval_queue_error.v1",
                     "error": {"type": exc.__class__.__name__, "message": str(exc)},
                     "provider_calls_made": False,
                     "wrote_local_policy_files": False,
@@ -6802,7 +6802,7 @@ def optimization_eval_queue_cli(
             )
             return 1
 
-        if recommendation_payload.get("schema") != "agentflow.promotion_blocker_recommendation_review.v1":
+        if recommendation_payload.get("schema") != "tokenclaw.promotion_blocker_recommendation_review.v1":
             recommendation_payload = build_promotion_blocker_recommendation_review(recommendation_payload, limit=int(args.limit or 25))
 
         store = _open_store_for_db(str(args.db))
@@ -6866,8 +6866,8 @@ def optimization_promotion_report_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--evidence-report",
@@ -6929,7 +6929,7 @@ def optimization_promotion_report_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.optimization_promotion_report_error.v1",
+                "schema": "tokenclaw.optimization_promotion_report_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "wrote_local_policy_files": False,
@@ -6977,8 +6977,8 @@ def optimization_promotion_actions_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path when building a fresh promotion report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh promotion report, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",
@@ -7023,7 +7023,7 @@ def optimization_promotion_actions_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.optimization_promotion_rollout_actions_error.v1",
+                "schema": "tokenclaw.optimization_promotion_rollout_actions_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,
@@ -7138,7 +7138,7 @@ def optimization_promotion_blocker_review_cli(
     parser.add_argument(
         "recommendations",
         nargs="?",
-        help="Promotion blocker recommendation JSON path, or '-' to read from stdin. If omitted, --url or AGENTFLOW_PROMOTION_BLOCKER_RECOMMENDATIONS_URL is used when configured.",
+        help="Promotion blocker recommendation JSON path, or '-' to read from stdin. If omitted, --url or TOKENCLAW_PROMOTION_BLOCKER_RECOMMENDATIONS_URL is used when configured.",
     )
     parser.add_argument(
         "--url",
@@ -7152,14 +7152,14 @@ def optimization_promotion_blocker_review_cli(
         help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
     )
     parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
-    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
-    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--tenant", help="Optional x-tokenclaw-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-tokenclaw-account header for account metadata.")
     parser.add_argument("--limit", type=int, default=20, help="Maximum recommendations to include in the local review, default: 20.")
     parser.add_argument("--source-limit", type=int, default=500, help="Maximum managed rollups to scan when fetching, default: 500.")
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
         help="HTTP timeout in seconds, default: 10.",
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print review JSON instead of emitting one compact line.")
@@ -7184,7 +7184,7 @@ def optimization_promotion_blocker_review_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.promotion_blocker_recommendation_review_error.v1",
+                "schema": "tokenclaw.promotion_blocker_recommendation_review_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,
@@ -7236,13 +7236,13 @@ def optimization_promotion_canary_apply_cli(
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory containing local AgentFlow YAML policy files, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory containing local AgentFlow YAML policy files, default: TOKENCLAW_CONFIG_DIR or ~/.tokenclaw",
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--section",
@@ -7276,7 +7276,7 @@ def optimization_promotion_canary_apply_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.optimization_promotion_canary_apply_error.v1",
+                "schema": "tokenclaw.optimization_promotion_canary_apply_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,
@@ -7322,8 +7322,8 @@ def optimization_promotion_impact_cli(
     )
     parser.add_argument(
         "--db",
-        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=500, help="Maximum recent calls to scan, default: 500, max: 10000.")
     parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp. Defaults to the action bundle generated_at.")
@@ -7349,7 +7349,7 @@ def optimization_promotion_impact_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.optimization_promotion_impact_error.v1",
+                "schema": "tokenclaw.optimization_promotion_impact_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,
@@ -7503,7 +7503,7 @@ def _rollout_lifecycle_payload(command: str, result: dict[str, Any]) -> dict[str
     files = [item for item in result.get("files", []) if isinstance(item, dict)]
     event_type = _rollout_lifecycle_event_type(command, result)
     metadata: dict[str, Any] = {
-        "schema": "agentflow.rollout_action_lifecycle_metadata.v1",
+        "schema": "tokenclaw.rollout_action_lifecycle_metadata.v1",
         "lifecycle_kind": "pattern_rollout_actions",
         "command": f"rollout-actions-{command}",
         "local_result_status": "ok" if result.get("ok") else "error",
@@ -7780,7 +7780,7 @@ def _optimization_promotion_lifecycle_payload(command: str, result: dict[str, An
     }
     digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
     metadata: dict[str, Any] = {
-        "schema": "agentflow.optimization_promotion_lifecycle_feedback.v1",
+        "schema": "tokenclaw.optimization_promotion_lifecycle_feedback.v1",
         "lifecycle_kind": "optimization_promotion_canary",
         "command": f"optimization-promotion-{command}",
         "local_result_status": "ok" if result.get("ok") else "error",
@@ -7972,7 +7972,7 @@ def post_promotion_priority_delta_review_cli(
     parser.add_argument(
         "deltas",
         nargs="?",
-        help="Post-promotion priority delta JSON path, or '-' to read from stdin. If omitted, --url or AGENTFLOW_POST_PROMOTION_PRIORITY_DELTAS_URL is used when configured.",
+        help="Post-promotion priority delta JSON path, or '-' to read from stdin. If omitted, --url or TOKENCLAW_POST_PROMOTION_PRIORITY_DELTAS_URL is used when configured.",
     )
     parser.add_argument(
         "--url",
@@ -7986,14 +7986,14 @@ def post_promotion_priority_delta_review_cli(
         help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
     )
     parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
-    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
-    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--tenant", help="Optional x-tokenclaw-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-tokenclaw-account header for account metadata.")
     parser.add_argument("--limit", type=int, default=20, help="Maximum deltas to include in the local review, default: 20.")
     parser.add_argument("--source-limit", type=int, default=500, help="Maximum managed rollups to scan when fetching, default: 500.")
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
         help="HTTP timeout in seconds, default: 10.",
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print review JSON instead of emitting one compact line.")
@@ -8018,7 +8018,7 @@ def post_promotion_priority_delta_review_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.post_promotion_priority_delta_review_error.v1",
+                "schema": "tokenclaw.post_promotion_priority_delta_review_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,
@@ -8096,7 +8096,7 @@ def post_promotion_policy_draft_dry_run_cli(
 
     if not args.priority_review:
         result = {
-            "schema": "agentflow.post_promotion_policy_draft_dry_run.v1",
+            "schema": "tokenclaw.post_promotion_policy_draft_dry_run.v1",
             "ok": False,
             "status": "invalid",
             "error": {
@@ -8117,7 +8117,7 @@ def post_promotion_policy_draft_dry_run_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.post_promotion_policy_draft_dry_run_error.v1",
+                "schema": "tokenclaw.post_promotion_policy_draft_dry_run_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,
@@ -8176,13 +8176,13 @@ def post_promotion_policy_draft_apply_cli(
     )
     parser.add_argument(
         "--config-dir",
-        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
-        help="Directory containing local rule files, default: ~/.agentflow.",
+        default=os.getenv("TOKENCLAW_POLICY_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory containing local rule files, default: ~/.tokenclaw.",
     )
     parser.add_argument(
         "--workspace",
-        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
-        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+        default=os.getenv("TOKENCLAW_POLICY_DRAFT_DIR", str(Path.home() / ".tokenclaw" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.tokenclaw/policy_drafts.",
     )
     parser.add_argument("--max-apply", type=int, default=20, help="Maximum gated drafts to process, default: 20.")
     parser.add_argument("--dry-run", action="store_true", help="Stage and validate generated policy drafts without writing active rule files.")
@@ -8195,7 +8195,7 @@ def post_promotion_policy_draft_apply_cli(
 
     if not args.policy_draft_report:
         result = {
-            "schema": "agentflow.post_promotion_policy_draft_apply.v1",
+            "schema": "tokenclaw.post_promotion_policy_draft_apply.v1",
             "ok": False,
             "status": "invalid",
             "error": {
@@ -8216,7 +8216,7 @@ def post_promotion_policy_draft_apply_cli(
             stderr,
             {
                 "ok": False,
-                "schema": "agentflow.post_promotion_policy_draft_apply_error.v1",
+                "schema": "tokenclaw.post_promotion_policy_draft_apply_error.v1",
                 "error": {"type": exc.__class__.__name__, "message": str(exc)},
                 "provider_calls_made": False,
                 "managed_server_calls_made": False,

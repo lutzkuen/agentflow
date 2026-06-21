@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-SCHEMA = "agentflow.savings_report.v1"
+SCHEMA = "tokenclaw.savings_report.v1"
 
 OPPORTUNITY_FAMILY_ACTIVATION = "activation"
 OPPORTUNITY_FAMILY_CACHE_REPLAY = "cache-replay"
@@ -93,7 +93,7 @@ def _activation_opportunity(target: str, provider: str) -> dict[str, Any]:
         "blocker_codes": ["target-not-configured"],
         "projected_savings_bucket": SAVINGS_BUCKET_UNKNOWN,
         "evidence_window": None,
-        "suggested_command": f"agentflow activate {target}",
+        "suggested_command": f"tokenclaw activate {target}",
     }
 
 
@@ -125,7 +125,7 @@ def _routing_opportunity(target: str, provider: str, report: dict[str, Any]) -> 
         candidate_count = _as_int(summary.get("candidate_count"))
         blockers = ["no-routing-candidates"] if candidate_count == 0 else ["no-routing-blockers"]
 
-    suggested = "agentflow-openai-routing-report" if target == "openai" else None
+    suggested = "tokenclaw-openai-routing-report" if target == "openai" else None
     return {
         "target": target,
         "provider": provider,
@@ -173,7 +173,7 @@ def _cache_replay_opportunity(
     if not blockers:
         blockers = ["cache-replay-ready"]
 
-    suggested = "agentflow-openai-cache-replay-report" if target == "openai" else None
+    suggested = "tokenclaw-openai-cache-replay-report" if target == "openai" else None
     opportunity = {
         "target": target,
         "provider": provider,
@@ -297,7 +297,7 @@ def build_savings_report(
         "opportunity_count": len(opportunities),
         "activation_lifecycle_feedback": lifecycle_feedback
         or {
-            "schema": "agentflow.activation_staged_lifecycle_feedback_summary.v1",
+            "schema": "tokenclaw.activation_staged_lifecycle_feedback_summary.v1",
             "queue_rows": 0,
             "family_event_count": 0,
             "state_breakdown": [],

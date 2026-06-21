@@ -16,8 +16,8 @@ from tokenclaw.policy_workbench import load_staged_policy_draft
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.managed_activation_bundle_apply.v1"
-APPLY_METADATA_SCHEMA = "agentflow.managed_activation_rule_apply_metadata.v1"
+SCHEMA = "tokenclaw.managed_activation_bundle_apply.v1"
+APPLY_METADATA_SCHEMA = "tokenclaw.managed_activation_rule_apply_metadata.v1"
 SUPPORTED_FAMILIES = ("cache", "crunch")
 RULE_FILES = {
     "cache": "cache_rules.yaml",
@@ -616,7 +616,7 @@ def apply_staged_managed_activation_bundle(
     rollback_command = None
     if changed_sections and not dry_run:
         rollback_command = " ".join(
-            ["agentflow-policy-rollback", "--config-dir", str(config_path), "--apply-id", transaction_id]
+            ["tokenclaw-policy-rollback", "--config-dir", str(config_path), "--apply-id", transaction_id]
             + [part for section in changed_sections for part in ("--section", section)]
         )
     result = {

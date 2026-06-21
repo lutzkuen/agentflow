@@ -151,7 +151,7 @@ class TerminalOutputCompactionDryRunTests(unittest.TestCase):
 
     def test_dry_run_report_is_metadata_only_and_ranks_plateaued_anthropic_plan(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -181,7 +181,7 @@ class TerminalOutputCompactionDryRunTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.terminal_output_compaction_dry_run.v1")
         self.assertTrue(payload["dry_run"])
         self.assertGreaterEqual(payload["summary"]["planned_call_count"], 2)
         self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
@@ -206,7 +206,7 @@ class TerminalOutputCompactionDryRunTests(unittest.TestCase):
 
     def test_unsafe_cases_return_blockers_instead_of_plans(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -233,7 +233,7 @@ class TerminalOutputCompactionDryRunTests(unittest.TestCase):
 
     def test_cli_emits_terminal_output_compaction_dry_run(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_call(
@@ -261,7 +261,7 @@ class TerminalOutputCompactionDryRunTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.terminal_output_compaction_dry_run.v1")
         self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
         self.assertNotIn("RAW_CLI_SECRET", json.dumps(payload, sort_keys=True))
 

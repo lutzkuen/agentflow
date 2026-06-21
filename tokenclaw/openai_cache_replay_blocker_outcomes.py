@@ -9,7 +9,7 @@ from tokenclaw.openai_cache_replay_report import _as_float, _as_int, build_opena
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_cache_replay_blocker_outcomes.v1"
+SCHEMA = "tokenclaw.openai_cache_replay_blocker_outcomes.v1"
 
 READY_REASONS = {
     "replay-rule-required",
@@ -248,7 +248,7 @@ def _safe_audit(candidate: dict[str, Any]) -> dict[str, Any] | None:
 def _cohort_row(*, source: str, candidate: dict[str, Any], outcome: str, reason: str, amount: int) -> dict[str, Any]:
     audit = _safe_audit(candidate)
     return {
-        "schema": "agentflow.openai_cache_replay_blocker_outcome_cohort.v1",
+        "schema": "tokenclaw.openai_cache_replay_blocker_outcome_cohort.v1",
         "rank": 0,
         "source": source,
         "outcome": outcome,

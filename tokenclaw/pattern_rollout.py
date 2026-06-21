@@ -5,8 +5,8 @@ import json
 from typing import Any
 
 
-PATTERN_ROLLOUT_SCHEMA = "agentflow.pattern_policy_rollout.v1"
-PATTERN_CANARY_DECISION_SCHEMA = "agentflow.pattern_canary_decision.v1"
+PATTERN_ROLLOUT_SCHEMA = "tokenclaw.pattern_policy_rollout.v1"
+PATTERN_CANARY_DECISION_SCHEMA = "tokenclaw.pattern_canary_decision.v1"
 
 _SAFE_FEATURE_KEYS = (
     "source_surface",

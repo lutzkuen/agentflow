@@ -13,9 +13,9 @@ from tokenclaw.provider_adoption_gate import (
 from tokenclaw.store import utc_now
 
 
-OLD_CONTEXT_SUMMARY_IMPACT_SCHEMA = "agentflow.old_context_summary_impact.v1"
+OLD_CONTEXT_SUMMARY_IMPACT_SCHEMA = "tokenclaw.old_context_summary_impact.v1"
 
-OLD_CONTEXT_SUMMARY_QUALITY_GATE_SCHEMA = "agentflow.old_context_summary_quality_gate.v1"
+OLD_CONTEXT_SUMMARY_QUALITY_GATE_SCHEMA = "tokenclaw.old_context_summary_quality_gate.v1"
 
 
 def _json_obj(raw: Any) -> dict[str, Any]:
@@ -434,7 +434,7 @@ def _quality_gate_thresholds(policy: dict[str, Any], projection: dict[str, Any])
     if not min_holdout:
         min_holdout = max(1, min_samples // 4) if bool(canary.get("enabled")) else 0
     thresholds = {
-        "schema": "agentflow.old_context_summary_quality_gate_thresholds.v1",
+        "schema": "tokenclaw.old_context_summary_quality_gate_thresholds.v1",
         "min_matched_samples": min_samples,
         "min_canary_applied_samples": min_applied,
         "min_canary_holdout_samples": min_holdout,

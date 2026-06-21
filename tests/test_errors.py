@@ -50,7 +50,7 @@ class FakeRaisingStreamClient:
         return False
 
     def stream(self, *args, **kwargs):
-        raise RuntimeError("secret stream failure from /tmp/agentflow-token")
+        raise RuntimeError("secret stream failure from /tmp/tokenclaw-token")
 
 
 class FakeSuccessfulAnthropicClient:
@@ -110,7 +110,7 @@ class PublicProxyErrorTest(unittest.TestCase):
         with patch.object(
             anthropic_proxy,
             "crunch_body",
-            side_effect=RuntimeError("secret anthropic failure from /tmp/agentflow-token"),
+            side_effect=RuntimeError("secret anthropic failure from /tmp/tokenclaw-token"),
         ), self.assertLogs(level="ERROR") as logs:
             response = TestClient(server.app).post("/v1/messages", json=request_body)
 
@@ -119,11 +119,11 @@ class PublicProxyErrorTest(unittest.TestCase):
         self.assertEqual(body["type"], "error")
         self.assertEqual(body["error"]["type"], "tokenclaw_error")
         self.assertEqual(body["error"]["message"], "Internal proxy error")
-        self.assertNotIn("agentflow-token", response.text)
-        self.assertIn("agentflow-token", "\n".join(logs.output))
+        self.assertNotIn("tokenclaw-token", response.text)
+        self.assertIn("tokenclaw-token", "\n".join(logs.output))
         [row] = server.store.conn.execute("select status_code, error from calls").fetchall()
         self.assertEqual(row["status_code"], 500)
-        self.assertIn("agentflow-token", row["error"])
+        self.assertIn("tokenclaw-token", row["error"])
 
     def test_anthropic_request_does_not_500_when_home_directory_unavailable(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
@@ -133,10 +133,10 @@ class PublicProxyErrorTest(unittest.TestCase):
             "messages": [{"role": "user", "content": "Say ok."}],
         }
 
-        config_dir = str(Path(self.tmp.name).parent / "agentflow-config")
+        config_dir = str(Path(self.tmp.name).parent / "tokenclaw-config")
         with patch.dict(
             os.environ,
-            {"HOME": "", "AGENTFLOW_CONFIG_DIR": config_dir, "AGENTFLOW_DB": self.tmp.name},
+            {"HOME": "", "TOKENCLAW_CONFIG_DIR": config_dir, "TOKENCLAW_DB": self.tmp.name},
             clear=False,
         ), patch.object(Path, "home", side_effect=RuntimeError("Could not determine home directory.")), patch.object(
             anthropic_proxy.httpx,
@@ -203,7 +203,7 @@ class PublicProxyErrorTest(unittest.TestCase):
         with patch.object(
             openai_proxy,
             "crunch_body",
-            side_effect=RuntimeError("secret openai failure from /tmp/agentflow-token"),
+            side_effect=RuntimeError("secret openai failure from /tmp/tokenclaw-token"),
         ), self.assertLogs(level="ERROR"):
             response = TestClient(server.app).post("/v1/responses", json=request_body)
 
@@ -211,11 +211,11 @@ class PublicProxyErrorTest(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["error"]["type"], "tokenclaw_error")
         self.assertEqual(body["error"]["message"], "Internal proxy error")
-        self.assertNotIn("agentflow-token", response.text)
+        self.assertNotIn("tokenclaw-token", response.text)
         [row] = server.store.conn.execute("select provider, status_code, error from calls").fetchall()
         self.assertEqual(row["provider"], "openai")
         self.assertEqual(row["status_code"], 500)
-        self.assertIn("agentflow-token", row["error"])
+        self.assertIn("tokenclaw-token", row["error"])
 
     def test_openai_malformed_json_returns_400_without_passthrough(self):
         server.configure_provider("openai", openai_upstream="https://openai.test")
@@ -281,10 +281,10 @@ class PublicProxyErrorTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Internal proxy error", body)
         self.assertIn("tokenclaw_error", body)
-        self.assertNotIn("agentflow-token", body)
+        self.assertNotIn("tokenclaw-token", body)
         [row] = server.store.conn.execute("select status_code, error from calls").fetchall()
         self.assertEqual(row["status_code"], 500)
-        self.assertIn("agentflow-token", row["error"])
+        self.assertIn("tokenclaw-token", row["error"])
 
     def test_openai_streaming_internal_exception_returns_generic_event(self):
         server.configure_provider("openai", openai_upstream="https://openai.test")
@@ -297,11 +297,11 @@ class PublicProxyErrorTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Internal proxy error", body)
         self.assertIn("tokenclaw_error", body)
-        self.assertNotIn("agentflow-token", body)
+        self.assertNotIn("tokenclaw-token", body)
         [row] = server.store.conn.execute("select provider, status_code, error from calls").fetchall()
         self.assertEqual(row["provider"], "openai")
         self.assertEqual(row["status_code"], 500)
-        self.assertIn("agentflow-token", row["error"])
+        self.assertIn("tokenclaw-token", row["error"])
 
 
 if __name__ == "__main__":

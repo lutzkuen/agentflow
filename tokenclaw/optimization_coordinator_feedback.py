@@ -9,7 +9,7 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-FEEDBACK_SCHEMA = "agentflow.optimization_coordinator_lifecycle_feedback.v1"
+FEEDBACK_SCHEMA = "tokenclaw.optimization_coordinator_lifecycle_feedback.v1"
 SOURCE_SURFACE = "optimization_coordinator_lifecycle"
 RAW_REASON_HINTS = {
     "api",
@@ -241,7 +241,7 @@ def build_optimization_coordinator_lifecycle_feedback(
     cost_baseline_usd: float | None = None,
     extra_family_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    if not isinstance(decision, dict) or decision.get("schema") != "agentflow.optimization_coordinator.v1":
+    if not isinstance(decision, dict) or decision.get("schema") != "tokenclaw.optimization_coordinator.v1":
         return None
     family_events = _public_family_events(decision, extra_family_events)
     if not family_events:

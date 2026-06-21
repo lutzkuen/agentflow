@@ -14,10 +14,10 @@ from tokenclaw.optimization.cli_support import default_db_path, open_store_for_d
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.provider_tool_adoption_report.v1"
-WINDOW_SCHEMA = "agentflow.provider_tool_adoption_window.v1"
-ADOPTION_TTL_SECONDS = int(os.getenv("AGENTFLOW_PROVIDER_ADOPTION_TTL_SECONDS", "3600"))
-TOKEN_NAMESPACE = "agentflow.provider_tool_adoption.v1"
+SCHEMA = "tokenclaw.provider_tool_adoption_report.v1"
+WINDOW_SCHEMA = "tokenclaw.provider_tool_adoption_window.v1"
+ADOPTION_TTL_SECONDS = int(os.getenv("TOKENCLAW_PROVIDER_ADOPTION_TTL_SECONDS", "3600"))
+TOKEN_NAMESPACE = "tokenclaw.provider_tool_adoption.v1"
 
 
 def _parse_utc(raw: Any) -> datetime | None:

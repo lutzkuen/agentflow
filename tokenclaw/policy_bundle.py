@@ -20,20 +20,20 @@ from tokenclaw.pattern_rollout import pattern_canary_decision
 from tokenclaw.public_metadata import public_label
 from tokenclaw.store import utc_now
 
-POLICY_BUNDLE_APPLY_SCHEMA = "agentflow.policy_bundle_apply.v1"
-POLICY_BUNDLE_SCHEMA = "agentflow.policy_bundle.v1"
-POLICY_BUNDLE_DIFF_SCHEMA = "agentflow.policy_bundle_diff.v1"
-POLICY_BUNDLE_REVIEW_SCHEMA = "agentflow.policy_bundle_review.v1"
-POLICY_BUNDLE_ROLLBACK_SCHEMA = "agentflow.policy_bundle_rollback.v1"
-POLICY_BUNDLE_VALIDATION_SCHEMA = "agentflow.policy_bundle_validation.v1"
-POLICY_BUNDLE_PROVENANCE_SCHEMA = "agentflow.policy_bundle_provenance.v1"
-POLICY_BUNDLE_PROVENANCE_VERIFICATION_SCHEMA = "agentflow.policy_bundle_provenance_verification.v1"
-PATTERN_CANDIDATE_REVIEW_SCHEMA = "agentflow.pattern_candidate_review.v1"
-OLD_CONTEXT_SUMMARY_POLICY_REVIEW_SCHEMA = "agentflow.old_context_summary_policy_review.v1"
-POLICY_STATE_SCHEMA = "agentflow.policy_state.v1"
-MANAGED_POLICY_VERIFICATION_SECRET_ENV = "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET"
-MANAGED_POLICY_VERIFICATION_SECRETS_ENV = "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS"
-MANAGED_POLICY_HMAC_SECRET_ENV = "AGENTFLOW_MANAGED_POLICY_HMAC_SECRET"
+POLICY_BUNDLE_APPLY_SCHEMA = "tokenclaw.policy_bundle_apply.v1"
+POLICY_BUNDLE_SCHEMA = "tokenclaw.policy_bundle.v1"
+POLICY_BUNDLE_DIFF_SCHEMA = "tokenclaw.policy_bundle_diff.v1"
+POLICY_BUNDLE_REVIEW_SCHEMA = "tokenclaw.policy_bundle_review.v1"
+POLICY_BUNDLE_ROLLBACK_SCHEMA = "tokenclaw.policy_bundle_rollback.v1"
+POLICY_BUNDLE_VALIDATION_SCHEMA = "tokenclaw.policy_bundle_validation.v1"
+POLICY_BUNDLE_PROVENANCE_SCHEMA = "tokenclaw.policy_bundle_provenance.v1"
+POLICY_BUNDLE_PROVENANCE_VERIFICATION_SCHEMA = "tokenclaw.policy_bundle_provenance_verification.v1"
+PATTERN_CANDIDATE_REVIEW_SCHEMA = "tokenclaw.pattern_candidate_review.v1"
+OLD_CONTEXT_SUMMARY_POLICY_REVIEW_SCHEMA = "tokenclaw.old_context_summary_policy_review.v1"
+POLICY_STATE_SCHEMA = "tokenclaw.policy_state.v1"
+MANAGED_POLICY_VERIFICATION_SECRET_ENV = "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET"
+MANAGED_POLICY_VERIFICATION_SECRETS_ENV = "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRETS"
+MANAGED_POLICY_HMAC_SECRET_ENV = "TOKENCLAW_MANAGED_POLICY_HMAC_SECRET"
 POLICY_SOURCES = {
     "local-default",
     "local-manual",
@@ -61,7 +61,7 @@ _POLICY_SECTION_FILES = {
     "routing_experiments": "routing_experiments.yaml",
     "codex_app": "codex_app_rules.yaml",
 }
-POLICY_IMPACT_SCHEMA = "agentflow.policy_bundle_impact.v1"
+POLICY_IMPACT_SCHEMA = "tokenclaw.policy_bundle_impact.v1"
 _DEFAULT_IMPACT_LIMIT = 1000
 
 
@@ -76,7 +76,7 @@ async def build_policy_bundle() -> dict[str, Any]:
         "schema": POLICY_BUNDLE_SCHEMA,
         "generated_at": utc_now(),
         "generator": {
-            "name": "agentflow-proxy",
+            "name": "tokenclaw-proxy",
             "version": __version__,
             "mode": "local-offline",
         },
@@ -1418,7 +1418,7 @@ def _validate_managed_activation_drafts(
         if not isinstance(item, dict):
             _add_error(errors, path, "expected object")
             continue
-        if item.get("schema") not in (None, "agentflow.managed_activation_policy_draft_entry.v1"):
+        if item.get("schema") not in (None, "tokenclaw.managed_activation_policy_draft_entry.v1"):
             _add_error(errors, f"{path}.schema", "expected managed activation draft entry schema")
         if item.get("status") not in (None, "review-required"):
             _add_error(errors, f"{path}.status", "expected review-required")
@@ -1778,8 +1778,8 @@ def validate_policy_bundle(bundle: Any) -> dict[str, Any]:
     if not isinstance(generator, dict):
         _add_error(errors, "$.generator", "expected object")
     else:
-        if generator.get("name") != "agentflow-proxy":
-            _add_error(errors, "$.generator.name", "expected agentflow-proxy")
+        if generator.get("name") != "tokenclaw-proxy":
+            _add_error(errors, "$.generator.name", "expected tokenclaw-proxy")
         if not isinstance(generator.get("version"), str) or not generator.get("version"):
             _add_error(errors, "$.generator.version", "expected non-empty string")
         if generator.get("mode") != "local-offline":
@@ -1965,11 +1965,11 @@ def _round_usd(value: float) -> float:
 def _resolve_route_to(route_to: Any) -> str:
     value = str(route_to or "").strip()
     if value == "haiku":
-        return os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
+        return os.getenv("TOKENCLAW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
     if value == "sonnet":
-        return os.getenv("AGENTFLOW_SONNET_MODEL", "claude-sonnet-4-6")
+        return os.getenv("TOKENCLAW_SONNET_MODEL", "claude-sonnet-4-6")
     if value == "opus":
-        return os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4-5")
+        return os.getenv("TOKENCLAW_OPUS_MODEL", "claude-opus-4-5")
     return value
 
 
@@ -3581,8 +3581,8 @@ def simulate_policy_bundle_impact(
     db_path: str | None = None,
     limit: int = _DEFAULT_IMPACT_LIMIT,
 ) -> dict[str, Any]:
-    path = db_path or os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv(
-        "AGENTFLOW_DB",
+    path = db_path or os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv(
+        "TOKENCLAW_DB",
         str(default_db_path()),
     )
     if not isinstance(proposed, dict):

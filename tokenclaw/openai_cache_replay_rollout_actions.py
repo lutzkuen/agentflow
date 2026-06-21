@@ -20,15 +20,15 @@ from tokenclaw.policy_bundle import (
 from tokenclaw.store import utc_now
 
 
-OPENAI_CACHE_REPLAY_ROLLOUT_ACTIONS_SCHEMA = "agentflow.openai_cache_replay_rollout_actions.v1"
-OPTIMIZATION_ROLLOUT_ACTION_SCHEMA = "agentflow.optimization_rollout_action.v1"
-OPENAI_CACHE_REPLAY_REVIEW_ACTION_SCHEMA = "agentflow.openai_cache_replay_rollout_review_action.v1"
-OPENAI_CACHE_REPLAY_CANARY_POLICY_SCHEMA = "agentflow.openai_cache_replay_canary_policy.v1"
-OPENAI_CACHE_REPLAY_ROLLOUT_REVIEW_SCHEMA = "agentflow.openai_cache_replay_rollout_actions_review.v1"
-OPENAI_CACHE_REPLAY_ROLLOUT_APPLY_SCHEMA = "agentflow.openai_cache_replay_rollout_actions_apply.v1"
-OPENAI_CACHE_REPLAY_ROLLOUT_DRY_RUN_SCHEMA = "agentflow.openai_cache_replay_rollout_actions_dry_run.v1"
-OPENAI_CACHE_REPLAY_ROLLOUT_VALIDATION_SCHEMA = "agentflow.openai_cache_replay_rollout_actions_validation.v1"
-OPENAI_CACHE_REPLAY_ROLLOUT_PROVENANCE_SCHEMA = "agentflow.openai_cache_replay_rollout_actions_provenance_verification.v1"
+OPENAI_CACHE_REPLAY_ROLLOUT_ACTIONS_SCHEMA = "tokenclaw.openai_cache_replay_rollout_actions.v1"
+OPTIMIZATION_ROLLOUT_ACTION_SCHEMA = "tokenclaw.optimization_rollout_action.v1"
+OPENAI_CACHE_REPLAY_REVIEW_ACTION_SCHEMA = "tokenclaw.openai_cache_replay_rollout_review_action.v1"
+OPENAI_CACHE_REPLAY_CANARY_POLICY_SCHEMA = "tokenclaw.openai_cache_replay_canary_policy.v1"
+OPENAI_CACHE_REPLAY_ROLLOUT_REVIEW_SCHEMA = "tokenclaw.openai_cache_replay_rollout_actions_review.v1"
+OPENAI_CACHE_REPLAY_ROLLOUT_APPLY_SCHEMA = "tokenclaw.openai_cache_replay_rollout_actions_apply.v1"
+OPENAI_CACHE_REPLAY_ROLLOUT_DRY_RUN_SCHEMA = "tokenclaw.openai_cache_replay_rollout_actions_dry_run.v1"
+OPENAI_CACHE_REPLAY_ROLLOUT_VALIDATION_SCHEMA = "tokenclaw.openai_cache_replay_rollout_actions_validation.v1"
+OPENAI_CACHE_REPLAY_ROLLOUT_PROVENANCE_SCHEMA = "tokenclaw.openai_cache_replay_rollout_actions_provenance_verification.v1"
 
 ACTION_TYPES = {"widen", "hold", "rollback", "retire", "disable"}
 DISABLE_ACTION_TYPES = {"rollback", "retire", "disable"}
@@ -469,7 +469,7 @@ def _find_rule(rules: list[Any], action: dict[str, Any]) -> tuple[int | None, di
 def _rule_rollout(rule: dict[str, Any]) -> dict[str, Any]:
     rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
     return {
-        "schema": str(rollout.get("schema") or "agentflow.pattern_policy_rollout.v1"),
+        "schema": str(rollout.get("schema") or "tokenclaw.pattern_policy_rollout.v1"),
         "recommendation_mode": str(rollout.get("recommendation_mode") or "canary"),
         "canary_enabled": bool(rollout.get("canary_enabled", True)),
         "canary_fraction": _as_float(rollout.get("canary_fraction"), 1.0),

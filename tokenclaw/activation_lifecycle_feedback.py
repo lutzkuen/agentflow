@@ -11,10 +11,10 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-QUEUE_META_SCHEMA = "agentflow.activation_staged_lifecycle_feedback_queue_meta.v1"
-SUMMARY_SCHEMA = "agentflow.activation_staged_lifecycle_feedback_summary.v1"
-SAFETY_STOP_BURNDOWN_SCHEMA = "agentflow.activation_safety_stop_burndown.v1"
-PASS_THROUGH_ROUTING_SCHEMA = "agentflow.pass_through_routing_activation_candidates.v1"
+QUEUE_META_SCHEMA = "tokenclaw.activation_staged_lifecycle_feedback_queue_meta.v1"
+SUMMARY_SCHEMA = "tokenclaw.activation_staged_lifecycle_feedback_summary.v1"
+SAFETY_STOP_BURNDOWN_SCHEMA = "tokenclaw.activation_safety_stop_burndown.v1"
+PASS_THROUGH_ROUTING_SCHEMA = "tokenclaw.pass_through_routing_activation_candidates.v1"
 
 RAW_REASON_HINTS = {
     "api",
@@ -696,7 +696,7 @@ def _activation_feedback_unblock_criteria(
         and next_state == "unblock-ready"
     )
     return {
-        "schema": "agentflow.activation_feedback_safety_stop_unblock_criteria.v1",
+        "schema": "tokenclaw.activation_feedback_safety_stop_unblock_criteria.v1",
         "status": "unblock-ready" if ready else "blocked",
         "safety_stop_count_zero": safety_stop_clear,
         "applied_coverage_present": applied_coverage_present,
@@ -980,7 +980,7 @@ def _anthropic_routing_unblock_criteria(
         and next_state == "recovery-ready"
     )
     return {
-        "schema": "agentflow.anthropic_routing_safety_stop_unblock_criteria.v1",
+        "schema": "tokenclaw.anthropic_routing_safety_stop_unblock_criteria.v1",
         "status": "recovery-ready" if ready else "blocked",
         "safety_stop_count_zero": safety_stop_clear,
         "applied_coverage_present": applied_coverage_present,
@@ -1014,7 +1014,7 @@ def _anthropic_routing_review_field(
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     field = {
-        "schema": f"agentflow.anthropic_routing_safety_stop_{schema_suffix}.v1",
+        "schema": f"tokenclaw.anthropic_routing_safety_stop_{schema_suffix}.v1",
         "status": status,
         "present": present,
         "passed": present and status == "present" and not stale,
@@ -1143,7 +1143,7 @@ def _local_file_backed_routing_representation() -> dict[str, Any]:
 
 def _anthropic_routing_rollback_metadata() -> dict[str, Any]:
     return {
-        "schema": "agentflow.anthropic_routing_safety_stop_rollback_metadata.v1",
+        "schema": "tokenclaw.anthropic_routing_safety_stop_rollback_metadata.v1",
         "rollback_action_type": "keep_anthropic_routing_policy_disabled",
         "rollback_action": "keep-routing-policy-disabled",
         "target_local_policy_section": "routing.rules",
@@ -1186,7 +1186,7 @@ def _anthropic_routing_burndown_refresh_proof(
     all_fields_recorded = all(proof_fields.values())
     blocked = safety_stop_count > 0 or not promotion_allowed or not stage_allowed or next_state != "recovery-ready"
     return {
-        "schema": "agentflow.anthropic_routing_safety_stop_burndown_refresh_proof.v1",
+        "schema": "tokenclaw.anthropic_routing_safety_stop_burndown_refresh_proof.v1",
         "status": "blocked" if blocked else "recovery-ready",
         "all_required_fields_recorded": all_fields_recorded,
         "required_field_results": proof_fields,
@@ -1241,7 +1241,7 @@ def _anthropic_routing_evidence_freshness(
     if not isinstance(max_age_hours, (int, float)):
         max_age_hours = 72.0
     return {
-        "schema": "agentflow.anthropic_routing_safety_stop_evidence_freshness.v1",
+        "schema": "tokenclaw.anthropic_routing_safety_stop_evidence_freshness.v1",
         "status": "stale" if stale else "fresh",
         "stale": stale,
         "age_hours": age_hours,
@@ -1367,7 +1367,7 @@ def _anthropic_routing_group_from_bucket(bucket: dict[str, Any]) -> dict[str, An
         "activation_gate": "anthropic-routing-safety-stop-burndown",
     }
     duplicate_suppression = {
-        "schema": "agentflow.anthropic_routing_activation_issue_duplicate_suppression.v1",
+        "schema": "tokenclaw.anthropic_routing_activation_issue_duplicate_suppression.v1",
         "reason": (
             "anthropic-routing-safety-stop-burndown-not-cleared"
             if safety_stop_count > 0 or "safety-stop-observed" in blockers

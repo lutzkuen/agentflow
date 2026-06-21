@@ -25,9 +25,9 @@ from tokenclaw.request_shape_rollups import (
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_cache_replay_apply.v1"
-PLAN_SCHEMA = "agentflow.openai_cache_replay_apply_plan.v1"
-POLICY_SCHEMA = "agentflow.openai_cache_replay_canary_policy.v1"
+SCHEMA = "tokenclaw.openai_cache_replay_apply.v1"
+PLAN_SCHEMA = "tokenclaw.openai_cache_replay_apply_plan.v1"
+POLICY_SCHEMA = "tokenclaw.openai_cache_replay_canary_policy.v1"
 CACHE_CANARY_POLICY_FILE = "cache_canary_policy.yaml"
 CACHE_RULES_FILE = "cache_rules.yaml"
 
@@ -105,7 +105,7 @@ def _request_shape_cache_replay_rollback_action(
     if not rules:
         return None
     return {
-        "schema": "agentflow.openai_cache_replay_file_backed_rollback_action.v1",
+        "schema": "tokenclaw.openai_cache_replay_file_backed_rollback_action.v1",
         "source_schema": decision.get("schema"),
         "decision_id": top.get("decision_id"),
         "decision": top.get("decision"),
@@ -349,7 +349,7 @@ def _rule_from_candidate(
             ],
         },
         "graduation": {
-            "schema": "agentflow.openai_cache_replay_graduation.v1",
+            "schema": "tokenclaw.openai_cache_replay_graduation.v1",
             "source_verdict": candidate.get("verdict"),
             "observed_savings_usd": candidate.get("observed_savings_usd"),
             "projected_savings_usd": candidate.get("projected_savings_usd"),
@@ -363,7 +363,7 @@ def _rule_from_candidate(
 
 def _shape_candidate_id(cohort: dict[str, Any]) -> str:
     basis = {
-        "schema": "agentflow.openai_cache_replay_shape_candidate_basis.v1",
+        "schema": "tokenclaw.openai_cache_replay_shape_candidate_basis.v1",
         "provider_family": cohort.get("provider_family"),
         "source_surface": cohort.get("source_surface"),
         "endpoint": cohort.get("endpoint"),
@@ -467,8 +467,8 @@ def _rule_from_request_shape_cohort(
             ],
         },
         "graduation": {
-            "schema": "agentflow.openai_cache_replay_shape_activation.v1",
-            "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+            "schema": "tokenclaw.openai_cache_replay_shape_activation.v1",
+            "source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
             "source_reason": cohort.get("reason"),
             "cohort_bucket": cohort_bucket,
             "source_surface": cohort.get("source_surface"),
@@ -488,7 +488,7 @@ def _rule_from_request_shape_cohort(
 
 def _safe_tool_cohort_candidate_id(cohort: dict[str, Any]) -> str:
     basis = {
-        "schema": "agentflow.openai_tool_cache_replay_safe_cohort_basis.v1",
+        "schema": "tokenclaw.openai_tool_cache_replay_safe_cohort_basis.v1",
         "source": cohort.get("source"),
         "outcome": cohort.get("outcome"),
         "reason": cohort.get("reason"),
@@ -568,7 +568,7 @@ def _rule_from_safe_tool_outcome_cohort(
     }
     conditions = {key: value for key, value in conditions.items() if value not in (None, "", [])}
     rollback_metadata = {
-        "schema": "agentflow.openai_tool_cache_replay_rollback_metadata.v1",
+        "schema": "tokenclaw.openai_tool_cache_replay_rollback_metadata.v1",
         "rollback_action_type": "disable_openai_tool_cache_replay_canary",
         "rollback_reason_codes": [
             "safety-stop-observed",
@@ -600,7 +600,7 @@ def _rule_from_safe_tool_outcome_cohort(
         "candidate_id": candidate_id,
         "description": "Local OpenAI tool-light exact-cache replay canary staged after safe invalidation evidence.",
         "target_cache_policy": {
-            "schema": "agentflow.openai_tool_cache_replay_target_policy.v1",
+            "schema": "tokenclaw.openai_tool_cache_replay_target_policy.v1",
             "policy_section": "cache.pattern_rules",
             "target_local_policy": "cache",
             "target_local_rule_file": "cache_rules.yaml",
@@ -620,10 +620,10 @@ def _rule_from_safe_tool_outcome_cohort(
             "scope": "session",
             "min_call_count": 2,
             "invalidation": {
-                "schema": "agentflow.openai_tool_cache_replay_invalidation_assumptions.v1",
+                "schema": "tokenclaw.openai_tool_cache_replay_invalidation_assumptions.v1",
                 "safe_invalidation": True,
                 "safe_invalidation_evidence": True,
-                "source_schema": "agentflow.openai_cache_replay_blocker_outcomes.v1",
+                "source_schema": "tokenclaw.openai_cache_replay_blocker_outcomes.v1",
                 "source_reason": cohort.get("reason"),
                 "file_dependency_status": cohort.get("file_dependency_status"),
                 "file_dependency_audit": audit,
@@ -653,8 +653,8 @@ def _rule_from_safe_tool_outcome_cohort(
             ],
         },
         "graduation": {
-            "schema": "agentflow.openai_tool_cache_replay_safe_invalidation_activation.v1",
-            "source_schema": "agentflow.openai_cache_replay_blocker_outcomes.v1",
+            "schema": "tokenclaw.openai_tool_cache_replay_safe_invalidation_activation.v1",
+            "source_schema": "tokenclaw.openai_cache_replay_blocker_outcomes.v1",
             "source_reason": cohort.get("reason"),
             "cohort_bucket": cohort_bucket,
             "source_surface": cohort.get("source_surface"),
@@ -673,7 +673,7 @@ def _rule_from_safe_tool_outcome_cohort(
         },
         "rollback_metadata": rollback_metadata,
         "promotion": {
-            "schema": "agentflow.openai_tool_cache_replay_safe_invalidation_promotion.v1",
+            "schema": "tokenclaw.openai_tool_cache_replay_safe_invalidation_promotion.v1",
             "target_local_rule_file": "cache_rules.yaml",
             "target_local_policy_section": "cache.pattern_rules",
             "rollback_metadata": rollback_metadata,

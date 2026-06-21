@@ -18,7 +18,7 @@ from tokenclaw.repeated_scaffold_feedback import SOURCE_SURFACE as LIFECYCLE_SOU
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.repeated_scaffold_activation.v1"
+SCHEMA = "tokenclaw.repeated_scaffold_activation.v1"
 ANTHROPIC_SOURCE_SURFACE = "anthropic_messages"
 FEEDBACK_SOURCE_SURFACES = {ANTHROPIC_SOURCE_SURFACE, LIFECYCLE_SOURCE_SURFACE}
 

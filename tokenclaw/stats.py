@@ -31,7 +31,7 @@ from tokenclaw.pricing import (
     provider_prompt_cache_accounting,
 )
 from tokenclaw.golden_path import build_golden_path_summary
-from tokenclaw.paths import agentflow_config_path
+from tokenclaw.paths import tokenclaw_config_path
 from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.quality import (
     derive_codex_turn_quality_signals,
@@ -111,11 +111,11 @@ def _metadata_only_privacy() -> dict[str, bool]:
 
 def _crunch_rule_candidate_paths() -> list[Path]:
     candidates: list[Path] = []
-    env_path = os.getenv("AGENTFLOW_CRUNCH_RULES")
+    env_path = os.getenv("TOKENCLAW_CRUNCH_RULES")
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / "crunch_rules.yaml")
-    candidates.append(agentflow_config_path("crunch_rules.yaml"))
+    candidates.append(tokenclaw_config_path("crunch_rules.yaml"))
     candidates.append(Path(__file__).parent / "crunch_rules.yaml")
     deduped: list[Path] = []
     seen: set[str] = set()
@@ -138,7 +138,7 @@ def _active_crunch_rule_coverage() -> dict[str, Any] | None:
             value = yaml.safe_load(path.read_text(encoding="utf-8"))
         except Exception:
             return {
-                "schema": "agentflow.active_crunch_rule_coverage.v1",
+                "schema": "tokenclaw.active_crunch_rule_coverage.v1",
                 "status": "unreadable-rule-file",
                 "rule_file": "crunch_rules.yaml",
                 "target_local_policy": "crunch_rules",
@@ -185,7 +185,7 @@ def _active_crunch_rule_coverage() -> dict[str, Any] | None:
             continue
         decision = item.get("policy_decision") if isinstance(item.get("policy_decision"), dict) else {}
         decision_value = str(decision.get("decision") or "").strip()
-        if decision.get("schema") != "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1":
+        if decision.get("schema") != "tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1":
             continue
         source = public_label(item.get("policy_source") or "local-manual", "local-manual")
         policy_sources[source] = policy_sources.get(source, 0) + 1
@@ -233,7 +233,7 @@ def _active_crunch_rule_coverage() -> dict[str, Any] | None:
     no_op_reason = None if has_applied else "no-applied-coverage"
     missing = [] if has_applied else ["no-applied-coverage"]
     return {
-        "schema": "agentflow.active_crunch_rule_coverage.v1",
+        "schema": "tokenclaw.active_crunch_rule_coverage.v1",
         "status": status,
         "rule_file": "crunch_rules.yaml",
         "rules_path_included": False,
@@ -355,7 +355,7 @@ def _url_host_state(raw_url: str | None) -> dict[str, Any]:
 
 
 def _db_path_class(default_db: str | None) -> str:
-    raw = os.getenv("AGENTFLOW_DATABASE_URL") or default_db or ""
+    raw = os.getenv("TOKENCLAW_DATABASE_URL") or default_db or ""
     lowered = raw.lower()
     if "://" in raw:
         if lowered.startswith("sqlite://"):
@@ -365,61 +365,61 @@ def _db_path_class(default_db: str | None) -> str:
     home = os.path.abspath(os.path.expanduser("~"))
     if not expanded:
         return "unknown"
-    if expanded.startswith(os.path.join(home, ".agentflow") + os.sep):
-        return "local-agentflow-home"
+    if expanded.startswith(os.path.join(home, ".tokenclaw") + os.sep):
+        return "local-tokenclaw-home"
     if expanded.startswith("/tmp/") or expanded.startswith("/var/tmp/"):
         return "local-temp"
     return "local-path"
 
 
 def _policy_events_path_class() -> str:
-    raw = os.getenv("AGENTFLOW_POLICY_EVENTS_LOG", "~/.agentflow/policy_events.jsonl")
+    raw = os.getenv("TOKENCLAW_POLICY_EVENTS_LOG", "~/.tokenclaw/policy_events.jsonl")
     expanded = os.path.abspath(os.path.expanduser(raw))
     home = os.path.abspath(os.path.expanduser("~"))
-    if expanded.startswith(os.path.join(home, ".agentflow") + os.sep):
-        return "local-agentflow-home"
+    if expanded.startswith(os.path.join(home, ".tokenclaw") + os.sep):
+        return "local-tokenclaw-home"
     if expanded.startswith("/tmp/") or expanded.startswith("/var/tmp/"):
         return "local-temp"
     return "local-path"
 
 
 def _promotion_blocker_review_path() -> Path:
-    raw = os.getenv("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")
+    raw = os.getenv("TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH")
     if raw:
         return Path(raw).expanduser()
-    return agentflow_config_path("promotion_blocker_recommendation_review.json")
+    return tokenclaw_config_path("promotion_blocker_recommendation_review.json")
 
 
 def _post_promotion_priority_review_path() -> Path:
-    raw = os.getenv("AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH")
+    raw = os.getenv("TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH")
     if raw:
         return Path(raw).expanduser()
-    return agentflow_config_path("post_promotion_priority_delta_review.json")
+    return tokenclaw_config_path("post_promotion_priority_delta_review.json")
 
 
 def _post_promotion_policy_draft_dry_run_path() -> Path:
-    raw = os.getenv("AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH")
+    raw = os.getenv("TOKENCLAW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH")
     if raw:
         return Path(raw).expanduser()
-    return agentflow_config_path("post_promotion_policy_draft_dry_run.json")
+    return tokenclaw_config_path("post_promotion_policy_draft_dry_run.json")
 
 
 def _evidence_to_activation_plan_candidate_paths(package_root: Path | None = None) -> list[Path]:
     candidates: list[Path] = []
-    for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON"):
+    for name in ("TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "TOKENCLAW_RESEARCH_PLAN_JSON"):
         raw = os.getenv(name)
         if raw:
             candidates.append(Path(raw).expanduser())
             return candidates
-    ops_root = os.getenv("AGENTFLOW_OPS_ROOT")
+    ops_root = os.getenv("TOKENCLAW_OPS_ROOT")
     if ops_root:
         candidates.append(Path(ops_root).expanduser() / "runs" / "research" / "latest.plan.json")
         return candidates
     root = package_root or Path(__file__).resolve().parents[1]
     candidates.append(root.parent / "runs" / "research" / "latest.plan.json")
     for parent in (root, *root.parents):
-        candidates.append(parent / "agentflow_ops" / "runs" / "research" / "latest.plan.json")
-    candidates.append(agentflow_config_path("research/latest.plan.json"))
+        candidates.append(parent / "tokenclaw_ops" / "runs" / "research" / "latest.plan.json")
+    candidates.append(tokenclaw_config_path("research/latest.plan.json"))
 
     deduped: list[Path] = []
     seen: set[str] = set()
@@ -441,10 +441,10 @@ def _evidence_to_activation_plan_path() -> Path:
 
 
 def _post_promotion_outcome_flush_status_path() -> Path:
-    raw = os.getenv("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH")
+    raw = os.getenv("TOKENCLAW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH")
     if raw:
         return Path(raw).expanduser()
-    return agentflow_config_path("post_promotion_outcome_flush_status.json")
+    return tokenclaw_config_path("post_promotion_outcome_flush_status.json")
 
 
 def _local_path_class(raw: str | os.PathLike[str] | None) -> str:
@@ -452,8 +452,8 @@ def _local_path_class(raw: str | os.PathLike[str] | None) -> str:
     home = os.path.abspath(os.path.expanduser("~"))
     if not expanded:
         return "unknown"
-    if expanded.startswith(os.path.join(home, ".agentflow") + os.sep):
-        return "local-agentflow-home"
+    if expanded.startswith(os.path.join(home, ".tokenclaw") + os.sep):
+        return "local-tokenclaw-home"
     if expanded.startswith("/tmp/") or expanded.startswith("/var/tmp/"):
         return "local-temp"
     return "local-path"
@@ -501,7 +501,7 @@ def _public_workbench_draft(manifest: dict[str, Any], *, mtime: float | None = N
 def _workbench_staged_drafts(limit: int = 10) -> tuple[list[dict[str, Any]], int]:
     from tokenclaw.policy_files import _draft_workspace_root
 
-    raw_workspace = os.getenv("AGENTFLOW_POLICY_DRAFT_DIR")
+    raw_workspace = os.getenv("TOKENCLAW_POLICY_DRAFT_DIR")
     workspace = _draft_workspace_root(raw_workspace)
     if not workspace.exists() or not workspace.is_dir():
         return [], 0
@@ -651,7 +651,7 @@ async def stats_policy_workbench_readiness(policy_state: dict[str, Any] | None =
     )
 
     return {
-        "schema": "agentflow.policy_workbench_readiness.v1",
+        "schema": "tokenclaw.policy_workbench_readiness.v1",
         "status": status,
         "status_reason": reason,
         "generated_at": utc_now(),
@@ -659,8 +659,8 @@ async def stats_policy_workbench_readiness(policy_state: dict[str, Any] | None =
         "mutating_dashboard_endpoints": False,
         "loopback_admin_only": True,
         "workspace": {
-            "configured": bool(os.getenv("AGENTFLOW_POLICY_DRAFT_DIR")),
-            "path_class": _local_path_class(os.getenv("AGENTFLOW_POLICY_DRAFT_DIR") or "~/.agentflow/policy_drafts"),
+            "configured": bool(os.getenv("TOKENCLAW_POLICY_DRAFT_DIR")),
+            "path_class": _local_path_class(os.getenv("TOKENCLAW_POLICY_DRAFT_DIR") or "~/.tokenclaw/policy_drafts"),
             "raw_path_included": False,
         },
         "staged_drafts": {
@@ -701,12 +701,12 @@ async def stats_policy_workbench_readiness(policy_state: dict[str, Any] | None =
             "recent": public_events,
         },
         "operator_labels": {
-            "stage": "agentflow-policy-draft-stage",
-            "validate": "agentflow-policy-draft-validate",
-            "apply": "agentflow-policy-draft-apply",
-            "rollback": "agentflow-policy-rollback",
-            "reload": "agentflow-policy-reload",
-            "admin_reload_path": "/agentflow/admin/reload-policies",
+            "stage": "tokenclaw-policy-draft-stage",
+            "validate": "tokenclaw-policy-draft-validate",
+            "apply": "tokenclaw-policy-draft-apply",
+            "rollback": "tokenclaw-policy-rollback",
+            "reload": "tokenclaw-policy-reload",
+            "admin_reload_path": "/tokenclaw/admin/reload-policies",
         },
         "privacy": {
             "local_only": True,
@@ -888,15 +888,15 @@ async def stats_safety(
 
     recommendation_enabled = recommendations_enabled()
     recommendation_url = recommendation_server_url()
-    policy_bundle_url = os.getenv("AGENTFLOW_POLICY_BUNDLE_RECOMMENDATION_URL")
+    policy_bundle_url = os.getenv("TOKENCLAW_POLICY_BUNDLE_RECOMMENDATION_URL")
     auth_configured = managed_auth_configured()
-    log_bodies_enabled = _env_bool("AGENTFLOW_LOG_BODIES", False)
-    policy_events_enabled = _env_bool("AGENTFLOW_POLICY_EVENTS", True)
-    proxy_host_value = proxy_host or os.getenv("AGENTFLOW_PROXY_HOST") or os.getenv("AGENTFLOW_HOST")
+    log_bodies_enabled = _env_bool("TOKENCLAW_LOG_BODIES", False)
+    policy_events_enabled = _env_bool("TOKENCLAW_POLICY_EVENTS", True)
+    proxy_host_value = proxy_host or os.getenv("TOKENCLAW_PROXY_HOST") or os.getenv("TOKENCLAW_HOST")
     proxy_loopback = _host_is_loopback(proxy_host_value)
     dashboard_loopback = _host_is_loopback(dashboard_host) if dashboard_host else None
     db_class = _db_path_class(default_db)
-    recommendation_state = _url_host_state(recommendation_url if recommendation_enabled or os.getenv("AGENTFLOW_RECOMMENDATION_SERVER_URL") else None)
+    recommendation_state = _url_host_state(recommendation_url if recommendation_enabled or os.getenv("TOKENCLAW_RECOMMENDATION_SERVER_URL") else None)
     policy_bundle_state = _url_host_state(policy_bundle_url)
     feedback_queue = _managed_feedback_queue_health(store_obj)
     feedback_summary = feedback_queue.get("summary") or {}
@@ -922,7 +922,7 @@ async def stats_safety(
         warn(
             "body-logging-enabled",
             "critical",
-            "AGENTFLOW_LOG_BODIES is enabled; raw request and response bodies may be stored locally for debugging.",
+            "TOKENCLAW_LOG_BODIES is enabled; raw request and response bodies may be stored locally for debugging.",
         )
     if recommendation_enabled and not auth_configured:
         warn(
@@ -985,7 +985,7 @@ async def stats_safety(
         worst = max((row["severity"] for row in warnings), key=lambda value: severity_rank.get(value, 0))
 
     return {
-        "schema": "agentflow.safety_privacy.v1",
+        "schema": "tokenclaw.safety_privacy.v1",
         "generated_at": utc_now(),
         "status": "warning" if any(row["severity"] != "info" for row in warnings) else "ok",
         "highest_severity": worst,
@@ -1059,7 +1059,7 @@ async def stats_policies() -> dict[str, Any]:
     from tokenclaw import cache, crunch, router, routing_experiments
 
     state = {
-        "schema": "agentflow.policy_state.v1",
+        "schema": "tokenclaw.policy_state.v1",
         "routing": {
             "enabled": bool(router.ROUTING_ENABLED),
             "policy_source": router.ROUTING_RULES_SOURCE,
@@ -1352,21 +1352,21 @@ def _post_promotion_next_safe_command(
     if review_payload is None:
         return {
             "label": "fetch managed priority deltas",
-            "command": "agentflow-post-promotion-priority-delta-review --pretty",
+            "command": "tokenclaw-post-promotion-priority-delta-review --pretty",
             "read_only": True,
             "reason": "priority-review-missing",
         }
     if top_next_action == "collect-holdout-evidence":
         return {
             "label": "inspect holdout evidence successor",
-            "command": "agentflow-post-promotion-priority-delta-review --pretty",
+            "command": "tokenclaw-post-promotion-priority-delta-review --pretty",
             "read_only": True,
             "reason": "holdout-evidence-required",
         }
     if draft_payload is None and top_next_action in {"widen-local-policy", "rollback-local-policy", "keep-blocked"}:
         return {
             "label": "dry-run local policy handoff",
-            "command": "agentflow-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
+            "command": "tokenclaw-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
             "read_only": True,
             "reason": "policy-draft-dry-run-missing",
         }
@@ -1374,20 +1374,20 @@ def _post_promotion_next_safe_command(
     if draft_status == "blocked":
         return {
             "label": "inspect dry-run impact gate blockers",
-            "command": "agentflow-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
+            "command": "tokenclaw-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
             "read_only": True,
             "reason": "impact-gate-blocked",
         }
     if flush_payload is None:
         return {
             "label": "dry-run post-promotion outcome flush",
-            "command": "agentflow-managed-feedback-status --post-promotion-action-outcomes --dry-run --pretty",
+            "command": "tokenclaw-managed-feedback-status --post-promotion-action-outcomes --dry-run --pretty",
             "read_only": True,
             "reason": "outcome-flush-status-missing",
         }
     return {
         "label": "review handoff status",
-        "command": "agentflow-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
+        "command": "tokenclaw-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
         "read_only": True,
         "reason": "handoff-artifacts-present",
     }
@@ -1402,17 +1402,17 @@ async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
     draft_payload, draft_status, draft_reason = _read_post_promotion_artifact(draft_path)
     flush_payload, flush_status, flush_reason = _read_post_promotion_artifact(flush_path)
 
-    if review_payload is not None and review_payload.get("schema") != "agentflow.post_promotion_priority_delta_review.v1":
+    if review_payload is not None and review_payload.get("schema") != "tokenclaw.post_promotion_priority_delta_review.v1":
         review_payload = None
         review_status = "unavailable"
         review_reason = "unexpected-priority-review-schema"
-    if draft_payload is not None and draft_payload.get("schema") != "agentflow.post_promotion_policy_draft_dry_run.v1":
+    if draft_payload is not None and draft_payload.get("schema") != "tokenclaw.post_promotion_policy_draft_dry_run.v1":
         draft_payload = None
         draft_status = "unavailable"
         draft_reason = "unexpected-policy-draft-schema"
     if flush_payload is not None and flush_payload.get("schema") not in {
-        "agentflow.managed_feedback_flush.v1",
-        "agentflow.post_promotion_action_outcome_rollup_flush_status.v1",
+        "tokenclaw.managed_feedback_flush.v1",
+        "tokenclaw.post_promotion_action_outcome_rollup_flush_status.v1",
     }:
         flush_payload = None
         flush_status = "unavailable"
@@ -1444,7 +1444,7 @@ async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
         flush_payload.get("post_promotion_action_outcome_rollups")
         if isinstance(flush_payload, dict) and isinstance(flush_payload.get("post_promotion_action_outcome_rollups"), dict)
         else flush_payload
-        if isinstance(flush_payload, dict) and flush_payload.get("schema") == "agentflow.post_promotion_action_outcome_rollup_flush_status.v1"
+        if isinstance(flush_payload, dict) and flush_payload.get("schema") == "tokenclaw.post_promotion_action_outcome_rollup_flush_status.v1"
         else {}
     )
     flush_summary = flush_payload.get("flush") if isinstance(flush_payload, dict) and isinstance(flush_payload.get("flush"), dict) else {}
@@ -1472,7 +1472,7 @@ async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
     available_count = sum(1 for payload in (review_payload, draft_payload, flush_payload) if payload is not None)
     overall_status = "available" if review_payload is not None else "no-data" if available_count == 0 else "partial"
     return {
-        "schema": "agentflow.post_promotion_priority_handoff_dashboard.v1",
+        "schema": "tokenclaw.post_promotion_priority_handoff_dashboard.v1",
         "ok": True,
         "read_only": True,
         "generated_at": utc_now(),
@@ -1513,7 +1513,7 @@ async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
             "priority_review": _post_promotion_artifact_source(
                 kind="priority-review-report",
                 path=review_path,
-                env_name="AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH",
+                env_name="TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH",
                 payload=review_payload,
                 status=review_status,
                 reason=review_reason,
@@ -1521,7 +1521,7 @@ async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
             "policy_draft_dry_run": _post_promotion_artifact_source(
                 kind="policy-draft-dry-run-report",
                 path=draft_path,
-                env_name="AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH",
+                env_name="TOKENCLAW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH",
                 payload=draft_payload,
                 status=draft_status,
                 reason=draft_reason,
@@ -1529,7 +1529,7 @@ async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
             "outcome_flush_status": _post_promotion_artifact_source(
                 kind="outcome-flush-status-report",
                 path=flush_path,
-                env_name="AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH",
+                env_name="TOKENCLAW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH",
                 payload=flush_payload,
                 status=flush_status,
                 reason=flush_reason,
@@ -1539,17 +1539,17 @@ async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
             command,
             {
                 "label": "fetch managed priority deltas",
-                "command": "agentflow-post-promotion-priority-delta-review --pretty",
+                "command": "tokenclaw-post-promotion-priority-delta-review --pretty",
                 "read_only": True,
             },
             {
                 "label": "dry-run local policy handoff",
-                "command": "agentflow-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
+                "command": "tokenclaw-post-promotion-policy-draft-dry-run post_promotion_priority_delta_review.json --pretty",
                 "read_only": True,
             },
             {
                 "label": "dry-run post-promotion outcome flush",
-                "command": "agentflow-managed-feedback-status --post-promotion-action-outcomes --dry-run --pretty",
+                "command": "tokenclaw-managed-feedback-status --post-promotion-action-outcomes --dry-run --pretty",
                 "read_only": True,
             },
         ],
@@ -1560,7 +1560,7 @@ async def stats_post_promotion_priority_handoff() -> dict[str, Any]:
 def _promotion_blocker_no_data(reason: str, *, source_path: Path | None = None) -> dict[str, Any]:
     path = source_path or _promotion_blocker_review_path()
     return {
-        "schema": "agentflow.promotion_blocker_next_actions_dashboard.v1",
+        "schema": "tokenclaw.promotion_blocker_next_actions_dashboard.v1",
         "ok": True,
         "read_only": True,
         "generated_at": utc_now(),
@@ -1568,7 +1568,7 @@ def _promotion_blocker_no_data(reason: str, *, source_path: Path | None = None) 
         "status_reason": reason,
         "source": {
             "kind": "local-review-report",
-            "configured": bool(os.getenv("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")),
+            "configured": bool(os.getenv("TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH")),
             "available": False,
             "path_class": _local_path_class(path),
             "path_included": False,
@@ -1594,7 +1594,7 @@ def _promotion_blocker_no_data(reason: str, *, source_path: Path | None = None) 
         "commands": [
             {
                 "label": "review local promotion blocker recommendations",
-                "command": "agentflow-optimization-promotion-blocker-review recommendations.json --pretty",
+                "command": "tokenclaw-optimization-promotion-blocker-review recommendations.json --pretty",
                 "read_only": True,
             }
         ],
@@ -1689,7 +1689,7 @@ async def stats_promotion_blocker_next_actions(limit: int = 20) -> dict[str, Any
         result = _promotion_blocker_no_data(f"local promotion blocker review report unreadable: {exc.__class__.__name__}", source_path=path)
         result["status"] = "unavailable"
         return result
-    if not isinstance(payload, dict) or payload.get("schema") != "agentflow.promotion_blocker_recommendation_review.v1":
+    if not isinstance(payload, dict) or payload.get("schema") != "tokenclaw.promotion_blocker_recommendation_review.v1":
         result = _promotion_blocker_no_data("local report is not a promotion blocker recommendation review", source_path=path)
         result["status"] = "unavailable"
         return result
@@ -1723,7 +1723,7 @@ async def stats_promotion_blocker_next_actions(limit: int = 20) -> dict[str, Any
     top_candidate = candidates[0] if candidates else {}
     generated_at = payload.get("generated_at") if isinstance(payload.get("generated_at"), str) else None
     return {
-        "schema": "agentflow.promotion_blocker_next_actions_dashboard.v1",
+        "schema": "tokenclaw.promotion_blocker_next_actions_dashboard.v1",
         "ok": True,
         "read_only": True,
         "generated_at": utc_now(),
@@ -1731,7 +1731,7 @@ async def stats_promotion_blocker_next_actions(limit: int = 20) -> dict[str, Any
         "status_reason": "loaded local promotion blocker review report" if candidates else "local review report has no candidates",
         "source": {
             "kind": "local-review-report",
-            "configured": bool(os.getenv("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")),
+            "configured": bool(os.getenv("TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH")),
             "available": True,
             "generated_at": generated_at,
             "source_schema": payload.get("source_schema"),
@@ -1766,17 +1766,17 @@ async def stats_promotion_blocker_next_actions(limit: int = 20) -> dict[str, Any
         "commands": [
             {
                 "label": "review local promotion blocker recommendations",
-                "command": "agentflow-optimization-promotion-blocker-review recommendations.json --pretty",
+                "command": "tokenclaw-optimization-promotion-blocker-review recommendations.json --pretty",
                 "read_only": True,
             },
             {
                 "label": "queue local shadow eval tasks",
-                "command": "agentflow-optimization-eval-next --promotion-blocker-review review.json --dry-run --pretty",
+                "command": "tokenclaw-optimization-eval-next --promotion-blocker-review review.json --dry-run --pretty",
                 "read_only": True,
             },
             {
                 "label": "inspect promotion funnel",
-                "command": "agentflow-optimization-promotion-report --pretty",
+                "command": "tokenclaw-optimization-promotion-report --pretty",
                 "read_only": True,
             },
         ],
@@ -1789,7 +1789,7 @@ async def stats_sqlite_maintenance(store_obj: Any) -> dict[str, Any]:
         status = store_obj.sqlite_retention_status()
     else:
         status = {
-            "schema": "agentflow.sqlite_retention_status.v1",
+            "schema": "tokenclaw.sqlite_retention_status.v1",
             "backend": getattr(store_obj, "backend", "unknown"),
             "enabled": False,
             "retention_days": None,
@@ -1798,7 +1798,7 @@ async def stats_sqlite_maintenance(store_obj: Any) -> dict[str, Any]:
             "request_path_maintenance": "not-available",
         }
     return {
-        "schema": "agentflow.sqlite_maintenance_dashboard.v1",
+        "schema": "tokenclaw.sqlite_maintenance_dashboard.v1",
         "generated_at": utc_now(),
         "status": status,
         "summary": {
@@ -1907,7 +1907,7 @@ def _openai_activation_review_metadata(manifest: dict[str, Any]) -> dict[str, An
 def _managed_openai_activation_staged_drafts(limit: int = 10) -> tuple[list[dict[str, Any]], int]:
     from tokenclaw.policy_files import _draft_workspace_root
 
-    raw_workspace = os.getenv("AGENTFLOW_POLICY_DRAFT_DIR")
+    raw_workspace = os.getenv("TOKENCLAW_POLICY_DRAFT_DIR")
     workspace = _draft_workspace_root(raw_workspace)
     if not workspace.exists() or not workspace.is_dir():
         return [], 0
@@ -1944,7 +1944,7 @@ def _managed_openai_activation_staged_drafts(limit: int = 10) -> tuple[list[dict
                 "changed_sections": manifest.get("changed_sections") if isinstance(manifest.get("changed_sections"), list) else [],
                 "change_count": _as_int(manifest.get("change_count")),
                 "openai_optimization_review": review,
-                "workspace_path_class": _local_path_class(raw_workspace or "~/.agentflow/policy_drafts"),
+                "workspace_path_class": _local_path_class(raw_workspace or "~/.tokenclaw/policy_drafts"),
                 "workspace_path_included": False,
                 "manifest_path_included": False,
                 "bundle_path_included": False,
@@ -2030,11 +2030,11 @@ def _managed_openai_activation_status(
 
 def _scaffold_canary_policy_candidates() -> list[Path]:
     candidates: list[Path] = []
-    env_path = os.getenv("AGENTFLOW_SCAFFOLD_CANARY_POLICY")
+    env_path = os.getenv("TOKENCLAW_SCAFFOLD_CANARY_POLICY")
     if env_path:
         candidates.append(Path(env_path).expanduser())
     candidates.append(Path.cwd() / "config" / SCAFFOLD_CANARY_POLICY_FILENAME)
-    candidates.append(agentflow_config_path(SCAFFOLD_CANARY_POLICY_FILENAME))
+    candidates.append(tokenclaw_config_path(SCAFFOLD_CANARY_POLICY_FILENAME))
     return candidates
 
 
@@ -2048,7 +2048,7 @@ def _scaffold_canary_policy_health() -> dict[str, Any]:
             "active_rule_count": 0,
             "policy_source": None,
             "rule_path_included": False,
-            "rule_path_class": _local_path_class(os.getenv("AGENTFLOW_SCAFFOLD_CANARY_POLICY") or "~/.agentflow/scaffold_canary_policy.yaml"),
+            "rule_path_class": _local_path_class(os.getenv("TOKENCLAW_SCAFFOLD_CANARY_POLICY") or "~/.tokenclaw/scaffold_canary_policy.yaml"),
             "yaml_contents_included": False,
         }
 
@@ -2190,7 +2190,7 @@ async def stats_managed_openai_activation(store_obj: Any, limit: int = 500) -> d
     family_counts = latest_review.get("counts_by_family") if isinstance(latest_review.get("counts_by_family"), list) else []
 
     return {
-        "schema": "agentflow.managed_openai_activation.v1",
+        "schema": "tokenclaw.managed_openai_activation.v1",
         "generated_at": utc_now(),
         "status": status,
         "status_reason": status_reason,
@@ -2249,9 +2249,9 @@ async def stats_managed_openai_activation(store_obj: Any, limit: int = 500) -> d
         "feedback_queue": feedback_queue,
         "recent_events": public_events[:25],
         "next_read_only_command": (
-            "agentflow-openai-optimization-draft-dry-run <draft-id> --pretty"
+            "tokenclaw-openai-optimization-draft-dry-run <draft-id> --pretty"
             if staged_drafts and not (latest_dry_run and latest_dry_run.get("ok"))
-            else "agentflow-openai-optimization-draft-apply <draft-id> --dry-run --pretty"
+            else "tokenclaw-openai-optimization-draft-apply <draft-id> --dry-run --pretty"
             if latest_dry_run and latest_dry_run.get("ok") and not (latest_apply and latest_apply.get("status") == "applied")
             else None
         ),
@@ -2534,10 +2534,10 @@ def _next_rollout_read_only_command(
     latest_dry_run: dict[str, Any] | None,
 ) -> str | None:
     if not latest_review or not latest_review.get("ok", True):
-        return "agentflow-managed-rollout-actions-review actions.json --pretty"
+        return "tokenclaw-managed-rollout-actions-review actions.json --pretty"
     if not latest_dry_run or not latest_dry_run.get("ok", True):
-        return "agentflow-managed-rollout-actions-dry-run actions.json --db ~/.agentflow/agentflow.sqlite3 --pretty"
-    return "agentflow-managed-rollout-actions-apply actions.json --config-dir ~/.agentflow --dry-run --pretty"
+        return "tokenclaw-managed-rollout-actions-dry-run actions.json --db ~/.tokenclaw/tokenclaw.sqlite3 --pretty"
+    return "tokenclaw-managed-rollout-actions-apply actions.json --config-dir ~/.tokenclaw --dry-run --pretty"
 
 
 async def stats_rollout_actions_readiness(store_obj: Any, limit: int = 500) -> dict[str, Any]:
@@ -2603,7 +2603,7 @@ async def stats_rollout_actions_readiness(store_obj: Any, limit: int = 500) -> d
         and not _as_int(feedback_queue.get("summary", {}).get("due"))
     )
     return {
-        "schema": "agentflow.rollout_actions_readiness.v1",
+        "schema": "tokenclaw.rollout_actions_readiness.v1",
         "generated_at": utc_now(),
         "status": "ready" if ready else "needs-review",
         "limit": capped_limit,
@@ -2981,7 +2981,7 @@ def _finalize_old_context_summary_quality_bucket(bucket: dict[str, Any]) -> dict
         reason_codes = ["quality-gate-passed"]
 
     return {
-        "schema": "agentflow.old_context_summary_dashboard_quality_gate.v1",
+        "schema": "tokenclaw.old_context_summary_dashboard_quality_gate.v1",
         "candidate_id": bucket.get("candidate_id"),
         "rule_id": bucket.get("rule_id"),
         "policy_source": bucket.get("policy_source"),
@@ -3420,7 +3420,7 @@ async def stats_phase_routing(store_obj: Any, limit: int = 1000) -> dict[str, An
             rollout_status = "safety-stopped"
 
     return {
-        "schema": "agentflow.phase_routing_dashboard.v1",
+        "schema": "tokenclaw.phase_routing_dashboard.v1",
         "generated_at": utc_now(),
         "limit": capped_limit,
         "status": rollout_status,
@@ -3821,7 +3821,7 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
     }
     readiness_state_counts["rollback"] = quality_gate_summary["rollback_count"]
     readiness = {
-        "schema": "agentflow.old_context_summary_dashboard_readiness.v1",
+        "schema": "tokenclaw.old_context_summary_dashboard_readiness.v1",
         "status": "observed" if observed_rows else "no-observed-rows",
         "latest_quality_gate_verdict": quality_gates[0].get("verdict") if quality_gates else None,
         "state_breakdown": _count_breakdown(readiness_state_counts),
@@ -3850,7 +3850,7 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
         reverse=True,
     )
     plateau_session_context = {
-        "schema": "agentflow.old_context_summary_plateau_session_context.v1",
+        "schema": "tokenclaw.old_context_summary_plateau_session_context.v1",
         "affected_session_count": len(affected_sessions),
         "observed_large_context_rows": len(plateau_text_chars),
         "median_text_chars": _median_int(plateau_text_chars),
@@ -3916,7 +3916,7 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
     )
     skip_breakdown = _count_breakdown(reason_counts)
     rollout_health = {
-        "schema": "agentflow.old_context_summary_rollout_health.v1",
+        "schema": "tokenclaw.old_context_summary_rollout_health.v1",
         "status": rollout_status,
         "state_flags": {
             "disabled": rollout_status == "disabled",
@@ -3981,7 +3981,7 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
     }
 
     return {
-        "schema": "agentflow.old_context_summarization_opportunity.v1",
+        "schema": "tokenclaw.old_context_summarization_opportunity.v1",
         "generated_at": utc_now(),
         "summary": summary,
         "rollout_health": rollout_health,
@@ -4066,7 +4066,7 @@ def _codex_turn_risk_features(row: dict[str, Any]) -> dict[str, Any]:
     input_text_chars = _as_int(row.get("input_text_chars"))
     params_chars = _as_int(row.get("params_chars"))
     method = str(row.get("method") or "turn/start")
-    raw_prompt_logging_enabled = os.getenv("AGENTFLOW_LOG_BODIES", "0") == "1"
+    raw_prompt_logging_enabled = os.getenv("TOKENCLAW_LOG_BODIES", "0") == "1"
     return {
         "mutation_safe": False,
         "mutation_safe_reason": CODEX_APP_TELEMETRY_ONLY_REASON,
@@ -4818,7 +4818,7 @@ def _cache_zero_hit_blocker_ladder(rows: list[dict[str, Any]], *, scan_limit: in
         if candidate is not None
     ][:10] if cache_hits == 0 else []
     return {
-        "schema": "agentflow.cache_zero_hit_blocker_ladder.v1",
+        "schema": "tokenclaw.cache_zero_hit_blocker_ladder.v1",
         "generated_at": utc_now(),
         "summary": {
             "scan_limit": capped_limit,
@@ -5430,7 +5430,7 @@ async def stats_cache_replay_confidence(store_obj: Any, limit: int = 1000) -> di
         reverse=True,
     )
     return {
-        "schema": "agentflow.cache_replay_confidence.v1",
+        "schema": "tokenclaw.cache_replay_confidence.v1",
         "generated_at": utc_now(),
         "summary": {
             "rows_considered": len(rows),
@@ -5668,7 +5668,7 @@ async def stats_cache_replay_readiness(store_obj: Any, limit: int = 1000) -> dic
         status = "no-rules"
 
     return {
-        "schema": "agentflow.cache_replay_readiness.v1",
+        "schema": "tokenclaw.cache_replay_readiness.v1",
         "generated_at": utc_now(),
         "status": status,
         "summary": {
@@ -6015,7 +6015,7 @@ async def stats_cache_replay_activation_health(
     )
 
     return {
-        "schema": "agentflow.cache_replay_activation_health.v1",
+        "schema": "tokenclaw.cache_replay_activation_health.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "status": "observed" if cohorts else "needs evidence",
@@ -6326,7 +6326,7 @@ async def stats_streaming_cache_hit_recovery(
     )
     top = cohorts[0] if cohorts else None
     return {
-        "schema": "agentflow.streaming_cache_hit_recovery.v1",
+        "schema": "tokenclaw.streaming_cache_hit_recovery.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "status": "observed" if cohorts else "needs evidence",
@@ -6465,7 +6465,7 @@ async def stats_local_pattern_coverage(store_obj: Any, limit: int = 1000) -> dic
 
     conn = store_obj.conn
     row_limit = max(1, min(int(limit or 1000), 10000))
-    min_samples = max(1, _as_int(os.getenv("AGENTFLOW_PATTERN_COVERAGE_MIN_SAMPLES")) or 10)
+    min_samples = max(1, _as_int(os.getenv("TOKENCLAW_PATTERN_COVERAGE_MIN_SAMPLES")) or 10)
     recommendations_configured = bool(recommendations_enabled() and recommendation_server_configured())
     registered = {item["family"]: item for item in registered_pattern_modules() if isinstance(item, dict)}
     families = sorted(set(LOCAL_PATTERN_COVERAGE_FAMILIES) | set(registered))
@@ -6643,7 +6643,7 @@ async def stats_local_pattern_coverage(store_obj: Any, limit: int = 1000) -> dic
 
     output_rows.sort(key=lambda item: (item["family"] not in LOCAL_PATTERN_COVERAGE_FAMILIES, item["family"]))
     return {
-        "schema": "agentflow.local_pattern_coverage.v1",
+        "schema": "tokenclaw.local_pattern_coverage.v1",
         "generated_at": utc_now(),
         "sampled_call_limit": row_limit,
         "sampled_call_count": len(rows),
@@ -6765,7 +6765,7 @@ def _managed_pattern_add_summary(
     bucket = grouped.setdefault(
         key,
         {
-            "schema": "agentflow.managed_pattern_canary_cohort_bucket.v1",
+            "schema": "tokenclaw.managed_pattern_canary_cohort_bucket.v1",
             "policy_section": key[0],
             "candidate_id": None if key[1] == "unknown" else key[1],
             "rule_id": None if key[2] == "unknown" else key[2],
@@ -7025,7 +7025,7 @@ async def stats_managed_pattern_rollups(store_obj: Any, *, limit: int = 500, min
 
     cohorts = _managed_pattern_finalize_buckets(grouped)
     return {
-        "schema": "agentflow.managed_pattern_canary_cohort_rollups.v1",
+        "schema": "tokenclaw.managed_pattern_canary_cohort_rollups.v1",
         "generated_at": utc_now(),
         "limit": capped_limit,
         "min_samples": sample_floor,
@@ -7180,7 +7180,7 @@ def _cache_replay_dependency_freshness(unit: dict[str, Any]) -> dict[str, Any]:
         freshness_reason = "file-dependency-evidence-absent"
 
     return {
-        "schema": "agentflow.cache_replay_dependency_freshness.v1",
+        "schema": "tokenclaw.cache_replay_dependency_freshness.v1",
         "status": status,
         "reason": freshness_reason,
         "tool_call_cohort": has_tools,
@@ -7501,7 +7501,7 @@ def _cache_file_dependency_audit_from_cache(cache: dict[str, Any]) -> dict[str, 
     if isinstance(audit, dict):
         safe = bool(audit.get("safe_invalidation_evidence"))
         return {
-            "schema": str(audit.get("schema") or "agentflow.cache_file_dependency_audit.v1"),
+            "schema": str(audit.get("schema") or "tokenclaw.cache_file_dependency_audit.v1"),
             "file_watch_enabled": bool(audit.get("file_watch_enabled")),
             "snapshot_root_policy": str(audit.get("snapshot_root_policy") or "unknown"),
             "root_path_included": False,
@@ -7532,7 +7532,7 @@ def _cache_file_dependency_audit_from_cache(cache: dict[str, Any]) -> dict[str, 
     if reason is None and not evidence:
         reason = "file-dependency-missing"
     return {
-        "schema": "agentflow.cache_file_dependency_audit.v1",
+        "schema": "tokenclaw.cache_file_dependency_audit.v1",
         "file_watch_enabled": bool(cache.get("file_watch_enabled")),
         "snapshot_root_policy": "unknown",
         "root_path_included": False,
@@ -7709,7 +7709,7 @@ def _public_session_memory_replay_proposal(proposal: dict[str, Any]) -> dict[str
     families = proposal.get("blocker_families") if isinstance(proposal.get("blocker_families"), dict) else {}
     privacy = proposal.get("privacy") if isinstance(proposal.get("privacy"), dict) else {}
     return {
-        "schema": "agentflow.session_memory_cache_replay_proposal.v1",
+        "schema": "tokenclaw.session_memory_cache_replay_proposal.v1",
         "status": public_label(proposal.get("status") or "unknown", "unknown"),
         "reason": public_label(proposal.get("reason") or "unknown", "unknown"),
         "proposal_id": f"session-memory-cache-replay:{fingerprint.removeprefix('sha256:')}",
@@ -7979,7 +7979,7 @@ def _cache_replayability_evidence_from_report(
         zero_hit_explanation = "cache hits are zero because no repeated normalized metadata shape was observed"
 
     return {
-        "schema": "agentflow.cache_replayability_evidence.v1",
+        "schema": "tokenclaw.cache_replayability_evidence.v1",
         "generated_at": utc_now(),
         "status": status,
         "zero_hit_explanation": zero_hit_explanation,
@@ -8250,7 +8250,7 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
         limit=limit,
     )
     return {
-        "schema": "agentflow.cache_replayability.v1",
+        "schema": "tokenclaw.cache_replayability.v1",
         "generated_at": utc_now(),
         "privacy": {
             "metadata_only": True,
@@ -8575,7 +8575,7 @@ def _cache_replay_cohort_ranking_from_units(units: list[dict[str, Any]], *, limi
         bucket = grouped.setdefault(
             cohort_hash,
             {
-                "schema": "agentflow.cache_replay_plateau_cohort.v1",
+                "schema": "tokenclaw.cache_replay_plateau_cohort.v1",
                 "cohort_id": f"cache-replay-cohort:{cohort_hash}",
                 "cohort_basis": basis,
                 "source_surface": basis["source_surface"],
@@ -8662,7 +8662,7 @@ def _cache_replay_cohort_ranking_from_units(units: list[dict[str, Any]], *, limi
     )
     output_limit = max(1, min(int(limit or 25), 1000))
     return {
-        "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+        "schema": "tokenclaw.cache_replay_plateau_cohort_ranking.v1",
         "generated_at": utc_now(),
         "summary": {
             "candidate_rows": len(units),
@@ -9091,7 +9091,7 @@ def _cache_replay_dry_run_from_units(
         if status in {"blocked", "invalidation-required", "unsupported-source-surface"}
     )
     return {
-        "schema": "agentflow.cache_replay_dry_run.v1",
+        "schema": "tokenclaw.cache_replay_dry_run.v1",
         "generated_at": utc_now(),
         "summary": {
             "rows_considered": len(units),
@@ -9256,7 +9256,7 @@ def _managed_policy_lifecycle_rows(policy_events: list[dict[str, Any]]) -> list[
         candidate_ids = details.get("candidate_ids") if isinstance(details.get("candidate_ids"), list) else []
         for section in _managed_policy_event_sections(details, action):
             rows.append({
-                "schema": "agentflow.managed_pattern_lifecycle_event.v1",
+                "schema": "tokenclaw.managed_pattern_lifecycle_event.v1",
                 "day": _day_key(event.get("created_at")),
                 "created_at": event.get("created_at"),
                 "lifecycle_stage": stage,
@@ -9348,7 +9348,7 @@ def _managed_pattern_add_adoption_row(
     bucket = grouped.setdefault(
         key,
         {
-            "schema": "agentflow.managed_pattern_adoption_bucket.v1",
+            "schema": "tokenclaw.managed_pattern_adoption_bucket.v1",
             "day": key[0],
             "lifecycle_stage": key[1],
             "policy_section": key[2],
@@ -9437,7 +9437,7 @@ def _managed_pattern_holdout_comparisons(rows: list[dict[str, Any]]) -> list[dic
         bucket = grouped.setdefault(
             key,
             {
-                "schema": "agentflow.managed_pattern_holdout_comparison.v1",
+                "schema": "tokenclaw.managed_pattern_holdout_comparison.v1",
                 "policy_section": key[0],
                 "candidate_id": None if key[1] == "unknown" else key[1],
                 "rule_id": None if key[2] == "unknown" else key[2],
@@ -9644,7 +9644,7 @@ def _managed_pattern_adoption_from_store(
             blocker_counts[str(item.get("value") or "unknown")] = blocker_counts.get(str(item.get("value") or "unknown"), 0) + _as_int(item.get("count"))
 
     return {
-        "schema": "agentflow.managed_pattern_adoption.v1",
+        "schema": "tokenclaw.managed_pattern_adoption.v1",
         "summary": {
             "lifecycle_event_count": len(lifecycle_rows),
             "pattern_outcome_bucket_count": len(outcome_rows),
@@ -9939,7 +9939,7 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
     }
 
     return {
-        "schema": "agentflow.managed_recommendations.v1",
+        "schema": "tokenclaw.managed_recommendations.v1",
         "generated_at": utc_now(),
         "limit": capped_limit,
         "current_config": {
@@ -10114,7 +10114,7 @@ def _finalize_openai_scoreboard_bucket(bucket: dict[str, Any]) -> dict[str, Any]
     return bucket
 
 
-OPENAI_GOVERNOR_SCHEMA = "agentflow.openai_optimization_governor.v1"
+OPENAI_GOVERNOR_SCHEMA = "tokenclaw.openai_optimization_governor.v1"
 OPENAI_GOVERNOR_FAMILIES = ("routing", "old_context_summary", "cache_replay")
 
 
@@ -10370,7 +10370,7 @@ async def stats_openai_optimization_readiness(store_obj: Any, limit: int = 1000)
         reason = "governor metadata exists but no family has been selected in this window"
 
     return {
-        "schema": "agentflow.openai_optimization_readiness.v1",
+        "schema": "tokenclaw.openai_optimization_readiness.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "wrote_local_files": False,
@@ -10599,7 +10599,7 @@ async def stats_openai_scoreboard(store_obj: Any, limit: int = 1000) -> dict[str
     )
 
     return {
-        "schema": "agentflow.openai_optimization_scoreboard.v1",
+        "schema": "tokenclaw.openai_optimization_scoreboard.v1",
         "generated_at": utc_now(),
         "limit": capped_limit,
         "question": "Are OpenAI optimizations helping?",
@@ -10815,7 +10815,7 @@ async def stats_openai_canary_readiness(store_obj: Any, limit: int = 1000) -> di
         for row in candidates[:10]
     ]
     return {
-        "schema": "agentflow.openai_canary_readiness.v1",
+        "schema": "tokenclaw.openai_canary_readiness.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "wrote_local_files": False,
@@ -11334,7 +11334,7 @@ async def stats_claude_routing_promotion_funnel(store_obj: Any, limit: int = 100
             verdict_counts[str(item.get("value") or "unknown")] = verdict_counts.get(str(item.get("value") or "unknown"), 0) + _as_int(item.get("count"))
 
     return {
-        "schema": "agentflow.claude_routing_promotion_funnel.v1",
+        "schema": "tokenclaw.claude_routing_promotion_funnel.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "wrote_local_files": False,
@@ -11513,7 +11513,7 @@ async def stats_shadow_routing_promotion_readiness(store_obj: Any, limit: int = 
         for reason in row.get("reason_codes") or []:
             _increment_count(reason_counts, reason)
     return {
-        "schema": "agentflow.shadow_routing_promotion_readiness.v1",
+        "schema": "tokenclaw.shadow_routing_promotion_readiness.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "wrote_local_files": False,
@@ -12031,7 +12031,7 @@ async def stats_terminal_output_compaction_activation(
     ]
 
     return {
-        "schema": "agentflow.terminal_output_compaction_activation.v1",
+        "schema": "tokenclaw.terminal_output_compaction_activation.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "status": status,
@@ -12209,7 +12209,7 @@ async def stats_terminal_output_compaction_readiness(
         })
 
     return {
-        "schema": "agentflow.terminal_output_compaction_readiness.v1",
+        "schema": "tokenclaw.terminal_output_compaction_readiness.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "state": state,
@@ -12333,7 +12333,7 @@ async def stats_scaffold_rollout_health(store_obj: Any, limit: int = 500) -> dic
         "estimated_savings_usd": _as_float(impact_summary.get("estimated_savings_usd")),
     }
     return {
-        "schema": "agentflow.scaffold_rollout_health.v1",
+        "schema": "tokenclaw.scaffold_rollout_health.v1",
         "generated_at": utc_now(),
         "status": status,
         "status_reason": status_reason,
@@ -12504,7 +12504,7 @@ async def stats_openai_tool_cache_invalidation_burndown(
         row["rank"] = rank
 
     return {
-        "schema": "agentflow.openai_tool_cache_invalidation_burndown.v1",
+        "schema": "tokenclaw.openai_tool_cache_invalidation_burndown.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "wrote_local_files": False,
@@ -12611,7 +12611,7 @@ async def stats_openai_old_context_summary_report(store_obj: Any, limit: int = 1
     crunch_file = crunch_state.get("file") if isinstance(crunch_state.get("file"), dict) else {}
     canary = policy.get("canary") if isinstance(policy.get("canary"), dict) else {}
     local_policy = {
-        "schema": "agentflow.openai_old_context_summary_dashboard_policy.v1",
+        "schema": "tokenclaw.openai_old_context_summary_dashboard_policy.v1",
         "enabled": bool(policy.get("enabled")),
         "policy_source": policy.get("policy_source") or "unknown",
         "summary_provider": policy.get("summary_provider"),
@@ -12812,7 +12812,7 @@ async def stats_optimization_eval_queue(store_obj: Any, limit: int = 500) -> dic
             _increment_count(blocker_counts, blocker)
 
     return {
-        "schema": "agentflow.optimization_eval_queue.v1",
+        "schema": "tokenclaw.optimization_eval_queue.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "wrote_local_files": False,
@@ -13164,10 +13164,10 @@ def _promotion_target_local_policy_section(policy_section: str) -> str | None:
 
 def _promotion_next_command(status: str) -> tuple[str, str]:
     if status in {"pending-lifecycle-feedback", "impact-stale", "needs-more-samples"}:
-        return "promotion-impact", "agentflow-optimization-promotion-impact promotion-actions.json --pretty"
+        return "promotion-impact", "tokenclaw-optimization-promotion-impact promotion-actions.json --pretty"
     if status == "supported":
-        return "promotion-canaries-apply --dry-run", "agentflow-optimization-promotion-canaries-apply promotion-actions.json --dry-run --pretty"
-    return "promotion-actions", "agentflow-optimization-promotion-actions --pretty"
+        return "promotion-canaries-apply --dry-run", "tokenclaw-optimization-promotion-canaries-apply promotion-actions.json --dry-run --pretty"
+    return "promotion-actions", "tokenclaw-optimization-promotion-actions --pretty"
 
 
 def _promotion_impact_stale(last_evidence_at: Any, *, max_age_hours: int = 168) -> bool:
@@ -13467,7 +13467,7 @@ def _post_promotion_delta_row(
         recommendation_counts[recommendation] = recommendation_counts.get(recommendation, 0) + 1
         status_counts[status_label] = status_counts.get(status_label, 0) + 1
     return {
-        "schema": "agentflow.post_promotion_blocker_delta.v1",
+        "schema": "tokenclaw.post_promotion_blocker_delta.v1",
         "local_action_family": family,
         "status": status,
         "entry_count": len(entries),
@@ -13528,7 +13528,7 @@ async def stats_post_promotion_deltas(store_obj: Any, limit: int = 1000) -> dict
     top = deltas[0] if deltas else {}
     privacy = _post_promotion_privacy_summary()
     return {
-        "schema": "agentflow.post_promotion_blocker_deltas_dashboard.v1",
+        "schema": "tokenclaw.post_promotion_blocker_deltas_dashboard.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "wrote_local_files": False,
@@ -13590,7 +13590,7 @@ async def stats_optimization_promotion_actions(store_obj: Any, limit: int = 50) 
     omission_buckets = [_promotion_omission_dashboard_bucket(row) for row in omitted]
     summary = promotion_actions.get("summary") if isinstance(promotion_actions.get("summary"), dict) else {}
     return {
-        "schema": "agentflow.optimization_promotion_actions_dashboard.v1",
+        "schema": "tokenclaw.optimization_promotion_actions_dashboard.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "wrote_local_files": False,
@@ -13732,7 +13732,7 @@ async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) 
 
     candidates.sort(key=lambda row: (str(row.get("primary_state")), str(row.get("action_family")), str(row.get("candidate_id"))))
     return {
-        "schema": "agentflow.optimization_promotion_funnel.v1",
+        "schema": "tokenclaw.optimization_promotion_funnel.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "wrote_local_files": False,
@@ -14539,7 +14539,7 @@ def _codex_quota_token_usage_report(
                     "output_tokens": 0,
                     "reasoning_output_tokens": 0,
                     "total_tokens": 0,
-                    "agentflow_total_tokens_est": 0,
+                    "tokenclaw_total_tokens_est": 0,
                     "cost_usd": 0.0,
                     "status_counts": {},
                 },
@@ -14547,7 +14547,7 @@ def _codex_quota_token_usage_report(
             phase_bucket["updates"] += 1
             for key in _CODEX_TOKEN_USAGE_KEYS:
                 phase_bucket[key] += _as_int(delta.get(key))
-            phase_bucket["agentflow_total_tokens_est"] += _as_int(turn_estimates.get("total_tokens_est"))
+            phase_bucket["tokenclaw_total_tokens_est"] += _as_int(turn_estimates.get("total_tokens_est"))
             phase_bucket["cost_usd"] += cost
             _increment_count(phase_bucket["status_counts"], status)
             model_key = (model, CODEX_APP_PROCESSING_MODE)
@@ -14587,7 +14587,7 @@ def _codex_quota_token_usage_report(
                         "output_tokens": 0,
                         "reasoning_output_tokens": 0,
                         "total_tokens": 0,
-                        "agentflow_total_tokens_est": 0,
+                        "tokenclaw_total_tokens_est": 0,
                         "cost_usd": 0.0,
                         "status_counts": {},
                     },
@@ -14595,7 +14595,7 @@ def _codex_quota_token_usage_report(
                 thread_bucket["updates"] += 1
                 for key in _CODEX_TOKEN_USAGE_KEYS:
                     thread_bucket[key] += _as_int(delta.get(key))
-                thread_bucket["agentflow_total_tokens_est"] += _as_int(turn_estimates.get("total_tokens_est"))
+                thread_bucket["tokenclaw_total_tokens_est"] += _as_int(turn_estimates.get("total_tokens_est"))
                 thread_bucket["cost_usd"] += cost
                 _increment_count(thread_bucket["status_counts"], status)
             token_usage_updates.append({
@@ -14626,7 +14626,7 @@ def _codex_quota_token_usage_report(
         "total_tokens": usage_total - estimated_total,
     }
     return {
-        "schema": "agentflow.codex_app_quota_token_usage.v1",
+        "schema": "tokenclaw.codex_app_quota_token_usage.v1",
         "rate_limit_update_count": len(rate_limit_updates),
         "token_usage_update_count": len(token_usage_updates),
         "latest_rate_limits": latest_rate_limit.get("rate_limits") if latest_rate_limit else None,
@@ -14638,12 +14638,12 @@ def _codex_quota_token_usage_report(
         "raw_counter_totals": raw_counter_totals,
         "reconciled_cost_usd": round(reconciled_cost_usd, 8),
         "reconciled_cost_known": reconciled_cost_known,
-        "agentflow_estimated_totals": {
+        "tokenclaw_estimated_totals": {
             "input_tokens_est": estimated_input,
             "output_tokens_est": estimated_output,
             "total_tokens_est": estimated_total,
         },
-        "matched_agentflow_estimated_totals": reconciled_estimates,
+        "matched_tokenclaw_estimated_totals": reconciled_estimates,
         "reconciliation": {
             "input_drift_tokens": drift["input_tokens"],
             "output_drift_tokens": drift["output_tokens"],
@@ -15551,7 +15551,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     summary_model_hint_savings = sum(_as_float(row.get("estimated_savings_usd")) for row in summary_model_hint_buckets)
     summary_model_hint_canary = _codex_summary_hint_canary_summary(summary_model_hint_buckets)
     return {
-        "schema": "agentflow.codex_app_effectiveness.v1",
+        "schema": "tokenclaw.codex_app_effectiveness.v1",
         "generated_at": utc_now(),
         "source_surface": CODEX_APP_SOURCE_SURFACE,
         "limit": capped_limit,
@@ -15681,7 +15681,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             for bucket in sorted(phase_buckets.values(), key=lambda item: item["turns"], reverse=True)
         ],
         "summary_model_hint": {
-            "schema": "agentflow.codex_app_summary_model_hint.v1",
+            "schema": "tokenclaw.codex_app_summary_model_hint.v1",
             "summary": {
                 "turns": summary_model_hint_turns,
                 "applied": sum(
@@ -15727,7 +15727,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         "cache_breakdown": _decision_breakdown(turn_rows, "cache_json"),
         "managed_recommendation_breakdown": _count_breakdown(managed_status_counts),
         "managed_pattern_fingerprints": {
-            "schema": "agentflow.managed_pattern_fingerprint_diagnostics.v1",
+            "schema": "tokenclaw.managed_pattern_fingerprint_diagnostics.v1",
             "rows_with_fingerprints": managed_pattern_fingerprint_rows,
             "pattern_hash_count": managed_pattern_hash_count,
             "raw_pattern_strings_included": False,
@@ -15737,7 +15737,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         "managed_feedback_reason_breakdown": _count_breakdown(managed_feedback_reason_counts),
         "managed_feedback_queue_breakdown": _count_breakdown(managed_feedback_queue_counts),
         "safety_stop": {
-            "schema": "agentflow.codex_app_safety_stop_state.v1",
+            "schema": "tokenclaw.codex_app_safety_stop_state.v1",
             "active": bool(safety_stop_rows),
             "rows": safety_stop_rows,
             "latest": latest_safety_stop,
@@ -15829,7 +15829,7 @@ def _codex_rule_report_cohort(decision: dict[str, Any]) -> str:
 
 def _new_codex_rule_report_bucket(meta: dict[str, Any], *, action_family: str, rule_path: str | None) -> dict[str, Any]:
     return {
-        "schema": "agentflow.codex_app_canary_rule_impact.v1",
+        "schema": "tokenclaw.codex_app_canary_rule_impact.v1",
         "action_family": action_family,
         "rule_id": meta.get("rule_id"),
         "candidate_id": meta.get("candidate_id"),
@@ -16053,7 +16053,7 @@ async def stats_codex_canary_impact(store_obj: Any, limit: int = 1000) -> dict[s
     rules = [_finalize_codex_rule_report_bucket(bucket) for bucket in buckets.values()]
     rules.sort(key=lambda item: (_as_int(item.get("observed_rows")), str(item.get("rule_id") or "")), reverse=True)
     return {
-        "schema": "agentflow.codex_app_canary_impact_by_rule.v1",
+        "schema": "tokenclaw.codex_app_canary_impact_by_rule.v1",
         "generated_at": utc_now(),
         "source_surface": CODEX_APP_SOURCE_SURFACE,
         "limit": capped_limit,
@@ -16220,7 +16220,7 @@ async def stats_openai_codex_readiness(store_obj: Any, limit: int = 1000) -> dic
     codex_exact_cache = codex_readiness.get("exact_cache") if isinstance(codex_readiness.get("exact_cache"), dict) else {}
     codex_impact_summary = codex_impact.get("summary") if isinstance(codex_impact.get("summary"), dict) else {}
 
-    openai_live_savings = _as_float(live.get("estimated_agentflow_savings_usd"))
+    openai_live_savings = _as_float(live.get("estimated_tokenclaw_savings_usd"))
     openai_live_family = str(live.get("local_action_family") or "none")
     openai_live_active = bool(
         live.get("status") == "active"
@@ -16248,22 +16248,22 @@ async def stats_openai_codex_readiness(store_obj: Any, limit: int = 1000) -> dic
     )
 
     live_savings = openai_live_savings + codex_live_savings
-    fixture_savings = _as_float(fixture.get("estimated_agentflow_savings_usd") or golden.get("estimated_agentflow_savings_usd"))
+    fixture_savings = _as_float(fixture.get("estimated_tokenclaw_savings_usd") or golden.get("estimated_tokenclaw_savings_usd"))
     if openai_live_active or codex_active:
         state = "active"
-        agentflow_savings = live_savings
+        tokenclaw_savings = live_savings
         evidence_basis = "live-local-metadata"
     elif codex_ready:
         state = "ready"
-        agentflow_savings = 0.0
+        tokenclaw_savings = 0.0
         evidence_basis = "ready-local-metadata"
     elif codex_turn_count > 0 and codex_blocked:
         state = "blocked"
-        agentflow_savings = 0.0
+        tokenclaw_savings = 0.0
         evidence_basis = "blocked-local-metadata"
     else:
         state = "demo_only"
-        agentflow_savings = fixture_savings
+        tokenclaw_savings = fixture_savings
         evidence_basis = "golden-path-fixture"
 
     codex_family = "cache" if codex_cache_savings >= codex_hint_savings and codex_cache_savings > 0 else "routing"
@@ -16283,16 +16283,16 @@ async def stats_openai_codex_readiness(store_obj: Any, limit: int = 1000) -> dic
     provider_prompt_cache_discount = _openai_provider_prompt_cache_discount(store_obj, limit=capped_limit)
 
     return {
-        "schema": "agentflow.openai_codex_savings_readiness.v1",
+        "schema": "tokenclaw.openai_codex_savings_readiness.v1",
         "generated_at": utc_now(),
         "vertical": "openai_codex_savings",
         "state": state,
         "active_surface": active_surface,
         "active_action_family": active_action_family,
         "demonstrated_action_family": fixture.get("local_action_family") or "none",
-        "agentflow_generated_savings_usd": round(agentflow_savings, 8),
-        "live_agentflow_generated_savings_usd": round(live_savings, 8),
-        "demonstrated_agentflow_savings_usd": round(fixture_savings, 8),
+        "tokenclaw_generated_savings_usd": round(tokenclaw_savings, 8),
+        "live_tokenclaw_generated_savings_usd": round(live_savings, 8),
+        "demonstrated_tokenclaw_savings_usd": round(fixture_savings, 8),
         "provider_prompt_cache_discount_usd": provider_prompt_cache_discount,
         "top_blocker_reason": top_blocker,
         "rollback_available": bool(state == "active" and active_action_family in {"routing", "crunch", "cache"}),
@@ -16301,23 +16301,23 @@ async def stats_openai_codex_readiness(store_obj: Any, limit: int = 1000) -> dic
         "surfaces": {
             "openai_responses": {
                 "state": "active" if openai_live_active else "demo_available",
-                "agentflow_generated_savings_usd": round(openai_live_savings, 8),
+                "tokenclaw_generated_savings_usd": round(openai_live_savings, 8),
                 "local_action_family": openai_live_family,
                 "routing_applied_count": _as_int(live.get("routing_applied_count")),
                 "crunch_changed_count": _as_int(live.get("crunch_changed_count")),
             },
             CODEX_APP_SOURCE_SURFACE: {
                 "state": "active" if codex_active else str(codex_readiness.get("status") or "no-data"),
-                "agentflow_generated_savings_usd": round(codex_live_savings, 8),
+                "tokenclaw_generated_savings_usd": round(codex_live_savings, 8),
                 "turn_start_rows": codex_turn_count,
                 "summary_model_hint_applied": _as_int(codex_summary.get("summary_model_hint_applied")),
                 "exact_cache_hits": _as_int(codex_summary.get("exact_cache_hits")),
             },
         },
         "savings_breakdown": {
-            "agentflow_generated_savings_usd": round(agentflow_savings, 8),
-            "live_agentflow_generated_savings_usd": round(live_savings, 8),
-            "demonstrated_agentflow_savings_usd": round(fixture_savings, 8),
+            "tokenclaw_generated_savings_usd": round(tokenclaw_savings, 8),
+            "live_tokenclaw_generated_savings_usd": round(live_savings, 8),
+            "demonstrated_tokenclaw_savings_usd": round(fixture_savings, 8),
             "provider_prompt_cache_discount_usd": provider_prompt_cache_discount,
             "basis": "AgentFlow-generated routing/crunch/cache savings are kept separate from provider prompt-cache discounts.",
         },
@@ -16424,7 +16424,7 @@ async def stats_codex_readiness(store_obj: Any, limit: int = 500) -> dict[str, A
         readiness = "ready"
 
     return {
-        "schema": "agentflow.codex_optimization_readiness.v1",
+        "schema": "tokenclaw.codex_optimization_readiness.v1",
         "generated_at": utc_now(),
         "source_surface": CODEX_APP_SOURCE_SURFACE,
         "limit": capped_limit,
@@ -16507,8 +16507,8 @@ async def stats_codex_readiness(store_obj: Any, limit: int = 500) -> dict[str, A
 
 
 def _usage_bucket_identity(app_family: str, session_id: Any) -> dict[str, Any]:
-    engineer = os.getenv("AGENTFLOW_ENGINEER") or None
-    app = os.getenv("AGENTFLOW_APP") or app_family or "unknown"
+    engineer = os.getenv("TOKENCLAW_ENGINEER") or None
+    app = os.getenv("TOKENCLAW_APP") or app_family or "unknown"
     session = str(session_id or "")
     sid = session[:8] if session else None
     if engineer:
@@ -16533,8 +16533,8 @@ def _usage_bucket_identity(app_family: str, session_id: Any) -> dict[str, Any]:
         "session_id": session or None,
         "sid": sid,
         "label_sources": {
-            "engineer": "env:AGENTFLOW_ENGINEER" if engineer else None,
-            "app": "env:AGENTFLOW_APP" if os.getenv("AGENTFLOW_APP") else "inferred_app_family",
+            "engineer": "env:TOKENCLAW_ENGINEER" if engineer else None,
+            "app": "env:TOKENCLAW_APP" if os.getenv("TOKENCLAW_APP") else "inferred_app_family",
             "session": "stored_session_id" if session else None,
         },
     }
@@ -16666,7 +16666,7 @@ def _provider_activity_unit(
         provider_adoption_windows=provider_adoption_windows,
     )
     return {
-        "feature_schema_version": "agentflow.optimization_unit_features.v1",
+        "feature_schema_version": "tokenclaw.optimization_unit_features.v1",
         "unit_id": f"provider_call:{r.get('id')}",
         "created_at": r.get("created_at"),
         "source_surface": source_surface,
@@ -16787,8 +16787,8 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         if source
     }) or ["local-default"]
     return {
-        "feature_schema_version": "agentflow.optimization_unit_features.v1",
-        "schema": "agentflow.optimization_unit.v1",
+        "feature_schema_version": "tokenclaw.optimization_unit_features.v1",
+        "schema": "tokenclaw.optimization_unit.v1",
         "unit_id": f"codex_turn:{r.get('start_event_id')}",
         "created_at": r.get("created_at"),
         "source_surface": CODEX_APP_SOURCE_SURFACE,
@@ -17424,7 +17424,7 @@ async def stats_session_phase_memory(store_obj: Any, limit: int = 1000) -> dict[
     })
 
     return {
-        "schema": "agentflow.session_phase_memory_dashboard.v1",
+        "schema": "tokenclaw.session_phase_memory_dashboard.v1",
         "memory_schema": memory.get("schema"),
         "generated_at": memory.get("generated_at") or utc_now(),
         "lookback": memory.get("lookback") or {},
@@ -17552,7 +17552,7 @@ async def stats_activity(store_obj: Any, limit: int = 100) -> dict[str, Any]:
 
     return {
         "generated_at": utc_now(),
-        "schema": "agentflow.optimization_activity.v1",
+        "schema": "tokenclaw.optimization_activity.v1",
         "summary": {
             "units": len(units),
             "provider_request_units": sum(1 for unit in units if unit["granularity"] == "provider_request"),
@@ -17572,7 +17572,7 @@ async def stats_quality_signals(store_obj: Any, limit: int = 500) -> dict[str, A
     activity = await stats_activity(store_obj, limit=limit)
     return {
         "generated_at": utc_now(),
-        "schema": "agentflow.quality_signal_report.v1",
+        "schema": "tokenclaw.quality_signal_report.v1",
         "privacy": {
             "raw_prompts_included": False,
             "raw_responses_included": False,
@@ -17850,8 +17850,8 @@ async def stats_provider_adoption_health(store_obj: Any, limit: int = 5000) -> d
     finalized_summary = _finalize_provider_adoption_bucket(summary)
     return {
         "generated_at": utc_now(),
-        "schema": "agentflow.provider_adoption_dashboard_health.v1",
-        "window_schema": "agentflow.provider_tool_adoption_window.v1",
+        "schema": "tokenclaw.provider_adoption_dashboard_health.v1",
+        "window_schema": "tokenclaw.provider_tool_adoption_window.v1",
         "row_count": len(rows),
         "status_counts": dict(sorted(status_counts.items())),
         "summary": finalized_summary,
@@ -18201,12 +18201,12 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
 
     return {
         "generated_at": utc_now(),
-        "schema": "agentflow.usage_by_owner.v1",
+        "schema": "tokenclaw.usage_by_owner.v1",
         "scope": "today",
         "grouping": {
             "display_name": "By source",
-            "priority": ["AGENTFLOW_ENGINEER", "AGENTFLOW_APP", "app_family", "session_id"],
-            "primary_fields": ["AGENTFLOW_ENGINEER", "AGENTFLOW_APP", "app_family"],
+            "priority": ["TOKENCLAW_ENGINEER", "TOKENCLAW_APP", "app_family", "session_id"],
+            "primary_fields": ["TOKENCLAW_ENGINEER", "TOKENCLAW_APP", "app_family"],
             "fallback_fields": ["session_id"],
             "description": (
                 "Usage is grouped by configured engineer/app source labels when present, "
@@ -18470,7 +18470,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         })
 
     prompt_cache_accounting = {
-        "schema": "agentflow.provider_prompt_cache_accounting_rollup.v1",
+        "schema": "tokenclaw.provider_prompt_cache_accounting_rollup.v1",
         "label": "provider prompt-cache discount/economics",
         "boundary": "provider-side prompt-cache pricing; separate from AgentFlow local exact-cache replay savings",
         "totals": {
@@ -18687,13 +18687,13 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     # provider_prompt_cache_discount_usd is provider-side billing economics, not AgentFlow-generated.
     # sub-buckets provider_exact_local_cache_usd / codex_app_exact_local_cache_usd are already
     # counted inside exact_local_cache_usd, so exclude them from the sum to avoid double-counting.
-    _AGENTFLOW_SAVINGS_KEYS = ("routing_usd", "crunching_usd", "exact_local_cache_usd")
-    today_agentflow_generated_savings = sum(float(today_savings_buckets[k] or 0.0) for k in _AGENTFLOW_SAVINGS_KEYS)
-    agentflow_generated_savings = sum(float(savings_buckets[k] or 0.0) for k in _AGENTFLOW_SAVINGS_KEYS)
+    _TOKENCLAW_SAVINGS_KEYS = ("routing_usd", "crunching_usd", "exact_local_cache_usd")
+    today_tokenclaw_generated_savings = sum(float(today_savings_buckets[k] or 0.0) for k in _TOKENCLAW_SAVINGS_KEYS)
+    tokenclaw_generated_savings = sum(float(savings_buckets[k] or 0.0) for k in _TOKENCLAW_SAVINGS_KEYS)
     today_total_savings = sum(float(value or 0.0) for value in today_savings_buckets.values())
     total_savings = sum(float(value or 0.0) for value in savings_buckets.values())
-    today_observed_baseline = today_cost + today_agentflow_generated_savings
-    observed_baseline = total_cost + agentflow_generated_savings
+    today_observed_baseline = today_cost + today_tokenclaw_generated_savings
+    observed_baseline = total_cost + tokenclaw_generated_savings
     today_calculated_spend = today_cost + today_codex_cost_est
     calculated_spend = total_cost + codex_cost_est
     today_observed_baseline_with_codex = today_observed_baseline + today_codex_cost_est
@@ -18705,7 +18705,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     today_codex_spend_rounded = round(today_codex_cost_est, 6)
     codex_spend_rounded = round(codex_cost_est, 6)
     executive_summary = {
-        "schema": "agentflow.executive_summary.v1",
+        "schema": "tokenclaw.executive_summary.v1",
         "accounting_today": accounting_today,
         "accounting_total": accounting_total,
         "tokens_today": {
@@ -18753,10 +18753,10 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "cost_basis": CODEX_APP_COST_BASIS,
         },
         "savings": {
-            "today_agentflow_generated_savings_usd": round(today_agentflow_generated_savings, 6),
-            "agentflow_generated_savings_usd": round(agentflow_generated_savings, 6),
-            "today_agentflow_generated_buckets": {k: today_savings_buckets[k] for k in (*_AGENTFLOW_SAVINGS_KEYS, "provider_exact_local_cache_usd", "codex_app_exact_local_cache_usd")},
-            "agentflow_generated_buckets": {k: savings_buckets[k] for k in (*_AGENTFLOW_SAVINGS_KEYS, "provider_exact_local_cache_usd", "codex_app_exact_local_cache_usd")},
+            "today_tokenclaw_generated_savings_usd": round(today_tokenclaw_generated_savings, 6),
+            "tokenclaw_generated_savings_usd": round(tokenclaw_generated_savings, 6),
+            "today_tokenclaw_generated_buckets": {k: today_savings_buckets[k] for k in (*_TOKENCLAW_SAVINGS_KEYS, "provider_exact_local_cache_usd", "codex_app_exact_local_cache_usd")},
+            "tokenclaw_generated_buckets": {k: savings_buckets[k] for k in (*_TOKENCLAW_SAVINGS_KEYS, "provider_exact_local_cache_usd", "codex_app_exact_local_cache_usd")},
             "provider_prompt_cache_discount_usd": round(prompt_cache_savings, 6),
             "today_provider_prompt_cache_discount_usd": round(today_prompt_cache_savings, 6),
             "provider_prompt_cache_economics": {
@@ -18773,7 +18773,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
                 "label": "provider billing efficiency",
                 "boundary": "provider-side pricing; separate from AgentFlow local exact-cache replay savings",
             },
-            # backward-compat: these include provider_prompt_cache_discount_usd; prefer agentflow_generated_savings_usd
+            # backward-compat: these include provider_prompt_cache_discount_usd; prefer tokenclaw_generated_savings_usd
             "today_total_savings_usd": round(today_total_savings, 6),
             "total_savings_usd": round(total_savings, 6),
             "today_buckets": today_savings_buckets,
@@ -18784,7 +18784,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "unavoidable_provider_spend_usd": round(hard_floor, 6),
             "today_unavoidable_calculated_spend_usd": round(today_hard_floor, 6),
             "unavoidable_calculated_spend_usd": round(hard_floor, 6),
-            "today_baseline_minus_feasible_savings_usd": round(today_observed_baseline_with_codex - today_agentflow_generated_savings, 6),
+            "today_baseline_minus_feasible_savings_usd": round(today_observed_baseline_with_codex - today_tokenclaw_generated_savings, 6),
             "excludes_unknown_codex_app_cost": not today_codex_cost_known,
             "codex_app_cost_estimated": today_codex_cost_known,
             "cost_basis": CODEX_APP_COST_BASIS,
@@ -19293,7 +19293,7 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
     }
     return {
         "generated_at": generated_at,
-        "schema": "agentflow.weekly_activity.v1",
+        "schema": "tokenclaw.weekly_activity.v1",
         "source_surfaces": ["anthropic_messages", "openai_responses", "openai_chat", CODEX_APP_SOURCE_SURFACE],
         "cost_basis": "provider-reported + codex-estimated-from-chars",
         "days": days,
@@ -20082,7 +20082,7 @@ async def stats_optimization_coordinator_dashboard(store_obj: Any, *, limit: int
     ]
     runtime_error_rate = rows_with_errors / runtime_decision_count if runtime_decision_count else None
     return {
-        "schema": "agentflow.optimization_coordinator_dashboard.v1",
+        "schema": "tokenclaw.optimization_coordinator_dashboard.v1",
         "ok": True,
         "read_only": True,
         "generated_at": utc_now(),
@@ -20205,7 +20205,7 @@ def _empty_evidence_next_actions_payload(
     source: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "schema": "agentflow.dashboard_evidence_to_activation_next_actions.v1",
+        "schema": "tokenclaw.dashboard_evidence_to_activation_next_actions.v1",
         "generated_at": utc_now(),
         "status": status,
         "status_reason": status_reason,
@@ -20242,7 +20242,7 @@ async def stats_evidence_to_activation_next_actions(limit: int = 20) -> dict[str
     path = _evidence_to_activation_plan_path()
     source: dict[str, Any] = {
         "kind": "orchestrator-research-plan",
-        "configured": any(os.getenv(name) for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON")),
+        "configured": any(os.getenv(name) for name in ("TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "TOKENCLAW_RESEARCH_PLAN_JSON")),
         "path_class": _local_path_class(path),
         "path_included": False,
         "available": False,
@@ -20323,7 +20323,7 @@ async def stats_evidence_to_activation_next_actions(limit: int = 20) -> dict[str
 
     ledger_privacy = ledger.get("privacy") if isinstance(ledger.get("privacy"), dict) else {}
     return {
-        "schema": "agentflow.dashboard_evidence_to_activation_next_actions.v1",
+        "schema": "tokenclaw.dashboard_evidence_to_activation_next_actions.v1",
         "generated_at": utc_now(),
         "status": "tracked" if entries else "empty",
         "status_reason": "latest research plan ledger loaded" if entries else "latest research plan ledger has no entries",
@@ -20406,7 +20406,7 @@ def _managed_preview_coverage_privacy(*, managed_server_calls_made: bool = False
 
 def _empty_managed_preview_coverage(*, status: str, status_reason: str) -> dict[str, Any]:
     return {
-        "schema": "agentflow.dashboard_managed_activation_preview_coverage.v1",
+        "schema": "tokenclaw.dashboard_managed_activation_preview_coverage.v1",
         "generated_at": utc_now(),
         "status": status,
         "status_reason": status_reason,
@@ -20538,7 +20538,7 @@ def _managed_preview_coverage_for_family(coverage: dict[str, Any] | None, family
     for row in coverage.get("family_coverage") or []:
         if isinstance(row, dict) and str(row.get("local_action_family") or "") == str(family):
             return {
-                "schema": "agentflow.dashboard_managed_activation_preview_family_coverage.v1",
+                "schema": "tokenclaw.dashboard_managed_activation_preview_family_coverage.v1",
                 "status": coverage.get("status"),
                 "preview_data_status": coverage.get("preview_data_status"),
                 "stored_preview_outcome_count": row.get("stored_preview_outcome_count", 0),
@@ -20553,7 +20553,7 @@ def _managed_preview_coverage_for_family(coverage: dict[str, Any] | None, family
                 "top_omitted_or_blocker_reason": row.get("top_omitted_or_blocker_reason"),
             }
     return {
-        "schema": "agentflow.dashboard_managed_activation_preview_family_coverage.v1",
+        "schema": "tokenclaw.dashboard_managed_activation_preview_family_coverage.v1",
         "status": coverage.get("status"),
         "preview_data_status": coverage.get("preview_data_status"),
         "stored_preview_outcome_count": 0,
@@ -20618,7 +20618,7 @@ def _managed_activation_preview_coverage(store_obj: Any | None) -> dict[str, Any
     managed_calls_made = bool(report.get("managed_server_calls_made"))
     preview_data_status = _managed_preview_data_status(outcomes)
     return {
-        "schema": "agentflow.dashboard_managed_activation_preview_coverage.v1",
+        "schema": "tokenclaw.dashboard_managed_activation_preview_coverage.v1",
         "generated_at": utc_now(),
         "status": "tracked",
         "status_reason": "bounded local managed preview outcomes loaded",
@@ -20663,7 +20663,7 @@ def _empty_local_activation_queue_payload(
     managed_preview_coverage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
-        "schema": "agentflow.dashboard_local_activation_next_action_queue.v1",
+        "schema": "tokenclaw.dashboard_local_activation_next_action_queue.v1",
         "generated_at": utc_now(),
         "status": status,
         "status_reason": status_reason,
@@ -20702,7 +20702,7 @@ def _empty_preview_gated_activation_issue_queue_payload(
     source: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "schema": "agentflow.dashboard_preview_gated_activation_issue_queue.v1",
+        "schema": "tokenclaw.dashboard_preview_gated_activation_issue_queue.v1",
         "generated_at": utc_now(),
         "status": status,
         "status_reason": status_reason,
@@ -20781,7 +20781,7 @@ def _activation_successor_health_empty(
     source: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "schema": "agentflow.activation_successor_queue_health.v1",
+        "schema": "tokenclaw.activation_successor_queue_health.v1",
         "generated_at": utc_now(),
         "status": status,
         "status_reason": status_reason,
@@ -20920,7 +20920,7 @@ def _activation_successor_health_from_queue(
         )
     capped = max(1, min(int(limit or 5), 20))
     return {
-        "schema": "agentflow.activation_successor_queue_health.v1",
+        "schema": "tokenclaw.activation_successor_queue_health.v1",
         "generated_at": utc_now(),
         "status": "ranked" if rows else "empty",
         "status_reason": "latest local activation successor queue health loaded" if rows else "latest queue has no entries",
@@ -20979,7 +20979,7 @@ def build_activation_successor_queue_health(limit: int = 5) -> dict[str, Any]:
     path = _evidence_to_activation_plan_path()
     source: dict[str, Any] = {
         "kind": "orchestrator-research-plan",
-        "configured": any(os.getenv(name) for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON")),
+        "configured": any(os.getenv(name) for name in ("TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "TOKENCLAW_RESEARCH_PLAN_JSON")),
         "path_class": _local_path_class(path),
         "path_included": False,
         "available": False,
@@ -21119,7 +21119,7 @@ def _proposal_status_label(labels: Any) -> str:
 def _public_preview_gated_issue_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
     labels = [public_label(label, "unknown") for label in proposal.get("labels") or [] if str(label or "").strip()]
     public = {
-        "repo": public_label(proposal.get("repo") or "lutzkuen/agentflow", "lutzkuen/agentflow"),
+        "repo": public_label(proposal.get("repo") or "lutzkuen/tokenclaw", "lutzkuen/tokenclaw"),
         "title": public_label(proposal.get("title") or "Untitled activation successor issue", "Untitled activation successor issue"),
         "labels": labels,
         "status_label": _proposal_status_label(labels),
@@ -21206,7 +21206,7 @@ def _preview_gated_activation_issue_queue_payload(
     capped = max(1, min(int(limit or 20), 50))
     queue_privacy = queue.get("privacy") if isinstance(queue.get("privacy"), dict) else {}
     return {
-        "schema": "agentflow.dashboard_preview_gated_activation_issue_queue.v1",
+        "schema": "tokenclaw.dashboard_preview_gated_activation_issue_queue.v1",
         "generated_at": utc_now(),
         "status": "ranked" if public_decisions else "empty",
         "status_reason": "latest preview-gated activation issue queue loaded" if public_decisions else "latest queue has no successor decisions",
@@ -21346,7 +21346,7 @@ async def stats_local_activation_next_action_queue(limit: int = 20, store_obj: A
     path = _evidence_to_activation_plan_path()
     source: dict[str, Any] = {
         "kind": "orchestrator-research-plan",
-        "configured": any(os.getenv(name) for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON")),
+        "configured": any(os.getenv(name) for name in ("TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "TOKENCLAW_RESEARCH_PLAN_JSON")),
         "path_class": _local_path_class(path),
         "path_included": False,
         "available": False,
@@ -21405,7 +21405,7 @@ async def stats_local_activation_next_action_queue(limit: int = 20, store_obj: A
     )
     queue_privacy = queue.get("privacy") if isinstance(queue.get("privacy"), dict) else {}
     return {
-        "schema": "agentflow.dashboard_local_activation_next_action_queue.v1",
+        "schema": "tokenclaw.dashboard_local_activation_next_action_queue.v1",
         "generated_at": utc_now(),
         "status": "ranked" if entries else "empty",
         "status_reason": "latest local activation next-action queue loaded" if entries else "latest queue has no entries",
@@ -21425,7 +21425,7 @@ async def stats_preview_gated_activation_issue_queue(limit: int = 20, store_obj:
     path = _evidence_to_activation_plan_path()
     source: dict[str, Any] = {
         "kind": "orchestrator-research-plan",
-        "configured": any(os.getenv(name) for name in ("AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "AGENTFLOW_RESEARCH_PLAN_JSON")),
+        "configured": any(os.getenv(name) for name in ("TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON", "TOKENCLAW_RESEARCH_PLAN_JSON")),
         "path_class": _local_path_class(path),
         "path_included": False,
         "available": False,
@@ -23257,7 +23257,7 @@ async function loadFullStats(){
   const now=Date.now();
   if(fullStatsCache&&now-fullStatsCacheAt<FULL_STATS_TTL_MS)return fullStatsCache;
   if(fullStatsInFlight)return fullStatsInFlight;
-  fullStatsInFlight=fetch('/agentflow/stats/full')
+  fullStatsInFlight=fetch('/tokenclaw/stats/full')
     .then(r=>{
       if(!r.ok)throw new Error('full stats HTTP '+r.status);
       return r.json();
@@ -23303,7 +23303,7 @@ function adoptionBadge(value){
 
 async function refreshProviderAdoptionHealth(){
   try{
-    const r=await fetch('/agentflow/stats/provider-adoption-health?limit=1000');
+    const r=await fetch('/tokenclaw/stats/provider-adoption-health?limit=1000');
     const d=await r.json();
     const summary=d.summary||{};
     const privacy=d.privacy||{};
@@ -23370,7 +23370,7 @@ async function refreshProviderAdoptionHealth(){
 
 async function refreshUsage(){
   try{
-    const r=await fetch('/agentflow/stats/usage');
+    const r=await fetch('/tokenclaw/stats/usage');
     const d=await r.json();
     const tb=document.getElementById('usage-tbody');
     const rows=d.buckets||[];
@@ -23382,7 +23382,7 @@ async function refreshUsage(){
       const codexCost=row.codex_cost_estimated?'<span class="badge miss">Codex estimated</span>':'';
       const totalTokens=(row.provider_total_tokens||0)+(row.codex_total_tokens_est||0);
       const sourceFields={
-        engineer_app:'AGENTFLOW_ENGINEER + AGENTFLOW_APP',
+        engineer_app:'TOKENCLAW_ENGINEER + TOKENCLAW_APP',
         app_session:'app_family + session_id',
         app_unknown_session:'app_family'
       }[row.bucket_kind]||row.bucket_kind||'unknown';
@@ -23409,11 +23409,11 @@ async function refreshUsage(){
 
 async function refreshCodexQuota(){
   try{
-    const r=await fetch('/agentflow/stats/codex-effectiveness?limit=500');
+    const r=await fetch('/tokenclaw/stats/codex-effectiveness?limit=500');
     const d=await r.json();
     const q=d.quota_and_token_usage||{};
     const totals=q.token_usage_totals||{};
-    const est=q.agentflow_estimated_totals||{};
+    const est=q.tokenclaw_estimated_totals||{};
     const rec=q.reconciliation||{};
     const latest=q.latest_rate_limits||{};
     const privacy=q.privacy||{};
@@ -23483,7 +23483,7 @@ async function refreshCodexQuota(){
 
 async function refreshCodexCanaryImpact(){
   try{
-    const r=await fetch('/agentflow/stats/codex-canary-impact?limit=1000');
+    const r=await fetch('/tokenclaw/stats/codex-canary-impact?limit=1000');
     const d=await r.json();
     const rows=d.rules||[];
     document.getElementById('codex-canary-impact-tbody').innerHTML=rows.map(row=>{
@@ -23533,7 +23533,7 @@ function readinessBadge(status){
 
 async function refreshOpenAICodexReadiness(){
   try{
-    const r=await fetch('/agentflow/stats/openai-codex-readiness?limit=1000');
+    const r=await fetch('/tokenclaw/stats/openai-codex-readiness?limit=1000');
     const d=await r.json();
     const state=d.state||'unknown';
     document.getElementById('openai-codex-state').className='badge '+readinessBadge(state);
@@ -23544,10 +23544,10 @@ async function refreshOpenAICodexReadiness(){
     document.getElementById('openai-codex-family').textContent=family==='none'&&demoFamily!=='none'
       ? `demo action family: ${demoFamily}`
       : `${family} action family`;
-    document.getElementById('openai-codex-savings').textContent=fmt(d.agentflow_generated_savings_usd||0,6);
+    document.getElementById('openai-codex-savings').textContent=fmt(d.tokenclaw_generated_savings_usd||0,6);
     const basis=d.evidence_basis||'metadata';
-    const live=d.live_agentflow_generated_savings_usd||0;
-    const demonstrated=d.demonstrated_agentflow_savings_usd||0;
+    const live=d.live_tokenclaw_generated_savings_usd||0;
+    const demonstrated=d.demonstrated_tokenclaw_savings_usd||0;
     document.getElementById('openai-codex-savings-sub').textContent=`${basis} · live ${fmt(live,6)} · demo ${fmt(demonstrated,6)}`;
     document.getElementById('openai-codex-provider-discount').textContent=fmt(d.provider_prompt_cache_discount_usd||0,6);
     document.getElementById('openai-codex-blocker').textContent=d.top_blocker_reason||'none';
@@ -23561,7 +23561,7 @@ async function refreshOpenAICodexReadiness(){
 
 async function refreshCodexReadiness(){
   try{
-    const r=await fetch('/agentflow/stats/codex-readiness?limit=500');
+    const r=await fetch('/tokenclaw/stats/codex-readiness?limit=500');
     const d=await r.json();
     const tb=document.getElementById('codex-readiness-tbody');
     const cb=document.getElementById('codex-cache-readiness-tbody');
@@ -23641,7 +23641,7 @@ async function refreshCodexReadiness(){
 
 async function refreshActivity(){
   try{
-    const r=await fetch('/agentflow/stats/activity?limit=100');
+    const r=await fetch('/tokenclaw/stats/activity?limit=100');
     const d=await r.json();
     const tb=document.getElementById('activity-tbody');
     const rows=d.units||[];
@@ -23669,7 +23669,7 @@ async function refreshActivity(){
 
 async function refreshWeekly(){
   try{
-    const r=await fetch('/agentflow/stats/weekly');
+    const r=await fetch('/tokenclaw/stats/weekly');
     const d=await r.json();
     const tb=document.getElementById('weekly-tbody');
     const rows=[...d.days,{...d.totals,_total:true}];
@@ -23721,11 +23721,11 @@ async function refresh(){
     document.getElementById('c-tokens-codex').textContent=basisText;
     document.getElementById('c-spend').textContent=fmt(acct.cost_est_usd??spend.today_calculated_spend_usd??spend.today_provider_spend_usd??0,4);
     document.getElementById('c-spend-sub').textContent=fmt(acctTotal.cost_est_usd??spend.calculated_spend_usd??spend.total_provider_spend_usd??0,4)+' total · '+fmt(spend.today_provider_spend_usd||0,4)+' provider reported · '+fmt(spend.today_codex_app_estimated_spend_usd||0,4)+' Codex est';
-    const agentflowBuckets=savings.today_agentflow_generated_buckets||buckets;
+    const tokenclawBuckets=savings.today_tokenclaw_generated_buckets||buckets;
     const accountAgentflowSavings=(acct.routing_savings_usd??0)+(acct.crunch_savings_usd??0)+(acct.cache_savings_usd??0);
-    const todayAgentflowSavings=(accountAgentflowSavings||savings.today_agentflow_generated_savings_usd)??0;
+    const todayAgentflowSavings=(accountAgentflowSavings||savings.today_tokenclaw_generated_savings_usd)??0;
     document.getElementById('c-savings').textContent=fmt(todayAgentflowSavings,4);
-    document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??agentflowBuckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??agentflowBuckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??agentflowBuckets.exact_local_cache_usd??0,4);
+    document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??tokenclawBuckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??tokenclawBuckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??tokenclawBuckets.exact_local_cache_usd??0,4);
     document.getElementById('c-health').textContent=(health.errors_today??health.errors??0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
     renderActivationBottleneckCard(d);
@@ -23785,10 +23785,10 @@ function cacheReplayActivationStateBadge(state){
   if(state==='needs evidence')return'provider';
   return'provider';
 }
-const cacheReplayActivationHealthEndpoint='/agentflow/stats/cache-replay-activation-health';
+const cacheReplayActivationHealthEndpoint='/tokenclaw/stats/cache-replay-activation-health';
 async function refreshOpenAICacheReplayReadiness(){
   try{
-    const r=await fetch('/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=250&impact_limit=100');
+    const r=await fetch('/tokenclaw/stats/openai-cache-replay-readiness?opportunity_limit=250&impact_limit=100');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -23832,7 +23832,7 @@ async function refreshOpenAICacheReplayReadiness(){
 }
 async function refreshOpenAIToolCacheInvalidationBurndown(){
   try{
-    const r=await fetch('/agentflow/stats/openai-tool-cache-invalidation-burndown?opportunity_limit=250&impact_limit=100&row_limit=25');
+    const r=await fetch('/tokenclaw/stats/openai-tool-cache-invalidation-burndown?opportunity_limit=250&impact_limit=100&row_limit=25');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -24240,7 +24240,7 @@ function thinkingActionBadge(action){
 }
 async function refreshThinkingCompactionImpact(){
   try{
-    const r=await fetch('/agentflow/stats/anthropic-thinking-compaction-impact?limit=500');
+    const r=await fetch('/tokenclaw/stats/anthropic-thinking-compaction-impact?limit=500');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -24301,8 +24301,8 @@ async function refreshThinkingCompactionImpact(){
 async function refreshTerminalOutputCompaction(){
   try{
     const [r,ar]=await Promise.all([
-      fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=250&impact_limit=100'),
-      fetch('/agentflow/stats/terminal-output-compaction-activation?opportunity_limit=250&impact_limit=100')
+      fetch('/tokenclaw/stats/terminal-output-compaction?opportunity_limit=250&impact_limit=100'),
+      fetch('/tokenclaw/stats/terminal-output-compaction-activation?opportunity_limit=250&impact_limit=100')
     ]);
     const d=await r.json();
     const activation=await ar.json();
@@ -24421,10 +24421,10 @@ async function refreshTerminalOutputCompaction(){
 async function refreshRepeatedScaffold(){
   try{
     const [hr,or,ir,ar]=await Promise.all([
-      fetch('/agentflow/stats/scaffold-rollout-health?limit=250'),
-      fetch('/agentflow/stats/repeated-scaffold-opportunity?limit=250&min_repeated_rows=2'),
-      fetch('/agentflow/stats/repeated-scaffold-impact?limit=100'),
-      fetch('/agentflow/stats/repeated-scaffold-activation?limit=100')
+      fetch('/tokenclaw/stats/scaffold-rollout-health?limit=250'),
+      fetch('/tokenclaw/stats/repeated-scaffold-opportunity?limit=250&min_repeated_rows=2'),
+      fetch('/tokenclaw/stats/repeated-scaffold-impact?limit=100'),
+      fetch('/tokenclaw/stats/repeated-scaffold-activation?limit=100')
     ]);
     const health=await hr.json();
     const opportunity=await or.json();
@@ -24586,7 +24586,7 @@ async function refreshErrors(){
 
 async function refreshLimiter(){
   try{
-    const r=await fetch('/agentflow/stats/limiter');
+    const r=await fetch('/tokenclaw/stats/limiter');
     const d=await r.json();
     const tiers=d.tiers||[];
     const active=tiers.filter(t=>t.active);
@@ -24648,7 +24648,7 @@ function queueStatusBadge(status){
 }
 async function refreshSafety(){
   try{
-    const r=await fetch('/agentflow/stats/safety');
+    const r=await fetch('/tokenclaw/stats/safety');
     const d=await r.json();
     const s=d.summary||{};
     const checks=d.checks||{};
@@ -24714,7 +24714,7 @@ async function refreshSafety(){
       <td class="model">${esc(row.code)}</td>
       <td class="flags">${esc(row.message)}</td>
     </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No safety or privacy warnings</td></tr>';
-    const mr=await fetch('/agentflow/stats/sqlite-maintenance');
+    const mr=await fetch('/tokenclaw/stats/sqlite-maintenance');
     const maintenance=await mr.json();
     const retention=maintenance.status||{};
     const last=retention.last_run||{};
@@ -24790,12 +24790,12 @@ function workbenchEventDetails(row){
 }
 async function refreshPolicies(){
   try{
-    const r=await fetch('/agentflow/stats/policies');
+    const r=await fetch('/tokenclaw/stats/policies');
     const d=await r.json();
     const summary=d.summary||{};
     let wb=d.workbench||{};
     try{
-      const wbr=await fetch('/agentflow/stats/policy-workbench');
+      const wbr=await fetch('/tokenclaw/stats/policy-workbench');
       if(wbr.ok)wb=await wbr.json();
     }catch(_e){}
     const drafts=wb.staged_drafts||{};
@@ -24932,7 +24932,7 @@ async function refreshPolicies(){
       <td class="flags">${esc(JSON.stringify(rule.action||{}))}</td>
     </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No routing rules loaded</td></tr>';
 
-    const er=await fetch('/agentflow/stats/policy-events?limit=20');
+    const er=await fetch('/tokenclaw/stats/policy-events?limit=20');
     const ed=await er.json();
     const events=ed.events||[];
     document.getElementById('policy-events-tbody').innerHTML=events.map(event=>{
@@ -25127,7 +25127,7 @@ function openaiSuppressedConflictBadges(items){
 }
 async function refreshManagedOpenAIActivation(){
   try{
-    const r=await fetch('/agentflow/stats/managed-openai-activation?limit=500');
+    const r=await fetch('/tokenclaw/stats/managed-openai-activation?limit=500');
     const d=await r.json();
     const s=d.summary||{};
     const bundle=d.bundle_health||{};
@@ -25164,7 +25164,7 @@ async function refreshManagedOpenAIActivation(){
 }
 async function refreshOpenAIOptimizationReadiness(){
   try{
-    const r=await fetch('/agentflow/stats/openai-optimization-readiness?limit=1000');
+    const r=await fetch('/tokenclaw/stats/openai-optimization-readiness?limit=1000');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -25212,7 +25212,7 @@ async function refreshOpenAIOptimizationReadiness(){
 }
 async function refreshOpenAIOldContextSummary(){
   try{
-    const r=await fetch('/agentflow/stats/openai-old-context-summary?limit=1000');
+    const r=await fetch('/tokenclaw/stats/openai-old-context-summary?limit=1000');
     const d=await r.json();
     const s=d.summary||{};
     const q=d.quality_gate_summary||{};
@@ -25275,7 +25275,7 @@ async function refreshOpenAIOldContextSummary(){
 }
 async function refreshOpenAICanaryReadiness(){
   try{
-    const r=await fetch('/agentflow/stats/openai-canary-readiness?limit=1000');
+    const r=await fetch('/tokenclaw/stats/openai-canary-readiness?limit=1000');
     const d=await r.json();
     const s=d.summary||{};
     const p=d.policy||{};
@@ -25318,7 +25318,7 @@ async function refreshOpenAICanaryReadiness(){
 }
 async function refreshOpenAIScoreboard(){
   try{
-    const r=await fetch('/agentflow/stats/openai-scoreboard?limit=1000');
+    const r=await fetch('/tokenclaw/stats/openai-scoreboard?limit=1000');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -25423,7 +25423,7 @@ function promotionActionListBadges(items,emptyLabel){
 }
 async function refreshOptimizationPromotionActions(){
   try{
-    const r=await fetch('/agentflow/stats/optimization-promotion-actions?limit=50');
+    const r=await fetch('/tokenclaw/stats/optimization-promotion-actions?limit=50');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -25496,7 +25496,7 @@ function keyedBreakdownBadges(items,keyName,emptyLabel){
 }
 async function refreshClaudeRoutingPromotionFunnel(){
   try{
-    const r=await fetch('/agentflow/stats/claude-routing-promotion-funnel?limit=1000');
+    const r=await fetch('/tokenclaw/stats/claude-routing-promotion-funnel?limit=1000');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -25555,7 +25555,7 @@ async function refreshClaudeRoutingPromotionFunnel(){
 }
 async function refreshShadowRoutingPromotionReadiness(){
   try{
-    const r=await fetch('/agentflow/stats/shadow-routing-promotion-readiness?limit=500');
+    const r=await fetch('/tokenclaw/stats/shadow-routing-promotion-readiness?limit=500');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -25615,7 +25615,7 @@ async function refreshShadowRoutingPromotionReadiness(){
 }
 async function refreshOptimizationPromotionFunnel(){
   try{
-    const r=await fetch('/agentflow/stats/optimization-promotion-funnel?limit=500');
+    const r=await fetch('/tokenclaw/stats/optimization-promotion-funnel?limit=500');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -25667,7 +25667,7 @@ async function refreshOptimizationPromotionFunnel(){
 }
 async function refreshOptimizationEvalQueue(){
   try{
-    const r=await fetch('/agentflow/stats/optimization-eval-queue?limit=500');
+    const r=await fetch('/tokenclaw/stats/optimization-eval-queue?limit=500');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -25717,7 +25717,7 @@ function coordinatorBadge(state){
 }
 async function refreshOptimizationCoordinator(){
   try{
-    const r=await fetch('/agentflow/stats/optimization-coordinator?limit=250');
+    const r=await fetch('/tokenclaw/stats/optimization-coordinator?limit=250');
     const d=await r.json();
     const s=d.summary||{};
     const c=d.capabilities||{};
@@ -25897,7 +25897,7 @@ function renderActivationBurndown(d){
 }
 async function refreshLocalActivationQueue(){
   try{
-    const r=await fetch('/agentflow/stats/local-activation-next-action-queue?limit=20');
+    const r=await fetch('/tokenclaw/stats/local-activation-next-action-queue?limit=20');
     const d=await r.json();
     const s=d.summary||{};
     const source=d.source||{};
@@ -25943,7 +25943,7 @@ function previewIssueReason(row){
 }
 async function refreshPreviewGatedActivationIssueQueue(){
   try{
-    const r=await fetch('/agentflow/stats/preview-gated-activation-issue-queue?limit=20');
+    const r=await fetch('/tokenclaw/stats/preview-gated-activation-issue-queue?limit=20');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -25989,7 +25989,7 @@ async function refreshPreviewGatedActivationIssueQueue(){
 }
 async function refreshEvidenceActivationNextActions(){
   try{
-    const r=await fetch('/agentflow/stats/evidence-to-activation-next-actions?limit=20');
+    const r=await fetch('/tokenclaw/stats/evidence-to-activation-next-actions?limit=20');
     const d=await r.json();
     const s=d.summary||{};
     const source=d.source||{};
@@ -26027,9 +26027,9 @@ async function refreshEvidenceActivationNextActions(){
 async function refreshPromotionBlockerNextActions(){
   try{
     const [blockerResponse,deltaResponse,handoffResponse]=await Promise.all([
-      fetch('/agentflow/stats/promotion-blocker-next-actions?limit=20'),
-      fetch('/agentflow/stats/post-promotion-deltas?limit=1000'),
-      fetch('/agentflow/stats/post-promotion-priority-handoff')
+      fetch('/tokenclaw/stats/promotion-blocker-next-actions?limit=20'),
+      fetch('/tokenclaw/stats/post-promotion-deltas?limit=1000'),
+      fetch('/tokenclaw/stats/post-promotion-priority-handoff')
     ]);
     const d=await blockerResponse.json();
     const deltaData=await deltaResponse.json();
@@ -26104,7 +26104,7 @@ async function refreshPromotionBlockerNextActions(){
       <td class="flags"><span class="badge ${h.impact_gate_status==='blocked'?'err':h.impact_gate_status==='passed'?'hit':'miss'}">${esc(h.impact_gate_status||'missing')}</span><div class="sub">${(h.impact_gate_blocked_count||0).toLocaleString()} blocked</div></td>
       <td class="flags"><span class="badge ${['flushed','sent','completed','would-queue'].includes(h.outcome_flush_status)?'hit':h.outcome_flush_status==='missing'?'miss':'routed'}">${esc(h.outcome_flush_status||'missing')}</span><div class="sub">${esc(h.outcome_flush_reason||'')}</div></td>
       <td class="flags">${noopReasons}</td>
-      <td class="model">${esc(h.next_safe_command||'agentflow-post-promotion-priority-delta-review --pretty')}<div class="sub">${esc(h.next_command_reason||'')}</div></td>
+      <td class="model">${esc(h.next_safe_command||'tokenclaw-post-promotion-priority-delta-review --pretty')}<div class="sub">${esc(h.next_command_reason||'')}</div></td>
       <td class="flags">${hp.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} ${hp.artifact_payloads_included?'<span class="badge err">payloads</span>':'<span class="badge hit">payloads omitted</span>'} ${hp.raw_prompts_included||hp.provider_bodies_included||hp.request_ids_included||hp.session_ids_included||hp.cache_keys_included||hp.file_paths_included?'<span class="badge err">raw/local data</span>':'<span class="badge hit">raw data omitted</span>'}</td>
     </tr>`;
     const sources=handoff.sources||{};
@@ -26123,10 +26123,10 @@ async function refreshPromotionBlockerNextActions(){
 async function refreshManaged(){
   try{
     const [managedResponse,safetyResponse,rolloutResponse,coverageResponse]=await Promise.all([
-      fetch('/agentflow/stats/managed-recommendations?limit=500'),
-      fetch('/agentflow/stats/safety'),
-      fetch('/agentflow/stats/rollout-actions/readiness?limit=500'),
-      fetch('/agentflow/stats/local-pattern-coverage?limit=250')
+      fetch('/tokenclaw/stats/managed-recommendations?limit=500'),
+      fetch('/tokenclaw/stats/safety'),
+      fetch('/tokenclaw/stats/rollout-actions/readiness?limit=500'),
+      fetch('/tokenclaw/stats/local-pattern-coverage?limit=250')
     ]);
     const d=await managedResponse.json();
     const safety=await safetyResponse.json();
@@ -26311,7 +26311,7 @@ async function refreshManaged(){
 
 async function refreshPhaseRouting(){
   try{
-    const r=await fetch('/agentflow/stats/phase-routing?limit=1000');
+    const r=await fetch('/tokenclaw/stats/phase-routing?limit=1000');
     const d=await r.json();
     const summary=d.summary||{};
     const policy=d.policy||{};
@@ -26463,7 +26463,7 @@ function phaseMemoryBlockerBadges(reasons){
 }
 async function refreshSessionPhaseMemory(){
   try{
-    const r=await fetch('/agentflow/stats/session-phase-memory?limit=1000');
+    const r=await fetch('/tokenclaw/stats/session-phase-memory?limit=1000');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -26520,7 +26520,7 @@ async function refreshSessionPhaseMemory(){
 
 async function refreshSessions(){
   try{
-    const [r,full]=await Promise.all([fetch('/agentflow/stats/sessions'),loadFullStats()]);
+    const [r,full]=await Promise.all([fetch('/tokenclaw/stats/sessions'),loadFullStats()]);
     const d=await r.json();
     const tb=document.getElementById('sess-tbody');
     const pb=document.getElementById('plateau-tbody');

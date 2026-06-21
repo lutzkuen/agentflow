@@ -11,15 +11,15 @@ from tokenclaw.router import OPENAI_LARGE_DEFAULT, OPENAI_SMALL_DEFAULT, OPENAI_
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_routing_opportunity.v1"
-PROMOTION_DECISION_REPORT_SCHEMA = "agentflow.openai_routing_promotion_decision_report.v1"
-PROMOTION_DECISION_SCHEMA = "agentflow.openai_routing_promotion_decision.v1"
-ACTIVE_LOCAL_POLICY_OUTCOME_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome.v1"
-ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
-ACTIVE_LOCAL_POLICY_SAVINGS_DELTAS_SCHEMA = "agentflow.openai_routing_active_local_policy_savings_deltas.v1"
-ROUTING_CANARY_OUTCOME_SCHEMA = "agentflow.openai_routing_canary_outcome.v1"
-ROUTING_LIFECYCLE_REVIEW_SCHEMA = "agentflow.openai_routing_lifecycle_review.v1"
-SEMANTIC_REGRESSION_ACTION_SCHEMA = "agentflow.openai_routing_semantic_regression_action.v1"
+SCHEMA = "tokenclaw.openai_routing_opportunity.v1"
+PROMOTION_DECISION_REPORT_SCHEMA = "tokenclaw.openai_routing_promotion_decision_report.v1"
+PROMOTION_DECISION_SCHEMA = "tokenclaw.openai_routing_promotion_decision.v1"
+ACTIVE_LOCAL_POLICY_OUTCOME_SCHEMA = "tokenclaw.openai_routing_active_local_policy_outcome.v1"
+ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "tokenclaw.openai_routing_active_local_policy_outcome_gate.v1"
+ACTIVE_LOCAL_POLICY_SAVINGS_DELTAS_SCHEMA = "tokenclaw.openai_routing_active_local_policy_savings_deltas.v1"
+ROUTING_CANARY_OUTCOME_SCHEMA = "tokenclaw.openai_routing_canary_outcome.v1"
+ROUTING_LIFECYCLE_REVIEW_SCHEMA = "tokenclaw.openai_routing_lifecycle_review.v1"
+SEMANTIC_REGRESSION_ACTION_SCHEMA = "tokenclaw.openai_routing_semantic_regression_action.v1"
 PROMOTION_VERDICT_OPTIONS = ["promotion-ready", "active-local-policy", "keep-staged", "keep-blocked", "rollback-required"]
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
@@ -41,18 +41,18 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-OPENAI_SMALL_TEXT_CHARS_LT = _env_int("AGENTFLOW_OPENAI_SMALL_TEXT_CHARS_LT", DEFAULT_SMALL_TEXT_CHARS_LT)
-OPENAI_TINY_TEXT_CHARS_LT = _env_int("AGENTFLOW_OPENAI_TINY_TEXT_CHARS_LT", DEFAULT_TINY_TEXT_CHARS_LT)
+OPENAI_SMALL_TEXT_CHARS_LT = _env_int("TOKENCLAW_OPENAI_SMALL_TEXT_CHARS_LT", DEFAULT_SMALL_TEXT_CHARS_LT)
+OPENAI_TINY_TEXT_CHARS_LT = _env_int("TOKENCLAW_OPENAI_TINY_TEXT_CHARS_LT", DEFAULT_TINY_TEXT_CHARS_LT)
 OPENAI_GPT54_CANARY_TEXT_CHARS_LT = _env_int(
-    "AGENTFLOW_OPENAI_GPT54_CANARY_TEXT_CHARS_LT",
+    "TOKENCLAW_OPENAI_GPT54_CANARY_TEXT_CHARS_LT",
     DEFAULT_OPENAI_GPT54_CANARY_TEXT_CHARS_LT,
 )
 OPENAI_ROUTING_MIN_SEMANTIC_COMPARISONS = _env_int(
-    "AGENTFLOW_OPENAI_ROUTING_MIN_SEMANTIC_COMPARISONS",
+    "TOKENCLAW_OPENAI_ROUTING_MIN_SEMANTIC_COMPARISONS",
     DEFAULT_MIN_SEMANTIC_COMPARISONS,
 )
 OPENAI_ROUTING_MIN_SEMANTIC_PASSES = _env_int(
-    "AGENTFLOW_OPENAI_ROUTING_MIN_SEMANTIC_PASSES",
+    "TOKENCLAW_OPENAI_ROUTING_MIN_SEMANTIC_PASSES",
     DEFAULT_MIN_SEMANTIC_PASSES,
 )
 
@@ -65,7 +65,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 OPENAI_ROUTING_MIN_SEMANTIC_PASS_RATE = _env_float(
-    "AGENTFLOW_OPENAI_ROUTING_MIN_SEMANTIC_PASS_RATE",
+    "TOKENCLAW_OPENAI_ROUTING_MIN_SEMANTIC_PASS_RATE",
     DEFAULT_MIN_SEMANTIC_PASS_RATE,
 )
 
@@ -145,7 +145,7 @@ def _semantic_quality_key(
 
 def _empty_semantic_quality_summary() -> dict[str, Any]:
     return {
-        "schema": "agentflow.openai_routing_semantic_quality_gate.v1",
+        "schema": "tokenclaw.openai_routing_semantic_quality_gate.v1",
         "clean_comparison_count": 0,
         "pass_count": 0,
         "fail_count": 0,
@@ -228,7 +228,7 @@ def _openai_routing_semantic_quality_by_target(store_obj: Any) -> dict[tuple[str
     for row in rows:
         data = dict(row)
         summary = {
-            "schema": "agentflow.openai_routing_semantic_quality_gate.v1",
+            "schema": "tokenclaw.openai_routing_semantic_quality_gate.v1",
             "clean_comparison_count": _as_int(data.get("clean_comparison_count")),
             "pass_count": _as_int(data.get("pass_count")),
             "fail_count": _as_int(data.get("fail_count")),
@@ -891,7 +891,7 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
     }
 
     return {
-        "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+        "schema": "tokenclaw.openai_routing_canary_lifecycle_evidence.v1",
         "status": "matched" if observed else "no-openai-canary-metadata",
         "observed_count": observed,
         "cohort_counts": {
@@ -924,7 +924,7 @@ def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> di
         "cohort_costs": cohort_costs,
         "savings_deltas": _cohort_cost_deltas(cohort_costs),
         "skipped_unknown_classification": {
-            "schema": "agentflow.openai_routing_canary_skipped_unknown_classification.v1",
+            "schema": "tokenclaw.openai_routing_canary_skipped_unknown_classification.v1",
             "safe_bypass_count": safe_bypass_count,
             "unsupported_shape_count": unsupported_shape_count,
             "promotion_blocker_count": promotion_blocker_count,
@@ -974,7 +974,7 @@ def _routing_rule_metadata(bucket: dict[str, Any]) -> dict[str, Any]:
             conditions["max_text_chars"] = OPENAI_SMALL_TEXT_CHARS_LT
 
     return {
-        "schema": "agentflow.openai_routing_rule_metadata.v1",
+        "schema": "tokenclaw.openai_routing_rule_metadata.v1",
         "policy_source": "local-manual-review",
         "target_local_rule_file": "routing_rules.yaml",
         "target_local_policy_section": "routing.rules",
@@ -1113,7 +1113,7 @@ def _promotion_readiness(
         reason = unique_reasons[0] if unique_reasons else "insufficient-promotion-evidence"
 
     return {
-        "schema": "agentflow.openai_routing_canary_promotion_readiness.v1",
+        "schema": "tokenclaw.openai_routing_canary_promotion_readiness.v1",
         "decision": decision,
         "promotion_ready": decision == "promote",
         "next_action": next_action,
@@ -1515,7 +1515,7 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
             "keep_blocked_count": keep_blocked_count,
         },
         "simulation_policy": {
-            "schema": "agentflow.openai_routing_simulation_policy.v1",
+            "schema": "tokenclaw.openai_routing_simulation_policy.v1",
             "provider_calls_made": False,
             "existing_route_openai_model_thresholds": {
                 "large_model": OPENAI_LARGE_DEFAULT,
@@ -1622,7 +1622,7 @@ def _stable_fingerprint(*parts: Any) -> str:
 
 def _candidate_set_metadata(candidate_ids: list[str]) -> dict[str, Any]:
     return {
-        "schema": "agentflow.openai_routing_candidate_set_metadata.v1",
+        "schema": "tokenclaw.openai_routing_candidate_set_metadata.v1",
         "candidate_count": len(candidate_ids),
         "candidate_fingerprint": f"openai-routing-candidates:{_stable_fingerprint(*sorted(candidate_ids))}"
         if candidate_ids
@@ -1668,7 +1668,7 @@ def _openai_promotion_rollback_metadata(
     rule_id = str(rule_preview.get("id") or "promote-openai-routing-canary")
     disabled_reason = reason_codes[0] if reason_codes else "operator-requested"
     return {
-        "schema": "agentflow.openai_routing_promotion_rollback_metadata.v1",
+        "schema": "tokenclaw.openai_routing_promotion_rollback_metadata.v1",
         "required_for_promotion": True,
         "promotion_verdict": promotion_verdict,
         "rollback_action_type": "disable_openai_routing_rule",
@@ -1716,14 +1716,14 @@ def _openai_promotion_local_policy_patch(
         "conditions": rule_preview.get("conditions") if isinstance(rule_preview.get("conditions"), dict) else {},
         "action": rule_preview.get("action") if isinstance(rule_preview.get("action"), dict) else {},
         "metadata": {
-            "schema": "agentflow.openai_routing_promotion_rule_metadata.v1",
+            "schema": "tokenclaw.openai_routing_promotion_rule_metadata.v1",
             "source": "openai_routing_promotion_decision",
             "operator_apply_required": True,
             "policy_files_written": False,
             "target_local_policy_section": "routing.rules",
             "target_local_rule_file": "routing_rules.yaml",
             "promotion_evidence": {
-                "schema": "agentflow.openai_routing_promotion_patch_evidence.v1",
+                "schema": "tokenclaw.openai_routing_promotion_patch_evidence.v1",
                 "applied_count": _as_int(lifecycle.get("applied_count")),
                 "holdout_count": _as_int(lifecycle.get("holdout_count")),
                 "safety_stop_count": _as_int(lifecycle.get("safety_stop_count")),
@@ -1736,7 +1736,7 @@ def _openai_promotion_local_policy_patch(
         },
     }
     return {
-        "schema": "agentflow.openai_routing_local_policy_patch.v1",
+        "schema": "tokenclaw.openai_routing_local_policy_patch.v1",
         "patch_type": "promote_openai_routing_canary",
         "status": "drafted",
         "operator_apply_required": True,
@@ -1789,7 +1789,7 @@ def _active_openai_local_policy_rule(target: dict[str, Any]) -> dict[str, Any] |
         metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
         rule_id = str(rule.get("id") or "promoted-openai-routing-rule")
         return {
-            "schema": "agentflow.openai_routing_active_local_policy_rule.v1",
+            "schema": "tokenclaw.openai_routing_active_local_policy_rule.v1",
             "status": "active-local-policy",
             "reason": "matching-openai-routing-rule-active-in-local-policy",
             "policy_source": str(rule.get("policy_source") or metadata.get("policy_source") or "local-promoted"),
@@ -1808,7 +1808,7 @@ def _active_openai_local_policy_rule(target: dict[str, Any]) -> dict[str, Any] |
                 "category": category,
             },
             "rollback_metadata": {
-                "schema": "agentflow.openai_routing_promotion_rollback_metadata.v1",
+                "schema": "tokenclaw.openai_routing_promotion_rollback_metadata.v1",
                 "required_for_promotion": True,
                 "rollback_action_type": "disable_openai_routing_rule",
                 "target_local_policy_section": "routing.rules",
@@ -1876,7 +1876,7 @@ def _disabled_openai_local_policy_rule(target: dict[str, Any]) -> dict[str, Any]
             continue
         metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
         return {
-            "schema": "agentflow.openai_routing_disabled_local_policy_rule.v1",
+            "schema": "tokenclaw.openai_routing_disabled_local_policy_rule.v1",
             "status": "disabled-local-policy",
             "reason": str(rule.get("disabled_reason") or "disabled-local-policy"),
             "policy_source": str(rule.get("policy_source") or metadata.get("policy_source") or "local-promoted"),
@@ -1907,7 +1907,7 @@ def _openai_promotion_duplicate_suppression(
         ",".join(sorted(reason_codes)),
     )
     return {
-        "schema": "agentflow.openai_routing_promotion_duplicate_suppression.v1",
+        "schema": "tokenclaw.openai_routing_promotion_duplicate_suppression.v1",
         "fingerprint": f"routing-promotion:{fingerprint}",
         "reason": reason or (reason_codes[0] if reason_codes else promotion_verdict),
         "promotion_verdict": promotion_verdict,
@@ -1996,7 +1996,7 @@ def _openai_active_policy_outcome_gate(
         "savings_per_1000_calls_usd": savings_per_1000,
         "decision_options": ["keep-active", "review-stale-evidence", "rollback-required", "keep-blocked"],
         "regression_counters": {
-            "schema": "agentflow.openai_routing_active_local_policy_outcome_regression_counters.v1",
+            "schema": "tokenclaw.openai_routing_active_local_policy_outcome_regression_counters.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "applied_count": applied_count,
@@ -2100,7 +2100,7 @@ def _openai_routing_canary_outcome(
         reason_codes = ["no-regression-routing-canary"]
 
     quality_performance_regression = {
-        "schema": "agentflow.openai_routing_canary_quality_performance_regression.v1",
+        "schema": "tokenclaw.openai_routing_canary_quality_performance_regression.v1",
         "metadata_only": True,
         "aggregate_only": True,
         "frontend_visible_regression_reported": False,
@@ -2139,7 +2139,7 @@ def _openai_routing_canary_outcome(
         },
         "thresholds": thresholds,
         "routing_savings": {
-            "schema": "agentflow.openai_routing_canary_routing_savings.v1",
+            "schema": "tokenclaw.openai_routing_canary_routing_savings.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "routing_only_savings_usd": round(routing_only_savings, 8),
@@ -2152,7 +2152,7 @@ def _openai_routing_canary_outcome(
             ),
         },
         "non_routing_savings": {
-            "schema": "agentflow.openai_routing_canary_non_routing_savings.v1",
+            "schema": "tokenclaw.openai_routing_canary_non_routing_savings.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "crunch_savings_usd": round(
@@ -2175,7 +2175,7 @@ def _openai_routing_canary_outcome(
             ),
         },
         "regression_metrics": {
-            "schema": "agentflow.openai_routing_canary_regression_metrics.v1",
+            "schema": "tokenclaw.openai_routing_canary_regression_metrics.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "applied_minus_holdout_error_rate_delta": _as_float(savings_deltas.get("applied_minus_holdout_error_rate_delta")),
@@ -2198,7 +2198,7 @@ def _openai_active_policy_rollback_metadata(
     reason_codes = outcome_gate.get("reason_codes") if isinstance(outcome_gate.get("reason_codes"), list) else []
     disabled_reason = str(reason_codes[0]) if reason_codes else "operator-requested"
     return {
-        "schema": "agentflow.openai_routing_active_local_policy_rollback_metadata.v1",
+        "schema": "tokenclaw.openai_routing_active_local_policy_rollback_metadata.v1",
         "required_for_active_policy_measurement": True,
         "rollback_action_type": "disable_openai_routing_rule",
         "target_local_policy_section": "routing.rules",
@@ -2297,7 +2297,7 @@ def _openai_active_local_policy_outcome(
         evidence_age_hours=lifecycle.get("evidence_age_hours"),
     )
     coverage = {
-        "schema": "agentflow.openai_routing_active_local_policy_coverage.v1",
+        "schema": "tokenclaw.openai_routing_active_local_policy_coverage.v1",
         "matched_count": matched_count,
         "observed_count": _as_int(lifecycle.get("observed_count")),
         "applied_count": applied,
@@ -2330,7 +2330,7 @@ def _openai_active_local_policy_outcome(
         "target_local_policy_section": "routing.rules",
         "target_local_rule_file": "routing_rules.yaml",
         "local_file_backed_representation": {
-            "schema": "agentflow.openai_routing_local_file_backed_representation.v1",
+            "schema": "tokenclaw.openai_routing_local_file_backed_representation.v1",
             "exists": True,
             "policy_section": "routing",
             "policy_source": "local-file-backed",
@@ -2339,7 +2339,7 @@ def _openai_active_local_policy_outcome(
             "policy_file_contents_included": False,
         },
         "active_local_policy_rule": {
-            "schema": "agentflow.openai_routing_active_local_policy_rule_reference.v1",
+            "schema": "tokenclaw.openai_routing_active_local_policy_rule_reference.v1",
             "status": active_local_policy_rule.get("status"),
             "reason": active_local_policy_rule.get("reason"),
             "policy_source": active_local_policy_rule.get("policy_source"),
@@ -2364,7 +2364,7 @@ def _openai_active_local_policy_outcome(
         "fallback_count": fallbacks,
         "retry_count": retries,
         "regression_counters": {
-            "schema": "agentflow.openai_routing_active_local_policy_regression_counters.v1",
+            "schema": "tokenclaw.openai_routing_active_local_policy_regression_counters.v1",
             "applied_count": applied,
             "holdout_count": holdout,
             "skipped_count": skipped,
@@ -2548,7 +2548,7 @@ def _openai_routing_lifecycle_review(
         "savings_per_1000_calls_usd": savings_per_1000,
         "projected_savings_usd": round(projected_savings_usd, 6),
         "semantic_quality_regression": {
-            "schema": "agentflow.openai_routing_semantic_quality_regression_review.v1",
+            "schema": "tokenclaw.openai_routing_semantic_quality_regression_review.v1",
             "observed": semantic_regression,
             "disabled_local_policy_rule_present": isinstance(disabled_local_policy_rule, dict),
             "disabled_local_policy_reason": disabled_reason,
@@ -2657,7 +2657,7 @@ def _openai_semantic_regression_action(
     draft_record: dict[str, Any] | None = None
     if action in {"rollback-required", "narrow-canary-shape"}:
         draft_record = {
-            "schema": "agentflow.openai_routing_semantic_regression_review_draft.v1",
+            "schema": "tokenclaw.openai_routing_semantic_regression_review_draft.v1",
             "draft_action": "rollback-local-routing-rule" if action == "rollback-required" else "narrow-local-routing-canary",
             "operator_apply_required": True,
             "policy_files_written": False,
@@ -2683,7 +2683,7 @@ def _openai_semantic_regression_action(
         "target_local_policy_section": "routing.rules",
         "target_local_rule_file": "routing_rules.yaml",
         "counters": {
-            "schema": "agentflow.openai_routing_semantic_regression_action_counters.v1",
+            "schema": "tokenclaw.openai_routing_semantic_regression_action_counters.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "matched_count": matched_count,
@@ -2702,7 +2702,7 @@ def _openai_semantic_regression_action(
             "unclassified_count": unclassified_count,
         },
         "semantic_quality": {
-            "schema": "agentflow.openai_routing_semantic_regression_quality_evidence.v1",
+            "schema": "tokenclaw.openai_routing_semantic_regression_quality_evidence.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "gate_passed": bool(semantic_quality.get("gate_passed")),
@@ -2714,7 +2714,7 @@ def _openai_semantic_regression_action(
         },
         "review_draft": draft_record,
         "duplicate_suppression": {
-            "schema": "agentflow.openai_routing_semantic_regression_duplicate_suppression.v1",
+            "schema": "tokenclaw.openai_routing_semantic_regression_duplicate_suppression.v1",
             "fingerprint": f"openai-routing-semantic-regression:{fingerprint}",
             "metadata_only": True,
             "aggregate_only": True,
@@ -2931,7 +2931,7 @@ def _build_openai_promotion_decision(
 
     if routing_rule_metadata is None:
         routing_rule_metadata = {
-            "schema": "agentflow.openai_routing_rule_metadata.v1",
+            "schema": "tokenclaw.openai_routing_rule_metadata.v1",
             "policy_source": "local-manual-review",
             "target_local_rule_file": "routing_rules.yaml",
             "target_local_policy_section": "routing.rules",
@@ -2967,7 +2967,7 @@ def _build_openai_promotion_decision(
         "target_local_rule_file": "routing_rules.yaml",
     }
     lifecycle = {
-        "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+        "schema": "tokenclaw.openai_routing_canary_lifecycle_evidence.v1",
         "status": "matched" if observed_count else "no-openai-canary-metadata",
         "observed_count": observed_count,
         "cohort_counts": cohort_counts,
@@ -2982,7 +2982,7 @@ def _build_openai_promotion_decision(
         "latest_observed_at": latest_observed_at,
         "oldest_observed_at": oldest_observed_at,
         "stale_evidence": {
-            "schema": "agentflow.openai_routing_active_local_policy_stale_evidence.v1",
+            "schema": "tokenclaw.openai_routing_active_local_policy_stale_evidence.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "stale": stale_evidence_count > 0,
@@ -2996,7 +2996,7 @@ def _build_openai_promotion_decision(
         "skipped_reason_breakdown": _breakdown(skipped_reason_counts),
         "unknown_reason_breakdown": _breakdown(unknown_reason_counts),
         "skipped_unknown_classification": {
-            "schema": "agentflow.openai_routing_canary_skipped_unknown_classification.v1",
+            "schema": "tokenclaw.openai_routing_canary_skipped_unknown_classification.v1",
             "safe_bypass_count": sum(safe_bypass_reason_counts.values()),
             "unsupported_shape_count": unsupported_shape_count,
             "promotion_blocker_count": promotion_blocker_count,

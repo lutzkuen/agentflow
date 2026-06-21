@@ -117,7 +117,7 @@ async def reload_policy_modules(after_reload: Callable[[], None] | None = None) 
     policy_state = await stats.stats_policies()
     payload = {
         "ok": True,
-        "schema": "agentflow.policy_reload.v1",
+        "schema": "tokenclaw.policy_reload.v1",
         "reloaded_modules": reloaded,
         "policies": policy_state,
     }
@@ -132,7 +132,7 @@ async def reload_policy_modules(after_reload: Callable[[], None] | None = None) 
 def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRouter:
     router = APIRouter()
 
-    @router.post("/agentflow/admin/reload-policies", response_model=None)
+    @router.post("/tokenclaw/admin/reload-policies", response_model=None)
     async def reload_policies(request: Request) -> Any:
         if not request_is_loopback(request):
             log_policy_event(
@@ -156,7 +156,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
             )
         return await reload_policy_modules(after_reload=after_reload)
 
-    @router.post("/agentflow/admin/policy-drafts/stage", response_model=None)
+    @router.post("/tokenclaw/admin/policy-drafts/stage", response_model=None)
     async def stage_policy_draft(request: Request) -> Any:
         if not request_is_loopback(request):
             return _forbidden_workbench_response(
@@ -165,7 +165,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
                 "policy draft staging is only available from loopback clients",
             )
 
-        body, error_response = await _json_object_request(request, schema="agentflow.policy_draft_stage.v1")
+        body, error_response = await _json_object_request(request, schema="tokenclaw.policy_draft_stage.v1")
         if error_response is not None:
             log_policy_event(
                 "draft-stage",
@@ -208,7 +208,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
-    @router.post("/agentflow/admin/policy-drafts/validate", response_model=None)
+    @router.post("/tokenclaw/admin/policy-drafts/validate", response_model=None)
     async def validate_policy_draft(request: Request) -> Any:
         if not request_is_loopback(request):
             return _forbidden_workbench_response(
@@ -217,7 +217,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
                 "policy draft validation is only available from loopback clients",
             )
 
-        body, error_response = await _json_object_request(request, schema="agentflow.policy_draft_validate.v1")
+        body, error_response = await _json_object_request(request, schema="tokenclaw.policy_draft_validate.v1")
         if error_response is not None:
             return error_response
         assert body is not None
@@ -225,7 +225,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
         if not isinstance(draft, str) or not draft.strip():
             return JSONResponse(
                 {
-                    "schema": "agentflow.policy_draft_validate.v1",
+                    "schema": "tokenclaw.policy_draft_validate.v1",
                     "ok": False,
                     "status": "fail",
                     "can_apply": False,
@@ -276,7 +276,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
-    @router.post("/agentflow/admin/policy-drafts/apply", response_model=None)
+    @router.post("/tokenclaw/admin/policy-drafts/apply", response_model=None)
     async def apply_policy_draft(request: Request) -> Any:
         if not request_is_loopback(request):
             return _forbidden_workbench_response(
@@ -285,7 +285,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
                 "policy draft apply is only available from loopback clients",
             )
 
-        body, error_response = await _json_object_request(request, schema="agentflow.policy_draft_apply.v1")
+        body, error_response = await _json_object_request(request, schema="tokenclaw.policy_draft_apply.v1")
         if error_response is not None:
             return error_response
         assert body is not None
@@ -293,7 +293,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
         if not isinstance(draft, str) or not draft.strip():
             return JSONResponse(
                 {
-                    "schema": "agentflow.policy_draft_apply.v1",
+                    "schema": "tokenclaw.policy_draft_apply.v1",
                     "ok": False,
                     "status": "blocked",
                     "error": {"type": "invalid_payload", "message": "draft or draft_id is required"},
@@ -322,7 +322,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
-    @router.post("/agentflow/admin/policy-drafts/rollback", response_model=None)
+    @router.post("/tokenclaw/admin/policy-drafts/rollback", response_model=None)
     async def rollback_policy_draft(request: Request) -> Any:
         if not request_is_loopback(request):
             return _forbidden_workbench_response(
@@ -331,7 +331,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
                 "policy draft rollback is only available from loopback clients",
             )
 
-        body, error_response = await _json_object_request(request, schema="agentflow.policy_draft_rollback.v1")
+        body, error_response = await _json_object_request(request, schema="tokenclaw.policy_draft_rollback.v1")
         if error_response is not None:
             return error_response
         assert body is not None
@@ -339,7 +339,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
         if not isinstance(apply_id, str) or not apply_id.strip():
             return JSONResponse(
                 {
-                    "schema": "agentflow.policy_draft_rollback.v1",
+                    "schema": "tokenclaw.policy_draft_rollback.v1",
                     "ok": False,
                     "status": "blocked",
                     "error": {"type": "invalid_payload", "message": "apply_id is required"},

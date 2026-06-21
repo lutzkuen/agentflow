@@ -16,10 +16,10 @@ from tokenclaw.recommendations import (
 from tokenclaw.store import stable_json
 
 
-OPENAI_RECOMMENDATION_DECISION_SCHEMA = "agentflow.openai_managed_recommendation_decision.v1"
-OPENAI_RECOMMENDATION_MODE_ENV = "AGENTFLOW_OPENAI_RECOMMENDATION_MODE"
-OPENAI_RECOMMENDATION_CANARY_FRACTION_ENV = "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION"
-OPENAI_RECOMMENDATION_CANARY_SALT_ENV = "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_SALT"
+OPENAI_RECOMMENDATION_DECISION_SCHEMA = "tokenclaw.openai_managed_recommendation_decision.v1"
+OPENAI_RECOMMENDATION_MODE_ENV = "TOKENCLAW_OPENAI_RECOMMENDATION_MODE"
+OPENAI_RECOMMENDATION_CANARY_FRACTION_ENV = "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION"
+OPENAI_RECOMMENDATION_CANARY_SALT_ENV = "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_SALT"
 
 VALID_OPENAI_RECOMMENDATION_MODES = {"observe-only", "dry-run", "canary"}
 LIVE_POLICY_DECISION_MODES = {"live", "enforced", "promoted", "promotion", "route_to"}
@@ -50,7 +50,7 @@ def openai_canary_fraction() -> float:
 def openai_canary_salt() -> str:
     return os.getenv(
         OPENAI_RECOMMENDATION_CANARY_SALT_ENV,
-        "agentflow-openai-managed-canary-v1",
+        "tokenclaw-openai-managed-canary-v1",
     )
 
 
@@ -116,7 +116,7 @@ def _projection(
         if risk[key] is None:
             risk["missing_fields"].append(key)
     return {
-        "schema": "agentflow.openai_recommendation_projection.v1",
+        "schema": "tokenclaw.openai_recommendation_projection.v1",
         "input_tokens_est": input_tokens_est,
         "current_model": current_model,
         "target_model": target_model,
@@ -156,7 +156,7 @@ def _cohort(recommendation_unit: dict[str, Any], recommendation_meta: dict[str, 
     score = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
     selected = score < fraction
     return {
-        "schema": "agentflow.openai_recommendation_canary.v1",
+        "schema": "tokenclaw.openai_recommendation_canary.v1",
         "enabled": True,
         "fraction": fraction,
         "salt": openai_canary_salt(),

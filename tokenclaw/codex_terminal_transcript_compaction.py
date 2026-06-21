@@ -14,7 +14,7 @@ from tokenclaw.terminal_features import _line_classes
 
 
 FAMILY = "codex_terminal_transcript_compaction"
-SCHEMA = "agentflow.codex_terminal_transcript_compaction_canary.v1"
+SCHEMA = "tokenclaw.codex_terminal_transcript_compaction_canary.v1"
 _DEFAULT_CANARY_SALT = "codex-terminal-transcript-compaction"
 _INCOMPATIBLE_FAMILIES = frozenset({"exact_cache_replay", "managed_recommendation"})
 _MIN_TERMINAL_LINE_FRACTION = 0.05

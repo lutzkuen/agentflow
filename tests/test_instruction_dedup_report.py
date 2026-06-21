@@ -17,7 +17,7 @@ from tokenclaw.store import SQLiteStore, stable_json, utc_now
 class InstructionDedupReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -110,7 +110,7 @@ class InstructionDedupReportTests(unittest.TestCase):
 
         report = build_instruction_dedup_opportunity_report(self.store, limit=20)
 
-        self.assertEqual(report["schema"], "agentflow.instruction_dedup_opportunity.v1")
+        self.assertEqual(report["schema"], "tokenclaw.instruction_dedup_opportunity.v1")
         self.assertEqual(report["summary"]["body_rows"], 2)
         self.assertGreater(report["summary"]["instruction_fingerprint_rows"], 0)
         self.assertGreater(report["summary"]["projected_saved_chars"], 0)
@@ -311,13 +311,13 @@ class InstructionDedupReportTests(unittest.TestCase):
             self._log_call(request_json={"system": instruction, "messages": []})
 
         result = asyncio.run(stats_instruction_dedup_opportunity(self.store, limit=10))
-        self.assertEqual(result["schema"], "agentflow.instruction_dedup_opportunity.v1")
+        self.assertEqual(result["schema"], "tokenclaw.instruction_dedup_opportunity.v1")
 
         output = io.StringIO()
         exit_code = cli.instruction_dedup_opportunity_cli(["--db", self.db_path, "--limit", "10"], stdout=output)
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.instruction_dedup_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.instruction_dedup_opportunity.v1")
         self.assertEqual(payload["summary"]["scanned_provider_call_count"], 2)
         self.assertNotIn("Repeated instruction section", output.getvalue())
 

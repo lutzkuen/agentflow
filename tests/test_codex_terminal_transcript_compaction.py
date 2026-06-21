@@ -275,7 +275,7 @@ class TerminalTranscriptCompactionPolicyLoadTests(unittest.TestCase):
             policy_path = f.name
         try:
             env_backup = os.environ.copy()
-            os.environ["AGENTFLOW_CODEX_APP_RULES"] = policy_path
+            os.environ["TOKENCLAW_CODEX_APP_RULES"] = policy_path
             import tokenclaw.codex_turn_policy as policy_mod
             policy_mod = importlib.reload(policy_mod)
             terminal = policy_mod.CODEX_APP_POLICY.get("terminal_transcript_compaction")

@@ -20,14 +20,14 @@ from tokenclaw.policy_bundle import (
 from tokenclaw.store import utc_now
 
 
-PATTERN_ROLLOUT_ACTION_SCHEMA = "agentflow.pattern_rollout_action.v1"
-PATTERN_ROLLOUT_ACTIONS_SCHEMA = "agentflow.pattern_rollout_actions.v1"
-PATTERN_ROLLOUT_ACTION_REVIEW_SCHEMA = "agentflow.pattern_rollout_actions_review.v1"
-PATTERN_ROLLOUT_ACTION_APPLY_SCHEMA = "agentflow.pattern_rollout_actions_apply.v1"
-PATTERN_ROLLOUT_ACTION_DRY_RUN_SCHEMA = "agentflow.pattern_rollout_actions_dry_run.v1"
-PATTERN_ROLLOUT_ACTION_IMPACT_SCHEMA = "agentflow.pattern_rollout_actions_impact.v1"
-PATTERN_ROLLOUT_ACTION_VALIDATION_SCHEMA = "agentflow.pattern_rollout_actions_validation.v1"
-PATTERN_ROLLOUT_ACTION_PROVENANCE_VERIFICATION_SCHEMA = "agentflow.pattern_rollout_actions_provenance_verification.v1"
+PATTERN_ROLLOUT_ACTION_SCHEMA = "tokenclaw.pattern_rollout_action.v1"
+PATTERN_ROLLOUT_ACTIONS_SCHEMA = "tokenclaw.pattern_rollout_actions.v1"
+PATTERN_ROLLOUT_ACTION_REVIEW_SCHEMA = "tokenclaw.pattern_rollout_actions_review.v1"
+PATTERN_ROLLOUT_ACTION_APPLY_SCHEMA = "tokenclaw.pattern_rollout_actions_apply.v1"
+PATTERN_ROLLOUT_ACTION_DRY_RUN_SCHEMA = "tokenclaw.pattern_rollout_actions_dry_run.v1"
+PATTERN_ROLLOUT_ACTION_IMPACT_SCHEMA = "tokenclaw.pattern_rollout_actions_impact.v1"
+PATTERN_ROLLOUT_ACTION_VALIDATION_SCHEMA = "tokenclaw.pattern_rollout_actions_validation.v1"
+PATTERN_ROLLOUT_ACTION_PROVENANCE_VERIFICATION_SCHEMA = "tokenclaw.pattern_rollout_actions_provenance_verification.v1"
 
 ROLLOUT_ACTION_TYPES = {
     "widen",
@@ -43,8 +43,8 @@ _POLICY_SECTION_FILES = {
     "cache": "cache_rules.yaml",
 }
 _SAFE_POLICY_SOURCES = {"managed-recommended"}
-_PATTERN_ACTION_VALIDATION_DETAIL_SCHEMA = "agentflow.pattern_rollout_action_family_validation.v1"
-_TERMINAL_COMPACTION_FAMILY_VALIDATION_DETAIL_SCHEMA = "agentflow.terminal_output_compaction_rollout_action_validation.v1"
+_PATTERN_ACTION_VALIDATION_DETAIL_SCHEMA = "tokenclaw.pattern_rollout_action_family_validation.v1"
+_TERMINAL_COMPACTION_FAMILY_VALIDATION_DETAIL_SCHEMA = "tokenclaw.terminal_output_compaction_rollout_action_validation.v1"
 _TERMINAL_COMPACTION_CANDIDATE_FAMILIES = {
     "terminal-output-compaction-crunch-policy-rule",
     "terminal-output-compaction",

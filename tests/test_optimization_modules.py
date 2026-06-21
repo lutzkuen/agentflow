@@ -170,7 +170,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_shadow_eval_output_and_stored_result_scrub_raw_like_fixture_fields(self):
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 {
                     "candidate_id": "shadow-privacy-candidate",
@@ -217,7 +217,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_eval_queue_runs_bounded_mixed_batch_without_provider_calls(self):
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "generated_at": "2026-06-10T02:00:00+00:00",
             "plans": [
                 {
@@ -302,7 +302,7 @@ class OptimizationModuleTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(result["schema"], "agentflow.optimization_eval_queue_run.v1")
+        self.assertEqual(result["schema"], "tokenclaw.optimization_eval_queue_run.v1")
         self.assertFalse(result["provider_calls_made"])
         self.assertFalse(result["managed_server_calls_made"])
         self.assertFalse(result["wrote_local_policy_files"])
@@ -325,7 +325,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_promotion_eval_backfill_queues_needs_eval_candidates_and_updates_report_status(self):
         promotion_report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     "candidate_id": "promotion-eval-high",
@@ -369,10 +369,10 @@ class OptimizationModuleTests(unittest.TestCase):
             ],
         }
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 {
-                    "schema": "agentflow.optimization_eval_plan_row.v1",
+                    "schema": "tokenclaw.optimization_eval_plan_row.v1",
                     "candidate_id": "promotion-eval-high",
                     "optimization_family": "cache_replayability",
                     "action_family": "cache",
@@ -412,7 +412,7 @@ class OptimizationModuleTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(dry_run["schema"], "agentflow.optimization_promotion_eval_backfill.v1")
+        self.assertEqual(dry_run["schema"], "tokenclaw.optimization_promotion_eval_backfill.v1")
         self.assertTrue(dry_run["dry_run"])
         self.assertFalse(dry_run["wrote_eval_queue_rows"])
         self.assertEqual(dry_count, 0)
@@ -436,10 +436,10 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_promotion_report_omits_raw_like_plan_and_eval_result_fields(self):
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 {
-                    "schema": "agentflow.optimization_eval_plan_row.v1",
+                    "schema": "tokenclaw.optimization_eval_plan_row.v1",
                     "candidate_id": "promotion-privacy-candidate",
                     "optimization_family": "phase_routing",
                     "action_family": "routing",
@@ -508,10 +508,10 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_promotion_report_uses_activation_lifecycle_evidence_to_clear_canary_blockers(self):
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 {
-                    "schema": "agentflow.optimization_eval_plan_row.v1",
+                    "schema": "tokenclaw.optimization_eval_plan_row.v1",
                     "candidate_id": "activation-routing-candidate",
                     "optimization_family": "openai_local_routing",
                     "action_family": "routing",
@@ -531,7 +531,7 @@ class OptimizationModuleTests(unittest.TestCase):
                     "evidence": self._dangerous_metadata(),
                 },
                 {
-                    "schema": "agentflow.optimization_eval_plan_row.v1",
+                    "schema": "tokenclaw.optimization_eval_plan_row.v1",
                     "candidate_id": "activation-cache-candidate",
                     "optimization_family": "cache_replayability",
                     "action_family": "cache",
@@ -554,7 +554,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
         def lifecycle_payload(candidate_id: str, family: str, section: str, savings: float) -> dict:
             result = {
-                "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+                "schema": "tokenclaw.optimization_promotion_rollout_actions.v1",
                 "ok": True,
                 "generated_at": "2026-06-10T03:00:00+00:00",
                 "summary": {"projected_savings_usd": savings},
@@ -747,10 +747,10 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_openai_canary_impact_reports_verdicts_and_feeds_promotion_report(self):
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 {
-                    "schema": "agentflow.optimization_eval_plan_row.v1",
+                    "schema": "tokenclaw.optimization_eval_plan_row.v1",
                     "candidate_id": "openai-canary-candidate",
                     "optimization_family": "openai_local_routing",
                     "action_family": "routing",
@@ -766,7 +766,7 @@ class OptimizationModuleTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 self._log_openai_canary_call(store, cohort="canary_applied", suffix="a1")
                 self._log_openai_canary_call(store, cohort="canary_applied", suffix="a2-crunch", latency_ms=900)
@@ -796,7 +796,7 @@ class OptimizationModuleTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(impact["schema"], "agentflow.openai_canary_impact.v1")
+        self.assertEqual(impact["schema"], "tokenclaw.openai_canary_impact.v1")
         self.assertTrue(impact["read_only"])
         self.assertFalse(impact["provider_calls_made"])
         self.assertEqual(impact["summary"]["observed_openai_canary_metadata_row_count"], 3)
@@ -821,7 +821,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_openai_canary_impact_routes_classified_skipped_unknown_rows_to_single_verdict(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for idx in range(14):
                     self._log_openai_canary_call(
@@ -887,7 +887,7 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(candidate["cohort_counts"]["skipped"], 145)
         self.assertEqual(candidate["cohort_counts"]["unknown"], 6)
         verdict = candidate["routing_promotion_verdict"]
-        self.assertEqual(verdict["schema"], "agentflow.openai_routing_promotion_verdict.v1")
+        self.assertEqual(verdict["schema"], "tokenclaw.openai_routing_promotion_verdict.v1")
         self.assertEqual(verdict["verdict"], "blocked")
         self.assertEqual(verdict["next_action"], "review-openai-routing-canary-blockers")
         self.assertIn("skipped-canary-promotion-blocker", verdict["reason_codes"])
@@ -912,7 +912,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_openai_canary_impact_keeps_low_volume_tool_heavy_without_holdout_staged(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for idx in range(2):
                     self._log_openai_canary_call(
@@ -957,7 +957,7 @@ class OptimizationModuleTests(unittest.TestCase):
         for scenario, expected_verdict, expected_reason in scenarios:
             with self.subTest(scenario=scenario):
                 with tempfile.TemporaryDirectory() as tmp:
-                    store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+                    store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
                     try:
                         if scenario == "insufficient":
                             self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", suffix="a1")
@@ -1000,7 +1000,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_promotion_actions_emit_local_rollout_actions_and_explicit_omissions(self):
         report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     "candidate_id": "routing-action-candidate",
@@ -1058,7 +1058,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
         result = build_optimization_promotion_actions(report, widen_step=0.25, holdout_fraction=0.1)
 
-        self.assertEqual(result["schema"], "agentflow.optimization_promotion_rollout_actions.v1")
+        self.assertEqual(result["schema"], "tokenclaw.optimization_promotion_rollout_actions.v1")
         self.assertTrue(result["read_only"])
         self.assertFalse(result["provider_calls_made"])
         self.assertFalse(result["managed_server_calls_made"])
@@ -1082,7 +1082,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_promotion_actions_rank_aggregate_omission_buckets_without_candidate_ids(self):
         report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     "candidate_id": "blocked-cache-high",
@@ -1171,7 +1171,7 @@ class OptimizationModuleTests(unittest.TestCase):
     def test_cache_promotion_actions_apply_dependency_gated_replay_canary(self):
         pattern_hash = "sha256:" + ("e" * 64)
         report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     "candidate_id": "stable-cache-replay-candidate",
@@ -1262,7 +1262,7 @@ class OptimizationModuleTests(unittest.TestCase):
             "privacy": {"metadata_only": True, "raw_prompts_included": False},
         }
         report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     **base,
@@ -1297,7 +1297,7 @@ class OptimizationModuleTests(unittest.TestCase):
     def test_crunch_promotion_actions_require_positive_lifecycle_before_widening(self):
         pattern_hash = "sha256:" + ("a" * 64)
         report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     "candidate_id": "crunch-positive-lifecycle",
@@ -1414,7 +1414,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_promotion_actions_attach_family_specific_safety_stop_reasons(self):
         report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     "candidate_id": "routing-missing-holdout",
@@ -1486,10 +1486,10 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_promotion_blocker_recommendation_review_groups_sanitized_local_candidates(self):
         payload = {
-            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "schema": "tokenclaw.promotion_blocker_next_action_recommendations.v1",
             "recommendations": [
                 {
-                    "schema": "agentflow.promotion_blocker_next_action_recommendation.v1",
+                    "schema": "tokenclaw.promotion_blocker_next_action_recommendation.v1",
                     "recommendation_id": "promotion-blocker-next-action:openai:routing:eval-missing",
                     "rank": 1,
                     "status": "recommended",
@@ -1559,7 +1559,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
         result = build_promotion_blocker_recommendation_review(payload, limit=10)
 
-        self.assertEqual(result["schema"], "agentflow.promotion_blocker_recommendation_review.v1")
+        self.assertEqual(result["schema"], "tokenclaw.promotion_blocker_recommendation_review.v1")
         self.assertTrue(result["ok"])
         self.assertTrue(result["read_only"])
         self.assertFalse(result["wrote_local_policy_files"])
@@ -1604,7 +1604,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_promotion_blocker_recommendations_queue_shadow_eval_rows_and_noops_idempotently(self):
         payload = {
-            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "schema": "tokenclaw.promotion_blocker_next_action_recommendations.v1",
             "recommendations": [
                 {
                     "recommendation_id": "promotion-blocker-next-action:openai:routing:eval-missing",
@@ -1675,7 +1675,7 @@ class OptimizationModuleTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(dry_run["schema"], "agentflow.promotion_recommendation_eval_queue.v1")
+        self.assertEqual(dry_run["schema"], "tokenclaw.promotion_recommendation_eval_queue.v1")
         self.assertTrue(dry_run["dry_run"])
         self.assertEqual(dry_count, 0)
         self.assertEqual(dry_run["summary"]["selected_task_count"], 1)
@@ -1705,11 +1705,11 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_promotion_funnel_stats_include_aggregate_omission_buckets(self):
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [],
         }
         promotion_report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     "candidate_id": "stats-omitted-cache-candidate",
@@ -1744,19 +1744,19 @@ class OptimizationModuleTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(result["schema"], "agentflow.optimization_promotion_funnel.v1")
+        self.assertEqual(result["schema"], "tokenclaw.optimization_promotion_funnel.v1")
         self.assertEqual(result["summary"]["promotion_action_count"], 0)
         self.assertEqual(result["summary"]["promotion_omitted_count"], 1)
         self.assertEqual(result["summary"]["promotion_omission_bucket_count"], 1)
         self.assertEqual(result["summary"]["top_promotion_omission_next_action"], "run-local-shadow-eval")
-        self.assertEqual(result["source_reports"]["promotion_actions_schema"], "agentflow.optimization_promotion_rollout_actions.v1")
+        self.assertEqual(result["source_reports"]["promotion_actions_schema"], "tokenclaw.optimization_promotion_rollout_actions.v1")
         self.assertEqual(result["omission_buckets"][0]["next_action"], "run-local-shadow-eval")
         self.assertNotIn("stats-omitted-cache-candidate", json.dumps(result["omission_buckets"], sort_keys=True))
         self._assert_privacy_clean(result)
 
     def test_promotion_canary_apply_records_deterministic_holdout_and_safety_stop(self):
         report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     "candidate_id": "routing-canary-candidate",
@@ -1842,7 +1842,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def _promotion_impact_bundle(self, *actions):
         return {
-            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_promotion_rollout_actions.v1",
             "generated_at": "2026-06-10T00:00:00+00:00",
             "ok": True,
             "actions": list(actions),
@@ -1851,7 +1851,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def _promotion_impact_action(self, section: str, candidate_id: str, *, projected_savings: float = 0.004):
         return {
-            "schema": "agentflow.optimization_promotion_rollout_action.v1",
+            "schema": "tokenclaw.optimization_promotion_rollout_action.v1",
             "action_id": f"promotion-action-{candidate_id}",
             "action_type": "widen",
             "policy_section": section,
@@ -1960,7 +1960,7 @@ class OptimizationModuleTests(unittest.TestCase):
         eval_only["action_family"] = "evaluation-only"
         bundle = self._promotion_impact_bundle(routing, crunch, cache, eval_only)
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for action in (routing, crunch, cache):
                     self._log_promotion_impact_call(store, action, cohort="canary_applied", suffix="a")
@@ -1977,7 +1977,7 @@ class OptimizationModuleTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["schema"], "agentflow.optimization_promotion_impact.v1")
+        self.assertEqual(report["schema"], "tokenclaw.optimization_promotion_impact.v1")
         self.assertTrue(report["ok"])
         self.assertEqual(report["status"], "matched")
         self.assertTrue(report["read_only"])
@@ -2042,7 +2042,7 @@ class OptimizationModuleTests(unittest.TestCase):
             bundle = self._promotion_impact_bundle(action)
             with self.subTest(scenario=scenario):
                 with tempfile.TemporaryDirectory() as tmp:
-                    store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+                    store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
                     try:
                         if scenario == "insufficient":
                             self._log_promotion_impact_call(store, action, cohort="canary_applied", suffix="one")
@@ -2079,7 +2079,7 @@ class OptimizationModuleTests(unittest.TestCase):
         blocked = self._promotion_impact_bundle(self._promotion_impact_action("routing", "privacy"))
         blocked["actions"][0]["raw_prompt"] = "raw promotion impact secret"
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 blocked_report = measure_optimization_promotion_impact(blocked, store_obj=store)
             finally:
@@ -2093,7 +2093,7 @@ class OptimizationModuleTests(unittest.TestCase):
         action = self._promotion_impact_action("routing", "routing-feedback-ledger", projected_savings=0.004)
         bundle = self._promotion_impact_bundle(action)
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 self._log_promotion_impact_call(store, action, cohort="canary_applied", status_code=500, suffix="a")
                 self._log_promotion_impact_call(store, action, cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, suffix="h")
@@ -2113,7 +2113,7 @@ class OptimizationModuleTests(unittest.TestCase):
                 promotion_report = build_optimization_promotion_report(
                     store,
                     plan={
-                        "schema": "agentflow.optimization_eval_plan.v1",
+                        "schema": "tokenclaw.optimization_eval_plan.v1",
                         "plans": [{
                             "candidate_id": action["target_candidate_id"],
                             "optimization_family": "phase_routing",
@@ -2140,11 +2140,11 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertNotEqual(rows[0]["id"], rows[1]["id"])
         entry = first["entries"][0]
-        self.assertEqual(entry["schema"], "agentflow.promotion_outcome_feedback_entry.v1")
+        self.assertEqual(entry["schema"], "tokenclaw.promotion_outcome_feedback_entry.v1")
         self.assertEqual(entry["policy_id"], action["target_rule_id"])
         self.assertEqual(entry["action_family"], "routing")
         self.assertEqual(entry["rule_source"], "managed-recommended")
-        self.assertEqual(entry["source_evidence_schema"], "agentflow.optimization_promotion_rollout_actions.v1")
+        self.assertEqual(entry["source_evidence_schema"], "tokenclaw.optimization_promotion_rollout_actions.v1")
         self.assertEqual(entry["status"], "rollback-needed")
         self.assertTrue(entry["rollback_needed"])
         self.assertEqual(entry["applied_count"], 1)
@@ -2168,7 +2168,7 @@ class OptimizationModuleTests(unittest.TestCase):
         action = self._promotion_impact_action("routing", "routing-adoption-regression", projected_savings=0.001)
         bundle = self._promotion_impact_bundle(action)
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 self._log_promotion_impact_call(store, action, cohort="canary_applied", suffix="a1")
                 self._log_promotion_impact_call(store, action, cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, suffix="h1")
@@ -2247,7 +2247,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def _optimization_rollout_bundle(self):
         return {
-            "schema": "agentflow.optimization_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_rollout_actions.v1",
             "generated_at": "2026-06-10T05:00:00+00:00",
             "expires_at": "2099-06-11T05:00:00+00:00",
             "tenant_scope": "current-authenticated-tenant",
@@ -2274,7 +2274,7 @@ class OptimizationModuleTests(unittest.TestCase):
             },
             "actions": [
                 {
-                    "schema": "agentflow.optimization_rollout_action.v1",
+                    "schema": "tokenclaw.optimization_rollout_action.v1",
                     "action_id": "optimization-rollout-action:routing",
                     "action_type": "widen",
                     "target_candidate_id": "routing-policy-candidate",
@@ -2306,7 +2306,7 @@ class OptimizationModuleTests(unittest.TestCase):
                         "sample_count": 3,
                     },
                     "action": {
-                        "schema": "agentflow.openai_rollout_action.v1",
+                        "schema": "tokenclaw.openai_rollout_action.v1",
                         "target_rule_id": "openai-routing-rule",
                         "proposed_edit": {
                             "rule_id": "openai-routing-rule",
@@ -2353,20 +2353,20 @@ class OptimizationModuleTests(unittest.TestCase):
         signed = attach_optimization_rollout_provenance(
             bundle,
             secret="review-secret",
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="managed-test",
             key_id="review-key",
             generated_at="2026-06-10T05:00:00+00:00",
         )
 
-        with patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+        with patch.dict("os.environ", {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
             result = review_optimization_rollout_actions(
                 signed,
                 now=datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc),
             )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["schema"], "agentflow.optimization_rollout_actions_review.v1")
+        self.assertEqual(result["schema"], "tokenclaw.optimization_rollout_actions_review.v1")
         self.assertEqual(result["provenance"]["status"], "verified")
         self.assertEqual(result["summary"]["accepted_action_count"], 1)
         self.assertTrue(result["read_only"])
@@ -2386,7 +2386,7 @@ class OptimizationModuleTests(unittest.TestCase):
         unsigned["actions"][0]["privacy_summary"]["raw_prompts_returned"] = True
         unsigned["actions"][0]["raw_request"] = {"prompt": "raw managed prompt must not be accepted"}
 
-        with patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+        with patch.dict("os.environ", {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
             result = review_optimization_rollout_actions(
                 unsigned,
                 now=datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc),
@@ -2410,7 +2410,7 @@ class OptimizationModuleTests(unittest.TestCase):
         return attach_optimization_rollout_provenance(
             bundle or self._optimization_rollout_bundle(),
             secret="review-secret",
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="managed-test",
             key_id="review-key",
             generated_at="2026-06-10T05:00:00+00:00",
@@ -2419,7 +2419,7 @@ class OptimizationModuleTests(unittest.TestCase):
     def test_optimization_rollout_apply_writes_openai_canary_and_rolls_back(self):
         signed = self._signed_optimization_rollout_bundle()
 
-        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
             dry_run = apply_optimization_promotion_canaries(signed, config_dir=tmp, dry_run=True)
             self.assertTrue(dry_run["ok"])
             self.assertFalse(dry_run["wrote_policy_files"])
@@ -2458,7 +2458,7 @@ class OptimizationModuleTests(unittest.TestCase):
         raw_bundle["actions"][0]["raw_request"] = {"prompt": "raw managed prompt must not be written"}
         signed_raw = self._signed_optimization_rollout_bundle(raw_bundle)
 
-        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
             rejected = apply_optimization_promotion_canaries(signed_raw, config_dir=tmp, dry_run=False)
             self.assertFalse(rejected["ok"])
             self.assertFalse(rejected["wrote_policy_files"])
@@ -2489,7 +2489,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_optimization_rollout_cli_and_impact_are_metadata_only(self):
         signed = self._signed_optimization_rollout_bundle()
-        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
             bundle_path = Path(tmp) / "rollout.json"
             bundle_path.write_text(json.dumps(signed), encoding="utf-8")
             out = io.StringIO()
@@ -2504,8 +2504,8 @@ class OptimizationModuleTests(unittest.TestCase):
             self.assertFalse(cli_result["wrote_policy_files"])
             self.assertEqual(cli_result["actions"][0]["target_local_policy"], "openai_canary")
 
-        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
-            db_path = Path(tmp) / "agentflow.sqlite3"
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+            db_path = Path(tmp) / "tokenclaw.sqlite3"
             store = Store(str(db_path))
             try:
                 self._log_openai_canary_call(
@@ -2547,7 +2547,7 @@ class OptimizationModuleTests(unittest.TestCase):
             sample_limit=5,
         )
 
-        self.assertEqual(result["schema"], "agentflow.managed_feedback_status.v1")
+        self.assertEqual(result["schema"], "tokenclaw.managed_feedback_status.v1")
         self.assertEqual(result["summary"]["queued"], 1)
         self.assertEqual(result["summary"]["due"], 1)
         self.assertFalse(result["due_samples"][0]["payload_included"])
@@ -2555,7 +2555,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_feedback_status_counts_openai_optimization_lifecycle_cohorts(self):
         payload = {
-            "schema": "agentflow.openai_optimization_lifecycle_feedback.v1",
+            "schema": "tokenclaw.openai_optimization_lifecycle_feedback.v1",
             "event_type": "openai_optimization_lifecycle",
             "provider": "openai",
             "source_surface": "openai_optimization_lifecycle",
@@ -2652,7 +2652,7 @@ class OptimizationModuleTests(unittest.TestCase):
                 store.conn.close()
 
         lifecycle = result["openai_optimization_lifecycle"]
-        self.assertEqual(lifecycle["schema"], "agentflow.openai_optimization_lifecycle_queue_status.v1")
+        self.assertEqual(lifecycle["schema"], "tokenclaw.openai_optimization_lifecycle_queue_status.v1")
         self.assertEqual(lifecycle["queue_rows"], 1)
         self.assertEqual(lifecycle["family_event_count"], 6)
         cohorts = {item["value"]: item["count"] for item in lifecycle["cohort_breakdown"]}
@@ -2666,7 +2666,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_feedback_status_includes_routing_experiment_queue_summary(self):
         event = {
-            "schema": "agentflow.routing_experiment_outcome_event.v1",
+            "schema": "tokenclaw.routing_experiment_outcome_event.v1",
             "event_type": "routing_experiment_outcome",
             "source_surface": "anthropic_messages",
             "app_family": "claude_code",
@@ -2710,7 +2710,7 @@ class OptimizationModuleTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(result["routing_experiments"]["schema"], "agentflow.routing_experiment_feedback_queue_status.v1")
+        self.assertEqual(result["routing_experiments"]["schema"], "tokenclaw.routing_experiment_feedback_queue_status.v1")
         self.assertEqual(result["routing_experiments"]["queue_rows"], 1)
         self.assertEqual(result["routing_experiments"]["status_breakdown"], [{"value": "queued", "count": 1}])
         self.assertEqual(result["routing_experiments"]["outcome_status_breakdown"], [{"value": "compared", "count": 1}])
@@ -2719,7 +2719,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_shadow_routing_policy_event_egress_blocks_raw_payload_before_queue(self):
         raw_event = {
-            "schema": "agentflow.routing_experiment_outcome_event.v1",
+            "schema": "tokenclaw.routing_experiment_outcome_event.v1",
             "event_type": "routing_experiment_outcome",
             "source_surface": "codex_turn",
             "candidate": {
@@ -2750,8 +2750,8 @@ class OptimizationModuleTests(unittest.TestCase):
                 with patch.dict(
                     "os.environ",
                     {
-                        "AGENTFLOW_RECOMMENDATION_ENABLED": "0",
-                        "AGENTFLOW_RECOMMENDATION_SERVER_URL": "",
+                        "TOKENCLAW_RECOMMENDATION_ENABLED": "0",
+                        "TOKENCLAW_RECOMMENDATION_SERVER_URL": "",
                     },
                     clear=False,
                 ):
@@ -2796,7 +2796,7 @@ class OptimizationModuleTests(unittest.TestCase):
 
     def test_feedback_status_includes_codex_canary_lifecycle_queue_summary(self):
         base_event = {
-            "schema": "agentflow.codex_app_canary_lifecycle_feedback.v1",
+            "schema": "tokenclaw.codex_app_canary_lifecycle_feedback.v1",
             "event_type": "codex_app_canary_lifecycle",
             "source_surface": "codex_turn",
             "app_family": "codex",
@@ -2858,7 +2858,7 @@ class OptimizationModuleTests(unittest.TestCase):
                 store.conn.close()
 
         codex_status = result["codex_app_canaries"]
-        self.assertEqual(codex_status["schema"], "agentflow.codex_app_canary_lifecycle_queue_status.v1")
+        self.assertEqual(codex_status["schema"], "tokenclaw.codex_app_canary_lifecycle_queue_status.v1")
         self.assertEqual(codex_status["queue_rows"], 2)
         self.assertEqual(codex_status["queue_state_breakdown"], [
             {"value": "pending", "count": 1},
@@ -2884,7 +2884,7 @@ class OptimizationModuleTests(unittest.TestCase):
         base_event = {
             "event_type": "impact",
             "metadata": {
-                "schema": "agentflow.optimization_promotion_lifecycle_feedback.v1",
+                "schema": "tokenclaw.optimization_promotion_lifecycle_feedback.v1",
                 "lifecycle_kind": "optimization_promotion_canary",
                 "command": "optimization-promotion-impact",
                 "local_result_status": "ok",
@@ -2934,7 +2934,7 @@ class OptimizationModuleTests(unittest.TestCase):
         disable_event = {
             "event_type": "apply",
             "metadata": {
-                "schema": "agentflow.optimization_promotion_lifecycle_feedback.v1",
+                "schema": "tokenclaw.optimization_promotion_lifecycle_feedback.v1",
                 "lifecycle_kind": "optimization_promotion_canary",
                 "command": "optimization-promotion-apply",
                 "local_result_status": "ok",
@@ -2997,7 +2997,7 @@ class OptimizationModuleTests(unittest.TestCase):
                 store.conn.close()
 
         lifecycle = result["routing_promotion_lifecycle"]
-        self.assertEqual(lifecycle["schema"], "agentflow.routing_promotion_lifecycle_queue_status.v1")
+        self.assertEqual(lifecycle["schema"], "tokenclaw.routing_promotion_lifecycle_queue_status.v1")
         self.assertEqual(lifecycle["queue_rows"], 2)
         self.assertEqual(lifecycle["action_count"], 2)
         self.assertEqual(lifecycle["queue_state_breakdown"], [
@@ -3043,7 +3043,7 @@ class OptimizationModuleTests(unittest.TestCase):
         )
 
         summary = routing_meta["openai_outcome_unit"]
-        self.assertEqual(summary["schema"], "agentflow.openai_outcome_summary.v1")
+        self.assertEqual(summary["schema"], "tokenclaw.openai_outcome_summary.v1")
         self.assertEqual(summary["source_surface"], "openai_responses")
         self.assertFalse(summary["raw_payload_included"])
         self.assertEqual(managed_egress_violations(summary), [])
@@ -3108,7 +3108,7 @@ class OptimizationModuleTests(unittest.TestCase):
 class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
     def _fixture(self) -> dict:
         return {
-            "schema": "agentflow.post_promotion_policy_priority_deltas.v1",
+            "schema": "tokenclaw.post_promotion_policy_priority_deltas.v1",
             "deltas": [
                 {
                     "delta_id": "post-promo-delta:routing:widen:crunch-savings",
@@ -3173,7 +3173,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
 
         result = build_post_promotion_priority_delta_review(self._fixture(), limit=10)
 
-        self.assertEqual(result["schema"], "agentflow.post_promotion_priority_delta_review.v1")
+        self.assertEqual(result["schema"], "tokenclaw.post_promotion_priority_delta_review.v1")
         self.assertTrue(result["ok"])
         self.assertTrue(result["read_only"])
         self.assertFalse(result["wrote_local_policy_files"])
@@ -3227,7 +3227,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
         self.assertEqual(candidate["next_action"], "collect-holdout-evidence")
         self.assertIn("missing-holdout-coverage", candidate["no_op_reasons"])
         successor = candidate["holdout_evidence_successor"]
-        self.assertEqual(successor["schema"], "agentflow.post_promotion_holdout_evidence_successor.v1")
+        self.assertEqual(successor["schema"], "tokenclaw.post_promotion_holdout_evidence_successor.v1")
         self.assertEqual(successor["reason"], "missing-holdout-coverage")
         self.assertEqual(successor["local_action_family"], "routing")
         self.assertEqual(successor["source_surface"], "crunch-proxy-request")
@@ -3320,7 +3320,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         out = json.loads(stdout.getvalue())
-        self.assertEqual(out["schema"], "agentflow.post_promotion_priority_delta_review.v1")
+        self.assertEqual(out["schema"], "tokenclaw.post_promotion_priority_delta_review.v1")
         self.assertTrue(out["ok"])
         self.assertEqual(out["summary"]["review_candidate_count"], 3)
         self.assertFalse(out["provider_calls_made"])
@@ -3335,7 +3335,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         out = json.loads(stdout.getvalue())
-        self.assertEqual(out["schema"], "agentflow.post_promotion_priority_delta_review.v1")
+        self.assertEqual(out["schema"], "tokenclaw.post_promotion_priority_delta_review.v1")
         self.assertEqual(out["summary"]["review_candidate_count"], 0)
         self.assertEqual(out["fetch"]["status"], "skipped")
         self.assertEqual(out["fetch"]["reason"], "no-managed-url-configured")
@@ -3344,7 +3344,7 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
 class TestPostPromotionPolicyDrafts(unittest.TestCase):
     def _priority_fixture(self) -> dict:
         return {
-            "schema": "agentflow.post_promotion_policy_priority_deltas.v1",
+            "schema": "tokenclaw.post_promotion_policy_priority_deltas.v1",
             "deltas": [
                 {
                     "delta_id": "post-promo-delta:routing:widen:tool-result",
@@ -3422,7 +3422,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
 
         result = build_post_promotion_policy_drafts(self._review(), widen_fraction=0.05, holdout_fraction=0.10)
 
-        self.assertEqual(result["schema"], "agentflow.post_promotion_policy_draft_dry_run.v1")
+        self.assertEqual(result["schema"], "tokenclaw.post_promotion_policy_draft_dry_run.v1")
         self.assertTrue(result["ok"])
         self.assertEqual(result["summary"]["draft_count"], 2)
         self.assertEqual(result["summary"]["widen_draft_count"], 1)
@@ -3438,8 +3438,8 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
 
         self.assertEqual(widen["target_local_rule_file"], "routing_rules.yaml")
         self.assertEqual(widen["target_local_policy_section"], "routing.rules")
-        self.assertEqual(widen["review"]["review_command"], "agentflow-post-promotion-policy-draft-dry-run")
-        self.assertEqual(widen["review"]["family_review_command"], "agentflow-routing-promotion-draft-dry-run")
+        self.assertEqual(widen["review"]["review_command"], "tokenclaw-post-promotion-policy-draft-dry-run")
+        self.assertEqual(widen["review"]["family_review_command"], "tokenclaw-routing-promotion-draft-dry-run")
         self.assertEqual(widen["source"], "post-promotion-priority-delta-review")
         self.assertTrue(widen["proposed_policy_patch"]["requires_existing_compatible_rule"])
         self.assertTrue(widen["proposed_policy_patch"]["bounded_changes"]["preserve_holdout_fraction_gte"] >= 0.10)
@@ -3453,7 +3453,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
 
         self.assertEqual(rollback["target_local_rule_file"], "cache_rules.yaml")
         self.assertEqual(rollback["target_local_policy_section"], "cache.pattern_rules")
-        self.assertEqual(rollback["review"]["family_review_command"], "agentflow-cache-promotion-draft-dry-run")
+        self.assertEqual(rollback["review"]["family_review_command"], "tokenclaw-cache-promotion-draft-dry-run")
         self.assertEqual(rollback["proposed_policy_patch"]["operation"], "rollback_existing_rule")
         self.assertFalse(rollback["proposed_policy_patch"]["bounded_changes"]["delete_rule"])
         self.assertTrue(rollback["rollback_metadata"]["preserve_operator_rule_history"])
@@ -3463,7 +3463,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertEqual(noop["next_action"], "keep-blocked")
         self.assertEqual(noop["target_local_rule_file"], "crunch_rules.yaml")
         self.assertEqual(noop["target_local_policy_section"], "anthropic_thinking_history_compaction.rules")
-        self.assertEqual(noop["review"]["family_review_command"], "agentflow-crunch-promotion-draft-dry-run")
+        self.assertEqual(noop["review"]["family_review_command"], "tokenclaw-crunch-promotion-draft-dry-run")
         self.assertEqual(noop["reason"], "keep-blocked")
         self.assertTrue(noop["privacy"]["metadata_only"])
 
@@ -3500,7 +3500,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         out = json.loads(stdout.getvalue())
-        self.assertEqual(out["schema"], "agentflow.post_promotion_policy_draft_dry_run.v1")
+        self.assertEqual(out["schema"], "tokenclaw.post_promotion_policy_draft_dry_run.v1")
         self.assertEqual(out["summary"]["widen_draft_count"], 1)
         self.assertEqual(out["summary"]["rollback_draft_count"], 1)
         self.assertEqual(out["summary"]["omitted_count"], 1)
@@ -3521,7 +3521,7 @@ class TestPostPromotionPolicyDrafts(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(stdout.getvalue(), "")
         out = json.loads(stderr.getvalue())
-        self.assertEqual(out["schema"], "agentflow.post_promotion_policy_draft_dry_run.v1")
+        self.assertEqual(out["schema"], "tokenclaw.post_promotion_policy_draft_dry_run.v1")
         self.assertEqual(out["error"]["type"], "impact_gate_blocked")
         self.assertEqual(out["summary"]["impact_gate_blocked_count"], 1)
 

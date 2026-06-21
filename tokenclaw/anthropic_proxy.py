@@ -93,8 +93,8 @@ from tokenclaw.managed_session_tier import (
 from tokenclaw.store import stable_json, utc_now
 
 
-SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
-MAX_THINKING_BUDGET_TOKENS = int(os.getenv("AGENTFLOW_MAX_THINKING_BUDGET_TOKENS", "0"))
+SESSION_COST_ALERT_USD = float(os.getenv("TOKENCLAW_SESSION_COST_ALERT_USD", "5.0"))
+MAX_THINKING_BUDGET_TOKENS = int(os.getenv("TOKENCLAW_MAX_THINKING_BUDGET_TOKENS", "0"))
 
 
 async def _queue_optimization_coordinator_lifecycle_feedback(
@@ -231,7 +231,7 @@ def _anthropic_stream_primary_response_body(
         "type": "message",
         "content": [{"type": "text", "text": output_text}] if output_text else [],
         "usage": usage,
-        "agentflow_streaming_capture": {
+        "tokenclaw_streaming_capture": {
             "complete": True,
             "output_text_sha256": hashlib.sha256(output_text.encode("utf-8")).hexdigest(),
             "raw_stream_included": False,
@@ -689,7 +689,7 @@ def _anthropic_shadow_tool_result_audit(body: dict[str, Any]) -> dict[str, Any]:
         status = "unsupported"
         reason = "non-adjacent-tool-result"
     return {
-        "schema": "agentflow.anthropic_shadow_tool_result_audit.v1",
+        "schema": "tokenclaw.anthropic_shadow_tool_result_audit.v1",
         "status": status,
         "reason": reason,
         "tool_result_count": tool_result_count,
@@ -721,7 +721,7 @@ def _prepare_anthropic_shadow_request(
     shadow_body["model"] = shadow_model
     shadow_body["stream"] = False
     diagnostics: dict[str, Any] = {
-        "schema": "agentflow.anthropic_shadow_request_preflight.v1",
+        "schema": "tokenclaw.anthropic_shadow_request_preflight.v1",
         "status": "ok",
         "reason": None,
         "primary_model": primary_model,
@@ -800,7 +800,7 @@ async def _fetch_old_context_summary(context: ProviderContext, summary_request: 
                     json=summary_request,
                 )
     except Exception:
-        logging.exception("agentflow old-context summary error")
+        logging.exception("tokenclaw old-context summary error")
         return {
             "summary": None,
             "summary_status_code": None,
@@ -1091,7 +1091,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         summary_extra_cost = float(summary_meta.get("summary_cost_est_usd") or 0.0)
         if summary_meta.get("status") == "applied":
             print(
-                "agentflow_old_context_summary "
+                "tokenclaw_old_context_summary "
                 f"reason={summary_meta.get('reason')} "
                 f"cache_hit={int(bool(summary_meta.get('summary_cache_hit')))} "
                 f"cost_est_usd={summary_extra_cost:.6f} "
@@ -1340,7 +1340,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     )
                     observed_count = prior_observed + 1
                     cache_meta["pattern_rule_warmup"] = {
-                        "schema": "agentflow.cache_pattern_warmup.v1",
+                        "schema": "tokenclaw.cache_pattern_warmup.v1",
                         "rule_id": replay_pattern_rule.get("rule_id"),
                         "candidate_id": replay_pattern_rule.get("candidate_id"),
                         "policy_source": replay_pattern_rule.get("policy_source"),
@@ -1473,7 +1473,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     return StreamingResponse(
                         replay_cached_stream(),
                         media_type="text/event-stream",
-                        headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))},
+                        headers={"x-tokenclaw-cache": "hit", "x-tokenclaw-routed-model": str(crunched.get("model"))},
                     )
                 if cached is not None:
                     cache_meta["status"] = "bypassed"
@@ -1597,7 +1597,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     stream_cancelled = True
                     raise
                 except Exception as exc:
-                    logging.exception("agentflow anthropic streaming proxy error")
+                    logging.exception("tokenclaw anthropic streaming proxy error")
                     status_code = 500
                     error = repr(exc)
                     yield (
@@ -1783,7 +1783,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             return StreamingResponse(
                 gen(),
                 media_type="text/event-stream",
-                headers={"x-agentflow-cache": "miss" if can_stream_cache else "skip-streaming", "x-agentflow-routed-model": str(crunched.get("model"))},
+                headers={"x-tokenclaw-cache": "miss" if can_stream_cache else "skip-streaming", "x-tokenclaw-routed-model": str(crunched.get("model"))},
             )
 
         has_tool_blocks = has_tools(crunched)
@@ -1948,7 +1948,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     stream=False,
                     session_id=session_id,
                 )
-                return JSONResponse(response_body, headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))})
+                return JSONResponse(response_body, headers={"x-tokenclaw-cache": "hit", "x-tokenclaw-routed-model": str(crunched.get("model"))})
 
         if can_semantic_cache:
             emb = build_embedding(extract_text(crunched))
@@ -2022,7 +2022,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     stream=False,
                     session_id=session_id,
                 )
-                return JSONResponse(sem_resp, headers={"x-agentflow-cache": "semantic-hit", "x-agentflow-routed-model": str(crunched.get("model"))})
+                return JSONResponse(sem_resp, headers={"x-tokenclaw-cache": "semantic-hit", "x-tokenclaw-routed-model": str(crunched.get("model"))})
 
         async with context.limiter.semaphores[model_tier(crunched["model"])]:
             async with httpx.AsyncClient(timeout=context.http_timeout) as client:
@@ -2229,7 +2229,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             error=error,
         )
         await _check_session_cost_alert(context, session_id)
-        return JSONResponse(response_body, status_code=status_code, headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))})
+        return JSONResponse(response_body, status_code=status_code, headers={"x-tokenclaw-cache": "miss", "x-tokenclaw-routed-model": str(crunched.get("model"))})
 
     except TierBackoffActive as exc:
         routed_model_for_log: Optional[str] = None
@@ -2284,7 +2284,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             headers=tier_backoff_headers(exc, routed_model_for_log or ""),
         )
     except Exception as exc:
-        logging.exception("agentflow anthropic proxy error")
+        logging.exception("tokenclaw anthropic proxy error")
         error = repr(exc)
         latency_ms = int((time.time() - started) * 1000)
         context.store.log_call(

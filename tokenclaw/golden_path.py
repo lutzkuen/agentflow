@@ -17,7 +17,7 @@ from tokenclaw.pricing import estimate_cost, pricing_basis
 from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
-SCHEMA = "agentflow.golden_path_summary.v1"
+SCHEMA = "tokenclaw.golden_path_summary.v1"
 FIXTURE_SURFACE = "openai_responses"
 FIXTURE_ENDPOINT = "responses"
 FIXTURE_MODEL = "gpt-5.4-mini"
@@ -56,14 +56,14 @@ def _fixture_request() -> dict[str, Any]:
             {"role": "user", "content": repeated},
             {"role": "user", "content": repeated},
         ],
-        "_agentflow_source_surface": FIXTURE_SURFACE,
-        "_agentflow_endpoint": FIXTURE_ENDPOINT,
+        "_tokenclaw_source_surface": FIXTURE_SURFACE,
+        "_tokenclaw_endpoint": FIXTURE_ENDPOINT,
     }
 
 
 def _fixture_policy_decision() -> dict[str, Any]:
     return {
-        "schema": "agentflow.policy_decision.v1",
+        "schema": "tokenclaw.policy_decision.v1",
         "feature_only": True,
         "locally_executed": True,
         "managed_enforced": False,
@@ -105,8 +105,8 @@ def _build_fixture_summary() -> dict[str, Any]:
     preflight = extract_openai_preflight_features(parsed, path="/v1/responses")
     policy_decision = _fixture_policy_decision()
 
-    with tempfile.TemporaryDirectory(prefix="agentflow-golden-path-") as tmpdir:
-        store = SQLiteStore(str(Path(tmpdir) / "agentflow.sqlite3"))
+    with tempfile.TemporaryDirectory(prefix="tokenclaw-golden-path-") as tmpdir:
+        store = SQLiteStore(str(Path(tmpdir) / "tokenclaw.sqlite3"))
         try:
             local_stage = execute_openai_local_policy(
                 raw_body=copy.deepcopy(parsed.body),
@@ -187,10 +187,10 @@ def _build_fixture_summary() -> dict[str, Any]:
         "local_action_family": local_action_family,
         "decision_status": "demo_applied" if changed else "demo_noop",
         "managed_server_required": False,
-        "estimated_agentflow_savings_usd": _round_usd(estimated_savings),
+        "estimated_tokenclaw_savings_usd": _round_usd(estimated_savings),
         "provider_prompt_cache_discount_usd": 0.0,
         "savings_breakdown": {
-            "agentflow_generated_savings_usd": _round_usd(estimated_savings),
+            "tokenclaw_generated_savings_usd": _round_usd(estimated_savings),
             "provider_prompt_cache_discount_usd": 0.0,
             "basis": "fixture local crunch savings only; provider prompt-cache discounts are not counted as AgentFlow-generated savings",
         },
@@ -293,10 +293,10 @@ def _live_evidence_summary(store: Any | None, *, limit: int = 1000) -> dict[str,
         "routing_applied_count": routing_applied,
         "crunch_changed_count": crunch_changed,
         "crunch_tokens_saved_est": max(0, tokens_saved),
-        "estimated_agentflow_savings_usd": _round_usd(estimated_savings),
+        "estimated_tokenclaw_savings_usd": _round_usd(estimated_savings),
         "provider_prompt_cache_discount_usd": 0.0,
         "savings_breakdown": {
-            "agentflow_generated_savings_usd": _round_usd(estimated_savings),
+            "tokenclaw_generated_savings_usd": _round_usd(estimated_savings),
             "provider_prompt_cache_discount_usd": 0.0,
             "basis": "local routing/crunch/cache savings only; provider prompt-cache discounts are reported separately and not included",
         },
@@ -323,8 +323,8 @@ def build_golden_path_summary(
     if local_action_family == "none":
         local_action_family = fixture["local_action_family"]
     savings = max(
-        float(fixture.get("estimated_agentflow_savings_usd") or 0.0),
-        float(live.get("estimated_agentflow_savings_usd") or 0.0),
+        float(fixture.get("estimated_tokenclaw_savings_usd") or 0.0),
+        float(live.get("estimated_tokenclaw_savings_usd") or 0.0),
     )
     prompt_cache_discount = max(
         float(fixture.get("provider_prompt_cache_discount_usd") or 0.0),
@@ -337,10 +337,10 @@ def build_golden_path_summary(
         "surface": FIXTURE_SURFACE,
         "local_action_family": local_action_family,
         "decision_status": "active" if live_active else fixture["decision_status"],
-        "estimated_agentflow_savings_usd": _round_usd(savings),
+        "estimated_tokenclaw_savings_usd": _round_usd(savings),
         "provider_prompt_cache_discount_usd": _round_usd(prompt_cache_discount),
         "savings_breakdown": {
-            "agentflow_generated_savings_usd": _round_usd(savings),
+            "tokenclaw_generated_savings_usd": _round_usd(savings),
             "provider_prompt_cache_discount_usd": _round_usd(prompt_cache_discount),
             "basis": "AgentFlow savings come from local routing/crunch/cache decisions; provider prompt-cache discounts are separate provider-side savings",
         },

@@ -14,9 +14,9 @@ from tokenclaw.provider_adoption_gate import (
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_canary_impact.v1"
-VERDICT_SCHEMA = "agentflow.openai_canary_promotion_verdict.v1"
-ROUTING_PROMOTION_VERDICT_SCHEMA = "agentflow.openai_routing_promotion_verdict.v1"
+SCHEMA = "tokenclaw.openai_canary_impact.v1"
+VERDICT_SCHEMA = "tokenclaw.openai_canary_promotion_verdict.v1"
+ROUTING_PROMOTION_VERDICT_SCHEMA = "tokenclaw.openai_routing_promotion_verdict.v1"
 DEFAULT_MIN_HOLDOUT_VOLUME = 10
 
 _REASON_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")
@@ -478,7 +478,7 @@ def _skipped_unknown_classification(aggregate: dict[str, Any]) -> dict[str, Any]
     promotion_blocker_count = _counter_total(aggregate["promotion_blocker_reason_buckets"])
     unclassified_count = _counter_total(aggregate["unclassified_reason_buckets"])
     return {
-        "schema": "agentflow.openai_routing_canary_skipped_unknown_classification.v1",
+        "schema": "tokenclaw.openai_routing_canary_skipped_unknown_classification.v1",
         "safe_bypass_count": safe_bypass_count,
         "unsupported_shape_count": unsupported_shape_count,
         "promotion_blocker_count": promotion_blocker_count,
@@ -801,7 +801,7 @@ def build_openai_canary_impact_report(
         lifecycle_feedback = activation_lifecycle_feedback_summary(store_obj, limit=lookback_limit)
     except Exception:
         lifecycle_feedback = {
-            "schema": "agentflow.activation_staged_lifecycle_feedback_summary.v1",
+            "schema": "tokenclaw.activation_staged_lifecycle_feedback_summary.v1",
             "queue_rows": 0,
             "family_event_count": 0,
             "state_breakdown": [],

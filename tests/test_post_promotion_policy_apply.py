@@ -30,7 +30,7 @@ def _assert_metadata_only(testcase, payload):
 
 def _gate(**overrides):
     gate = {
-        "schema": "agentflow.post_promotion_policy_draft_impact_gate.v1",
+        "schema": "tokenclaw.post_promotion_policy_draft_impact_gate.v1",
         "status": "passed",
         "reason": "impact-gate-passed",
         "blocker_reasons": [],
@@ -53,7 +53,7 @@ def _gate(**overrides):
 
 def _rollback_metadata():
     return {
-        "schema": "agentflow.post_promotion_policy_draft_rollback_metadata.v1",
+        "schema": "tokenclaw.post_promotion_policy_draft_rollback_metadata.v1",
         "rollback_action_type": "disable_rule",
         "preserve_previous_rule_required": True,
         "preserve_operator_rule_history": True,
@@ -71,7 +71,7 @@ def _draft(
     gate=None,
 ):
     return {
-        "schema": "agentflow.post_promotion_policy_draft.v1",
+        "schema": "tokenclaw.post_promotion_policy_draft.v1",
         "status": "drafted",
         "draft_action": action,
         "draft_id": draft_id,
@@ -82,7 +82,7 @@ def _draft(
         "target_local_policy_section": policy_section,
         "source": "post-promotion-priority-delta-review",
         "proposed_policy_patch": {
-            "schema": "agentflow.post_promotion_local_policy_patch.v1",
+            "schema": "tokenclaw.post_promotion_local_policy_patch.v1",
             "operation": "widen_existing_rule" if action == "widen-local-policy" else "rollback_existing_rule",
             "target_rule_selector": {
                 "delta_id": candidate_id,
@@ -105,7 +105,7 @@ def _draft(
 
 def _report(*drafts):
     return {
-        "schema": "agentflow.post_promotion_policy_draft_dry_run.v1",
+        "schema": "tokenclaw.post_promotion_policy_draft_dry_run.v1",
         "ok": True,
         "status": "drafted",
         "generated_at": "2026-06-15T08:00:00+00:00",
@@ -120,7 +120,7 @@ def _report(*drafts):
 class PostPromotionPolicyApplyTest(unittest.TestCase):
     def test_safe_widen_and_rollback_update_local_rule_files_with_rollback_metadata(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             workspace = Path(tmp) / "drafts"
             event_log = Path(tmp) / "policy_events.jsonl"
             config_dir.mkdir()
@@ -186,10 +186,10 @@ class PostPromotionPolicyApplyTest(unittest.TestCase):
                 ),
             )
             env = {
-                "AGENTFLOW_ROUTING_RULES": str(routing_path),
-                "AGENTFLOW_CACHE_RULES": str(cache_path),
-                "AGENTFLOW_CRUNCH_RULES": str(crunch_path),
-                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+                "TOKENCLAW_ROUTING_RULES": str(routing_path),
+                "TOKENCLAW_CACHE_RULES": str(cache_path),
+                "TOKENCLAW_CRUNCH_RULES": str(crunch_path),
+                "TOKENCLAW_POLICY_EVENTS_LOG": str(event_log),
             }
             with patch.dict(os.environ, env, clear=False):
                 asyncio.run(reload_policy_modules())
@@ -230,7 +230,7 @@ class PostPromotionPolicyApplyTest(unittest.TestCase):
 
     def test_refuses_stale_missing_holdout_and_safety_stop_without_writes(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             workspace = Path(tmp) / "drafts"
             config_dir.mkdir()
             routing_path = config_dir / "routing_rules.yaml"
@@ -272,7 +272,7 @@ class PostPromotionPolicyApplyTest(unittest.TestCase):
                     gate=_gate(safety_stop_active=True),
                 ),
             )
-            with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(routing_path)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(routing_path)}, clear=False):
                 asyncio.run(reload_policy_modules())
                 try:
                     result = asyncio.run(apply_post_promotion_policy_drafts(
@@ -295,7 +295,7 @@ class PostPromotionPolicyApplyTest(unittest.TestCase):
 
     def test_dry_run_stages_without_active_rule_file_write(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             workspace = Path(tmp) / "drafts"
             config_dir.mkdir()
             routing_path = config_dir / "routing_rules.yaml"
@@ -318,7 +318,7 @@ class PostPromotionPolicyApplyTest(unittest.TestCase):
                 candidate_id="delta-widen",
                 policy_section="routing.rules",
             ))
-            with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(routing_path)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(routing_path)}, clear=False):
                 asyncio.run(reload_policy_modules())
                 try:
                     result = asyncio.run(apply_post_promotion_policy_drafts(

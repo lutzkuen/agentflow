@@ -33,7 +33,7 @@ class CodexTerminalTranscriptOpportunityTests(unittest.TestCase):
                 "requested_model": "gpt-5.4",
                 "workflow_phase": "tool_execution",
                 "terminal_log_features": {
-                    "schema": "agentflow.terminal_log_features.v1",
+                    "schema": "tokenclaw.terminal_log_features.v1",
                     "terminal_output_char_fraction_bucket": "gte_75pct",
                     "log_line_fraction_bucket": "gte_75pct",
                     "stack_trace_present": False,
@@ -65,7 +65,7 @@ class CodexTerminalTranscriptOpportunityTests(unittest.TestCase):
                 "policy_source": "local-default",
             }),
             event_window_json=stable_json({
-                "schema": "agentflow.codex_app_event_window.v1",
+                "schema": "tokenclaw.codex_app_event_window.v1",
                 "workflow_phase": "tool_execution",
                 "input_text_chars": 20_000,
                 "method_counts": {
@@ -126,7 +126,7 @@ class CodexTerminalTranscriptOpportunityTests(unittest.TestCase):
 
     def test_report_promotes_high_terminal_turn_without_raw_content(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._log_high_terminal_turn(store)
@@ -140,7 +140,7 @@ class CodexTerminalTranscriptOpportunityTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(payload["schema"], "agentflow.codex_terminal_transcript_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.codex_terminal_transcript_opportunity.v1")
         self.assertEqual(payload["summary"]["scanned_turn_count"], 2)
         self.assertEqual(payload["summary"]["candidate_turn_count"], 1)
         self.assertEqual(payload["summary"]["candidate_count"], 1)
@@ -163,7 +163,7 @@ class CodexTerminalTranscriptOpportunityTests(unittest.TestCase):
 
     def test_cli_emits_privacy_safe_summary(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._log_high_terminal_turn(store)
@@ -178,7 +178,7 @@ class CodexTerminalTranscriptOpportunityTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.codex_terminal_transcript_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.codex_terminal_transcript_opportunity.v1")
         self.assertEqual(payload["summary"]["candidate_turn_count"], 1)
         self.assertFalse(payload["privacy"]["raw_terminal_lines_included"])
         self.assertNotIn("raw-terminal-request-id-must-not-leak", stdout.getvalue())

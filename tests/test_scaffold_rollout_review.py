@@ -26,7 +26,7 @@ from tokenclaw.store import stable_json
 class ScaffoldRolloutReviewTests(unittest.TestCase):
     def _bundle(self, *, canary_fraction: float = 1.0) -> dict:
         return {
-            "schema": "agentflow.optimization_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_rollout_actions.v1",
             "generated_at": "2026-06-12T00:00:00+00:00",
             "expires_at": "2099-06-12T00:00:00+00:00",
             "summary": {
@@ -46,7 +46,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
             },
             "actions": [
                 {
-                    "schema": "agentflow.optimization_rollout_action.v1",
+                    "schema": "tokenclaw.optimization_rollout_action.v1",
                     "action_id": "rollout-action:repeated-scaffold:test",
                     "action_type": "review-local-repeated-scaffold-crunch-rule",
                     "target_candidate_id": "repeated-scaffold-candidate:test",
@@ -161,7 +161,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
         return attach_optimization_rollout_provenance(
             bundle,
             secret="scaffold-review-secret",
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="managed-test",
             key_id="scaffold-review",
             generated_at="2026-06-12T00:00:00+00:00",
@@ -175,7 +175,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
         action["action"]["status"] = "review-local-repeated-scaffold-crunch-rule"
         action["evidence_summary"]["rollout_gate"]["next_action"] = decision
         action["evidence_summary"]["rollout_decision"] = {
-            "schema": "agentflow.repeated_scaffold_rollout_decision.v1",
+            "schema": "tokenclaw.repeated_scaffold_rollout_decision.v1",
             "next_action": decision,
             "reason_codes": [] if decision in {"widen", "promote"} else [f"fixture-{decision}"],
             "privacy_summary": {
@@ -192,7 +192,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
         }
         if omitted:
             omitted_action = {
-                "schema": "agentflow.repeated_scaffold_rollout_omitted_action.v1",
+                "schema": "tokenclaw.repeated_scaffold_rollout_omitted_action.v1",
                 "target_candidate_id": action["target_candidate_id"],
                 "action_id": action["action_id"],
                 "action_family": "crunch",
@@ -226,11 +226,11 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
 
     def test_review_accepts_signed_repeated_scaffold_action_without_raw_payloads(self) -> None:
         signed = self._signed(self._bundle())
-        with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+        with patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             result = review_scaffold_rollout_actions(signed)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["schema"], "agentflow.scaffold_rollout_actions_fetch_review.v1")
+        self.assertEqual(result["schema"], "tokenclaw.scaffold_rollout_actions_fetch_review.v1")
         self.assertEqual(result["accepted_action_count"], 1)
         self.assertEqual(result["provenance"]["status"], "verified")
         rule = result["actions"][0]["proposed_rule"]
@@ -255,7 +255,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
         bundle["privacy_summary"]["provider_bodies_returned"] = True
         signed = self._signed(bundle)
 
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             review = review_scaffold_rollout_actions(signed)
             applied = apply_scaffold_rollout_actions(signed, config_dir=tmp, dry_run=False)
 
@@ -297,7 +297,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
             "unsigned": self._bundle(),
             "capability-mismatch": self._signed(unsupported),
         }
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             for name, bundle in cases.items():
                 with self.subTest(name=name):
                     result = apply_scaffold_rollout_actions(bundle, config_dir=tmp, dry_run=False)
@@ -319,7 +319,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
         cases["missing-holdout"]["omitted_actions"][0]["reason_codes"] = ["insufficient-holdout-samples"]
         cases["missing-holdout"]["omitted_actions"][0]["reason"] = "insufficient-holdout-samples"
 
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             for name, bundle in cases.items():
                 with self.subTest(name=name):
                     result = apply_scaffold_rollout_actions(self._signed(bundle), config_dir=tmp, dry_run=False)
@@ -333,7 +333,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
 
     def test_apply_cli_writes_scaffold_canary_overlay_by_default(self) -> None:
         signed = self._signed(self._decision_bundle("widen", canary_fraction=0.5))
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             stdout = io.StringIO()
             code = cli.scaffold_rollout_actions_apply_cli(
                 ["--config-dir", tmp, "--pretty", "-"],
@@ -375,7 +375,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
             "rollback": True,
             "suppress": True,
         }
-        with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+        with patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             for decision, omitted in cases.items():
                 with self.subTest(decision=decision):
                     result = review_scaffold_rollout_actions(self._signed(self._decision_bundle(decision, omitted=omitted)))
@@ -395,7 +395,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
             "rollback": True,
             "suppress": True,
         }
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             for decision, omitted in cases.items():
                 with self.subTest(decision=decision):
                     result = apply_scaffold_rollout_actions(
@@ -412,7 +412,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
 
     def test_promote_writes_durable_crunch_rule_with_backup(self) -> None:
         signed = self._signed(self._decision_bundle("promote", canary_fraction=1.0))
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             crunch_path = Path(tmp) / SCAFFOLD_LOCAL_CRUNCH_RULES_FILE
             crunch_path.write_text(
                 yaml.safe_dump(
@@ -473,7 +473,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
             "match_any_repeated": True,
             "rollout": {"canary_enabled": True, "canary_fraction": 0.5},
         }
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             for filename in (SCAFFOLD_CANARY_POLICY_FILE, SCAFFOLD_LOCAL_CRUNCH_RULES_FILE):
                 (Path(tmp) / filename).write_text(
                     yaml.safe_dump(
@@ -509,11 +509,11 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
 
     def test_crunch_loads_scaffold_overlay_and_applies_metadata_only_rule(self) -> None:
         signed = self._signed(self._bundle(canary_fraction=1.0))
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             applied = apply_scaffold_rollout_actions(signed, config_dir=tmp)
             self.assertTrue(applied["ok"])
             overlay_path = str(Path(tmp) / SCAFFOLD_CANARY_POLICY_FILE)
-            with patch.dict(os.environ, {"AGENTFLOW_SCAFFOLD_CANARY_POLICY": overlay_path}):
+            with patch.dict(os.environ, {"TOKENCLAW_SCAFFOLD_CANARY_POLICY": overlay_path}):
                 import tokenclaw.crunch as crunch
 
                 reloaded = importlib.reload(crunch)

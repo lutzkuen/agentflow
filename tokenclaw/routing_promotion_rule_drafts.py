@@ -9,9 +9,9 @@ from typing import Any
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.routing_promotion_draft_dry_run.v1"
-RULE_DRAFT_SCHEMA = "agentflow.routing_promotion_rule_draft.v1"
-OMISSION_SCHEMA = "agentflow.routing_promotion_draft_omission.v1"
+SCHEMA = "tokenclaw.routing_promotion_draft_dry_run.v1"
+RULE_DRAFT_SCHEMA = "tokenclaw.routing_promotion_rule_draft.v1"
+OMISSION_SCHEMA = "tokenclaw.routing_promotion_draft_omission.v1"
 
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,95}$")
 _FORBIDDEN_KEYS = {
@@ -343,7 +343,7 @@ def _candidate_omission_reason(candidate: dict[str, Any], *, max_evidence_age_ho
 
 def _evidence_summary(report: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "agentflow.routing_promotion_evidence_summary.v1",
+        "schema": "tokenclaw.routing_promotion_evidence_summary.v1",
         "source_report_schema": report.get("schema"),
         "source_report_generated_at": report.get("generated_at"),
         "source_evidence_schema": candidate.get("source_evidence_schema"),
@@ -417,7 +417,7 @@ def _draft_rule(
             "reason": f"guarded Anthropic routing promotion {candidate_id} to local Haiku rule",
         },
         "metadata": {
-            "schema": "agentflow.routing_promotion_local_draft_metadata.v1",
+            "schema": "tokenclaw.routing_promotion_local_draft_metadata.v1",
             "source": "local_promotion_candidates",
             "promoted_from_canary": True,
             "promotion_source_policy_id": candidate.get("policy_id"),
@@ -439,7 +439,7 @@ def _draft_rule(
             "privacy": _privacy(),
         },
         "rollout": {
-            "schema": "agentflow.routing_promotion_rollout.v1",
+            "schema": "tokenclaw.routing_promotion_rollout.v1",
             "recommendation_mode": "routing-promotion-rule-draft",
             "canary_enabled": True,
             "canary_fraction": canary_fraction,
@@ -459,14 +459,14 @@ def _draft_rule(
             "limit": 500,
         },
         "promotion": {
-            "schema": "agentflow.routing_promotion_local_draft_metadata.v1",
+            "schema": "tokenclaw.routing_promotion_local_draft_metadata.v1",
             "source": "local_promotion_candidates",
             "target_candidate_id": candidate_id,
             "target_local_rule_file": "routing_rules.yaml",
             "target_local_policy_section": "routing.rules",
             "evidence_summary": evidence,
             "dry_run_impact_estimate": {
-                "schema": "agentflow.routing_promotion_dry_run_impact_estimate.v1",
+                "schema": "tokenclaw.routing_promotion_dry_run_impact_estimate.v1",
                 "sample_count": evidence["sample_count"],
                 "applied_count": evidence["applied_count"],
                 "holdout_count": evidence["holdout_count"],

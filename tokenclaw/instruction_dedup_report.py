@@ -12,7 +12,7 @@ from tokenclaw.public_metadata import public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.instruction_dedup_opportunity.v1"
+SCHEMA = "tokenclaw.instruction_dedup_opportunity.v1"
 TOKEN_CHARS = 4
 MIN_SECTION_CHARS = 80
 
@@ -726,7 +726,7 @@ def build_instruction_dedup_opportunity_report(
             "projected_saved_usd": round(sum(_as_float(item.get("projected_saved_usd")) for item in candidates), 6),
         },
         "projection_policy": {
-            "schema": "agentflow.instruction_dedup_projection_policy.v1",
+            "schema": "tokenclaw.instruction_dedup_projection_policy.v1",
             "provider_calls_made": False,
             "managed_server_calls_made": False,
             "raw_body_required": False,

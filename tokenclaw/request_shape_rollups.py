@@ -11,56 +11,56 @@ from uuid import uuid4
 
 import yaml
 
-from tokenclaw.paths import agentflow_config_path
+from tokenclaw.paths import tokenclaw_config_path
 from tokenclaw.pricing import pricing_basis
 from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import stable_json, utc_now
 
 
-SCHEMA = "agentflow.request_shape_rollups.v1"
-ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
-ROLLUP_SNAPSHOT_SCHEMA = "agentflow.request_shape_rollup_snapshot.v1"
-REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
-REPLAY_INVALIDATION_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence.v1"
-REPLAY_INVALIDATION_EVIDENCE_COHORT_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence_cohort.v1"
-REPLAY_DEPENDENCY_FINGERPRINT_COVERAGE_SCHEMA = "agentflow.request_shape_tool_cache_dependency_fingerprint_coverage.v1"
+SCHEMA = "tokenclaw.request_shape_rollups.v1"
+ROLLUP_ROW_SCHEMA = "tokenclaw.request_shape_rollup_row.v1"
+ROLLUP_SNAPSHOT_SCHEMA = "tokenclaw.request_shape_rollup_snapshot.v1"
+REPLAYABILITY_DRY_RUN_SCHEMA = "tokenclaw.request_shape_cache_replayability_dry_run.v1"
+REPLAY_INVALIDATION_EVIDENCE_SCHEMA = "tokenclaw.request_shape_cache_invalidation_evidence.v1"
+REPLAY_INVALIDATION_EVIDENCE_COHORT_SCHEMA = "tokenclaw.request_shape_cache_invalidation_evidence_cohort.v1"
+REPLAY_DEPENDENCY_FINGERPRINT_COVERAGE_SCHEMA = "tokenclaw.request_shape_tool_cache_dependency_fingerprint_coverage.v1"
 REPLAY_DEPENDENCY_FINGERPRINT_COVERAGE_ROW_SCHEMA = (
-    "agentflow.request_shape_tool_cache_dependency_fingerprint_coverage_row.v1"
+    "tokenclaw.request_shape_tool_cache_dependency_fingerprint_coverage_row.v1"
 )
-REPLAY_SKIPPED_OPENAI_BLOCKERS_SCHEMA = "agentflow.request_shape_skipped_openai_cache_replay_blockers.v1"
-REPLAY_SKIPPED_OPENAI_BLOCKER_ROW_SCHEMA = "agentflow.request_shape_skipped_openai_cache_replay_blocker.v1"
-REPLAY_TOOL_REPLAY_EVIDENCE_SCHEMA = "agentflow.request_shape_tool_cache_replay_evidence.v1"
-REPLAY_TOOL_REPLAY_EVIDENCE_ROW_SCHEMA = "agentflow.request_shape_tool_cache_replay_evidence_row.v1"
-REPLAY_TOOL_REVIEW_CANDIDATES_SCHEMA = "agentflow.request_shape_tool_cache_review_candidates.v1"
-REPLAY_TOOL_REVIEW_CANDIDATE_ROW_SCHEMA = "agentflow.request_shape_tool_cache_review_candidate.v1"
-REPLAY_TOOL_MANAGED_LOCAL_PREVIEWS_SCHEMA = "agentflow.request_shape_tool_cache_managed_local_replay_previews.v1"
-REPLAY_TOOL_MANAGED_LOCAL_PREVIEW_ROW_SCHEMA = "agentflow.request_shape_tool_cache_managed_local_replay_preview.v1"
-REPLAY_TOOL_MANAGED_PREVIEW_AGREEMENT_SCHEMA = "agentflow.request_shape_tool_cache_managed_preview_agreement.v1"
-REPLAY_BLOCKER_CLASSIFICATION_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification.v1"
-REPLAY_BLOCKER_CLASSIFICATION_ROW_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification_row.v1"
-REPLAY_CACHE_CANARY_ACTION_SCHEMA = "agentflow.request_shape_cache_replay_canary_action.v1"
-REPLAY_CACHE_CANARY_STAGE_SCHEMA = "agentflow.request_shape_cache_replay_canary_stage.v1"
-REPLAY_CACHE_CANARY_APPLY_SCHEMA = "agentflow.request_shape_cache_replay_canary_apply.v1"
-REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_replay_evidence.v1"
-REPLAY_CACHE_POLICY_DECISION_SCHEMA = "agentflow.request_shape_cache_replay_policy_decision.v1"
-CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "agentflow.request_shape_crunch_opportunity_dry_run.v1"
-CRUNCH_CANARY_ACTION_SCHEMA = "agentflow.request_shape_crunch_canary_action.v1"
-CRUNCH_CANARY_STAGE_SCHEMA = "agentflow.request_shape_repeated_context_crunch_canary_stage.v1"
-CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
-CRUNCH_CANARY_APPLY_BATCH_SCHEMA = "agentflow.request_shape_crunch_canary_apply_batch.v1"
-CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
-CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
-CRUNCH_CANARY_IMPACT_ROWS_SCHEMA = "agentflow.request_shape_crunch_canary_impact_rows.v1"
-CRUNCH_CANARY_IMPACT_ROW_SCHEMA = "agentflow.request_shape_crunch_canary_impact_row.v1"
-CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
-CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "agentflow.request_shape_crunch_activation_evidence.v1"
-CRUNCH_REMAINING_MEASUREMENT_SCHEMA = "agentflow.request_shape_crunch_remaining_measurement_cohorts.v1"
-CRUNCH_POLICY_DECISION_APPLY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_apply.v1"
-CRUNCH_POLICY_DECISION_LEDGER_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger.v1"
-CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger_entry.v1"
-CRUNCH_POST_MAX_ROLLOUT_DECISION_SCHEMA = "agentflow.request_shape_crunch_post_max_rollout_decision.v1"
-FOLLOW_UP_CANDIDATES_SCHEMA = "agentflow.request_shape_follow_up_candidates.v1"
-FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "agentflow.request_shape_blocker_cohort.v1"
+REPLAY_SKIPPED_OPENAI_BLOCKERS_SCHEMA = "tokenclaw.request_shape_skipped_openai_cache_replay_blockers.v1"
+REPLAY_SKIPPED_OPENAI_BLOCKER_ROW_SCHEMA = "tokenclaw.request_shape_skipped_openai_cache_replay_blocker.v1"
+REPLAY_TOOL_REPLAY_EVIDENCE_SCHEMA = "tokenclaw.request_shape_tool_cache_replay_evidence.v1"
+REPLAY_TOOL_REPLAY_EVIDENCE_ROW_SCHEMA = "tokenclaw.request_shape_tool_cache_replay_evidence_row.v1"
+REPLAY_TOOL_REVIEW_CANDIDATES_SCHEMA = "tokenclaw.request_shape_tool_cache_review_candidates.v1"
+REPLAY_TOOL_REVIEW_CANDIDATE_ROW_SCHEMA = "tokenclaw.request_shape_tool_cache_review_candidate.v1"
+REPLAY_TOOL_MANAGED_LOCAL_PREVIEWS_SCHEMA = "tokenclaw.request_shape_tool_cache_managed_local_replay_previews.v1"
+REPLAY_TOOL_MANAGED_LOCAL_PREVIEW_ROW_SCHEMA = "tokenclaw.request_shape_tool_cache_managed_local_replay_preview.v1"
+REPLAY_TOOL_MANAGED_PREVIEW_AGREEMENT_SCHEMA = "tokenclaw.request_shape_tool_cache_managed_preview_agreement.v1"
+REPLAY_BLOCKER_CLASSIFICATION_SCHEMA = "tokenclaw.request_shape_cache_replay_blocker_classification.v1"
+REPLAY_BLOCKER_CLASSIFICATION_ROW_SCHEMA = "tokenclaw.request_shape_cache_replay_blocker_classification_row.v1"
+REPLAY_CACHE_CANARY_ACTION_SCHEMA = "tokenclaw.request_shape_cache_replay_canary_action.v1"
+REPLAY_CACHE_CANARY_STAGE_SCHEMA = "tokenclaw.request_shape_cache_replay_canary_stage.v1"
+REPLAY_CACHE_CANARY_APPLY_SCHEMA = "tokenclaw.request_shape_cache_replay_canary_apply.v1"
+REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA = "tokenclaw.request_shape_cache_replay_evidence.v1"
+REPLAY_CACHE_POLICY_DECISION_SCHEMA = "tokenclaw.request_shape_cache_replay_policy_decision.v1"
+CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "tokenclaw.request_shape_crunch_opportunity_dry_run.v1"
+CRUNCH_CANARY_ACTION_SCHEMA = "tokenclaw.request_shape_crunch_canary_action.v1"
+CRUNCH_CANARY_STAGE_SCHEMA = "tokenclaw.request_shape_repeated_context_crunch_canary_stage.v1"
+CRUNCH_CANARY_APPLY_SCHEMA = "tokenclaw.request_shape_crunch_canary_apply.v1"
+CRUNCH_CANARY_APPLY_BATCH_SCHEMA = "tokenclaw.request_shape_crunch_canary_apply_batch.v1"
+CRUNCH_CANARY_LIFECYCLE_SCHEMA = "tokenclaw.request_shape_crunch_canary_lifecycle.v1"
+CRUNCH_CANARY_IMPACT_SCHEMA = "tokenclaw.request_shape_crunch_canary_impact.v1"
+CRUNCH_CANARY_IMPACT_ROWS_SCHEMA = "tokenclaw.request_shape_crunch_canary_impact_rows.v1"
+CRUNCH_CANARY_IMPACT_ROW_SCHEMA = "tokenclaw.request_shape_crunch_canary_impact_row.v1"
+CRUNCH_POLICY_DECISION_SCHEMA = "tokenclaw.request_shape_crunch_policy_decision.v1"
+CRUNCH_ACTIVATION_EVIDENCE_SCHEMA = "tokenclaw.request_shape_crunch_activation_evidence.v1"
+CRUNCH_REMAINING_MEASUREMENT_SCHEMA = "tokenclaw.request_shape_crunch_remaining_measurement_cohorts.v1"
+CRUNCH_POLICY_DECISION_APPLY_SCHEMA = "tokenclaw.request_shape_crunch_policy_decision_apply.v1"
+CRUNCH_POLICY_DECISION_LEDGER_SCHEMA = "tokenclaw.request_shape_crunch_policy_decision_ledger.v1"
+CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA = "tokenclaw.request_shape_crunch_policy_decision_ledger_entry.v1"
+CRUNCH_POST_MAX_ROLLOUT_DECISION_SCHEMA = "tokenclaw.request_shape_crunch_post_max_rollout_decision.v1"
+FOLLOW_UP_CANDIDATES_SCHEMA = "tokenclaw.request_shape_follow_up_candidates.v1"
+FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "tokenclaw.request_shape_blocker_cohort.v1"
 DEPENDENCY_EVIDENCE_CLASSES = (
     "missing-dependency-evidence",
     "stable-dependency-evidence",
@@ -345,7 +345,7 @@ def _sanitized_file_dependency_audit(cache: dict[str, Any]) -> dict[str, Any]:
     if isinstance(audit, dict):
         safe = bool(audit.get("safe_invalidation_evidence"))
         return {
-            "schema": str(audit.get("schema") or "agentflow.cache_file_dependency_audit.v1"),
+            "schema": str(audit.get("schema") or "tokenclaw.cache_file_dependency_audit.v1"),
             "file_watch_enabled": bool(audit.get("file_watch_enabled")),
             "snapshot_root_policy": public_label(audit.get("snapshot_root_policy"), "unknown"),
             "root_path_included": False,
@@ -375,7 +375,7 @@ def _sanitized_file_dependency_audit(cache: dict[str, Any]) -> dict[str, Any]:
         }
     evidence = bool(cache.get("file_dependency_evidence_available") or cache.get("safe_invalidation_evidence"))
     return {
-        "schema": "agentflow.cache_file_dependency_audit.v1",
+        "schema": "tokenclaw.cache_file_dependency_audit.v1",
         "file_watch_enabled": bool(cache.get("file_watch_enabled")),
         "snapshot_root_policy": "unknown",
         "root_path_included": False,
@@ -431,7 +431,7 @@ def _file_dependency_fingerprint_available(cache: dict[str, Any]) -> bool:
 def _local_dependency_fingerprint_metadata(available: bool, audit: dict[str, Any] | None = None) -> dict[str, Any]:
     audit = audit if isinstance(audit, dict) else {}
     return {
-        "schema": "agentflow.local_dependency_fingerprint_metadata.v1",
+        "schema": "tokenclaw.local_dependency_fingerprint_metadata.v1",
         "fingerprint_available": bool(available),
         "fingerprint_value_included": False,
         "fingerprint_sha256_included": False,
@@ -754,11 +754,11 @@ def _crunch_rules_candidate_paths(rules_path: str | Path | None = None) -> list[
     import os
 
     candidates: list[Path] = []
-    env_path = os.getenv("AGENTFLOW_CRUNCH_RULES")
+    env_path = os.getenv("TOKENCLAW_CRUNCH_RULES")
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / "crunch_rules.yaml")
-    candidates.append(Path.home() / ".agentflow" / "crunch_rules.yaml")
+    candidates.append(Path.home() / ".tokenclaw" / "crunch_rules.yaml")
     candidates.append(Path(__file__).parent / "crunch_rules.yaml")
     return candidates
 
@@ -919,7 +919,7 @@ def _request_shape_crunch_cohort_duplicate_suppression(
                 reason = "repeated-context-crunch-full-rollout-active"
             policy_decision = rule.get("policy_decision") if isinstance(rule.get("policy_decision"), dict) else {}
             return {
-                "schema": "agentflow.request_shape_crunch_stage_duplicate_suppression.v1",
+                "schema": "tokenclaw.request_shape_crunch_stage_duplicate_suppression.v1",
                 "suppressed": True,
                 "suppresses_new_stage_action": True,
                 "reason": reason,
@@ -952,7 +952,7 @@ def _request_shape_crunch_cohort_duplicate_suppression(
         else None
     )
     return {
-        "schema": "agentflow.request_shape_crunch_stage_duplicate_suppression.v1",
+        "schema": "tokenclaw.request_shape_crunch_stage_duplicate_suppression.v1",
         "suppressed": lifecycle_suppressed,
         "suppresses_new_stage_action": lifecycle_suppressed,
         "reason": reason,
@@ -1360,7 +1360,7 @@ def _crunch_impact_coverage(
         + unknown_count
     )
     return {
-        "schema": "agentflow.request_shape_crunch_canary_coverage.v1",
+        "schema": "tokenclaw.request_shape_crunch_canary_coverage.v1",
         "observed_count": observed_count,
         "applied_count": applied_count,
         "holdout_count": holdout_count,
@@ -1415,7 +1415,7 @@ def _crunch_impact_activation_lifecycle_feedback(candidates: list[dict[str, Any]
             }
         )
     return {
-        "schema": "agentflow.activation_staged_lifecycle_feedback_summary.v1",
+        "schema": "tokenclaw.activation_staged_lifecycle_feedback_summary.v1",
         "queue_rows": 0,
         "family_event_count": sum(_as_int(item.get("observed_count")) for item in candidates),
         "state_breakdown": _breakdown(state_counts),
@@ -1432,7 +1432,7 @@ def _crunch_impact_activation_lifecycle_feedback(candidates: list[dict[str, Any]
 def _crunch_impact_stage_follow_up_action(action: dict[str, Any], *, rank: int) -> dict[str, Any]:
     conditions = action.get("conditions") if isinstance(action.get("conditions"), dict) else {}
     return {
-        "schema": "agentflow.request_shape_crunch_canary_stage_follow_up.v1",
+        "schema": "tokenclaw.request_shape_crunch_canary_stage_follow_up.v1",
         "rank": rank,
         "action_type": public_label(action.get("action_type") or "stage-local-repeated-context-crunch-canary", "unknown"),
         "target_local_policy": "crunch_rules",
@@ -1550,7 +1550,7 @@ def _crunch_impact_activation_ready_measurements(
         _increment(state_counts, state)
         rows.append(
             {
-                "schema": "agentflow.request_shape_crunch_activation_ready_cohort_measurement.v1",
+                "schema": "tokenclaw.request_shape_crunch_activation_ready_cohort_measurement.v1",
                 "rank": _as_int(cohort.get("rank")),
                 "cohort_id": cohort_id,
                 "policy_id": public_label(cohort.get("policy_id"), "unknown"),
@@ -1628,7 +1628,7 @@ def _crunch_impact_activation_ready_measurements(
         )
     ]
     return {
-        "schema": "agentflow.request_shape_crunch_activation_ready_measurements.v1",
+        "schema": "tokenclaw.request_shape_crunch_activation_ready_measurements.v1",
         "status": "classified" if rows else "no-activation-ready-cohorts",
         "cohort_count": len(rows),
         "measured_count": _as_int(state_counts.get("measured")),
@@ -2095,7 +2095,7 @@ def _crunch_impact_newly_staged_measurement(measurements: dict[str, Any]) -> dic
         next_action = "measure-repeated-context-crunch-canary-impact"
 
     return {
-        "schema": "agentflow.request_shape_crunch_newly_staged_measurement.v1",
+        "schema": "tokenclaw.request_shape_crunch_newly_staged_measurement.v1",
         "status": status,
         "next_action": next_action,
         "cohort_count": len(newly_staged),
@@ -2122,7 +2122,7 @@ def _crunch_impact_newly_staged_measurement(measurements: dict[str, Any]) -> dic
         "cohorts": newly_staged[:50],
         "active_max_rollout_suppression": [
             {
-                "schema": "agentflow.request_shape_crunch_active_max_rollout_suppression.v1",
+                "schema": "tokenclaw.request_shape_crunch_active_max_rollout_suppression.v1",
                 "cohort_id": row.get("cohort_id"),
                 "policy_id": row.get("policy_id"),
                 "reason": (row.get("duplicate_suppression") or {}).get("reason")
@@ -2237,7 +2237,7 @@ def build_request_shape_crunch_canary_impact_report(
         )
         finalized.append(
             {
-                "schema": "agentflow.request_shape_crunch_canary_impact_candidate.v1",
+                "schema": "tokenclaw.request_shape_crunch_canary_impact_candidate.v1",
                 "policy_id": raw["policy_id"],
                 "cohort_id": raw["cohort_id"],
                 "cohort_metadata": raw["cohort_metadata"],
@@ -2293,7 +2293,7 @@ def build_request_shape_crunch_canary_impact_report(
                 "coverage": coverage,
                 "applied_vs_holdout_coverage": coverage,
                 "promotion_metadata": {
-                    "schema": "agentflow.request_shape_crunch_canary_promotion_recommendation.v1",
+                    "schema": "tokenclaw.request_shape_crunch_canary_promotion_recommendation.v1",
                     "action_family": "crunch",
                     "local_action_family": "crunch",
                     "target_local_policy": "crunch_rules",
@@ -2356,7 +2356,7 @@ def build_request_shape_crunch_canary_impact_report(
     total_unknown = sum(_as_int((item.get("cohorts") or {}).get("unknown", {}).get("count")) for item in finalized)
     cohort_family_actions = [
         {
-            "schema": "agentflow.request_shape_crunch_canary_cohort_family_action.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_cohort_family_action.v1",
             "rank": item.get("rank"),
             "policy_id": item.get("policy_id"),
             "cohort_id": item.get("cohort_id"),
@@ -2577,7 +2577,7 @@ def _crunch_policy_graduation_decision(decision: str, reason_codes: list[str]) -
 
 def _crunch_policy_decision_rollback_metadata(candidate: dict[str, Any] | None, decision: str) -> dict[str, Any]:
     return {
-        "schema": "agentflow.request_shape_crunch_policy_decision_rollback_metadata.v1",
+        "schema": "tokenclaw.request_shape_crunch_policy_decision_rollback_metadata.v1",
         "rollback_action_type": "disable_repeated_context_crunch_canary",
         "target_policy_id": candidate.get("policy_id") if candidate else None,
         "target_cohort_id": candidate.get("cohort_id") if candidate else None,
@@ -2608,7 +2608,7 @@ def _crunch_policy_decision_metrics(candidate: dict[str, Any] | None) -> dict[st
     applied = cohorts.get("canary_applied") if isinstance(cohorts.get("canary_applied"), dict) else {}
     holdout = cohorts.get("canary_holdout") if isinstance(cohorts.get("canary_holdout"), dict) else {}
     return {
-        "schema": "agentflow.request_shape_crunch_policy_decision_metrics.v1",
+        "schema": "tokenclaw.request_shape_crunch_policy_decision_metrics.v1",
         "coverage": coverage,
         "applied_count": _as_int(candidate.get("applied_count")) if candidate else 0,
         "holdout_count": _as_int(candidate.get("holdout_count")) if candidate else 0,
@@ -2645,7 +2645,7 @@ def _crunch_policy_decision_patch(candidate: dict[str, Any] | None, decision: st
         "blocked": "keep_repeated_context_crunch_canary_blocked",
     }[decision]
     return {
-        "schema": "agentflow.request_shape_crunch_policy_decision_local_patch.v1",
+        "schema": "tokenclaw.request_shape_crunch_policy_decision_local_patch.v1",
         "status": "drafted" if decision == "widen" else "not-written",
         "patch_type": patch_type,
         "target_local_rule_file": "crunch_rules.yaml",
@@ -2675,7 +2675,7 @@ def _crunch_policy_decision_from_candidate(candidate: dict[str, Any] | None) -> 
         candidate = {}
     decision_id = _crunch_policy_decision_id(candidate, decision)
     return {
-        "schema": "agentflow.request_shape_crunch_policy_decision_entry.v1",
+        "schema": "tokenclaw.request_shape_crunch_policy_decision_entry.v1",
         "decision_id": decision_id,
         "decision": decision,
         "graduation_decision": _crunch_policy_graduation_decision(decision, candidate.get("reason_codes") or [reason]),
@@ -2988,7 +2988,7 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
         observed_savings=_as_float(group.get("observed_savings_usd")),
     )
     metadata = {
-        "schema": "agentflow.request_shape_rollup_metadata.v1",
+        "schema": "tokenclaw.request_shape_rollup_metadata.v1",
         "status_breakdown": _breakdown(group.pop("status_counts", {})),
         "retry_bucket_breakdown": _breakdown(group.pop("retry_bucket_counts", {})),
         "cost_bucket_breakdown": _breakdown(group.pop("cost_bucket_counts", {})),
@@ -3125,11 +3125,11 @@ def _crunch_rule_candidate_paths(rules_path: str | Path | None = None) -> list[P
     candidates: list[Path] = []
     if rules_path:
         candidates.append(Path(rules_path))
-    env_path = os.getenv("AGENTFLOW_CRUNCH_RULES")
+    env_path = os.getenv("TOKENCLAW_CRUNCH_RULES")
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / "crunch_rules.yaml")
-    candidates.append(agentflow_config_path("crunch_rules.yaml"))
+    candidates.append(tokenclaw_config_path("crunch_rules.yaml"))
     candidates.append(Path(__file__).parent / "crunch_rules.yaml")
     deduped: list[Path] = []
     seen: set[str] = set()
@@ -3164,7 +3164,7 @@ def _active_request_shape_crunch_rules(rules_path: str | Path | None = None) -> 
         if not isinstance(item, dict) or not item.get("enabled", True):
             continue
         decision = item.get("policy_decision") if isinstance(item.get("policy_decision"), dict) else {}
-        if decision.get("schema") != "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1":
+        if decision.get("schema") != "tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1":
             continue
         rollout = item.get("rollout") if isinstance(item.get("rollout"), dict) else {}
         safety_gates = item.get("safety_gates") if isinstance(item.get("safety_gates"), dict) else {}
@@ -3278,7 +3278,7 @@ def _crunch_post_max_rollout_local_policy_patch(
     max_rollout_fraction: float,
 ) -> dict[str, Any]:
     patch: dict[str, Any] = {
-        "schema": "agentflow.request_shape_crunch_post_max_rollout_policy_patch.v1",
+        "schema": "tokenclaw.request_shape_crunch_post_max_rollout_policy_patch.v1",
         "patch_type": patch_type,
         "target_local_policy": "crunch_rules",
         "target_local_rule_file": "crunch_rules.yaml",
@@ -3290,7 +3290,7 @@ def _crunch_post_max_rollout_local_policy_patch(
         "policy_files_written": False,
         "policy_file_contents_included": False,
         "current_rollout": {
-            "schema": "agentflow.request_shape_crunch_rollout_snapshot.v1",
+            "schema": "tokenclaw.request_shape_crunch_rollout_snapshot.v1",
             "canary_fraction": round(canary_fraction, 6),
             "max_rollout_fraction": round(max_rollout_fraction, 6),
             "metadata_only": True,
@@ -3300,7 +3300,7 @@ def _crunch_post_max_rollout_local_policy_patch(
     }
     if patch_type == "promote_repeated_context_crunch_rule_full_rollout":
         patch["rollout_update"] = {
-            "schema": "agentflow.request_shape_crunch_full_rollout_update.v1",
+            "schema": "tokenclaw.request_shape_crunch_full_rollout_update.v1",
             "canary_enabled": False,
             "full_rollout_fraction": 1.0,
             "canary_fraction": 1.0,
@@ -3310,7 +3310,7 @@ def _crunch_post_max_rollout_local_policy_patch(
         }
     elif patch_type == "rollback_repeated_context_crunch_rule":
         patch["rollout_update"] = {
-            "schema": "agentflow.request_shape_crunch_rollback_update.v1",
+            "schema": "tokenclaw.request_shape_crunch_rollback_update.v1",
             "enabled": False,
             "canary_enabled": False,
             "metadata_only": True,
@@ -3381,7 +3381,7 @@ def _crunch_activation_post_max_rollout_decision(
         reason_codes = reason_codes or [cap_reason]
 
     rollback_metadata = {
-        "schema": "agentflow.request_shape_crunch_post_max_rollout_rollback_metadata.v1",
+        "schema": "tokenclaw.request_shape_crunch_post_max_rollout_rollback_metadata.v1",
         "present": bool(rollback_metadata_present),
         "required_for_promotion": True,
         "rollback_action_type": "disable_repeated_context_crunch_canary",
@@ -3525,7 +3525,7 @@ def build_request_shape_crunch_activation_evidence_report(
         else None
     )
     duplicate_suppression = {
-        "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+        "schema": "tokenclaw.request_shape_crunch_keep_active_duplicate_suppression.v1",
         "suppresses_new_activation_issue": keep_active_outcome or full_rollout_outcome,
         "suppresses_generic_crunch_activation_issue": keep_active_outcome or full_rollout_outcome,
         "reason": duplicate_reason,
@@ -3551,7 +3551,7 @@ def build_request_shape_crunch_activation_evidence_report(
         "aggregate_only": True,
     }
     activation_follow_up = {
-        "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
+        "schema": "tokenclaw.request_shape_crunch_activation_follow_up.v1",
         "status": "full-rollout-outcome-recorded"
         if full_rollout_outcome
         else "keep-active-outcome-recorded"
@@ -3686,7 +3686,7 @@ def _crunch_remaining_active_rule_coverage(
     for rule in active_rules:
         if _request_shape_crunch_cohort_matches_rule(candidate, rule):
             return {
-                "schema": "agentflow.request_shape_crunch_remaining_active_rule_coverage.v1",
+                "schema": "tokenclaw.request_shape_crunch_remaining_active_rule_coverage.v1",
                 "status": "covered-by-active-rule",
                 "covered": True,
                 "matching_local_policy": "crunch_rules",
@@ -3707,7 +3707,7 @@ def _crunch_remaining_active_rule_coverage(
     else:
         status = "no-active-rule-coverage"
     return {
-        "schema": "agentflow.request_shape_crunch_remaining_active_rule_coverage.v1",
+        "schema": "tokenclaw.request_shape_crunch_remaining_active_rule_coverage.v1",
         "status": status,
         "covered": False,
         "matching_local_policy": None,
@@ -3790,7 +3790,7 @@ def build_request_shape_crunch_remaining_measurement_report(
         safety_stop_count += row_safety
         rows.append(
             {
-                "schema": "agentflow.request_shape_crunch_remaining_measurement_cohort.v1",
+                "schema": "tokenclaw.request_shape_crunch_remaining_measurement_cohort.v1",
                 "rank": _as_int(candidate.get("rank")),
                 "row_count": _as_int(candidate.get("row_count")),
                 "sample_count": _as_int(candidate.get("sample_count") or candidate.get("row_count")),
@@ -3812,7 +3812,7 @@ def build_request_shape_crunch_remaining_measurement_report(
                 "active_rule_coverage_status": coverage["status"],
                 "active_rule_coverage": coverage,
                 "duplicate_suppression": {
-                    "schema": public_label(duplicate.get("schema"), "agentflow.request_shape_crunch_stage_duplicate_suppression.v1"),
+                    "schema": public_label(duplicate.get("schema"), "tokenclaw.request_shape_crunch_stage_duplicate_suppression.v1"),
                     "suppressed": bool(duplicate.get("suppressed") or duplicate.get("suppresses_new_stage_action")),
                     "suppresses_new_stage_action": bool(duplicate.get("suppresses_new_stage_action")),
                     "reason": public_label(duplicate.get("reason"), "unknown"),
@@ -4047,7 +4047,7 @@ def _request_shape_crunch_canary_lifecycle_projection(
     projected_usd = _as_float(cohort.get("projected_saved_usd"))
 
     return {
-        "schema": "agentflow.request_shape_crunch_canary_projected_lifecycle.v1",
+        "schema": "tokenclaw.request_shape_crunch_canary_projected_lifecycle.v1",
         "status": lifecycle_status,
         "reason": explicit_reason,
         "readiness": readiness,
@@ -4097,7 +4097,7 @@ def _request_shape_crunch_canary_action(
     )
     evidence_blockers = _public_label_list(cohort.get("evidence_blocker_codes") or cohort.get("blocker_codes"))
     cohort_selector = {
-        "schema": "agentflow.request_shape_crunch_canary_cohort_selector.v1",
+        "schema": "tokenclaw.request_shape_crunch_canary_cohort_selector.v1",
         "provider_family": cohort.get("provider_family"),
         "source_surface": cohort.get("source_surface"),
         "endpoint": cohort.get("endpoint"),
@@ -4113,7 +4113,7 @@ def _request_shape_crunch_canary_action(
         "aggregate_only": True,
     }
     rollback_metadata = {
-        "schema": "agentflow.request_shape_crunch_canary_rollback_metadata.v1",
+        "schema": "tokenclaw.request_shape_crunch_canary_rollback_metadata.v1",
         "present": True,
         "required_for_promotion": True,
         "rollback_action_type": "disable_repeated_context_crunch_canary",
@@ -4203,7 +4203,7 @@ def _request_shape_crunch_canary_action(
             "records_applied_holdout_skipped_safety_stopped_fallback_rollback": True,
         },
         "lifecycle_metadata": {
-            "schema": "agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1",
             "emits_applied": True,
             "emits_holdout": True,
             "emits_skipped": True,
@@ -4267,7 +4267,7 @@ def _request_shape_crunch_stage_rollup_selection_review(
             _increment(skipped_reasons, reason, _as_int(cohort.get("row_count")) or 1)
         _increment(state_counts, state)
         row: dict[str, Any] = {
-            "schema": "agentflow.request_shape_crunch_canary_stage_rollup_selection_row.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_stage_rollup_selection_row.v1",
             "rank": _as_int(cohort.get("rank")),
             "cohort_id": cohort_id,
             "policy_id": public_label(cohort.get("policy_id"), "unknown"),
@@ -4320,7 +4320,7 @@ def _request_shape_crunch_stage_rollup_selection_review(
     drafted_count = _as_int(state_counts.get("drafted"))
     skipped_count = _as_int(state_counts.get("skipped"))
     return {
-        "schema": "agentflow.request_shape_crunch_canary_stage_rollup_selection.v1",
+        "schema": "tokenclaw.request_shape_crunch_canary_stage_rollup_selection.v1",
         "status": "drafted" if drafted_count else "no-activation-ready-drafts",
         "source_schema": CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
         "cohort_count": len(rows),
@@ -4458,7 +4458,7 @@ def apply_request_shape_crunch_canary_action(
         "evidence_blocker_codes": _public_label_list(action.get("evidence_blocker_codes")),
         "conditions": action.get("conditions") if isinstance(action.get("conditions"), dict) else {},
         "rollout": {
-            "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_rollout.v1",
             "canary_enabled": True,
             "canary_fraction": _bounded_fraction(action.get("rollout_fraction"), DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION),
             "holdout_fraction": _bounded_fraction(action.get("holdout_fraction"), DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION),
@@ -4482,7 +4482,7 @@ def apply_request_shape_crunch_canary_action(
     kept = [rule for rule in rules if not (isinstance(rule, dict) and rule.get("id") == policy_id)]
     section.update({
         "enabled": True,
-        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+        "schema": "tokenclaw.request_shape_repeated_context_canaries.v1",
         "rules": kept + [canary_rule],
     })
     updated["request_shape_repeated_context_canaries"] = section
@@ -4582,7 +4582,7 @@ def _crunch_policy_decision_application_fingerprint(decision: dict[str, Any]) ->
     metrics = decision.get("metrics") if isinstance(decision.get("metrics"), dict) else {}
     coverage = metrics.get("coverage") if isinstance(metrics.get("coverage"), dict) else {}
     payload = {
-        "schema": "agentflow.request_shape_crunch_policy_decision_application_fingerprint.v1",
+        "schema": "tokenclaw.request_shape_crunch_policy_decision_application_fingerprint.v1",
         "decision_id": decision.get("decision_id"),
         "decision": decision.get("decision"),
         "policy_id": decision.get("policy_id"),
@@ -4608,7 +4608,7 @@ def _crunch_policy_decision_full_rollout_fingerprint(decision: dict[str, Any]) -
     digest = hashlib.sha256(
         stable_json(
             {
-                "schema": "agentflow.request_shape_crunch_full_rollout_application_fingerprint.v1",
+                "schema": "tokenclaw.request_shape_crunch_full_rollout_application_fingerprint.v1",
                 "decision_id": decision.get("decision_id"),
                 "application_fingerprint": _crunch_policy_decision_application_fingerprint(decision),
                 "policy_id": decision.get("policy_id"),
@@ -4767,7 +4767,7 @@ def apply_request_shape_crunch_policy_decision(
     updated_rollout = dict(rollout)
     if full_rollout_ready:
         updated_rollout.update({
-            "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_rollout.v1",
             "canary_enabled": False,
             "full_rollout_enabled": True,
             "full_rollout_fraction": 1.0,
@@ -4778,7 +4778,7 @@ def apply_request_shape_crunch_policy_decision(
         })
     else:
         updated_rollout.update({
-            "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_rollout.v1",
             "canary_enabled": True,
             "full_rollout_enabled": False,
             "full_rollout_fraction": 0.0,
@@ -4814,7 +4814,7 @@ def apply_request_shape_crunch_policy_decision(
         "rollout": updated_rollout,
         "safety_gates": updated_safety_gates,
         "policy_decision": {
-            "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+            "schema": "tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1",
             "decision_id": decision_identifier,
             "application_fingerprint": application_fingerprint,
             "full_rollout_fingerprint": full_rollout_fingerprint if full_rollout_ready else None,
@@ -4856,7 +4856,7 @@ def apply_request_shape_crunch_policy_decision(
     updated_section = dict(section) if isinstance(section, dict) else {}
     updated_section.update({
         "enabled": True,
-        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+        "schema": "tokenclaw.request_shape_repeated_context_canaries.v1",
         "rules": updated_rules,
     })
     updated = dict(existing)
@@ -4913,7 +4913,7 @@ def apply_request_shape_crunch_policy_decision(
         "max_canary_fraction": round(_bounded_fraction(max_canary_fraction, DEFAULT_CRUNCH_CANARY_MAX_WIDENED_FRACTION), 6),
         "rollback_metadata": updated_rule["rollback_metadata"],
         "widened_cohort": {
-            "schema": "agentflow.request_shape_crunch_policy_decision_widened_cohort.v1",
+            "schema": "tokenclaw.request_shape_crunch_policy_decision_widened_cohort.v1",
             "policy_id": policy_id,
             "cohort_id": cohort_id,
             "decision_id": decision_identifier,
@@ -4998,7 +4998,7 @@ def _request_shape_crunch_follow_up(
     )
 
     return {
-        "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
+        "schema": "tokenclaw.request_shape_crunch_activation_follow_up.v1",
         "status": status,
         "savings_status": savings_status,
         "report_key": report_key,
@@ -5023,7 +5023,7 @@ def _request_shape_crunch_follow_up(
         "canary_already_applied": canary_applied_rows > 0,
         "no_op_reason": no_op_reason,
         "duplicate_suppression": {
-            "schema": "agentflow.request_shape_crunch_follow_up_duplicate_suppression.v1",
+            "schema": "tokenclaw.request_shape_crunch_follow_up_duplicate_suppression.v1",
             "suppresses_new_stage_action": recommended_action_count == 0 and (canary_already_staged or canary_safety_stopped_rows > 0),
             "reason": no_op_reason,
             "matching_local_policy": "crunch_rules" if canary_already_staged or canary_safety_stopped_rows > 0 else None,
@@ -5119,7 +5119,7 @@ def build_request_shape_crunch_opportunity_dry_run(
         matched_count += row_count
 
         cohort = {
-                "schema": "agentflow.request_shape_crunch_opportunity_cohort.v1",
+                "schema": "tokenclaw.request_shape_crunch_opportunity_cohort.v1",
                 "cohort_id": cohort_id,
                 "policy_id": policy_id,
                 "source_evidence_schema": row.get("source_schema") or row.get("schema") or ROLLUP_ROW_SCHEMA,
@@ -5407,7 +5407,7 @@ def build_request_shape_crunch_canary_stage_report(
         if skipped_or_safety:
             _increment(skipped_or_safety_reasons, item.get("reason") or "unknown", skipped_or_safety)
     stage_lifecycle_projection = {
-        "schema": "agentflow.request_shape_crunch_canary_stage_lifecycle_projection.v1",
+        "schema": "tokenclaw.request_shape_crunch_canary_stage_lifecycle_projection.v1",
         "cohort_count": len(lifecycle_projections),
         "matched_count": sum(_as_int(item.get("matched_count")) for item in lifecycle_projections),
         "projected_canary_applied_count": sum(_as_int(item.get("projected_canary_applied_count")) for item in lifecycle_projections),
@@ -5425,7 +5425,7 @@ def build_request_shape_crunch_canary_stage_report(
         "privacy": _crunch_opportunity_privacy(),
     }
     duplicate_suppression = {
-        "schema": "agentflow.request_shape_crunch_stage_duplicate_suppression_summary.v1",
+        "schema": "tokenclaw.request_shape_crunch_stage_duplicate_suppression_summary.v1",
         "existing_local_rule_count": len(existing_canary_rules),
         "suppressed_existing_cohort_count": (dry_run.get("summary") or {}).get("duplicate_suppressed_cohort_count", 0),
         "active_max_rollout_suppressed_cohort_count": (dry_run.get("summary") or {}).get(
@@ -5539,14 +5539,14 @@ def build_request_shape_crunch_canary_stage_report(
             "has_cohort_selector": bool(
                 top_action
                 and isinstance(top_action.get("cohort_selector"), dict)
-                and top_action["cohort_selector"].get("schema") == "agentflow.request_shape_crunch_canary_cohort_selector.v1"
+                and top_action["cohort_selector"].get("schema") == "tokenclaw.request_shape_crunch_canary_cohort_selector.v1"
             ),
             "has_rollback_threshold": bool(top_action and _as_float(top_action.get("rollback_threshold")) > 0),
             "has_duplicate_suppression": isinstance(duplicate_suppression, dict)
-            and duplicate_suppression.get("schema") == "agentflow.request_shape_crunch_stage_duplicate_suppression_summary.v1",
+            and duplicate_suppression.get("schema") == "tokenclaw.request_shape_crunch_stage_duplicate_suppression_summary.v1",
             "has_file_backed_target": True,
             "has_activation_ready_rollup_selection": rollup_selection.get("schema")
-            == "agentflow.request_shape_crunch_canary_stage_rollup_selection.v1",
+            == "tokenclaw.request_shape_crunch_canary_stage_rollup_selection.v1",
             "drafts_only_activation_ready_rollups": all(
                 row.get("activation_readiness") == "activation-ready"
                 for row in rollup_selection.get("rows") or []
@@ -5579,7 +5579,7 @@ def build_request_shape_crunch_canary_stage_report(
 
 def _cache_replay_canary_cohort_id(cohort: dict[str, Any]) -> str:
     basis = {
-        "schema": "agentflow.request_shape_cache_replay_canary_cohort_id_basis.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_canary_cohort_id_basis.v1",
         "provider_family": cohort.get("provider_family"),
         "source_surface": cohort.get("source_surface"),
         "endpoint": cohort.get("endpoint"),
@@ -5648,7 +5648,7 @@ def _cache_replay_handled_rule_state(rule: dict[str, Any]) -> str:
 def _cache_replay_handled_rule_public(rule: dict[str, Any]) -> dict[str, Any]:
     graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else {}
     return {
-        "schema": "agentflow.request_shape_cache_replay_handled_local_policy.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_handled_local_policy.v1",
         "handled": True,
         "handled_state": _cache_replay_handled_rule_state(rule),
         "policy_source": public_label(rule.get("policy_source"), "unknown"),
@@ -5722,7 +5722,7 @@ def _request_shape_cache_replay_canary_lifecycle_projection(
         explicit_reason = reason or (blockers[0] if blockers else "not-stageable")
 
     return {
-        "schema": "agentflow.request_shape_cache_replay_canary_projected_lifecycle.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_canary_projected_lifecycle.v1",
         "status": lifecycle_status,
         "reason": explicit_reason,
         "readiness": readiness,
@@ -5783,7 +5783,7 @@ def _request_shape_cache_replay_canary_action(
         "reason": cohort.get("reason"),
     }
     target_cache_policy = {
-        "schema": "agentflow.request_shape_cache_replay_target_policy.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_target_policy.v1",
         "policy_section": "cache.pattern_rules",
         "target_local_policy": "cache_canary_policy",
         "target_local_rule_file": "cache_canary_policy.yaml",
@@ -5816,7 +5816,7 @@ def _request_shape_cache_replay_canary_action(
         "conditions": shape,
         "ttl_seconds": DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS,
         "invalidation": {
-            "schema": "agentflow.request_shape_cache_replay_invalidation_assumptions.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_invalidation_assumptions.v1",
             "strategy": "session-scoped-exact-non-tool",
             "scope": "session",
             "safe_invalidation": False,
@@ -5870,7 +5870,7 @@ def _request_shape_cache_replay_canary_action(
             "records_applied_holdout_hit_miss_bypass_invalidation_blocked_stale_risk": True,
         },
         "cache_decision_metadata": {
-            "schema": "agentflow.request_shape_cache_replay_decision_metadata.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_decision_metadata.v1",
             "cache_json_field": "cache_replay_canary",
             "emits_statuses": [
                 "applied",
@@ -5898,7 +5898,7 @@ def _request_shape_cache_replay_canary_action(
             "aggregate_only": True,
         },
         "lifecycle_metadata": {
-            "schema": "agentflow.request_shape_cache_replay_canary_stage_lifecycle_metadata.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_canary_stage_lifecycle_metadata.v1",
             "emits_applied": True,
             "emits_holdout": True,
             "emits_skipped": True,
@@ -5916,8 +5916,8 @@ def _request_shape_cache_replay_canary_action(
             "projected_skipped_count": lifecycle_projection["projected_skipped_count"],
             "projected_invalidated_count": lifecycle_projection["projected_invalidated_count"],
             "projected_bypassed_count": lifecycle_projection["projected_bypassed_count"],
-            "impact_report": "agentflow.openai_cache_replay_impact.v1",
-            "lifecycle_feedback_schema": "agentflow.openai_cache_replay_lifecycle_feedback.v1",
+            "impact_report": "tokenclaw.openai_cache_replay_impact.v1",
+            "lifecycle_feedback_schema": "tokenclaw.openai_cache_replay_lifecycle_feedback.v1",
             "metadata_only": True,
             "aggregate_only": True,
         },
@@ -5979,7 +5979,7 @@ def _cache_replay_stage_skipped_guard_summary(cohorts: list[dict[str, Any]]) -> 
             )
 
     return {
-        "schema": "agentflow.request_shape_cache_replay_canary_skipped_guards.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_canary_skipped_guards.v1",
         "skipped_cohort_count": len(skipped),
         "skipped_rows": skipped_rows,
         "tool_cohort_count": tool_count,
@@ -6276,7 +6276,7 @@ def apply_request_shape_cache_replay_canary_action(
         "target_cache_policy": action.get("target_cache_policy")
         if isinstance(action.get("target_cache_policy"), dict)
         else {
-            "schema": "agentflow.request_shape_cache_replay_target_policy.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_target_policy.v1",
             "policy_section": "cache.pattern_rules",
             "target_local_policy": "cache_canary_policy",
             "target_local_rule_file": "cache_canary_policy.yaml",
@@ -6298,7 +6298,7 @@ def apply_request_shape_cache_replay_canary_action(
             "ttl_seconds": ttl_seconds,
         },
         "rollout": {
-            "schema": "agentflow.pattern_policy_rollout.v1",
+            "schema": "tokenclaw.pattern_policy_rollout.v1",
             "recommendation_mode": "openai-cache-replay-request-shape-canary",
             "canary_enabled": True,
             "canary_fraction": round(rollout, 6),
@@ -6317,7 +6317,7 @@ def apply_request_shape_cache_replay_canary_action(
             ],
         },
         "graduation": {
-            "schema": "agentflow.request_shape_cache_replay_shape_activation.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_shape_activation.v1",
             "source_schema": REPLAYABILITY_DRY_RUN_SCHEMA,
             "source_reason": conditions.get("reason"),
             "cohort_id": cohort_id,
@@ -6344,7 +6344,7 @@ def apply_request_shape_cache_replay_canary_action(
     }
 
     updated = dict(existing)
-    updated["schema"] = str(updated.get("schema") or "agentflow.openai_cache_replay_canary_policy.v1")
+    updated["schema"] = str(updated.get("schema") or "tokenclaw.openai_cache_replay_canary_policy.v1")
     updated["policy_source"] = "local-manual"
     updated["generated_at"] = utc_now()
     rules = updated.get("pattern_rules") if isinstance(updated.get("pattern_rules"), list) else []
@@ -6431,7 +6431,7 @@ def _cache_replay_policy_file_candidates(filename: str) -> list[tuple[str, Path]
     if filename == "cache_rules.yaml":
         candidates.append((filename, Path(__file__).with_name(filename)))
     candidates.append((filename, Path.cwd() / "config" / filename))
-    candidates.append((filename, agentflow_config_path(filename)))
+    candidates.append((filename, tokenclaw_config_path(filename)))
     return candidates
 
 
@@ -6799,7 +6799,7 @@ def _cache_replay_warmup_window_analysis(
         classification = "no-warmup-evidence"
         next_action = "collect-cache-replay-canary-traffic"
     return {
-        "schema": "agentflow.request_shape_cache_replay_warmup_analysis.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_warmup_analysis.v1",
         "status": status,
         "classification": classification,
         "next_action": next_action,
@@ -6811,7 +6811,7 @@ def _cache_replay_warmup_window_analysis(
         "first_warmup_age_hours": first_age_hours,
         "latest_warmup_age_hours": latest_age_hours,
         "repeat_window": {
-            "schema": "agentflow.request_shape_cache_replay_repeat_window.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_repeat_window.v1",
             "ttl_seconds": ttl,
             "ttl_hours": ttl_hours,
             "eligible": bool(warmup_miss_count > 0 and ttl > 0),
@@ -6998,7 +6998,7 @@ def build_request_shape_cache_replay_evidence_report(
             reason = "stale-cache-replay-evidence"
             next_action = "rollback-cache-replay-rule"
             durable_outcome = {
-                "schema": "agentflow.request_shape_cache_replay_durable_outcome.v1",
+                "schema": "tokenclaw.request_shape_cache_replay_durable_outcome.v1",
                 "decision": "rollback",
                 "reason": reason,
                 "next_action": next_action,
@@ -7238,7 +7238,7 @@ def _cache_replay_policy_decision_metrics(evidence: dict[str, Any] | None) -> di
     ]
     applied_miss_blocker_values = [value for value in applied_miss_blocker_values if value != "unknown"]
     return {
-        "schema": "agentflow.request_shape_cache_replay_policy_decision_metrics.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_policy_decision_metrics.v1",
         "staged_canary_count": _as_int(evidence.get("staged_canary_count")) if isinstance(evidence, dict) else 0,
         "observed_row_count": _as_int(summary.get("observed_row_count")),
         "applied_count": applied,
@@ -7307,7 +7307,7 @@ def _cache_replay_policy_hit_recovery_metrics(
     top_shape = top.get("shape") if isinstance(top.get("shape"), dict) else {}
     if not isinstance(hit_recovery_report, dict):
         return {
-            "schema": "agentflow.request_shape_cache_replay_policy_hit_recovery_metrics.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_policy_hit_recovery_metrics.v1",
             "source_schema": None,
             "status": "unavailable",
             "reason": "hit-recovery-smoke-not-provided",
@@ -7327,7 +7327,7 @@ def _cache_replay_policy_hit_recovery_metrics(
     privacy = hit_recovery_report.get("privacy") if isinstance(hit_recovery_report.get("privacy"), dict) else {}
     target_shape = hit_recovery_report.get("target_shape") if isinstance(hit_recovery_report.get("target_shape"), dict) else {}
     return {
-        "schema": "agentflow.request_shape_cache_replay_policy_hit_recovery_metrics.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_policy_hit_recovery_metrics.v1",
         "source_schema": hit_recovery_report.get("schema"),
         "status": public_label(hit_recovery_report.get("status"), "unknown"),
         "reason": public_label(hit_recovery_report.get("reason"), "unknown"),
@@ -7434,7 +7434,7 @@ def _cache_replay_policy_warmup_analysis(evidence: dict[str, Any] | None, metric
     top = metrics.get("top_applied_miss_blocker")
     warmup_only = bool(_cache_replay_warmup_only_applied_miss(evidence))
     return {
-        "schema": "agentflow.request_shape_cache_replay_warmup_analysis.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_warmup_analysis.v1",
         "status": "warmup-only-without-window-metadata" if warmup_only else "unavailable",
         "classification": "first-seen-warmup" if warmup_only else "unknown",
         "next_action": "continue-cache-replay-warmup" if warmup_only else "collect-cache-replay-canary-traffic",
@@ -7446,7 +7446,7 @@ def _cache_replay_policy_warmup_analysis(evidence: dict[str, Any] | None, metric
         "first_warmup_age_hours": metrics.get("evidence_age_hours"),
         "latest_warmup_age_hours": metrics.get("evidence_age_hours"),
         "repeat_window": {
-            "schema": "agentflow.request_shape_cache_replay_repeat_window.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_repeat_window.v1",
             "ttl_seconds": None,
             "ttl_hours": None,
             "eligible": False,
@@ -7630,7 +7630,7 @@ def _cache_replay_policy_promotion_readiness(evidence: dict[str, Any] | None, de
 def _cache_replay_policy_rollback_metadata(evidence: dict[str, Any] | None, decision: str) -> dict[str, Any]:
     rule_id = _cache_replay_policy_rule_id(evidence or {})
     return {
-        "schema": "agentflow.request_shape_cache_replay_policy_decision_rollback_metadata.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_policy_decision_rollback_metadata.v1",
         "required_for_promotion": True,
         "rollback_action_type": "disable_openai_exact_cache_replay_policy",
         "target_local_rule_file": "cache_rules.yaml",
@@ -7662,7 +7662,7 @@ def _cache_replay_policy_duplicate_suppression(
     if decision == "retire-staged-no-repeat":
         reason = "synthetic-hit-recovery-proven-live-traffic-no-repeat-retired"
     return {
-        "schema": "agentflow.request_shape_cache_replay_policy_decision_duplicate_suppression.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_policy_decision_duplicate_suppression.v1",
         "reason": reason,
         "metadata_only": True,
         "aggregate_only": True,
@@ -7707,7 +7707,7 @@ def _cache_replay_policy_patch(evidence: dict[str, Any] | None, decision: str) -
     reason = _cache_replay_policy_decision_reason(evidence, decision)
     if decision in {"rollback", "retire-staged-no-repeat"}:
         return {
-            "schema": "agentflow.request_shape_cache_replay_policy_decision_local_patch.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_policy_decision_local_patch.v1",
             "patch_type": (
                 "retire_openai_exact_cache_replay_canary"
                 if decision == "retire-staged-no-repeat"
@@ -7730,7 +7730,7 @@ def _cache_replay_policy_patch(evidence: dict[str, Any] | None, decision: str) -
         return None
     ttl_seconds = _as_int(top.get("ttl_seconds"), DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS)
     return {
-        "schema": "agentflow.request_shape_cache_replay_policy_decision_local_patch.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_policy_decision_local_patch.v1",
         "patch_type": "widen_openai_exact_cache_replay_canary",
         "target_local_rule_file": "cache_rules.yaml",
         "source_canary_policy_file": "cache_canary_policy.yaml",
@@ -7752,7 +7752,7 @@ def _cache_replay_policy_patch(evidence: dict[str, Any] | None, decision: str) -
                     "ttl_seconds": ttl_seconds,
                 },
                 "rollout": {
-                    "schema": "agentflow.pattern_policy_rollout.v1",
+                    "schema": "tokenclaw.pattern_policy_rollout.v1",
                     "recommendation_mode": "active",
                     "canary_enabled": False,
                     "canary_fraction": 1.0,
@@ -7761,7 +7761,7 @@ def _cache_replay_policy_patch(evidence: dict[str, Any] | None, decision: str) -
                     "canary_unit": "request_fingerprint",
                 },
                 "graduation": {
-                    "schema": "agentflow.request_shape_cache_replay_policy_graduation.v1",
+                    "schema": "tokenclaw.request_shape_cache_replay_policy_graduation.v1",
                     "source_schema": REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA,
                     "source_verdict": "widen",
                     "source_surface": shape.get("source_surface"),
@@ -7827,7 +7827,7 @@ def build_request_shape_cache_replay_policy_decision_report(
     if retirement_required:
         reason_codes = list(dict.fromkeys(["retire-staged-no-repeat", reason, *reason_codes]))
     entry = {
-        "schema": "agentflow.request_shape_cache_replay_policy_decision_entry.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_policy_decision_entry.v1",
         "decision_id": _cache_replay_policy_decision_id(evidence, decision),
         "decision": decision,
         "promotion_decision": promotion_decision,
@@ -7862,7 +7862,7 @@ def build_request_shape_cache_replay_policy_decision_report(
         "keep_staged": decision == "keep-staged",
         "keep_blocked": decision == "keep-blocked",
         "coverage": {
-            "schema": "agentflow.request_shape_cache_replay_policy_decision_coverage.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_policy_decision_coverage.v1",
             "has_applied_coverage": metrics["applied_count"] > 0,
             "has_holdout_coverage": metrics["holdout_count"] > 0,
             "has_observed_hits": metrics["observed_hits"] > 0,
@@ -8180,7 +8180,7 @@ def _cache_dependency_evidence_decision(
         "not-required": "not-required",
     }.get(decision, "unknown-dependency-evidence")
     return {
-        "schema": "agentflow.request_shape_cache_dependency_evidence_decision.v1",
+        "schema": "tokenclaw.request_shape_cache_dependency_evidence_decision.v1",
         "status": status,
         "decision": decision,
         "evidence_class": evidence_class,
@@ -8226,7 +8226,7 @@ def _dependency_evidence_classification(rows: list[dict[str, Any]]) -> dict[str,
         if isinstance(row.get("dependency_evidence_decision"), dict)
     )
     return {
-        "schema": "agentflow.request_shape_cache_dependency_evidence_classification.v1",
+        "schema": "tokenclaw.request_shape_cache_dependency_evidence_classification.v1",
         "supported_evidence_classes": list(DEPENDENCY_EVIDENCE_CLASSES),
         "decision_options": list(DEPENDENCY_EVIDENCE_DECISION_OPTIONS),
         "observed_evidence_classes": sorted(observed_classes),
@@ -8268,7 +8268,7 @@ def _dependency_evidence_burndown(rows: list[dict[str, Any]]) -> list[dict[str, 
         entry = burndown.setdefault(
             key,
             {
-                "schema": "agentflow.request_shape_cache_dependency_evidence_burndown_row.v1",
+                "schema": "tokenclaw.request_shape_cache_dependency_evidence_burndown_row.v1",
                 "dependency_evidence_decision": decision,
                 "dependency_evidence_class": evidence_class,
                 "dependency_evidence_status": status,
@@ -8549,7 +8549,7 @@ def _build_dependency_fingerprint_coverage_report(
         "coverage_decision": coverage_decision,
         "next_action": next_action,
         "no_apply_guarantee": {
-            "schema": "agentflow.request_shape_tool_cache_dependency_fingerprint_no_apply_guarantee.v1",
+            "schema": "tokenclaw.request_shape_tool_cache_dependency_fingerprint_no_apply_guarantee.v1",
             "emits_cache_apply_action": False,
             "tool_cache_replay_enabled": False,
             "streaming_replay_enabled": False,
@@ -8750,7 +8750,7 @@ def build_request_shape_cache_invalidation_evidence_report(
                 "cache_entries_written": 0,
                 "policy_files_written": False,
                 "local_file_backed_policy_compatibility": {
-                    "schema": "agentflow.request_shape_cache_invalidation_policy_compatibility.v1",
+                    "schema": "tokenclaw.request_shape_cache_invalidation_policy_compatibility.v1",
                     "compatible": True,
                     "policy_source": "local-file-backed",
                     "policy_section": "cache",
@@ -8824,7 +8824,7 @@ def build_request_shape_cache_invalidation_evidence_report(
         "dependency_evidence_burndown": dependency_evidence_burndown,
         "dependency_evidence_classification": dependency_evidence_classification,
         "local_file_backed_policy_compatibility": {
-            "schema": "agentflow.request_shape_cache_invalidation_policy_compatibility.v1",
+            "schema": "tokenclaw.request_shape_cache_invalidation_policy_compatibility.v1",
             "compatible": True,
             "policy_source": "local-file-backed",
             "policy_section": "cache",
@@ -9227,7 +9227,7 @@ def _tool_cache_replay_proof(row: dict[str, Any]) -> dict[str, Any]:
     else:
         reason = "missing-live-repeat-or-observed-hit-proof"
     return {
-        "schema": "agentflow.request_shape_tool_cache_replay_proof.v1",
+        "schema": "tokenclaw.request_shape_tool_cache_replay_proof.v1",
         "proof_available": proof_available,
         "reason": reason,
         "live_repeat_confirmed": live_repeat_confirmed,
@@ -9251,7 +9251,7 @@ def _tool_cache_review_readiness_gate(
     proof_required = dependency_decision == "stable-dependency-evidence"
     proof_available = bool(replay_proof.get("proof_available"))
     gate["tool_cache_replay_review_gate"] = {
-        "schema": "agentflow.request_shape_tool_cache_replay_review_gate.v1",
+        "schema": "tokenclaw.request_shape_tool_cache_replay_review_gate.v1",
         "requires_stable_dependency_evidence": True,
         "requires_live_repeat_or_observed_hit_proof": proof_required,
         "proof_gate_passed": (not proof_required) or proof_available,
@@ -10333,7 +10333,7 @@ def build_request_shape_cache_replayability_dry_run(
         else:
             skipped_rows += row_count
         cohort = {
-            "schema": "agentflow.request_shape_cache_replayability_cohort.v1",
+            "schema": "tokenclaw.request_shape_cache_replayability_cohort.v1",
             "readiness": readiness,
             "reason": reason,
             "blockers": decision.get("blockers") or [],
@@ -10496,7 +10496,7 @@ def build_request_shape_cache_replayability_dry_run(
         "remaining_replay_ready_cohorts": remaining_replay_ready[:capped_limit],
         "handled_replay_ready_cohorts": handled_replay_ready[:capped_limit],
         "handled_policy_summary": {
-            "schema": "agentflow.request_shape_cache_replay_handled_policy_summary.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_handled_policy_summary.v1",
             "handled_rule_count": len(handled_rules),
             "matched_handled_cohort_count": len(handled_replay_ready),
             "policy_paths_included": False,
@@ -10905,7 +10905,7 @@ def _cache_replay_readiness_gate(
     else:
         gate_status = "replay-ready-but-too-small"
     return {
-        "schema": "agentflow.request_shape_cache_replay_readiness_gate.v1",
+        "schema": "tokenclaw.request_shape_cache_replay_readiness_gate.v1",
         "gate_status": gate_status,
         "stage_allowed": stage_allowed,
         "next_action": "stage-cache-replay-canary" if stage_allowed else "no-op-too-small-without-live-repeat",
@@ -11365,7 +11365,7 @@ def _snapshot_age_metadata(
         age_hours = round(max(0.0, (now_dt - generated).total_seconds() / 3600.0), 3)
         stale = bool(max_age_hours > 0 and age_hours > max_age_hours)
     return {
-        "schema": "agentflow.request_shape_rollup_snapshot_freshness.v1",
+        "schema": "tokenclaw.request_shape_rollup_snapshot_freshness.v1",
         "status": "snapshot-stale" if stale else "fresh",
         "stale": stale,
         "age_hours": age_hours,

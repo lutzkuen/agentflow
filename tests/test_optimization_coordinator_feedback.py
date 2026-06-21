@@ -21,7 +21,7 @@ def _decision(*, selected_family: str = "routing", holdout: bool = False) -> dic
         selected_family = "none"
     suppressed_reason = "coordinator-holdout" if holdout else "conflicts-with-selected-family"
     return {
-        "schema": "agentflow.optimization_coordinator.v1",
+        "schema": "tokenclaw.optimization_coordinator.v1",
         "selected_family": selected_family,
         "selected_action_family": selected_family,
         "selected_candidate": None if selected_family == "none" else {
@@ -304,7 +304,7 @@ class OptimizationCoordinatorFeedbackTests(unittest.TestCase):
                 store.conn.close()
 
         lifecycle = result["optimization_coordinator_lifecycle"]
-        self.assertEqual(lifecycle["schema"], "agentflow.optimization_coordinator_lifecycle_queue_status.v1")
+        self.assertEqual(lifecycle["schema"], "tokenclaw.optimization_coordinator_lifecycle_queue_status.v1")
         self.assertEqual(lifecycle["queue_rows"], 3)
         self.assertEqual(lifecycle["retryable_failures"], 1)
         self.assertEqual(lifecycle["dropped_privacy_violations"], 1)

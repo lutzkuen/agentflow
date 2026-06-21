@@ -12,8 +12,8 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.terminal_output_compaction_impact.v1"
-ACTION_SCHEMA = "agentflow.terminal_output_compaction_rollback_action.v1"
+SCHEMA = "tokenclaw.terminal_output_compaction_impact.v1"
+ACTION_SCHEMA = "tokenclaw.terminal_output_compaction_rollback_action.v1"
 TOKEN_CHARS = 4
 
 _REASON_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")

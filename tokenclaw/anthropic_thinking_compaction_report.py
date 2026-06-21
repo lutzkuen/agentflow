@@ -9,7 +9,7 @@ from tokenclaw.pricing import estimate_blended_input_savings
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.anthropic_thinking_compaction_opportunity.v1"
+SCHEMA = "tokenclaw.anthropic_thinking_compaction_opportunity.v1"
 _THINKING_BLOCK_TYPES = {"thinking", "redacted_thinking"}
 
 
@@ -547,7 +547,7 @@ def build_anthropic_thinking_compaction_opportunity_report(
             "projected_saved_usd": round(sum(_as_float(item.get("projected_saved_usd")) for item in candidates), 6),
         },
         "projection_policy": {
-            "schema": "agentflow.anthropic_thinking_compaction_projection_policy.v1",
+            "schema": "tokenclaw.anthropic_thinking_compaction_projection_policy.v1",
             "provider_calls_made": False,
             "managed_server_calls_made": False,
             "default_apply": False,

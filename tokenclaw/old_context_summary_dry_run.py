@@ -12,7 +12,7 @@ from tokenclaw.pricing import estimate_cost, pricing_basis
 from tokenclaw.store import stable_json, utc_now
 
 
-OLD_CONTEXT_SUMMARY_DRY_RUN_SCHEMA = "agentflow.old_context_summary_dry_run.v1"
+OLD_CONTEXT_SUMMARY_DRY_RUN_SCHEMA = "tokenclaw.old_context_summary_dry_run.v1"
 TOKEN_CHARS = 4
 CURRENT_POLICY_PROFILE = "current-policy"
 TOOL_PROTOCOL_AWARE_PROFILE = "tool-protocol-aware"

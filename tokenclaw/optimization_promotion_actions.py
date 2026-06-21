@@ -10,10 +10,10 @@ from tokenclaw.promotion_safety import classify_family_safety_stop_reason
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.optimization_promotion_rollout_actions.v1"
-ACTION_SCHEMA = "agentflow.optimization_promotion_rollout_action.v1"
-OMISSION_SCHEMA = "agentflow.optimization_promotion_rollout_omission.v1"
-OMISSION_BUCKET_SCHEMA = "agentflow.optimization_promotion_rollout_omission_bucket.v1"
+SCHEMA = "tokenclaw.optimization_promotion_rollout_actions.v1"
+ACTION_SCHEMA = "tokenclaw.optimization_promotion_rollout_action.v1"
+OMISSION_SCHEMA = "tokenclaw.optimization_promotion_rollout_omission.v1"
+OMISSION_BUCKET_SCHEMA = "tokenclaw.optimization_promotion_rollout_omission_bucket.v1"
 
 ACTIONABLE_VERDICTS = {"widen", "hold", "rollback"}
 CACHE_STALE_DEPENDENCY_REASONS = {
@@ -49,7 +49,7 @@ CACHE_REPLAY_FEEDBACK_OUTCOMES = [
     "safety-stopped",
     "noop",
 ]
-CRUNCH_LIFECYCLE_GATE_SCHEMA = "agentflow.crunch_canary_lifecycle_widen_gate.v1"
+CRUNCH_LIFECYCLE_GATE_SCHEMA = "tokenclaw.crunch_canary_lifecycle_widen_gate.v1"
 CRUNCH_SAFETY_REASON_MARKERS = (
     "safety-stop",
     "quality-gate",
@@ -66,22 +66,22 @@ LOCAL_POLICY_SECTIONS = {
         "policy_section": "routing",
         "target_local_policy_section": "routing.rules",
         "rule_prefix": "promotion-routing",
-        "review_command": "agentflow-policy-review",
-        "apply_command": "agentflow-optimization-promotion-canaries-apply --dry-run",
+        "review_command": "tokenclaw-policy-review",
+        "apply_command": "tokenclaw-optimization-promotion-canaries-apply --dry-run",
     },
     "cache": {
         "policy_section": "cache",
         "target_local_policy_section": "cache.rules",
         "rule_prefix": "promotion-cache",
-        "review_command": "agentflow-managed-rollout-actions-review",
-        "apply_command": "agentflow-optimization-promotion-canaries-apply --dry-run",
+        "review_command": "tokenclaw-managed-rollout-actions-review",
+        "apply_command": "tokenclaw-optimization-promotion-canaries-apply --dry-run",
     },
     "crunch": {
         "policy_section": "crunch",
         "target_local_policy_section": "crunch.rules",
         "rule_prefix": "promotion-crunch",
-        "review_command": "agentflow-managed-rollout-actions-review",
-        "apply_command": "agentflow-optimization-promotion-canaries-apply --dry-run",
+        "review_command": "tokenclaw-managed-rollout-actions-review",
+        "apply_command": "tokenclaw-optimization-promotion-canaries-apply --dry-run",
     },
 }
 
@@ -903,7 +903,7 @@ def _action(
             "projected_hit_rate": projection["projected_hit_rate"],
         }
         local_policy_update["cache_replay_canary"] = {
-            "schema": "agentflow.cache_replay_dependency_gated_canary.v1",
+            "schema": "tokenclaw.cache_replay_dependency_gated_canary.v1",
             "dependency_gate": dependency_gate,
             "projection": projection,
             "canary_fraction": canary_fraction,

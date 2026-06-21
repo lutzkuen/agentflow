@@ -32,9 +32,9 @@ POLICY_DECISION_PATH = "/v1/policy-decision"
 OUTCOME_PATH_TEMPLATE = "/v1/optimization-units/{unit_id}/outcome"
 POLICY_EVENTS_PATH = "/v1/policy-events"
 PROMOTION_BLOCKER_ACTION_OUTCOME_ROLLUPS_PATH = "/v1/promotion-blocker-action-outcome-rollups"
-FEATURE_SCHEMA_VERSION = "agentflow.optimization_unit_features.v1"
-POLICY_DECISION_PREFLIGHT_SCHEMA = "agentflow.policy_decision_preflight.v1"
-POLICY_DECISION_SCHEMA = "agentflow.policy_decision.v1"
+FEATURE_SCHEMA_VERSION = "tokenclaw.optimization_unit_features.v1"
+POLICY_DECISION_PREFLIGHT_SCHEMA = "tokenclaw.policy_decision_preflight.v1"
+POLICY_DECISION_SCHEMA = "tokenclaw.policy_decision.v1"
 MANAGED_API_KEY_ENV = "TOKENCLAW_MANAGED_API_KEY"
 RECOMMENDATION_ENABLED_ENV = "TOKENCLAW_RECOMMENDATION_ENABLED"
 RECOMMENDATIONS_ENABLED_ENV = "TOKENCLAW_RECOMMENDATIONS_ENABLED"
@@ -398,7 +398,7 @@ def _pattern_features(
     cacheability_features = _cacheability_pattern_features(local_module_entries)
     pattern_types = sorted({item["type"] for item in pattern_summaries} | set(local_module_families))
     descriptor: dict[str, Any] = {
-        "schema": "agentflow.normalized_pattern_descriptor.v1",
+        "schema": "tokenclaw.normalized_pattern_descriptor.v1",
         "source_surface": source_surface,
         "granularity": granularity,
         "app_family": app_family,
@@ -426,7 +426,7 @@ def _pattern_features(
     cache_hash = _pattern_hash({**descriptor, "pattern_family": "cache"})
     hashes = sorted({base_hash, crunch_hash, cache_hash})
     result = {
-        "schema": "agentflow.pattern_features.v1",
+        "schema": "tokenclaw.pattern_features.v1",
         "source_surface": source_surface,
         "granularity": granularity,
         "app_family": app_family,
@@ -503,7 +503,7 @@ def pattern_feature_diagnostics(unit: dict[str, Any]) -> dict[str, Any]:
         pattern_features = unit.get("pattern_features") if isinstance(unit, dict) else None
     if not isinstance(pattern_features, dict):
         return {
-            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+            "schema": "tokenclaw.managed_pattern_feature_diagnostics.v1",
             "present": False,
             "pattern_hash_count": 0,
             "raw_pattern_strings_included": False,
@@ -515,7 +515,7 @@ def pattern_feature_diagnostics(unit: dict[str, Any]) -> dict[str, Any]:
     ]
     hashes = [str(item) for item in hashes if isinstance(item, str) and item.startswith("sha256:")]
     diagnostics = {
-        "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+        "schema": "tokenclaw.managed_pattern_feature_diagnostics.v1",
         "present": bool(hashes),
         "pattern_hash_count": len(sorted(set(hashes))),
         "pattern_hashes": sorted(set(hashes)),
@@ -616,7 +616,7 @@ def _managed_headers() -> dict[str, str]:
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
-        "x-agentflow-local-fallback": "local-policy",
+        "x-tokenclaw-local-fallback": "local-policy",
     }
     api_key = env(MANAGED_API_KEY_ENV)
     if api_key:
@@ -953,7 +953,7 @@ def policy_decision_canary_fraction() -> float:
 
 
 def policy_decision_canary_salt() -> str:
-    return env(POLICY_DECISION_CANARY_SALT_ENV, "agentflow-policy-decision-canary-v1")
+    return env(POLICY_DECISION_CANARY_SALT_ENV, "tokenclaw-policy-decision-canary-v1")
 
 
 def _policy_decision_base_meta() -> dict[str, Any]:
@@ -1466,7 +1466,7 @@ def policy_decision_canary_sample(meta: dict[str, Any], *, current_model: str, t
     score = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
     selected = score < fraction
     return {
-        "schema": "agentflow.policy_decision_local_canary.v1",
+        "schema": "tokenclaw.policy_decision_local_canary.v1",
         "enabled": fraction > 0.0,
         "fraction": fraction,
         "salt": policy_decision_canary_salt(),
@@ -1923,7 +1923,7 @@ def _pattern_evidence_row(
         return None
     savings = savings_usd if savings_usd is not None else _safe_float(decision.get("estimated_cost_savings_usd"))
     row = {
-        "schema": "agentflow.managed_pattern_policy_evidence.v1",
+        "schema": "tokenclaw.managed_pattern_policy_evidence.v1",
         "source_surface": decision.get("source_surface"),
         "app_family": decision.get("app_family"),
         "action_family": action_family or _pattern_evidence_action_family(decision),
@@ -2013,7 +2013,7 @@ def pattern_policy_evidence_summaries(
             routing_changed = bool(requested_model and routed_model and requested_model != routed_model)
             managed = routing_meta.get("managed_recommendation") if isinstance(routing_meta.get("managed_recommendation"), dict) else {}
             routing_decision = {
-                "schema": "agentflow.pattern_decision_summary.v1",
+                "schema": "tokenclaw.pattern_decision_summary.v1",
                 "decision_type": "routing",
                 "source_surface": diagnostics.get("source_surface") or _source_surface(provider, path),
                 "app_family": diagnostics.get("app_family") or _app_family(provider, requested_model or "", path),
@@ -2107,7 +2107,7 @@ def pattern_decision_summaries(
                 continue
             seen_hashes.add(pattern_hash)
             rows.append({
-                "schema": "agentflow.pattern_decision_summary.v1",
+                "schema": "tokenclaw.pattern_decision_summary.v1",
                 "decision_type": "local_pattern_fingerprint",
                 "source_surface": pattern_diagnostics.get("source_surface") or source_surface,
                 "app_family": pattern_diagnostics.get("app_family") or app_family,
@@ -2149,7 +2149,7 @@ def pattern_decision_summaries(
             saved_tokens = max(0, saved_chars // TOKEN_CHARS)
             applied = _safe_int(rule.get("applied_count")) > 0
             base = {
-                "schema": "agentflow.pattern_decision_summary.v1",
+                "schema": "tokenclaw.pattern_decision_summary.v1",
                 "decision_type": "crunch",
                 "source_surface": source_surface,
                 "app_family": app_family,
@@ -2221,7 +2221,7 @@ def pattern_decision_summaries(
             if any(row.get("rule_id") == item.get("rule_id") for row in rows):
                 continue
             rows.append({
-                "schema": "agentflow.pattern_decision_summary.v1",
+                "schema": "tokenclaw.pattern_decision_summary.v1",
                 "decision_type": "crunch",
                 "source_surface": source_surface,
                 "app_family": app_family,
@@ -2250,7 +2250,7 @@ def pattern_decision_summaries(
         pattern_rule = cache_meta.get("pattern_rule") if isinstance(cache_meta.get("pattern_rule"), dict) else {}
         pattern_rules = cache_meta.get("pattern_rules") if isinstance(cache_meta.get("pattern_rules"), dict) else {}
         descriptor = {
-            "schema": "agentflow.cache_pattern_decision_basis.v1",
+            "schema": "tokenclaw.cache_pattern_decision_basis.v1",
             "source_surface": source_surface,
             "app_family": app_family,
             "category": category or routing_meta.get("category") or "unknown",
@@ -2265,7 +2265,7 @@ def pattern_decision_summaries(
             "replayability_level": cache_meta.get("replayability_level"),
         }
         rows.append({
-            "schema": "agentflow.pattern_decision_summary.v1",
+            "schema": "tokenclaw.pattern_decision_summary.v1",
             "decision_type": "cache",
             "source_surface": source_surface,
             "app_family": app_family,
@@ -2316,7 +2316,7 @@ def pattern_decision_summaries(
             safety_stopped = item.get("reason") == "local-canary-safety-stop"
             canary_meta = _copy_canary_meta(item)
             rows.append({
-                "schema": "agentflow.pattern_decision_summary.v1",
+                "schema": "tokenclaw.pattern_decision_summary.v1",
                 "decision_type": "cache",
                 "source_surface": source_surface,
                 "app_family": app_family,
@@ -2622,7 +2622,7 @@ def build_old_context_summary_outcome_feedback(
         else {}
     )
     feedback = {
-        "schema": "agentflow.old_context_summary_outcome_feedback.v1",
+        "schema": "tokenclaw.old_context_summary_outcome_feedback.v1",
         "source_surface": _source_surface(provider, path),
         "category": category or summary_meta.get("category") or "unknown",
         "status": status or "unknown",
@@ -2730,7 +2730,7 @@ def build_old_context_summary_outcome_event(
         "applied_files": [],
         "local_tool_version": __version__,
         "metadata": {
-            "schema": "agentflow.old_context_summary_outcome_event_metadata.v1",
+            "schema": "tokenclaw.old_context_summary_outcome_event_metadata.v1",
             "lifecycle_kind": "old_context_summarization",
             "outcome": outcome_feedback,
             "privacy": {
@@ -2820,7 +2820,7 @@ def build_phase_routing_outcome_feedback(
     )
     safety_stop = canary.get("safety_stop") if isinstance(canary.get("safety_stop"), dict) else {}
     feedback = {
-        "schema": "agentflow.phase_routing_outcome_feedback.v1",
+        "schema": "tokenclaw.phase_routing_outcome_feedback.v1",
         "source_surface": source_surface,
         "app_family": _app_family(provider, requested_model or "", path),
         "category": category or routing_meta.get("category") or canary.get("category") or "unknown",
@@ -2930,7 +2930,7 @@ def build_phase_routing_outcome_event(
         "applied_files": [],
         "local_tool_version": __version__,
         "metadata": {
-            "schema": "agentflow.phase_routing_outcome_event_metadata.v1",
+            "schema": "tokenclaw.phase_routing_outcome_event_metadata.v1",
             "lifecycle_kind": "phase_routing",
             "outcome": outcome_feedback,
             "privacy": {
@@ -3241,7 +3241,7 @@ def build_codex_app_canary_lifecycle_feedback(
     safety_stop = routing_meta.get("safety_stop") if isinstance(routing_meta.get("safety_stop"), dict) else {}
     canary = _codex_canary_for_action(action_family, routing_meta, cache_meta)
     feedback = {
-        "schema": "agentflow.codex_app_canary_lifecycle_feedback.v1",
+        "schema": "tokenclaw.codex_app_canary_lifecycle_feedback.v1",
         "event_type": "codex_app_canary_lifecycle",
         "occurred_at": utc_now(),
         "source_surface": CODEX_APP_SOURCE_SURFACE,

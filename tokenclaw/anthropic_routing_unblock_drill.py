@@ -13,10 +13,10 @@ from tokenclaw.orchestrator_research import sanitize_value
 from tokenclaw.public_metadata import public_id
 
 
-SCHEMA = "agentflow.anthropic_routing_safety_stop_unblock_drill.v1"
-ENTRY_SCHEMA = "agentflow.anthropic_routing_safety_stop_unblock_drill_entry.v1"
-ACCEPTANCE_SCHEMA = "agentflow.anthropic_routing_safety_stop_unblock_drill_acceptance.v1"
-PRIVACY_SCHEMA = "agentflow.anthropic_routing_safety_stop_unblock_drill_privacy.v1"
+SCHEMA = "tokenclaw.anthropic_routing_safety_stop_unblock_drill.v1"
+ENTRY_SCHEMA = "tokenclaw.anthropic_routing_safety_stop_unblock_drill_entry.v1"
+ACCEPTANCE_SCHEMA = "tokenclaw.anthropic_routing_safety_stop_unblock_drill_acceptance.v1"
+PRIVACY_SCHEMA = "tokenclaw.anthropic_routing_safety_stop_unblock_drill_privacy.v1"
 
 REQUIRED_CRITERIA = [
     "safety_stop_reason_review",
@@ -77,9 +77,9 @@ def _privacy() -> dict[str, Any]:
 def _source_to_burndown(source: dict[str, Any]) -> dict[str, Any]:
     if source.get("schema") == SAFETY_STOP_BURNDOWN_SCHEMA:
         return source
-    if source.get("schema") == "agentflow.pass_through_routing_activation_candidates.v1":
+    if source.get("schema") == "tokenclaw.pass_through_routing_activation_candidates.v1":
         source = {
-            "schema": "agentflow.orchestrator_research_plan.v1",
+            "schema": "tokenclaw.orchestrator_research_plan.v1",
             "evidence": {"stats_summary": {"pass_through_routing_report": source}},
         }
     return build_activation_safety_stop_burndown(research_plan=source)
@@ -100,7 +100,7 @@ def _review_field(row: dict[str, Any], field: str) -> dict[str, Any]:
         return sanitize_value(value)
     passed = _passed_criteria(row).get(field, False)
     return {
-        "schema": f"agentflow.anthropic_routing_safety_stop_{field}_drill_review.v1",
+        "schema": f"tokenclaw.anthropic_routing_safety_stop_{field}_drill_review.v1",
         "status": "present" if passed else "missing",
         "present": passed,
         "passed": passed,
@@ -114,7 +114,7 @@ def _review_field(row: dict[str, Any], field: str) -> dict[str, Any]:
 def _rollback_metadata(row: dict[str, Any], *, stage_allowed: bool) -> dict[str, Any]:
     metadata = row.get("rollback_metadata") if isinstance(row.get("rollback_metadata"), dict) else {}
     result = {
-        "schema": "agentflow.anthropic_routing_safety_stop_rollback_metadata.v1",
+        "schema": "tokenclaw.anthropic_routing_safety_stop_rollback_metadata.v1",
         "rollback_action_type": "keep_anthropic_routing_policy_disabled",
         "rollback_action": "keep-routing-policy-disabled",
         "target_local_policy_section": "routing.rules",

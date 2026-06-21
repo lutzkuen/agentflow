@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -76,23 +77,14 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 0)
                 self.assertIn("usage:", stdout.getvalue())
 
-    def test_legacy_agentflow_main_prints_deprecation_notice(self):
-        stderr = io.StringIO()
-
-        with patch("tokenclaw.cli.tokenclaw_cli", return_value=0), patch("sys.stderr", stderr), self.assertRaises(SystemExit) as raised:
-            cli.agentflow_main()
-
-        self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(stderr.getvalue(), "agentflow is deprecated; use tokenclaw instead.\n")
-
-    def test_agentflow_cli_reexports_onboarding_command_group(self):
-        self.assertIs(cli.agentflow_cli, onboarding_cli.agentflow_cli)
+    def test_tokenclaw_cli_reexports_onboarding_command_group(self):
+        self.assertIs(cli.tokenclaw_cli, onboarding_cli.tokenclaw_cli)
         self.assertIs(cli.tokenclaw_cli, onboarding_cli.tokenclaw_cli)
         self.assertIs(cli._activation_stats_result, onboarding_cli._activation_stats_result)
         self.assertIs(cli._doctor_codex_target, onboarding_cli._doctor_codex_target)
         self.assertIs(cli._doctor_claude_desktop_target, onboarding_cli._doctor_claude_desktop_target)
 
-    def test_agentflow_cli_reexports_optimization_report_commands(self):
+    def test_tokenclaw_cli_reexports_optimization_report_commands(self):
         moved_commands = [
             "openai_optimization_draft_dry_run_cli",
             "openai_optimization_draft_apply_cli",
@@ -117,13 +109,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_optimization_report_console_script_entrypoints_import(self):
         script_lines = Path("pyproject.toml").read_text(encoding="utf-8").splitlines()
-        affected_tokens = ("agentflow-openai-", "agentflow-optimization-", "agentflow-local-activation-")
+        affected_tokens = ("tokenclaw-openai-", "tokenclaw-optimization-", "tokenclaw-local-activation-")
         report_tokens = ("opportunity", "compaction", "report", "rollout-actions")
         checked = []
 
         for line in script_lines:
             stripped = line.strip()
-            if not stripped.startswith("agentflow-") or "=" not in stripped:
+            if not stripped.startswith("tokenclaw-") or "=" not in stripped:
                 continue
             script_name, target = [part.strip().strip('"') for part in stripped.split("=", 1)]
             if not (
@@ -136,15 +128,15 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertTrue(callable(getattr(module, attr)), script_name)
             checked.append(script_name)
 
-        self.assertIn("agentflow-openai-routing-report", checked)
-        self.assertIn("agentflow-optimization-eval-plan", checked)
-        self.assertIn("agentflow-repeated-scaffold-opportunity", checked)
+        self.assertIn("tokenclaw-openai-routing-report", checked)
+        self.assertIn("tokenclaw-optimization-eval-plan", checked)
+        self.assertIn("tokenclaw-repeated-scaffold-opportunity", checked)
 
     def test_optimization_reports_module_openai_routing_report_empty_db(self):
         from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             Store(db_path).conn.close()
             stdout = io.StringIO()
 
@@ -155,7 +147,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
-        self.assertEqual(payload["schema"], "agentflow.openai_routing_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_routing_opportunity.v1")
         self.assertEqual(payload["summary"]["candidate_count"], 0)
 
     def test_onboarding_module_version_json_path(self):
@@ -169,7 +161,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertEqual(
             json.loads(stdout.getvalue()),
             {
-                "schema": "agentflow.version.v1",
+                "schema": "tokenclaw.version.v1",
                 "ok": True,
                 "version": __version__,
                 "package": "tokenclaw",
@@ -205,7 +197,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_readme_onboarding_commands_smoke_without_credentials(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             codex_config = Path(tmp) / "codex-config.toml"
             desktop_file = Path(tmp) / "claude-desktop.desktop"
             desktop_file.write_text("[Desktop Entry]\nName=Claude\nExec=/opt/claude-desktop/claude-desktop %U\n", encoding="utf-8")
@@ -237,14 +229,14 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
             for command in smoke_commands:
                 with self.subTest(command=command):
-                    code = cli.agentflow_cli(command, stdout=io.StringIO(), stderr=io.StringIO())
+                    code = cli.tokenclaw_cli(command, stdout=io.StringIO(), stderr=io.StringIO())
                     self.assertEqual(code, 0)
 
-            cli.agentflow_cli(["activate", "openai", "--config-dir", str(config_dir)], stdout=io.StringIO())
-            cli.agentflow_cli(["activate", "claude", "--config-dir", str(config_dir)], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", str(config_dir)], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "claude", "--config-dir", str(config_dir)], stdout=io.StringIO())
             run_stdout = io.StringIO()
             self.assertEqual(
-                cli.agentflow_cli(["run", "openai", "--config-dir", str(config_dir), "--dry-run"], stdout=run_stdout),
+                cli.tokenclaw_cli(["run", "openai", "--config-dir", str(config_dir), "--dry-run"], stdout=run_stdout),
                 0,
             )
             self.assertIn("--provider openai", run_stdout.getvalue())
@@ -255,47 +247,47 @@ class AgentflowActivationCliTests(unittest.TestCase):
                     json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"},
                 )
                 doctor_stdout = io.StringIO()
-                code = cli.agentflow_cli(["doctor", "openai", "--config-dir", str(config_dir)], stdout=doctor_stdout)
+                code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", str(config_dir)], stdout=doctor_stdout)
             self.assertEqual(code, 0)
             self.assertIn("openai: healthy", doctor_stdout.getvalue())
 
     def test_activate_copilot_fails_as_unsupported_base_url_target(self):
         stderr = io.StringIO()
 
-        code = cli.agentflow_cli(["activate", "copilot"], stdout=io.StringIO(), stderr=stderr)
+        code = cli.tokenclaw_cli(["activate", "copilot"], stdout=io.StringIO(), stderr=stderr)
 
         self.assertEqual(code, 2)
         self.assertIn("unsupported: GitHub Copilot is not a base-url target", stderr.getvalue())
 
-    def test_agentflow_version_command_prints_version(self):
+    def test_tokenclaw_version_command_prints_version(self):
         from tokenclaw import __version__
 
         stdout = io.StringIO()
 
-        code = cli.agentflow_cli(["version"], stdout=stdout)
+        code = cli.tokenclaw_cli(["version"], stdout=stdout)
 
         self.assertEqual(code, 0)
-        self.assertEqual(stdout.getvalue(), f"agentflow {__version__}\n")
+        self.assertEqual(stdout.getvalue(), f"tokenclaw {__version__}\n")
 
-    def test_agentflow_stats_prints_activation_targets_without_http(self):
+    def test_tokenclaw_stats_prints_activation_targets_without_http(self):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
-            cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
 
             with patch("tokenclaw.cli.httpx.get") as http_get:
-                code = cli.agentflow_cli(["stats", "--config-dir", tmp, "openai"], stdout=stdout)
+                code = cli.tokenclaw_cli(["stats", "--config-dir", tmp, "openai"], stdout=stdout)
 
         self.assertEqual(code, 0)
         http_get.assert_not_called()
         output = stdout.getvalue()
         self.assertEqual(output, "openai: configured, base url: http://127.0.0.1:4003/v1, upstream: https://api.openai.com\n")
 
-    def test_agentflow_stats_lists_all_known_targets(self):
+    def test_tokenclaw_stats_lists_all_known_targets(self):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
-            cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
 
-            code = cli.agentflow_cli(["stats", "--config-dir", tmp], stdout=stdout)
+            code = cli.tokenclaw_cli(["stats", "--config-dir", tmp], stdout=stdout)
 
         self.assertEqual(code, 0)
         output = stdout.getvalue()
@@ -305,11 +297,11 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn("claude-vscode: not configured", output)
         self.assertIn("claude-desktop: not configured", output)
 
-    def test_agentflow_doctor_codex_not_configured(self):
+    def test_tokenclaw_doctor_codex_not_configured(self):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["doctor", "codex", "--config-dir", tmp], stdout=stdout)
+            code = cli.tokenclaw_cli(["doctor", "codex", "--config-dir", tmp], stdout=stdout)
 
         self.assertEqual(code, 1)
         self.assertIn("codex: not configured", stdout.getvalue())
@@ -318,12 +310,12 @@ class AgentflowActivationCliTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with patch("sys.stderr", stderr), self.assertRaises(SystemExit) as raised:
-            cli.agentflow_cli(["nope"])
+            cli.tokenclaw_cli(["nope"])
 
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("invalid choice", stderr.getvalue())
 
-    def test_pyproject_scripts_keep_public_and_legacy_entry_points(self):
+    def test_pyproject_scripts_keep_public_entry_points(self):
         raw = Path("pyproject.toml").read_text(encoding="utf-8").splitlines()
         scripts: dict[str, str] = {}
         in_scripts = False
@@ -338,16 +330,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 name, value = stripped.split("=", 1)
                 scripts[name.strip()] = value.strip().strip('"')
 
-        self.assertEqual(scripts["agentflow"], "tokenclaw.cli:agentflow_main")
         self.assertEqual(scripts["tokenclaw"], "tokenclaw.cli:tokenclaw_main")
         self.assertEqual(scripts["tokenclaw-proxy"], "tokenclaw.cli:proxy_main")
         self.assertEqual(scripts["tokenclaw-dashboard"], "tokenclaw.dashboard:main")
-        self.assertEqual(scripts["agentflow-proxy"], "tokenclaw.cli:proxy_main")
-        self.assertEqual(scripts["agentflow-claude-proxy"], "tokenclaw.cli:proxy_main")
-        self.assertEqual(scripts["agentflow-dashboard"], "tokenclaw.dashboard:main")
         self.assertEqual(scripts["tokenclaw-openai-routing-report"], "tokenclaw.cli:openai_routing_report_main")
         self.assertEqual(scripts["tokenclaw-optimization-eval-plan"], "tokenclaw.cli:optimization_eval_plan_main")
         self.assertGreater(len(scripts), 80)
+        self.assertFalse([name for name in scripts if name.startswith("agentflow")])
 
         for name, target in scripts.items():
             with self.subTest(script=name, target=target):
@@ -355,10 +344,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 module = importlib.import_module(module_name)
                 self.assertTrue(callable(getattr(module, attr_name)))
 
-        cli_exceptions = {
-            "agentflow-dashboard": "tokenclaw.dashboard:main",
-            "tokenclaw-dashboard": "tokenclaw.dashboard:main",
-        }
+        cli_exceptions = {"tokenclaw-dashboard": "tokenclaw.dashboard:main"}
         for name, target in scripts.items():
             if name in cli_exceptions:
                 self.assertEqual(target, cli_exceptions[name])
@@ -373,21 +359,26 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn('Repository = "https://github.com/lutzkuen/tokenclaw"', raw)
         self.assertIn('Issues = "https://github.com/lutzkuen/tokenclaw/issues"', raw)
 
-    def test_agentflow_proxy_imports_remain_compatible(self):
-        from agentflow_proxy.server import app as legacy_app
-        from tokenclaw.server import app as renamed_app
+    def test_agentflow_proxy_import_is_removed(self):
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", "import agentflow_proxy"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
 
-        self.assertIs(legacy_app, renamed_app)
-        self.assertIs(sys.modules["agentflow_proxy"], sys.modules["tokenclaw"])
-        self.assertIs(sys.modules["agentflow_proxy.server"], sys.modules["tokenclaw.server"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ModuleNotFoundError", result.stderr)
 
     def test_activate_openai_writes_default_profile_idempotently(self):
         with TemporaryDirectory() as tmp:
             stdout_one = io.StringIO()
             stdout_two = io.StringIO()
 
-            code_one = cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=stdout_one)
-            code_two = cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=stdout_two)
+            code_one = cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=stdout_one)
+            code_two = cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=stdout_two)
 
             self.assertEqual(code_one, 0)
             self.assertEqual(code_two, 0)
@@ -412,7 +403,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(
+            code = cli.tokenclaw_cli(
                 [
                     "activate",
                     "openai",
@@ -440,7 +431,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(
+            code = cli.tokenclaw_cli(
                 [
                     "activate",
                     "openai",
@@ -467,7 +458,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             status = activation.activation_status(tmp)
 
-        self.assertEqual(status["schema"], "agentflow.activation_status.v1")
+        self.assertEqual(status["schema"], "tokenclaw.activation_status.v1")
         self.assertTrue(status["ok"])
         self.assertFalse(status["targets"]["openai"]["configured"])
         self.assertFalse(status["targets"]["claude"]["configured"])
@@ -491,7 +482,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             (Path(tmp) / "activation.json").write_text('{"schema":"bad","targets":{}}\n', encoding="utf-8")
             stderr = io.StringIO()
 
-            code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp], stdout=io.StringIO(), stderr=stderr)
+            code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", tmp], stdout=io.StringIO(), stderr=stderr)
 
         self.assertEqual(code, 1)
         self.assertIn("Invalid TokenClaw activation config", stderr.getvalue())
@@ -502,7 +493,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             (Path(tmp) / "activation.json").write_text('{"schema":"bad","targets":{}}\n', encoding="utf-8")
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
+            code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
 
         self.assertEqual(code, 1)
         result = json.loads(stdout.getvalue())
@@ -516,7 +507,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             path.write_text('{"schema":"bad","targets":{}}\n', encoding="utf-8")
             stderr = io.StringIO()
 
-            code = cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO(), stderr=stderr)
+            code = cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO(), stderr=stderr)
 
             self.assertEqual(code, 2)
             self.assertEqual(path.read_text(encoding="utf-8"), '{"schema":"bad","targets":{}}\n')
@@ -524,16 +515,16 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_stats_json_includes_activation_status_snapshot(self):
         with TemporaryDirectory() as tmp:
-            cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
             stdout = io.StringIO()
 
             with patch("tokenclaw.cli.httpx.get") as http_get:
-                code = cli.agentflow_cli(["stats", "--config-dir", tmp, "openai", "--json"], stdout=stdout)
+                code = cli.tokenclaw_cli(["stats", "--config-dir", tmp, "openai", "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
         http_get.assert_not_called()
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.activation_stats.v1")
+        self.assertEqual(result["schema"], "tokenclaw.activation_stats.v1")
         status = result["targets"]["openai"]
         self.assertEqual(status["status"], "configured")
         self.assertTrue(status["configured"])
@@ -551,14 +542,14 @@ class AgentflowActivationCliTests(unittest.TestCase):
             plan_path.write_text(
                 json.dumps(
                     {
-                        "schema": "agentflow.orchestrator_research_plan.v1",
+                        "schema": "tokenclaw.orchestrator_research_plan.v1",
                         "generated_at": "2026-06-20T22:40:11+00:00",
                         "evidence": {
                             "stats_summary": {
                                 "local_activation_next_action_queue": {
-                                    "schema": "agentflow.local_activation_next_action_queue.v1",
+                                    "schema": "tokenclaw.local_activation_next_action_queue.v1",
                                     "status": "ranked",
-                                    "source_schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                                    "source_schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
                                     "summary": {
                                         "queued_action_count": 2,
                                         "successor_action_count": 2,
@@ -631,23 +622,23 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            cli.agentflow_cli(["activate", "openai", "--config-dir", str(config_dir)], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", str(config_dir)], stdout=io.StringIO())
             stdout = io.StringIO()
 
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
-                    "AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path),
+                    "TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "TOKENCLAW_RESEARCH_PLAN_JSON": str(plan_path),
                 },
                 clear=False,
             ):
-                code = cli.agentflow_cli(["stats", "--config-dir", str(config_dir), "--json"], stdout=stdout)
+                code = cli.tokenclaw_cli(["stats", "--config-dir", str(config_dir), "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
         health = result["activation_successor_queue_health"]
-        self.assertEqual(health["schema"], "agentflow.activation_successor_queue_health.v1")
+        self.assertEqual(health["schema"], "tokenclaw.activation_successor_queue_health.v1")
         self.assertEqual(health["status"], "ranked")
         self.assertEqual(health["summary"]["top_blocker"], "evidence-older-than-max-age")
         self.assertEqual(health["summary"]["top_next_action"], "collect-cache-replay-canary-traffic")
@@ -677,11 +668,11 @@ class AgentflowActivationCliTests(unittest.TestCase):
             plan_path.write_text(
                 json.dumps(
                     {
-                        "schema": "agentflow.orchestrator_research_plan.v1",
+                        "schema": "tokenclaw.orchestrator_research_plan.v1",
                         "evidence": {
                             "stats_summary": {
                                 "local_activation_next_action_queue": {
-                                    "schema": "agentflow.local_activation_next_action_queue.v1",
+                                    "schema": "tokenclaw.local_activation_next_action_queue.v1",
                                     "status": "ranked",
                                     "summary": {"queued_action_count": 1},
                                     "entries": [
@@ -703,21 +694,21 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            cli.agentflow_cli(["activate", "openai", "--config-dir", str(config_dir)], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", str(config_dir)], stdout=io.StringIO())
             stdout = io.StringIO()
 
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
-                    "AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path),
+                    "TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "TOKENCLAW_RESEARCH_PLAN_JSON": str(plan_path),
                 },
                 clear=False,
             ), patch(
                 "tokenclaw.cli_commands.onboarding.httpx.get",
                 return_value=httpx.Response(200, json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"}),
             ):
-                code = cli.agentflow_cli(["doctor", "openai", "--config-dir", str(config_dir), "--json"], stdout=stdout)
+                code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", str(config_dir), "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
@@ -730,7 +721,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stderr = io.StringIO()
 
-            code = cli.agentflow_cli(
+            code = cli.tokenclaw_cli(
                 ["activate", "openai", "--config-dir", tmp, "--openai-base-url", "api.openai.com"],
                 stdout=io.StringIO(),
                 stderr=stderr,
@@ -745,8 +736,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
             stdout_one = io.StringIO()
             stdout_two = io.StringIO()
 
-            code_one = cli.agentflow_cli(["activate", "claude", "--config-dir", tmp], stdout=stdout_one)
-            code_two = cli.agentflow_cli(["activate", "claude", "--config-dir", tmp], stdout=stdout_two)
+            code_one = cli.tokenclaw_cli(["activate", "claude", "--config-dir", tmp], stdout=stdout_one)
+            code_two = cli.tokenclaw_cli(["activate", "claude", "--config-dir", tmp], stdout=stdout_two)
 
             self.assertEqual(code_one, 0)
             self.assertEqual(code_two, 0)
@@ -766,7 +757,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
+            code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             config_path = Path(tmp) / "activation.json"
@@ -796,14 +787,14 @@ class AgentflowActivationCliTests(unittest.TestCase):
     def test_activate_claude_vscode_appends_shell_profile_source_line(self):
         with TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
-            config_dir = home / ".agentflow"
+            config_dir = home / ".tokenclaw"
             home.mkdir()
             bashrc = home / ".bashrc"
             bashrc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
             stdout = io.StringIO()
 
             with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
-                code = cli.agentflow_cli(["activate", "claude-code", "--config-dir", str(config_dir)], stdout=stdout)
+                code = cli.tokenclaw_cli(["activate", "claude-code", "--config-dir", str(config_dir)], stdout=stdout)
 
             self.assertEqual(code, 0)
             env_path = config_dir / "claude-vscode.env"
@@ -818,16 +809,16 @@ class AgentflowActivationCliTests(unittest.TestCase):
     def test_activate_claude_vscode_shell_profile_is_idempotent(self):
         with TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
-            config_dir = home / ".agentflow"
+            config_dir = home / ".tokenclaw"
             home.mkdir()
             profile = home / ".zshrc"
             env_path = config_dir / "claude-vscode.env"
             profile.write_text(f"source {env_path}\n", encoding="utf-8")
 
             with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
-                first = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=io.StringIO())
+                first = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=io.StringIO())
                 second_stdout = io.StringIO()
-                second = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=second_stdout)
+                second = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=second_stdout)
 
             self.assertEqual(first, 0)
             self.assertEqual(second, 0)
@@ -836,9 +827,9 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_claude_vscode_is_idempotent(self):
         with TemporaryDirectory() as tmp:
-            first = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
+            first = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
             second_stdout = io.StringIO()
-            second = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=second_stdout)
+            second = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=second_stdout)
 
             self.assertEqual(first, 0)
             self.assertEqual(second, 0)
@@ -848,13 +839,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_claude_vscode_uses_existing_claude_local_base_url(self):
         with TemporaryDirectory() as tmp:
-            cli.agentflow_cli(
+            cli.tokenclaw_cli(
                 ["activate", "claude", "--config-dir", tmp, "--local-base-url", "http://127.0.0.1:4998"],
                 stdout=io.StringIO(),
             )
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
+            code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
@@ -867,7 +858,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["activate", "claude-code", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
+            code = cli.tokenclaw_cli(["activate", "claude-code", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
@@ -882,7 +873,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             home.mkdir()
             profile = home / ".profile"
             with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
-                code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--dry-run"], stdout=stdout)
+                code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--dry-run"], stdout=stdout)
 
             self.assertEqual(code, 0)
             self.assertFalse((Path(tmp) / "activation.json").exists())
@@ -903,7 +894,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             stdout = io.StringIO()
 
             with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
-                code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
+                code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             self.assertEqual(bashrc.read_text(encoding="utf-8"), "export PATH=/usr/bin\n")
@@ -923,7 +914,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
+                code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=stdout)
 
             self.assertEqual(code, 0)
             activation_raw = (Path(tmp) / "activation.json").read_text(encoding="utf-8")
@@ -941,7 +932,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stderr = io.StringIO()
 
-            code = cli.agentflow_cli(
+            code = cli.tokenclaw_cli(
                 ["activate", "claude-vscode", "--config-dir", tmp, "--no-auto-claude"],
                 stdout=io.StringIO(),
                 stderr=stderr,
@@ -955,7 +946,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_claude_desktop_patches_exec_line_and_writes_backup(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             desktop_file = Path(tmp) / "claude-desktop.desktop"
             desktop_file.write_text(
                 "[Desktop Entry]\nName=Claude\nExec=/opt/claude-desktop/claude-desktop %U\n",
@@ -963,7 +954,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             )
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(
+            code = cli.tokenclaw_cli(
                 [
                     "activate",
                     "claude-desktop",
@@ -981,7 +972,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 "[Desktop Entry]\nName=Claude\nExec=env ANTHROPIC_BASE_URL=http://127.0.0.1:4000 /opt/claude-desktop/claude-desktop %U\n",
             )
             self.assertEqual(
-                desktop_file.with_name(desktop_file.name + ".agentflow.bak").read_text(encoding="utf-8"),
+                desktop_file.with_name(desktop_file.name + ".tokenclaw.bak").read_text(encoding="utf-8"),
                 "[Desktop Entry]\nName=Claude\nExec=/opt/claude-desktop/claude-desktop %U\n",
             )
             config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
@@ -1000,7 +991,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_claude_desktop_is_idempotent_and_updates_existing_env_exec(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             desktop_file = Path(tmp) / "claude-desktop.desktop"
             desktop_file.write_text(
                 "[Desktop Entry]\nName=Claude\nExec=env FOO=bar ANTHROPIC_BASE_URL=http://old.example /opt/claude %U\n",
@@ -1008,7 +999,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             )
 
             first_stdout = io.StringIO()
-            first = cli.agentflow_cli(
+            first = cli.tokenclaw_cli(
                 [
                     "activate",
                     "claude",
@@ -1019,7 +1010,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 ],
                 stdout=io.StringIO(),
             )
-            first_desktop = cli.agentflow_cli(
+            first_desktop = cli.tokenclaw_cli(
                 [
                     "activate",
                     "claude-desktop",
@@ -1031,7 +1022,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 stdout=first_stdout,
             )
             second_stdout = io.StringIO()
-            second = cli.agentflow_cli(
+            second = cli.tokenclaw_cli(
                 [
                     "activate",
                     "claude-desktop",
@@ -1055,13 +1046,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_claude_desktop_dry_run_does_not_write_files(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             desktop_file = Path(tmp) / "claude-desktop.desktop"
             original = "[Desktop Entry]\nName=Claude\nExec=/opt/claude %U\n"
             desktop_file.write_text(original, encoding="utf-8")
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(
+            code = cli.tokenclaw_cli(
                 [
                     "activate",
                     "claude-desktop",
@@ -1077,7 +1068,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(desktop_file.read_text(encoding="utf-8"), original)
             self.assertFalse((config_dir / "activation.json").exists())
-            self.assertFalse(desktop_file.with_name(desktop_file.name + ".agentflow.bak").exists())
+            self.assertFalse(desktop_file.with_name(desktop_file.name + ".tokenclaw.bak").exists())
             self.assertIn("Dry run: would configure TokenClaw target: claude-desktop", stdout.getvalue())
             self.assertIn("Desktop file changed: true", stdout.getvalue())
 
@@ -1085,12 +1076,12 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stderr = io.StringIO()
 
-            code = cli.agentflow_cli(
+            code = cli.tokenclaw_cli(
                 [
                     "activate",
                     "claude-desktop",
                     "--config-dir",
-                    str(Path(tmp) / "agentflow"),
+                    str(Path(tmp) / "tokenclaw"),
                     "--desktop-file",
                     str(Path(tmp) / "missing.desktop"),
                 ],
@@ -1101,12 +1092,12 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("Claude Desktop .desktop file not found", stderr.getvalue())
 
-    def test_agentflow_stats_claude_desktop_shows_configured_path(self):
+    def test_tokenclaw_stats_claude_desktop_shows_configured_path(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             desktop_file = Path(tmp) / "claude-desktop.desktop"
             desktop_file.write_text("[Desktop Entry]\nExec=/opt/claude %U\n", encoding="utf-8")
-            cli.agentflow_cli(
+            cli.tokenclaw_cli(
                 [
                     "activate",
                     "claude-desktop",
@@ -1119,19 +1110,19 @@ class AgentflowActivationCliTests(unittest.TestCase):
             )
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["stats", "claude-desktop", "--config-dir", str(config_dir)], stdout=stdout)
+            code = cli.tokenclaw_cli(["stats", "claude-desktop", "--config-dir", str(config_dir)], stdout=stdout)
 
             self.assertEqual(code, 0)
             output = stdout.getvalue()
             self.assertIn("claude-desktop: configured", output)
             self.assertIn(f"desktop file: {desktop_file}", output)
 
-    def test_agentflow_doctor_claude_desktop_reports_healthy_stale_and_not_routed(self):
+    def test_tokenclaw_doctor_claude_desktop_reports_healthy_stale_and_not_routed(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             desktop_file = Path(tmp) / "claude-desktop.desktop"
             desktop_file.write_text("[Desktop Entry]\nExec=/opt/claude %U\n", encoding="utf-8")
-            cli.agentflow_cli(
+            cli.tokenclaw_cli(
                 [
                     "activate",
                     "claude-desktop",
@@ -1144,13 +1135,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
             )
 
             healthy_stdout = io.StringIO()
-            healthy_code = cli.agentflow_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=healthy_stdout)
+            healthy_code = cli.tokenclaw_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=healthy_stdout)
             desktop_file.write_text("[Desktop Entry]\nExec=env ANTHROPIC_BASE_URL=http://127.0.0.1:4999 /opt/claude %U\n", encoding="utf-8")
             stale_stdout = io.StringIO()
-            stale_code = cli.agentflow_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=stale_stdout)
+            stale_code = cli.tokenclaw_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=stale_stdout)
             desktop_file.write_text("[Desktop Entry]\nExec=/opt/claude %U\n", encoding="utf-8")
             missing_stdout = io.StringIO()
-            missing_code = cli.agentflow_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=missing_stdout)
+            missing_code = cli.tokenclaw_cli(["doctor", "claude-desktop", "--config-dir", str(config_dir), "--json"], stdout=missing_stdout)
 
             self.assertEqual(healthy_code, 0)
             healthy = json.loads(healthy_stdout.getvalue())["targets"]["claude-desktop"]
@@ -1169,7 +1160,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["activate", "openai", "--config-dir", tmp, "--dry-run"], stdout=stdout)
+            code = cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp, "--dry-run"], stdout=stdout)
 
             self.assertEqual(code, 0)
             self.assertFalse((Path(tmp) / "activation.json").exists())
@@ -1179,7 +1170,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["--config-dir", tmp, "activate", "openai"], stdout=stdout)
+            code = cli.tokenclaw_cli(["--config-dir", tmp, "activate", "openai"], stdout=stdout)
 
             self.assertEqual(code, 0)
             self.assertTrue((Path(tmp) / "activation.json").exists())
@@ -1193,11 +1184,11 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 {
                     "OPENAI_API_KEY": "sk-openai-secret",
                     "ANTHROPIC_API_KEY": "sk-ant-secret",
-                    "AGENTFLOW_OPENAI_API_KEY": "sk-proxy-secret",
+                    "TOKENCLAW_OPENAI_API_KEY": "sk-proxy-secret",
                 },
                 clear=False,
             ):
-                code = cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=stdout)
+                code = cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=stdout)
 
             self.assertEqual(code, 0)
             raw_config = (Path(tmp) / "activation.json").read_text(encoding="utf-8")
@@ -1206,10 +1197,10 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 self.assertNotIn(secret, raw_config)
                 self.assertNotIn(secret, output)
 
-    def test_agentflow_run_translates_openai_profile_to_proxy_flags(self):
+    def test_tokenclaw_run_translates_openai_profile_to_proxy_flags(self):
         upstream = "https://azure.example/openai"
         with TemporaryDirectory() as tmp:
-            cli.agentflow_cli(
+            cli.tokenclaw_cli(
                 [
                     "activate",
                     "openai",
@@ -1224,7 +1215,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             )
 
             with patch("tokenclaw.server.main") as server_main:
-                code = cli.agentflow_cli(["run", "openai", "--config-dir", tmp], stdout=io.StringIO())
+                code = cli.tokenclaw_cli(["run", "openai", "--config-dir", tmp], stdout=io.StringIO())
 
             self.assertEqual(code, 0)
             server_main.assert_called_once_with([
@@ -1240,10 +1231,10 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 "proxy",
             ])
 
-    def test_agentflow_doctor_reports_redacted_upstream_mismatch(self):
+    def test_tokenclaw_doctor_reports_redacted_upstream_mismatch(self):
         upstream = "https://user:pass@example-resource.openai.azure.com/openai/deployments/a?api-key=secret&api-version=2024-10-21"
         with TemporaryDirectory() as tmp:
-            cli.agentflow_cli(
+            cli.tokenclaw_cli(
                 ["activate", "openai", "--config-dir", tmp, "--openai-base-url", upstream],
                 stdout=io.StringIO(),
             )
@@ -1259,7 +1250,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                         "openai_auth_mode": "client",
                     },
                 )
-                code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp], stdout=stdout)
+                code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", tmp], stdout=stdout)
 
             self.assertEqual(code, 1)
             output = stdout.getvalue()
@@ -1269,7 +1260,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertNotIn("user:pass", output)
             self.assertNotIn("api-key=secret", output)
 
-    def test_agentflow_doctor_json_covers_provider_health_statuses(self):
+    def test_tokenclaw_doctor_json_covers_provider_health_statuses(self):
         cases = [
             (
                 "healthy",
@@ -1323,11 +1314,11 @@ class AgentflowActivationCliTests(unittest.TestCase):
         ]
         for name, response_or_exc, expected_code, expected_status, expected_reasons in cases:
             with self.subTest(name=name), TemporaryDirectory() as tmp:
-                cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+                cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
                 stdout = io.StringIO()
 
                 with patch("tokenclaw.cli.httpx.get", side_effect=[response_or_exc]):
-                    code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
+                    code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
 
                 self.assertEqual(code, expected_code)
                 result = json.loads(stdout.getvalue())
@@ -1340,9 +1331,9 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 for reason in expected_reasons:
                     self.assertIn(reason, target["reasons"])
 
-    def test_agentflow_doctor_provider_mismatch_on_openai_port(self):
+    def test_tokenclaw_doctor_provider_mismatch_on_openai_port(self):
         with TemporaryDirectory() as tmp:
-            cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
             stdout = io.StringIO()
 
             with patch("tokenclaw.cli.httpx.get") as http_get:
@@ -1350,28 +1341,28 @@ class AgentflowActivationCliTests(unittest.TestCase):
                     200,
                     json={"ok": True, "provider": "anthropic", "upstream": "https://api.openai.com"},
                 )
-                code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp], stdout=stdout)
+                code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", tmp], stdout=stdout)
 
         self.assertEqual(code, 1)
         self.assertIn("openai: provider mismatch", stdout.getvalue())
         self.assertIn("provider-mismatch", stdout.getvalue())
 
-    def test_agentflow_doctor_codex_reports_not_routed_when_config_missing_or_stale(self):
+    def test_tokenclaw_doctor_codex_reports_not_routed_when_config_missing_or_stale(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             codex_config = Path(tmp) / "config.toml"
-            cli.agentflow_cli(
+            cli.tokenclaw_cli(
                 ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
                 stdout=io.StringIO(),
             )
             codex_config.unlink()
             missing_stdout = io.StringIO()
 
-            missing_code = cli.agentflow_cli(["doctor", "codex", "--config-dir", str(config_dir), "--json"], stdout=missing_stdout)
+            missing_code = cli.tokenclaw_cli(["doctor", "codex", "--config-dir", str(config_dir), "--json"], stdout=missing_stdout)
 
             codex_config.write_text('openai_base_url = "https://api.openai.com/v1"\n', encoding="utf-8")
             stale_stdout = io.StringIO()
-            stale_code = cli.agentflow_cli(["doctor", "codex", "--config-dir", str(config_dir), "--json"], stdout=stale_stdout)
+            stale_code = cli.tokenclaw_cli(["doctor", "codex", "--config-dir", str(config_dir), "--json"], stdout=stale_stdout)
 
         self.assertEqual(missing_code, 1)
         missing = json.loads(missing_stdout.getvalue())["targets"]["codex"]
@@ -1383,30 +1374,30 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertEqual(stale["codex_openai_base_url"], "https://api.openai.com/v1")
         self.assertIn("codex-openai-base-url-mismatch", stale["reasons"])
 
-    def test_agentflow_doctor_codex_reports_healthy_when_toml_points_to_agentflow(self):
+    def test_tokenclaw_doctor_codex_reports_healthy_when_toml_points_to_tokenclaw(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             codex_config = Path(tmp) / "config.toml"
-            cli.agentflow_cli(
+            cli.tokenclaw_cli(
                 ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
                 stdout=io.StringIO(),
             )
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(["doctor", "codex", "--config-dir", str(config_dir), "--json"], stdout=stdout)
+            code = cli.tokenclaw_cli(["doctor", "codex", "--config-dir", str(config_dir), "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
         target = json.loads(stdout.getvalue())["targets"]["codex"]
         self.assertEqual(target["status"], "healthy")
         self.assertEqual(target["codex_openai_base_url"], "http://127.0.0.1:4003/v1")
 
-    def test_agentflow_doctor_claude_vscode_reports_environment_uncertainty(self):
+    def test_tokenclaw_doctor_claude_vscode_reports_environment_uncertainty(self):
         with TemporaryDirectory() as tmp:
-            cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
             stdout = io.StringIO()
 
             with patch.dict(os.environ, {}, clear=True):
-                code = cli.agentflow_cli(["doctor", "claude-vscode", "--config-dir", tmp, "--json"], stdout=stdout)
+                code = cli.tokenclaw_cli(["doctor", "claude-vscode", "--config-dir", tmp, "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
         target = json.loads(stdout.getvalue())["targets"]["claude-vscode"]
@@ -1415,29 +1406,29 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn("shell-env-missing", target["reasons"])
         self.assertIn("vscode-runtime-env-uncertain", target["reasons"])
 
-    def test_agentflow_doctor_claude_vscode_detects_shell_base_url_mismatch(self):
+    def test_tokenclaw_doctor_claude_vscode_detects_shell_base_url_mismatch(self):
         with TemporaryDirectory() as tmp:
-            cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
             stdout = io.StringIO()
 
             with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}, clear=True):
-                code = cli.agentflow_cli(["doctor", "claude-vscode", "--config-dir", tmp, "--json"], stdout=stdout)
+                code = cli.tokenclaw_cli(["doctor", "claude-vscode", "--config-dir", tmp, "--json"], stdout=stdout)
 
         self.assertEqual(code, 1)
         target = json.loads(stdout.getvalue())["targets"]["claude-vscode"]
         self.assertEqual(target["status"], "not routed via tokenclaw")
         self.assertIn("current-shell-anthropic-base-url-mismatch", target["reasons"])
 
-    def test_agentflow_run_translates_claude_profile_to_proxy_flags(self):
+    def test_tokenclaw_run_translates_claude_profile_to_proxy_flags(self):
         upstream = "https://anthropic.example"
         with TemporaryDirectory() as tmp:
-            cli.agentflow_cli(
+            cli.tokenclaw_cli(
                 ["activate", "claude", "--config-dir", tmp, "--claude-base-url", upstream],
                 stdout=io.StringIO(),
             )
 
             with patch("tokenclaw.server.main") as server_main:
-                code = cli.agentflow_cli(["run", "claude", "--config-dir", tmp], stdout=io.StringIO())
+                code = cli.tokenclaw_cli(["run", "claude", "--config-dir", tmp], stdout=io.StringIO())
 
             self.assertEqual(code, 0)
             server_main.assert_called_once_with([
@@ -1456,14 +1447,14 @@ class AgentflowActivationCliTests(unittest.TestCase):
             codex_config = Path(tmp) / "home" / ".codex" / "config.toml"
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(
-                ["activate", "codex", "--config-dir", str(Path(tmp) / "agentflow"), "--codex-config", str(codex_config)],
+            code = cli.tokenclaw_cli(
+                ["activate", "codex", "--config-dir", str(Path(tmp) / "tokenclaw"), "--codex-config", str(codex_config)],
                 stdout=stdout,
             )
 
             self.assertEqual(code, 0)
             self.assertEqual(codex_config.read_text(encoding="utf-8"), 'openai_base_url = "http://127.0.0.1:4003/v1"\n')
-            config = json.loads((Path(tmp) / "agentflow" / "activation.json").read_text(encoding="utf-8"))
+            config = json.loads((Path(tmp) / "tokenclaw" / "activation.json").read_text(encoding="utf-8"))
             self.assertEqual(sorted(config["targets"].keys()), ["codex", "openai"])
             self.assertEqual(config["targets"]["codex"]["depends_on"], "openai")
             self.assertEqual(config["targets"]["codex"]["codex_config_path"], str(codex_config))
@@ -1473,15 +1464,15 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_codex_is_idempotent(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             codex_config = Path(tmp) / "config.toml"
 
-            first = cli.agentflow_cli(
+            first = cli.tokenclaw_cli(
                 ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
                 stdout=io.StringIO(),
             )
             second_stdout = io.StringIO()
-            second = cli.agentflow_cli(
+            second = cli.tokenclaw_cli(
                 ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
                 stdout=second_stdout,
             )
@@ -1489,7 +1480,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(first, 0)
             self.assertEqual(second, 0)
             self.assertEqual(codex_config.read_text(encoding="utf-8"), 'openai_base_url = "http://127.0.0.1:4003/v1"\n')
-            self.assertFalse(list(codex_config.parent.glob("config.toml.agentflow.bak*")))
+            self.assertFalse(list(codex_config.parent.glob("config.toml.tokenclaw.bak*")))
             self.assertIn("Codex config changed: false", second_stdout.getvalue())
 
     def test_activate_codex_preserves_unrelated_toml_and_comments(self):
@@ -1500,8 +1491,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            code = cli.agentflow_cli(
-                ["activate", "codex", "--config-dir", str(Path(tmp) / "agentflow"), "--codex-config", str(codex_config)],
+            code = cli.tokenclaw_cli(
+                ["activate", "codex", "--config-dir", str(Path(tmp) / "tokenclaw"), "--codex-config", str(codex_config)],
                 stdout=io.StringIO(),
             )
 
@@ -1513,18 +1504,18 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_codex_replaces_stale_url_when_openai_local_url_changes(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             codex_config = Path(tmp) / "config.toml"
-            cli.agentflow_cli(
+            cli.tokenclaw_cli(
                 ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
                 stdout=io.StringIO(),
             )
-            cli.agentflow_cli(
+            cli.tokenclaw_cli(
                 ["activate", "openai", "--config-dir", str(config_dir), "--local-base-url", "http://127.0.0.1:4999/v1"],
                 stdout=io.StringIO(),
             )
 
-            code = cli.agentflow_cli(
+            code = cli.tokenclaw_cli(
                 ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
                 stdout=io.StringIO(),
             )
@@ -1536,11 +1527,11 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_activate_codex_dry_run_does_not_write_files(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / "agentflow"
+            config_dir = Path(tmp) / "tokenclaw"
             codex_config = Path(tmp) / "config.toml"
             stdout = io.StringIO()
 
-            code = cli.agentflow_cli(
+            code = cli.tokenclaw_cli(
                 [
                     "activate",
                     "codex",
@@ -1565,13 +1556,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
             original = 'model = "gpt-5-codex"\n'
             codex_config.write_text(original, encoding="utf-8")
 
-            code = cli.agentflow_cli(
-                ["activate", "codex", "--config-dir", str(Path(tmp) / "agentflow"), "--codex-config", str(codex_config)],
+            code = cli.tokenclaw_cli(
+                ["activate", "codex", "--config-dir", str(Path(tmp) / "tokenclaw"), "--codex-config", str(codex_config)],
                 stdout=io.StringIO(),
             )
 
             self.assertEqual(code, 0)
-            backup = codex_config.with_name("config.toml.agentflow.bak")
+            backup = codex_config.with_name("config.toml.tokenclaw.bak")
             self.assertTrue(backup.exists())
             self.assertEqual(backup.read_text(encoding="utf-8"), original)
             self.assertIn("openai_base_url", codex_config.read_text(encoding="utf-8"))
@@ -1584,17 +1575,17 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 os.environ,
                 {
                     "OPENAI_API_KEY": "sk-openai-secret",
-                    "AGENTFLOW_OPENAI_API_KEY": "sk-proxy-secret",
+                    "TOKENCLAW_OPENAI_API_KEY": "sk-proxy-secret",
                 },
                 clear=False,
             ):
-                code = cli.agentflow_cli(
-                    ["activate", "codex", "--config-dir", str(Path(tmp) / "agentflow"), "--codex-config", str(codex_config)],
+                code = cli.tokenclaw_cli(
+                    ["activate", "codex", "--config-dir", str(Path(tmp) / "tokenclaw"), "--codex-config", str(codex_config)],
                     stdout=stdout,
                 )
 
             self.assertEqual(code, 0)
-            activation_raw = (Path(tmp) / "agentflow" / "activation.json").read_text(encoding="utf-8")
+            activation_raw = (Path(tmp) / "tokenclaw" / "activation.json").read_text(encoding="utf-8")
             codex_raw = codex_config.read_text(encoding="utf-8")
             output = stdout.getvalue()
             for secret in ("sk-openai-secret", "sk-proxy-secret"):
@@ -1615,8 +1606,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
             try:
                 os.chdir(workspace)
                 with patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                    code = cli.agentflow_cli(
-                        ["activate", "codex", "--config-dir", str(Path(tmp) / "agentflow")],
+                    code = cli.tokenclaw_cli(
+                        ["activate", "codex", "--config-dir", str(Path(tmp) / "tokenclaw")],
                         stdout=io.StringIO(),
                     )
             finally:
@@ -1640,12 +1631,12 @@ class AgentflowActivationCliTests(unittest.TestCase):
             previous_cwd = Path.cwd()
             try:
                 os.chdir(workspace)
-                code = cli.agentflow_cli(
+                code = cli.tokenclaw_cli(
                     [
                         "activate",
                         "codex",
                         "--config-dir",
-                        str(Path(tmp) / "agentflow"),
+                        str(Path(tmp) / "tokenclaw"),
                         "--codex-config",
                         str(project_config),
                     ],
@@ -1666,14 +1657,14 @@ class PolicyReloadCliTests(unittest.TestCase):
         ManagedFeedbackFlushClient.status_code = 200
         ManagedFeedbackFlushClient.text = '{"ok":true}'
         self.tmp = TemporaryDirectory()
-        self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+        self.old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
         self._old_provenance_env = {
             key: os.environ.get(key)
             for key in (
-                "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET",
-                "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS",
-                "AGENTFLOW_MANAGED_POLICY_HMAC_SECRET",
+                "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET",
+                "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRETS",
+                "TOKENCLAW_MANAGED_POLICY_HMAC_SECRET",
             )
         }
         for key in self._old_provenance_env:
@@ -1681,9 +1672,9 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def tearDown(self):
         if self.old_event_log is None:
-            os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
         else:
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = self.old_event_log
         for key, value in self._old_provenance_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -1691,11 +1682,11 @@ class PolicyReloadCliTests(unittest.TestCase):
                 os.environ[key] = value
         self.tmp.cleanup()
 
-    def test_default_policy_reload_url_uses_agentflow_port(self):
-        with patch.dict(os.environ, {"AGENTFLOW_PORT": "4001"}, clear=False):
+    def test_default_policy_reload_url_uses_tokenclaw_port(self):
+        with patch.dict(os.environ, {"TOKENCLAW_PORT": "4001"}, clear=False):
             self.assertEqual(
                 cli._default_policy_reload_url(),
-                "http://127.0.0.1:4001/agentflow/admin/reload-policies",
+                "http://127.0.0.1:4001/tokenclaw/admin/reload-policies",
             )
 
     def test_cli_module_re_exports_policy_bundle_commands(self):
@@ -1713,36 +1704,36 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertIs(cli.policy_draft_apply_cli, policy_workbench_cli.policy_draft_apply_cli)
 
     def test_loopback_url_validation(self):
-        self.assertTrue(cli._is_loopback_url("http://127.0.0.1:4000/agentflow/admin/reload-policies"))
-        self.assertTrue(cli._is_loopback_url("http://localhost:4000/agentflow/admin/reload-policies"))
-        self.assertTrue(cli._is_loopback_url("http://[::1]:4000/agentflow/admin/reload-policies"))
-        self.assertFalse(cli._is_loopback_url("http://192.168.1.20:4000/agentflow/admin/reload-policies"))
+        self.assertTrue(cli._is_loopback_url("http://127.0.0.1:4000/tokenclaw/admin/reload-policies"))
+        self.assertTrue(cli._is_loopback_url("http://localhost:4000/tokenclaw/admin/reload-policies"))
+        self.assertTrue(cli._is_loopback_url("http://[::1]:4000/tokenclaw/admin/reload-policies"))
+        self.assertFalse(cli._is_loopback_url("http://192.168.1.20:4000/tokenclaw/admin/reload-policies"))
         self.assertFalse(cli._is_loopback_url("file:///tmp/reload"))
 
     def test_policy_reload_cli_prints_reload_json_on_success(self):
         payload = {
             "ok": True,
-            "schema": "agentflow.policy_reload.v1",
-            "policies": {"schema": "agentflow.policy_state.v1"},
+            "schema": "tokenclaw.policy_reload.v1",
+            "policies": {"schema": "tokenclaw.policy_state.v1"},
         }
         stdout = io.StringIO()
         stderr = io.StringIO()
 
         with patch("tokenclaw.cli_commands.policy_bundle.httpx.post") as post:
             post.return_value = httpx.Response(200, json=payload)
-            code = cli.policy_reload_cli(["--url", "http://127.0.0.1:4001/agentflow/admin/reload-policies"], stdout=stdout, stderr=stderr)
+            code = cli.policy_reload_cli(["--url", "http://127.0.0.1:4001/tokenclaw/admin/reload-policies"], stdout=stdout, stderr=stderr)
 
         self.assertEqual(code, 0)
         self.assertEqual(stderr.getvalue(), "")
         self.assertEqual(json.loads(stdout.getvalue()), payload)
-        post.assert_called_once_with("http://127.0.0.1:4001/agentflow/admin/reload-policies", timeout=10.0)
+        post.assert_called_once_with("http://127.0.0.1:4001/tokenclaw/admin/reload-policies", timeout=10.0)
 
     def test_policy_reload_cli_rejects_non_loopback_url(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
         with patch("tokenclaw.cli_commands.policy_bundle.httpx.post") as post:
-            code = cli.policy_reload_cli(["--url", "http://192.168.1.20:4000/agentflow/admin/reload-policies"], stdout=stdout, stderr=stderr)
+            code = cli.policy_reload_cli(["--url", "http://192.168.1.20:4000/tokenclaw/admin/reload-policies"], stdout=stdout, stderr=stderr)
 
         self.assertEqual(code, 2)
         self.assertEqual(stdout.getvalue(), "")
@@ -1754,7 +1745,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stderr = io.StringIO()
 
         code = cli.policy_draft_apply_cli(
-            ["draft-one", "--reload-url", "http://192.168.1.20:4000/agentflow/admin/reload-policies"],
+            ["draft-one", "--reload-url", "http://192.168.1.20:4000/tokenclaw/admin/reload-policies"],
             stdout=stdout,
             stderr=stderr,
         )
@@ -1762,7 +1753,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(stdout.getvalue(), "")
         payload = json.loads(stderr.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.policy_draft_apply.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_draft_apply.v1")
         self.assertEqual(payload["error"]["type"], "unsafe_url")
         self.assertFalse(payload["privacy"]["provider_calls_made"])
         self.assertFalse(payload["privacy"]["managed_server_calls_made"])
@@ -1776,14 +1767,14 @@ class PolicyReloadCliTests(unittest.TestCase):
                 "--apply-id",
                 "apply-one",
                 "--reload-url",
-                "http://192.168.1.20:4000/agentflow/admin/reload-policies",
+                "http://192.168.1.20:4000/tokenclaw/admin/reload-policies",
             ],
             stdout=stdout,
         )
 
         self.assertEqual(code, 2)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.policy_draft_rollback.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_draft_rollback.v1")
         self.assertEqual(payload["error"]["type"], "unsafe_url")
         self.assertFalse(payload["privacy"]["provider_calls_made"])
         self.assertFalse(payload["privacy"]["managed_server_calls_made"])
@@ -1795,7 +1786,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         with patch("tokenclaw.cli_commands.policy_bundle.httpx.post") as post:
             post.return_value = httpx.Response(403, json={"ok": False, "error": {"type": "forbidden"}})
-            code = cli.policy_reload_cli(["--url", "http://127.0.0.1:4000/agentflow/admin/reload-policies"], stdout=stdout, stderr=stderr)
+            code = cli.policy_reload_cli(["--url", "http://127.0.0.1:4000/tokenclaw/admin/reload-policies"], stdout=stdout, stderr=stderr)
 
         self.assertEqual(code, 1)
         self.assertEqual(stdout.getvalue(), "")
@@ -1809,8 +1800,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "AGENTFLOW_CODEX_APP_OPTIMIZE": "1",
-                "AGENTFLOW_CODEX_APP_CACHE": "0",
+                "TOKENCLAW_CODEX_APP_OPTIMIZE": "1",
+                "TOKENCLAW_CODEX_APP_CACHE": "0",
             },
             clear=False,
         ):
@@ -1818,10 +1809,10 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.policy_bundle.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_bundle.v1")
         self.assertEqual(payload["generator"]["mode"], "local-offline")
         self.assertFalse(payload["managed_optimizer"]["enabled"])
-        self.assertEqual(payload["policies"]["schema"], "agentflow.policy_state.v1")
+        self.assertEqual(payload["policies"]["schema"], "tokenclaw.policy_state.v1")
         self.assertIn("routing", payload["policies"])
         self.assertIn("codex_app", payload["policies"])
         self.assertFalse(payload["policies"]["codex_app"]["review_only"])
@@ -1834,7 +1825,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store, stable_json, utc_now
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 store.log_codex_app_event(
@@ -1859,7 +1850,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                         "applied": False,
                         "policy_source": "local-default",
                         "managed_pattern_features": {
-                            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                            "schema": "tokenclaw.managed_pattern_feature_diagnostics.v1",
                             "present": True,
                             "pattern_hash_count": 3,
                             "hash_basis": "normalized-structure-and-size-buckets",
@@ -1930,7 +1921,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.codex_app_effectiveness.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.codex_app_effectiveness.v1")
         self.assertEqual(payload["summary"]["turn_start_rows"], 1)
         self.assertEqual(payload["summary"]["model_field_absent"], 1)
         self.assertEqual(payload["summary"]["codex_repeated_scaffolding_saved_chars"], 48)
@@ -1946,10 +1937,10 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store, stable_json, utc_now
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             rule_meta = {
-                "schema": "agentflow.codex_app_rule_execution.v1",
+                "schema": "tokenclaw.codex_app_rule_execution.v1",
                 "rule_id": "cli-codex-rule",
                 "candidate_id": "cli-candidate",
                 "policy_source": "managed-recommended",
@@ -2013,7 +2004,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.codex_app_canary_impact_by_rule.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.codex_app_canary_impact_by_rule.v1")
         self.assertEqual(payload["summary"]["applied_count"], 1)
         self.assertEqual(payload["rules"][0]["rule_id"], "cli-codex-rule")
         encoded = json.dumps(payload, sort_keys=True)
@@ -2024,7 +2015,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store, stable_json, utc_now
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 for idx, similarity in enumerate((0.95, 0.75), start=1):
@@ -2069,7 +2060,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.routing_experiment_report.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.routing_experiment_report.v1")
         self.assertEqual(payload["summary"]["sample_count"], 2)
         self.assertEqual(payload["summary"]["comparison_count"], 2)
         self.assertAlmostEqual(payload["summary"]["pass_rate"], 0.5, places=6)
@@ -2083,7 +2074,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store, stable_json
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 store.log_routing_experiment(
@@ -2208,7 +2199,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
         yield_report = payload["post_fix_shadow_yield"]
-        self.assertEqual(yield_report["schema"], "agentflow.post_fix_shadow_yield.v1")
+        self.assertEqual(yield_report["schema"], "tokenclaw.post_fix_shadow_yield.v1")
         self.assertEqual(yield_report["summary"]["sample_count"], 2)
         self.assertEqual(yield_report["summary"]["compared_count"], 1)
         self.assertEqual(yield_report["summary"]["eligible_unsampled_count"], 1)
@@ -2245,7 +2236,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store, stable_json
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 for index, cost in enumerate((0.01, 0.02)):
@@ -2288,7 +2279,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                             "policy_source": "local-default",
                             "session_memory_hints": {
                                 "dry_run_replay_proposal": {
-                                    "schema": "agentflow.session_memory_cache_replay_proposal.v1",
+                                    "schema": "tokenclaw.session_memory_cache_replay_proposal.v1",
                                     "status": "session-plateau-dry-run-eligible",
                                     "reason": "session-plateau-dry-run-eligible",
                                     "proposal_id": "session-memory-cache-replay:cli123",
@@ -2331,7 +2322,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.cache_replayability.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.cache_replayability.v1")
         self.assertEqual(payload["summary"]["repeated_shape_groups"], 1)
         self.assertAlmostEqual(payload["summary"]["projected_repeated_call_cost_usd"], 0.015)
         self.assertEqual(payload["groups"][0]["replay_candidate_class"], "streaming-non-tool-exact-candidate")
@@ -2340,7 +2331,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["session_memory_replay_proposals"][0]["status"], "session-plateau-dry-run-eligible")
         self.assertEqual(payload["session_memory_replay_proposals"][0]["rule_id"], "cli-session-memory-cache")
         evidence = payload["cache_replayability_evidence"]
-        self.assertEqual(evidence["schema"], "agentflow.cache_replayability_evidence.v1")
+        self.assertEqual(evidence["schema"], "tokenclaw.cache_replayability_evidence.v1")
         self.assertEqual(evidence["status"], "no-safe-replayable-cohorts")
         self.assertEqual(evidence["summary"]["total_rows_considered"], 2)
         self.assertEqual(evidence["summary"]["repeated_shape_groups"], 1)
@@ -2367,7 +2358,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         def audit(reason=None, safe=True):
             return {
-                "schema": "agentflow.cache_file_dependency_audit.v1",
+                "schema": "tokenclaw.cache_file_dependency_audit.v1",
                 "file_watch_enabled": True,
                 "snapshot_root_policy": "stored-local-paths",
                 "root_path_included": False,
@@ -2390,7 +2381,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         def proposal(fingerprint, *, status="session-plateau-dry-run-eligible", blockers=None):
             return {
-                "schema": "agentflow.session_memory_cache_replay_proposal.v1",
+                "schema": "tokenclaw.session_memory_cache_replay_proposal.v1",
                 "status": status,
                 "reason": status,
                 "proposal_fingerprint": "sha256:" + fingerprint,
@@ -2471,7 +2462,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             )
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 log_plateau(
@@ -2526,7 +2517,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.cache_replay_plateau_cohort_ranking.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.cache_replay_plateau_cohort_ranking.v1")
         self.assertEqual(payload["summary"]["activation_ready_count"], 1)
         self.assertEqual(payload["summary"]["needs_more_evidence_count"], 1)
         self.assertEqual(payload["summary"]["blocked_count"], 1)
@@ -2561,7 +2552,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            db_path = str(tmp_path / "agentflow.sqlite3")
+            db_path = str(tmp_path / "tokenclaw.sqlite3")
             dep_path = tmp_path / "watched.txt"
             dep_path.write_text("old", encoding="utf-8")
             stat = dep_path.stat()
@@ -2686,7 +2677,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.cache_smoke_diagnostic.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.cache_smoke_diagnostic.v1")
         self.assertEqual(payload["summary"]["cache_rows"], 3)
         self.assertEqual(payload["summary"]["eligible_lookup_count"], 3)
         self.assertEqual(payload["summary"]["exact_miss_count"], 2)
@@ -2770,7 +2761,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         payload = stats._cache_zero_hit_blocker_ladder(rows, scan_limit=20)
 
-        self.assertEqual(payload["schema"], "agentflow.cache_zero_hit_blocker_ladder.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.cache_zero_hit_blocker_ladder.v1")
         self.assertTrue(payload["summary"]["zero_hit_window"])
         self.assertGreaterEqual(payload["summary"]["action_candidate_count"], 3)
         self.assertEqual(payload["summary"]["top_action_candidate_family"], "stage-replay-policy")
@@ -2814,7 +2805,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         pattern_hash = "sha256:" + "a" * 64
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             policy_path = Path(tmp) / "proposed-cache-policy.json"
             policy_path.write_text(
                 json.dumps({
@@ -2903,7 +2894,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(cache_rows, 1)
         payload = json.loads(stdout.getvalue())
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["schema"], "agentflow.cache_replay_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.cache_replay_dry_run.v1")
         self.assertEqual(payload["summary"]["cache_rows_before"], 1)
         self.assertEqual(payload["summary"]["cache_rows_after"], 1)
         self.assertFalse(payload["summary"]["cache_table_mutated"])
@@ -2923,7 +2914,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         pattern_hash = "sha256:" + "9" * 64
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 store.log_call(
@@ -2980,7 +2971,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.managed_pattern_canary_cohort_rollups.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.managed_pattern_canary_cohort_rollups.v1")
         self.assertEqual(payload["summary"]["cohort_bucket_count"], 1)
         crunch = next(row for row in payload["cohorts"] if row["candidate_id"] == "cli-crunch-candidate")
         self.assertEqual(crunch["canary_cohort"], "canary_applied")
@@ -2994,7 +2985,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         pattern_hash = "sha256:" + "7" * 64
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 store.log_call(
@@ -3018,7 +3009,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                         "category": "tool-result",
                         "workflow_phase": "tool-result",
                         "managed_pattern_features": {
-                            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                            "schema": "tokenclaw.managed_pattern_feature_diagnostics.v1",
                             "present": True,
                             "pattern_hash": pattern_hash,
                             "normalized_pattern_hash": pattern_hash,
@@ -3069,7 +3060,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         pattern_hash = "sha256:" + "8" * 64
         cache_pattern_hash = "sha256:" + "6" * 64
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 store.log_call(
@@ -3234,7 +3225,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.optimization_eval_plan.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.optimization_eval_plan.v1")
         self.assertTrue(payload["privacy"]["metadata_only"])
         self.assertGreaterEqual(payload["summary"]["candidate_count"], 4)
         family_counts = {row["value"]: row["count"] for row in payload["summary"]["family_counts"]}
@@ -3263,7 +3254,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 {
                     "candidate_id": "shadow-pass",
@@ -3322,7 +3313,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             Store(db_path).conn.close()
             plan_path = Path(tmp) / "plan.json"
             plan_path.write_text(json.dumps(plan), encoding="utf-8")
@@ -3343,7 +3334,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.optimization_shadow_eval.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.optimization_shadow_eval.v1")
         self.assertEqual(payload["mode"], "plan-only")
         self.assertFalse(payload["provider_calls_made"])
         self.assertFalse(payload["managed_server_calls_made"])
@@ -3372,7 +3363,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         async def fake_plan(_store, *, limit=500, min_samples=1):
             return {
-                "schema": "agentflow.optimization_eval_plan.v1",
+                "schema": "tokenclaw.optimization_eval_plan.v1",
                 "generated_at": "2026-06-10T02:00:00+00:00",
                 "plans": [
                     {
@@ -3396,7 +3387,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             Store(db_path).conn.close()
             stdout = io.StringIO()
 
@@ -3414,7 +3405,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.optimization_eval_queue_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.optimization_eval_queue_run.v1")
         self.assertEqual(payload["summary"]["selected_candidate_count"], 1)
         self.assertEqual(payload["results"][0]["candidate_id"], "queue-cli-pass")
         self.assertFalse(payload["provider_calls_made"])
@@ -3426,7 +3417,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     "candidate_id": "queue-promotion-high",
@@ -3456,7 +3447,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             Store(db_path).conn.close()
             report_path = Path(tmp) / "promotion-report.json"
             report_path.write_text(json.dumps(report), encoding="utf-8")
@@ -3490,7 +3481,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(code_apply, 0)
-        self.assertEqual(dry_payload["schema"], "agentflow.optimization_promotion_eval_backfill.v1")
+        self.assertEqual(dry_payload["schema"], "tokenclaw.optimization_promotion_eval_backfill.v1")
         self.assertTrue(dry_payload["dry_run"])
         self.assertFalse(dry_payload["wrote_eval_queue_rows"])
         self.assertEqual(dry_count, 0)
@@ -3547,7 +3538,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         if extra_evidence:
             evidence.update(extra_evidence)
         return {
-            "schema": "agentflow.optimization_eval_plan_row.v1",
+            "schema": "tokenclaw.optimization_eval_plan_row.v1",
             "candidate_id": candidate_id,
             "optimization_family": optimization_family,
             "action_family": action_family,
@@ -3592,7 +3583,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 self._promotion_plan_row(
                     "routing-widen",
@@ -3634,7 +3625,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._log_promotion_eval_result(store, "routing-widen", "pass")
@@ -3645,7 +3636,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 evidence_path = Path(tmp) / "old-context-impact.json"
                 evidence_path.write_text(
                     json.dumps({
-                        "schema": "agentflow.old_context_summary_impact.v1",
+                        "schema": "tokenclaw.old_context_summary_impact.v1",
                         "policy": {"candidate_id": "old-context-hold"},
                         "quality_gate": {
                             "verdict": "hold",
@@ -3665,7 +3656,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.optimization_promotion_report.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.optimization_promotion_report.v1")
         self.assertTrue(payload["read_only"])
         self.assertFalse(payload["provider_calls_made"])
         self.assertFalse(payload["managed_server_calls_made"])
@@ -3708,7 +3699,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 self._promotion_plan_row(
                     "routing-eval-fail",
@@ -3722,7 +3713,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._log_promotion_eval_result(store, "routing-eval-fail", "fail")
@@ -3745,7 +3736,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def test_optimization_promotion_actions_cli_emits_rollout_bundle_from_report(self):
         report = {
-            "schema": "agentflow.optimization_promotion_report.v1",
+            "schema": "tokenclaw.optimization_promotion_report.v1",
             "candidates": [
                 {
                     "candidate_id": "routing-cli-action",
@@ -3807,7 +3798,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.optimization_promotion_rollout_actions.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.optimization_promotion_rollout_actions.v1")
         self.assertEqual(payload["summary"]["action_count"], 2)
         self.assertEqual(payload["summary"]["omitted_count"], 1)
         self.assertEqual(payload["summary"]["omission_bucket_count"], 1)
@@ -3839,7 +3830,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def test_optimization_promotion_blocker_review_cli_reads_fixture_and_scrubs_raw_fields(self):
         fixture = {
-            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "schema": "tokenclaw.promotion_blocker_next_action_recommendations.v1",
             "recommendations": [
                 {
                     "recommendation_id": "promotion-blocker-next-action:openai:routing:eval",
@@ -3899,7 +3890,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.promotion_blocker_recommendation_review.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.promotion_blocker_recommendation_review.v1")
         self.assertEqual(payload["summary"]["review_candidate_count"], 2)
         self.assertEqual(payload["summary"]["recommended_count"], 1)
         self.assertEqual(payload["summary"]["noop_count"], 1)
@@ -3932,7 +3923,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         recommendations = {
-            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "schema": "tokenclaw.promotion_blocker_next_action_recommendations.v1",
             "recommendations": [
                 {
                     "recommendation_id": "promotion-blocker-next-action:openai:routing:eval-cli",
@@ -3968,7 +3959,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             Store(db_path).conn.close()
             stdout = io.StringIO()
             code = cli.optimization_eval_queue_cli(
@@ -3986,7 +3977,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 conn.close()
 
         self.assertEqual(code, 0)
-        self.assertEqual(payload["schema"], "agentflow.promotion_recommendation_eval_queue.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.promotion_recommendation_eval_queue.v1")
         self.assertFalse(payload["dry_run"])
         self.assertEqual(payload["summary"]["written_task_count"], 1)
         self.assertEqual(stored[1], "queued")
@@ -4013,11 +4004,11 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def test_optimization_promotion_canary_apply_cli_dry_run_and_apply_routing_yaml(self):
         bundle = {
-            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_promotion_rollout_actions.v1",
             "generated_at": "2026-06-10T05:00:00+00:00",
             "actions": [
                 {
-                    "schema": "agentflow.optimization_promotion_rollout_action.v1",
+                    "schema": "tokenclaw.optimization_promotion_rollout_action.v1",
                     "action_id": "promotion-rollout-action:cli-routing",
                     "status": "planned",
                     "action_type": "widen",
@@ -4043,7 +4034,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             ],
         }
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             stdout = io.StringIO()
             code = cli.optimization_promotion_canary_apply_cli(
                 ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
@@ -4053,7 +4044,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             dry_run = json.loads(stdout.getvalue())
-            self.assertEqual(dry_run["schema"], "agentflow.optimization_promotion_canary_apply.v1")
+            self.assertEqual(dry_run["schema"], "tokenclaw.optimization_promotion_canary_apply.v1")
             self.assertTrue(dry_run["dry_run"])
             self.assertFalse(dry_run["wrote_policy_files"])
             self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
@@ -4080,11 +4071,11 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         bundle = {
-            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_promotion_rollout_actions.v1",
             "generated_at": "2026-06-10T05:00:00+00:00",
             "actions": [
                 {
-                    "schema": "agentflow.optimization_promotion_rollout_action.v1",
+                    "schema": "tokenclaw.optimization_promotion_rollout_action.v1",
                     "action_id": "promotion-rollout-action:cli-disabled-queue",
                     "status": "planned",
                     "action_type": "widen",
@@ -4111,9 +4102,9 @@ class PolicyReloadCliTests(unittest.TestCase):
             "privacy": {"metadata_only": True},
         }
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             stdout = io.StringIO()
-            with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "0"}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "0"}, clear=False):
                 code = cli.optimization_promotion_canary_apply_cli(
                     ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
                     stdin=io.StringIO(json.dumps(bundle)),
@@ -4149,7 +4140,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(lifecycle["payload_json_included"])
         self.assertFalse(status_payload["privacy"]["payload_json_included"])
         self.assertEqual(queued_payload["event_type"], "dry-run")
-        self.assertEqual(queued_payload["metadata"]["schema"], "agentflow.optimization_promotion_lifecycle_feedback.v1")
+        self.assertEqual(queued_payload["metadata"]["schema"], "tokenclaw.optimization_promotion_lifecycle_feedback.v1")
         self.assertEqual(queued_payload["metadata"]["candidate_ids"], ["routing-cli-disabled-queue"])
         self.assertEqual(queued_payload["metadata"]["action_snapshots"][0]["source_surface"], "anthropic_messages")
         self.assertEqual(queued_payload["metadata"]["action_snapshots"][0]["policy_source"], "managed-recommended")
@@ -4158,11 +4149,11 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def test_optimization_promotion_canary_apply_retries_lifecycle_feedback_without_payload_output(self):
         bundle = {
-            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_promotion_rollout_actions.v1",
             "generated_at": "2026-06-10T05:00:00+00:00",
             "actions": [
                 {
-                    "schema": "agentflow.optimization_promotion_rollout_action.v1",
+                    "schema": "tokenclaw.optimization_promotion_rollout_action.v1",
                     "action_id": "promotion-rollout-action:cli-retry",
                     "status": "planned",
                     "action_type": "widen",
@@ -4189,14 +4180,14 @@ class PolicyReloadCliTests(unittest.TestCase):
         ManagedFeedbackFlushClient.status_code = 503
         ManagedFeedbackFlushClient.text = "managed unavailable"
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             stdout = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
-                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
                 },
                 clear=False,
             ):
@@ -4232,11 +4223,11 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def test_optimization_promotion_canary_apply_rejects_raw_like_input_without_leaking_feedback(self):
         bundle = {
-            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_promotion_rollout_actions.v1",
             "generated_at": "2026-06-10T05:00:00+00:00",
             "actions": [
                 {
-                    "schema": "agentflow.optimization_promotion_rollout_action.v1",
+                    "schema": "tokenclaw.optimization_promotion_rollout_action.v1",
                     "action_id": "promotion-rollout-action:cli-raw-rejected",
                     "status": "planned",
                     "action_type": "widen",
@@ -4258,13 +4249,13 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
         ManagedFeedbackFlushClient.calls = []
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             stderr = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                 },
                 clear=False,
             ):
@@ -4290,7 +4281,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store, stable_json
 
         action = {
-            "schema": "agentflow.optimization_promotion_rollout_action.v1",
+            "schema": "tokenclaw.optimization_promotion_rollout_action.v1",
             "action_id": "promotion-rollout-action:cli-impact",
             "action_type": "widen",
             "target_candidate_id": "routing-cli-impact",
@@ -4312,14 +4303,14 @@ class PolicyReloadCliTests(unittest.TestCase):
             "privacy": {"metadata_only": True},
         }
         bundle = {
-            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_promotion_rollout_actions.v1",
             "generated_at": "2026-06-10T00:00:00+00:00",
             "ok": True,
             "actions": [action],
             "privacy": {"metadata_only": True},
         }
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 for cohort, suffix, cost_est, cost_baseline in (
@@ -4383,7 +4374,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.optimization_promotion_impact.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.optimization_promotion_impact.v1")
         self.assertTrue(payload["wrote_store"])
         self.assertEqual(payload["summary"]["actual_canary_applied_count"], 1)
         self.assertEqual(payload["summary"]["actual_canary_holdout_count"], 1)
@@ -4394,7 +4385,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["family_impacts"][0]["cohort_metrics"]["canary_applied"]["count"], 1)
         self.assertEqual(payload["family_impacts"][0]["cohort_metrics"]["canary_holdout"]["count"], 1)
         self.assertEqual(payload["summary"]["recommendation_counts"], [{"value": "promote", "count": 1}])
-        self.assertEqual(payload["promotion_outcome_feedback"]["schema"], "agentflow.promotion_outcome_feedback_ledger.v1")
+        self.assertEqual(payload["promotion_outcome_feedback"]["schema"], "tokenclaw.promotion_outcome_feedback_ledger.v1")
         self.assertEqual(payload["promotion_outcome_feedback"]["summary"]["rows_written"], 1)
         self.assertEqual(payload["promotion_outcome_feedback"]["entries"][0]["status"], "positive")
         self.assertEqual(len(feedback_rows), 1)
@@ -4407,7 +4398,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store, stable_json
 
         action = {
-            "schema": "agentflow.optimization_promotion_rollout_action.v1",
+            "schema": "tokenclaw.optimization_promotion_rollout_action.v1",
             "action_id": "promotion-rollout-action:cli-impact-feedback",
             "action_type": "widen",
             "target_candidate_id": "routing-cli-impact-feedback",
@@ -4429,7 +4420,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             "privacy": {"metadata_only": True},
         }
         bundle = {
-            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_promotion_rollout_actions.v1",
             "generated_at": "2026-06-10T00:00:00+00:00",
             "ok": True,
             "actions": [action],
@@ -4439,7 +4430,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         ManagedFeedbackFlushClient.status_code = 503
         ManagedFeedbackFlushClient.text = "managed unavailable with raw impact secret"
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 for cohort, suffix, cost_est, cost_baseline in (
@@ -4492,9 +4483,9 @@ class PolicyReloadCliTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
-                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
                 },
                 clear=False,
             ):
@@ -4518,7 +4509,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
         self.assertEqual(sent_payload["event_type"], "impact")
         metadata = sent_payload["metadata"]
-        self.assertEqual(metadata["schema"], "agentflow.optimization_promotion_lifecycle_feedback.v1")
+        self.assertEqual(metadata["schema"], "tokenclaw.optimization_promotion_lifecycle_feedback.v1")
         self.assertEqual(metadata["actual_canary_applied_count"], 1)
         self.assertEqual(metadata["actual_canary_holdout_count"], 1)
         self.assertEqual(metadata["reason_code_counts"]["promotion-impact-positive"], 1)
@@ -4546,7 +4537,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.optimization_rollout_review import attach_optimization_rollout_provenance
 
         bundle = {
-            "schema": "agentflow.optimization_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_rollout_actions.v1",
             "generated_at": "2026-06-10T05:00:00+00:00",
             "expires_at": "2099-06-11T05:00:00+00:00",
             "summary": {
@@ -4566,7 +4557,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             },
             "actions": [
                 {
-                    "schema": "agentflow.optimization_rollout_action.v1",
+                    "schema": "tokenclaw.optimization_rollout_action.v1",
                     "action_id": "optimization-rollout-action:cli-routing",
                     "action_type": "widen",
                     "target_candidate_id": "cli-routing-candidate",
@@ -4589,7 +4580,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                         "local_eval_verdict": {"verdict": "widen", "latest_eval_at": "2026-06-10T04:30:00+00:00"}
                     },
                     "action": {
-                        "schema": "agentflow.openai_rollout_action.v1",
+                        "schema": "tokenclaw.openai_rollout_action.v1",
                         "target_rule_id": "cli-openai-routing-rule",
                         "proposed_edit": {
                             "rule_id": "cli-openai-routing-rule",
@@ -4632,14 +4623,14 @@ class PolicyReloadCliTests(unittest.TestCase):
         signed = attach_optimization_rollout_provenance(
             bundle,
             secret="cli-review-secret",
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="managed-test",
             key_id="cli-review",
             generated_at="2026-06-10T05:00:00+00:00",
         )
         stdout = io.StringIO()
 
-        with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "cli-review-secret"}):
+        with patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "cli-review-secret"}):
             code = cli.optimization_rollout_actions_review_cli(
                 ["--pretty", "-"],
                 stdin=io.StringIO(json.dumps(signed)),
@@ -4648,14 +4639,14 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.optimization_rollout_actions_review.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.optimization_rollout_actions_review.v1")
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["read_only"])
         self.assertFalse(payload["wrote_local_policy_files"])
         self.assertEqual(payload["provenance"]["status"], "verified")
         self.assertEqual(payload["actions"][0]["target_rule_id"], "cli-openai-routing-rule")
 
-        events_path = Path(os.environ["AGENTFLOW_POLICY_EVENTS_LOG"])
+        events_path = Path(os.environ["TOKENCLAW_POLICY_EVENTS_LOG"])
         event = json.loads(events_path.read_text(encoding="utf-8").strip().splitlines()[-1])
         self.assertEqual(event["action"], "optimization-rollout-actions-review")
         self.assertTrue(event["ok"])
@@ -4668,7 +4659,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         code = cli.optimization_shadow_eval_cli(
             ["--execute", "-"],
-            stdin=io.StringIO(json.dumps({"schema": "agentflow.optimization_eval_plan.v1", "plans": []})),
+            stdin=io.StringIO(json.dumps({"schema": "tokenclaw.optimization_eval_plan.v1", "plans": []})),
             stdout=stdout,
             stderr=stderr,
         )
@@ -4701,7 +4692,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 {
                     "candidate_id": "shadow-budget-blocked",
@@ -4717,7 +4708,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             Store(db_path).conn.close()
             plan_path = Path(tmp) / "plan.json"
             plan_path.write_text(json.dumps(plan), encoding="utf-8")
@@ -4765,7 +4756,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["schema"], "agentflow.policy_bundle_validation.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_bundle_validation.v1")
         self.assertEqual(payload["errors"], [])
 
     def test_policy_validate_cli_rejects_invalid_json_with_structured_errors(self):
@@ -4776,19 +4767,19 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         payload = json.loads(stdout.getvalue())
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["schema"], "agentflow.policy_bundle_validation.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_bundle_validation.v1")
         self.assertIn("invalid JSON", payload["errors"][0]["message"])
 
     def test_policy_validate_cli_rejects_missing_file_with_structured_errors(self):
         stdout = io.StringIO()
 
-        code = cli.policy_validate_cli(["/tmp/agentflow-no-such-policy-bundle.json"], stdout=stdout)
+        code = cli.policy_validate_cli(["/tmp/tokenclaw-no-such-policy-bundle.json"], stdout=stdout)
 
         self.assertEqual(code, 1)
         payload = json.loads(stdout.getvalue())
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["schema"], "agentflow.policy_bundle_validation.v1")
-        self.assertEqual(payload["errors"][0]["path"], "/tmp/agentflow-no-such-policy-bundle.json")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_bundle_validation.v1")
+        self.assertEqual(payload["errors"][0]["path"], "/tmp/tokenclaw-no-such-policy-bundle.json")
         self.assertIn("No such file", payload["errors"][0]["message"])
 
     def test_policy_validate_cli_rejects_malformed_bundle(self):
@@ -4860,7 +4851,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         payload = json.loads(stdout.getvalue())
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["schema"], "agentflow.policy_bundle_diff.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_bundle_diff.v1")
         self.assertIn("invalid JSON", payload["before_validation"]["errors"][0]["message"])
 
     def test_policy_review_cli_reports_current_to_proposed_changes(self):
@@ -4876,7 +4867,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["changed"])
-        self.assertEqual(payload["schema"], "agentflow.policy_bundle_review.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_bundle_review.v1")
         self.assertEqual(payload["changed_sections"], ["routing"])
         self.assertEqual(payload["change_count"], 1)
         self.assertEqual(payload["safety_warning_count"], 0)
@@ -4894,7 +4885,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }]
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 store.log_call(
@@ -4988,7 +4979,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }]
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 for index, status in enumerate((200, 500)):
@@ -5146,7 +5137,7 @@ class PolicyReloadCliTests(unittest.TestCase):
     def test_old_context_summary_dry_run_cli_reports_metadata_only_projection(self):
         proposed = self._old_context_summary_bundle()
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_old_context_summary_dry_run_rows(db_path)
             stdout = io.StringIO()
 
@@ -5158,7 +5149,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.old_context_summary_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.old_context_summary_dry_run.v1")
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["dry_run"])
         self.assertEqual(payload["policy"]["rule_id"], "test-old-context-dry-run")
@@ -5299,7 +5290,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def test_old_context_summary_dry_run_tool_protocol_aware_profile_reports_plateau_eligibility(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_tool_protocol_aware_old_context_rows(db_path)
             stdout = io.StringIO()
 
@@ -5356,14 +5347,14 @@ class PolicyReloadCliTests(unittest.TestCase):
         proposed = self._old_context_summary_bundle()
         ManagedFeedbackFlushClient.calls = []
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_old_context_summary_dry_run_rows(db_path)
             stdout = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                 },
                 clear=False,
             ):
@@ -5396,7 +5387,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def _old_context_summary_impact_dry_run(self) -> dict:
         return {
-            "schema": "agentflow.old_context_summary_dry_run.v1",
+            "schema": "tokenclaw.old_context_summary_dry_run.v1",
             "ok": True,
             "dry_run": True,
             "read_only": True,
@@ -5692,7 +5683,7 @@ class PolicyReloadCliTests(unittest.TestCase):
     def test_old_context_summary_impact_cli_reports_metadata_only_post_apply_evidence(self):
         dry_run = self._old_context_summary_impact_dry_run()
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_old_context_summary_impact_rows(db_path)
             stdout = io.StringIO()
 
@@ -5704,7 +5695,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.old_context_summary_impact.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.old_context_summary_impact.v1")
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["summary"]["projected_affected_metadata_row_count"], 4)
         self.assertEqual(payload["summary"]["actual_matched_metadata_row_count"], 3)
@@ -5738,7 +5729,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             dry_run = self._old_context_summary_quality_gate_dry_run()
             with self.subTest(scenario=scenario):
                 with TemporaryDirectory() as tmp:
-                    db_path = str(Path(tmp) / "agentflow.sqlite3")
+                    db_path = str(Path(tmp) / "tokenclaw.sqlite3")
                     self._write_old_context_summary_quality_gate_rows(db_path, scenario=scenario)
                     stdout = io.StringIO()
 
@@ -5751,7 +5742,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 payload = json.loads(stdout.getvalue())
                 gate = payload["quality_gate"]
-                self.assertEqual(gate["schema"], "agentflow.old_context_summary_quality_gate.v1")
+                self.assertEqual(gate["schema"], "tokenclaw.old_context_summary_quality_gate.v1")
                 self.assertEqual(gate["verdict"], expected_verdict)
                 self.assertIn(expected_reason, gate["reason_codes"])
                 self.assertEqual(payload["summary"]["quality_gate_verdict"], expected_verdict)
@@ -5775,7 +5766,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             dry_run = self._old_context_summary_quality_gate_dry_run()
             with self.subTest(scenario=scenario):
                 with TemporaryDirectory() as tmp:
-                    db_path = str(Path(tmp) / "agentflow.sqlite3")
+                    db_path = str(Path(tmp) / "tokenclaw.sqlite3")
                     self._write_old_context_summary_quality_gate_rows(db_path, scenario=scenario)
                     stdout = io.StringIO()
 
@@ -5787,7 +5778,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
                 self.assertEqual(code, 0)
                 payload = json.loads(stdout.getvalue())
-                self.assertEqual(payload["schema"], "agentflow.old_context_summary_quality_gate.v1")
+                self.assertEqual(payload["schema"], "tokenclaw.old_context_summary_quality_gate.v1")
                 self.assertTrue(payload["ok"])
                 self.assertEqual(payload["candidate_id"], "candidate-old-context-quality-gate")
                 self.assertEqual(payload["rule_id"], "test-old-context-quality-gate")
@@ -5814,7 +5805,7 @@ class PolicyReloadCliTests(unittest.TestCase):
     def test_old_context_summary_impact_cli_exits_nonzero_without_matches(self):
         dry_run = self._old_context_summary_impact_dry_run()
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             stdout = io.StringIO()
 
             code = cli.old_context_summary_impact_cli(
@@ -5835,14 +5826,14 @@ class PolicyReloadCliTests(unittest.TestCase):
         dry_run = self._old_context_summary_impact_dry_run()
         ManagedFeedbackFlushClient.calls = []
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_old_context_summary_impact_rows(db_path)
             stdout = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                 },
                 clear=False,
             ):
@@ -5884,15 +5875,15 @@ class PolicyReloadCliTests(unittest.TestCase):
         ManagedFeedbackFlushClient.status_code = 503
         ManagedFeedbackFlushClient.text = "managed unavailable with raw quality secret"
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_old_context_summary_quality_gate_rows(db_path, scenario="promote")
             stdout = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
-                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
                 },
                 clear=False,
             ):
@@ -5919,8 +5910,8 @@ class PolicyReloadCliTests(unittest.TestCase):
 
                     metadata = queued_payload["metadata"]
                     gate = metadata["old_context_summary_quality_gate"]
-                    self.assertEqual(gate["schema"], "agentflow.old_context_summary_quality_gate_feedback.v1")
-                    self.assertEqual(gate["quality_gate_schema"], "agentflow.old_context_summary_quality_gate.v1")
+                    self.assertEqual(gate["schema"], "tokenclaw.old_context_summary_quality_gate_feedback.v1")
+                    self.assertEqual(gate["quality_gate_schema"], "tokenclaw.old_context_summary_quality_gate.v1")
                     self.assertEqual(gate["candidate_id"], "candidate-old-context-quality-gate")
                     self.assertEqual(gate["rule_id"], "test-old-context-quality-gate")
                     self.assertEqual(gate["policy_source"], "managed-recommended")
@@ -5996,14 +5987,14 @@ class PolicyReloadCliTests(unittest.TestCase):
         dry_run = self._old_context_summary_quality_gate_dry_run()
         ManagedFeedbackFlushClient.calls = []
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_old_context_summary_quality_gate_rows(db_path, scenario="promote")
             stdout = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                 },
                 clear=False,
             ):
@@ -6022,7 +6013,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         metadata = sent_payload["metadata"]
         self.assertEqual(metadata["command"], "old-context-summary-quality-gate")
         gate = metadata["old_context_summary_quality_gate"]
-        self.assertEqual(gate["schema"], "agentflow.old_context_summary_quality_gate_feedback.v1")
+        self.assertEqual(gate["schema"], "tokenclaw.old_context_summary_quality_gate_feedback.v1")
         self.assertEqual(gate["verdict"], "promote")
         self.assertEqual(gate["cohort_counts"]["matched"], 4)
         self.assertFalse(gate["privacy"]["raw_old_context_included"])
@@ -6041,7 +6032,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def _summary_rollout_action_bundle(self, *, action_type: str = "widen", raw_like: bool = False, verdict: str = "promote") -> dict:
         action = {
-            "schema": "agentflow.old_context_summary_rollout_action.v1",
+            "schema": "tokenclaw.old_context_summary_rollout_action.v1",
             "action_type": action_type,
             "target_candidate_id": "candidate-old-context-rollout",
             "target_rule_id": "managed-old-context-summary-rollout",
@@ -6052,7 +6043,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             "rationale": "Quality-gated metadata shows positive old-context summary canary outcomes.",
             "blockers": [] if action_type == "widen" else ["quality-gate-rollback"],
             "quality_gate": {
-                "schema": "agentflow.old_context_summary_quality_gate.v1",
+                "schema": "tokenclaw.old_context_summary_quality_gate.v1",
                 "verdict": verdict,
                 "reason_codes": ["quality-gate-passed"] if verdict == "promote" else ["applied-retry-rate-above-threshold"],
                 "warning_codes": [],
@@ -6068,7 +6059,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         if raw_like:
             action["evidence"] = {"prompt": "raw old context must be rejected"}
         return {
-            "schema": "agentflow.old_context_summary_rollout_actions.v1",
+            "schema": "tokenclaw.old_context_summary_rollout_actions.v1",
             "generated_at": "2026-06-09T04:10:00+00:00",
             "summary": {"action_count": 1, "managed_enforced": False, "required_local_review": True},
             "actions": [action],
@@ -6238,14 +6229,14 @@ class PolicyReloadCliTests(unittest.TestCase):
         bundle = attach_summary_rollout_action_provenance(
             self._summary_rollout_action_bundle(action_type="rollback", verdict="rollback"),
             secret=secret,
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="local-dev",
             key_id="summary-rollout-key",
         )
         with TemporaryDirectory() as tmp:
             path = self._write_summary_rollout_rule(tmp)
             stdout = io.StringIO()
-            with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS": json.dumps({"summary-rollout-key": secret})}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRETS": json.dumps({"summary-rollout-key": secret})}, clear=False):
                 code = cli.old_context_summary_rollout_actions_apply_cli(
                     ["--config-dir", tmp, "-"],
                     stdin=io.StringIO(json.dumps(bundle)),
@@ -6304,7 +6295,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         bundle = self._summary_rollout_action_bundle(action_type="widen")
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._write_summary_rollout_rule(tmp)
@@ -6345,7 +6336,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(impact_code, 0)
         impact = json.loads(impact_stdout.getvalue())
-        self.assertEqual(impact["schema"], "agentflow.old_context_summary_rollout_actions_impact.v1")
+        self.assertEqual(impact["schema"], "tokenclaw.old_context_summary_rollout_actions_impact.v1")
         self.assertTrue(impact["ok"])
         self.assertEqual(impact["summary"]["actual_matched_metadata_row_count"], 1)
         self.assertEqual(impact["actions"][0]["actual"]["actual_canary_applied_count"], 1)
@@ -6354,7 +6345,7 @@ class PolicyReloadCliTests(unittest.TestCase):
     def test_policy_review_cli_includes_old_context_summary_dry_run(self):
         proposed = self._old_context_summary_bundle()
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_old_context_summary_dry_run_rows(db_path)
             stdout = io.StringIO()
 
@@ -6367,7 +6358,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
         dry_run = payload["impact_summary"]["sections"]["crunch"]["old_context_summary_dry_run"]
-        self.assertEqual(dry_run["schema"], "agentflow.old_context_summary_dry_run.v1")
+        self.assertEqual(dry_run["schema"], "tokenclaw.old_context_summary_dry_run.v1")
         self.assertEqual(dry_run["summary"]["eligible_call_count"], 1)
         encoded = json.dumps(dry_run, sort_keys=True)
         self.assertNotIn("raw-secret-old-context", encoded)
@@ -6437,7 +6428,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_old_context_summary_dry_run_rows(db_path)
             stdout = io.StringIO()
             code = cli.policy_review_cli(
@@ -6449,7 +6440,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
         old_context = payload["section_reviews"]["crunch"]["old_context_summarization"]
-        self.assertEqual(old_context["schema"], "agentflow.old_context_summary_policy_review.v1")
+        self.assertEqual(old_context["schema"], "tokenclaw.old_context_summary_policy_review.v1")
         self.assertEqual(old_context["candidate_ids"], ["candidate-old-context-summary"])
         candidate = old_context["candidates"][0]
         self.assertEqual(candidate["candidate_family"], "old-context-summarization-policy-rule")
@@ -6509,7 +6500,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 "min_text_chars": 1000,
             },
             "rollout": {
-                "schema": "agentflow.pattern_policy_rollout.v1",
+                "schema": "tokenclaw.pattern_policy_rollout.v1",
                 "recommendation_mode": "full-review",
                 "canary_enabled": False,
                 "canary_fraction": 1.0,
@@ -6532,7 +6523,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                     "dimensions": {"source_surface": "anthropic_messages", "app_family": "claude_code", "category": "chat", "phase": "chat"},
                     "buckets": {"has_tools": False},
                     "rollout": {
-                        "schema": "agentflow.pattern_policy_rollout.v1",
+                        "schema": "tokenclaw.pattern_policy_rollout.v1",
                         "recommendation_mode": "canary-only",
                         "canary_enabled": True,
                         "canary_fraction": 0.0,
@@ -6549,7 +6540,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                     "dimensions": {"source_surface": "codex_turn", "app_family": "codex", "category": "summary", "phase": "summary"},
                     "buckets": {"has_tools": False},
                     "rollout": {
-                        "schema": "agentflow.pattern_policy_rollout.v1",
+                        "schema": "tokenclaw.pattern_policy_rollout.v1",
                         "recommendation_mode": "full-review",
                         "canary_enabled": False,
                         "canary_fraction": 1.0,
@@ -6564,7 +6555,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             config_path = Path(tmp) / "crunch_rules.yaml"
             config_path.write_text("enabled: true\n", encoding="utf-8")
             store = Store(db_path)
@@ -6590,7 +6581,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                         "text_chars": 8000,
                         "has_tools": False,
                         "managed_pattern_features": {
-                            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                            "schema": "tokenclaw.managed_pattern_feature_diagnostics.v1",
                             "present": True,
                             "pattern_hashes": [crunch_hash],
                             "pattern_hash_count": 1,
@@ -6624,7 +6615,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                         "text_chars": 4800,
                         "has_tools": False,
                         "managed_pattern_features": {
-                            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                            "schema": "tokenclaw.managed_pattern_feature_diagnostics.v1",
                             "present": True,
                             "pattern_hashes": [cache_hash],
                             "pattern_hash_count": 1,
@@ -6658,7 +6649,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                         "category": "summary",
                         "workflow_phase": "summary",
                         "managed_pattern_features": {
-                            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                            "schema": "tokenclaw.managed_pattern_feature_diagnostics.v1",
                             "present": True,
                             "pattern_hashes": [blocked_cache_hash],
                             "pattern_hash_count": 1,
@@ -6674,7 +6665,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 )
 
                 before_cache = store.get_cache("cache-key")
-                event_log = Path(os.environ["AGENTFLOW_POLICY_EVENTS_LOG"])
+                event_log = Path(os.environ["TOKENCLAW_POLICY_EVENTS_LOG"])
                 before_event_text = event_log.read_text(encoding="utf-8") if event_log.exists() else ""
 
                 impact = simulate_policy_bundle_impact(proposed, db_path=db_path, limit=10)
@@ -6719,7 +6710,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         payload = json.loads(stdout.getvalue())
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["schema"], "agentflow.policy_bundle_review.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_bundle_review.v1")
         self.assertIn("$.schema", {error["path"] for error in payload["proposed_validation"]["errors"]})
         self.assertFalse(payload["changed"])
 
@@ -6771,7 +6762,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             return {"schema": "wrong"}
         bundle = json.loads(exported.getvalue())
         bundle["recommendation"] = {
-            "schema": "agentflow.policy_bundle_recommendation.v1",
+            "schema": "tokenclaw.policy_bundle_recommendation.v1",
             "policy_source": "managed-recommended",
             "candidate_ids": ["candidate-route-chat"],
             "candidate_count": 1,
@@ -6931,7 +6922,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         policy_profile: str | None = "conservative",
     ) -> dict:
         action = {
-            "schema": "agentflow.pattern_rollout_action.v1",
+            "schema": "tokenclaw.pattern_rollout_action.v1",
             "action_type": "widen",
             "target_candidate_id": candidate_id,
             "target_rule_id": rule_id,
@@ -6956,7 +6947,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def _rollout_bundle_for_actions(self, actions: list[dict]) -> dict:
         return {
-            "schema": "agentflow.pattern_rollout_actions.v1",
+            "schema": "tokenclaw.pattern_rollout_actions.v1",
             "generated_at": "2026-06-09T03:10:00+00:00",
             "tenant_scope": "local-dev",
             "filters": {"min_samples": 3},
@@ -7047,7 +7038,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             "conditions": conditions,
             "action": action,
             "rollout": {
-                "schema": "agentflow.pattern_policy_rollout.v1",
+                "schema": "tokenclaw.pattern_policy_rollout.v1",
                 "recommendation_mode": "canary",
                 "canary_enabled": True,
                 "canary_fraction": 0.1,
@@ -7061,7 +7052,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
     def _rollout_action_bundle(self, *, action_type: str = "widen", raw_like: bool = False):
         action = {
-            "schema": "agentflow.pattern_rollout_action.v1",
+            "schema": "tokenclaw.pattern_rollout_action.v1",
             "action_type": action_type,
             "target_candidate_id": "candidate-crunch-rollout",
             "target_rule_id": "managed-crunch-pattern-candidate-crunch-rollout",
@@ -7087,7 +7078,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         if raw_like:
             action["evidence"]["raw_request"] = "raw prompt body must be rejected"
         return {
-            "schema": "agentflow.pattern_rollout_actions.v1",
+            "schema": "tokenclaw.pattern_rollout_actions.v1",
             "generated_at": "2026-06-09T03:10:00+00:00",
             "tenant_scope": "local-dev",
             "filters": {"min_samples": 3},
@@ -7191,7 +7182,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         if unsupported_field:
             proposed_edit["action"]["provider_body_patch"] = {"path": "$.messages"}
         action = {
-            "schema": "agentflow.pattern_rollout_action.v1",
+            "schema": "tokenclaw.pattern_rollout_action.v1",
             "action_type": "widen",
             "candidate_family": "terminal-output-compaction-crunch-policy-rule",
             "target_candidate_id": "terminal-compaction-candidate-123",
@@ -7292,7 +7283,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                                 "max_replacement_chars": 1800,
                             },
                             "rollout": {
-                                "schema": "agentflow.pattern_policy_rollout.v1",
+                                "schema": "tokenclaw.pattern_policy_rollout.v1",
                                 "recommendation_mode": "canary",
                                 "canary_enabled": True,
                                 "canary_fraction": 0.1,
@@ -7454,14 +7445,14 @@ class PolicyReloadCliTests(unittest.TestCase):
         ManagedFeedbackFlushClient.text = "managed unavailable"
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             stdout = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
-                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
                 },
                 clear=False,
             ):
@@ -7523,14 +7514,14 @@ class PolicyReloadCliTests(unittest.TestCase):
         ManagedFeedbackFlushClient.calls = []
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_rollout_crunch_rule(tmp)
             stdout = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                 },
                 clear=False,
             ):
@@ -7735,15 +7726,15 @@ class PolicyReloadCliTests(unittest.TestCase):
         bundle = self._rollout_bundle_for_actions(actions)
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             paths = self._write_rollout_pattern_files(tmp, crunch_rules=crunch_rules, cache_rules=cache_rules)
             before = {section: path.read_text(encoding="utf-8") for section, path in paths.items()}
             stdout = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                 },
                 clear=False,
             ):
@@ -7787,15 +7778,15 @@ class PolicyReloadCliTests(unittest.TestCase):
         ManagedFeedbackFlushClient.text = "managed unavailable"
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             self._write_rollout_crunch_rule(tmp)
             stdout = io.StringIO()
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
-                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
                 },
                 clear=False,
             ):
@@ -7832,7 +7823,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         bundle = attach_rollout_action_provenance(
             self._rollout_action_bundle(action_type="rollback"),
             secret=secret,
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="local-dev",
             key_id="rollout-key",
         )
@@ -7840,7 +7831,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             path = self._write_rollout_crunch_rule(tmp)
             stdout = io.StringIO()
-            with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS": json.dumps({"rollout-key": secret})}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRETS": json.dumps({"rollout-key": secret})}, clear=False):
                 code = cli.managed_rollout_actions_apply_cli(
                     ["--config-dir", tmp, "-"],
                     stdin=io.StringIO(json.dumps(bundle)),
@@ -7992,7 +7983,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         bundle = self._rollout_action_bundle(action_type="widen")
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._write_rollout_crunch_rule(tmp)
@@ -8073,7 +8064,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(before_rule_text, after_rule_text)
         self.assertEqual(before_db_size, after_db_size)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.pattern_rollout_actions_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.pattern_rollout_actions_dry_run.v1")
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["dry_run"])
         self.assertTrue(payload["read_only"])
@@ -8106,7 +8097,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         bundle = self._rollout_action_bundle(action_type="widen")
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._write_rollout_crunch_rule(tmp)
@@ -8223,7 +8214,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.pattern_rollout_actions_impact.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.pattern_rollout_actions_impact.v1")
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["status"], "matched")
         self.assertTrue(payload["read_only"])
@@ -8259,7 +8250,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         bundle = self._rollout_action_bundle(action_type="widen")
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._write_rollout_crunch_rule(tmp)
@@ -8302,7 +8293,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._write_rollout_crunch_rule(tmp)
@@ -8378,7 +8369,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"AGENTFLOW_POLICY_CONFIG_DIR": tmp, cli.MANAGED_POLICY_API_KEY_ENV: ""}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_POLICY_CONFIG_DIR": tmp, cli.MANAGED_POLICY_API_KEY_ENV: ""}, clear=False):
                 with patch("tokenclaw.cli.httpx.get") as get:
                     get.return_value = httpx.Response(200, json=bundle)
                     code = cli.policy_fetch_review_cli(
@@ -8417,8 +8408,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(codex_review["status"], "review-only")
         self.assertEqual(codex_review["application"]["status"], "not-applied")
         self.assertFalse(codex_review["application"]["writes_local_policy_files"])
-        self.assertEqual(payload["bundle"]["schema"], "agentflow.policy_bundle.v1")
-        self.assertIn("agentflow-policy-apply", payload["next_manual_command"])
+        self.assertEqual(payload["bundle"]["schema"], "tokenclaw.policy_bundle.v1")
+        self.assertIn("tokenclaw-policy-apply", payload["next_manual_command"])
         call = get.call_args
         self.assertEqual(call.kwargs["headers"], {})
         self.assertEqual(call.kwargs["params"]["min_samples"], 3)
@@ -8433,7 +8424,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         bundle = json.loads(exported.getvalue())
         supported = ["cache", "old_context_summarization", "routing"]
         selected = {
-            "schema": "agentflow.openai_optimization_review_action.v1",
+            "schema": "tokenclaw.openai_optimization_review_action.v1",
             "action_id": "openai-review:routing",
             "target_candidate_id": "openai-routing-candidate",
             "action_family": "routing",
@@ -8515,8 +8506,8 @@ class PolicyReloadCliTests(unittest.TestCase):
             "provider_forwarding": False,
         }
         bundle["recommendation"] = {
-            "schema": "agentflow.policy_bundle_recommendation.v1",
-            "openai_optimization_schema": "agentflow.openai_optimization_review_bundle.v1",
+            "schema": "tokenclaw.policy_bundle_recommendation.v1",
+            "openai_optimization_schema": "tokenclaw.openai_optimization_review_bundle.v1",
             "created_at": bundle["generated_at"],
             "policy_source": "managed-recommended",
             "recommendation_mode": "review-only-openai-optimization-bundle",
@@ -8549,8 +8540,8 @@ class PolicyReloadCliTests(unittest.TestCase):
             "omitted_actions": [],
         }
         bundle["openai_optimization"] = {
-            "schema": "agentflow.openai_optimization_review_bundle.v1",
-            "ranking_schema": "agentflow.openai_optimization_rollout_ranking.v1",
+            "schema": "tokenclaw.openai_optimization_review_bundle.v1",
+            "ranking_schema": "tokenclaw.openai_optimization_rollout_ranking.v1",
             "ranking_summary": {"candidate_count": 3, "conflict_bucket_count": 1},
             "selected_actions": [selected],
             "suppressed_actions": [suppressed],
@@ -8575,7 +8566,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         signed = attach_policy_bundle_provenance(
             bundle,
             secret="openai-review-secret",
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="managed-test",
             key_id="openai-review-key",
             generated_at="2026-06-10T12:00:00+00:00",
@@ -8585,8 +8576,8 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             env = {
-                "AGENTFLOW_POLICY_CONFIG_DIR": tmp,
-                "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                "TOKENCLAW_POLICY_CONFIG_DIR": tmp,
+                "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
                 cli.MANAGED_POLICY_API_KEY_ENV: "",
             }
             with patch.dict(os.environ, env, clear=False):
@@ -8638,10 +8629,10 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(review["counts_by_family"]["cache"]["omitted"], 1)
         self.assertEqual(review["conflict_summary"]["conflict_bucket_count"], 1)
         self.assertEqual(review["local_capability_gaps"][0]["action_family"], "cache")
-        self.assertIn("agentflow-policy-draft-stage", payload["next_manual_commands"][0])
+        self.assertIn("tokenclaw-policy-draft-stage", payload["next_manual_commands"][0])
         call = get.call_args
-        self.assertEqual(call.kwargs["headers"]["x-agentflow-local-version"], __version__)
-        self.assertEqual(call.kwargs["headers"]["x-agentflow-supported-local-action-families"], "old_context_summarization,routing")
+        self.assertEqual(call.kwargs["headers"]["x-tokenclaw-local-version"], __version__)
+        self.assertEqual(call.kwargs["headers"]["x-tokenclaw-supported-local-action-families"], "old_context_summarization,routing")
         self.assertEqual(call.kwargs["params"]["provider_endpoint"], "responses")
         self.assertEqual(call.kwargs["params"]["requested_model_family"], "gpt-5")
         self.assertEqual(call.kwargs["params"]["max_retry_rate"], 0.02)
@@ -8668,7 +8659,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         bundle = json.loads(exported.getvalue())
         supported = ["cache", "old_context_summarization", "routing"]
         selected = {
-            "schema": "agentflow.openai_optimization_review_action.v1",
+            "schema": "tokenclaw.openai_optimization_review_action.v1",
             "action_id": "openai-review:routing",
             "target_candidate_id": "openai-routing-candidate",
             "action_family": "routing",
@@ -8777,8 +8768,8 @@ class PolicyReloadCliTests(unittest.TestCase):
             "provider_forwarding": False,
         }
         bundle["recommendation"] = {
-            "schema": "agentflow.policy_bundle_recommendation.v1",
-            "openai_optimization_schema": "agentflow.openai_optimization_review_bundle.v1",
+            "schema": "tokenclaw.policy_bundle_recommendation.v1",
+            "openai_optimization_schema": "tokenclaw.openai_optimization_review_bundle.v1",
             "created_at": bundle["generated_at"],
             "expires_at": expires_at or "2099-06-11T12:00:00+00:00",
             "policy_source": "managed-recommended",
@@ -8800,7 +8791,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             },
         }
         bundle["openai_optimization"] = {
-            "schema": "agentflow.openai_optimization_review_bundle.v1",
+            "schema": "tokenclaw.openai_optimization_review_bundle.v1",
             "selected_actions": [selected],
             "suppressed_actions": [suppressed_summary],
             "omitted_actions": [omitted_cache],
@@ -8828,7 +8819,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         return attach_policy_bundle_provenance(
             bundle,
             secret="openai-review-secret",
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="managed-test",
             key_id="openai-review-key",
             generated_at="2026-06-10T12:00:00+00:00",
@@ -8847,14 +8838,14 @@ class PolicyReloadCliTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_POLICY_CONFIG_DIR": str(config_dir),
-                    "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                    "TOKENCLAW_POLICY_CONFIG_DIR": str(config_dir),
+                    "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
                 },
                 clear=False,
             ):
                 code = cli.policy_draft_stage_cli(
                     ["--draft-id", "openai-review-stage", "--workspace", str(workspace), "-"],
-                    stdin=io.StringIO(json.dumps({"schema": "agentflow.policy_bundle_fetch_review.v1", "ok": True, "bundle": bundle})),
+                    stdin=io.StringIO(json.dumps({"schema": "tokenclaw.policy_bundle_fetch_review.v1", "ok": True, "bundle": bundle})),
                     stdout=stdout,
                 )
 
@@ -8924,7 +8915,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         for bundle, expected_path_fragment in cases:
             with TemporaryDirectory() as tmp:
                 stdout = io.StringIO()
-                with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret"}, clear=False):
+                with patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret"}, clear=False):
                     code = cli.policy_draft_stage_cli(
                         ["--workspace", str(Path(tmp) / "drafts"), "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -8986,8 +8977,8 @@ class PolicyReloadCliTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_POLICY_CONFIG_DIR": str(config_dir),
-                    "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                    "TOKENCLAW_POLICY_CONFIG_DIR": str(config_dir),
+                    "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
                 },
                 clear=False,
             ):
@@ -8999,7 +8990,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 )
             self.assertEqual(stage_code, 0, stage_stdout.getvalue())
 
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 store.log_call(
@@ -9077,7 +9068,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
             payload = json.loads(dry_stdout.getvalue())
             self.assertEqual(dry_code, 0, dry_stdout.getvalue())
-            self.assertEqual(payload["schema"], "agentflow.openai_optimization_draft_dry_run.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.openai_optimization_draft_dry_run.v1")
             self.assertTrue(payload["ok"])
             self.assertTrue(payload["dry_run"])
             self.assertEqual(payload["summary"]["openai_rows_considered"], 2)
@@ -9135,7 +9126,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "drafts"
-            with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret"}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret"}, clear=False):
                 stage_stdout = io.StringIO()
                 stage_code = cli.policy_draft_stage_cli(
                     ["--draft-id", "openai-review-raw-edited", "--workspace", str(workspace), "-"],
@@ -9148,7 +9139,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             staged["policies"]["routing"]["openai"]["canary"]["managed_recommendation"]["raw_prompt"] = "raw prompt must not leak"
             staged_path.write_text(json.dumps(staged), encoding="utf-8")
 
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             store.conn.close()
             stdout = io.StringIO()
@@ -9189,8 +9180,8 @@ class PolicyReloadCliTests(unittest.TestCase):
             cache_path.write_text(before_cache, encoding="utf-8")
 
             env = {
-                "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
-                "AGENTFLOW_POLICY_EVENTS_LOG": str(events_log),
+                "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                "TOKENCLAW_POLICY_EVENTS_LOG": str(events_log),
             }
             with patch.dict(os.environ, env, clear=False):
                 stage_stdout = io.StringIO()
@@ -9201,12 +9192,12 @@ class PolicyReloadCliTests(unittest.TestCase):
                 )
             self.assertEqual(stage_code, 0, stage_stdout.getvalue())
 
-            db_path = str(root / "agentflow.sqlite3")
+            db_path = str(root / "tokenclaw.sqlite3")
             store = Store(db_path)
             store.conn.close()
 
             dry_stdout = io.StringIO()
-            with patch.dict(os.environ, {"AGENTFLOW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
                 dry_code = cli.openai_optimization_draft_apply_cli(
                     [
                         "openai-review-apply",
@@ -9226,13 +9217,13 @@ class PolicyReloadCliTests(unittest.TestCase):
 
             dry_payload = json.loads(dry_stdout.getvalue())
             self.assertEqual(dry_code, 0, dry_stdout.getvalue())
-            self.assertEqual(dry_payload["schema"], "agentflow.openai_optimization_draft_apply.v1")
+            self.assertEqual(dry_payload["schema"], "tokenclaw.openai_optimization_draft_apply.v1")
             self.assertTrue(dry_payload["dry_run"])
             self.assertFalse(dry_payload["privacy"]["active_policy_files_written"])
             self.assertEqual(routing_path.read_text(encoding="utf-8"), before_routing)
 
             apply_stdout = io.StringIO()
-            with patch.dict(os.environ, {"AGENTFLOW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
                 apply_code = cli.openai_optimization_draft_apply_cli(
                     [
                         "openai-review-apply",
@@ -9257,7 +9248,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(payload["status"], "applied")
             self.assertTrue(payload["privacy"]["active_policy_files_written"])
             self.assertEqual(payload["changed_sections"], ["routing"])
-            self.assertIn("agentflow-policy-rollback", payload["rollback_command"])
+            self.assertIn("tokenclaw-policy-rollback", payload["rollback_command"])
             self.assertTrue(Path(payload["backups"][0]["path"]).exists())
             self.assertEqual(crunch_path.read_text(encoding="utf-8"), before_crunch)
             self.assertEqual(cache_path.read_text(encoding="utf-8"), before_cache)
@@ -9288,7 +9279,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                     },
                 }
 
-            with patch.dict(os.environ, {"AGENTFLOW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
                 rollback = asyncio.run(
                     rollback_policy_apply(
                         payload["apply_id"],
@@ -9343,15 +9334,15 @@ class PolicyReloadCliTests(unittest.TestCase):
                 events_log = root / "policy_events.jsonl"
                 routing_path = config_dir / "routing_rules.yaml"
                 routing_path.write_text("rules: []\n", encoding="utf-8")
-                db_path = str(root / "agentflow.sqlite3")
+                db_path = str(root / "tokenclaw.sqlite3")
                 store = Store(db_path)
                 store.conn.close()
 
                 with patch.dict(
                     os.environ,
                     {
-                        "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
-                        "AGENTFLOW_POLICY_EVENTS_LOG": str(events_log),
+                        "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                        "TOKENCLAW_POLICY_EVENTS_LOG": str(events_log),
                     },
                     clear=False,
                 ):
@@ -9373,9 +9364,9 @@ class PolicyReloadCliTests(unittest.TestCase):
 
                 stdout = io.StringIO()
                 stderr = io.StringIO()
-                env = {"AGENTFLOW_POLICY_EVENTS_LOG": str(events_log)}
+                env = {"TOKENCLAW_POLICY_EVENTS_LOG": str(events_log)}
                 if not require_verified:
-                    env["AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET"] = "openai-review-secret"
+                    env["TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET"] = "openai-review-secret"
                 with patch.dict(os.environ, env, clear=True):
                     code = cli.openai_optimization_draft_apply_cli(
                         [
@@ -9437,8 +9428,8 @@ class PolicyReloadCliTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
-                    "AGENTFLOW_POLICY_EVENTS_LOG": str(events_log),
+                    "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                    "TOKENCLAW_POLICY_EVENTS_LOG": str(events_log),
                 },
                 clear=False,
             ):
@@ -9450,7 +9441,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 )
             self.assertEqual(stage_code, 0, stage_stdout.getvalue())
 
-            db_path = str(root / "agentflow.sqlite3")
+            db_path = str(root / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 store.log_call(
@@ -9484,7 +9475,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
             stdout = io.StringIO()
             stderr = io.StringIO()
-            with patch.dict(os.environ, {"AGENTFLOW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
                 code = cli.openai_optimization_draft_apply_cli(
                     [
                         "conflict-apply",
@@ -9514,7 +9505,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         bundle = self._managed_policy_bundle()
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             policy_path = Path(tmp) / "managed-codex-app-bundle.json"
             fixture_path = Path(tmp) / "codex-fixture.json"
             policy_path.write_text(json.dumps(bundle), encoding="utf-8")
@@ -9564,7 +9555,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                         "policy_source": "local-default",
                     }),
                     event_window_json=stable_json({
-                        "schema": "agentflow.codex_app_event_window.v1",
+                        "schema": "tokenclaw.codex_app_event_window.v1",
                         "workflow_phase": "summary",
                         "model_field_state": "derived_present",
                         "input_text_chars": 600,
@@ -9590,7 +9581,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(cache_rows, 1)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.codex_app_policy_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.codex_app_policy_dry_run.v1")
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["applied"])
         self.assertFalse(payload["wrote_local_policy_files"])
@@ -9622,9 +9613,9 @@ class PolicyReloadCliTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             config_dir = Path(tmp) / "config"
-            with patch.dict(os.environ, {"AGENTFLOW_POLICY_CONFIG_DIR": str(config_dir), cli.MANAGED_POLICY_API_KEY_ENV: ""}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_POLICY_CONFIG_DIR": str(config_dir), cli.MANAGED_POLICY_API_KEY_ENV: ""}, clear=False):
                 with patch("tokenclaw.cli.httpx.get") as get:
                     get.return_value = httpx.Response(200, json=bundle)
                     code = cli.codex_app_policy_dry_run_cli(
@@ -9741,8 +9732,8 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             env = {
-                "AGENTFLOW_POLICY_CONFIG_DIR": tmp,
-                "AGENTFLOW_POLICY_EVENTS_LOG": str(Path(tmp) / "policy_events.jsonl"),
+                "TOKENCLAW_POLICY_CONFIG_DIR": tmp,
+                "TOKENCLAW_POLICY_EVENTS_LOG": str(Path(tmp) / "policy_events.jsonl"),
                 cli.MANAGED_POLICY_API_KEY_ENV: "",
             }
             with patch.dict(os.environ, env, clear=False):
@@ -9808,8 +9799,8 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             env = {
-                "AGENTFLOW_POLICY_CONFIG_DIR": tmp,
-                "AGENTFLOW_POLICY_EVENTS_LOG": str(Path(tmp) / "policy_events.jsonl"),
+                "TOKENCLAW_POLICY_CONFIG_DIR": tmp,
+                "TOKENCLAW_POLICY_EVENTS_LOG": str(Path(tmp) / "policy_events.jsonl"),
                 cli.MANAGED_POLICY_API_KEY_ENV: "",
             }
             with patch.dict(os.environ, env, clear=False):
@@ -9854,7 +9845,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"AGENTFLOW_POLICY_CONFIG_DIR": tmp}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_POLICY_CONFIG_DIR": tmp}, clear=False):
                 with patch("tokenclaw.cli.httpx.get") as get:
                     get.return_value = httpx.Response(200, json=self._managed_policy_bundle(invalid=True))
                     code = cli.policy_fetch_review_cli(
@@ -9897,7 +9888,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(get.call_args.kwargs["headers"]["authorization"], f"Bearer {secret}")
-        self.assertEqual(get.call_args.kwargs["headers"]["x-agentflow-tenant"], "tenant-a")
+        self.assertEqual(get.call_args.kwargs["headers"]["x-tokenclaw-tenant"], "tenant-a")
         rendered = stdout.getvalue() + stderr.getvalue()
         self.assertNotIn(secret, rendered)
 
@@ -9905,7 +9896,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         event_text = json.dumps(recent_policy_events(limit=5)["events"])
         self.assertNotIn(secret, event_text)
-        self.assertIn("env:AGENTFLOW_MANAGED_API_KEY", event_text)
+        self.assertIn("env:TOKENCLAW_MANAGED_API_KEY", event_text)
 
     def test_policy_apply_cli_dry_run_reports_files_without_writing(self):
         exported = io.StringIO()
@@ -10017,7 +10008,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             "last_sample_at": "2026-06-10T22:00:00+00:00",
             "last_sample_age_hours": 1.0,
             "promotion": {
-                "schema": "agentflow.routing_experiment_promotion_verdict.v1",
+                "schema": "tokenclaw.routing_experiment_promotion_verdict.v1",
                 "verdict": "promote",
                 "promotion_ready": True,
                 "reason_codes": ["promotion-thresholds-met"],
@@ -10058,7 +10049,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         if extra_candidate is not None:
             candidates.append(extra_candidate)
         return {
-            "schema": "agentflow.routing_experiment_report.v1",
+            "schema": "tokenclaw.routing_experiment_report.v1",
             "generated_at": "2026-06-10T22:30:00+00:00",
             "policy": {
                 "policy_source": "local-default",
@@ -10291,7 +10282,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "drafts"
             config_dir = Path(tmp) / "config"
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 store.log_call(
@@ -10366,7 +10357,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
         self.assertEqual(validate_code, 0)
         payload = json.loads(validate_stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.policy_draft_validate.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_draft_validate.v1")
         self.assertEqual(payload["status"], "pass")
         self.assertTrue(payload["can_apply"])
         self.assertFalse(payload["apply_blocked"])
@@ -10658,7 +10649,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         proposed = self._managed_codex_apply_bundle()
 
         with TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "codex-secret"}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "codex-secret"}, clear=False):
                 stdout = io.StringIO()
                 code = cli.policy_apply_cli(
                     ["--config-dir", tmp, "--section", "codex_app", "-"],
@@ -10883,7 +10874,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             event_log = Path(tmp) / "policy_events.jsonl"
             event_log.write_text(
                 json.dumps({
-                    "schema": "agentflow.policy_event.v1",
+                    "schema": "tokenclaw.policy_event.v1",
                     "id": "event-apply",
                     "created_at": "2026-06-10T22:00:00+00:00",
                     "action": "draft-apply",
@@ -10902,7 +10893,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             )
             stdout = io.StringIO()
 
-            with patch.dict(os.environ, {"AGENTFLOW_POLICY_EVENTS_LOG": str(event_log)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_POLICY_EVENTS_LOG": str(event_log)}, clear=False):
                 code = cli.policy_rollback_cli(
                     ["--config-dir", tmp, "--apply-id", apply_id, "--section", "cache", "--dry-run"],
                     stdout=stdout,
@@ -10910,7 +10901,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             payload = json.loads(stdout.getvalue())
-            self.assertEqual(payload["schema"], "agentflow.policy_draft_rollback.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.policy_draft_rollback.v1")
             self.assertEqual(payload["status"], "dry-run")
             self.assertEqual(payload["apply_id"], apply_id)
             self.assertEqual(payload["restored_sections"], ["cache"])
@@ -10933,7 +10924,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             payload = json.loads(stdout.getvalue())
-            self.assertEqual(payload["schema"], "agentflow.policy_bundle_rollback.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.policy_bundle_rollback.v1")
             self.assertEqual(payload["restored_sections"], ["cache"])
             self.assertEqual(payload["files"][0]["restored_from"], str(latest))
             self.assertEqual(cache_path.read_text(encoding="utf-8"), "exact_cache:\n  enabled: newest\n")
@@ -11039,7 +11030,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 "quality_signals": {"status": "success"},
                 "pattern_decisions": [
                     {
-                        "schema": "agentflow.pattern_decision_summary.v1",
+                        "schema": "tokenclaw.pattern_decision_summary.v1",
                         "decision_type": "routing",
                         "status": "applied",
                         "policy_source": "managed-recommended",
@@ -11047,7 +11038,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 ],
                 "pattern_policy_evidence": [
                     {
-                        "schema": "agentflow.managed_pattern_policy_evidence.v1",
+                        "schema": "tokenclaw.managed_pattern_policy_evidence.v1",
                         "source_surface": "codex_turn",
                         "app_family": "codex",
                         "action_family": "routing",
@@ -11091,14 +11082,14 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         from tokenclaw.store import stable_json
 
         entry = {
-            "schema": "agentflow.promotion_outcome_feedback_entry.v1",
+            "schema": "tokenclaw.promotion_outcome_feedback_entry.v1",
             "id": row_id,
             "created_at": "2026-06-15T07:00:00+00:00",
             "policy_id": f"local-policy-{action_family}",
             "action_family": action_family,
             "policy_section": action_family,
             "rule_source": "managed-recommended",
-            "source_evidence_schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "source_evidence_schema": "tokenclaw.optimization_promotion_rollout_actions.v1",
             "status": status,
             "recommendation": recommendation,
             "rollback_needed": recommendation == "rollback",
@@ -11132,7 +11123,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
             rule_id=f"rule-{action_family}",
             candidate_id=f"candidate-{action_family}",
             action_id=f"action-{action_family}",
-            source_evidence_schema="agentflow.optimization_promotion_rollout_actions.v1",
+            source_evidence_schema="tokenclaw.optimization_promotion_rollout_actions.v1",
             status=status,
             recommendation=recommendation,
             rollback_needed=1 if recommendation == "rollback" else 0,
@@ -11154,7 +11145,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._enqueue_feedback(store)
@@ -11169,7 +11160,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.managed_feedback_status.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.managed_feedback_status.v1")
         self.assertEqual(payload["summary"]["queued"], 1)
         self.assertEqual(payload["summary"]["due"], 1)
         self.assertEqual(payload["pattern_evidence"]["queue_rows"], 1)
@@ -11193,7 +11184,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._enqueue_feedback(store)
@@ -11228,7 +11219,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._enqueue_feedback(store)
@@ -11239,8 +11230,8 @@ class ManagedFeedbackCliTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                 },
                 clear=False,
             ):
@@ -11280,7 +11271,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         ManagedFeedbackFlushClient.text = "managed unavailable"
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._enqueue_feedback(store)
@@ -11291,9 +11282,9 @@ class ManagedFeedbackCliTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
-                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS": "3",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS": "3",
                 },
                 clear=False,
             ):
@@ -11317,7 +11308,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._log_post_promotion_feedback(
@@ -11350,8 +11341,8 @@ class ManagedFeedbackCliTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                 },
                 clear=False,
             ):
@@ -11368,7 +11359,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
             "http://managed.test/v1/promotion-blocker-action-outcome-rollups",
         )
         sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
-        self.assertEqual(sent_payload["schema"], "agentflow.promotion_blocker_action_outcome_rollup_ingest.v1")
+        self.assertEqual(sent_payload["schema"], "tokenclaw.promotion_blocker_action_outcome_rollup_ingest.v1")
         self.assertEqual(len(sent_payload["rollups"]), 2)
         rollups = {row["local_action_family"]: row for row in sent_payload["rollups"]}
         self.assertEqual(rollups["routing"]["applied_count"], 3)
@@ -11397,7 +11388,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         from tokenclaw.store import Store
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._log_post_promotion_feedback(
@@ -11417,8 +11408,8 @@ class ManagedFeedbackCliTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                 },
                 clear=False,
             ):
@@ -11440,7 +11431,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         from tokenclaw.store import Store, stable_json
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 store.log_call(
@@ -11486,7 +11477,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 store.conn.close()
 
         self.assertEqual(code, 0)
-        self.assertEqual(payload["schema"], "agentflow.sqlite_maintenance_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.sqlite_maintenance_run.v1")
         self.assertEqual(payload["status"], "dry-run")
         self.assertEqual(payload["retention_days"], 7)
         self.assertEqual(payload["deleted_rows"]["calls"], 1)

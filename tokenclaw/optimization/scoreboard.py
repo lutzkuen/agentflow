@@ -14,7 +14,7 @@ def openai_scoreboard_cli(argv: Sequence[str] | None = None, *, stdout: Any = No
     parser.add_argument(
         "--db",
         default=default_db_path(),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument(
         "--limit",

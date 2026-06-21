@@ -9,7 +9,7 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-FEEDBACK_SCHEMA = "agentflow.terminal_output_compaction_lifecycle_feedback.v1"
+FEEDBACK_SCHEMA = "tokenclaw.terminal_output_compaction_lifecycle_feedback.v1"
 SOURCE_SURFACE = "terminal_output_compaction_lifecycle"
 
 
@@ -238,9 +238,9 @@ def _rollout_snapshots(result: dict[str, Any], *, command: str) -> list[dict[str
 
 def _action_snapshots(result: dict[str, Any], *, command: str) -> list[dict[str, Any]]:
     schema = str(result.get("schema") or "")
-    if schema == "agentflow.terminal_output_compaction_dry_run.v1":
+    if schema == "tokenclaw.terminal_output_compaction_dry_run.v1":
         return _dry_run_snapshots(result)
-    if schema == "agentflow.terminal_output_compaction_impact.v1":
+    if schema == "tokenclaw.terminal_output_compaction_impact.v1":
         return _impact_snapshots(result)
     return _rollout_snapshots(result, command=command)
 

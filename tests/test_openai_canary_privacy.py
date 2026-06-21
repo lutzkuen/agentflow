@@ -125,17 +125,17 @@ class FakeQueuedFeedbackStore:
 class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
-        self.saved_routing_rules = os.environ.get("AGENTFLOW_ROUTING_RULES")
+        self.saved_routing_rules = os.environ.get("TOKENCLAW_ROUTING_RULES")
 
     def tearDown(self) -> None:
         self.store.conn.close()
         self.tmpdir.cleanup()
         if self.saved_routing_rules is None:
-            os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
+            os.environ.pop("TOKENCLAW_ROUTING_RULES", None)
         else:
-            os.environ["AGENTFLOW_ROUTING_RULES"] = self.saved_routing_rules
+            os.environ["TOKENCLAW_ROUTING_RULES"] = self.saved_routing_rules
         importlib.reload(router_module)
 
     def _log_openai_call(
@@ -242,7 +242,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
 
         report = build_openai_routing_report(self.store, limit=10)
 
-        self.assertEqual(report["schema"], "agentflow.openai_routing_opportunity.v1")
+        self.assertEqual(report["schema"], "tokenclaw.openai_routing_opportunity.v1")
         self.assertEqual(report["summary"]["openai_call_count"], 5)
         self.assertEqual(report["summary"]["candidate_count"], 1)
         candidate = report["candidates"][0]
@@ -289,7 +289,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
                 ]
             )
         )
-        os.environ["AGENTFLOW_ROUTING_RULES"] = str(policy_path)
+        os.environ["TOKENCLAW_ROUTING_RULES"] = str(policy_path)
         router = importlib.reload(router_module)
 
         routed, meta = router.route_openai_model(
@@ -326,7 +326,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
         self._log_openai_call(call_id="privacy-canary-e1", cohort="canary_applied", status_code=500)
 
         impact = build_openai_canary_impact_report(self.store, limit=10)
-        self.assertEqual(impact["schema"], "agentflow.openai_canary_impact.v1")
+        self.assertEqual(impact["schema"], "tokenclaw.openai_canary_impact.v1")
         self.assertEqual(impact["summary"]["observed_openai_canary_metadata_row_count"], 4)
         self.assertEqual(impact["candidates"][0]["candidate_id"], "openai-canary-candidate-privacy")
         self.assertEqual(impact["candidates"][0]["cohort_counts"]["canary_applied"], 3)
@@ -339,7 +339,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
         exit_code = cli.openai_canary_impact_cli(["--db", self.db_path, "--limit", "10"], stdout=cli_output)
         self.assertEqual(exit_code, 0)
         cli_payload = json.loads(cli_output.getvalue())
-        self.assertEqual(cli_payload["schema"], "agentflow.openai_canary_impact.v1")
+        self.assertEqual(cli_payload["schema"], "tokenclaw.openai_canary_impact.v1")
         _assert_openai_canary_privacy_clean(self, cli_payload)
 
         with patch.dict(
@@ -358,7 +358,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
             with patch.object(router_module, "ROUTING_RULES_PATH", "/home/lutz/private/canary_secret.py"):
                 readiness = asyncio.run(stats_openai_canary_readiness(self.store, limit=10))
 
-        self.assertEqual(readiness["schema"], "agentflow.openai_canary_readiness.v1")
+        self.assertEqual(readiness["schema"], "tokenclaw.openai_canary_readiness.v1")
         self.assertTrue(readiness["read_only"])
         self.assertFalse(readiness["provider_calls_made"])
         self.assertFalse(readiness["managed_server_calls_made"])
@@ -372,7 +372,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
     def test_openai_canary_impact_includes_activation_lifecycle_feedback_state(self) -> None:
         now = utc_now()
         event = {
-            "schema": "agentflow.openai_optimization_lifecycle_feedback.v1",
+            "schema": "tokenclaw.openai_optimization_lifecycle_feedback.v1",
             "event_type": "activation_staged_optimization_lifecycle",
             "occurred_at": now,
             "provider": "openai",
@@ -458,7 +458,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
             **_raw_like_extra_fields(),
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "1"}):
             asyncio.run(
                 record_managed_outcome_feedback(
                     store=store,
@@ -524,7 +524,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
         }
         crunch_meta = {
             "old_context_summarization": {
-                "schema": "agentflow.openai_old_context_summary.v1",
+                "schema": "tokenclaw.openai_old_context_summary.v1",
                 "enabled": True,
                 "status": "skipped",
                 "applied": False,
@@ -557,7 +557,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
             **_raw_like_extra_fields(),
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "1"}):
             asyncio.run(
                 record_managed_outcome_feedback(
                     store=store,
@@ -654,7 +654,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
             **_raw_like_extra_fields(),
         }
 
-        with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "1"}):
             asyncio.run(
                 record_managed_outcome_feedback(
                     store=store,

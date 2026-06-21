@@ -18,13 +18,13 @@ import tokenclaw.routing_experiments as experiments
 
 class RoutingExperimentPolicyTest(unittest.TestCase):
     ENV_KEYS = (
-        "AGENTFLOW_ROUTING_EXPERIMENTS",
-        "AGENTFLOW_ROUTING_EXPERIMENTS_ENABLED",
-        "AGENTFLOW_ROUTING_EXPERIMENT_SAMPLE_RATE",
-        "AGENTFLOW_ROUTING_EXPERIMENT_DAILY_BUDGET_USD",
-        "AGENTFLOW_ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD",
-        "AGENTFLOW_RECOMMENDATION_ENABLED",
-        "AGENTFLOW_RECOMMENDATION_SERVER_URL",
+        "TOKENCLAW_ROUTING_EXPERIMENTS",
+        "TOKENCLAW_ROUTING_EXPERIMENTS_ENABLED",
+        "TOKENCLAW_ROUTING_EXPERIMENT_SAMPLE_RATE",
+        "TOKENCLAW_ROUTING_EXPERIMENT_DAILY_BUDGET_USD",
+        "TOKENCLAW_ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD",
+        "TOKENCLAW_RECOMMENDATION_ENABLED",
+        "TOKENCLAW_RECOMMENDATION_SERVER_URL",
         "HOME",
     )
 
@@ -129,7 +129,7 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
 
     def test_streaming_shadow_budget_exhaustion_uses_existing_budget_controls(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 store.log_routing_experiment(
                     id="spent-streaming-budget",
@@ -401,7 +401,7 @@ eligibility_overrides:
             )
             os.chdir(tmp_path)
             manual = importlib.reload(experiments)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             try:
                 store.log_routing_experiment(
                     id="spent-category-budget",
@@ -1073,7 +1073,7 @@ categories:
             )
             os.chdir(tmp_path)
             manual = importlib.reload(experiments)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             try:
                 store.log_routing_experiment(
                     id="spent-budget",
@@ -1155,7 +1155,7 @@ categories:
 
     def test_report_explains_unqualified_traffic_with_decision_reasons(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 store.log_call(
                     id="call-streaming-skip",
@@ -1239,7 +1239,7 @@ eligibility_overrides:
             )
             os.chdir(tmp_path)
             manual = importlib.reload(experiments)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             try:
                 store.log_call(
                     id="claude-large-stream-secret",
@@ -1364,7 +1364,7 @@ eligibility_overrides:
             )
             os.chdir(tmp_path)
             manual = importlib.reload(experiments)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             try:
                 store.log_call(
                     id="claude-stream-tool-result-secret",
@@ -1386,7 +1386,7 @@ eligibility_overrides:
                         "category": "tool-result",
                         "text_chars": 90000,
                         "routing_experiment": {
-                            "schema": "agentflow.routing_experiment_decision.v1",
+                            "schema": "tokenclaw.routing_experiment_decision.v1",
                             "provider": "anthropic",
                             "source_surface": "anthropic_messages",
                             "status": "selected",
@@ -1424,7 +1424,7 @@ eligibility_overrides:
                         "category": "chat",
                         "text_chars": 90000,
                         "routing_experiment": {
-                            "schema": "agentflow.routing_experiment_decision.v1",
+                            "schema": "tokenclaw.routing_experiment_decision.v1",
                             "provider": "anthropic",
                             "source_surface": "anthropic_messages",
                             "status": "skipped",
@@ -1474,7 +1474,7 @@ eligibility_overrides:
                 store.conn.close()
 
         yield_report = report["claude_shadow_yield"]
-        self.assertEqual(yield_report["schema"], "agentflow.claude_shadow_routing_yield.v1")
+        self.assertEqual(yield_report["schema"], "tokenclaw.claude_shadow_routing_yield.v1")
         self.assertEqual(yield_report["summary"]["observed_call_count"], 2)
         self.assertEqual(yield_report["summary"]["selected_count"], 1)
         self.assertEqual(yield_report["summary"]["skipped_count"], 1)
@@ -1501,7 +1501,7 @@ eligibility_overrides:
 
     def test_report_counts_codex_app_event_decision_reasons_without_sample_rows(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 store.log_codex_app_event(
                     id="codex-start-skip",
@@ -1519,7 +1519,7 @@ eligibility_overrides:
                         "status": "skipped",
                         "reason": "codex-turn-start-model-field-absent",
                         "routing_experiment": {
-                            "schema": "agentflow.routing_experiment_decision.v1",
+                            "schema": "tokenclaw.routing_experiment_decision.v1",
                             "provider": "openai",
                             "source_surface": "codex_turn",
                             "status": "skipped",
@@ -1548,7 +1548,7 @@ eligibility_overrides:
 
     def test_store_attaches_shadow_coverage_metadata_to_uncovered_proxy_calls(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 store.log_call(
                     id="uncovered-openai-call",
@@ -1584,7 +1584,7 @@ eligibility_overrides:
         routing = json.loads(row["routing_json"])
         experiment = routing["routing_experiment"]
         self.assertEqual(row["source_surface"], "openai_chat")
-        self.assertEqual(experiment["schema"], "agentflow.routing_experiment_decision.v1")
+        self.assertEqual(experiment["schema"], "tokenclaw.routing_experiment_decision.v1")
         self.assertEqual(experiment["status"], "skipped")
         self.assertEqual(experiment["reason"], "routing-experiment-decision-missing")
         self.assertEqual(experiment["coverage_class"], "blocked")
@@ -1602,7 +1602,7 @@ eligibility_overrides:
 
     def test_report_denominator_includes_codex_turns_without_sample_rows(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 store.log_codex_app_event(
                     id="codex-uncovered-turn",
@@ -1647,7 +1647,7 @@ eligibility_overrides:
 
     def test_report_groups_anthropic_openai_and_codex_samples_separately(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for idx, (provider, surface, requested, routed, shadow) in enumerate([
                     ("anthropic", "anthropic_messages", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
@@ -1731,7 +1731,7 @@ eligibility_overrides:
             shadow_cost_est_usd=0.004,
         )
 
-        self.assertEqual(result["schema"], "agentflow.routing_experiment_feedback.v1")
+        self.assertEqual(result["schema"], "tokenclaw.routing_experiment_feedback.v1")
         self.assertEqual(result["mode"], "shadow_candidate_pass_through")
         self.assertTrue(result["counterfactual"])
         self.assertTrue(result["shadow_only"])
@@ -1785,7 +1785,7 @@ eligibility_overrides:
         event = experiments.routing_experiment_outcome_event(feedback)
 
         assert_managed_egress_safe(event)
-        self.assertEqual(event["schema"], "agentflow.routing_experiment_outcome_event.v1")
+        self.assertEqual(event["schema"], "tokenclaw.routing_experiment_outcome_event.v1")
         self.assertEqual(event["candidate"]["mode"], "shadow_candidate_pass_through")
         self.assertTrue(event["candidate"]["counterfactual"])
         self.assertTrue(event["candidate"]["shadow_only"])
@@ -1852,7 +1852,7 @@ eligibility_overrides:
         event = experiments.routing_experiment_outcome_event(feedback)
 
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 meta = asyncio.run(
                     queue_policy_event_feedback(
@@ -1876,14 +1876,14 @@ eligibility_overrides:
         self.assertEqual(row["status"], "queued")
         self.assertEqual(row["attempts"], 0)
         payload = json.loads(row["payload_json"])
-        self.assertEqual(payload["schema"], "agentflow.routing_experiment_outcome_event.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.routing_experiment_outcome_event.v1")
         assert_managed_egress_safe(payload)
         self.assertNotIn("claude-sonnet-4-6", row["payload_json"])
         self.assertNotIn("claude-haiku-4-5-20251001", row["payload_json"])
 
     def test_enabled_managed_mode_can_queue_routing_experiment_for_explicit_flush(self):
         event = experiments.routing_experiment_outcome_event({
-            "schema": "agentflow.routing_experiment_feedback.v1",
+            "schema": "tokenclaw.routing_experiment_feedback.v1",
             "experiment_id": "exp-1",
             "sampled": True,
             "status": "compared",
@@ -1904,10 +1904,10 @@ eligibility_overrides:
         })
 
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
-                os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
-                os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+                os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+                os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
                 meta = asyncio.run(
                     queue_policy_event_feedback(
                         store,
@@ -2026,7 +2026,7 @@ similarity_threshold: 0.86
             tmp_path,
             daily_budget_usd=sample_kwargs.pop("daily_budget_usd", 10.0),
         )
-        store = Store(str(tmp_path / "agentflow.sqlite3"))
+        store = Store(str(tmp_path / "tokenclaw.sqlite3"))
         try:
             for idx in range(sample_count):
                 self._log_shadow_promotion_sample(store, idx=idx, **sample_kwargs)
@@ -2102,7 +2102,7 @@ similarity_threshold: 0.86
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             manual = self._reload_with_promotion_fixture_policy(tmp_path)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             try:
                 for idx in range(3):
                     self._log_shadow_promotion_sample(store, idx=idx, mode="shadow_candidate_pass_through")
@@ -2120,7 +2120,7 @@ similarity_threshold: 0.86
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             manual = self._reload_with_promotion_fixture_policy(tmp_path)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             try:
                 for idx in range(3):
                     self._log_shadow_promotion_sample(store, idx=idx, stream=True)
@@ -2138,7 +2138,7 @@ similarity_threshold: 0.86
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             self._reload_with_promotion_fixture_policy(tmp_path)
-            db_path = str(tmp_path / "agentflow.sqlite3")
+            db_path = str(tmp_path / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 for idx in range(3):

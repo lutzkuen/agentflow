@@ -36,20 +36,20 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
     def setUp(self):
         ManagedFeedbackFlushClient.calls = []
         self.tmp = TemporaryDirectory()
-        self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
-        self.old_secret = os.environ.get("AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET")
-        os.environ["AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET"] = ""
+        self.old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+        self.old_secret = os.environ.get("TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET")
+        os.environ["TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET"] = ""
 
     def tearDown(self):
         if self.old_event_log is None:
-            os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
         else:
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = self.old_event_log
         if self.old_secret is None:
-            os.environ.pop("AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET", None)
+            os.environ.pop("TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET", None)
         else:
-            os.environ["AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET"] = self.old_secret
+            os.environ["TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET"] = self.old_secret
         self.tmp.cleanup()
 
     def _policy_path(self, config_dir: str) -> Path:
@@ -58,7 +58,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
         path.write_text(
             yaml.safe_dump(
                 {
-                    "schema": "agentflow.openai_cache_replay_canary_policy.v1",
+                    "schema": "tokenclaw.openai_cache_replay_canary_policy.v1",
                     "policy_source": "managed-recommended",
                     "pattern_rules": [
                         {
@@ -82,7 +82,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
                                 "scope": "session",
                             },
                             "rollout": {
-                                "schema": "agentflow.pattern_policy_rollout.v1",
+                                "schema": "tokenclaw.pattern_policy_rollout.v1",
                                 "recommendation_mode": "canary",
                                 "canary_enabled": True,
                                 "canary_fraction": 0.25,
@@ -101,7 +101,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
 
     def _bundle(self, **overrides):
         action = {
-            "schema": "agentflow.optimization_rollout_action.v1",
+            "schema": "tokenclaw.optimization_rollout_action.v1",
             "action_id": "openai-cache-replay-rollout-action",
             "action_type": "widen",
             "target_candidate_id": "openai-cache-replay-candidate",
@@ -127,7 +127,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
                 "openai_cache_replay": {"sample_counts": {"applied": 4, "holdout": 4}},
             },
             "action": {
-                "schema": "agentflow.openai_cache_replay_rollout_review_action.v1",
+                "schema": "tokenclaw.openai_cache_replay_rollout_review_action.v1",
                 "status": "review-local-openai-cache-replay-rule",
                 "local_action": "cache",
                 "locally_executable": True,
@@ -183,7 +183,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
             },
         }
         bundle = {
-            "schema": "agentflow.openai_cache_replay_rollout_actions.v1",
+            "schema": "tokenclaw.openai_cache_replay_rollout_actions.v1",
             "generated_at": "2026-06-12T15:00:00+00:00",
             "expires_at": "2099-01-01T00:00:00+00:00",
             "summary": {
@@ -233,14 +233,14 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
         return attach_openai_cache_replay_rollout_provenance(
             bundle,
             secret="cache-replay-secret",
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="managed-test",
             key_id="cache-replay-key",
             generated_at="2026-06-12T15:00:00+00:00",
         )
 
     def test_signed_openai_cache_replay_actions_review_dry_run_and_apply_overlay(self):
-        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "cache-replay-secret"}, clear=False):
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "cache-replay-secret"}, clear=False):
             policy_path = self._policy_path(tmp)
             before = policy_path.read_text(encoding="utf-8")
             signed = self._signed(self._bundle())
@@ -254,7 +254,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
             )
             self.assertEqual(review_code, 0)
             review = json.loads(review_out.getvalue())
-            self.assertEqual(review["schema"], "agentflow.openai_cache_replay_rollout_actions_review.v1")
+            self.assertEqual(review["schema"], "tokenclaw.openai_cache_replay_rollout_actions_review.v1")
             self.assertEqual(review["provenance"]["status"], "verified")
             self.assertEqual(review["planned_action_count"], 1)
             self.assertEqual(review["actions"][0]["proposed_edit"]["recommended_fraction"], 0.5)
@@ -267,7 +267,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
             )
             self.assertEqual(dry_code, 0)
             dry_run = json.loads(dry_out.getvalue())
-            self.assertEqual(dry_run["schema"], "agentflow.openai_cache_replay_rollout_actions_dry_run.v1")
+            self.assertEqual(dry_run["schema"], "tokenclaw.openai_cache_replay_rollout_actions_dry_run.v1")
             self.assertTrue(dry_run["dry_run"])
             self.assertTrue(dry_run["files"][0]["changed"])
             self.assertEqual(policy_path.read_text(encoding="utf-8"), before)
@@ -280,7 +280,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
             )
             self.assertEqual(apply_code, 0)
             applied = json.loads(apply_out.getvalue())
-            self.assertEqual(applied["schema"], "agentflow.openai_cache_replay_rollout_actions_apply.v1")
+            self.assertEqual(applied["schema"], "tokenclaw.openai_cache_replay_rollout_actions_apply.v1")
             self.assertTrue(applied["wrote_policy_files"])
             self.assertEqual(applied["applied_sections"], ["cache"])
             self.assertEqual(len(list(Path(tmp).glob("cache_canary_policy.yaml.bak-*"))), 1)
@@ -310,7 +310,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
 
         for name, bundle in cases:
             with self.subTest(name=name):
-                with TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "cache-replay-secret"}, clear=False):
+                with TemporaryDirectory() as tmp, patch.dict(os.environ, {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "cache-replay-secret"}, clear=False):
                     policy_path = self._policy_path(tmp)
                     before = policy_path.read_text(encoding="utf-8")
                     out = io.StringIO()
@@ -331,14 +331,14 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict(
             os.environ,
             {
-                "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "cache-replay-secret",
-                "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                "TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "cache-replay-secret",
+                "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
             },
             clear=False,
         ):
             self._policy_path(tmp)
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             signed = self._signed(self._bundle())
             out = io.StringIO()
             with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):

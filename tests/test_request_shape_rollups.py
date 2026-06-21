@@ -41,7 +41,7 @@ from tokenclaw.store import SQLiteStore, stable_json, utc_now
 class RequestShapeRollupTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -51,7 +51,7 @@ class RequestShapeRollupTests(unittest.TestCase):
     def test_follow_up_candidates_reports_explicit_no_source_traffic_reason(self):
         report = build_request_shape_follow_up_candidates([], limit=10)
 
-        self.assertEqual(report["schema"], "agentflow.request_shape_follow_up_candidates.v1")
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_follow_up_candidates.v1")
         self.assertEqual(report["status"], "no-source-traffic")
         self.assertEqual(report["summary"]["rollup_count"], 0)
         self.assertEqual(report["summary"]["top_next_action"], "emit-request-shape-rollups")
@@ -99,7 +99,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
                 cache_json=stable_json({"status": "skipped", "reason": "codex-app-cache-disabled"}),
                 event_window_json=stable_json({
-                    "schema": "agentflow.codex_app_event_window.v1",
+                    "schema": "tokenclaw.codex_app_event_window.v1",
                     "workflow_phase": "tool-execution",
                     "input_text_chars": 42_000,
                     "method_counts": {"turn/start": 1, "item/commandExecution/outputDelta": 4},
@@ -118,7 +118,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["summary"]["rows_considered"], 2)
         self.assertEqual(report["summary"]["metadata_window_backfill_rows"], 2)
         self.assertGreaterEqual(report["summary"]["rollup_count"], 1)
-        self.assertEqual(follow_up["schema"], "agentflow.request_shape_follow_up_candidates.v1")
+        self.assertEqual(follow_up["schema"], "tokenclaw.request_shape_follow_up_candidates.v1")
         self.assertEqual(follow_up["status"], "candidates-ranked")
         self.assertEqual(follow_up["summary"]["rows_considered"], 2)
         self.assertGreaterEqual(follow_up["summary"]["ranked_candidate_count"], 1)
@@ -150,7 +150,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def _cache_replay_hit_recovery_smoke(self) -> dict[str, object]:
         return {
-            "schema": "agentflow.cache_replay_hit_recovery_smoke.v1",
+            "schema": "tokenclaw.cache_replay_hit_recovery_smoke.v1",
             "status": "hit-recovered",
             "reason": "synthetic-repeat-exact-cache-hit",
             "target_rule_id": "local-openai-cache-replay-canary-ae8404ee817f89f4",
@@ -194,7 +194,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         fingerprint_available: bool = False,
     ) -> dict[str, object]:
         return {
-            "schema": "agentflow.cache_file_dependency_audit.v1",
+            "schema": "tokenclaw.cache_file_dependency_audit.v1",
             "file_watch_enabled": True,
             "snapshot_root_policy": "cwd-relative",
             "root_path_included": False,
@@ -228,15 +228,15 @@ class RequestShapeRollupTests(unittest.TestCase):
         decision: str = "review-only-recommendation",
     ) -> dict[str, object]:
         return {
-            "schema": "agentflow.managed_activation_preview_outcomes.v1",
+            "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
             "review_only": True,
             "outcomes": [
                 {
-                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                     "handoff_ref": "managed-preview-cache-ref",
                     "preview_ref": "managed-preview-cache-preview",
                     "local_action_family": "cache",
-                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "evidence_schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                     "classification": classification,
                     "decision": decision,
                     "next_action": next_action,
@@ -284,7 +284,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             managed_preview_outcomes=self._managed_tool_cache_preview_outcomes(),
         )
 
-        self.assertEqual(report["schema"], "agentflow.request_shape_tool_cache_replay_evidence.v1")
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_tool_cache_replay_evidence.v1")
         self.assertEqual(report["summary"]["stable_dependency_evidence_rows"], 12)
         self.assertEqual(report["summary"]["review_only_candidate_count"], 1)
         self.assertEqual(report["summary"]["review_ready_rows"], 12)
@@ -295,7 +295,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["acceptance"]["review_only_candidates_do_not_allow_savings_floor_without_replay_proof"])
         self.assertTrue(report["acceptance"]["review_only_candidates_require_live_repeat_or_observed_hit_proof"])
         review = report["review_only_candidates"]
-        self.assertEqual(review["schema"], "agentflow.request_shape_tool_cache_review_candidates.v1")
+        self.assertEqual(review["schema"], "tokenclaw.request_shape_tool_cache_review_candidates.v1")
         self.assertEqual(review["summary"]["review_only_candidate_count"], 1)
         self.assertEqual(review["summary"]["cache_entries_written"], 0)
         self.assertFalse(review["summary"]["policy_files_written"])
@@ -326,7 +326,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(candidate["privacy"]["cache_keys_included"])
         self.assertFalse(candidate["privacy"]["file_paths_included"])
         previews = report["managed_local_replay_previews"]
-        self.assertEqual(previews["schema"], "agentflow.request_shape_tool_cache_managed_local_replay_previews.v1")
+        self.assertEqual(previews["schema"], "tokenclaw.request_shape_tool_cache_managed_local_replay_previews.v1")
         self.assertEqual(previews["summary"]["preview_count"], 1)
         self.assertEqual(previews["summary"]["review_ready_preview_rows"], 12)
         self.assertEqual(previews["summary"]["managed_preview_required_rows"], 12)
@@ -671,7 +671,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         report = build_request_shape_rollups_report(self.store, limit=20, persist=True, run_id="test-rollup")
 
-        self.assertEqual(report["schema"], "agentflow.request_shape_rollups.v1")
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_rollups.v1")
         self.assertTrue(report["persisted"])
         self.assertEqual(report["persisted_count"], 2)
         self.assertEqual(report["summary"]["rows_considered"], 4)
@@ -682,7 +682,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["snapshot_persisted"])
         self.assertEqual(report["snapshot_persisted_count"], 1)
         snapshot = report["rollup_snapshot"]
-        self.assertEqual(snapshot["schema"], "agentflow.request_shape_rollup_snapshot.v1")
+        self.assertEqual(snapshot["schema"], "tokenclaw.request_shape_rollup_snapshot.v1")
         self.assertEqual(snapshot["summary"]["rollup_count"], 2)
         self.assertEqual(snapshot["summary"]["ranked_candidate_count"], 2)
         self.assertEqual(snapshot["summary"]["top_readiness_state"], "activation-ready")
@@ -698,7 +698,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(latest_snapshot_report["snapshot_freshness"]["status"], "fresh")
         self.assertEqual(latest_snapshot_report["rollup_snapshot"]["summary"]["rollup_count"], 2)
         follow_up = report["follow_up_candidates"]
-        self.assertEqual(follow_up["schema"], "agentflow.request_shape_follow_up_candidates.v1")
+        self.assertEqual(follow_up["schema"], "tokenclaw.request_shape_follow_up_candidates.v1")
         self.assertEqual(follow_up["status"], "candidates-ranked")
         self.assertEqual(follow_up["summary"]["ranked_candidate_count"], 2)
         self.assertEqual(follow_up["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
@@ -814,7 +814,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         follow_up = report["follow_up_candidates"]
         top = follow_up["top_blocker_cohort"]
 
-        self.assertEqual(top["schema"], "agentflow.request_shape_blocker_cohort.v1")
+        self.assertEqual(top["schema"], "tokenclaw.request_shape_blocker_cohort.v1")
         self.assertEqual(top["rank"], 1)
         self.assertEqual(top["readiness_state"], "activation-ready")
         self.assertEqual(top["local_action_family"], "crunch")
@@ -960,7 +960,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         skipped_openai = dry_run["skipped_openai_blockers"]
         tool_replay_evidence = dry_run["tool_replay_evidence"]
 
-        self.assertEqual(dry_run["schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(dry_run["schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(dry_run["summary"]["replay_ready_cohort_count"], 1)
         self.assertEqual(dry_run["summary"]["skipped_cohort_count"], 3)
         self.assertEqual(dry_run["summary"]["projected_hits"], 1)
@@ -1008,7 +1008,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(
             skipped_openai["schema"],
-            "agentflow.request_shape_skipped_openai_cache_replay_blockers.v1",
+            "tokenclaw.request_shape_skipped_openai_cache_replay_blockers.v1",
         )
         self.assertEqual(skipped_openai["status"], "ranked")
         self.assertTrue(skipped_openai["read_only"])
@@ -1075,7 +1075,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(
             tool_replay_evidence["schema"],
-            "agentflow.request_shape_tool_cache_replay_evidence.v1",
+            "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
         )
         self.assertEqual(tool_replay_evidence["status"], "ranked")
         self.assertTrue(tool_replay_evidence["read_only"])
@@ -1102,7 +1102,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         dependency_coverage = tool_replay_evidence["dependency_fingerprint_coverage"]
         self.assertEqual(
             dependency_coverage["schema"],
-            "agentflow.request_shape_tool_cache_dependency_fingerprint_coverage.v1",
+            "tokenclaw.request_shape_tool_cache_dependency_fingerprint_coverage.v1",
         )
         self.assertEqual(dependency_coverage["coverage_decision"], "missing-stable-coverage")
         self.assertEqual(dependency_coverage["summary"]["missing_dependency_evidence_rows"], 1)
@@ -1182,7 +1182,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, rendered_tool_replay)
 
-        self.assertEqual(invalidation_evidence["schema"], "agentflow.request_shape_cache_invalidation_evidence.v1")
+        self.assertEqual(invalidation_evidence["schema"], "tokenclaw.request_shape_cache_invalidation_evidence.v1")
         self.assertEqual(invalidation_evidence["status"], "ranked")
         self.assertTrue(invalidation_evidence["read_only"])
         self.assertEqual(invalidation_evidence["summary"]["ranked_blocker_cohort_count"], 3)
@@ -1265,7 +1265,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(streaming_evidence["tool_cache_replay_enabled"])
         self.assertFalse(streaming_evidence["streaming_replay_enabled"])
 
-        self.assertEqual(classification["schema"], "agentflow.request_shape_cache_replay_blocker_classification.v1")
+        self.assertEqual(classification["schema"], "tokenclaw.request_shape_cache_replay_blocker_classification.v1")
         self.assertEqual(classification["status"], "classified")
         self.assertEqual(classification["summary"]["skipped_cohort_count"], 3)
         classes = {item["value"]: item["count"] for item in classification["class_breakdown"]}
@@ -1358,7 +1358,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             cache_extra={
                 "file_dependency_audit": stable_audit,
                 "file_dependency_fingerprint": {
-                    "schema": "agentflow.cache_file_dependency_fingerprint.v1",
+                    "schema": "tokenclaw.cache_file_dependency_fingerprint.v1",
                     "fingerprint_available": True,
                     "fingerprint_sha256": "sha256:raw-stable-dependency-fingerprint-must-not-leak",
                     "paths_included": False,
@@ -1374,7 +1374,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             cache_extra={
                 "file_dependency_audit": stale_audit,
                 "file_dependency_fingerprint": {
-                    "schema": "agentflow.cache_file_dependency_fingerprint.v1",
+                    "schema": "tokenclaw.cache_file_dependency_fingerprint.v1",
                     "fingerprint_available": True,
                     "fingerprint_sha256": "sha256:raw-stale-dependency-fingerprint-must-not-leak",
                     "paths_included": False,
@@ -1390,7 +1390,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             cache_extra={
                 "file_dependency_audit": unsafe_audit,
                 "file_dependency_fingerprint": {
-                    "schema": "agentflow.cache_file_dependency_fingerprint.v1",
+                    "schema": "tokenclaw.cache_file_dependency_fingerprint.v1",
                     "fingerprint_available": True,
                     "fingerprint_sha256": "sha256:raw-unsafe-dependency-fingerprint-must-not-leak",
                     "paths_included": False,
@@ -1406,7 +1406,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             cache_extra={
                 "file_dependency_audit": unknown_audit,
                 "file_dependency_fingerprint": {
-                    "schema": "agentflow.cache_file_dependency_fingerprint.v1",
+                    "schema": "tokenclaw.cache_file_dependency_fingerprint.v1",
                     "fingerprint_available": True,
                     "fingerprint_sha256": "sha256:raw-unknown-dependency-fingerprint-must-not-leak",
                     "paths_included": False,
@@ -1551,7 +1551,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(tool_replay["acceptance"]["reports_dependency_fingerprint_coverage_after_capture"])
         self.assertTrue(tool_replay["acceptance"]["reports_narrow_no_safe_invalidation_reason"])
         coverage = tool_replay["dependency_fingerprint_coverage"]
-        self.assertEqual(coverage["schema"], "agentflow.request_shape_tool_cache_dependency_fingerprint_coverage.v1")
+        self.assertEqual(coverage["schema"], "tokenclaw.request_shape_tool_cache_dependency_fingerprint_coverage.v1")
         self.assertEqual(coverage["coverage_decision"], "stable-coverage-observed")
         self.assertEqual(coverage["next_action"], "rank-safe-tool-cache-replay-readiness")
         self.assertEqual(coverage["summary"]["stable_dependency_evidence_rows"], 1)
@@ -1747,7 +1747,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         tool_replay = report["cache_replayability_dry_run"]["tool_replay_evidence"]
         rows_by_status = {row["file_dependency_status"]: row for row in tool_replay["cohorts"]}
 
-        self.assertEqual(tool_replay["schema"], "agentflow.request_shape_tool_cache_replay_evidence.v1")
+        self.assertEqual(tool_replay["schema"], "tokenclaw.request_shape_tool_cache_replay_evidence.v1")
         self.assertEqual(tool_replay["summary"]["stable_dependency_evidence_rows"], 2)
         self.assertEqual(tool_replay["summary"]["stale_dependency_evidence_rows"], 1)
         self.assertEqual(tool_replay["summary"]["unsafe_dependency_evidence_rows"], 1)
@@ -1918,7 +1918,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         )
         dry_run = report["cache_replayability_dry_run"]
 
-        self.assertEqual(dry_run["schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(dry_run["schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(dry_run["summary"]["replay_ready_cohort_count"], 3)
         self.assertEqual(dry_run["summary"]["remaining_replay_ready_cohort_count"], 1)
         self.assertEqual(dry_run["summary"]["handled_replay_ready_cohort_count"], 2)
@@ -2281,7 +2281,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             mark_handled_cache_replay_cohorts=False,
         )
 
-        self.assertEqual(report["schema"], "agentflow.request_shape_cache_replay_canary_stage.v1")
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_cache_replay_canary_stage.v1")
         self.assertEqual(report["status"], "staged")
         self.assertTrue(report["ok"])
         self.assertTrue(report["dry_run"])
@@ -2314,11 +2314,11 @@ class RequestShapeRollupTests(unittest.TestCase):
         )
 
         action = report["top_stage_action"]
-        self.assertEqual(action["schema"], "agentflow.request_shape_cache_replay_canary_action.v1")
+        self.assertEqual(action["schema"], "tokenclaw.request_shape_cache_replay_canary_action.v1")
         self.assertEqual(action["action_type"], "stage-local-openai-cache-replay-canary")
         self.assertEqual(action["target_local_policy"], "cache_canary_policy")
         self.assertEqual(action["target_local_rule_file"], "cache_canary_policy.yaml")
-        self.assertEqual(action["target_cache_policy"]["schema"], "agentflow.request_shape_cache_replay_target_policy.v1")
+        self.assertEqual(action["target_cache_policy"]["schema"], "tokenclaw.request_shape_cache_replay_target_policy.v1")
         self.assertEqual(action["target_cache_policy"]["policy_section"], "cache.pattern_rules")
         self.assertEqual(action["target_cache_policy"]["target_local_rule_file"], "cache_canary_policy.yaml")
         self.assertFalse(action["target_cache_policy"]["rules_path_included"])
@@ -2348,7 +2348,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(action["holdout_fraction"], 0.2)
         self.assertTrue(action["canary_applied_eligible"])
         self.assertTrue(action["canary_holdout_eligible"])
-        self.assertEqual(action["projected_lifecycle"]["schema"], "agentflow.request_shape_cache_replay_canary_projected_lifecycle.v1")
+        self.assertEqual(action["projected_lifecycle"]["schema"], "tokenclaw.request_shape_cache_replay_canary_projected_lifecycle.v1")
         self.assertGreater(action["projected_lifecycle"]["projected_canary_applied_count"], 0)
         self.assertGreater(action["projected_lifecycle"]["projected_canary_holdout_count"], 0)
         self.assertGreater(action["projected_lifecycle"]["projected_applied_hits"], 0)
@@ -2380,9 +2380,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(action["lifecycle_metadata"]["canary_holdout_eligible"])
         self.assertGreater(action["lifecycle_metadata"]["projected_canary_applied_count"], 0)
         self.assertGreater(action["lifecycle_metadata"]["projected_canary_holdout_count"], 0)
-        self.assertEqual(action["lifecycle_metadata"]["impact_report"], "agentflow.openai_cache_replay_impact.v1")
+        self.assertEqual(action["lifecycle_metadata"]["impact_report"], "tokenclaw.openai_cache_replay_impact.v1")
         skipped_guards = report["skipped_cohort_guards"]
-        self.assertEqual(skipped_guards["schema"], "agentflow.request_shape_cache_replay_canary_skipped_guards.v1")
+        self.assertEqual(skipped_guards["schema"], "tokenclaw.request_shape_cache_replay_canary_skipped_guards.v1")
         self.assertGreaterEqual(skipped_guards["tool_cohort_count"], 1)
         self.assertGreaterEqual(skipped_guards["streaming_cohort_count"], 1)
         self.assertGreaterEqual(skipped_guards["invalidation_missing_cohort_count"], 1)
@@ -2420,7 +2420,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(rule["id"], "local-openai-cache-replay-canary-ae8404ee817f89f4")
         self.assertEqual(rule["policy_source"], "local-manual")
-        self.assertEqual(rule["target_cache_policy"]["schema"], "agentflow.request_shape_cache_replay_target_policy.v1")
+        self.assertEqual(rule["target_cache_policy"]["schema"], "tokenclaw.request_shape_cache_replay_target_policy.v1")
         self.assertEqual(rule["target_cache_policy"]["policy_section"], "cache.pattern_rules")
         self.assertEqual(rule["target_cache_policy"]["target_local_policy"], "cache_rules")
         self.assertEqual(rule["target_cache_policy"]["target_local_rule_file"], "cache_rules.yaml")
@@ -2444,8 +2444,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(rule["rollout"]["canary_unit"], "request_fingerprint")
 
         graduation = rule["graduation"]
-        self.assertEqual(graduation["schema"], "agentflow.request_shape_cache_replay_shape_activation.v1")
-        self.assertEqual(graduation["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(graduation["schema"], "tokenclaw.request_shape_cache_replay_shape_activation.v1")
+        self.assertEqual(graduation["source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(graduation["source_reason"], "replay-ready-exact-non-tool-shape")
         self.assertEqual(graduation["sample_count"], 49)
         self.assertEqual(graduation["rank"], 1)
@@ -2478,7 +2478,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(rule["id"], "local-openai-cache-replay-canary-204ae274924d75dd")
         self.assertEqual(rule["policy_source"], "local-manual")
-        self.assertEqual(rule["target_cache_policy"]["schema"], "agentflow.request_shape_cache_replay_target_policy.v1")
+        self.assertEqual(rule["target_cache_policy"]["schema"], "tokenclaw.request_shape_cache_replay_target_policy.v1")
         self.assertEqual(rule["target_cache_policy"]["policy_section"], "cache.pattern_rules")
         self.assertEqual(rule["target_cache_policy"]["target_local_policy"], "cache_rules")
         self.assertEqual(rule["target_cache_policy"]["target_local_rule_file"], "cache_rules.yaml")
@@ -2502,8 +2502,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(rule["rollout"]["canary_unit"], "request_fingerprint")
 
         graduation = rule["graduation"]
-        self.assertEqual(graduation["schema"], "agentflow.request_shape_cache_replay_shape_activation.v1")
-        self.assertEqual(graduation["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(graduation["schema"], "tokenclaw.request_shape_cache_replay_shape_activation.v1")
+        self.assertEqual(graduation["source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(graduation["source_reason"], "replay-ready-exact-non-tool-shape")
         self.assertEqual(graduation["sample_count"], 10)
         self.assertEqual(graduation["rank"], 1)
@@ -2538,7 +2538,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(rule["id"], "local-openai-cache-replay-canary-3acbfbd015741a58")
         self.assertEqual(rule["policy_source"], "local-manual")
-        self.assertEqual(rule["target_cache_policy"]["schema"], "agentflow.request_shape_cache_replay_target_policy.v1")
+        self.assertEqual(rule["target_cache_policy"]["schema"], "tokenclaw.request_shape_cache_replay_target_policy.v1")
         self.assertEqual(rule["target_cache_policy"]["policy_section"], "cache.pattern_rules")
         self.assertEqual(rule["target_cache_policy"]["target_local_policy"], "cache_rules")
         self.assertEqual(rule["target_cache_policy"]["target_local_rule_file"], "cache_rules.yaml")
@@ -2562,8 +2562,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(rule["rollout"]["canary_unit"], "request_fingerprint")
 
         graduation = rule["graduation"]
-        self.assertEqual(graduation["schema"], "agentflow.request_shape_cache_replay_shape_activation.v1")
-        self.assertEqual(graduation["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(graduation["schema"], "tokenclaw.request_shape_cache_replay_shape_activation.v1")
+        self.assertEqual(graduation["source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(graduation["source_reason"], "replay-ready-exact-non-tool-shape")
         self.assertEqual(graduation["sample_count"], 8)
         self.assertEqual(graduation["rank"], 1)
@@ -2722,7 +2722,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.request_shape_cache_replay_canary_stage.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.request_shape_cache_replay_canary_stage.v1")
         self.assertEqual(payload["staged_canary_count"], 1)
         self.assertEqual(payload["top_stage_action"]["conditions"]["source_surface"], "openai_responses")
         self.assertEqual(payload["top_stage_action"]["conditions"]["endpoint"], "responses")
@@ -2771,7 +2771,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             rules_path=policy_path,
         )
 
-        self.assertEqual(result["schema"], "agentflow.request_shape_cache_replay_canary_apply.v1")
+        self.assertEqual(result["schema"], "tokenclaw.request_shape_cache_replay_canary_apply.v1")
         self.assertTrue(result["ok"])
         self.assertFalse(result["dry_run"])
         self.assertTrue(result["wrote_policy_files"])
@@ -2787,14 +2787,14 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(result["privacy"]["aggregate_only"])
 
         written = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
-        self.assertEqual(written["schema"], "agentflow.openai_cache_replay_canary_policy.v1")
+        self.assertEqual(written["schema"], "tokenclaw.openai_cache_replay_canary_policy.v1")
         self.assertEqual(written["policy_source"], "local-manual")
         self.assertEqual(len(written["pattern_rules"]), 1)
         rule = written["pattern_rules"][0]
         self.assertEqual(rule["id"], result["policy_id"])
         self.assertEqual(rule["policy_source"], "local-manual")
         self.assertEqual(rule["candidate_id"], result["cohort_id"])
-        self.assertEqual(rule["target_cache_policy"]["schema"], "agentflow.request_shape_cache_replay_target_policy.v1")
+        self.assertEqual(rule["target_cache_policy"]["schema"], "tokenclaw.request_shape_cache_replay_target_policy.v1")
         self.assertEqual(rule["target_cache_policy"]["policy_section"], "cache.pattern_rules")
         self.assertEqual(rule["target_cache_policy"]["target_local_rule_file"], "cache_canary_policy.yaml")
         self.assertFalse(rule["target_cache_policy"]["rules_path_included"])
@@ -2811,7 +2811,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(rule["action"]["ttl_seconds"], 3600)
         self.assertEqual(rule["rollout"]["canary_fraction"], 0.05)
         self.assertEqual(rule["rollout"]["holdout_fraction"], 0.2)
-        self.assertEqual(rule["graduation"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(rule["graduation"]["source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(rule["graduation"]["rank"], 1)
         self.assertEqual(rule["graduation"]["cohort_rank"], 1)
         self.assertEqual(rule["graduation"]["shape"]["text_bucket"], "2k_8k_chars")
@@ -2882,7 +2882,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(payload["wrote_policy_files"])
         self.assertFalse(payload["cache_entries_written"])
         self.assertTrue(payload["apply_result"]["ok"])
-        self.assertEqual(payload["apply_result"]["schema"], "agentflow.request_shape_cache_replay_canary_apply.v1")
+        self.assertEqual(payload["apply_result"]["schema"], "tokenclaw.request_shape_cache_replay_canary_apply.v1")
         policy_path = config_dir / "cache_canary_policy.yaml"
         self.assertTrue(policy_path.exists())
         written = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
@@ -2901,7 +2901,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             limit=20,
         )
 
-        self.assertEqual(report["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(report["status"], "no-canary-policy")
         self.assertFalse(report["ok"])
         self.assertFalse(report["source"]["policy_file_present"])
@@ -2960,7 +2960,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         finally:
             empty_store.conn.close()
 
-        self.assertEqual(evidence["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(evidence["schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(evidence["status"], "staged-no-traffic")
         self.assertTrue(evidence["ok"])
         self.assertEqual(evidence["staged_canary_count"], 1)
@@ -3024,7 +3024,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         finally:
             empty_store.conn.close()
 
-        self.assertEqual(evidence["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(evidence["schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(evidence["status"], "staged-stale-no-traffic")
         self.assertNotEqual(evidence["status"], "staged-no-traffic")
         self.assertEqual(evidence["reason"], "stale-cache-replay-evidence")
@@ -3035,7 +3035,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(evidence["summary"]["applied_count"], 0)
         self.assertEqual(evidence["summary"]["holdout_count"], 0)
         durable = evidence["durable_outcome"]
-        self.assertEqual(durable["schema"], "agentflow.request_shape_cache_replay_durable_outcome.v1")
+        self.assertEqual(durable["schema"], "tokenclaw.request_shape_cache_replay_durable_outcome.v1")
         self.assertEqual(durable["decision"], "rollback")
         self.assertEqual(durable["reason"], "stale-cache-replay-evidence")
         self.assertEqual(durable["next_action"], "rollback-cache-replay-rule")
@@ -3096,7 +3096,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             "graduation": rule["graduation"],
         }
         applied_canary = {
-            "schema": "agentflow.cache_replay_canary_decision.v1",
+            "schema": "tokenclaw.cache_replay_canary_decision.v1",
             "rule_id": rule["id"],
             "candidate_id": rule["candidate_id"],
             "policy_source": "local-manual",
@@ -3243,7 +3243,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         )
 
         self.assertTrue(apply_result["ok"])
-        self.assertEqual(evidence["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(evidence["schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(evidence["status"], "observed")
         self.assertEqual(evidence["summary"]["applied_count"], 2)
         self.assertEqual(evidence["summary"]["holdout_count"], 1)
@@ -3329,7 +3329,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             "graduation": rule["graduation"],
         }
         applied_canary = {
-            "schema": "agentflow.cache_replay_canary_decision.v1",
+            "schema": "tokenclaw.cache_replay_canary_decision.v1",
             "rule_id": rule["id"],
             "candidate_id": rule["candidate_id"],
             "policy_source": "local-manual",
@@ -3492,7 +3492,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             "graduation": rule["graduation"],
         }
         applied_canary = {
-            "schema": "agentflow.cache_replay_canary_decision.v1",
+            "schema": "tokenclaw.cache_replay_canary_decision.v1",
             "rule_id": rule["id"],
             "candidate_id": rule["candidate_id"],
             "policy_source": "local-manual",
@@ -3580,11 +3580,11 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(evidence["summary"]["observed_hits"], 0)
         self.assertEqual(applied_miss_blockers, {"first-seen-cache-warmup": 3})
         self.assertEqual(evidence["summary"]["top_applied_miss_blocker"], "first-seen-cache-warmup")
-        self.assertEqual(evidence["warmup_analysis"]["schema"], "agentflow.request_shape_cache_replay_warmup_analysis.v1")
+        self.assertEqual(evidence["warmup_analysis"]["schema"], "tokenclaw.request_shape_cache_replay_warmup_analysis.v1")
         self.assertTrue(evidence["warmup_analysis"]["warmup_only_applied_misses"])
         self.assertEqual(evidence["warmup_analysis"]["warmup_miss_count"], 3)
         self.assertEqual(evidence["warmup_analysis"]["observed_hit_blocker"], "first-seen-cache-warmup")
-        self.assertEqual(evidence["warmup_analysis"]["repeat_window"]["schema"], "agentflow.request_shape_cache_replay_repeat_window.v1")
+        self.assertEqual(evidence["warmup_analysis"]["repeat_window"]["schema"], "tokenclaw.request_shape_cache_replay_repeat_window.v1")
         self.assertTrue(evidence["warmup_analysis"]["repeat_window"]["eligible"])
         self.assertTrue(evidence["warmup_analysis"]["repeat_window"]["later_exact_repeat_expected"])
         self.assertFalse(evidence["warmup_analysis"]["provider_calls_made"])
@@ -3594,7 +3594,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["decision"], "keep-staged")
         self.assertEqual(decision["promotion_decision"], "keep-staged-warmup")
         self.assertEqual(decision["reason"], "first-seen-cache-warmup")
-        self.assertEqual(decision["warmup_analysis"]["schema"], "agentflow.request_shape_cache_replay_warmup_analysis.v1")
+        self.assertEqual(decision["warmup_analysis"]["schema"], "tokenclaw.request_shape_cache_replay_warmup_analysis.v1")
         self.assertEqual(decision["top_decision"]["warmup_analysis"]["status"], evidence["warmup_analysis"]["status"])
         self.assertTrue(decision["summary"]["later_exact_repeat_expected"])
         self.assertIn("first-seen-cache-warmup", decision["reason_codes"])
@@ -3660,7 +3660,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(payload["status"], "staged-no-traffic")
         self.assertEqual(payload["staged_canary_count"], 1)
         self.assertTrue(payload["privacy"]["aggregate_only"])
@@ -3711,7 +3711,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             "graduation": rule["graduation"],
         }
         applied_canary = {
-            "schema": "agentflow.cache_replay_canary_decision.v1",
+            "schema": "tokenclaw.cache_replay_canary_decision.v1",
             "rule_id": rule["id"],
             "candidate_id": rule["candidate_id"],
             "policy_source": "local-manual",
@@ -3798,13 +3798,13 @@ class RequestShapeRollupTests(unittest.TestCase):
         )
         cli_decision = json.loads(stdout.getvalue())
 
-        self.assertEqual(decision["schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
+        self.assertEqual(decision["schema"], "tokenclaw.request_shape_cache_replay_policy_decision.v1")
         self.assertEqual(decision["decision"], "widen")
         self.assertEqual(decision["promotion_readiness"], "promotion-ready")
         self.assertEqual(decision["impact_recommendation"], "promotion-ready")
         self.assertEqual(decision["promotion_recommendation"], "promotion-ready")
         self.assertEqual(code, 0)
-        self.assertEqual(cli_decision["schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
+        self.assertEqual(cli_decision["schema"], "tokenclaw.request_shape_cache_replay_policy_decision.v1")
         self.assertEqual(cli_decision["decision"], "widen")
         self.assertEqual(cli_decision["summary"]["promotion_readiness"], "promotion-ready")
         self.assertEqual(cli_decision["summary"]["target_local_rule_file"], "cache_rules.yaml")
@@ -3871,7 +3871,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def test_cache_replay_policy_decision_keeps_staged_for_insufficient_holdout(self) -> None:
         evidence = {
-            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
             "status": "observed",
             "staged_canary_count": 1,
             "staged_canaries": [
@@ -3923,7 +3923,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def test_cache_replay_policy_decision_keeps_blocked_for_applied_miss_with_holdout(self) -> None:
         evidence = {
-            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
             "status": "observed",
             "staged_canary_count": 1,
             "staged_canaries": [
@@ -3987,7 +3987,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def test_cache_replay_policy_decision_retires_no_repeat_warmup_after_elapsed_window(self) -> None:
         evidence = {
-            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
             "status": "observed",
             "staged_canary_count": 1,
             "staged_canaries": [
@@ -4024,7 +4024,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             },
             "applied_miss_blocker_breakdown": [{"value": "first-seen-cache-warmup", "count": 24}],
             "warmup_analysis": {
-                "schema": "agentflow.request_shape_cache_replay_warmup_analysis.v1",
+                "schema": "tokenclaw.request_shape_cache_replay_warmup_analysis.v1",
                 "status": "repeat-window-elapsed-no-live-repeat",
                 "classification": "first-seen-warmup-no-later-repeat-yet",
                 "next_action": "keep-staged-until-live-repeat-or-blocker",
@@ -4036,7 +4036,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 "first_warmup_age_hours": 2.5,
                 "latest_warmup_age_hours": 0.1,
                 "repeat_window": {
-                    "schema": "agentflow.request_shape_cache_replay_repeat_window.v1",
+                    "schema": "tokenclaw.request_shape_cache_replay_repeat_window.v1",
                     "ttl_seconds": 3600,
                     "ttl_hours": 1.0,
                     "eligible": True,
@@ -4110,7 +4110,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("repeat-window-elapsed-no-live-repeat", decision["reason_codes"])
         self.assertIn("first-seen-cache-warmup", decision["reason_codes"])
         self.assertIn("applied-miss:first-seen-cache-warmup", decision["reason_codes"])
-        self.assertEqual(decision["hit_recovery_metrics"]["source_schema"], "agentflow.cache_replay_hit_recovery_smoke.v1")
+        self.assertEqual(decision["hit_recovery_metrics"]["source_schema"], "tokenclaw.cache_replay_hit_recovery_smoke.v1")
         self.assertTrue(decision["hit_recovery_metrics"]["hit_recovery_demonstrated"])
         self.assertEqual(decision["hit_recovery_metrics"]["synthetic_exact_hit_count"], 1)
         self.assertFalse(decision["hit_recovery_metrics"]["provider_calls_made"])
@@ -4201,7 +4201,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def test_cache_replay_policy_decision_keeps_blocked_for_invalidation_risk(self) -> None:
         evidence = {
-            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
             "status": "observed",
             "staged_canary_count": 1,
             "staged_canaries": [
@@ -4252,7 +4252,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def test_cache_replay_policy_decision_rolls_back_stale_evidence(self) -> None:
         evidence = {
-            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
             "status": "observed",
             "staged_canary_count": 1,
             "staged_canaries": [
@@ -4331,7 +4331,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.request_shape_cache_replay_policy_decision.v1")
         self.assertEqual(payload["decision"], "keep-blocked")
         self.assertTrue(payload["summary"]["keep_blocked"])
         self.assertEqual(payload["summary"]["staged_canary_count"], 0)
@@ -4388,7 +4388,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.managed_recommendation_handoff_health.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.managed_recommendation_handoff_health.v1")
         self.assertTrue(payload["read_only"])
         self.assertFalse(payload["provider_calls_made"])
         self.assertFalse(payload["managed_server_calls_made"])
@@ -4455,7 +4455,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-dry-run")
         dry_run = report["crunch_opportunity_dry_run"]
 
-        self.assertEqual(dry_run["schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertEqual(dry_run["schema"], "tokenclaw.request_shape_crunch_opportunity_dry_run.v1")
         self.assertEqual(dry_run["status"], "ranked")
         self.assertEqual(dry_run["summary"]["measurement_ready_cohort_count"], 1)
         self.assertGreater(dry_run["summary"]["projected_saved_tokens"], 0)
@@ -4463,12 +4463,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(dry_run["summary"]["activation_state"], "activation-ready")
         self.assertEqual(dry_run["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
         follow_up = dry_run["activation_follow_up"]
-        self.assertEqual(follow_up["schema"], "agentflow.request_shape_crunch_activation_follow_up.v1")
+        self.assertEqual(follow_up["schema"], "tokenclaw.request_shape_crunch_activation_follow_up.v1")
         self.assertEqual(follow_up["activation_state"], "activation-ready")
         self.assertEqual(follow_up["activation_mode"], "canary-candidate")
         self.assertEqual(follow_up["savings_status"], "projected-savings-ranked")
         self.assertEqual(follow_up["report_key"], "request_shape_crunch_opportunity")
-        self.assertEqual(follow_up["evidence_schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertEqual(follow_up["evidence_schema"], "tokenclaw.request_shape_crunch_opportunity_dry_run.v1")
         self.assertEqual(follow_up["candidate_count"], dry_run["summary"]["candidate_count"])
         self.assertEqual(follow_up["matched_count"], dry_run["summary"]["matched_count"])
         self.assertEqual(follow_up["rows_considered"], dry_run["summary"]["rows_considered"])
@@ -4507,7 +4507,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(dry_run["summary"]["target_local_rule_file"], "crunch_rules.yaml")
         self.assertEqual(dry_run["summary"]["recommended_action_count"], 1)
         action = dry_run["recommended_actions"][0]
-        self.assertEqual(action["schema"], "agentflow.request_shape_crunch_canary_action.v1")
+        self.assertEqual(action["schema"], "tokenclaw.request_shape_crunch_canary_action.v1")
         self.assertEqual(action["target_local_policy"], "crunch_rules")
         self.assertEqual(action["rollout_fraction"], 0.1)
         self.assertEqual(action["holdout_fraction"], 0.1)
@@ -4540,8 +4540,8 @@ class RequestShapeRollupTests(unittest.TestCase):
     def test_crunch_opportunity_dry_run_noops_for_small_or_one_off_rollups(self) -> None:
         small_rollups = [
             {
-                "schema": "agentflow.request_shape_rollup_row.v1",
-                "source_schema": "agentflow.request_shape_rollup_row.v1",
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "source_schema": "tokenclaw.request_shape_rollup_row.v1",
                 "candidate_work_classes": ["repeated_context", "crunch"],
                 "provider_family": "anthropic",
                 "source_surface": "anthropic_messages",
@@ -4611,7 +4611,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             holdout_fraction=0.20,
         )
 
-        self.assertEqual(report["schema"], "agentflow.request_shape_repeated_context_crunch_canary_stage.v1")
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_repeated_context_crunch_canary_stage.v1")
         self.assertEqual(report["status"], "staged")
         self.assertTrue(report["ok"])
         self.assertTrue(report["dry_run"])
@@ -4629,7 +4629,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["acceptance"]["unsafe_or_stale_cohorts_remain_skipped"])
 
         action = report["top_stage_action"]
-        self.assertEqual(action["schema"], "agentflow.request_shape_crunch_canary_action.v1")
+        self.assertEqual(action["schema"], "tokenclaw.request_shape_crunch_canary_action.v1")
         self.assertEqual(action["action_type"], "stage-local-repeated-context-crunch-canary")
         self.assertEqual(action["target_local_policy"], "crunch_rules")
         self.assertEqual(action["conditions"]["provider_family"], "anthropic")
@@ -4640,7 +4640,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(action["conditions"]["text_bucket"], "gte_128k_chars")
         self.assertTrue(action["conditions"]["stream"])
         self.assertTrue(action["conditions"]["has_tools"])
-        self.assertEqual(action["cohort_selector"]["schema"], "agentflow.request_shape_crunch_canary_cohort_selector.v1")
+        self.assertEqual(action["cohort_selector"]["schema"], "tokenclaw.request_shape_crunch_canary_cohort_selector.v1")
         self.assertEqual(action["cohort_selector"]["workflow_phase"], "thinking")
         self.assertEqual(action["rollout_fraction"], 0.05)
         self.assertEqual(action["holdout_fraction"], 0.2)
@@ -4651,19 +4651,19 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(action["duplicate_suppression"]["metadata_only"])
         self.assertGreater(action["projected_saved_tokens"], 0)
         self.assertGreater(action["projected_saved_usd"], 0)
-        self.assertEqual(action["projected_lifecycle"]["schema"], "agentflow.request_shape_crunch_canary_projected_lifecycle.v1")
+        self.assertEqual(action["projected_lifecycle"]["schema"], "tokenclaw.request_shape_crunch_canary_projected_lifecycle.v1")
         self.assertEqual(action["projected_lifecycle"]["matched_count"], 3)
         self.assertEqual(action["projected_lifecycle"]["projected_canary_applied_count"], 1)
         self.assertEqual(action["projected_lifecycle"]["projected_canary_holdout_count"], 1)
         self.assertEqual(action["projected_lifecycle"]["projected_skipped_count"], 1)
         self.assertGreater(action["projected_lifecycle"]["projected_applied_saved_tokens"], 0)
         self.assertGreater(action["projected_lifecycle"]["projected_applied_saved_usd"], 0)
-        self.assertEqual(action["source_evidence_schema"], "agentflow.request_shape_rollup_row.v1")
+        self.assertEqual(action["source_evidence_schema"], "tokenclaw.request_shape_rollup_row.v1")
         self.assertEqual(
             action["source_evidence_schemas"],
             [
-                "agentflow.request_shape_follow_up_candidates.v1",
-                "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                "tokenclaw.request_shape_follow_up_candidates.v1",
+                "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
             ],
         )
         self.assertEqual(action["local_only_reason"], "file-backed-local-policy-no-managed-dependency")
@@ -4696,9 +4696,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(action["lifecycle_metadata"]["projected_canary_applied_count"], 1)
         self.assertEqual(action["lifecycle_metadata"]["projected_canary_holdout_count"], 1)
         self.assertEqual(action["lifecycle_metadata"]["projected_skipped_count"], 1)
-        self.assertEqual(action["lifecycle_metadata"]["impact_report"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(action["lifecycle_metadata"]["impact_report"], "tokenclaw.request_shape_crunch_canary_impact.v1")
         projection = report["stage_lifecycle_projection"]
-        self.assertEqual(projection["schema"], "agentflow.request_shape_crunch_canary_stage_lifecycle_projection.v1")
+        self.assertEqual(projection["schema"], "tokenclaw.request_shape_crunch_canary_stage_lifecycle_projection.v1")
         self.assertEqual(projection["matched_count"], 3)
         self.assertEqual(projection["projected_canary_applied_count"], 1)
         self.assertEqual(projection["projected_canary_holdout_count"], 1)
@@ -4708,7 +4708,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(projection["privacy"]["metadata_only"])
         self.assertTrue(projection["privacy"]["aggregate_only"])
         self.assertEqual(report["source_report"]["activation_follow_up"]["next_action"], "stage-repeated-context-crunch-canary")
-        self.assertEqual(report["duplicate_suppression"]["schema"], "agentflow.request_shape_crunch_stage_duplicate_suppression_summary.v1")
+        self.assertEqual(report["duplicate_suppression"]["schema"], "tokenclaw.request_shape_crunch_stage_duplicate_suppression_summary.v1")
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertTrue(report["privacy"]["aggregate_only"])
 
@@ -4757,7 +4757,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.request_shape_repeated_context_crunch_canary_stage.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.request_shape_repeated_context_crunch_canary_stage.v1")
         self.assertEqual(payload["staged_canary_count"], 1)
         self.assertEqual(payload["top_stage_action"]["conditions"]["workflow_phase"], "thinking")
         self.assertEqual(payload["top_stage_action"]["conditions"]["text_bucket"], "gte_128k_chars")
@@ -4822,7 +4822,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["acceptance"]["reports_skipped_rollup_reasons"])
 
         selection = report["activation_ready_rollup_selection"]
-        self.assertEqual(selection["schema"], "agentflow.request_shape_crunch_canary_stage_rollup_selection.v1")
+        self.assertEqual(selection["schema"], "tokenclaw.request_shape_crunch_canary_stage_rollup_selection.v1")
         self.assertEqual(selection["activation_ready_cohort_count"], 2)
         self.assertEqual(selection["drafted_count"], 1)
         self.assertEqual(selection["skipped_count"], 1)
@@ -4839,7 +4839,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(drafted["canary_fraction"], 0.05)
         self.assertEqual(drafted["holdout_fraction"], 0.2)
         self.assertEqual(drafted["rollback_metadata"]["rollback_action_type"], "disable_repeated_context_crunch_canary")
-        self.assertEqual(drafted["source_evidence_schema"], "agentflow.request_shape_rollup_row.v1")
+        self.assertEqual(drafted["source_evidence_schema"], "tokenclaw.request_shape_rollup_row.v1")
         self.assertFalse(skipped["selected_for_stage"])
         self.assertEqual(skipped["activation_readiness"], "activation-ready")
         self.assertEqual(skipped["skip_reason"], "stage-action-limit-reached")
@@ -4849,7 +4849,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("measurement-ready", action["source_readiness_aliases"])
         self.assertEqual(action["target_local_policy_section"], "crunch.rules")
         self.assertEqual(action["target_local_rule_file"], "crunch_rules.yaml")
-        self.assertEqual(action["source_evidence_schema"], "agentflow.request_shape_rollup_row.v1")
+        self.assertEqual(action["source_evidence_schema"], "tokenclaw.request_shape_rollup_row.v1")
         self.assertTrue(action["privacy"]["metadata_only"])
         self.assertTrue(action["privacy"]["aggregate_only"])
         self.assertFalse(action["privacy"]["raw_prompts_included"])
@@ -4929,9 +4929,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(canary["conditions"]["text_bucket"], "gte_128k_chars")
         self.assertEqual(canary["rollout"]["canary_fraction"], 0.05)
         self.assertEqual(canary["rollout"]["holdout_fraction"], 0.2)
-        self.assertEqual(canary["source_evidence_schema"], "agentflow.request_shape_rollup_row.v1")
-        self.assertIn("agentflow.request_shape_follow_up_candidates.v1", canary["source_evidence_schemas"])
-        self.assertIn("agentflow.request_shape_crunch_opportunity_dry_run.v1", canary["source_evidence_schemas"])
+        self.assertEqual(canary["source_evidence_schema"], "tokenclaw.request_shape_rollup_row.v1")
+        self.assertIn("tokenclaw.request_shape_follow_up_candidates.v1", canary["source_evidence_schemas"])
+        self.assertIn("tokenclaw.request_shape_crunch_opportunity_dry_run.v1", canary["source_evidence_schemas"])
         self.assertEqual(canary["local_only_reason"], "file-backed-local-policy-no-managed-dependency")
         self.assertIn("thinking-routing-guard", canary["evidence_blocker_codes"])
         self.assertIn("tool-call-cache-disabled", canary["evidence_blocker_codes"])
@@ -5195,7 +5195,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                     "enabled": True,
                     "request_shape_repeated_context_canaries": {
                         "enabled": True,
-                        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+                        "schema": "tokenclaw.request_shape_repeated_context_canaries.v1",
                         "rules": [
                             {
                                 "id": covered_action["policy_id"],
@@ -5283,7 +5283,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 {
                     "request_shape_repeated_context_canaries": {
                         "enabled": True,
-                        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+                        "schema": "tokenclaw.request_shape_repeated_context_canaries.v1",
                         "rules": [
                             {
                                 "id": active_action["policy_id"],
@@ -5299,9 +5299,9 @@ class RequestShapeRollupTests(unittest.TestCase):
                                 },
                                 "safety_gates": {"max_rollout_fraction": 0.30},
                                 "policy_decision": {
-                                    "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                    "schema": "tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1",
                                     "decision_id": "request-shape-crunch-policy-decision:test-max-rollout",
-                                    "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                    "source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                                     "decision": "widen",
                                     "graduation_decision": "widen",
                                     "applied_count": 107,
@@ -5349,7 +5349,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["top_cohort"]["duplicate_suppression"]["matching_max_rollout_fraction"], 0.30)
         self.assertEqual(
             report["top_cohort"]["duplicate_suppression"]["matching_policy_decision"]["source_evidence_schema"],
-            "agentflow.request_shape_crunch_policy_decision.v1",
+            "tokenclaw.request_shape_crunch_policy_decision.v1",
         )
         self.assertEqual(report["duplicate_suppression"]["suppressed_existing_cohort_count"], 1)
         self.assertEqual(report["duplicate_suppression"]["active_max_rollout_suppressed_cohort_count"], 1)
@@ -5546,7 +5546,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 {
                     "request_shape_repeated_context_canaries": {
                         "enabled": True,
-                        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+                        "schema": "tokenclaw.request_shape_repeated_context_canaries.v1",
                         "rules": [
                             {
                                 "id": existing["policy_id"],
@@ -5598,7 +5598,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         apply_result = apply_request_shape_crunch_canary_actions(report["stage_actions"], rules_path=rules_path)
         self.assertTrue(apply_result["ok"])
-        self.assertEqual(apply_result["schema"], "agentflow.request_shape_crunch_canary_apply_batch.v1")
+        self.assertEqual(apply_result["schema"], "tokenclaw.request_shape_crunch_canary_apply_batch.v1")
         self.assertEqual(apply_result["applied_count"], 10)
         self.assertEqual(apply_result["failed_count"], 0)
         self.assertTrue(apply_result["wrote_policy_files"])
@@ -5609,7 +5609,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual({rule["id"] for rule in staged_rules}, {existing["policy_id"], *apply_result["policy_ids"]})
         for rule in staged_rules:
             self.assertEqual(rule["policy_source"], "local-manual")
-            self.assertEqual(rule["source_evidence_schema"], "agentflow.request_shape_rollup_row.v1")
+            self.assertEqual(rule["source_evidence_schema"], "tokenclaw.request_shape_rollup_row.v1")
             self.assertGreater(rule["projected_saved_tokens"], 0)
             self.assertGreater(rule["projected_saved_usd"], 0)
             self.assertEqual(rule["rollout"]["holdout_fraction"], 0.1)
@@ -5750,7 +5750,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         )
         self.assertEqual(
             report["duplicate_suppression"]["schema"],
-            "agentflow.request_shape_crunch_stage_duplicate_suppression_summary.v1",
+            "tokenclaw.request_shape_crunch_stage_duplicate_suppression_summary.v1",
         )
         self.assertFalse(report["duplicate_suppression"]["suppresses_new_stage_action"])
         self.assertTrue(report["privacy"]["metadata_only"])
@@ -5758,7 +5758,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def test_crunch_canary_stage_keeps_safety_stopped_cohort_out_of_applied_holdout_split(self) -> None:
         safety_lifecycle = {
-            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
             "policy_id": "local-repeated-context-crunch-canary-safety",
             "cohort_id": "request-shape-crunch:safety",
             "status": "safety-stopped",
@@ -5962,7 +5962,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         impact_report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-impact")[
             "crunch_canary_impact"
         ]
-        self.assertEqual(impact_report["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(impact_report["schema"], "tokenclaw.request_shape_crunch_canary_impact.v1")
         self.assertEqual(impact_report["status"], "widen-ready")
         self.assertEqual(impact_report["next_action"], "widen")
         self.assertEqual(impact_report["graduation_decision"], "widen")
@@ -6006,7 +6006,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(candidate["promotion_metadata"]["next_action"], "widen")
         self.assertEqual(candidate["promotion_metadata"]["observed_saved_tokens"], 2_000)
         feedback = impact_report["activation_lifecycle_feedback"]
-        self.assertEqual(feedback["schema"], "agentflow.activation_staged_lifecycle_feedback_summary.v1")
+        self.assertEqual(feedback["schema"], "tokenclaw.activation_staged_lifecycle_feedback_summary.v1")
         self.assertEqual(feedback["cohort_lifecycle_metadata"][0]["action_family"], "crunch")
         self.assertEqual(feedback["cohort_lifecycle_metadata"][0]["applied_count"], 1)
         self.assertEqual(feedback["cohort_lifecycle_metadata"][0]["holdout_count"], 1)
@@ -6033,7 +6033,7 @@ class RequestShapeRollupTests(unittest.TestCase):
     def test_crunch_canary_impact_reports_no_applied_coverage_without_failing(self) -> None:
         report = build_request_shape_crunch_canary_impact_report([])
 
-        self.assertEqual(report["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_crunch_canary_impact.v1")
         self.assertTrue(report["ok"])
         self.assertTrue(report["read_only"])
         self.assertEqual(report["status"], "no-applied-coverage")
@@ -6054,7 +6054,7 @@ class RequestShapeRollupTests(unittest.TestCase):
     def test_crunch_canary_impact_rows_rank_metadata_only_repeated_context_measurements(self) -> None:
         impact_candidates = [
             {
-                "schema": "agentflow.request_shape_crunch_canary_impact_candidate.v1",
+                "schema": "tokenclaw.request_shape_crunch_canary_impact_candidate.v1",
                 "policy_id": "raw-session-id-must-not-leak",
                 "cohort_id": "/tmp/private/source.py",
                 "cohort_metadata": {
@@ -6088,10 +6088,10 @@ class RequestShapeRollupTests(unittest.TestCase):
             }
         ]
         activation_ready_measurements = {
-            "schema": "agentflow.request_shape_crunch_activation_ready_measurements.v1",
+            "schema": "tokenclaw.request_shape_crunch_activation_ready_measurements.v1",
             "cohorts": [
                 {
-                    "schema": "agentflow.request_shape_crunch_activation_ready_cohort_measurement.v1",
+                    "schema": "tokenclaw.request_shape_crunch_activation_ready_cohort_measurement.v1",
                     "rank": 1,
                     "cohort_id": "request-shape-crunch:anthropic:messages:tool-result:measurement-required",
                     "policy_id": "local-repeated-context-crunch-canary",
@@ -6128,10 +6128,10 @@ class RequestShapeRollupTests(unittest.TestCase):
             ],
         }
         follow_up_candidates = {
-            "schema": "agentflow.request_shape_follow_up_candidates.v1",
+            "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
             "candidates": [
                 {
-                    "schema": "agentflow.request_shape_blocker_cohort.v1",
+                    "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                     "rank": 1,
                     "local_action_family": "crunch",
                     "readiness_state": "measurement-required",
@@ -6155,7 +6155,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                     "token_bucket": "lt_500_tokens",
                 },
                 {
-                    "schema": "agentflow.request_shape_blocker_cohort.v1",
+                    "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                     "rank": 2,
                     "local_action_family": "crunch",
                     "readiness_state": "blocked",
@@ -6174,7 +6174,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             ],
         }
         activation_evidence = {
-            "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+            "schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
             "status": "active-rule-evidence-observed",
             "decision_id": "request-shape-crunch-policy-decision:raw-request-id-must-not-leak",
             "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
@@ -6204,7 +6204,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             activation_evidence=activation_evidence,
         )
 
-        self.assertEqual(report["schema"], "agentflow.request_shape_crunch_canary_impact_rows.v1")
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_crunch_canary_impact_rows.v1")
         self.assertEqual(report["status"], "ranked")
         self.assertTrue(report["acceptance"]["has_ranked_repeated_context_crunch_impact_rows"])
         self.assertTrue(report["acceptance"]["has_blocker_codes"])
@@ -6257,14 +6257,14 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def test_crunch_canary_impact_classifies_remaining_activation_ready_cohorts(self) -> None:
         measured_lifecycle = {
-            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
             "policy_id": "local-repeated-context-crunch-canary-measured",
             "cohort_id": "request-shape-crunch:anthropic:messages:tool-result:measured",
             "status": "applied",
             "cohort": "canary_applied",
             "reason": "selected-canary",
             "policy_source": "local-manual",
-            "source_evidence_schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "source_evidence_schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
             "projected_saved_tokens": 10_000,
             "projected_saved_usd": 0.03,
             "metadata_only": True,
@@ -6272,7 +6272,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         }
         holdout_lifecycle = dict(measured_lifecycle, status="holdout", cohort="canary_holdout")
         opportunity_report = {
-            "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
             "cohorts": [
                 {
                     "rank": 1,
@@ -6339,7 +6339,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                     "holdout_fraction": 0.1,
                     "projected_saved_tokens": 8_000,
                     "projected_saved_usd": 0.024,
-                    "source_evidence_schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                    "source_evidence_schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
                 }
             ],
         }
@@ -6387,7 +6387,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         )
 
         measurements = report["activation_ready_measurements"]
-        self.assertEqual(measurements["schema"], "agentflow.request_shape_crunch_activation_ready_measurements.v1")
+        self.assertEqual(measurements["schema"], "tokenclaw.request_shape_crunch_activation_ready_measurements.v1")
         self.assertEqual(measurements["status"], "classified")
         self.assertEqual(measurements["measured_count"], 1)
         self.assertEqual(measurements["keep_staged_count"], 1)
@@ -6425,7 +6425,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         active_cohort_id = "request-shape-crunch:anthropic:messages:tool-result:active-max"
         staged_cohort_id = "request-shape-crunch:anthropic:messages:tool-result:newly-staged"
         opportunity_report = {
-            "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
             "cohorts": [
                 {
                     "rank": 1,
@@ -6499,8 +6499,8 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         report = build_request_shape_crunch_canary_impact_report([], opportunity_report=opportunity_report)
 
-        self.assertEqual(report["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
-        self.assertEqual(report["newly_staged_measurement"]["schema"], "agentflow.request_shape_crunch_newly_staged_measurement.v1")
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(report["newly_staged_measurement"]["schema"], "tokenclaw.request_shape_crunch_newly_staged_measurement.v1")
         self.assertEqual(report["newly_staged_measurement"]["status"], "measured")
         self.assertEqual(report["newly_staged_measurement"]["cohort_count"], 1)
         self.assertEqual(report["newly_staged_measurement"]["applied_count"], 7)
@@ -6525,7 +6525,7 @@ class RequestShapeRollupTests(unittest.TestCase):
     def test_crunch_canary_impact_names_high_cost_thinking_measurement_row(self) -> None:
         cohort_id = "request-shape-crunch:anthropic:unknown:tool-result:high-cost-thinking"
         opportunity_report = {
-            "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
             "cohorts": [
                 {
                     "rank": 1,
@@ -6556,7 +6556,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                         "unsupported-streaming-shape",
                     ],
                     "crunch_canary_lifecycle": {
-                        "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+                        "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
                         "policy_id": "local-repeated-context-crunch-canary-thinking",
                         "cohort_id": cohort_id,
                         "applied_count": 99,
@@ -6584,7 +6584,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         rows = report["activation_ready_measurements"]["cohorts"]
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row["schema"], "agentflow.request_shape_crunch_activation_ready_cohort_measurement.v1")
+        self.assertEqual(row["schema"], "tokenclaw.request_shape_crunch_activation_ready_cohort_measurement.v1")
         self.assertEqual(row["cohort_id"], cohort_id)
         self.assertEqual(row["state"], "keep-staged")
         self.assertEqual(row["next_action"], "measure-repeated-context-crunch-canary-impact")
@@ -6614,17 +6614,17 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def test_crunch_canary_impact_emits_durable_action_for_fresh_staged_holdout(self) -> None:
         lifecycle = {
-            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
             "policy_id": "local-repeated-context-crunch-canary-fresh",
             "cohort_id": "request-shape-crunch:anthropic:messages:tool-result:fresh",
             "status": "holdout",
             "cohort": "canary_holdout",
             "reason": "selected-holdout",
             "policy_source": "local-manual",
-            "source_evidence_schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "source_evidence_schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
             "source_evidence_schemas": [
-                "agentflow.request_shape_crunch_opportunity_dry_run.v1",
-                "agentflow.request_shape_follow_up_candidates.v1",
+                "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
+                "tokenclaw.request_shape_follow_up_candidates.v1",
             ],
             "staged_at": "2026-06-16T18:00:00+00:00",
             "projected_saved_tokens": 12_000,
@@ -6669,7 +6669,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(report["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_crunch_canary_impact.v1")
         self.assertEqual(report["summary"]["candidate_count"], 1)
         self.assertEqual(report["summary"]["applied_count"], 0)
         self.assertEqual(report["summary"]["holdout_count"], 1)
@@ -6677,13 +6677,13 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["summary"]["freshly_staged_cohort_count"], 1)
         self.assertEqual(report["summary"]["top_durable_next_action"], "measure-more")
         action = report["cohort_family_actions"][0]
-        self.assertEqual(action["schema"], "agentflow.request_shape_crunch_canary_cohort_family_action.v1")
+        self.assertEqual(action["schema"], "tokenclaw.request_shape_crunch_canary_cohort_family_action.v1")
         self.assertEqual(action["durable_next_action"], "measure-more")
         self.assertEqual(action["applied_count"], 0)
         self.assertEqual(action["holdout_count"], 1)
         self.assertEqual(action["projected_saved_tokens"], 12_000)
         self.assertEqual(action["projected_saved_usd"], 0.036)
-        self.assertEqual(action["source_evidence_schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertEqual(action["source_evidence_schema"], "tokenclaw.request_shape_crunch_opportunity_dry_run.v1")
         self.assertEqual(action["staged_at"], "2026-06-16T18:00:00+00:00")
         self.assertIn("applied-crunch-canary-coverage", action["missing_measurements"])
         candidate = report["candidates"][0]
@@ -6703,7 +6703,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.request_shape_crunch_canary_impact.v1")
         self.assertEqual(payload["status"], "no-applied-coverage")
         self.assertEqual(payload["next_action"], "stage-canary-first")
         self.assertEqual(payload["summary"]["applied_count"], 0)
@@ -6725,7 +6725,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-safety-stage")
         action = report["crunch_opportunity_dry_run"]["recommended_actions"][0]
         safety_lifecycle = {
-            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
             "policy_id": action["policy_id"],
             "cohort_id": action["cohort_id"],
             "status": "safety-stopped",
@@ -6873,7 +6873,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             saved_chars: int = 0,
         ) -> dict[str, object]:
             lifecycle = {
-                "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+                "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
                 "policy_id": policy_id,
                 "cohort_id": cohort_id,
                 "status": status,
@@ -6947,7 +6947,7 @@ class RequestShapeRollupTests(unittest.TestCase):
     def test_crunch_policy_decision_promotes_positive_canary_with_rollback_metadata(self) -> None:
         def impact_row(status: str, *, saved_tokens: int = 0, saved_chars: int = 0, saved_usd: float = 0.0) -> dict[str, object]:
             lifecycle = {
-                "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+                "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
                 "policy_id": "policy-promote",
                 "cohort_id": "cohort-promote",
                 "status": status,
@@ -7000,7 +7000,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         )
         decision = build_request_shape_crunch_policy_decision_report(impact_report)
 
-        self.assertEqual(decision["schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(decision["schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
         self.assertEqual(decision["decision"], "widen")
         self.assertEqual(decision["graduation_decision"], "widen")
         self.assertEqual(decision["summary"]["decision"], "widen")
@@ -7028,7 +7028,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             decision,
             recorded_at="2026-06-15T18:00:00+00:00",
         )
-        self.assertEqual(ledger["schema"], "agentflow.request_shape_crunch_policy_decision_ledger.v1")
+        self.assertEqual(ledger["schema"], "tokenclaw.request_shape_crunch_policy_decision_ledger.v1")
         self.assertEqual(ledger["status"], "recordable")
         self.assertEqual(ledger["entries"][0]["status"], "positive")
         self.assertEqual(ledger["entries"][0]["recommendation"], "widen")
@@ -7043,7 +7043,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(first["wrote_store"])
         self.assertEqual(first["summary"]["rows_written"], 1)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(rows[0]["source_evidence_schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
         self.assertEqual(rows[0]["status"], "positive")
         self.assertEqual(rows[0]["recommendation"], "widen")
         self.assertEqual(rows[0]["applied_count"], 1)
@@ -7058,7 +7058,7 @@ class RequestShapeRollupTests(unittest.TestCase):
     def test_crunch_policy_decision_apply_widens_local_rule_with_rollback_metadata(self) -> None:
         def impact_row(status: str, *, saved_tokens: int = 0, saved_chars: int = 0, saved_usd: float = 0.0) -> dict[str, object]:
             lifecycle = {
-                "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+                "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
                 "policy_id": "policy-promote",
                 "cohort_id": "cohort-promote",
                 "status": status,
@@ -7120,7 +7120,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                     "enabled": True,
                     "request_shape_repeated_context_canaries": {
                         "enabled": True,
-                        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+                        "schema": "tokenclaw.request_shape_repeated_context_canaries.v1",
                         "rules": [
                             {
                                 "id": "policy-promote",
@@ -7202,7 +7202,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(widened["rollout"]["canary_fraction"], 0.2)
         self.assertEqual(widened["rollout"]["holdout_fraction"], 0.1)
         self.assertEqual(widened["policy_decision"]["decision_id"], decision_id)
-        self.assertEqual(widened["policy_decision"]["source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(widened["policy_decision"]["source_evidence_schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
         self.assertEqual(widened["policy_decision"]["observed_saved_tokens"], 2_000)
         self.assertEqual(widened["rollback_metadata"]["target_local_rule_file"], "crunch_rules.yaml")
         self.assertTrue(widened["rollback_metadata"]["required_for_promotion"])
@@ -7282,8 +7282,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(full_rule["rollout"]["holdout_fraction"], 0.0)
         self.assertEqual(full_rule["policy_decision"]["decision"], "promote-full")
         self.assertEqual(full_rule["policy_decision"]["graduation_decision"], "promote-full")
-        self.assertEqual(full_rule["policy_decision"]["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
-        self.assertEqual(full_rule["policy_decision"]["source_policy_decision_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(full_rule["policy_decision"]["source_evidence_schema"], "tokenclaw.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(full_rule["policy_decision"]["source_policy_decision_schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
         self.assertIn("full_rollout_fingerprint", full_rule["policy_decision"])
         self.assertEqual(full_rule["rollback_metadata"]["selected_decision"], "promote-full")
 
@@ -7300,7 +7300,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def test_crunch_policy_decision_rolls_back_on_safety_stop(self) -> None:
         lifecycle = {
-            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
             "policy_id": "policy-safety",
             "cohort_id": "cohort-safety",
             "status": "safety-stopped",
@@ -7352,7 +7352,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
     def test_crunch_policy_decision_keeps_staged_for_missing_holdout(self) -> None:
         lifecycle = {
-            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "schema": "tokenclaw.request_shape_crunch_canary_lifecycle.v1",
             "policy_id": "policy-staged",
             "cohort_id": "cohort-staged",
             "status": "applied",
@@ -7423,9 +7423,9 @@ class RequestShapeRollupTests(unittest.TestCase):
                                     "enabled": True,
                                     "policy_source": "local-manual",
                                     "policy_decision": {
-                                        "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                        "schema": "tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1",
                                         "decision_id": decision_id,
-                                        "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                        "source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                                         "decision": "widen",
                                         "graduation_decision": "widen",
                                         "applied_count": 26,
@@ -7441,7 +7441,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                                         "holdout_fraction": 0.10,
                                     },
                                     "rollout": {
-                                        "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+                                        "schema": "tokenclaw.request_shape_crunch_canary_rollout.v1",
                                         "canary_fraction": 0.30,
                                         "holdout_fraction": 0.10,
                                     },
@@ -7460,7 +7460,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             )
             payload = build_request_shape_crunch_activation_evidence_report(
                 crunch_policy_decision={
-                    "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                     "decision": "widen",
                     "graduation_decision": "widen",
                     "decision_id": decision_id,
@@ -7481,7 +7481,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                     },
                 },
                 crunch_canary_impact={
-                    "schema": "agentflow.request_shape_crunch_canary_impact.v1",
+                    "schema": "tokenclaw.request_shape_crunch_canary_impact.v1",
                     "summary": {
                         "applied_count": 77,
                         "holdout_count": 30,
@@ -7492,7 +7492,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 rules_path=rules_path,
             )
 
-        self.assertEqual(payload["schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.request_shape_crunch_activation_evidence.v1")
         self.assertEqual(payload["status"], "active-rule-evidence-observed")
         self.assertEqual(payload["decision_id"], decision_id)
         self.assertEqual(payload["summary"]["active_rule_count"], 1)
@@ -7534,9 +7534,9 @@ class RequestShapeRollupTests(unittest.TestCase):
                                     "enabled": True,
                                     "policy_source": "local-manual",
                                     "policy_decision": {
-                                        "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                        "schema": "tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1",
                                         "decision_id": decision_id,
-                                        "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                        "source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                                         "decision": "widen",
                                         "graduation_decision": "widen",
                                         "applied_count": 107,
@@ -7567,7 +7567,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
             payload = build_request_shape_crunch_activation_evidence_report(
                 crunch_policy_decision={
-                    "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                     "decision": "widen",
                     "graduation_decision": "widen",
                     "decision_id": decision_id,
@@ -7587,7 +7587,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                         },
                     },
                 },
-                crunch_canary_impact={"schema": "agentflow.request_shape_crunch_canary_impact.v1", "summary": {}},
+                crunch_canary_impact={"schema": "tokenclaw.request_shape_crunch_canary_impact.v1", "summary": {}},
                 rules_path=rules_path,
             )
 
@@ -7600,7 +7600,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["post_max_rollout_next_action"], "promote-full-repeated-context-crunch-rule")
         self.assertTrue(payload["summary"]["post_max_rollout_promotion_allowed"])
         post_max = payload["post_max_rollout_decision"]
-        self.assertEqual(post_max["schema"], "agentflow.request_shape_crunch_post_max_rollout_decision.v1")
+        self.assertEqual(post_max["schema"], "tokenclaw.request_shape_crunch_post_max_rollout_decision.v1")
         self.assertEqual(post_max["decision"], "promote-full")
         self.assertEqual(post_max["target_local_rule_file"], "crunch_rules.yaml")
         self.assertEqual(post_max["target_local_policy_section"], "crunch.rules")
@@ -7642,10 +7642,10 @@ class RequestShapeRollupTests(unittest.TestCase):
                                     "enabled": True,
                                     "policy_source": "local-manual",
                                     "policy_decision": {
-                                        "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                        "schema": "tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1",
                                         "decision_id": decision_id,
-                                        "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
-                                        "source_policy_decision_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                        "source_evidence_schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
+                                        "source_policy_decision_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                                         "decision": "promote-full",
                                         "graduation_decision": "promote-full",
                                         "applied_count": 107,
@@ -7687,7 +7687,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
             payload = build_request_shape_crunch_activation_evidence_report(
                 crunch_policy_decision={
-                    "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                     "decision": "widen",
                     "graduation_decision": "widen",
                     "decision_id": decision_id,
@@ -7707,7 +7707,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                         },
                     },
                 },
-                crunch_canary_impact={"schema": "agentflow.request_shape_crunch_canary_impact.v1", "summary": {}},
+                crunch_canary_impact={"schema": "tokenclaw.request_shape_crunch_canary_impact.v1", "summary": {}},
                 rules_path=rules_path,
             )
 
@@ -7767,9 +7767,9 @@ class RequestShapeRollupTests(unittest.TestCase):
                                     "rollout": {"canary_enabled": True, "canary_fraction": 0.30, "holdout_fraction": 0.10},
                                     "safety_gates": {"max_rollout_fraction": 0.30},
                                     "policy_decision": {
-                                        "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                        "schema": "tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1",
                                         "decision_id": decision_id,
-                                        "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                        "source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                                         "decision": "widen",
                                         "graduation_decision": "widen",
                                         "applied_count": 107,
@@ -7793,7 +7793,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             )
             activation = build_request_shape_crunch_activation_evidence_report(
                 crunch_policy_decision={
-                    "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                     "decision": "widen",
                     "graduation_decision": "widen",
                     "decision_id": decision_id,
@@ -7808,11 +7808,11 @@ class RequestShapeRollupTests(unittest.TestCase):
                         "coverage": {"skipped_count": 280, "fallback_count": 0, "safety_stop_count": 0, "rollback_count": 0},
                     },
                 },
-                crunch_canary_impact={"schema": "agentflow.request_shape_crunch_canary_impact.v1", "summary": {}},
+                crunch_canary_impact={"schema": "tokenclaw.request_shape_crunch_canary_impact.v1", "summary": {}},
                 rules_path=rules_path,
             )
             follow_up = {
-                "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                 "candidates": [
                     {
                         "rank": 1,
@@ -7867,7 +7867,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 ],
             }
             opportunity = {
-                "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
                 "cohorts": [
                     {
                         "provider_family": "anthropic",
@@ -7918,7 +7918,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                 rules_path=rules_path,
             )
 
-        self.assertEqual(payload["schema"], "agentflow.request_shape_crunch_remaining_measurement_cohorts.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.request_shape_crunch_remaining_measurement_cohorts.v1")
         self.assertEqual(payload["status"], "ranked")
         self.assertEqual(payload["summary"]["excluded_active_rule_covered_count"], 1)
         self.assertEqual(payload["summary"]["remaining_measurement_required_count"], 1)
@@ -7958,9 +7958,9 @@ class RequestShapeRollupTests(unittest.TestCase):
                                     "enabled": True,
                                     "policy_source": "local-manual",
                                     "policy_decision": {
-                                        "schema": "agentflow.request_shape_crunch_policy_decision_rule_metadata.v1",
+                                        "schema": "tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1",
                                         "decision_id": decision_id,
-                                        "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                        "source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                                         "decision": "widen",
                                         "graduation_decision": "widen",
                                         "applied_count": 10,
@@ -7986,7 +7986,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
             payload = build_request_shape_crunch_activation_evidence_report(
                 crunch_policy_decision={
-                    "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                     "decision": "widen",
                     "graduation_decision": "widen",
                     "decision_id": decision_id,
@@ -8004,7 +8004,7 @@ class RequestShapeRollupTests(unittest.TestCase):
                         "coverage": {"fallback_count": 0, "safety_stop_count": 0, "rollback_count": 0},
                     },
                 },
-                crunch_canary_impact={"schema": "agentflow.request_shape_crunch_canary_impact.v1", "summary": {}},
+                crunch_canary_impact={"schema": "tokenclaw.request_shape_crunch_canary_impact.v1", "summary": {}},
                 rules_path=rules_path,
             )
 
@@ -8027,14 +8027,14 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
         self.assertEqual(payload["decision"], "blocked")
         self.assertEqual(payload["graduation_decision"], "blocked")
         self.assertTrue(payload["summary"]["keep_blocked"])
         self.assertEqual(payload["summary"]["applied_count"], 0)
         self.assertEqual(payload["summary"]["holdout_count"], 0)
         self.assertEqual(payload["top_decision"]["reason"], "missing-applied-or-holdout-coverage")
-        self.assertEqual(payload["ledger_update"]["schema"], "agentflow.request_shape_crunch_policy_decision_ledger.v1")
+        self.assertEqual(payload["ledger_update"]["schema"], "tokenclaw.request_shape_crunch_policy_decision_ledger.v1")
         self.assertEqual(payload["ledger_update"]["status"], "recorded")
         self.assertEqual(payload["ledger_update"]["summary"]["rows_written"], 1)
         rows = self.store.promotion_outcome_feedback_rows(action_family="crunch", limit=10)

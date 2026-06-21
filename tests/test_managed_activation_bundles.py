@@ -72,7 +72,7 @@ def _action(family: str, order: int, *, apply_after: list[str] | None = None) ->
             }
         }
     return {
-        "schema": "agentflow.local_activation_policy_bundle_action.v1",
+        "schema": "tokenclaw.local_activation_policy_bundle_action.v1",
         "action_id": f"local-activation-policy-bundle-action:{family}:fixture",
         "draft_id": draft_id,
         "recommendation_id": f"{family}-recommendation-fixture",
@@ -94,7 +94,7 @@ def _action(family: str, order: int, *, apply_after: list[str] | None = None) ->
         "target_local_rule_file": f"{family}-rules.yaml",
         "confidence": 0.92,
         "expected_savings": {
-            "schema": "agentflow.local_activation_expected_savings.v1",
+            "schema": "tokenclaw.local_activation_expected_savings.v1",
             "projected_savings_usd": 0.12,
             "projected_saved_tokens": 1234,
             "metadata_only": True,
@@ -102,7 +102,7 @@ def _action(family: str, order: int, *, apply_after: list[str] | None = None) ->
             "feature_only": True,
         },
         "required_coverage": {
-            "schema": "agentflow.local_activation_required_coverage.v1",
+            "schema": "tokenclaw.local_activation_required_coverage.v1",
             "observed_applied_count": 3,
             "observed_holdout_count": 2,
             "has_required_applied_coverage": True,
@@ -112,7 +112,7 @@ def _action(family: str, order: int, *, apply_after: list[str] | None = None) ->
             "feature_only": True,
         },
         "rollback_criteria": {
-            "schema": "agentflow.local_activation_rollback_criteria.v1",
+            "schema": "tokenclaw.local_activation_rollback_criteria.v1",
             "rollback_on_safety_stop": True,
             "local_rollback_required": True,
             "managed_enforced": False,
@@ -121,14 +121,14 @@ def _action(family: str, order: int, *, apply_after: list[str] | None = None) ->
             "feature_only": True,
         },
         "keep_staged_criteria": {
-            "schema": "agentflow.local_activation_keep_staged_criteria.v1",
+            "schema": "tokenclaw.local_activation_keep_staged_criteria.v1",
             "require_no_safety_stop": True,
             "metadata_only": True,
             "aggregate_only": True,
             "feature_only": True,
         },
         "risk_summary": {
-            "schema": "agentflow.local_activation_risk_summary.v1",
+            "schema": "tokenclaw.local_activation_risk_summary.v1",
             "required_local_review": True,
             "metadata_only": True,
             "aggregate_only": True,
@@ -140,7 +140,7 @@ def _action(family: str, order: int, *, apply_after: list[str] | None = None) ->
             "source_decision": "widen",
         },
         "local_policy_draft": {
-            "schema": "agentflow.local_policy_rule_draft.v1",
+            "schema": "tokenclaw.local_policy_rule_draft.v1",
             "status": "review-required",
             "policy_source": "managed-recommended",
             "managed_enforced": False,
@@ -157,7 +157,7 @@ def _action(family: str, order: int, *, apply_after: list[str] | None = None) ->
             "next_action": "widen",
             "candidate_bucket": {"policy_section": family, "source_decision": "widen"},
             "decision_provenance": {
-                "schema": "agentflow.local_activation_outcome_decision_provenance.v1",
+                "schema": "tokenclaw.local_activation_outcome_decision_provenance.v1",
                 "source_decision": "widen",
                 "metadata_only": True,
                 "aggregate_only": True,
@@ -169,8 +169,8 @@ def _action(family: str, order: int, *, apply_after: list[str] | None = None) ->
             "review_note": "Managed draft only; local file-backed rules must be reviewed and applied locally.",
         },
         "provenance": {
-            "schema": "agentflow.local_activation_outcome_policy_bundle_draft_provenance.v1",
-            "issuer": "agentflow-server",
+            "schema": "tokenclaw.local_activation_outcome_policy_bundle_draft_provenance.v1",
+            "issuer": "tokenclaw-server",
             "signing_status": "unsigned-development-draft",
             "managed_enforced": False,
         },
@@ -194,7 +194,7 @@ def _action(family: str, order: int, *, apply_after: list[str] | None = None) ->
 
 def _draft_for_action(action: dict[str, object]) -> dict[str, object]:
     return {
-        "schema": "agentflow.local_activation_outcome_policy_bundle_draft.v1",
+        "schema": "tokenclaw.local_activation_outcome_policy_bundle_draft.v1",
         "status": "draft",
         "draft_id": action["draft_id"],
         "recommendation_id": action["recommendation_id"],
@@ -244,7 +244,7 @@ def _bundle() -> dict[str, object]:
     cache = _action("cache", 1)
     crunch = _action("crunch", 2, apply_after=[str(cache["draft_id"])])
     return {
-        "schema": "agentflow.local_activation_outcome_policy_bundle_drafts.v1",
+        "schema": "tokenclaw.local_activation_outcome_policy_bundle_drafts.v1",
         "bundle_id": "local-activation-policy-bundle:fixture",
         "status": "review-only",
         "generated_at": "2026-06-16T04:00:00+00:00",
@@ -266,7 +266,7 @@ def _bundle() -> dict[str, object]:
         "drafts": [_draft_for_action(cache), _draft_for_action(crunch)],
         "omitted_actions": [
             {
-                "schema": "agentflow.local_activation_outcome_policy_bundle_draft_omission.v1",
+                "schema": "tokenclaw.local_activation_outcome_policy_bundle_draft_omission.v1",
                 "status": "omitted",
                 "local_action_family": "routing",
                 "reason_codes": ["local-activation-safety-stop"],
@@ -275,8 +275,8 @@ def _bundle() -> dict[str, object]:
             }
         ],
         "provenance": {
-            "schema": "agentflow.local_activation_policy_bundle_provenance.v1",
-            "issuer": "agentflow-server",
+            "schema": "tokenclaw.local_activation_policy_bundle_provenance.v1",
+            "issuer": "tokenclaw-server",
             "bundle_id": "local-activation-policy-bundle:fixture",
             "bundle_hash": "sha256:fixture",
             "signing_status": "unsigned-development-draft",
@@ -307,15 +307,15 @@ def _bundle() -> dict[str, object]:
 
 class ManagedActivationBundleTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        self.old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
         self.tmp = TemporaryDirectory()
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
 
     def tearDown(self) -> None:
         if self.old_event_log is None:
-            os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
         else:
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = self.old_event_log
         self.tmp.cleanup()
 
     def test_import_stages_cache_and_crunch_policy_draft_metadata(self) -> None:
@@ -330,7 +330,7 @@ class ManagedActivationBundleTests(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"], result)
-            self.assertEqual(result["schema"], "agentflow.managed_activation_bundle_import.v1")
+            self.assertEqual(result["schema"], "tokenclaw.managed_activation_bundle_import.v1")
             self.assertEqual(result["status"], "staged")
             self.assertEqual(result["summary"]["staged_count"], 2)
             self.assertEqual(result["summary"]["skipped_count"], 0)
@@ -354,7 +354,7 @@ class ManagedActivationBundleTests(unittest.TestCase):
                 section_payload = yaml.safe_load(section_path.read_text(encoding="utf-8"))
                 self.assertIn("managed_activation_drafts", section_payload)
                 entry = section_payload["managed_activation_drafts"][0]
-                self.assertEqual(entry["schema"], "agentflow.managed_activation_policy_draft_entry.v1")
+                self.assertEqual(entry["schema"], "tokenclaw.managed_activation_policy_draft_entry.v1")
                 self.assertEqual(entry["policy_source"], "managed-recommended")
                 self.assertEqual(entry["local_action_family"], family)
                 self.assertEqual(entry["target_local_rule_file"], f"{family}_rules.yaml")

@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any, Iterable
 
 
-SCHEMA = "agentflow.provider_adoption_regression_gate.v1"
+SCHEMA = "tokenclaw.provider_adoption_regression_gate.v1"
 
 RISK_STATUSES = {"abandoned", "orphan-result", "orphan_result", "unknown"}
 

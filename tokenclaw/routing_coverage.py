@@ -4,8 +4,8 @@ import json
 from typing import Any
 
 
-SCHEMA = "agentflow.routing_coverage_report.v1"
-ROW_SCHEMA = "agentflow.routing_coverage_row.v1"
+SCHEMA = "tokenclaw.routing_coverage_report.v1"
+ROW_SCHEMA = "tokenclaw.routing_coverage_row.v1"
 
 
 def _json_obj(value: Any) -> dict[str, Any]:

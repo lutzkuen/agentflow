@@ -60,7 +60,7 @@ class ProviderToolAdoptionTests(unittest.TestCase):
     def _store(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        return Store(str(Path(tmp.name) / "agentflow.sqlite3"))
+        return Store(str(Path(tmp.name) / "tokenclaw.sqlite3"))
 
     def test_anthropic_tool_use_window_is_fulfilled_without_raw_ids_in_report(self):
         store = self._store()
@@ -406,7 +406,7 @@ class ProviderToolAdoptionTests(unittest.TestCase):
         code = provider_tool_adoption_report_cli(["--db", store.path], stdout=out)
         self.assertEqual(code, 0)
         payload = json.loads(out.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.provider_tool_adoption_report.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.provider_tool_adoption_report.v1")
         self.assertEqual(payload["status_counts"], {"pending": 1})
 
 

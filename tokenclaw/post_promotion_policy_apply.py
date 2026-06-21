@@ -14,8 +14,8 @@ from tokenclaw.post_promotion_policy_drafts import DRAFT_SCHEMA
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.post_promotion_policy_draft_apply.v1"
-OUTCOME_SCHEMA = "agentflow.post_promotion_policy_draft_apply_outcome.v1"
+SCHEMA = "tokenclaw.post_promotion_policy_draft_apply.v1"
+OUTCOME_SCHEMA = "tokenclaw.post_promotion_policy_draft_apply_outcome.v1"
 
 _SUPPORTED_SECTION_PATHS = {
     "routing": "routing.rules",
@@ -165,7 +165,7 @@ def _set_holdout_fraction(container: dict[str, Any], required: float) -> None:
 
 def _attach_apply_metadata(rule: dict[str, Any], draft: dict[str, Any], *, apply_id: str, previous_rule: dict[str, Any]) -> None:
     rule["post_promotion_policy_apply"] = {
-        "schema": "agentflow.post_promotion_policy_apply_rule_metadata.v1",
+        "schema": "tokenclaw.post_promotion_policy_apply_rule_metadata.v1",
         "applied_at": utc_now(),
         "apply_id": apply_id,
         "draft_id": draft.get("draft_id"),
@@ -298,8 +298,8 @@ async def apply_post_promotion_policy_drafts(
     max_apply: int = 20,
     reload_policy_state: Callable[[], Awaitable[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    config_path = safe_expanduser(config_dir) if config_dir is not None else safe_expanduser("~/.agentflow")
-    workspace_path = safe_expanduser(workspace) if workspace is not None else safe_expanduser("~/.agentflow/policy_drafts")
+    config_path = safe_expanduser(config_dir) if config_dir is not None else safe_expanduser("~/.tokenclaw")
+    workspace_path = safe_expanduser(workspace) if workspace is not None else safe_expanduser("~/.tokenclaw/policy_drafts")
     if not isinstance(policy_draft_report, dict):
         return {
             "schema": SCHEMA,
@@ -374,7 +374,7 @@ async def apply_post_promotion_policy_drafts(
             draft_id=apply_id,
             workspace=workspace_path,
             metadata={
-                "schema": "agentflow.post_promotion_policy_apply_stage_metadata.v1",
+                "schema": "tokenclaw.post_promotion_policy_apply_stage_metadata.v1",
                 "source": "post-promotion-policy-draft-apply",
                 "post_promotion_draft_id": draft.get("draft_id"),
                 "draft_action": draft.get("draft_action"),

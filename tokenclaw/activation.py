@@ -12,11 +12,11 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from tokenclaw.env import env
-from tokenclaw.paths import default_config_dir as default_agentflow_config_dir, safe_home_dir
+from tokenclaw.paths import default_config_dir as default_tokenclaw_config_dir, safe_home_dir
 from tokenclaw.upstream_url import normalize_openai_upstream_base_url, redact_url
 
 
-SCHEMA = "agentflow.activation_config.v1"
+SCHEMA = "tokenclaw.activation_config.v1"
 DEFAULT_CONFIG_FILENAME = "activation.json"
 DEFAULT_OPENAI_LOCAL_BASE_URL = "http://127.0.0.1:4003/v1"
 DEFAULT_OPENAI_HEALTH_URL = "http://127.0.0.1:4003/health"
@@ -53,7 +53,7 @@ def utc_now() -> str:
 
 
 def default_config_dir() -> Path:
-    return default_agentflow_config_dir()
+    return default_tokenclaw_config_dir()
 
 
 def activation_config_path(config_dir: str | Path | None = None) -> Path:
@@ -256,7 +256,7 @@ def activation_status_from_config(
                     status[key] = raw_profile.get(key)
         targets[name] = status
     return {
-        "schema": "agentflow.activation_status.v1",
+        "schema": "tokenclaw.activation_status.v1",
         "ok": True,
         "config_path": str(activation_config_path(config_dir)),
         "targets": targets,
@@ -493,7 +493,7 @@ def activation_result(
     dry_run: bool,
 ) -> dict[str, Any]:
     return {
-        "schema": "agentflow.activation_result.v1",
+        "schema": "tokenclaw.activation_result.v1",
         "ok": True,
         "dry_run": dry_run,
         "target": profile["id"],
@@ -558,19 +558,19 @@ def _update_codex_toml(raw: str, local_base_url: str) -> tuple[str, bool]:
 
 
 def _next_backup_path(path: Path) -> Path:
-    candidate = path.with_name(path.name + ".agentflow.bak")
+    candidate = path.with_name(path.name + ".tokenclaw.bak")
     if not candidate.exists():
         return candidate
     index = 1
     while True:
-        candidate = path.with_name(path.name + f".agentflow.bak.{index}")
+        candidate = path.with_name(path.name + f".tokenclaw.bak.{index}")
         if not candidate.exists():
             return candidate
         index += 1
 
 
 def _desktop_backup_path(path: Path) -> Path:
-    return path.with_name(path.name + ".agentflow.bak")
+    return path.with_name(path.name + ".tokenclaw.bak")
 
 
 def _split_exec_value(value: str) -> list[str]:
@@ -761,7 +761,7 @@ def activate_claude_vscode(
     shell_exports = [f"export ANTHROPIC_BASE_URL={shlex.quote(local_base_url)}"]
     routing_snippet = "\n".join([*shell_exports, "code ."])
     return {
-        "schema": "agentflow.claude_vscode_activation_result.v1",
+        "schema": "tokenclaw.claude_vscode_activation_result.v1",
         "ok": True,
         "dry_run": bool(dry_run),
         "target": "claude-vscode",
@@ -842,7 +842,7 @@ def activate_claude_desktop(
         config_path = write_activation_config(updated_config, config_dir)
 
     return {
-        "schema": "agentflow.claude_desktop_activation_result.v1",
+        "schema": "tokenclaw.claude_desktop_activation_result.v1",
         "ok": True,
         "dry_run": bool(dry_run),
         "force": bool(force),
@@ -901,7 +901,7 @@ def activate_codex(
         config_path = write_activation_config(updated_config, config_dir)
 
     return {
-        "schema": "agentflow.codex_activation_result.v1",
+        "schema": "tokenclaw.codex_activation_result.v1",
         "ok": True,
         "dry_run": bool(dry_run),
         "force": bool(force),

@@ -29,7 +29,7 @@ from tokenclaw.pattern_modules import (
 class TestLocalCrunchModule(LocalPatternModule):
     family = "test_safe_crunch"
     version = "test.1"
-    feature_schema = "agentflow.test_safe_crunch_features.v1"
+    feature_schema = "tokenclaw.test_safe_crunch_features.v1"
     supports_local_crunch = True
 
     def detect(self, context: PatternModuleContext) -> PatternDetection:
@@ -77,7 +77,7 @@ class TestLocalCrunchModule(LocalPatternModule):
 class UnsafeFeatureModule(LocalPatternModule):
     family = "unsafe_fixture"
     version = "test.1"
-    feature_schema = "agentflow.unsafe_fixture_features.v1"
+    feature_schema = "tokenclaw.unsafe_fixture_features.v1"
 
     def detect(self, context: PatternModuleContext) -> PatternDetection:
         return PatternDetection(detected=True, reason="unsafe-fixture")
@@ -186,7 +186,7 @@ class PatternModuleTests(unittest.TestCase):
         self.assertEqual(meta["features_emitted_count"], 0)
 
     def test_crunch_body_reports_pattern_module_features_and_honors_config_disable(self):
-        saved_env = os.environ.get("AGENTFLOW_CRUNCH_RULES")
+        saved_env = os.environ.get("TOKENCLAW_CRUNCH_RULES")
         try:
             with TemporaryDirectory() as tmp:
                 tmp_path = Path(tmp)
@@ -202,7 +202,7 @@ pattern_modules:
 """,
                     encoding="utf-8",
                 )
-                os.environ["AGENTFLOW_CRUNCH_RULES"] = str(rules_path)
+                os.environ["TOKENCLAW_CRUNCH_RULES"] = str(rules_path)
                 manual = importlib.reload(crunch_module)
                 body = {
                     "messages": [{
@@ -224,9 +224,9 @@ pattern_modules:
                 self.assertEqual(managed_egress_violations(meta["pattern_modules"]["server_features"]), [])
         finally:
             if saved_env is None:
-                os.environ.pop("AGENTFLOW_CRUNCH_RULES", None)
+                os.environ.pop("TOKENCLAW_CRUNCH_RULES", None)
             else:
-                os.environ["AGENTFLOW_CRUNCH_RULES"] = saved_env
+                os.environ["TOKENCLAW_CRUNCH_RULES"] = saved_env
             importlib.reload(crunch_module)
 
     def _tool_result_feature(self, body, *, local_crunch_enabled=False):

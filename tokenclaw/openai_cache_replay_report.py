@@ -9,7 +9,7 @@ from tokenclaw.public_metadata import public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_cache_replay_opportunity.v1"
+SCHEMA = "tokenclaw.openai_cache_replay_opportunity.v1"
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -199,7 +199,7 @@ def _sanitized_dependency_audit(cache: dict[str, Any]) -> dict[str, Any]:
     if isinstance(audit, dict):
         safe = bool(audit.get("safe_invalidation_evidence"))
         return {
-            "schema": str(audit.get("schema") or "agentflow.cache_file_dependency_audit.v1"),
+            "schema": str(audit.get("schema") or "tokenclaw.cache_file_dependency_audit.v1"),
             "file_watch_enabled": bool(audit.get("file_watch_enabled")),
             "snapshot_root_policy": str(audit.get("snapshot_root_policy") or "unknown"),
             "root_path_included": False,
@@ -226,7 +226,7 @@ def _sanitized_dependency_audit(cache: dict[str, Any]) -> dict[str, Any]:
         }
     evidence = bool(cache.get("file_dependency_evidence_available") or cache.get("safe_invalidation_evidence"))
     return {
-        "schema": "agentflow.cache_file_dependency_audit.v1",
+        "schema": "tokenclaw.cache_file_dependency_audit.v1",
         "file_watch_enabled": bool(cache.get("file_watch_enabled")),
         "snapshot_root_policy": "unknown",
         "root_path_included": False,
@@ -589,7 +589,7 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
             "projected_savings_usd": round(projected_savings, 6),
         },
         "projection_policy": {
-            "schema": "agentflow.openai_cache_replay_projection_policy.v1",
+            "schema": "tokenclaw.openai_cache_replay_projection_policy.v1",
             "provider_calls_made": False,
             "raw_body_required": False,
             "method": "metadata-only repeated request fingerprints, then same-session shape repeats when fingerprints are unavailable",

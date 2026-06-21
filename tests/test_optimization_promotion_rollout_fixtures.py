@@ -48,7 +48,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
         return attach_optimization_rollout_provenance(
             bundle,
             secret="fixture-secret",
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="managed-fixture",
             key_id="fixture-key",
             generated_at="2026-06-10T05:00:00+00:00",
@@ -120,7 +120,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
             "holdout_fraction": 0.1 if action_type != "rollback" else 0.0,
             "evidence_summary": {"eval_pass_count": 2, "eval_fail_count": 0, "reason_codes": ["promotion-thresholds-met"]},
             "rollback_metadata": {"preserve_previous_rule_required": True},
-            "local_review": {"required": True, "apply_preview_command": "agentflow-optimization-promotion-canaries-apply --dry-run"},
+            "local_review": {"required": True, "apply_preview_command": "tokenclaw-optimization-promotion-canaries-apply --dry-run"},
             "privacy": {
                 "metadata_only": True,
                 "content_free": True,
@@ -213,7 +213,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
             "holdout_fraction": 0.1 if action_type != "rollback" else 0.0,
             "evidence_summary": {"eval_pass_count": 2, "eval_fail_count": 0, "projected_savings_usd": 0.012},
             "rollback_metadata": {"preserve_previous_rule_required": True},
-            "local_review": {"required": True, "apply_preview_command": "agentflow-optimization-promotion-canaries-apply --dry-run"},
+            "local_review": {"required": True, "apply_preview_command": "tokenclaw-optimization-promotion-canaries-apply --dry-run"},
             "privacy": {
                 "metadata_only": True,
                 "content_free": True,
@@ -312,7 +312,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
             "holdout_fraction": 0.0 if action_type == "rollback" else holdout_fraction,
             "evidence_summary": {"eval_pass_count": 3, "eval_fail_count": 0, "reason_codes": ["promotion-thresholds-met"]},
             "rollback_metadata": {"preserve_previous_rule_required": True},
-            "local_review": {"required": True, "apply_preview_command": "agentflow-optimization-promotion-canaries-apply --dry-run"},
+            "local_review": {"required": True, "apply_preview_command": "tokenclaw-optimization-promotion-canaries-apply --dry-run"},
             "privacy": {
                 "metadata_only": True,
                 "content_free": True,
@@ -351,7 +351,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
         fixture = self._fixture()
         signed = self._signed(copy.deepcopy(fixture["managed_rollout_bundle"]))
 
-        with patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "fixture-secret"}):
+        with patch.dict("os.environ", {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "fixture-secret"}):
             result = review_optimization_rollout_actions(
                 signed,
                 now=datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc),
@@ -374,7 +374,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
         raw_like = copy.deepcopy(fixture["managed_rollout_bundle"])
         raw_like["actions"][0]["raw_request"] = {"prompt": "raw fixture prompt secret"}
         raw_signed = self._signed(raw_like)
-        with patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "fixture-secret"}):
+        with patch.dict("os.environ", {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "fixture-secret"}):
             raw_result = validate_optimization_rollout_bundle(
                 raw_signed,
                 now=datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc),
@@ -385,7 +385,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
         missing_reason = copy.deepcopy(fixture["managed_rollout_bundle"])
         del missing_reason["omitted_actions"][0]["reason"]
         reason_signed = self._signed(missing_reason)
-        with patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "fixture-secret"}):
+        with patch.dict("os.environ", {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "fixture-secret"}):
             reason_result = validate_optimization_rollout_bundle(
                 reason_signed,
                 now=datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc),
@@ -396,7 +396,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
         missing_compatibility = copy.deepcopy(fixture["managed_rollout_bundle"])
         del missing_compatibility["actions"][0]["local_executor_compatibility"]
         compat_signed = self._signed(missing_compatibility)
-        with patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "fixture-secret"}):
+        with patch.dict("os.environ", {"TOKENCLAW_MANAGED_POLICY_VERIFICATION_SECRET": "fixture-secret"}):
             compat_result = validate_optimization_rollout_bundle(
                 compat_signed,
                 now=datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc),
@@ -494,7 +494,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
             "conditions": {"pattern_hashes": ["sha256:" + ("a" * 64)], "min_repeated_count": 2, "keep_recent_matches": 1},
             "action": {"type": "shorten", "head_chars": 800, "tail_chars": 600, "max_replacement_chars": 1800},
             "rollout": {
-                "schema": "agentflow.pattern_policy_rollout.v1",
+                "schema": "tokenclaw.pattern_policy_rollout.v1",
                 "recommendation_mode": "canary",
                 "canary_enabled": True,
                 "canary_fraction": 0.2,
@@ -685,7 +685,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
                 "streaming": False,
             },
             "rollout": {
-                "schema": "agentflow.pattern_policy_rollout.v1",
+                "schema": "tokenclaw.pattern_policy_rollout.v1",
                 "recommendation_mode": "canary",
                 "canary_enabled": True,
                 "canary_fraction": 0.25,
@@ -768,7 +768,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
             "privacy": {"metadata_only": True, "raw_prompts_included": False, "raw_provider_bodies_included": False},
         }
         built = build_optimization_promotion_actions(
-            {"schema": "agentflow.optimization_promotion_report.v1", "candidates": [candidate]},
+            {"schema": "tokenclaw.optimization_promotion_report.v1", "candidates": [candidate]},
             initial_canary_fraction=0.1,
             widen_step=0.25,
             holdout_fraction=0.1,
@@ -1019,8 +1019,8 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
-                "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
             },
         ):
             meta = asyncio.run(queue_policy_event_feedback(

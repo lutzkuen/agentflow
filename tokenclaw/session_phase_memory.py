@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA = "agentflow.session_phase_memory.v1"
+SCHEMA = "tokenclaw.session_phase_memory.v1"
 TOKEN_CHARS = 4
 DEFAULT_LIMIT = 1000
 DEFAULT_WINDOW_SIZE = 20

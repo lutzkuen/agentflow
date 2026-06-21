@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 
-SAFETY_STOP_REASON_SCHEMA = "agentflow.promotion_family_safety_stop_reason.v1"
+SAFETY_STOP_REASON_SCHEMA = "tokenclaw.promotion_family_safety_stop_reason.v1"
 
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:@+-]{0,119}$")
 

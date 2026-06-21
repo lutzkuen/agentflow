@@ -87,7 +87,7 @@ from tokenclaw.store import stable_json, utc_now
 from tokenclaw.upstream_url import join_openai_upstream_url, openai_websocket_url
 
 
-SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
+SESSION_COST_ALERT_USD = float(os.getenv("TOKENCLAW_SESSION_COST_ALERT_USD", "5.0"))
 
 
 async def _queue_optimization_coordinator_lifecycle_feedback(
@@ -203,7 +203,7 @@ def build_forward_headers(context: ProviderContext, request: Request, *, force_j
     return build_openai_forward_headers(
         request.headers,
         auth_mode=context.openai_auth_mode,
-        api_key=os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
+        api_key=os.getenv("TOKENCLAW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
         force_json=force_json,
     )
 
@@ -212,7 +212,7 @@ def build_websocket_headers(context: ProviderContext, websocket: WebSocket) -> d
     return build_openai_websocket_headers(
         websocket.headers,
         auth_mode=context.openai_auth_mode,
-        api_key=os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
+        api_key=os.getenv("TOKENCLAW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
     )
 
 
@@ -325,7 +325,7 @@ async def _fetch_openai_old_context_summary(
                     json=summary_request,
                 )
     except Exception:
-        logging.exception("agentflow openai old-context summary error")
+        logging.exception("tokenclaw openai old-context summary error")
         return {
             "summary": None,
             "summary_status_code": None,
@@ -628,7 +628,7 @@ async def openai_responses_websocket(context: ProviderContext, websocket: WebSoc
     except WebSocketDisconnect:
         return
     except Exception:
-        logging.exception("agentflow openai websocket proxy error")
+        logging.exception("tokenclaw openai websocket proxy error")
         try:
             await websocket.close(code=1011, reason=INTERNAL_PROXY_ERROR_MESSAGE)
         except Exception:
@@ -725,7 +725,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         )
         if selected_openai_governor_family(routing_meta) == "routing":
             summary_meta = {
-                "schema": "agentflow.openai_old_context_summary.v1",
+                "schema": "tokenclaw.openai_old_context_summary.v1",
                 "enabled": False,
                 "status": "suppressed",
                 "applied": False,
@@ -878,7 +878,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     payload = tier_backoff_payload(exc)
                     yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
                 except Exception as exc:
-                    logging.exception("agentflow openai streaming proxy error")
+                    logging.exception("tokenclaw openai streaming proxy error")
                     status_code = 500
                     error = repr(exc)
                     yield (
@@ -1052,7 +1052,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             return StreamingResponse(
                 gen(),
                 media_type="text/event-stream",
-                headers={"x-agentflow-cache": "skip-streaming", "x-agentflow-routed-model": str(crunched.get("model"))},
+                headers={"x-tokenclaw-cache": "skip-streaming", "x-tokenclaw-routed-model": str(crunched.get("model"))},
             )
 
         has_tool_blocks = has_tools(crunched)
@@ -1298,7 +1298,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     category=category,
                     session_id=session_id,
                 )
-                return JSONResponse(cached, headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))})
+                return JSONResponse(cached, headers={"x-tokenclaw-cache": "hit", "x-tokenclaw-routed-model": str(crunched.get("model"))})
 
         if can_semantic_cache:
             emb = build_embedding(extract_text(crunched))
@@ -1403,7 +1403,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     category=category,
                     session_id=session_id,
                 )
-                return JSONResponse(sem_resp, headers={"x-agentflow-cache": "semantic-hit", "x-agentflow-routed-model": str(crunched.get("model"))})
+                return JSONResponse(sem_resp, headers={"x-tokenclaw-cache": "semantic-hit", "x-tokenclaw-routed-model": str(crunched.get("model"))})
 
         async with context.limiter.semaphores[model_tier(crunched["model"])]:
             async with httpx.AsyncClient(timeout=context.http_timeout) as client:
@@ -1684,7 +1684,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         return JSONResponse(
             response_body,
             status_code=status_code,
-            headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))},
+            headers={"x-tokenclaw-cache": "miss", "x-tokenclaw-routed-model": str(crunched.get("model"))},
         )
     except TierBackoffActive as exc:
         routed_model_for_log: Optional[str] = None
@@ -1773,7 +1773,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             headers=tier_backoff_headers(exc, routed_model_for_log or ""),
         )
     except Exception as exc:
-        logging.exception("agentflow openai proxy error")
+        logging.exception("tokenclaw openai proxy error")
         error = repr(exc)
         latency_ms = int((time.time() - started) * 1000)
         attach_openai_optimization_governor(

@@ -6,7 +6,7 @@ import yaml
 from pathlib import Path
 from typing import Any
 
-from tokenclaw.paths import agentflow_config_path
+from tokenclaw.paths import tokenclaw_config_path
 from tokenclaw.policy_files import policy_file_snapshot, policy_file_status, utc_now
 from tokenclaw.public_metadata import public_id, public_label, public_path_state
 
@@ -206,7 +206,7 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / filename)
-    candidates.append(agentflow_config_path(filename))
+    candidates.append(tokenclaw_config_path(filename))
     return candidates
 
 
@@ -225,7 +225,7 @@ def _default_codex_app_policy() -> dict[str, Any]:
         },
         "exact_cache": {
             "enabled": False,
-            "namespace": os.getenv("AGENTFLOW_CACHE_NAMESPACE", "default"),
+            "namespace": os.getenv("TOKENCLAW_CACHE_NAMESPACE", "default"),
             "ttl_seconds": 24 * 60 * 60,
             "canary": {
                 "fraction": 1.0,
@@ -294,8 +294,8 @@ def _default_codex_app_policy() -> dict[str, Any]:
                 "max_error_rate_delta": 0.05,
             },
             "provenance": {
-                "schema": "agentflow.codex_terminal_transcript_compaction_policy.v1",
-                "issuer": "local-agentflow",
+                "schema": "tokenclaw.codex_terminal_transcript_compaction_policy.v1",
+                "issuer": "local-tokenclaw",
                 "status": "local-default",
             },
             "rules": [],
@@ -604,7 +604,7 @@ def _codex_terminal_transcript_compaction_public_policy(
     source = policy if isinstance(policy, dict) else CODEX_APP_POLICY["terminal_transcript_compaction"]
     canary = source.get("canary") if isinstance(source.get("canary"), dict) else {}
     public = {
-        "schema": "agentflow.codex_terminal_transcript_compaction_policy.v1",
+        "schema": "tokenclaw.codex_terminal_transcript_compaction_policy.v1",
         "enabled": _as_bool(source.get("enabled"), False),
         "review_only": _as_bool(source.get("review_only"), True),
         "policy_source": public_label(source.get("policy_source") or CODEX_APP_POLICY_SOURCE, "unknown"),
@@ -659,7 +659,7 @@ def codex_terminal_transcript_compaction_effective_policy() -> dict[str, Any]:
 
 
 def _load_codex_app_policy() -> tuple[dict[str, Any], str, str]:
-    for path in _manual_rule_candidates("codex_app_rules.yaml", "AGENTFLOW_CODEX_APP_RULES"):
+    for path in _manual_rule_candidates("codex_app_rules.yaml", "TOKENCLAW_CODEX_APP_RULES"):
         if not path.exists():
             continue
         with open(path, encoding="utf-8") as f:
@@ -675,62 +675,62 @@ def _load_codex_app_policy() -> tuple[dict[str, Any], str, str]:
         if isinstance(data, dict):
             policy = _apply_codex_app_policy_yaml(policy, data)
 
-    policy["enabled"] = _env_bool("AGENTFLOW_CODEX_APP_OPTIMIZE", policy["enabled"])
+    policy["enabled"] = _env_bool("TOKENCLAW_CODEX_APP_OPTIMIZE", policy["enabled"])
     policy["summary_model_hint"]["enabled"] = _env_bool(
-        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT",
+        "TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT",
         policy["summary_model_hint"]["enabled"],
     )
     policy["summary_model_hint"]["target_model"] = os.getenv(
-        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET",
+        "TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET",
         os.getenv(
-            "AGENTFLOW_CODEX_APP_SUMMARY_TARGET_MODEL",
+            "TOKENCLAW_CODEX_APP_SUMMARY_TARGET_MODEL",
             str(policy["summary_model_hint"]["target_model"]),
         ),
     ).strip()
     policy["summary_model_hint"]["canary"]["fraction"] = _bounded_fraction(
-        os.getenv("AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_FRACTION"),
+        os.getenv("TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_FRACTION"),
         policy["summary_model_hint"]["canary"]["fraction"],
     )
     policy["summary_model_hint"]["canary"]["holdout_fraction"] = _bounded_fraction(
-        os.getenv("AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_HOLDOUT_FRACTION"),
+        os.getenv("TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT_HOLDOUT_FRACTION"),
         policy["summary_model_hint"]["canary"]["holdout_fraction"],
     )
     policy["summary_model_hint"]["canary"]["salt"] = os.getenv(
-        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_SALT",
+        "TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_SALT",
         str(policy["summary_model_hint"]["canary"]["salt"]),
     ).strip() or "codex-app-summary-model-hint"
     unit = os.getenv(
-        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_UNIT",
+        "TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_UNIT",
         str(policy["summary_model_hint"]["canary"]["unit"]),
     ).strip().lower().replace("-", "_")
     if unit in {"source_hash", "thread_id", "model_and_size"}:
         policy["summary_model_hint"]["canary"]["unit"] = unit
-    policy["exact_cache"]["enabled"] = _env_bool("AGENTFLOW_CODEX_APP_CACHE", policy["exact_cache"]["enabled"])
+    policy["exact_cache"]["enabled"] = _env_bool("TOKENCLAW_CODEX_APP_CACHE", policy["exact_cache"]["enabled"])
     policy["exact_cache"]["namespace"] = os.getenv(
-        "AGENTFLOW_CODEX_APP_CACHE_NAMESPACE",
-        os.getenv("AGENTFLOW_CACHE_NAMESPACE", str(policy["exact_cache"]["namespace"])),
+        "TOKENCLAW_CODEX_APP_CACHE_NAMESPACE",
+        os.getenv("TOKENCLAW_CACHE_NAMESPACE", str(policy["exact_cache"]["namespace"])),
     ).strip() or "default"
     try:
         policy["exact_cache"]["ttl_seconds"] = max(
             0,
-            int(os.getenv("AGENTFLOW_CODEX_APP_CACHE_TTL_SECONDS", str(policy["exact_cache"]["ttl_seconds"]))),
+            int(os.getenv("TOKENCLAW_CODEX_APP_CACHE_TTL_SECONDS", str(policy["exact_cache"]["ttl_seconds"]))),
         )
     except ValueError:
         pass
     policy["exact_cache"]["canary"]["fraction"] = _bounded_fraction(
-        os.getenv("AGENTFLOW_CODEX_APP_CACHE_CANARY_FRACTION"),
+        os.getenv("TOKENCLAW_CODEX_APP_CACHE_CANARY_FRACTION"),
         policy["exact_cache"]["canary"]["fraction"],
     )
     policy["exact_cache"]["canary"]["holdout_fraction"] = _bounded_fraction(
-        os.getenv("AGENTFLOW_CODEX_APP_CACHE_HOLDOUT_FRACTION"),
+        os.getenv("TOKENCLAW_CODEX_APP_CACHE_HOLDOUT_FRACTION"),
         policy["exact_cache"]["canary"]["holdout_fraction"],
     )
     policy["exact_cache"]["canary"]["salt"] = os.getenv(
-        "AGENTFLOW_CODEX_APP_CACHE_CANARY_SALT",
+        "TOKENCLAW_CODEX_APP_CACHE_CANARY_SALT",
         str(policy["exact_cache"]["canary"]["salt"]),
     ).strip() or "codex-app-exact-cache"
     cache_unit = os.getenv(
-        "AGENTFLOW_CODEX_APP_CACHE_CANARY_UNIT",
+        "TOKENCLAW_CODEX_APP_CACHE_CANARY_UNIT",
         str(policy["exact_cache"]["canary"]["unit"]),
     ).strip().lower().replace("-", "_")
     if cache_unit in {"source_hash", "thread_id", "model_and_size"}:
@@ -811,20 +811,20 @@ CODEX_APP_RULES_LOADED_FILE = policy_file_snapshot(CODEX_APP_RULES_PATH)
 
 def codex_app_optimize_enabled() -> bool:
     if CODEX_APP_POLICY_SOURCE == "local-default":
-        return _env_bool("AGENTFLOW_CODEX_APP_OPTIMIZE", bool(CODEX_APP_POLICY["enabled"]))
+        return _env_bool("TOKENCLAW_CODEX_APP_OPTIMIZE", bool(CODEX_APP_POLICY["enabled"]))
     return bool(CODEX_APP_POLICY["enabled"])
 
 
 def codex_app_cache_enabled() -> bool:
     if CODEX_APP_POLICY_SOURCE == "local-default":
-        return _env_bool("AGENTFLOW_CODEX_APP_CACHE", bool(CODEX_APP_POLICY["exact_cache"]["enabled"]))
+        return _env_bool("TOKENCLAW_CODEX_APP_CACHE", bool(CODEX_APP_POLICY["exact_cache"]["enabled"]))
     return bool(CODEX_APP_POLICY["exact_cache"]["enabled"])
 
 
 def codex_app_summary_model_hint_enabled() -> bool:
     if CODEX_APP_POLICY_SOURCE == "local-default":
         return _env_bool(
-            "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT",
+            "TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT",
             bool(CODEX_APP_POLICY["summary_model_hint"]["enabled"]),
         )
     return bool(CODEX_APP_POLICY["summary_model_hint"]["enabled"])
@@ -833,9 +833,9 @@ def codex_app_summary_model_hint_enabled() -> bool:
 def codex_app_summary_model_hint_target() -> str:
     if CODEX_APP_POLICY_SOURCE == "local-default":
         return os.getenv(
-            "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET",
+            "TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET",
             os.getenv(
-                "AGENTFLOW_CODEX_APP_SUMMARY_TARGET_MODEL",
+                "TOKENCLAW_CODEX_APP_SUMMARY_TARGET_MODEL",
                 str(CODEX_APP_POLICY["summary_model_hint"]["target_model"]),
             ),
         ).strip()
@@ -848,19 +848,19 @@ def codex_app_summary_model_hint_canary() -> dict[str, Any]:
         canary = {}
     if CODEX_APP_POLICY_SOURCE == "local-default":
         fraction = _bounded_fraction(
-            os.getenv("AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_FRACTION"),
+            os.getenv("TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_FRACTION"),
             _bounded_fraction(canary.get("fraction"), 1.0),
         )
         holdout_fraction = _bounded_fraction(
-            os.getenv("AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_HOLDOUT_FRACTION"),
+            os.getenv("TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT_HOLDOUT_FRACTION"),
             _bounded_fraction(canary.get("holdout_fraction"), 0.0),
         )
         salt = os.getenv(
-            "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_SALT",
+            "TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_SALT",
             str(canary.get("salt") or "codex-app-summary-model-hint"),
         ).strip() or "codex-app-summary-model-hint"
         unit = os.getenv(
-            "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_UNIT",
+            "TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_UNIT",
             str(canary.get("unit") or "source_hash"),
         ).strip().lower().replace("-", "_")
     else:
@@ -881,8 +881,8 @@ def codex_app_summary_model_hint_canary() -> dict[str, Any]:
 def codex_app_cache_namespace() -> str:
     if CODEX_APP_POLICY_SOURCE == "local-default":
         return os.getenv(
-            "AGENTFLOW_CODEX_APP_CACHE_NAMESPACE",
-            os.getenv("AGENTFLOW_CACHE_NAMESPACE", str(CODEX_APP_POLICY["exact_cache"]["namespace"])),
+            "TOKENCLAW_CODEX_APP_CACHE_NAMESPACE",
+            os.getenv("TOKENCLAW_CACHE_NAMESPACE", str(CODEX_APP_POLICY["exact_cache"]["namespace"])),
         ).strip() or "default"
     return str(CODEX_APP_POLICY["exact_cache"]["namespace"]).strip() or "default"
 
@@ -891,7 +891,7 @@ def codex_app_cache_ttl_seconds() -> int:
     if CODEX_APP_POLICY_SOURCE == "local-default":
         try:
             return max(0, int(os.getenv(
-                "AGENTFLOW_CODEX_APP_CACHE_TTL_SECONDS",
+                "TOKENCLAW_CODEX_APP_CACHE_TTL_SECONDS",
                 str(CODEX_APP_POLICY["exact_cache"].get("ttl_seconds") or 0),
             )))
         except ValueError:
@@ -908,19 +908,19 @@ def codex_app_cache_canary() -> dict[str, Any]:
         canary = {}
     if CODEX_APP_POLICY_SOURCE == "local-default":
         fraction = _bounded_fraction(
-            os.getenv("AGENTFLOW_CODEX_APP_CACHE_CANARY_FRACTION"),
+            os.getenv("TOKENCLAW_CODEX_APP_CACHE_CANARY_FRACTION"),
             _bounded_fraction(canary.get("fraction"), 1.0),
         )
         holdout_fraction = _bounded_fraction(
-            os.getenv("AGENTFLOW_CODEX_APP_CACHE_HOLDOUT_FRACTION"),
+            os.getenv("TOKENCLAW_CODEX_APP_CACHE_HOLDOUT_FRACTION"),
             _bounded_fraction(canary.get("holdout_fraction"), 0.0),
         )
         salt = os.getenv(
-            "AGENTFLOW_CODEX_APP_CACHE_CANARY_SALT",
+            "TOKENCLAW_CODEX_APP_CACHE_CANARY_SALT",
             str(canary.get("salt") or "codex-app-exact-cache"),
         ).strip() or "codex-app-exact-cache"
         unit = os.getenv(
-            "AGENTFLOW_CODEX_APP_CACHE_CANARY_UNIT",
+            "TOKENCLAW_CODEX_APP_CACHE_CANARY_UNIT",
             str(canary.get("unit") or "source_hash"),
         ).strip().lower().replace("-", "_")
     else:
@@ -987,7 +987,7 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
         },
         "optimization": {
             "enabled": optimize_enabled,
-            "disabled_reason": None if optimize_enabled else "AGENTFLOW_CODEX_APP_OPTIMIZE=0",
+            "disabled_reason": None if optimize_enabled else "TOKENCLAW_CODEX_APP_OPTIMIZE=0",
             "scope": "metadata-only local JSON-RPC turn optimization",
         },
         "routing": {
@@ -1016,7 +1016,7 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
                 "cache_url": "codex-turn://turn/start",
                 "replayability_level": "local-exact-response",
             },
-            "disabled_reason": None if cache_enabled else "AGENTFLOW_CODEX_APP_CACHE is not 1",
+            "disabled_reason": None if cache_enabled else "TOKENCLAW_CODEX_APP_CACHE is not 1",
             "policy_source": policy_source,
         },
         "safe_turn_params": {

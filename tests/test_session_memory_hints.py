@@ -132,7 +132,7 @@ def _cache_policy(**overrides):
 class SessionMemoryHintTests(unittest.TestCase):
     def test_plateau_session_produces_metadata_only_crunch_and_cache_dry_run_hints(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for index, chars in enumerate((40_000, 40_500, 39_800, 40_100), start=1):
                     _log_call(store, f"0{index}", text_chars=chars)
@@ -157,7 +157,7 @@ class SessionMemoryHintTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(hints["schema"], "agentflow.session_memory_optimization_hints.v1")
+        self.assertEqual(hints["schema"], "tokenclaw.session_memory_optimization_hints.v1")
         self.assertTrue(hints["privacy"]["metadata_only"])
         self.assertFalse(hints["privacy"]["request_json_read"])
         self.assertFalse(hints["privacy"]["cache_mutation"])
@@ -180,7 +180,7 @@ class SessionMemoryHintTests(unittest.TestCase):
         self.assertFalse(cache["cache_mutation"])
         self.assertTrue(cache["dry_run_projection"]["exact_replay_grouping_candidate"])
         proposal = cache["dry_run_replay_proposal"]
-        self.assertEqual(proposal["schema"], "agentflow.session_memory_cache_replay_proposal.v1")
+        self.assertEqual(proposal["schema"], "tokenclaw.session_memory_cache_replay_proposal.v1")
         self.assertEqual(proposal["status"], "session-plateau-dry-run-eligible")
         self.assertEqual(proposal["rule_id"], "test-plateau-cache")
         self.assertTrue(proposal["proposal_fingerprint"].startswith("sha256:"))
@@ -201,7 +201,7 @@ class SessionMemoryHintTests(unittest.TestCase):
 
     def test_missing_memory_blocks_hints_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 hints = build_session_memory_optimization_hints(
                     store_obj=store,
@@ -248,7 +248,7 @@ class SessionMemoryHintTests(unittest.TestCase):
             "secret-session-alpha",
         )
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for index, chars in enumerate((40_000, 40_500, 39_800, 40_100), start=1):
                     _log_call(store, f"0{index}", text_chars=chars, adversarial_raw_fields=True)
@@ -282,7 +282,7 @@ class SessionMemoryHintTests(unittest.TestCase):
 
     def test_policy_disabled_records_skip_without_enabling_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for index in range(1, 5):
                     _log_call(store, f"0{index}")
@@ -315,7 +315,7 @@ class SessionMemoryHintTests(unittest.TestCase):
 
     def test_unsafe_plateau_cases_are_blocked_with_explicit_reasons(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for index, status in enumerate((200, 200, 429, 200), start=1):
                     _log_call(

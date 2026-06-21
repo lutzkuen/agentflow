@@ -29,7 +29,7 @@ from tokenclaw.pattern_rollout import pattern_canary_decision, pattern_rollout_p
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_cache_replay_dry_run.v1"
+SCHEMA = "tokenclaw.openai_cache_replay_dry_run.v1"
 
 
 def _canonical_json(value: Any) -> str:

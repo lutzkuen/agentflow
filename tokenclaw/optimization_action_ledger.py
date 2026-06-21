@@ -7,9 +7,9 @@ from typing import Any
 from tokenclaw.public_metadata import public_id, public_label
 
 
-LEDGER_SCHEMA = "agentflow.optimization_action_ledger.v1"
-ENTRY_SCHEMA = "agentflow.optimization_action_ledger_entry.v1"
-REPORT_SCHEMA = "agentflow.optimization_action_ledger_report.v1"
+LEDGER_SCHEMA = "tokenclaw.optimization_action_ledger.v1"
+ENTRY_SCHEMA = "tokenclaw.optimization_action_ledger_entry.v1"
+REPORT_SCHEMA = "tokenclaw.optimization_action_ledger_report.v1"
 
 FAMILIES = {
     "routing",

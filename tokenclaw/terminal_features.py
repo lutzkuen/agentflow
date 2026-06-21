@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 
-TERMINAL_LOG_FEATURE_SCHEMA = "agentflow.terminal_log_features.v1"
+TERMINAL_LOG_FEATURE_SCHEMA = "tokenclaw.terminal_log_features.v1"
 
 _TIMESTAMP_PREFIX_RE = re.compile(
     r"^\s*(?:"

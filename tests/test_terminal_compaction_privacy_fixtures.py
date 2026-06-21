@@ -159,7 +159,7 @@ def _log_call(
             "has_tools": True,
             "request_id": "raw-request-id-fixture",
             "terminal_log_features": {
-                "schema": "agentflow.terminal_log_features.v1",
+                "schema": "tokenclaw.terminal_log_features.v1",
                 "terminal_output_char_fraction_bucket": "gte_75pct",
                 "privacy": {"metadata_only": True, "raw_terminal_text_included": False},
             },
@@ -185,7 +185,7 @@ def _log_call(
 def _terminal_meta(*, cohort: str, status: str | None = None, reason: str | None = None) -> dict:
     applied = cohort == "canary_applied"
     return {
-        "schema": "agentflow.terminal_output_compaction_decision.v1",
+        "schema": "tokenclaw.terminal_output_compaction_decision.v1",
         "enabled": True,
         "status": status or ("applied" if applied else "holdout"),
         "reason": reason or ("terminal-output-compaction-applied" if applied else "canary_holdout"),
@@ -196,7 +196,7 @@ def _terminal_meta(*, cohort: str, status: str | None = None, reason: str | None
         "candidate_id": "terminal-output-compaction-candidate",
         "category": "tool-result",
         "canary": {
-            "schema": "agentflow.terminal_output_compaction_canary_decision.v1",
+            "schema": "tokenclaw.terminal_output_compaction_canary_decision.v1",
             "enabled": True,
             "selected": applied,
             "status": "applied" if applied else "holdout",
@@ -213,7 +213,7 @@ def _terminal_meta(*, cohort: str, status: str | None = None, reason: str | None
 
 
 class TerminalOutputCompactionPrivacyFixtureTests(unittest.TestCase):
-    ENV_KEYS = ("AGENTFLOW_CRUNCH_RULES", "AGENTFLOW_POLICY_EVENTS_LOG", "HOME")
+    ENV_KEYS = ("TOKENCLAW_CRUNCH_RULES", "TOKENCLAW_POLICY_EVENTS_LOG", "HOME")
 
     def setUp(self):
         self.old_cwd = Path.cwd()
@@ -270,7 +270,7 @@ class TerminalOutputCompactionPrivacyFixtureTests(unittest.TestCase):
             config.mkdir()
             _write_canary_rules(config, fraction=1.0, min_samples=2)
             os.chdir(tmp_path)
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(tmp_path / "policy_events.jsonl")
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(tmp_path / "policy_events.jsonl")
             manual = importlib.reload(crunch_module)
             body = _tool_result_body()
             plan, plan_meta = plan_terminal_output_compaction(body, keep_recent_turns=2, min_block_chars=500)
@@ -297,7 +297,7 @@ class TerminalOutputCompactionPrivacyFixtureTests(unittest.TestCase):
             self.assertEqual(thinking, _tool_result_body(thinking=True))
             self.assertEqual(thinking_meta["terminal_output_compaction"]["reason"], "active-thinking-blocked")
 
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             try:
                 for index in range(2):
                     _log_call(
@@ -317,14 +317,14 @@ class TerminalOutputCompactionPrivacyFixtureTests(unittest.TestCase):
             self.assertEqual(terminal_meta["status"], "bypass")
             self.assertEqual(terminal_meta["reason"], "local-canary-safety-stop")
             self.assertEqual(terminal_meta["safety_stop"]["error_count"], 2)
-            event_log = Path(os.environ["AGENTFLOW_POLICY_EVENTS_LOG"])
+            event_log = Path(os.environ["TOKENCLAW_POLICY_EVENTS_LOG"])
             self.assertTrue(event_log.exists())
             self.assert_content_free({"mismatch": mismatch_meta, "holdout": holdout_meta, "thinking": thinking_meta, "stopped": stopped_meta})
             self.assert_content_free(event_log.read_text(encoding="utf-8"))
 
     def test_reports_use_metadata_only_projection_and_exclude_raw_fixture_values(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(store, "metadata-only-1", created_at="2026-06-12T10:00:00+00:00", request_json=None, text_chars=48_000)
                 _log_call(store, "metadata-only-2", created_at="2026-06-12T10:01:00+00:00", request_json=None, text_chars=48_200)

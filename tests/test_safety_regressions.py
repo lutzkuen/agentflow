@@ -97,7 +97,7 @@ class ManagedFeedbackAsyncClient:
             body = ManagedFeedbackAsyncClient.session_tier_body
             if body is None:
                 body = {
-                    "schema": "agentflow.session_tier_decision.v1",
+                    "schema": "tokenclaw.session_tier_decision.v1",
                     "tier": "sonnet",
                     "confidence": 0.9,
                     "session_type": "coding-agent-file-ops",
@@ -123,7 +123,7 @@ class ManagedFeedbackAsyncClient:
             body = ManagedFeedbackAsyncClient.policy_decision_body
             if body is None:
                 body = {
-                    "schema": "agentflow.policy_decision.v1",
+                    "schema": "tokenclaw.policy_decision.v1",
                     "policy_id": "policy-managed-test",
                     "confidence": 0.91,
                     "route_to": "claude-haiku-4-5-20251001",
@@ -273,15 +273,15 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.old_log_bodies = server.LOG_BODIES
         self.old_routing_experiment_enabled = routing_experiments.ROUTING_EXPERIMENT_ENABLED
         self.recommendation_env_keys = (
-            "AGENTFLOW_RECOMMENDATION_ENABLED",
-            "AGENTFLOW_RECOMMENDATION_SERVER_URL",
-            "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
-            "AGENTFLOW_MANAGED_API_KEY",
-            "AGENTFLOW_POLICY_DECISION_ENABLED",
-            "AGENTFLOW_SESSION_TIER_ENABLED",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION",
-            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_SALT",
+            "TOKENCLAW_RECOMMENDATION_ENABLED",
+            "TOKENCLAW_RECOMMENDATION_SERVER_URL",
+            "TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS",
+            "TOKENCLAW_MANAGED_API_KEY",
+            "TOKENCLAW_POLICY_DECISION_ENABLED",
+            "TOKENCLAW_SESSION_TIER_ENABLED",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_SALT",
         )
         self.saved_recommendation_env = {key: os.environ.get(key) for key in self.recommendation_env_keys}
         for key in self.recommendation_env_keys:
@@ -342,16 +342,16 @@ class SafetyRegressionRouteTests(unittest.TestCase):
 
     def _managed_feedback_env(self):
         return patch.dict(os.environ, {
-            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-            "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
-            "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+            "TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
         }, clear=False)
 
     def test_log_bodies_defaults_disabled_when_env_is_absent(self):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db:
             env = os.environ.copy()
-            env.pop("AGENTFLOW_LOG_BODIES", None)
-            env["AGENTFLOW_DB"] = db.name
+            env.pop("TOKENCLAW_LOG_BODIES", None)
+            env["TOKENCLAW_DB"] = db.name
             result = subprocess.run(
                 [
                     sys.executable,
@@ -447,7 +447,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         recommendation = ManagedFeedbackAsyncClient.calls[0]["json"]
         upstream = ManagedFeedbackAsyncClient.calls[1]["json"]
-        self.assertEqual(recommendation["feature_schema_version"], "agentflow.optimization_unit_features.v1")
+        self.assertEqual(recommendation["feature_schema_version"], "tokenclaw.optimization_unit_features.v1")
         self.assertEqual(recommendation["candidate_target_model"], "claude-haiku-4-5-20251001")
         self.assertTrue(recommendation["privacy_summary"]["metadata_only"])
         self.assertFalse(recommendation["privacy_summary"]["raw_body_storage"])
@@ -480,9 +480,9 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         }
 
         env = {
-            "AGENTFLOW_SESSION_TIER_ENABLED": "1",
-            "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
-            "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
+            "TOKENCLAW_SESSION_TIER_ENABLED": "1",
+            "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
+            "TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
         }
         with (
             patch.dict(os.environ, env, clear=False),
@@ -499,7 +499,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         session_payload = session_tier_call["json"]
         self.assertEqual(session_tier_call["url"], "http://127.0.0.1:4100/v1/session-tier")
         self.assertNotIn("authorization", session_tier_call["headers"])
-        self.assertEqual(session_payload["schema"], "agentflow.session_tier_request.v1")
+        self.assertEqual(session_payload["schema"], "tokenclaw.session_tier_request.v1")
         self.assertEqual(session_payload["source_surface"], "anthropic_messages")
         self.assertEqual(session_payload["app_family"], "claude_code")
         self.assertEqual(session_payload["requested_model"], "claude-haiku-4-5-20251001")
@@ -562,9 +562,9 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         }
 
         env = {
-            "AGENTFLOW_SESSION_TIER_ENABLED": "1",
-            "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
-            "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
+            "TOKENCLAW_SESSION_TIER_ENABLED": "1",
+            "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
+            "TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
         }
         with (
             patch.dict(os.environ, env, clear=False),
@@ -591,7 +591,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
     def test_anthropic_policy_decision_route_to_applies_with_loopback_auth_metadata(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
         ManagedFeedbackAsyncClient.policy_decision_body = {
-            "schema": "agentflow.policy_decision.v1",
+            "schema": "tokenclaw.policy_decision.v1",
             "policy_id": "policy-managed-route-to",
             "confidence": 0.94,
             "route_to": "claude-haiku-4-5-20251001",
@@ -623,11 +623,11 @@ class SafetyRegressionRouteTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {
-                "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                "AGENTFLOW_POLICY_DECISION_ENABLED": "1",
-                "AGENTFLOW_SESSION_TIER_ENABLED": "0",
-                "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
-                "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
+                "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                "TOKENCLAW_POLICY_DECISION_ENABLED": "1",
+                "TOKENCLAW_SESSION_TIER_ENABLED": "0",
+                "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
+                "TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
             }, clear=False),
             patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient),
         ):
@@ -638,7 +638,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         decision_call = ManagedFeedbackAsyncClient.calls[0]
         self.assertEqual(decision_call["url"], "http://127.0.0.1:4100/v1/policy-decision")
         self.assertNotIn("authorization", decision_call["headers"])
-        self.assertEqual(decision_call["json"]["schema"], "agentflow.policy_decision_preflight.v1")
+        self.assertEqual(decision_call["json"]["schema"], "tokenclaw.policy_decision_preflight.v1")
         self.assertTrue({"messages", "content", "raw_request"}.isdisjoint(self._keys_in(decision_call["json"])))
         upstream = ManagedFeedbackAsyncClient.calls[1]["json"]
         self.assertEqual(upstream["model"], "claude-haiku-4-5-20251001")
@@ -870,7 +870,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual([call["kind"] for call in ManagedFeedbackAsyncClient.calls], ["recommendation", "upstream", "upstream", "feedback"])
         feedback = ManagedFeedbackAsyncClient.calls[-1]["json"]
         experiment = feedback["routing_experiment"]
-        self.assertEqual(experiment["schema"], "agentflow.routing_experiment_feedback.v1")
+        self.assertEqual(experiment["schema"], "tokenclaw.routing_experiment_feedback.v1")
         self.assertEqual(experiment["primary_model"], "claude-haiku-4-5-20251001")
         self.assertEqual(experiment["shadow_model"], "claude-sonnet-4-6")
         self.assertEqual(experiment["output_similarity"], 1.0)
@@ -1143,7 +1143,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
 
         with (
             self._managed_feedback_env(),
-            patch.dict(os.environ, {"AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "dry-run"}, clear=False),
+            patch.dict(os.environ, {"TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "dry-run"}, clear=False),
             patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient),
         ):
             response = TestClient(server.app).post("/v1/responses", json=request_body)
@@ -1168,7 +1168,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         lifecycle_row = rows_by_surface["openai_optimization_lifecycle"]
         self.assertEqual(lifecycle_row["status"], "queued")
         lifecycle_payload = json.loads(lifecycle_row["payload_json"])
-        self.assertEqual(lifecycle_payload["schema"], "agentflow.openai_optimization_lifecycle_feedback.v1")
+        self.assertEqual(lifecycle_payload["schema"], "tokenclaw.openai_optimization_lifecycle_feedback.v1")
         self.assertNotIn("raw openai prompt", lifecycle_row["payload_json"])
 
     def test_anthropic_route_forwards_allowlisted_headers_and_does_not_log_bodies(self):
@@ -1268,7 +1268,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.headers["retry-after"], "45")
-        self.assertEqual(response.headers["x-agentflow-routed-model"], "gpt-5-codex")
+        self.assertEqual(response.headers["x-tokenclaw-routed-model"], "gpt-5-codex")
         self.assertEqual(response.json()["error"]["type"], "rate_limit_error")
         self.assertEqual(limiter.entered, ["sonnet"])
         self.assertEqual(limiter.exited, ["sonnet"])

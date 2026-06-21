@@ -91,7 +91,7 @@ class OpenAIOptimizationGovernorTests(unittest.TestCase):
             "prompt": "raw-governor-prompt-secret",
         }
         summary_meta = {
-            "schema": "agentflow.openai_old_context_summary.v1",
+            "schema": "tokenclaw.openai_old_context_summary.v1",
             "enabled": True,
             "status": "applied",
             "applied": True,
@@ -163,7 +163,7 @@ class OpenAIOptimizationGovernorTests(unittest.TestCase):
             },
         }
         summary_meta = {
-            "schema": "agentflow.openai_old_context_summary.v1",
+            "schema": "tokenclaw.openai_old_context_summary.v1",
             "enabled": True,
             "status": "skipped",
             "applied": False,
@@ -228,8 +228,8 @@ class OpenAIOptimizationGovernorTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
-                "AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_CANARY_FRACTION": "0",
-                "AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_HOLDOUT_FRACTION": "1",
+                "TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_CANARY_FRACTION": "0",
+                "TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_HOLDOUT_FRACTION": "1",
             },
         ):
             governor = build_openai_optimization_governor(
@@ -311,7 +311,7 @@ class OpenAIOptimizationGovernorTests(unittest.TestCase):
             "request_id": "req_governor_secret",
         }
         summary_meta = {
-            "schema": "agentflow.openai_old_context_summary.v1",
+            "schema": "tokenclaw.openai_old_context_summary.v1",
             "enabled": True,
             "status": "applied",
             "applied": True,
@@ -368,7 +368,7 @@ class OpenAIOptimizationGovernorTests(unittest.TestCase):
 
         self.assertIsNotNone(event)
         assert event is not None
-        self.assertEqual(event["schema"], "agentflow.openai_optimization_lifecycle_feedback.v1")
+        self.assertEqual(event["schema"], "tokenclaw.openai_optimization_lifecycle_feedback.v1")
         by_family = {item["action_family"]: item for item in event["family_events"]}
         self.assertEqual(by_family["routing"]["cohort"], "applied")
         self.assertEqual(by_family["old_context_summary"]["cohort"], "suppressed")
@@ -417,7 +417,7 @@ class OpenAIOptimizationGovernorTests(unittest.TestCase):
             session_id="raw-governor-session",
         )
 
-        with patch.dict("os.environ", {"AGENTFLOW_RECOMMENDATION_ENABLED": "0"}):
+        with patch.dict("os.environ", {"TOKENCLAW_RECOMMENDATION_ENABLED": "0"}):
             asyncio.run(
                 record_managed_outcome_feedback(
                     store=store,
@@ -449,7 +449,7 @@ class OpenAIOptimizationGovernorTests(unittest.TestCase):
         row = store.rows[0]
         self.assertEqual(row["source_surface"], "openai_optimization_lifecycle")
         payload = json.loads(str(row["payload_json"]))
-        self.assertEqual(payload["schema"], "agentflow.openai_optimization_lifecycle_feedback.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_optimization_lifecycle_feedback.v1")
         self.assertEqual(payload["family_events"][0]["cohort"], "applied")
         self.assertEqual(store.updated[0][1]["openai_optimization_lifecycle_feedback"]["status"], "queued")
         self.assertFalse(store.updated[0][1]["openai_optimization_lifecycle_feedback"]["payload_included"])

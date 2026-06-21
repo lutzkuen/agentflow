@@ -12,9 +12,9 @@ from tokenclaw.policy_bundle import APPLY_POLICY_SECTIONS
 from tokenclaw.policy_files import _draft_workspace_root, utc_now
 
 
-POLICY_DRAFT_VALIDATE_SCHEMA = "agentflow.policy_draft_validate.v1"
-POLICY_DRAFT_APPLY_SCHEMA = "agentflow.policy_draft_apply.v1"
-POLICY_DRAFT_ROLLBACK_SCHEMA = "agentflow.policy_draft_rollback.v1"
+POLICY_DRAFT_VALIDATE_SCHEMA = "tokenclaw.policy_draft_validate.v1"
+POLICY_DRAFT_APPLY_SCHEMA = "tokenclaw.policy_draft_apply.v1"
+POLICY_DRAFT_ROLLBACK_SCHEMA = "tokenclaw.policy_draft_rollback.v1"
 POLICY_DRAFT_VALIDATE_PRIVACY = {
     "local_only": True,
     "metadata_only": True,
@@ -891,7 +891,7 @@ async def apply_validated_policy_draft(
     rollback_command = None
     if changed_sections:
         rollback_command = " ".join(
-            ["agentflow-policy-rollback", "--config-dir", str(config_path), "--apply-id", transaction_id]
+            ["tokenclaw-policy-rollback", "--config-dir", str(config_path), "--apply-id", transaction_id]
             + [part for section in changed_sections for part in ("--section", section)]
         )
     result = {

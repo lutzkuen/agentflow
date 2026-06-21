@@ -10,8 +10,8 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.instruction_dedup_impact.v1"
-ROLLBACK_ACTION_SCHEMA = "agentflow.instruction_dedup_rollback_action.v1"
+SCHEMA = "tokenclaw.instruction_dedup_impact.v1"
+ROLLBACK_ACTION_SCHEMA = "tokenclaw.instruction_dedup_rollback_action.v1"
 TOKEN_CHARS = 4
 
 

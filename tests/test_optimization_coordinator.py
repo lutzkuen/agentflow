@@ -33,7 +33,7 @@ FORBIDDEN_KEYS = (
 
 def ledger_with(*entries: dict[str, object]) -> dict[str, object]:
     return {
-        "schema": "agentflow.optimization_action_ledger.v1",
+        "schema": "tokenclaw.optimization_action_ledger.v1",
         "entry_count": len(entries),
         "entries": list(entries),
         "privacy": {
@@ -52,7 +52,7 @@ def entry(
     policy_source: str = "managed-recommended",
 ) -> dict[str, object]:
     return {
-        "schema": "agentflow.optimization_action_ledger_entry.v1",
+        "schema": "tokenclaw.optimization_action_ledger_entry.v1",
         "family": family,
         "source_surface": "openai_responses",
         "provider_family": "openai",
@@ -87,7 +87,7 @@ class OptimizationCoordinatorTests(unittest.TestCase):
             local_salt="coordinator-test",
         )
 
-        self.assertEqual(decision["schema"], "agentflow.optimization_coordinator.v1")
+        self.assertEqual(decision["schema"], "tokenclaw.optimization_coordinator.v1")
         self.assertEqual(decision["selected_family"], "cache_replay")
         self.assertEqual(decision["selected_candidate"]["candidate_id"], "cache-candidate")
         self.assertEqual(decision["family_status"]["cache_replay"]["selected"], True)

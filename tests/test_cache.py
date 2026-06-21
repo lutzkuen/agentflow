@@ -20,23 +20,23 @@ from tokenclaw.store import Store, stable_json
 
 class CacheDecisionMetaTest(unittest.TestCase):
     ENV_KEYS = (
-        "AGENTFLOW_CACHE",
-        "AGENTFLOW_CACHE_TOOL_CALLS",
-        "AGENTFLOW_SEMANTIC_CACHE",
-        "AGENTFLOW_SEMANTIC_THRESHOLD",
-        "AGENTFLOW_CACHE_RULES",
-        "AGENTFLOW_PROVIDER",
-        "AGENTFLOW_ANTHROPIC_UPSTREAM",
-        "AGENTFLOW_OPENAI_UPSTREAM",
-        "AGENTFLOW_CACHE_NAMESPACE",
-        "AGENTFLOW_CACHE_FILE_WATCH",
-        "AGENTFLOW_CACHE_WATCH_ROOT",
-        "AGENTFLOW_CACHE_WATCH_MAX_PATHS",
-        "AGENTFLOW_CACHE_CAPTURE_CANDIDATES",
-        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP",
-        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
-        "AGENTFLOW_POLICY_EVENTS",
-        "AGENTFLOW_POLICY_EVENTS_LOG",
+        "TOKENCLAW_CACHE",
+        "TOKENCLAW_CACHE_TOOL_CALLS",
+        "TOKENCLAW_SEMANTIC_CACHE",
+        "TOKENCLAW_SEMANTIC_THRESHOLD",
+        "TOKENCLAW_CACHE_RULES",
+        "TOKENCLAW_PROVIDER",
+        "TOKENCLAW_ANTHROPIC_UPSTREAM",
+        "TOKENCLAW_OPENAI_UPSTREAM",
+        "TOKENCLAW_CACHE_NAMESPACE",
+        "TOKENCLAW_CACHE_FILE_WATCH",
+        "TOKENCLAW_CACHE_WATCH_ROOT",
+        "TOKENCLAW_CACHE_WATCH_MAX_PATHS",
+        "TOKENCLAW_CACHE_CAPTURE_CANDIDATES",
+        "TOKENCLAW_PATTERN_CANARY_SAFETY_STOP",
+        "TOKENCLAW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
+        "TOKENCLAW_POLICY_EVENTS",
+        "TOKENCLAW_POLICY_EVENTS_LOG",
         "HOME",
     )
 
@@ -119,7 +119,7 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertEqual(rule["action"]["scope"], "session")
         self.assertEqual(rule["rollout"]["canary_fraction"], 0.10)
         self.assertEqual(rule["rollout"]["canary_unit"], "request_fingerprint")
-        self.assertEqual(rule["graduation"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(rule["graduation"]["source_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(rule["graduation"]["sample_count"], 49)
         self.assertEqual(rule["graduation"]["projected_hits"], 48)
         self.assertEqual(rule["graduation"]["projected_savings_usd"], 0.102518)
@@ -159,13 +159,13 @@ class CacheDecisionMetaTest(unittest.TestCase):
         from tokenclaw.cache_smoke import build_cache_replay_hit_recovery_smoke
 
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 result = build_cache_replay_hit_recovery_smoke(store)
             finally:
                 store.conn.close()
 
-        self.assertEqual(result["schema"], "agentflow.cache_replay_hit_recovery_smoke.v1")
+        self.assertEqual(result["schema"], "tokenclaw.cache_replay_hit_recovery_smoke.v1")
         self.assertEqual(result["status"], "hit-recovered")
         self.assertEqual(result["target_rule_id"], "local-openai-cache-replay-canary-ae8404ee817f89f4")
         self.assertEqual(result["target_shape"]["provider_family"], "openai")
@@ -200,14 +200,14 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertFalse(result["privacy"]["session_ids_included"])
         rendered = json.dumps(result, sort_keys=True)
         self.assertNotIn("AgentFlow deterministic OpenAI cache replay", rendered)
-        self.assertNotIn("agentflow-cache-replay-hit-recovery-smoke-", rendered)
-        self.assertNotIn("agentflow-cache-replay-hit-recovery-smoke-session", rendered)
+        self.assertNotIn("tokenclaw-cache-replay-hit-recovery-smoke-", rendered)
+        self.assertNotIn("tokenclaw-cache-replay-hit-recovery-smoke-session", rendered)
 
     def test_cache_smoke_diagnostic_includes_isolated_hit_recovery_without_mutating_store(self):
         from tokenclaw.cache_smoke import build_cache_smoke_diagnostic
 
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 before = store.conn.execute("select count(*) as c from cache").fetchone()["c"]
                 result = build_cache_smoke_diagnostic(store, limit=1, scan_limit=1)
@@ -218,7 +218,7 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertEqual(before, 0)
         self.assertEqual(after, 0)
         smoke = result["cache_replay_hit_recovery_smoke"]
-        self.assertEqual(smoke["schema"], "agentflow.cache_replay_hit_recovery_smoke.v1")
+        self.assertEqual(smoke["schema"], "tokenclaw.cache_replay_hit_recovery_smoke.v1")
         self.assertEqual(smoke["status"], "hit-recovered")
         self.assertTrue(result["privacy"]["synthetic_hit_recovery_included"])
 
@@ -288,9 +288,9 @@ class CacheDecisionMetaTest(unittest.TestCase):
 
     def test_cache_key_uses_environment_namespace_by_default(self):
         body = {"model": "same-model", "messages": [{"role": "user", "content": "same"}]}
-        os.environ["AGENTFLOW_CACHE_NAMESPACE"] = "env-project"
-        os.environ["AGENTFLOW_PROVIDER"] = "openai"
-        os.environ["AGENTFLOW_OPENAI_UPSTREAM"] = "https://openai.example"
+        os.environ["TOKENCLAW_CACHE_NAMESPACE"] = "env-project"
+        os.environ["TOKENCLAW_PROVIDER"] = "openai"
+        os.environ["TOKENCLAW_OPENAI_UPSTREAM"] = "https://openai.example"
 
         key_from_env = cache_module.cache_key_for(body, "/v1/responses")
         explicit_key = cache_module.cache_key_for(
@@ -410,7 +410,7 @@ semantic_cache:
             self.assertEqual(written["pattern_rules"][0]["candidate_id"], "cache-candidate-safe")
             self.assertNotIn("cache-candidate-unsafe", cache_rules_path.read_text(encoding="utf-8"))
 
-            os.environ["AGENTFLOW_CACHE_RULES"] = str(cache_rules_path)
+            os.environ["TOKENCLAW_CACHE_RULES"] = str(cache_rules_path)
             manual = importlib.reload(cache_module)
             can_exact, can_semantic, meta = manual.cache_lookup_meta(
                 has_tool_blocks=True,
@@ -467,7 +467,7 @@ pattern_rules:
       has_tools: true
       stream: false
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: canary-only
       canary_enabled: true
       canary_fraction: 0.10
@@ -538,7 +538,7 @@ pattern_rules:
             tmp_path = Path(tmp)
             config = tmp_path / "config"
             config.mkdir()
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(tmp_path / "policy_events.jsonl")
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(tmp_path / "policy_events.jsonl")
             (config / "cache_rules.yaml").write_text(
                 f"""
 exact_cache:
@@ -559,7 +559,7 @@ pattern_rules:
       has_tools: true
       stream: false
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: canary-only
       canary_enabled: true
       canary_fraction: 1.0
@@ -576,7 +576,7 @@ pattern_rules:
             )
             os.chdir(tmp_path)
             manual = importlib.reload(cache_module)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             features = {
                 "pattern_hashes": [pattern_hash],
                 "source_surface": "anthropic_messages",
@@ -627,7 +627,7 @@ pattern_rules:
                             "policy_source": "managed-recommended",
                             "matched_hashes": [pattern_hash],
                             "canary": {
-                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "schema": "tokenclaw.pattern_canary_decision.v1",
                                 "enabled": True,
                                 "selected": True,
                                 "status": "applied",
@@ -733,7 +733,7 @@ pattern_rules:
         self.assertEqual([Path(item["path"]).name for item in snapshots], ["relative.txt"])
 
     def test_file_dependency_snapshots_can_be_disabled_by_policy(self):
-        os.environ["AGENTFLOW_CACHE_FILE_WATCH"] = "0"
+        os.environ["TOKENCLAW_CACHE_FILE_WATCH"] = "0"
         disabled = importlib.reload(cache_module)
 
         snapshots = disabled.cache_file_dependency_snapshots({
@@ -743,7 +743,7 @@ pattern_rules:
         self.assertEqual(snapshots, [])
 
     def test_file_dependency_audit_reports_cap_exceeded_without_paths(self):
-        os.environ["AGENTFLOW_CACHE_WATCH_MAX_PATHS"] = "1"
+        os.environ["TOKENCLAW_CACHE_WATCH_MAX_PATHS"] = "1"
         capped = importlib.reload(cache_module)
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -768,7 +768,7 @@ pattern_rules:
         self.assertNotIn("a.txt", json.dumps(audit))
 
     def test_tool_result_dependency_capture_dedupes_repeated_mentions_before_cap(self):
-        os.environ["AGENTFLOW_CACHE_WATCH_MAX_PATHS"] = "3"
+        os.environ["TOKENCLAW_CACHE_WATCH_MAX_PATHS"] = "3"
         compact = importlib.reload(cache_module)
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1065,7 +1065,7 @@ pattern_rules:
       has_tools: true
       stream: false
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: canary-only
       canary_enabled: true
       canary_fraction: {canary_fraction}
@@ -1119,7 +1119,7 @@ pattern_rules:
             watched.write_text("print('stable')\n", encoding="utf-8")
             os.chdir(tmp_path)
             manual = importlib.reload(cache_module)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             body = {"messages": [{"role": "user", "content": "Read src/example.py"}]}
             try:
                 can_exact, can_semantic, meta = manual.cache_lookup_meta(
@@ -1176,7 +1176,7 @@ pattern_rules:
                 )
                 self.assertIsNotNone(event)
                 assert_managed_egress_safe(event)
-                self.assertEqual(event["schema"], "agentflow.cache_replay_lifecycle_feedback.v1")
+                self.assertEqual(event["schema"], "tokenclaw.cache_replay_lifecycle_feedback.v1")
                 self.assertEqual(event["cohort"], "replayed")
                 self.assertEqual(event["cache_decision_status"], "hit")
                 self.assertEqual(event["estimated_saved_cost_usd"], 0.001)
@@ -1201,7 +1201,7 @@ pattern_rules:
             watched.write_text("print('old')\n", encoding="utf-8")
             os.chdir(tmp_path)
             manual = importlib.reload(cache_module)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             body = {"messages": [{"role": "user", "content": "Read src/example.py"}]}
             try:
                 can_exact, _can_semantic, meta = manual.cache_lookup_meta(
@@ -1271,7 +1271,7 @@ pattern_rules:
             )
             os.chdir(tmp_path)
             manual = importlib.reload(cache_module)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             body = {"messages": [{"role": "user", "content": "Summarize the previous tool output."}]}
             try:
                 can_exact, _can_semantic, meta = manual.cache_lookup_meta(
@@ -1325,7 +1325,7 @@ file_watch:
             (tmp_path / "b.txt").write_text("b\n", encoding="utf-8")
             os.chdir(tmp_path)
             capped = importlib.reload(cache_module)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             body = {"messages": [{"role": "user", "content": "Read ./a.txt and ./b.txt"}]}
             try:
                 can_exact, _can_semantic, meta = capped.cache_lookup_meta(
@@ -1571,7 +1571,7 @@ file_watch:
 
     def test_cache_replay_lifecycle_feedback_rejects_raw_egress_fields(self):
         event = {
-            "schema": "agentflow.cache_replay_lifecycle_feedback.v1",
+            "schema": "tokenclaw.cache_replay_lifecycle_feedback.v1",
             "source_surface": "anthropic_messages",
             "cohort": "replayed",
             "prompt": "raw prompt must not leave local machine",
@@ -1621,7 +1621,7 @@ file_watch:
                 "user_specific_hint": False,
             },
             "rollout": {
-                "schema": "agentflow.pattern_policy_rollout.v1",
+                "schema": "tokenclaw.pattern_policy_rollout.v1",
                 "recommendation_mode": "canary-only",
                 "canary_enabled": True,
                 "canary_fraction": canary_fraction,
@@ -1715,7 +1715,7 @@ file_watch:
         pattern_hash = "sha256:" + "d" * 64
         old_rules = cache_module.CACHE_PATTERN_RULES
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 rule = self._streaming_static_rule(pattern_hash)
                 rule["rollout"]["min_outcome_samples"] = 2
@@ -1828,7 +1828,7 @@ file_watch:
 
     def test_capture_candidates_provides_workspace_evidence_when_body_has_no_paths(self):
         """With capture_candidates enabled, workspace files become dependency evidence."""
-        os.environ["AGENTFLOW_CACHE_CAPTURE_CANDIDATES"] = "1"
+        os.environ["TOKENCLAW_CACHE_CAPTURE_CANDIDATES"] = "1"
         enabled = importlib.reload(cache_module)
 
         with TemporaryDirectory() as tmp:
@@ -1932,7 +1932,7 @@ file_watch:
             self.assertFalse(audit_before["paths_included"])
 
             # State after: capture_candidates on, workspace evidence present
-            os.environ["AGENTFLOW_CACHE_CAPTURE_CANDIDATES"] = "1"
+            os.environ["TOKENCLAW_CACHE_CAPTURE_CANDIDATES"] = "1"
             enabled = importlib.reload(cache_module)
             audit_after = enabled.cache_file_dependency_audit(body)
             self.assertIsNone(audit_after["invalidation_reason"])
@@ -1968,7 +1968,7 @@ file_watch:
 
     def test_stream_cache_validation_rejects_malformed_sse_payload_without_raw_data(self):
         malformed = {
-            "agentflow_cache_type": "sse-stream",
+            "tokenclaw_cache_type": "sse-stream",
             "version": 1,
             "provider": "anthropic",
             "frames_b64": [base64.b64encode(b"not an sse frame\n\n").decode("ascii")],

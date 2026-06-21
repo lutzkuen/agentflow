@@ -11,8 +11,8 @@ from tokenclaw.pricing import estimate_cost, pricing_basis
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_old_context_summary_opportunity.v1"
-QUALITY_GATE_SCHEMA = "agentflow.openai_old_context_summary_quality_gate.v1"
+SCHEMA = "tokenclaw.openai_old_context_summary_opportunity.v1"
+QUALITY_GATE_SCHEMA = "tokenclaw.openai_old_context_summary_quality_gate.v1"
 DEFAULT_MIN_REQUEST_CHARS = 32_000
 DEFAULT_MIN_OLDER_CONTEXT_CHARS = 8_000
 DEFAULT_MAX_SUMMARY_CHARS = 4_000
@@ -46,13 +46,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _summary_provider_configured() -> bool:
-    if _env_bool("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED", False):
+    if _env_bool("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED", False):
         return True
-    return bool(os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"))
+    return bool(os.getenv("TOKENCLAW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"))
 
 
 def _summary_model() -> str:
-    return os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MODEL") or DEFAULT_SUMMARY_MODEL
+    return os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MODEL") or DEFAULT_SUMMARY_MODEL
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -890,7 +890,7 @@ def build_openai_old_context_summary_report(
             "projected_net_savings_usd": totals["projected_net_savings_usd"],
         },
         "quality_gate_summary": {
-            "schema": "agentflow.openai_old_context_summary_quality_gate_summary.v1",
+            "schema": "tokenclaw.openai_old_context_summary_quality_gate_summary.v1",
             "quality_gate_count": len(output_quality_gates),
             "actual_matched_metadata_row_count": sum(_as_int(item.get("actual_matched_metadata_row_count")) for item in output_quality_gates),
             "canary_applied_count": sum(_as_int((item.get("cohort_counts") or {}).get("canary_applied")) for item in output_quality_gates),
@@ -906,7 +906,7 @@ def build_openai_old_context_summary_report(
             "status_code_buckets": _breakdown(status_code_counts),
         },
         "measurement_policy": {
-            "schema": "agentflow.openai_old_context_summary_measurement_policy.v1",
+            "schema": "tokenclaw.openai_old_context_summary_measurement_policy.v1",
             "read_only": True,
             "provider_calls_made": False,
             "summary_provider_configured": provider_ready,

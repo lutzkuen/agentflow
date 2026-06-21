@@ -17,7 +17,7 @@ from tokenclaw.store import SQLiteStore, stable_json, utc_now
 class RoutingCoverageReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -120,7 +120,7 @@ class RoutingCoverageReportTests(unittest.TestCase):
 
         report = build_routing_coverage_report(self.store, limit=20)
 
-        self.assertEqual(report["schema"], "agentflow.routing_coverage_report.v1")
+        self.assertEqual(report["schema"], "tokenclaw.routing_coverage_report.v1")
         self.assertEqual(report["summary"]["routing_currently_active_only_for"], ["openai_api"])
         openai = self._row(report, "openai_api")
         self.assertTrue(openai["traffic_seen"])
@@ -200,7 +200,7 @@ class RoutingCoverageReportTests(unittest.TestCase):
         )
 
         result = asyncio.run(stats_routing_coverage_report(self.store, limit=10))
-        self.assertEqual(result["schema"], "agentflow.routing_coverage_report.v1")
+        self.assertEqual(result["schema"], "tokenclaw.routing_coverage_report.v1")
         self.assertTrue(result["privacy"]["metadata_only"])
         self.assertFalse(result["privacy"]["raw_prompts_included"])
         self.assertFalse(result["privacy"]["provider_bodies_included"])
@@ -210,7 +210,7 @@ class RoutingCoverageReportTests(unittest.TestCase):
         exit_code = cli.routing_coverage_report_cli(["--db", self.db_path, "--limit", "10"], stdout=output)
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.routing_coverage_report.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.routing_coverage_report.v1")
         self.assertNotIn("secret-session-id", output.getvalue())
 
 

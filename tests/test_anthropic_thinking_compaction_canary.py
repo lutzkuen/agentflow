@@ -123,7 +123,7 @@ def _log_prior_canary(
     status = "applied" if applied else "holdout"
     meta = {
         "anthropic_thinking_history_compaction": {
-            "schema": "agentflow.anthropic_thinking_history_compaction_decision.v1",
+            "schema": "tokenclaw.anthropic_thinking_history_compaction_decision.v1",
             "enabled": True,
             "status": status,
             "reason": "thinking-history-compaction-applied" if applied else "canary_holdout",
@@ -162,7 +162,7 @@ def _log_prior_canary(
 
 
 class AnthropicThinkingCompactionCanaryTests(unittest.TestCase):
-    ENV_KEYS = ("AGENTFLOW_CRUNCH", "AGENTFLOW_CRUNCH_RULES", "HOME")
+    ENV_KEYS = ("TOKENCLAW_CRUNCH", "TOKENCLAW_CRUNCH_RULES", "HOME")
 
     def setUp(self) -> None:
         self.old_cwd = Path.cwd()
@@ -311,7 +311,7 @@ class AnthropicThinkingCompactionCanaryTests(unittest.TestCase):
             _write_rules(config, fraction=1.0, holdout=0.0, min_samples=1, max_error_rate=0.1)
             os.chdir(tmp_path)
             manual = importlib.reload(crunch_module)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             try:
                 _log_prior_canary(store, status_code=500)
                 body = _tool_result_body(_thinking("stop"), _thinking("stop"))

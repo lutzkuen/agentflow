@@ -17,12 +17,12 @@ from tokenclaw.public_metadata import public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_cache_replay_impact.v1"
-QUALITY_GATE_SCHEMA = "agentflow.openai_cache_replay_quality_gate.v1"
-LIFECYCLE_SCHEMA = "agentflow.openai_cache_replay_lifecycle_feedback.v1"
-LOCAL_PROMOTION_EVIDENCE_SCHEMA = "agentflow.openai_cache_replay_local_promotion_evidence.v1"
-HIT_RECOVERY_SCHEMA = "agentflow.openai_cache_replay_hit_recovery.v1"
-INVALIDATION_SAFETY_SCHEMA = "agentflow.openai_cache_replay_invalidation_safety.v1"
+SCHEMA = "tokenclaw.openai_cache_replay_impact.v1"
+QUALITY_GATE_SCHEMA = "tokenclaw.openai_cache_replay_quality_gate.v1"
+LIFECYCLE_SCHEMA = "tokenclaw.openai_cache_replay_lifecycle_feedback.v1"
+LOCAL_PROMOTION_EVIDENCE_SCHEMA = "tokenclaw.openai_cache_replay_local_promotion_evidence.v1"
+HIT_RECOVERY_SCHEMA = "tokenclaw.openai_cache_replay_hit_recovery.v1"
+INVALIDATION_SAFETY_SCHEMA = "tokenclaw.openai_cache_replay_invalidation_safety.v1"
 
 DEFAULT_MIN_APPLIED_SAMPLES = 2
 DEFAULT_MIN_HOLDOUT_SAMPLES = 1
@@ -639,7 +639,7 @@ def _canary_hit_measurement(
     holdout_count = _as_int(holdout.get("count"))
     holdout_forwards = _as_int(holdout.get("bypass_skipped_count")) + _as_int(holdout.get("miss_count"))
     return {
-        "schema": "agentflow.openai_cache_replay_canary_hit_measurement.v1",
+        "schema": "tokenclaw.openai_cache_replay_canary_hit_measurement.v1",
         "replay_source_schema": candidate.get("replay_source_schema"),
         "first_real_hit_status": _first_real_hit_status(
             observed_hits=observed_hits,
@@ -680,7 +680,7 @@ def _aggregate_canary_hit_measurements(quality_gates: list[dict[str, Any]]) -> d
     applied_count = sum(_as_int(item.get("applied_count")) for item in measurements)
     holdout_count = sum(_as_int(item.get("holdout_count")) for item in measurements)
     return {
-        "schema": "agentflow.openai_cache_replay_canary_hit_measurement.v1",
+        "schema": "tokenclaw.openai_cache_replay_canary_hit_measurement.v1",
         "candidate_count": len(measurements),
         "first_real_hit_status": _first_real_hit_status(
             observed_hits=observed_hits,
@@ -871,7 +871,7 @@ def _candidate_local_promotion_evidence(item: dict[str, Any]) -> dict[str, Any]:
         readiness = "rollback-required"
         action = "review-openai-cache-replay-safety-stop"
     return {
-        "schema": "agentflow.openai_cache_replay_candidate_promotion_evidence.v1",
+        "schema": "tokenclaw.openai_cache_replay_candidate_promotion_evidence.v1",
         "candidate_id": item.get("candidate_id"),
         "rule_id": item.get("rule_id"),
         "readiness": readiness,

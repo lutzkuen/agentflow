@@ -90,7 +90,7 @@ terminal_transcript_compaction:
     max_negative_savings_rate: 0.25
     max_error_rate_delta: 0.05
   provenance:
-    schema: agentflow.codex_terminal_transcript_compaction_policy.v1
-    issuer: local-agentflow
+    schema: tokenclaw.codex_terminal_transcript_compaction_policy.v1
+    issuer: local-tokenclaw
     status: local-default
   rules: []

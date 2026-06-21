@@ -21,14 +21,14 @@ from tokenclaw.policy_bundle import (
 from tokenclaw.store import utc_now
 
 
-OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_SCHEMA = "agentflow.old_context_summary_rollout_action.v1"
-OLD_CONTEXT_SUMMARY_ROLLOUT_ACTIONS_SCHEMA = "agentflow.old_context_summary_rollout_actions.v1"
-OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_REVIEW_SCHEMA = "agentflow.old_context_summary_rollout_actions_review.v1"
-OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_APPLY_SCHEMA = "agentflow.old_context_summary_rollout_actions_apply.v1"
-OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_DRY_RUN_SCHEMA = "agentflow.old_context_summary_rollout_actions_dry_run.v1"
-OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_IMPACT_SCHEMA = "agentflow.old_context_summary_rollout_actions_impact.v1"
-OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_VALIDATION_SCHEMA = "agentflow.old_context_summary_rollout_actions_validation.v1"
-OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_PROVENANCE_VERIFICATION_SCHEMA = "agentflow.old_context_summary_rollout_actions_provenance_verification.v1"
+OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_SCHEMA = "tokenclaw.old_context_summary_rollout_action.v1"
+OLD_CONTEXT_SUMMARY_ROLLOUT_ACTIONS_SCHEMA = "tokenclaw.old_context_summary_rollout_actions.v1"
+OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_REVIEW_SCHEMA = "tokenclaw.old_context_summary_rollout_actions_review.v1"
+OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_APPLY_SCHEMA = "tokenclaw.old_context_summary_rollout_actions_apply.v1"
+OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_DRY_RUN_SCHEMA = "tokenclaw.old_context_summary_rollout_actions_dry_run.v1"
+OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_IMPACT_SCHEMA = "tokenclaw.old_context_summary_rollout_actions_impact.v1"
+OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_VALIDATION_SCHEMA = "tokenclaw.old_context_summary_rollout_actions_validation.v1"
+OLD_CONTEXT_SUMMARY_ROLLOUT_ACTION_PROVENANCE_VERIFICATION_SCHEMA = "tokenclaw.old_context_summary_rollout_actions_provenance_verification.v1"
 
 ACTION_TYPES = {"widen", "hold", "rollback", "retire", "disable", "more-samples", "request-more-samples"}
 DISABLE_ACTION_TYPES = {"rollback", "retire", "disable"}

@@ -6,7 +6,7 @@ from typing import Any
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.crunch_blocker_outcomes.v1"
+SCHEMA = "tokenclaw.crunch_blocker_outcomes.v1"
 
 CRUNCH_LOCAL_ACTION_FAMILIES = {
     "crunch",

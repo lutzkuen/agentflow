@@ -13,10 +13,10 @@ from tokenclaw.pricing import pricing_basis
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_routing_canary_stage.v1"
-APPLY_SCHEMA = "agentflow.openai_routing_canary_apply.v1"
-OMISSION_SCHEMA = "agentflow.openai_routing_canary_stage_omission.v1"
-STAGED_SCHEMA = "agentflow.openai_routing_canary_staged_draft.v1"
+SCHEMA = "tokenclaw.openai_routing_canary_stage.v1"
+APPLY_SCHEMA = "tokenclaw.openai_routing_canary_apply.v1"
+OMISSION_SCHEMA = "tokenclaw.openai_routing_canary_stage_omission.v1"
+STAGED_SCHEMA = "tokenclaw.openai_routing_canary_staged_draft.v1"
 PRIVACY = {
     "local_only": True,
     "metadata_only": True,
@@ -54,9 +54,9 @@ SUPPORTED_SURFACES = {
 }
 SUPPORTED_ENDPOINTS = {"responses", "chat", "chat_completions", "chat-completions"}
 DEFAULT_EXCLUDED_CATEGORIES = ["tool-result", "tool-heavy", "tool-light", "code-gen", "long-context"]
-PASS_THROUGH_SCHEMA = "agentflow.pass_through_routing_activation_candidates.v1"
-PROMOTION_BLOCKER_REVIEW_SCHEMA = "agentflow.promotion_blocker_recommendation_review.v1"
-PROJECTED_LIFECYCLE_SCHEMA = "agentflow.openai_routing_canary_projected_lifecycle_coverage.v1"
+PASS_THROUGH_SCHEMA = "tokenclaw.pass_through_routing_activation_candidates.v1"
+PROMOTION_BLOCKER_REVIEW_SCHEMA = "tokenclaw.promotion_blocker_recommendation_review.v1"
+PROJECTED_LIFECYCLE_SCHEMA = "tokenclaw.openai_routing_canary_projected_lifecycle_coverage.v1"
 RAW_KEYS = {
     "api_key",
     "authorization",
@@ -301,7 +301,7 @@ def _omission(candidate: dict[str, Any], reason: str, *, path: str | None = None
 
 def _rollback_metadata() -> dict[str, Any]:
     return {
-        "schema": "agentflow.openai_routing_canary_rollback.v1",
+        "schema": "tokenclaw.openai_routing_canary_rollback.v1",
         "rollback_action_type": "disable_openai_canary",
         "rollback_canary_fraction": 0.0,
         "rollback_holdout_fraction": 0.0,
@@ -380,7 +380,7 @@ def _stage_review_intent(canary: dict[str, Any]) -> dict[str, Any]:
     )
     counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
     return {
-        "schema": "agentflow.openai_routing_canary_stage_review_intent.v1",
+        "schema": "tokenclaw.openai_routing_canary_stage_review_intent.v1",
         "status": "ready-for-operator-review",
         "routing_change_mode": "draft-only",
         "active_policy_changed": False,
@@ -400,7 +400,7 @@ def _stage_review_intent(canary: dict[str, Any]) -> dict[str, Any]:
         if isinstance(canary.get("fallback"), dict)
         else False,
         "privacy_proof": {
-            "schema": "agentflow.openai_routing_canary_stage_privacy_proof.v1",
+            "schema": "tokenclaw.openai_routing_canary_stage_privacy_proof.v1",
             "metadata_only": True,
             "local_only": True,
             "raw_prompts_included": False,
@@ -500,7 +500,7 @@ def _candidate_payload(
             ],
         },
         "promotion": {
-            "schema": "agentflow.openai_routing_canary_stage_metadata.v1",
+            "schema": "tokenclaw.openai_routing_canary_stage_metadata.v1",
             "source": "pass_through_routing_report" if report.get("schema") == PASS_THROUGH_SCHEMA else "openai_routing_report",
             "source_report_schema": report.get("schema"),
             "source_report_generated_at": report.get("generated_at"),
@@ -938,7 +938,7 @@ def apply_openai_routing_canary_draft(
             "managed_server_calls_made": False,
             "applied": [],
             "omitted": [{
-                "schema": "agentflow.openai_routing_canary_apply_noop.v1",
+                "schema": "tokenclaw.openai_routing_canary_apply_noop.v1",
                 "status": "omitted",
                 "reason": noop_reason,
                 "target_candidate_id": canary.get("target_candidate_id") or (canary.get("promotion") or {}).get("candidate_id"),
@@ -959,7 +959,7 @@ def apply_openai_routing_canary_draft(
     active_canary.setdefault("activation", {})
     if isinstance(active_canary["activation"], dict):
         active_canary["activation"].update({
-            "schema": "agentflow.openai_routing_canary_local_activation.v1",
+            "schema": "tokenclaw.openai_routing_canary_local_activation.v1",
             "activated_at": utc_now(),
             "source": "reviewed-openai-routing-canary-draft",
             "provider_calls_made_by_apply": False,
@@ -984,7 +984,7 @@ def apply_openai_routing_canary_draft(
         "provider_calls_made": False,
         "managed_server_calls_made": False,
         "applied": [{
-            "schema": "agentflow.openai_routing_canary_apply_action.v1",
+            "schema": "tokenclaw.openai_routing_canary_apply_action.v1",
             "status": "planned" if dry_run else "applied",
             "target_local_policy": "openai_canary",
             "policy_file": "routing_rules.yaml",
@@ -1073,7 +1073,7 @@ async def stage_openai_routing_canary_drafts(
             workspace=workspace,
             metadata={
                 "openai_routing_canary_stage": {
-                    "schema": "agentflow.openai_routing_canary_stage_manifest_metadata.v1",
+                    "schema": "tokenclaw.openai_routing_canary_stage_manifest_metadata.v1",
                     "candidate_id": candidate_id,
                     "source_report_schema": routing_report.get("schema"),
                     "privacy": PRIVACY,

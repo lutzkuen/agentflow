@@ -11,13 +11,13 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.optimization_coordinator_dry_run.v1"
-ENTRY_SCHEMA = "agentflow.optimization_action_ledger_entry.v1"
+SCHEMA = "tokenclaw.optimization_coordinator_dry_run.v1"
+ENTRY_SCHEMA = "tokenclaw.optimization_action_ledger_entry.v1"
 
 _ACTIONABLE_TYPES = {"apply", "canary", "promote", "review", "widen"}
 _HOLD_TYPES = {"hold", "more-samples", "request-more-samples"}
 _SAFETY_TYPES = {"disable", "retire", "rollback", "safety-stop", "suppress"}
-_SUPPRESSION_BUCKET_SCHEMA = "agentflow.optimization_coordinator_suppression_bucket.v1"
+_SUPPRESSION_BUCKET_SCHEMA = "tokenclaw.optimization_coordinator_suppression_bucket.v1"
 _EXPLICIT_SAVINGS_KEYS = (
     "projected_savings_usd",
     "projected_saved_usd",
@@ -500,7 +500,7 @@ def build_optimization_coordinator_dry_run(
 
         decision = build_optimization_coordinator(
             ledger={
-                "schema": "agentflow.optimization_action_ledger.v1",
+                "schema": "tokenclaw.optimization_action_ledger.v1",
                 "entry_count": len(entries),
                 "entries": entries,
                 "privacy": ledger.get("privacy") or {},

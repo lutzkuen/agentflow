@@ -17,7 +17,7 @@ from tokenclaw.store import SQLiteStore
 def _source_reports() -> dict:
     return {
         "cache_impact": {
-            "schema": "agentflow.openai_cache_replay_impact.v1",
+            "schema": "tokenclaw.openai_cache_replay_impact.v1",
             "status": "matched",
             "candidates": [
                 {
@@ -41,9 +41,9 @@ def _source_reports() -> dict:
             ],
         },
         "request_shape_rollups": {
-            "schema": "agentflow.request_shape_rollups.v1",
+            "schema": "tokenclaw.request_shape_rollups.v1",
             "crunch_canary_impact": {
-                "schema": "agentflow.request_shape_crunch_canary_impact.v1",
+                "schema": "tokenclaw.request_shape_crunch_canary_impact.v1",
                 "status": "widen-ready",
                 "candidates": [
                     {
@@ -68,7 +68,7 @@ def _source_reports() -> dict:
             },
         },
         "claude_routing_impact": {
-            "schema": "agentflow.claude_canary_impact.v1",
+            "schema": "tokenclaw.claude_canary_impact.v1",
             "status": "matched",
             "candidates": [
                 {
@@ -91,7 +91,7 @@ def _source_reports() -> dict:
             ],
         },
         "openai_routing_report": {
-            "schema": "agentflow.openai_routing_opportunity.v1",
+            "schema": "tokenclaw.openai_routing_opportunity.v1",
             "status": "matched",
             "candidates": [],
         },
@@ -152,7 +152,7 @@ class LocalPromotionCandidatesTests(unittest.TestCase):
 
     def test_cli_emits_schema_for_empty_local_database(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = str(Path(tmpdir) / "agentflow.sqlite3")
+            db_path = str(Path(tmpdir) / "tokenclaw.sqlite3")
             store = SQLiteStore(db_path)
             store.conn.close()
             stdout = io.StringIO()

@@ -35,6 +35,8 @@ OPENAI_MODEL_LIST = list(dict.fromkeys([
     env("TOKENCLAW_OPENAI_LARGE_MODEL", "gpt-5-codex"),
     env("TOKENCLAW_OPENAI_SMALL_MODEL", "gpt-5-mini"),
     env("TOKENCLAW_OPENAI_TINY_MODEL", "gpt-5-nano"),
+    "gpt-5.4",
+    "gpt-5.4-mini",
     "gpt-5.5",
     "gpt-5.2-codex",
     "gpt-5-codex",
@@ -140,11 +142,11 @@ def _recent_session_spending_summary(hours: int = 24, limit: int = 10) -> list[d
 def _log_recent_session_spending_summary(event: str, hours: int = 24, limit: int = 10) -> None:
     rows = _recent_session_spending_summary(hours=hours, limit=limit)
     if not rows:
-        print(f"agentflow_session_summary event={event} window={hours}h sessions=0", file=sys.stderr)
+        print(f"tokenclaw_session_summary event={event} window={hours}h sessions=0", file=sys.stderr)
         return
     for row in rows:
         print(
-            "agentflow_session_summary "
+            "tokenclaw_session_summary "
             f"event={event} window={hours}h session={row['sid']} calls={row['calls']} "
             f"cost_usd={row['cost_usd']:.4f} baseline_savings_usd={row['baseline_savings_usd']:.4f} "
             f"routing_savings_usd={row['routing_savings_usd']:.4f} "
@@ -224,13 +226,13 @@ async def _finalize_routing_outcome_labels_once() -> None:
         result = await asyncio.to_thread(store.finalize_outcome_labels)
         if int(result.get("safe_count") or 0) or int(result.get("unsafe_count") or 0):
             print(
-                "agentflow_routing_outcome_labels "
+                "tokenclaw_routing_outcome_labels "
                 f"safe={result.get('safe_count')} unsafe={result.get('unsafe_count')} "
                 f"unknown={result.get('unknown_count')}",
                 file=sys.stderr,
             )
     except Exception as exc:
-        print(f"agentflow_routing_outcome_labels_error: {exc}", file=sys.stderr)
+        print(f"tokenclaw_routing_outcome_labels_error: {exc}", file=sys.stderr)
 
 
 async def _periodic_routing_outcome_label_finalizer(interval_seconds: int) -> None:
@@ -277,13 +279,13 @@ async def _log_startup_session_spending_summary() -> None:
         try:
             result = await asyncio.to_thread(store.run_sqlite_maintenance)
             print(
-                "agentflow_sqlite_maintenance "
+                "tokenclaw_sqlite_maintenance "
                 f"status={result.get('status')} retention_days={result.get('retention_days')} "
                 f"deleted_rows={result.get('total_deleted_rows')}",
                 file=sys.stderr,
             )
         except Exception as exc:
-            print(f"agentflow_sqlite_maintenance_error: {exc}", file=sys.stderr)
+            print(f"tokenclaw_sqlite_maintenance_error: {exc}", file=sys.stderr)
 
     asyncio.create_task(run_background_maintenance())
 

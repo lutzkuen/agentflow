@@ -75,7 +75,7 @@ from tokenclaw.cli_commands.onboarding import (
     _doctor_codex_target,
     _doctor_provider_target,
     _env_file_value,
-    _fetch_agentflow_stats,
+    _fetch_tokenclaw_stats,
     _profile_for_target,
     _selected_activation_targets,
     _target_activation_base,
@@ -86,7 +86,7 @@ from tokenclaw.cli_commands.onboarding import (
     _write_doctor_summary,
     _write_savings_report_summary,
     _write_stats_summary,
-    agentflow_cli,
+    tokenclaw_cli,
     tokenclaw_cli,
 )
 
@@ -354,7 +354,7 @@ def sqlite_maintenance_cli(argv: Sequence[str] | None = None, *, stdout: Any = N
         "--retention-days",
         type=int,
         default=None,
-        help="Retention window in days. Defaults to AGENTFLOW_SQLITE_RETENTION_DAYS or 7.",
+        help="Retention window in days. Defaults to TOKENCLAW_SQLITE_RETENTION_DAYS or 7.",
     )
     parser.add_argument("--disable-retention", action="store_true", help="Record disabled maintenance without deleting rows.")
     parser.add_argument("--dry-run", action="store_true", help="Report rows that would be purged without deleting them.")
@@ -409,12 +409,12 @@ def orchestrator_research_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     parser.add_argument(
         "--threshold",
         type=int,
-        default=int(os.getenv("AGENTFLOW_RESEARCH_BACKLOG_THRESHOLD", "3")),
+        default=int(os.getenv("TOKENCLAW_RESEARCH_BACKLOG_THRESHOLD", "3")),
         help="Minimum status:ready actionable issue count before research mode is skipped.",
     )
     parser.add_argument(
         "--trusted-author",
-        default=os.getenv("AGENTFLOW_GITHUB_TRUSTED_AUTHOR", "lutzkuen"),
+        default=os.getenv("TOKENCLAW_GITHUB_TRUSTED_AUTHOR", "lutzkuen"),
         help="Only issues from this GitHub author are considered unattended-actionable.",
     )
     parser.add_argument(
@@ -482,18 +482,18 @@ def _attach_recent_closed_github_issues_for_research(
     *,
     trusted_author: str,
 ) -> list[Any]:
-    if os.getenv("AGENTFLOW_RESEARCH_FETCH_CLOSED_ISSUES", "1").strip().lower() in {"0", "false", "no", "off"}:
+    if os.getenv("TOKENCLAW_RESEARCH_FETCH_CLOSED_ISSUES", "1").strip().lower() in {"0", "false", "no", "off"}:
         return issues
     gh = shutil.which("gh")
     if not gh:
         return issues
     repos = sorted({repo for repo in (_issue_repo_for_research(issue) for issue in issues) if repo})
     if not repos:
-        env_repos = os.getenv("AGENTFLOW_RESEARCH_GITHUB_REPOS", "")
+        env_repos = os.getenv("TOKENCLAW_RESEARCH_GITHUB_REPOS", "")
         repos = sorted({repo.strip() for repo in env_repos.split(",") if repo.strip().count("/") == 1})
     if not repos:
         return issues
-    limit = os.getenv("AGENTFLOW_RESEARCH_CLOSED_ISSUE_LIMIT", "200")
+    limit = os.getenv("TOKENCLAW_RESEARCH_CLOSED_ISSUE_LIMIT", "200")
     try:
         limit_value = str(max(1, min(200, int(limit))))
     except ValueError:
@@ -559,7 +559,7 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
         return stats
 
     try:
-        limit = max(1, min(int(os.getenv("AGENTFLOW_RESEARCH_REQUEST_SHAPE_LIMIT", "1000")), 10_000))
+        limit = max(1, min(int(os.getenv("TOKENCLAW_RESEARCH_REQUEST_SHAPE_LIMIT", "1000")), 10_000))
     except ValueError:
         limit = 1000
 
@@ -623,7 +623,7 @@ def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> 
             )
             if int((rollups_report.get("summary") or {}).get("rows_considered") or 0) <= 0:
                 try:
-                    max_age = float(os.getenv("AGENTFLOW_RESEARCH_REQUEST_SHAPE_SNAPSHOT_MAX_AGE_HOURS", "72"))
+                    max_age = float(os.getenv("TOKENCLAW_RESEARCH_REQUEST_SHAPE_SNAPSHOT_MAX_AGE_HOURS", "72"))
                 except ValueError:
                     max_age = 72.0
                 snapshot_report = latest_request_shape_rollup_snapshot_report(
@@ -851,7 +851,7 @@ def _routing_pathway_outcome_batch_result(
     error: str | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
-        "schema": "agentflow.routing_pathway_outcome_batch_preflight.v1",
+        "schema": "tokenclaw.routing_pathway_outcome_batch_preflight.v1",
         "status": status,
         "reason": reason,
         "outcome_count": int(outcome_count),
@@ -865,7 +865,7 @@ def _routing_pathway_outcome_batch_result(
         "policy_files_written": False,
         "managed_server_calls_made": bool(managed_server_calls_made),
         "privacy": {
-            "schema": "agentflow.routing_pathway_outcome_batch_preflight_privacy.v1",
+            "schema": "tokenclaw.routing_pathway_outcome_batch_preflight_privacy.v1",
             "feature_only": True,
             "metadata_only": True,
             "aggregate_only": True,
@@ -903,7 +903,7 @@ def _routing_pathway_outcome_batch_result(
 
 def _managed_routing_pathway_outcome_ingest_payload(report: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "agentflow.managed_routing_pathway_outcomes.v1",
+        "schema": "tokenclaw.managed_routing_pathway_outcomes.v1",
         "generated_at": report.get("generated_at"),
         "status": report.get("status") or "tracked",
         "read_only": True,
@@ -1071,13 +1071,13 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
     )
     parser.add_argument(
         "--managed-preview-url",
-        default=os.getenv("AGENTFLOW_MANAGED_ACTIVATION_PREVIEW_URL", ""),
+        default=os.getenv("TOKENCLAW_MANAGED_ACTIVATION_PREVIEW_URL", ""),
         help="Full managed preview endpoint URL. If omitted, no managed server call is made.",
     )
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_ACTIVATION_PREVIEW_TIMEOUT", "10")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_ACTIVATION_PREVIEW_TIMEOUT", "10")),
         help="HTTP timeout in seconds for the opt-in managed preview call, default: 10.",
     )
     parser.add_argument(
@@ -1097,7 +1097,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
     )
     parser.add_argument(
         "--routing-pathway-outcomes-json",
-        default=os.getenv("AGENTFLOW_ROUTING_PATHWAY_OUTCOMES_JSON", ""),
+        default=os.getenv("TOKENCLAW_ROUTING_PATHWAY_OUTCOMES_JSON", ""),
         help=(
             "Optional managed policy decision, routing_pathway_matrix, or pathway candidate JSON "
             "used to submit local routing pathway outcome feedback before the activation preview."
@@ -1105,7 +1105,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
     )
     parser.add_argument(
         "--managed-routing-pathway-outcomes-url",
-        default=os.getenv("AGENTFLOW_MANAGED_ROUTING_PATHWAY_OUTCOMES_URL", ""),
+        default=os.getenv("TOKENCLAW_MANAGED_ROUTING_PATHWAY_OUTCOMES_URL", ""),
         help=(
             "Managed routing pathway outcome ingest endpoint. If omitted, it is derived from "
             "--managed-preview-url when possible."
@@ -1114,7 +1114,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
     parser.add_argument(
         "--routing-pathway-outcome-limit",
         type=int,
-        default=int(os.getenv("AGENTFLOW_ROUTING_PATHWAY_OUTCOME_LIMIT", "1000")),
+        default=int(os.getenv("TOKENCLAW_ROUTING_PATHWAY_OUTCOME_LIMIT", "1000")),
         help="Local routing pathway evidence rows to inspect before preview, default: 1000.",
     )
     parser.add_argument(
@@ -1125,7 +1125,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
     parser.add_argument(
         "--preview-stale-after-hours",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_ACTIVATION_PREVIEW_STALE_AFTER_HOURS", "72")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_ACTIVATION_PREVIEW_STALE_AFTER_HOURS", "72")),
         help="Classify persisted preview outcomes as stale after this many hours, default: 72.",
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
@@ -1301,7 +1301,7 @@ def managed_activation_preview_outcomes_cli(
     parser.add_argument(
         "--preview-stale-after-hours",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_ACTIVATION_PREVIEW_STALE_AFTER_HOURS", "72")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_ACTIVATION_PREVIEW_STALE_AFTER_HOURS", "72")),
         help="Classify preview outcomes as stale after this many hours, default: 72.",
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
@@ -1346,7 +1346,7 @@ def managed_routing_pathway_candidates_cli(
     parser.add_argument(
         "--preview-stale-after-hours",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_ROUTING_PATHWAY_STALE_AFTER_HOURS", "72")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_ROUTING_PATHWAY_STALE_AFTER_HOURS", "72")),
         help="Classify pathway matrix rows as stale after this many hours, default: 72.",
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
@@ -1406,7 +1406,7 @@ def managed_routing_pathway_outcomes_cli(
     parser.add_argument(
         "--preview-stale-after-hours",
         type=float,
-        default=float(os.getenv("AGENTFLOW_MANAGED_ROUTING_PATHWAY_STALE_AFTER_HOURS", "72")),
+        default=float(os.getenv("TOKENCLAW_MANAGED_ROUTING_PATHWAY_STALE_AFTER_HOURS", "72")),
         help="Classify pathway matrix rows as stale after this many hours, default: 72.",
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
@@ -1452,8 +1452,8 @@ def managed_routing_pathway_outcomes_cli(
 def proxy_main() -> None:
     # The provider proxy forwards real API credentials and request bodies upstream.
     # Keep installed CLI defaults localhost-only unless the user explicitly opts in
-    # to a different bind address through TOKENCLAW_HOST, the legacy AGENTFLOW_HOST alias, or --host.
-    if "TOKENCLAW_HOST" not in os.environ and "AGENTFLOW_HOST" not in os.environ:
+    # to a different bind address through TOKENCLAW_HOST or --host.
+    if "TOKENCLAW_HOST" not in os.environ:
         os.environ["TOKENCLAW_HOST"] = "127.0.0.1"
 
     from tokenclaw.server import main
@@ -1462,11 +1462,6 @@ def proxy_main() -> None:
 
 
 def tokenclaw_main() -> None:
-    raise SystemExit(tokenclaw_cli())
-
-
-def agentflow_main() -> None:
-    sys.stderr.write("agentflow is deprecated; use tokenclaw instead.\n")
     raise SystemExit(tokenclaw_cli())
 
 

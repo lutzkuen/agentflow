@@ -18,11 +18,11 @@ from tokenclaw.store import Store, stable_json, utc_now
 class ActivationSafetyStopBurndownTests(unittest.TestCase):
     def _anthropic_routing_safety_stop_plan(self) -> dict:
         return {
-            "schema": "agentflow.orchestrator_research_plan.v1",
+            "schema": "tokenclaw.orchestrator_research_plan.v1",
             "evidence": {
                 "stats_summary": {
                     "pass_through_routing_report": {
-                        "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+                        "schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
                         "buckets": [
                             {
                                 "rank": 1,
@@ -39,7 +39,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
                                 "required_local_executor": "anthropic-routing-rules",
                                 "estimated_savings_per_1000_calls_usd": 4.5,
                                 "anthropic_canary_lifecycle_evidence": {
-                                    "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+                                    "schema": "tokenclaw.anthropic_routing_canary_lifecycle_evidence.v1",
                                     "status": "matched",
                                     "matched_count": 1250,
                                     "observed_count": 390,
@@ -111,7 +111,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
             research_plan=self._anthropic_routing_safety_stop_plan()
         )
 
-        self.assertEqual(report["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(report["schema"], "tokenclaw.activation_safety_stop_burndown.v1")
         self.assertEqual(report["status"], "ranked")
         self.assertEqual(report["summary"]["anthropic_routing_safety_stop_count"], 390)
         self.assertEqual(report["summary"]["anthropic_routing_refresh_proof_count"], 1)
@@ -170,7 +170,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         refresh_proof = group["burndown_refresh_proof"]
         self.assertEqual(
             refresh_proof["schema"],
-            "agentflow.anthropic_routing_safety_stop_burndown_refresh_proof.v1",
+            "tokenclaw.anthropic_routing_safety_stop_burndown_refresh_proof.v1",
         )
         self.assertEqual(refresh_proof["status"], "blocked")
         self.assertTrue(refresh_proof["all_required_fields_recorded"])
@@ -213,7 +213,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertFalse(group["rollback_proof"]["active_policy_changed"])
         self.assertFalse(group["rollback_proof"]["wrote_active_policy_files"])
         rollback = group["rollback_metadata"]
-        self.assertEqual(rollback["schema"], "agentflow.anthropic_routing_safety_stop_rollback_metadata.v1")
+        self.assertEqual(rollback["schema"], "tokenclaw.anthropic_routing_safety_stop_rollback_metadata.v1")
         self.assertEqual(rollback["rollback_action_type"], "keep_anthropic_routing_policy_disabled")
         self.assertEqual(rollback["target_local_policy_section"], "routing.rules")
         self.assertEqual(rollback["target_local_rule_file"], "routing_rules.yaml")
@@ -233,7 +233,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         self.assertFalse(group["holdout_coverage"]["passed"])
         self.assertEqual(group["holdout_coverage"]["holdout_count"], 0)
         unblock = group["unblock_criteria"]
-        self.assertEqual(unblock["schema"], "agentflow.anthropic_routing_safety_stop_unblock_criteria.v1")
+        self.assertEqual(unblock["schema"], "tokenclaw.anthropic_routing_safety_stop_unblock_criteria.v1")
         self.assertEqual(unblock["status"], "blocked")
         self.assertEqual(
             unblock["required_resolution_fields"],
@@ -270,7 +270,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         duplicate_suppression = group["duplicate_suppression"]
         self.assertEqual(
             duplicate_suppression["schema"],
-            "agentflow.anthropic_routing_activation_issue_duplicate_suppression.v1",
+            "tokenclaw.anthropic_routing_activation_issue_duplicate_suppression.v1",
         )
         self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
         self.assertEqual(duplicate_suppression["safety_stop_count"], 390)
@@ -290,7 +290,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         queue = build_local_activation_next_action_queue({"activation_safety_stop_burndown": report})
         self.assertIsNotNone(queue)
         queue_row = queue["entries"][0]
-        self.assertEqual(queue_row["evidence_schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(queue_row["evidence_schema"], "tokenclaw.activation_safety_stop_burndown.v1")
         self.assertEqual(queue_row["local_action_family"], "routing")
         self.assertEqual(queue_row["current_status"], "keep-blocked")
         self.assertEqual(queue_row["next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
@@ -542,7 +542,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(report["schema"], "tokenclaw.activation_safety_stop_burndown.v1")
         self.assertEqual(report["summary"]["safety_stop_count"], 1)
         group = report["groups"][0]
         self.assertEqual(group["action_family"], "routing")
@@ -561,7 +561,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
 
     def test_repeated_research_diagnostic_resolves_to_action_without_raw_examples(self):
         plan = {
-            "schema": "agentflow.orchestrator_research_plan.v1",
+            "schema": "tokenclaw.orchestrator_research_plan.v1",
             "evidence": {
                 "repeated_diagnostics": [
                     {
@@ -594,7 +594,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         )
         self.assertIn("human_review", report["groups"][0]["needed_resolution"])
         unblock = report["groups"][0]["unblock_criteria"]
-        self.assertEqual(unblock["schema"], "agentflow.activation_feedback_safety_stop_unblock_criteria.v1")
+        self.assertEqual(unblock["schema"], "tokenclaw.activation_feedback_safety_stop_unblock_criteria.v1")
         self.assertEqual(unblock["status"], "blocked")
         self.assertFalse(unblock["safety_stop_count_zero"])
         self.assertFalse(unblock["applied_coverage_present"])
@@ -618,7 +618,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
     def test_lifecycle_rows_classify_retry_later_and_superseded_next_states(self):
         report = build_activation_safety_stop_burndown(
             {
-                "schema": "agentflow.activation_staged_lifecycle_feedback_summary.v1",
+                "schema": "tokenclaw.activation_staged_lifecycle_feedback_summary.v1",
                 "cohort_lifecycle_metadata": [
                     {
                         "policy_ref": "policy:stale",
@@ -658,14 +658,14 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
 
     def test_cli_reads_plan_json_and_db(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "agentflow.sqlite3"
+            db_path = Path(tmp) / "tokenclaw.sqlite3"
             store = Store(str(db_path))
             store.conn.close()
             plan_path = Path(tmp) / "plan.json"
             plan_path.write_text(
                 json.dumps(
                     {
-                        "schema": "agentflow.orchestrator_research_plan.v1",
+                        "schema": "tokenclaw.orchestrator_research_plan.v1",
                         "evidence": {
                             "repeated_diagnostics": [
                                 {"reason": "safety-stop", "diagnostic_class": "safety-stop", "count": 3}
@@ -683,13 +683,13 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         report = json.loads(stdout.getvalue())
-        self.assertEqual(report["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(report["schema"], "tokenclaw.activation_safety_stop_burndown.v1")
         self.assertEqual(report["summary"]["safety_stop_count"], 3)
         self.assertEqual(report["summary"]["top_next_action"], "review-activation-feedback-safety-stop-and-record-keep-blocked-reason")
 
     def test_cli_reads_anthropic_routing_safety_stop_from_plan_json(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "agentflow.sqlite3"
+            db_path = Path(tmp) / "tokenclaw.sqlite3"
             store = Store(str(db_path))
             store.conn.close()
             plan_path = Path(tmp) / "plan.json"
@@ -703,7 +703,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         report = json.loads(stdout.getvalue())
-        self.assertEqual(report["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(report["schema"], "tokenclaw.activation_safety_stop_burndown.v1")
         self.assertEqual(report["summary"]["anthropic_routing_safety_stop_count"], 390)
         self.assertEqual(report["summary"]["top_next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
         self.assertFalse(report["groups"][0]["promotion_allowed"])

@@ -8,13 +8,13 @@ from typing import Any
 from tokenclaw.store import stable_json, utc_now
 
 
-SCHEMA = "agentflow.promotion_outcome_feedback_ledger.v1"
-ENTRY_SCHEMA = "agentflow.promotion_outcome_feedback_entry.v1"
-SUMMARY_SCHEMA = "agentflow.promotion_outcome_feedback_summary.v1"
+SCHEMA = "tokenclaw.promotion_outcome_feedback_ledger.v1"
+ENTRY_SCHEMA = "tokenclaw.promotion_outcome_feedback_entry.v1"
+SUMMARY_SCHEMA = "tokenclaw.promotion_outcome_feedback_summary.v1"
 POST_PROMOTION_ACTION_OUTCOME_ROLLUP_SOURCE_SURFACE = "post_promotion_action_outcomes"
 POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ENDPOINT = "/v1/promotion-blocker-action-outcome-rollups"
-POST_PROMOTION_ACTION_OUTCOME_ROLLUP_INGEST_SCHEMA = "agentflow.promotion_blocker_action_outcome_rollup_ingest.v1"
-POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ROW_SCHEMA = "agentflow.promotion_blocker_action_outcome_rollup_row.v1"
+POST_PROMOTION_ACTION_OUTCOME_ROLLUP_INGEST_SCHEMA = "tokenclaw.promotion_blocker_action_outcome_rollup_ingest.v1"
+POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ROW_SCHEMA = "tokenclaw.promotion_blocker_action_outcome_rollup_row.v1"
 
 _RAW_LIKE_KEY_PARTS = (
     "api_key",
@@ -207,7 +207,7 @@ def build_post_promotion_action_outcome_rollups(
     generated = generated_at or utc_now()
     capped = max(1, min(int(limit or 1), 10000))
     result: dict[str, Any] = {
-        "schema": "agentflow.post_promotion_action_outcome_rollups.v1",
+        "schema": "tokenclaw.post_promotion_action_outcome_rollups.v1",
         "ok": False,
         "status": "invalid",
         "generated_at": generated,
@@ -373,7 +373,7 @@ async def queue_post_promotion_action_outcome_rollups(
 
     built = build_post_promotion_action_outcome_rollups(store_obj, limit=limit)
     meta: dict[str, Any] = {
-        "schema": "agentflow.post_promotion_action_outcome_rollup_flush_status.v1",
+        "schema": "tokenclaw.post_promotion_action_outcome_rollup_flush_status.v1",
         "enabled": recommendations.recommendations_enabled(),
         "server_url": recommendations.recommendation_server_url(),
         "endpoint": POST_PROMOTION_ACTION_OUTCOME_ROLLUP_ENDPOINT,
@@ -649,7 +649,7 @@ def promotion_outcome_feedback_summary(store_obj: Any, *, limit: int = 1000) -> 
     for entry in entries:
         cohorts = entry.get("cohort_metrics") if isinstance(entry.get("cohort_metrics"), dict) else {}
         candidates.append({
-            "schema": "agentflow.promotion_outcome_feedback_candidate.v1",
+            "schema": "tokenclaw.promotion_outcome_feedback_candidate.v1",
             "candidate_id": entry.get("candidate_id") or entry.get("policy_id"),
             "target_candidate_id": entry.get("candidate_id"),
             "action_id": entry.get("action_id"),

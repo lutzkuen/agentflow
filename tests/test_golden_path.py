@@ -24,16 +24,16 @@ class TestGoldenPathSummary(unittest.TestCase):
     def test_fixture_summary_proves_local_savings_without_provider_or_managed_server(self) -> None:
         result = build_golden_path_summary()
 
-        self.assertEqual(result["schema"], "agentflow.golden_path_summary.v1")
+        self.assertEqual(result["schema"], "tokenclaw.golden_path_summary.v1")
         self.assertTrue(result["ok"])
         self.assertEqual(result["surface"], "openai_responses")
         self.assertEqual(result["local_action_family"], "crunch")
         self.assertIn(result["decision_status"], {"demo_applied", "active"})
-        self.assertGreater(result["estimated_agentflow_savings_usd"], 0)
+        self.assertGreater(result["estimated_tokenclaw_savings_usd"], 0)
         self.assertEqual(result["provider_prompt_cache_discount_usd"], 0.0)
         self.assertEqual(
-            result["savings_breakdown"]["agentflow_generated_savings_usd"],
-            result["estimated_agentflow_savings_usd"],
+            result["savings_breakdown"]["tokenclaw_generated_savings_usd"],
+            result["estimated_tokenclaw_savings_usd"],
         )
         self.assertEqual(result["savings_breakdown"]["provider_prompt_cache_discount_usd"], 0.0)
         self.assertFalse(result["managed_server_required"])
@@ -67,7 +67,7 @@ class TestGoldenPathSummary(unittest.TestCase):
 
     def test_live_evidence_reports_active_openai_routing_without_raw_bodies(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = str(Path(tmpdir) / "agentflow.sqlite3")
+            db_path = str(Path(tmpdir) / "tokenclaw.sqlite3")
             store = SQLiteStore(db_path)
             try:
                 store.log_call(
@@ -133,57 +133,57 @@ class TestGoldenPathSummary(unittest.TestCase):
 
 
 class TestGoldenPathCLI(unittest.TestCase):
-    def test_agentflow_demo_golden_path_json(self) -> None:
+    def test_tokenclaw_demo_golden_path_json(self) -> None:
         stdout = io.StringIO()
-        code = cli.agentflow_cli(["demo", "golden-path", "--json"], stdout=stdout)
+        code = cli.tokenclaw_cli(["demo", "golden-path", "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.golden_path_summary.v1")
+        self.assertEqual(result["schema"], "tokenclaw.golden_path_summary.v1")
         self.assertEqual(result["surface"], "openai_responses")
         self.assertIn("local_action_family", result)
         self.assertIn("decision_status", result)
-        self.assertIn("estimated_agentflow_savings_usd", result)
+        self.assertIn("estimated_tokenclaw_savings_usd", result)
         self.assertIn("provider_prompt_cache_discount_usd", result)
         self.assertEqual(
-            result["savings_breakdown"]["agentflow_generated_savings_usd"],
-            result["estimated_agentflow_savings_usd"],
+            result["savings_breakdown"]["tokenclaw_generated_savings_usd"],
+            result["estimated_tokenclaw_savings_usd"],
         )
         self.assertFalse(result["managed_server_required"])
 
-    def test_agentflow_demo_savings_json(self) -> None:
+    def test_tokenclaw_demo_savings_json(self) -> None:
         stdout = io.StringIO()
-        code = cli.agentflow_cli(["demo", "savings", "--json"], stdout=stdout)
+        code = cli.tokenclaw_cli(["demo", "savings", "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.golden_path_summary.v1")
+        self.assertEqual(result["schema"], "tokenclaw.golden_path_summary.v1")
         self.assertEqual(result["surface"], "openai_responses")
         self.assertEqual(result["local_action_family"], "crunch")
-        self.assertGreater(result["estimated_agentflow_savings_usd"], 0)
+        self.assertGreater(result["estimated_tokenclaw_savings_usd"], 0)
         self.assertEqual(result["provider_prompt_cache_discount_usd"], 0.0)
         self.assertFalse(result["managed_server_required"])
         self.assertFalse(result["provider_calls_made"])
 
-    def test_agentflow_demo_golden_path_human_summary(self) -> None:
+    def test_tokenclaw_demo_golden_path_human_summary(self) -> None:
         stdout = io.StringIO()
-        code = cli.agentflow_cli(["demo", "golden-path"], stdout=stdout)
+        code = cli.tokenclaw_cli(["demo", "golden-path"], stdout=stdout)
 
         self.assertEqual(code, 0)
         output = stdout.getvalue()
         self.assertIn("AgentFlow golden path:", output)
-        self.assertIn("agentflow_saved=$", output)
+        self.assertIn("tokenclaw_saved=$", output)
         self.assertIn("provider_prompt_cache_discount=$", output)
         self.assertIn("managed_server_required=false", output)
 
-    def test_agentflow_demo_savings_human_summary(self) -> None:
+    def test_tokenclaw_demo_savings_human_summary(self) -> None:
         stdout = io.StringIO()
-        code = cli.agentflow_cli(["demo", "savings"], stdout=stdout)
+        code = cli.tokenclaw_cli(["demo", "savings"], stdout=stdout)
 
         self.assertEqual(code, 0)
         output = stdout.getvalue()
         self.assertIn("AgentFlow savings demo:", output)
-        self.assertIn("agentflow_saved=$", output)
+        self.assertIn("tokenclaw_saved=$", output)
         self.assertIn("provider_prompt_cache_discount=$", output)
         self.assertIn("managed_server_required=false", output)
 
@@ -192,7 +192,7 @@ class TestLocalSavingsRuleDrill(unittest.TestCase):
     def test_apply_observe_rollback_observe_summary(self) -> None:
         result = build_local_savings_rule_drill_summary()
 
-        self.assertEqual(result["schema"], "agentflow.local_savings_rule_drill.v1")
+        self.assertEqual(result["schema"], "tokenclaw.local_savings_rule_drill.v1")
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["rule_family"], "routing")
@@ -236,20 +236,20 @@ class TestLocalSavingsRuleDrill(unittest.TestCase):
         self.assertFalse(privacy["provider_calls_made"])
         self.assertFalse(privacy["managed_server_calls_made"])
 
-    def test_agentflow_demo_rule_drill_json(self) -> None:
+    def test_tokenclaw_demo_rule_drill_json(self) -> None:
         stdout = io.StringIO()
-        code = cli.agentflow_cli(["demo", "rule-drill", "--json"], stdout=stdout)
+        code = cli.tokenclaw_cli(["demo", "rule-drill", "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.local_savings_rule_drill.v1")
+        self.assertEqual(result["schema"], "tokenclaw.local_savings_rule_drill.v1")
         self.assertTrue(result["applied"])
         self.assertTrue(result["rollback_available"])
         self.assertTrue(result["rollback_success"])
 
-    def test_agentflow_demo_rule_drill_human_summary(self) -> None:
+    def test_tokenclaw_demo_rule_drill_human_summary(self) -> None:
         stdout = io.StringIO()
-        code = cli.agentflow_cli(["demo", "rule-drill"], stdout=stdout)
+        code = cli.tokenclaw_cli(["demo", "rule-drill"], stdout=stdout)
 
         self.assertEqual(code, 0)
         output = stdout.getvalue()

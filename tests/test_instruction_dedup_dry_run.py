@@ -33,7 +33,7 @@ FORBIDDEN_VALUES = (
 class InstructionDedupDryRunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -196,7 +196,7 @@ class InstructionDedupDryRunTests(unittest.TestCase):
             local_salt="local-salt-dry-run-secret",
         )
 
-        self.assertEqual(report["schema"], "agentflow.instruction_dedup_dry_run.v1")
+        self.assertEqual(report["schema"], "tokenclaw.instruction_dedup_dry_run.v1")
         self.assertTrue(report["ok"])
         self.assertGreaterEqual(report["summary"]["actionable_plan_count"], 6)
         surfaces = {plan["source_surface"] for plan in report["plans"]}
@@ -293,7 +293,7 @@ class InstructionDedupDryRunTests(unittest.TestCase):
                 request_json={"model": "claude-sonnet-4-6", "system": instruction, "messages": []},
                 routing_extra={
                     "optimization_coordinator": {
-                        "schema": "agentflow.optimization_coordinator.v1",
+                        "schema": "tokenclaw.optimization_coordinator.v1",
                         "selected_family": "routing",
                         "reason_codes": [],
                     }
@@ -392,7 +392,7 @@ class InstructionDedupDryRunTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
 
         self.assertEqual(code, 0)
-        self.assertEqual(payload["schema"], "agentflow.instruction_dedup_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.instruction_dedup_dry_run.v1")
         self.assertGreaterEqual(payload["summary"]["plan_count"], 1)
         self.assertFalse(payload["summary"]["provider_calls_made"])
         self._assert_private(payload)

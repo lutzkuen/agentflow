@@ -46,12 +46,12 @@ REQUIRED_OPPORTUNITY_FIELDS = (
 
 
 def _empty_activation_config() -> dict:
-    return {"schema": "agentflow.activation_config.v1", "targets": {}}
+    return {"schema": "tokenclaw.activation_config.v1", "targets": {}}
 
 
 def _openai_activation_config() -> dict:
     return {
-        "schema": "agentflow.activation_config.v1",
+        "schema": "tokenclaw.activation_config.v1",
         "targets": {
             "openai": {
                 "id": "openai",
@@ -82,7 +82,7 @@ def _both_activation_config() -> dict:
 class _StoreFixture(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -161,7 +161,7 @@ class TestBuildSavingsReportNoStore(unittest.TestCase):
     def test_unconfigured_targets_produce_activation_opportunities(self) -> None:
         result = build_savings_report(_empty_activation_config())
 
-        self.assertEqual(result["schema"], "agentflow.savings_report.v1")
+        self.assertEqual(result["schema"], "tokenclaw.savings_report.v1")
         self.assertTrue(result["ok"])
         self.assertIn("generated_at", result)
         self.assertIn("privacy", result)
@@ -209,7 +209,7 @@ class TestBuildSavingsReportWithStore(_StoreFixture):
 
         result = build_savings_report(_openai_activation_config(), store=self.store, limit=50)
 
-        self.assertEqual(result["schema"], "agentflow.savings_report.v1")
+        self.assertEqual(result["schema"], "tokenclaw.savings_report.v1")
         self.assertTrue(result["ok"])
         self.assertGreater(result["opportunity_count"], 0)
 
@@ -344,7 +344,7 @@ class TestBuildSavingsReportWithStore(_StoreFixture):
             )
         ):
             event = {
-                "schema": "agentflow.openai_optimization_lifecycle_feedback.v1",
+                "schema": "tokenclaw.openai_optimization_lifecycle_feedback.v1",
                 "event_type": "activation_staged_optimization_lifecycle",
                 "occurred_at": now,
                 "provider": "openai",
@@ -390,7 +390,7 @@ class TestBuildSavingsReportWithStore(_StoreFixture):
         result = build_savings_report(_openai_activation_config(), store=self.store, limit=50)
 
         feedback = result["activation_lifecycle_feedback"]
-        self.assertEqual(feedback["schema"], "agentflow.activation_staged_lifecycle_feedback_summary.v1")
+        self.assertEqual(feedback["schema"], "tokenclaw.activation_staged_lifecycle_feedback_summary.v1")
         self.assertEqual(feedback["queue_rows"], 3)
         states = {item["value"]: item["count"] for item in feedback["state_breakdown"]}
         self.assertEqual(states["holdout_only"], 1)
@@ -421,20 +421,20 @@ class TestSavingsReportCLI(unittest.TestCase):
 
     def test_savings_report_json_no_db_unconfigured(self) -> None:
         stdout = io.StringIO()
-        code = cli.agentflow_cli(
+        code = cli.tokenclaw_cli(
             ["savings", "report", "--json", "--config-dir", self.config_dir],
             stdout=stdout,
         )
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.savings_report.v1")
+        self.assertEqual(result["schema"], "tokenclaw.savings_report.v1")
         self.assertTrue(result["ok"])
         self.assertIn("opportunities", result)
         self.assertIn("privacy", result)
 
     def test_savings_report_human_text_no_db_unconfigured(self) -> None:
         stdout = io.StringIO()
-        code = cli.agentflow_cli(
+        code = cli.tokenclaw_cli(
             ["savings", "report", "--config-dir", self.config_dir],
             stdout=stdout,
         )
@@ -445,24 +445,24 @@ class TestSavingsReportCLI(unittest.TestCase):
 
     def test_savings_report_json_with_configured_openai(self) -> None:
         # Activate OpenAI first
-        cli.agentflow_cli(["activate", "openai", "--config-dir", self.config_dir], stdout=io.StringIO())
+        cli.tokenclaw_cli(["activate", "openai", "--config-dir", self.config_dir], stdout=io.StringIO())
         stdout = io.StringIO()
         # Use a non-existent DB path so no store is opened
-        code = cli.agentflow_cli(
+        code = cli.tokenclaw_cli(
             ["savings", "report", "--json", "--config-dir", self.config_dir,
              "--db", str(Path(self.config_dir) / "nonexistent.sqlite3")],
             stdout=stdout,
         )
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.savings_report.v1")
+        self.assertEqual(result["schema"], "tokenclaw.savings_report.v1")
         # Claude is unconfigured so there should be an activation opportunity
         families = [o["opportunity_family"] for o in result["opportunities"]]
         self.assertIn(OPPORTUNITY_FAMILY_ACTIVATION, families)
 
     def test_savings_report_no_raw_ids_in_output(self) -> None:
         stdout = io.StringIO()
-        cli.agentflow_cli(
+        cli.tokenclaw_cli(
             ["savings", "report", "--json", "--config-dir", self.config_dir],
             stdout=stdout,
         )
@@ -474,7 +474,7 @@ class TestSavingsReportCLI(unittest.TestCase):
 
     def test_savings_report_json_has_required_top_level_fields(self) -> None:
         stdout = io.StringIO()
-        cli.agentflow_cli(
+        cli.tokenclaw_cli(
             ["savings", "report", "--json", "--config-dir", self.config_dir],
             stdout=stdout,
         )

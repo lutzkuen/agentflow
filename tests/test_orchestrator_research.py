@@ -29,9 +29,9 @@ def cache_replayability_stats():
         "cache_hits": 0,
         "cache_hit_rate": 0.0,
         "request_shape_rollup_report": {
-            "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+            "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
             "cache_replayability_dry_run": {
-                "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                "schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                 "status": "ranked",
                 "summary": {
                     "cohort_count": 1,
@@ -73,7 +73,7 @@ def issue(
     title,
     labels,
     *,
-    repo="lutzkuen/agentflow",
+    repo="lutzkuen/tokenclaw",
     author="lutzkuen",
     state="OPEN",
     updated="2026-06-11T08:00:00Z",
@@ -100,8 +100,8 @@ def issue(
 class OrchestratorResearchPlanTests(unittest.TestCase):
     def test_request_shape_snapshot_reused_for_zero_call_research_plan(self):
         snapshot = {
-            "schema": "agentflow.request_shape_rollup_snapshot.v1",
-            "source_schema": "agentflow.request_shape_rollups.v1",
+            "schema": "tokenclaw.request_shape_rollup_snapshot.v1",
+            "source_schema": "tokenclaw.request_shape_rollups.v1",
             "generated_at": "2026-06-11T07:00:00+00:00",
             "run_id": "snapshot-fresh",
             "window": {
@@ -144,19 +144,19 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "calls": 0,
                 "today_calls": 0,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "generated_at": snapshot["generated_at"],
                     "summary": {"rows_considered": 0, "rollup_count": 0},
                     "rollup_snapshot": snapshot,
                     "snapshot_freshness": {
-                        "schema": "agentflow.request_shape_rollup_snapshot_freshness.v1",
+                        "schema": "tokenclaw.request_shape_rollup_snapshot_freshness.v1",
                         "status": "fresh",
                         "stale": False,
                         "age_hours": 1.0,
                         "max_age_hours": 72.0,
                     },
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "status": "snapshot-reused",
                         "summary": {},
                         "candidates": [],
@@ -179,8 +179,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_request_shape_snapshot_stale_is_marked_not_reused_as_fresh(self):
         snapshot = {
-            "schema": "agentflow.request_shape_rollup_snapshot.v1",
-            "source_schema": "agentflow.request_shape_rollups.v1",
+            "schema": "tokenclaw.request_shape_rollup_snapshot.v1",
+            "source_schema": "tokenclaw.request_shape_rollups.v1",
             "generated_at": "2026-06-01T07:00:00+00:00",
             "run_id": "snapshot-stale",
             "window": {"source": "recent-local-call-metadata"},
@@ -203,18 +203,18 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "calls": 0,
                 "today_calls": 0,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 0, "rollup_count": 0},
                     "rollup_snapshot": snapshot,
                     "snapshot_freshness": {
-                        "schema": "agentflow.request_shape_rollup_snapshot_freshness.v1",
+                        "schema": "tokenclaw.request_shape_rollup_snapshot_freshness.v1",
                         "status": "snapshot-stale",
                         "stale": True,
                         "age_hours": 240.0,
                         "max_age_hours": 72.0,
                     },
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "status": "snapshot-stale",
                         "summary": {},
                         "candidates": [],
@@ -257,7 +257,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("Recent metadata summary:", created[0]["body"])
 
         milestone = plan["evidence"]["next_backlog_milestone"]
-        self.assertEqual(milestone["schema"], "agentflow.next_backlog_milestone.v1")
+        self.assertEqual(milestone["schema"], "tokenclaw.next_backlog_milestone.v1")
         self.assertEqual(milestone["status"], "ready")
         self.assertEqual(milestone["summary"]["proposal_count"], len(created))
         self.assertGreaterEqual(milestone["summary"]["ranked_candidate_count"], 1)
@@ -373,10 +373,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "raw_prompt": "raw prompt must not leak",
                 "file_path": "/home/lutz/private/issue_533_secret.py",
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 1000, "rollup_count": 32},
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "status": "candidates-ranked",
                         "summary": {
                             "rows_considered": 1000,
@@ -386,7 +386,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         },
                         "blocker_cohorts": [
                             {
-                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                                 "provider_family": "anthropic",
                                 "source_surface": "anthropic_messages",
                                 "endpoint": "messages",
@@ -431,7 +431,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "crunch_savings_signal": {
-                    "schema": "agentflow.crunch_savings_signal.v1",
+                    "schema": "tokenclaw.crunch_savings_signal.v1",
                     "status": "projected-savings-ranked",
                     "top_report": {
                         "matched_count": 41,
@@ -441,7 +441,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "pass_through_routing_report": {
-                    "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+                    "schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
                     "summary": {
                         "top_actionability": "actionable",
                         "top_requested_model": "claude-sonnet-4-6",
@@ -471,7 +471,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("stage-repeated-context-crunch-canary", milestone_issue["body"])
 
         milestone = plan["evidence"]["next_backlog_milestone"]
-        self.assertEqual(milestone["schema"], "agentflow.next_backlog_milestone.v1")
+        self.assertEqual(milestone["schema"], "tokenclaw.next_backlog_milestone.v1")
         self.assertEqual(milestone["status"], "ready")
         self.assertEqual(milestone["summary"]["proposal_count"], len(created))
         self.assertEqual(
@@ -543,7 +543,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         }
                     ],
                     "streaming_cache_hit_recovery": {
-                        "schema": "agentflow.streaming_cache_hit_recovery.v1",
+                        "schema": "tokenclaw.streaming_cache_hit_recovery.v1",
                         "summary": {
                             "recovery_verdict": "store-missing",
                             "eligible_calls": 8,
@@ -733,7 +733,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     }
                 ],
                 "promotion_blocker_next_actions": {
-                    "schema": "agentflow.promotion_blocker_next_actions_dashboard.v1",
+                    "schema": "tokenclaw.promotion_blocker_next_actions_dashboard.v1",
                     "status": "available",
                     "summary": {
                         "review_candidate_count": 2,
@@ -785,7 +785,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("Stage routing evidence for gpt-5.4 to gpt-5.4-mini", titles)
 
         status = plan["evidence"]["stats_summary"]["promotion_blocker_next_action_status"]
-        self.assertEqual(status["schema"], "agentflow.promotion_blocker_next_action_research_status.v1")
+        self.assertEqual(status["schema"], "tokenclaw.promotion_blocker_next_action_research_status.v1")
         self.assertEqual(status["summary"]["top_next_action"], "widen_local_openai_canary")
         self.assertEqual(status["summary"]["top_local_action_family"], "routing")
         self.assertTrue(status["privacy"]["metadata_only"])
@@ -851,7 +851,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     }
                 ],
                 "post_promotion_priority_review": {
-                    "schema": "agentflow.post_promotion_priority_delta_review.v1",
+                    "schema": "tokenclaw.post_promotion_priority_delta_review.v1",
                     "status": "ranked",
                     "summary": {
                         "review_candidate_count": 3,
@@ -924,7 +924,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             self.assertNotIn(stale_title, titles)
 
         status = plan["evidence"]["stats_summary"]["post_promotion_priority_delta_status"]
-        self.assertEqual(status["schema"], "agentflow.post_promotion_priority_delta_research_status.v1")
+        self.assertEqual(status["schema"], "tokenclaw.post_promotion_priority_delta_research_status.v1")
         self.assertEqual(status["summary"]["top_next_action"], "widen-local-policy")
         self.assertEqual(status["summary"]["top_local_action_family"], "routing")
         self.assertTrue(status["privacy"]["metadata_only"])
@@ -1018,7 +1018,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
 
         report = plan["evidence"]["stats_summary"]["pass_through_routing_report"]
-        self.assertEqual(report["schema"], "agentflow.pass_through_routing_activation_candidates.v1")
+        self.assertEqual(report["schema"], "tokenclaw.pass_through_routing_activation_candidates.v1")
         self.assertEqual(report["summary"]["pass_through_rows"], 2489)
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertTrue(report["privacy"]["aggregate_only"])
@@ -1037,7 +1037,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(gpt54["required_local_executor"], "openai-routing-canary")
         self.assertGreater(gpt54["estimated_savings_per_1000_calls_usd"], 0)
         lifecycle = gpt54["openai_canary_lifecycle_evidence"]
-        self.assertEqual(lifecycle["schema"], "agentflow.openai_routing_canary_lifecycle_evidence.v1")
+        self.assertEqual(lifecycle["schema"], "tokenclaw.openai_routing_canary_lifecycle_evidence.v1")
         self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 0)
         self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 0)
         self.assertEqual(lifecycle["coverage"]["matched_count"], 212)
@@ -1198,7 +1198,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         summary = plan["evidence"]["stats_summary"]
         decision_report = summary["openai_routing_promotion_decision"]
-        self.assertEqual(decision_report["schema"], "agentflow.openai_routing_promotion_decision_report.v1")
+        self.assertEqual(decision_report["schema"], "tokenclaw.openai_routing_promotion_decision_report.v1")
         self.assertEqual(decision_report["decision"], "keep-blocked")
         self.assertFalse(decision_report["promotion_ready"])
         self.assertEqual(decision_report["summary"]["applied_count"], 12)
@@ -1213,7 +1213,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(decision_report["summary"]["reason_codes"], ["semantic-quality-regression-observed"])
         self.assertEqual(decision_report["summary"]["active_local_policy_outcome_count"], 0)
         disabled_rule = decision_report["promotion_decision"]["disabled_local_policy_rule"]
-        self.assertEqual(disabled_rule["schema"], "agentflow.openai_routing_disabled_local_policy_rule.v1")
+        self.assertEqual(disabled_rule["schema"], "tokenclaw.openai_routing_disabled_local_policy_rule.v1")
         self.assertEqual(disabled_rule["status"], "disabled-local-policy")
         self.assertEqual(disabled_rule["reason"], "semantic-quality-regression-observed")
         self.assertEqual(disabled_rule["target_local_rule_file"], "routing_rules.yaml")
@@ -1222,7 +1222,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
         routing_lever = next(row for row in loop["levers"] if row["lever"] == "routing")
-        self.assertEqual(routing_lever["evidence_source"], "agentflow.openai_routing_promotion_decision_report.v1")
+        self.assertEqual(routing_lever["evidence_source"], "tokenclaw.openai_routing_promotion_decision_report.v1")
         self.assertEqual(routing_lever["state"], "keep-blocked")
         self.assertEqual(routing_lever["next_action"], "review-openai-routing-canary-blockers")
         self.assertEqual(routing_lever["applied_count"], 12)
@@ -1359,7 +1359,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
 
         lifecycle = candidate["anthropic_canary_lifecycle_evidence"]
-        self.assertEqual(lifecycle["schema"], "agentflow.anthropic_routing_canary_lifecycle_evidence.v1")
+        self.assertEqual(lifecycle["schema"], "tokenclaw.anthropic_routing_canary_lifecycle_evidence.v1")
         self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 0)
         self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 0)
         self.assertEqual(lifecycle["coverage"]["matched_count"], 100)
@@ -1506,7 +1506,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(top_candidate["candidate_target_model"], "claude-haiku-4-5-20251001")
         self.assertTrue(top_candidate["anthropic_canary_lifecycle_related_only"])
         lifecycle = top_candidate["anthropic_canary_lifecycle_evidence"]
-        self.assertEqual(lifecycle["schema"], "agentflow.anthropic_routing_canary_lifecycle_evidence.v1")
+        self.assertEqual(lifecycle["schema"], "tokenclaw.anthropic_routing_canary_lifecycle_evidence.v1")
         self.assertEqual(lifecycle["cohort_counts"]["safety_stopped"], 51)
         self.assertEqual(lifecycle["latest_observed_at"], observed_at)
         self.assertIn("safety-stop-observed", lifecycle["blocker_codes"])
@@ -1553,7 +1553,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         duplicate_suppression = routing_entry["duplicate_suppression"]
         self.assertEqual(
             duplicate_suppression["schema"],
-            "agentflow.anthropic_routing_activation_issue_duplicate_suppression.v1",
+            "tokenclaw.anthropic_routing_activation_issue_duplicate_suppression.v1",
         )
         self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
         self.assertEqual(duplicate_suppression["safety_stop_count"], 51)
@@ -1562,7 +1562,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(str(duplicate_suppression["fingerprint"]).startswith("activation:"))
 
         burndown = plan["evidence"]["activation_safety_stop_burndown"]
-        self.assertEqual(burndown["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(burndown["schema"], "tokenclaw.activation_safety_stop_burndown.v1")
         self.assertEqual(burndown["summary"]["anthropic_routing_safety_stop_count"], 51)
         self.assertIn("activation_safety_stop_burndown", plan["evidence"]["inspected_sources"])
         burndown_group = next(row for row in burndown["groups"] if row["source"] == "pass_through_routing_report")
@@ -1583,7 +1583,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(burndown_group["promotion_allowed"])
         self.assertFalse(burndown_group["stage_allowed"])
         unblock = burndown_group["unblock_criteria"]
-        self.assertEqual(unblock["schema"], "agentflow.anthropic_routing_safety_stop_unblock_criteria.v1")
+        self.assertEqual(unblock["schema"], "tokenclaw.anthropic_routing_safety_stop_unblock_criteria.v1")
         self.assertEqual(unblock["status"], "blocked")
         self.assertFalse(unblock["safety_stop_count_zero"])
         self.assertFalse(unblock["applied_coverage_present"])
@@ -1595,7 +1595,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         burndown_entry = next(
             row
             for row in ledger["entries"]
-            if row.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
+            if row.get("evidence_schema") == "tokenclaw.activation_safety_stop_burndown.v1"
             and row.get("local_action_family") == "routing"
         )
         self.assertEqual(burndown_entry["current_status"], "keep-blocked")
@@ -1641,7 +1641,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         queue_entry = next(
             row
             for row in queue["entries"]
-            if row.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
+            if row.get("evidence_schema") == "tokenclaw.activation_safety_stop_burndown.v1"
             and row.get("local_action_family") == "routing"
         )
         self.assertTrue(str(queue_entry["fingerprint"]).startswith("activation:"))
@@ -1740,7 +1740,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(routing_entry["current_status"], "projected")
         self.assertEqual(routing_entry["issue_worthy_status"], "ready")
         burndown = plan["evidence"]["activation_safety_stop_burndown"]
-        self.assertEqual(burndown["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(burndown["schema"], "tokenclaw.activation_safety_stop_burndown.v1")
         self.assertEqual(burndown["status"], "ranked")
         self.assertEqual(len(burndown["groups"]), 1)
         self.assertEqual(burndown["summary"]["anthropic_routing_safety_stop_count"], 0)
@@ -1753,7 +1753,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         burndown_entries = [
             row
             for row in ledger["entries"]
-            if row.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
+            if row.get("evidence_schema") == "tokenclaw.activation_safety_stop_burndown.v1"
         ]
         self.assertTrue(burndown_entries)
         self.assertEqual(burndown_entries[0]["state"], "recovery-ready")
@@ -1801,7 +1801,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
 
         loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
-        self.assertEqual(loop["schema"], "agentflow.evidence_to_activation_savings_loop.v1")
+        self.assertEqual(loop["schema"], "tokenclaw.evidence_to_activation_savings_loop.v1")
         self.assertEqual(loop["status"], "missing-evidence")
         self.assertEqual(loop["summary"]["top_lever"], "routing")
         self.assertEqual(loop["summary"]["top_next_action"], "activate-openai-routing-canary-cohorts")
@@ -1862,7 +1862,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         report = build_evidence_to_activation_burndown(plan, now=NOW)
 
-        self.assertEqual(report["schema"], "agentflow.evidence_to_activation_burndown.v1")
+        self.assertEqual(report["schema"], "tokenclaw.evidence_to_activation_burndown.v1")
         self.assertEqual(report["summary"]["top_lever"], "routing")
         self.assertEqual(report["summary"]["top_next_action"], "activate-openai-routing-canary-cohorts")
         families = set(report["summary"]["represented_blocker_families"])
@@ -1912,11 +1912,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     }
                 ],
                 "promotion_outcome_feedback": {
-                    "schema": "agentflow.promotion_outcome_feedback_summary.v1",
+                    "schema": "tokenclaw.promotion_outcome_feedback_summary.v1",
                     "entry_count": 1,
                     "entries": [
                         {
-                            "schema": "agentflow.promotion_outcome_feedback_entry.v1",
+                            "schema": "tokenclaw.promotion_outcome_feedback_entry.v1",
                             "created_at": "2026-06-11T08:30:00+00:00",
                             "policy_id": "policy-secret-burndown",
                             "candidate_id": "candidate-secret-burndown",
@@ -2010,20 +2010,20 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         report = json.loads(stdout.getvalue())
-        self.assertEqual(report["schema"], "agentflow.evidence_to_activation_burndown.v1")
+        self.assertEqual(report["schema"], "tokenclaw.evidence_to_activation_burndown.v1")
         self.assertEqual(report["summary"]["top_lever"], "routing")
         self.assertGreaterEqual(report["summary"]["ranked_blocker_count"], 4)
 
     def test_evidence_to_activation_ledger_tracks_metadata_only_next_actions(self):
         summary = {
             "evidence_to_activation_loop": {
-                "schema": "agentflow.evidence_to_activation_savings_loop.v1",
+                "schema": "tokenclaw.evidence_to_activation_savings_loop.v1",
                 "status": "activation-ready",
                 "levers": [
                     {
                         "lever": "routing",
                         "state": "activation-ready",
-                        "evidence_source": "agentflow.openai_canary_impact.v1",
+                        "evidence_source": "tokenclaw.openai_canary_impact.v1",
                         "local_action_family": "routing",
                         "next_action": "widen_local_openai_canary",
                         "sample_count": 8,
@@ -2037,7 +2037,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     {
                         "lever": "cache",
                         "state": "missing-evidence",
-                        "evidence_source": "agentflow.cache_replayability.v1",
+                        "evidence_source": "tokenclaw.cache_replayability.v1",
                         "local_action_family": "cache",
                         "next_action": "resolve-cache-replayability-blocker",
                         "blocker_codes": ["invalidation-evidence-missing request_id=req-ledger-secret"],
@@ -2049,7 +2049,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         ledger = build_evidence_to_activation_next_action_ledger(summary)
 
-        self.assertEqual(ledger["schema"], "agentflow.evidence_to_activation_next_action_ledger.v1")
+        self.assertEqual(ledger["schema"], "tokenclaw.evidence_to_activation_next_action_ledger.v1")
         self.assertEqual(ledger["summary"]["top_next_action"], "widen_local_openai_canary")
         self.assertEqual(ledger["summary"]["top_current_status"], "holdout")
         self.assertEqual(ledger["summary"]["top_expected_savings_path"], "Move routing from local lifecycle evidence into the next canary, widening, or blocked-review step.")
@@ -2069,11 +2069,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_local_activation_next_action_queue_ranks_savings_and_unblock_reasons(self):
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 1,
                     "fingerprint": "activation:crunch",
                     "lever": "crunch",
@@ -2097,7 +2097,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     },
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 2,
                     "fingerprint": "activation:routing",
                     "lever": "routing",
@@ -2114,7 +2114,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "target_local_policy_section": "routing.rules",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 3,
                     "fingerprint": "activation:tool-cache",
                     "lever": "cache",
@@ -2136,7 +2136,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "file_path": "/tmp/private-queue.py",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 4,
                     "fingerprint": "activation:retired-cache",
                     "lever": "cache",
@@ -2169,7 +2169,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             {"evidence_to_activation_next_action_ledger": ledger}
         )
 
-        self.assertEqual(queue["schema"], "agentflow.local_activation_next_action_queue.v1")
+        self.assertEqual(queue["schema"], "tokenclaw.local_activation_next_action_queue.v1")
         self.assertEqual(queue["status"], "ranked")
         self.assertEqual(queue["summary"]["successor_action_count"], 4)
         self.assertEqual(queue["summary"]["non_duplicate_successor_action_count"], 4)
@@ -2202,7 +2202,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(by_family["cache"]["target_local_policy_section"], "cache.pattern_rules")
         self.assertIn("dependency evidence", by_family["cache"]["acceptance_metric"])
         for action in successor_actions:
-            self.assertEqual(action["schema"], "agentflow.local_activation_successor_action.v1")
+            self.assertEqual(action["schema"], "tokenclaw.local_activation_successor_action.v1")
             self.assertTrue(action["fingerprint"].startswith("successor:"))
             self.assertTrue(action["source_fingerprint"].startswith("activation:"))
             self.assertIn("acceptance_metric", action)
@@ -2227,7 +2227,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         report = build_evidence_to_activation_burndown(
             {
-                "schema": "agentflow.orchestrator_research_plan.v1",
+                "schema": "tokenclaw.orchestrator_research_plan.v1",
                 "evidence": {"stats_summary": {"evidence_to_activation_next_action_ledger": ledger}},
             },
             now=NOW,
@@ -2237,7 +2237,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             "keep-active",
         )
         self.assertGreaterEqual(report["summary"]["non_duplicate_successor_action_count"], 3)
-        self.assertEqual(report["successor_actions"][0]["schema"], "agentflow.local_activation_successor_action.v1")
+        self.assertEqual(report["successor_actions"][0]["schema"], "tokenclaw.local_activation_successor_action.v1")
         rendered = json.dumps({"queue": queue, "report": report}, sort_keys=True)
         self.assertNotIn("req-queue-secret", rendered)
         self.assertNotIn("session-queue-secret", rendered)
@@ -2246,11 +2246,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_local_activation_next_action_queue_ranks_freshness_adjusted_successors(self):
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 1,
                     "fingerprint": "activation:fresh-routing",
                     "lever": "routing",
@@ -2269,7 +2269,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "target_local_policy_section": "routing.rules",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 2,
                     "fingerprint": "activation:stale-cache-rollback",
                     "lever": "cache",
@@ -2289,7 +2289,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "target_local_policy_section": "cache.pattern_rules",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 3,
                     "fingerprint": "activation:feedback-duplicate",
                     "lever": "activation-feedback",
@@ -2307,7 +2307,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     },
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 4,
                     "fingerprint": "activation:feedback-duplicate",
                     "lever": "activation-feedback",
@@ -2382,16 +2382,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_local_activation_successors_record_preview_verified_gates(self):
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 1,
                     "fingerprint": "activation:openai-routing-preview",
                     "lever": "routing",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                     "state": "keep-blocked",
                     "current_status": "review",
                     "issue_worthy_status": "ready",
@@ -2408,12 +2408,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "request_id": "req-preview-secret",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 2,
                     "fingerprint": "activation:cache-preview",
                     "lever": "cache",
                     "local_action_family": "cache",
-                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "evidence_schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                     "state": "missing-evidence",
                     "current_status": "blocked",
                     "issue_worthy_status": "ready",
@@ -2428,7 +2428,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             "privacy": {"metadata_only": True, "aggregate_only": True},
         }
         managed_preview_outcomes = {
-            "schema": "agentflow.managed_activation_preview_outcomes.v1",
+            "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
             "status": "tracked",
             "managed_dependency": "optional",
             "managed_server_calls_made": True,
@@ -2441,11 +2441,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             },
             "outcomes": [
                 {
-                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                     "outcome_fingerprint": "managed-preview-outcome:routing",
                     "preview_ref": "preview:routing",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                     "classification": "review-only",
                     "decision": "review-only-recommendation",
                     "next_action": "draft-openai-routing-recovery-canary",
@@ -2463,11 +2463,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "raw_prompt": "raw managed preview prompt must not leak",
                 },
                 {
-                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                     "outcome_fingerprint": "managed-preview-outcome:cache",
                     "preview_ref": "preview:cache",
                     "local_action_family": "cache",
-                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "evidence_schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                     "classification": "stale-preview",
                     "decision": "keep-blocked",
                     "next_action": "refresh-managed-activation-preview",
@@ -2513,7 +2513,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         report = build_evidence_to_activation_burndown(
             {
-                "schema": "agentflow.orchestrator_research_plan.v1",
+                "schema": "tokenclaw.orchestrator_research_plan.v1",
                 "evidence": {
                     "stats_summary": {
                         "evidence_to_activation_next_action_ledger": ledger,
@@ -2534,16 +2534,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_local_activation_successors_gate_on_managed_preview_health_freshness(self):
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 1,
                     "fingerprint": "activation:preview-health-routing",
                     "lever": "routing",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                     "state": "keep-blocked",
                     "current_status": "review",
                     "issue_worthy_status": "ready",
@@ -2561,11 +2561,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         def outcome_rows() -> list[dict[str, object]]:
             return [
                 {
-                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                     "outcome_fingerprint": "managed-preview-outcome:health-routing",
                     "preview_ref": "preview:health-routing",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                     "classification": "review-only",
                     "decision": "review-only-recommendation",
                     "next_action": "draft-openai-routing-recovery-canary",
@@ -2583,7 +2583,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         def preview_outcomes(rows: list[dict[str, object]]) -> dict[str, object]:
             return {
-                "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                 "status": "tracked" if rows else "empty",
                 "managed_dependency": "optional",
                 "managed_server_calls_made": True,
@@ -2605,7 +2605,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "fresh",
                 preview_outcomes(outcome_rows()),
                 {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 0,
@@ -2629,7 +2629,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "no-data",
                 preview_outcomes([]),
                 {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "no-data",
                     "accepted_batch_count": 0,
                     "rejected_batch_count": 0,
@@ -2651,7 +2651,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "rejected",
                 preview_outcomes(outcome_rows()),
                 {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 1,
@@ -2676,7 +2676,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "privacy-rejected",
                 preview_outcomes(outcome_rows()),
                 {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 1,
@@ -2712,7 +2712,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 gate = action["managed_preview_gate"]
                 health_gate = gate["health_gate"]
 
-                self.assertEqual(health_gate["schema"], "agentflow.managed_activation_preview_health_gate.v1")
+                self.assertEqual(health_gate["schema"], "tokenclaw.managed_activation_preview_health_gate.v1")
                 self.assertEqual(health_gate["status"], expected_health)
                 self.assertEqual(action["successor_status"], expected_status)
                 self.assertEqual(action["recommended_next_action"], expected_next)
@@ -2748,16 +2748,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ("activation:disagreed", "routing", "blocked", "review-openai-routing-canary-blockers"),
         ]
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": index,
                     "fingerprint": source,
                     "lever": family,
                     "local_action_family": family,
-                    "evidence_schema": f"agentflow.{family}.preview_fixture.v1",
+                    "evidence_schema": f"tokenclaw.{family}.preview_fixture.v1",
                     "state": "keep-blocked" if issue_status == "blocked" else "review",
                     "current_status": "keep-blocked" if issue_status == "blocked" else "review",
                     "issue_worthy_status": issue_status,
@@ -2774,12 +2774,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         outcomes = []
         for source, family, _issue_status, next_action in rows:
             outcome = {
-                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                 "outcome_fingerprint": f"managed-preview-outcome:{source}",
                 "source_fingerprint": source,
                 "preview_ref": f"preview:{source}",
                 "local_action_family": family,
-                "evidence_schema": f"agentflow.{family}.preview_fixture.v1",
+                "evidence_schema": f"tokenclaw.{family}.preview_fixture.v1",
                 "classification": "review-only",
                 "decision": "review-only-recommendation",
                 "next_action": next_action,
@@ -2807,7 +2807,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             {
                 "evidence_to_activation_next_action_ledger": ledger,
                 "managed_activation_preview_outcomes": {
-                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                     "status": "tracked",
                     "managed_dependency": "optional",
                     "managed_server_calls_made": True,
@@ -2822,7 +2822,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "managed_activation_preview_health": {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 0,
@@ -2897,16 +2897,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ),
         ]
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": index,
                     "fingerprint": source,
                     "lever": "request-shape-rollups",
                     "local_action_family": "cohort-ranking",
-                    "evidence_schema": "agentflow.request_shape_follow_up_candidates.v1",
+                    "evidence_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                     "state": "blocked",
                     "current_status": "blocked",
                     "issue_worthy_status": "ready" if outcome_class == "review-ready" else "blocked",
@@ -2925,14 +2925,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         }
         outcomes = [
             {
-                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                 "outcome_fingerprint": f"managed-preview-outcome:{source}",
                 "source_fingerprint": source,
                 "source_queue_rank": index,
                 "source_ledger_rank": index + 10,
                 "preview_ref": f"preview:{source}",
                 "local_action_family": "cohort-ranking",
-                "evidence_schema": "agentflow.request_shape_follow_up_candidates.v1",
+                "evidence_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                 "classification": "review-only",
                 "managed_preview_classification": "accepted",
                 "decision": "accepted",
@@ -2958,7 +2958,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             {
                 "evidence_to_activation_next_action_ledger": ledger,
                 "managed_activation_preview_outcomes": {
-                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                     "status": "tracked",
                     "managed_dependency": "optional",
                     "managed_server_calls_made": True,
@@ -2975,7 +2975,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "managed_activation_preview_health": {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 0,
@@ -3080,16 +3080,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ),
         ]
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": index,
                     "fingerprint": source,
                     "lever": "crunch",
                     "local_action_family": "crunch",
-                    "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                    "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
                     "state": "ranked-evidence",
                     "current_status": "ready",
                     "issue_worthy_status": "ready",
@@ -3116,7 +3116,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         }
         outcomes = [
             {
-                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                 "outcome_fingerprint": f"managed-preview-outcome:{source}",
                 "source_fingerprint": source,
                 "source_queue_rank": index,
@@ -3126,7 +3126,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "successor_decision_fingerprint": f"successor-decision:crunch-{index}",
                 "preview_ref": f"preview:{source}",
                 "local_action_family": "crunch",
-                "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
                 "classification": "review-only" if preview in {"review-ready", "keep-staged"} else "preview-omitted",
                 "managed_preview_classification": "accepted" if preview in {"review-ready", "keep-staged"} else "needs-local-evidence",
                 "decision": preview,
@@ -3166,7 +3166,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             {
                 "evidence_to_activation_next_action_ledger": ledger,
                 "managed_activation_preview_outcomes": {
-                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                     "status": "tracked",
                     "managed_dependency": "optional",
                     "managed_server_calls_made": True,
@@ -3183,7 +3183,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "managed_activation_preview_health": {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 0,
@@ -3249,7 +3249,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:preview-routing",
                 "routing",
-                "agentflow.openai_routing_promotion_decision_report.v1",
+                "tokenclaw.openai_routing_promotion_decision_report.v1",
                 "review",
                 "ready",
                 "widen",
@@ -3258,7 +3258,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:preview-cache",
                 "cache",
-                "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                 "missing-evidence",
                 "blocked",
                 "collect-file-invalidation-evidence",
@@ -3267,7 +3267,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:preview-feedback",
                 "activation-feedback",
-                "agentflow.activation_safety_stop_burndown.v1",
+                "tokenclaw.activation_safety_stop_burndown.v1",
                 "keep-blocked",
                 "blocked",
                 "refresh-managed-activation-preview",
@@ -3275,11 +3275,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ),
         ]
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": index,
                     "fingerprint": source,
                     "lever": family,
@@ -3309,12 +3309,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         }
         outcomes = [
             {
-                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                 "outcome_fingerprint": "managed-preview-outcome:routing",
                 "source_fingerprint": "activation:preview-routing",
                 "preview_ref": "preview:routing",
                 "local_action_family": "routing",
-                "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                 "classification": "review-only",
                 "managed_preview_classification": "accepted",
                 "decision": "accepted",
@@ -3333,12 +3333,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
             {
-                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                 "outcome_fingerprint": "managed-preview-outcome:cache",
                 "source_fingerprint": "activation:preview-cache",
                 "preview_ref": "preview:cache",
                 "local_action_family": "cache",
-                "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "evidence_schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                 "classification": "preview-omitted",
                 "managed_preview_classification": "needs-local-evidence",
                 "decision": "keep-blocked",
@@ -3357,12 +3357,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
             {
-                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                 "outcome_fingerprint": "managed-preview-outcome:feedback",
                 "source_fingerprint": "activation:preview-feedback",
                 "preview_ref": "preview:feedback",
                 "local_action_family": "activation-feedback",
-                "evidence_schema": "agentflow.activation_safety_stop_burndown.v1",
+                "evidence_schema": "tokenclaw.activation_safety_stop_burndown.v1",
                 "classification": "preview-omitted",
                 "managed_preview_classification": "needs-local-evidence",
                 "decision": "keep-blocked",
@@ -3386,7 +3386,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             {
                 "evidence_to_activation_next_action_ledger": ledger,
                 "managed_activation_preview_outcomes": {
-                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                     "status": "tracked",
                     "managed_dependency": "optional",
                     "managed_server_calls_made": True,
@@ -3404,7 +3404,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "managed_activation_preview_health": {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 0,
@@ -3460,16 +3460,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ("activation:cache-unsafe-guidance", "accepted", True),
         ]
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": index,
                     "fingerprint": source,
                     "lever": "cache",
                     "local_action_family": "cache",
-                    "evidence_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                    "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
                     "state": "blocked",
                     "current_status": "blocked",
                     "issue_worthy_status": "blocked",
@@ -3487,7 +3487,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         outcomes = []
         for source, kind, unsafe in rows:
             guidance = {
-                "schema": "agentflow.managed_cache_replay_rollback_guidance.v1",
+                "schema": "tokenclaw.managed_cache_replay_rollback_guidance.v1",
                 "rollback_required": True,
                 "rollback_action_type": "disable_openai_exact_cache_replay_policy",
                 "disabled_reason": "stale-cache-replay-evidence",
@@ -3502,12 +3502,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             }
             outcomes.append(
                 {
-                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                     "outcome_fingerprint": f"managed-preview-outcome:{source}",
                     "source_fingerprint": source,
                     "preview_ref": f"preview:{source}",
                     "local_action_family": "cache",
-                    "evidence_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                    "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
                     "classification": "accepted",
                     "managed_preview_classification": "accepted",
                     "decision": "accepted",
@@ -3533,7 +3533,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             {
                 "evidence_to_activation_next_action_ledger": ledger,
                 "managed_activation_preview_outcomes": {
-                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                     "status": "tracked",
                     "managed_dependency": "optional",
                     "managed_server_calls_made": True,
@@ -3550,7 +3550,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "managed_activation_preview_health": {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 0,
@@ -3615,16 +3615,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_stored_no_data_preview_outcomes_keep_successor_blocked(self):
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 1,
                     "fingerprint": "activation:no-data-routing",
                     "lever": "routing",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.routing.preview_fixture.v1",
+                    "evidence_schema": "tokenclaw.routing.preview_fixture.v1",
                     "state": "keep-blocked",
                     "current_status": "keep-blocked",
                     "issue_worthy_status": "ready",
@@ -3640,7 +3640,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             {
                 "evidence_to_activation_next_action_ledger": ledger,
                 "managed_activation_preview_outcomes": {
-                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                     "status": "tracked",
                     "managed_dependency": "optional",
                     "managed_server_calls_made": False,
@@ -3655,11 +3655,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     },
                     "outcomes": [
                         {
-                            "schema": "agentflow.managed_activation_preview_outcome.v1",
+                            "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                             "outcome_fingerprint": "managed-preview-outcome:no-data-routing",
                             "source_fingerprint": "activation:no-data-routing",
                             "local_action_family": "routing",
-                            "evidence_schema": "agentflow.routing.preview_fixture.v1",
+                            "evidence_schema": "tokenclaw.routing.preview_fixture.v1",
                             "classification": "no-data-preview-health",
                             "preview_status": "no-data-preview-health",
                             "preview_reason": "managed-preview-url-not-configured",
@@ -3698,16 +3698,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_preview_agreed_activation_outcomes_emit_successor_decisions(self):
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 1,
                     "fingerprint": "activation:crunch-keep",
                     "lever": "crunch",
                     "local_action_family": "crunch",
-                    "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                    "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
                     "state": "full-rollout-active",
                     "current_status": "full-rollout",
                     "issue_worthy_status": "review",
@@ -3729,12 +3729,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "target_local_policy_section": "crunch.rules",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 2,
                     "fingerprint": "activation:routing-semantic",
                     "lever": "routing",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                     "state": "keep-blocked",
                     "current_status": "keep-blocked",
                     "issue_worthy_status": "blocked",
@@ -3747,12 +3747,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "target_local_policy_section": "routing.rules",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 3,
                     "fingerprint": "activation:tool-cache-missing",
                     "lever": "cache",
                     "local_action_family": "cache",
-                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "evidence_schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                     "state": "missing-evidence",
                     "current_status": "blocked",
                     "issue_worthy_status": "blocked",
@@ -3766,12 +3766,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "request_id": "req-successor-secret",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 4,
                     "fingerprint": "activation:cache-retired",
                     "lever": "cache",
                     "local_action_family": "cache",
-                    "evidence_schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+                    "evidence_schema": "tokenclaw.request_shape_cache_replay_policy_decision.v1",
                     "state": "retired-no-repeat",
                     "current_status": "superseded",
                     "issue_worthy_status": "ready",
@@ -3796,7 +3796,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:crunch-keep",
                 "crunch",
-                "agentflow.crunch_savings_signal.v1",
+                "tokenclaw.crunch_savings_signal.v1",
                 "full-rollout",
                 "keep-active",
                 "keep-current-rule",
@@ -3806,7 +3806,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:routing-semantic",
                 "routing",
-                "agentflow.openai_routing_promotion_decision_report.v1",
+                "tokenclaw.openai_routing_promotion_decision_report.v1",
                 "keep-blocked",
                 "review-openai-routing-canary-blockers",
                 "keep-blocked",
@@ -3816,7 +3816,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:tool-cache-missing",
                 "cache",
-                "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                 "blocked",
                 "collect-file-invalidation-evidence",
                 "keep-blocked",
@@ -3826,7 +3826,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:cache-retired",
                 "cache",
-                "agentflow.request_shape_cache_replay_policy_decision.v1",
+                "tokenclaw.request_shape_cache_replay_policy_decision.v1",
                 "superseded",
                 "retire-cache-replay-canary-no-repeat",
                 "suppress-duplicate",
@@ -3835,7 +3835,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ),
         ]:
             outcome = {
-                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                 "outcome_fingerprint": f"managed-preview-outcome:{source}",
                 "source_fingerprint": source,
                 "preview_ref": f"preview:{family}:{status}",
@@ -3863,7 +3863,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             {
                 "evidence_to_activation_next_action_ledger": ledger,
                 "managed_activation_preview_outcomes": {
-                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                     "status": "tracked",
                     "managed_dependency": "optional",
                     "managed_server_calls_made": True,
@@ -3878,7 +3878,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "managed_activation_preview_health": {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 0,
@@ -3931,16 +3931,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_preview_verified_activation_successors_emit_github_ready_issue_proposals(self):
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 1,
                     "fingerprint": "activation:ready-routing",
                     "lever": "routing",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                     "state": "review",
                     "current_status": "review",
                     "issue_worthy_status": "ready",
@@ -3956,12 +3956,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "expected_savings_path": "Move preview-agreed routing evidence into a narrow local canary.",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 2,
                     "fingerprint": "activation:cache-preview-blocked",
                     "lever": "cache",
                     "local_action_family": "cache",
-                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "evidence_schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                     "state": "missing-evidence",
                     "current_status": "blocked",
                     "issue_worthy_status": "blocked",
@@ -3977,12 +3977,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "request_id": "req-successor-issue-secret",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 3,
                     "fingerprint": "activation:routing-keep-blocked",
                     "lever": "routing",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                     "state": "keep-blocked",
                     "current_status": "keep-blocked",
                     "issue_worthy_status": "blocked",
@@ -3996,12 +3996,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "expected_savings_path": "Keep routing blocked until semantic regression clears.",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 4,
                     "fingerprint": "activation:crunch-keep-active",
                     "lever": "crunch",
                     "local_action_family": "crunch",
-                    "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                    "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
                     "state": "full-rollout-active",
                     "current_status": "full-rollout",
                     "issue_worthy_status": "review",
@@ -4020,12 +4020,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "target_local_policy_section": "crunch.rules",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 5,
                     "fingerprint": "activation:closed-ready",
                     "lever": "activation-feedback",
                     "local_action_family": "activation-feedback",
-                    "evidence_schema": "agentflow.orchestrator_research_log_diagnostics.v1",
+                    "evidence_schema": "tokenclaw.orchestrator_research_log_diagnostics.v1",
                     "state": "review",
                     "current_status": "review",
                     "issue_worthy_status": "ready",
@@ -4042,7 +4042,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:ready-routing",
                 "routing",
-                "agentflow.openai_routing_promotion_decision_report.v1",
+                "tokenclaw.openai_routing_promotion_decision_report.v1",
                 "review",
                 "draft-openai-routing-recovery-canary",
                 "review-only-recommendation",
@@ -4052,7 +4052,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:routing-keep-blocked",
                 "routing",
-                "agentflow.openai_routing_promotion_decision_report.v1",
+                "tokenclaw.openai_routing_promotion_decision_report.v1",
                 "keep-blocked",
                 "review-openai-routing-canary-blockers",
                 "keep-blocked",
@@ -4062,7 +4062,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:cache-preview-blocked",
                 "cache",
-                "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                 "blocked",
                 "collect-file-invalidation-evidence",
                 "keep-blocked",
@@ -4072,7 +4072,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             (
                 "activation:closed-ready",
                 "activation-feedback",
-                "agentflow.orchestrator_research_log_diagnostics.v1",
+                "tokenclaw.orchestrator_research_log_diagnostics.v1",
                 "review",
                 "classify-activation-feedback-blocker-for-local-action-ledger",
                 "review-only-recommendation",
@@ -4081,7 +4081,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ),
         ]:
             outcome = {
-                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                 "outcome_fingerprint": f"managed-preview-outcome:{source}",
                 "source_fingerprint": source,
                 "preview_ref": f"preview:{source}",
@@ -4119,7 +4119,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "calls": 1883,
                 "evidence_to_activation_next_action_ledger": ledger,
                 "managed_activation_preview_outcomes": {
-                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                     "status": "tracked",
                     "managed_dependency": "optional",
                     "managed_server_calls_made": True,
@@ -4134,7 +4134,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "managed_activation_preview_health": {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 0,
@@ -4278,16 +4278,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             "stable_dependency_evidence_rows": 19,
         }
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": index,
                     "fingerprint": source,
                     "lever": "cache",
                     "local_action_family": "cache",
-                    "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                    "evidence_schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                     "source_surface": "openai_responses",
                     "endpoint": "responses",
                     "category": "tool-light",
@@ -4359,12 +4359,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         }
         outcomes = [
             {
-                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                 "outcome_fingerprint": f"managed-preview-outcome:{source}",
                 "source_fingerprint": source,
                 "preview_ref": f"preview:{source}",
                 "local_action_family": "cache",
-                "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "evidence_schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                 "current_status": "blocked",
                 "classification": "review-only",
                 "decision": "keep-blocked",
@@ -4389,7 +4389,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "calls": 1883,
                 "evidence_to_activation_next_action_ledger": ledger,
                 "managed_activation_preview_outcomes": {
-                    "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                     "status": "tracked",
                     "managed_dependency": "optional",
                     "managed_server_calls_made": True,
@@ -4404,7 +4404,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "managed_activation_preview_health": {
-                    "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                     "status": "ready",
                     "accepted_batch_count": 1,
                     "rejected_batch_count": 0,
@@ -4473,16 +4473,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             with self.subTest(name=name):
                 source = f"activation:openai-routing-{name}"
                 ledger = {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
                     "status": "tracked",
                     "entries": [
                         {
-                            "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                            "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                             "rank": 1,
                             "fingerprint": source,
                             "lever": "routing",
                             "local_action_family": "routing",
-                            "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                            "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                             "source_surface": "openai_responses",
                             "endpoint": "responses",
                             "category": "tool-light",
@@ -4510,7 +4510,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "target_local_policy_section": "routing.rules",
                             "expected_savings_path": "Move OpenAI routing recovery evidence into a narrow review path.",
                             "recovery_plan": {
-                                "schema": "agentflow.openai_routing_recovery_plan.v1",
+                                "schema": "tokenclaw.openai_routing_recovery_plan.v1",
                                 "selected_option": "restage-review-only",
                                 "blocker_status": "cleared" if not (stale or disagreed) else "active",
                                 "blocker_reason": "semantic-quality-regression-observed",
@@ -4527,12 +4527,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     ],
                 }
                 outcome = {
-                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                     "outcome_fingerprint": f"managed-preview-outcome:{source}",
                     "source_fingerprint": source,
                     "preview_ref": f"preview:{source}",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                     "current_status": "review",
                     "classification": "stale-preview" if stale else "review-only",
                     "decision": "review-only-recommendation",
@@ -4555,7 +4555,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "calls": 1883,
                         "evidence_to_activation_next_action_ledger": ledger,
                         "managed_activation_preview_outcomes": {
-                            "schema": "agentflow.managed_activation_preview_outcomes.v1",
+                            "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
                             "status": "tracked",
                             "managed_dependency": "optional",
                             "managed_server_calls_made": True,
@@ -4570,7 +4570,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "privacy": {"metadata_only": True, "aggregate_only": True},
                         },
                         "managed_activation_preview_health": {
-                            "schema": "agentflow.local_activation_executor_handoff_preview_health.v1",
+                            "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
                             "status": "ready",
                             "accepted_batch_count": 1,
                             "rejected_batch_count": 0,
@@ -4610,11 +4610,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_activation_burndown_report_ranks_successors_after_keep_active_crunch(self):
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 1,
                     "fingerprint": "activation:crunch",
                     "lever": "crunch",
@@ -4638,7 +4638,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     },
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 2,
                     "fingerprint": "activation:openai-routing",
                     "lever": "routing",
@@ -4659,7 +4659,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "target_local_policy_section": "routing.rules",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 3,
                     "fingerprint": "activation:openai-cache",
                     "lever": "cache",
@@ -4686,7 +4686,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "file_path": "/tmp/private-activation-burndown.py",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 4,
                     "fingerprint": "activation:managed",
                     "lever": "managed-recommendation",
@@ -4708,14 +4708,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         report = build_activation_burndown_report(
             {
-                "schema": "agentflow.orchestrator_research_plan.v1",
+                "schema": "tokenclaw.orchestrator_research_plan.v1",
                 "generated_at": NOW.isoformat(),
                 "evidence": {"stats_summary": {"evidence_to_activation_next_action_ledger": ledger}},
             },
             now=NOW,
         )
 
-        self.assertEqual(report["schema"], "agentflow.activation_burndown.v1")
+        self.assertEqual(report["schema"], "tokenclaw.activation_burndown.v1")
         self.assertEqual(report["status"], "ranked")
         self.assertGreaterEqual(report["summary"]["ranked_row_count"], 4)
         self.assertEqual(report["rows"][0]["local_action_family"], "routing")
@@ -4773,7 +4773,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             )
 
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
-        self.assertEqual(ledger["schema"], "agentflow.evidence_to_activation_next_action_ledger.v1")
+        self.assertEqual(ledger["schema"], "tokenclaw.evidence_to_activation_next_action_ledger.v1")
         self.assertTrue(ledger["privacy"]["metadata_only"])
         self.assertTrue(ledger["privacy"]["aggregate_only"])
         self.assertFalse(ledger["privacy"]["raw_prompts_included"])
@@ -4824,7 +4824,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             by_blocker["activation-feedback-blocker-review"]["diagnostic_fingerprint"],
-            "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
+            "tokenclaw.repeated-diagnostic.activation-feedback-blocker-review.v1",
         )
         self.assertIn(
             "durable local action issue",
@@ -4859,7 +4859,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         ]
         self.assertEqual(len(entries), 1)
         entry = entries[0]
-        self.assertEqual(entry["schema"], "agentflow.evidence_to_activation_next_action_ledger_entry.v1")
+        self.assertEqual(entry["schema"], "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1")
         self.assertEqual(entry["lever"], "activation-feedback")
         self.assertEqual(entry["local_action_family"], "activation-feedback")
         self.assertEqual(entry["current_status"], "keep-blocked")
@@ -4876,7 +4876,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             entry["diagnostic_fingerprint"],
-            "agentflow.repeated-diagnostic.no-local-representation.v1",
+            "tokenclaw.repeated-diagnostic.no-local-representation.v1",
         )
         self.assertTrue(entry["durable_action_ledger_entry"])
         self.assertEqual(entry["review_status"], "resolved-to-review-only-no-op")
@@ -4884,7 +4884,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         representation = entry["local_action_representation"]
         self.assertEqual(
             representation["schema"],
-            "agentflow.activation_feedback_local_action_representation.v1",
+            "tokenclaw.activation_feedback_local_action_representation.v1",
         )
         self.assertEqual(representation["representation_kind"], "review-only-no-op")
         self.assertEqual(representation["review_artifact"], "evidence-to-activation-next-action-ledger")
@@ -4940,7 +4940,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hits": 0,
                 "cache_hit_rate": 0.0,
                 "cache_replay_cohort_ranking": {
-                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "schema": "tokenclaw.cache_replay_plateau_cohort_ranking.v1",
                     "summary": {"candidate_rows": 1, "activation_ready_count": 1, "projected_ready_hits": 30},
                     "cohorts": [
                         {
@@ -4989,16 +4989,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             534,
             "Advance repeated-context cohort from evidence-to-activation ledger (evidence 3a012e702da0)",
             ["backlog", "status:ready", "priority:p2", "privacy"],
-            body="Existing implementation issue.\n\nFingerprint: activation:3a012e702da0a8a8\n",
+            body="Existing implementation issue.\n\nFingerprint: activation:80bba8232b0530b9\n",
         )
         plan = build_research_plan(
             issues=[open_ledger_issue],
             stats={
                 "calls": 1000,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "summary": {
                             "top_next_action": "stage-repeated-context-crunch-canary",
                             "top_local_action_family": "crunch",
@@ -5007,7 +5007,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         },
                         "blocker_cohorts": [
                             {
-                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                                 "local_action_family": "crunch",
                                 "next_action": "stage-repeated-context-crunch-canary",
                                 "readiness_state": "activation-ready",
@@ -5041,7 +5041,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "request_shape_crunch_opportunity": {
-                    "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                    "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
                     "status": "projected-savings-ranked",
                     "summary": {
                         "rows_considered": 738,
@@ -5070,16 +5070,16 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
         entry = next(item for item in ledger["entries"] if item["lever"] == "request-shape-rollups")
-        self.assertEqual(entry["fingerprint"], "activation:3a012e702da0a8a8")
+        self.assertEqual(entry["fingerprint"], "activation:80bba8232b0530b9")
         self.assertEqual(entry["fingerprint_next_action"], "stage-repeated-context-crunch-canary")
         self.assertEqual(entry["next_action"], "measure-repeated-context-crunch-canary-impact")
         self.assertEqual(entry["current_status"], "staged")
         self.assertEqual(entry["state"], "measurement-required")
         self.assertEqual(entry["blocker_codes"], ["missing-crunch-canary-impact-measurement"])
-        self.assertEqual(entry["evidence_schema"], "agentflow.request_shape_follow_up_candidates.v1")
+        self.assertEqual(entry["evidence_schema"], "tokenclaw.request_shape_follow_up_candidates.v1")
         self.assertEqual(
             entry["activation_follow_up_evidence_schema"],
-            "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+            "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
         )
         self.assertTrue(entry["canary_already_staged"])
         self.assertTrue(entry["canary_already_applied"])
@@ -5089,7 +5089,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         suppression = plan["evidence"]["issue_proposal_suppression"]
         self.assertEqual(suppression["fingerprint_match_count"], 1)
         self.assertEqual(suppression["open_existing_issue_count"], 1)
-        self.assertEqual(suppression["suppressed"][0]["evidence_fingerprint"], "activation:3a012e702da0a8a8")
+        self.assertEqual(suppression["suppressed"][0]["evidence_fingerprint"], "activation:80bba8232b0530b9")
         self.assertEqual(suppression["suppressed"][0]["existing_issue"]["number"], 534)
 
         rendered = json.dumps(plan, sort_keys=True)
@@ -5112,10 +5112,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 3130,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 1000, "rollup_count": 32},
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "status": "candidates-ranked",
                         "summary": {
                             "ranked_candidate_count": 1,
@@ -5124,7 +5124,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         },
                         "blocker_cohorts": [
                             {
-                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                                 "provider_family": "anthropic",
                                 "source_surface": "anthropic_messages",
                                 "endpoint": "messages",
@@ -5151,7 +5151,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "crunch_policy_decision": {
-                        "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                        "schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                         "status": "decided",
                         "decision": "widen",
                         "graduation_decision": "widen",
@@ -5260,7 +5260,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_recent_closed_issue_with_matching_evidence_fingerprint_suppresses_proposal(self):
         proposal = {
-            "repo": "lutzkuen/agentflow",
+            "repo": "lutzkuen/tokenclaw",
             "title": "Follow up cache replay cohort with renamed title",
             "labels": ["backlog", "status:ready"],
             "body": "## Evidence\n\n- Fingerprint: activation:abc123456789\n",
@@ -5296,7 +5296,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_recent_closed_issue_with_same_fingerprint_allows_advanced_next_action(self):
         proposal = {
-            "repo": "lutzkuen/agentflow",
+            "repo": "lutzkuen/tokenclaw",
             "title": "Advance cache next action from evidence-to-activation ledger (evidence abc123456789)",
             "labels": ["backlog", "status:ready", "cache"],
             "body": "## Evidence\n\n- Fingerprint: activation:abc123456789\n- Top next action: review-cache-replay-canary-promotion-readiness\n",
@@ -5349,7 +5349,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hits": 0,
                 "cache_hit_rate": 0.0,
                 "request_shape_rollup_candidates": {
-                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
                     "status": "candidates-ranked",
                     "summary": {
                         "calls": 2511,
@@ -5358,7 +5358,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "top_local_action_family": "crunch",
                     },
                     "cache_replayability_dry_run": {
-                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                         "status": "ranked",
                         "summary": {
                             "remaining_replay_ready_cohort_count": 1,
@@ -5428,11 +5428,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ),
             issue(
                 537,
-                "Stage cache replay canary from evidence-to-activation ledger (evidence 243c92b5d91f)",
+                "Stage cache replay canary from evidence-to-activation ledger (evidence 9616e8ca2ad3)",
                 ["backlog", "status:ready", "cache"],
                 state="CLOSED",
                 closed="2026-06-15T23:14:38Z",
-                body="Fingerprint: activation:243c92b5d91f9149\nNext action: `stage-cache-replay-canary`\n",
+                body="Fingerprint: activation:9616e8ca2ad382bd\nNext action: `stage-cache-replay-canary`\n",
             ),
             issue(
                 593,
@@ -5454,26 +5454,26 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             "cache_hits": 1,
             "cache_hit_rate": 0.00027,
             "evidence_to_activation_next_action_ledger": {
-                "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
                 "status": "tracked",
                 "summary": {"tracked_entry_count": 1, "closed_issue_seen_count": 1},
                 "entries": [
                     {
-                        "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
-                        "fingerprint": "activation:243c92b5d91f9149",
+                        "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                        "fingerprint": "activation:9616e8ca2ad382bd",
                         "lever": "cache",
                         "local_action_family": "cache",
-                        "evidence_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                        "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
                         "cohort_bucket": "openai_responses/responses/chat",
                         "current_status": "holdout",
                         "state": "replay-ready",
                         "next_action": "review-cache-replay-canary-promotion-readiness",
                         "issue_status": "closed-issue-seen",
                         "prior_issue": {
-                            "repo": "lutzkuen/agentflow",
+                            "repo": "lutzkuen/tokenclaw",
                             "number": 595,
                             "title": "Rank remaining replay-ready cache cohorts after current canary decision",
-                            "url": "https://github.com/lutzkuen/agentflow/issues/595",
+                            "url": "https://github.com/lutzkuen/tokenclaw/issues/595",
                         },
                         "expected_savings_path": "Move cache replay evidence toward the next local replay decision.",
                         "privacy": {"metadata_only": True, "aggregate_only": True},
@@ -5482,7 +5482,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
             "request_shape_rollup_candidates": {
-                "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
                 "status": "candidates-ranked",
                 "summary": {
                     "calls": 3685,
@@ -5502,7 +5502,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "blocker_codes": ["repeated-context-crunch-active-at-max-rollout"],
                 },
                 "cache_replayability_dry_run": {
-                    "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                    "schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                     "status": "ranked",
                     "summary": {
                         "replay_ready_cohort_count": 7,
@@ -5533,7 +5533,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
             "crunch_savings_signal": {
-                "schema": "agentflow.crunch_savings_signal.v1",
+                "schema": "tokenclaw.crunch_savings_signal.v1",
                 "status": "observed-savings-ranked",
                 "calls": 3685,
                 "observed": {"crunch_savings_usd": 25.818387, "crunch_tokens_saved": 8606129},
@@ -5541,7 +5541,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "report_key": "request_shape_crunch_activation_evidence",
                     "next_action": "keep-active",
                     "duplicate_suppression": {
-                        "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                        "schema": "tokenclaw.request_shape_crunch_keep_active_duplicate_suppression.v1",
                         "suppresses_new_activation_issue": True,
                         "suppresses_generic_crunch_activation_issue": True,
                         "reason": "repeated-context-crunch-active-at-max-rollout",
@@ -5572,7 +5572,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("Record request-shape repeated-context crunch keep-active outcome", titles)
         for stale_title in (
             "Rank next savings milestone from local telemetry evidence gaps",
-            "Stage cache replay canary from evidence-to-activation ledger (evidence 243c92b5d91f)",
+            "Stage cache replay canary from evidence-to-activation ledger (evidence 9616e8ca2ad3)",
             "Stage Anthropic messages repeated-context crunch cohort with holdout",
             "Rank remaining replay-ready cache cohorts after current canary decision",
             "Stage cache replay canary for replay-ready on openai/openai_responses/responses",
@@ -5609,7 +5609,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertGreaterEqual(ledger["summary"]["closed_issue_seen_count"], 1)
         cache_entry = next(
             entry for entry in ledger["entries"]
-            if entry.get("fingerprint") == "activation:243c92b5d91f9149"
+            if entry.get("fingerprint") == "activation:9616e8ca2ad382bd"
         )
         self.assertEqual(cache_entry["prior_issue"]["number"], 595)
 
@@ -5622,7 +5622,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hits": 0,
                 "cache_hit_rate": 0.0,
                 "cache_replay_cohort_ranking": {
-                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "schema": "tokenclaw.cache_replay_plateau_cohort_ranking.v1",
                     "summary": {"candidate_rows": 1, "activation_ready_count": 1, "projected_ready_hits": 30},
                     "cohorts": [
                         {
@@ -5656,7 +5656,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 50,
                 "openai_canary_impact": {
-                    "schema": "agentflow.openai_canary_impact.v1",
+                    "schema": "tokenclaw.openai_canary_impact.v1",
                     "summary": {
                         "candidate_count": 1,
                         "canary_applied_count": 2,
@@ -5707,7 +5707,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     },
                 },
                 "cache_replay_cohort_ranking": {
-                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "schema": "tokenclaw.cache_replay_plateau_cohort_ranking.v1",
                     "summary": {"candidate_rows": 1, "activation_ready_count": 1, "projected_ready_hits": 2},
                     "cohorts": [
                         {
@@ -5720,7 +5720,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     ],
                 },
                 "old_context_summary_opportunity": {
-                    "schema": "agentflow.old_context_summary_opportunity.v1",
+                    "schema": "tokenclaw.old_context_summary_opportunity.v1",
                     "summary": {
                         "candidate_count": 1,
                         "projected_saved_tokens": 5000,
@@ -5758,7 +5758,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 50,
                 "cache_replay_cohort_ranking": {
-                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "schema": "tokenclaw.cache_replay_plateau_cohort_ranking.v1",
                     "summary": {"candidate_rows": 1, "activation_ready_count": 1, "projected_ready_hits": 108},
                     "cohorts": [
                         {
@@ -5774,9 +5774,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     ],
                 },
                 "request_shape_rollup_candidates": {
-                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
                     "cache_replayability_dry_run": {
-                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                         "summary": {
                             "replay_ready_cohort_count": 1,
                             "projected_hits": 108,
@@ -5797,7 +5797,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     },
                 },
                 "openai_cache_replay_impact": {
-                    "schema": "agentflow.openai_cache_replay_impact.v1",
+                    "schema": "tokenclaw.openai_cache_replay_impact.v1",
                     "status": "matched",
                     "summary": {
                         "observed_openai_cache_replay_metadata_row_count": 4,
@@ -5831,7 +5831,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "projected_saved_usd": 0.09,
                             "reason_codes": ["target-savings-met"],
                             "canary_hit_measurement": {
-                                "schema": "agentflow.openai_cache_replay_canary_hit_measurement.v1",
+                                "schema": "tokenclaw.openai_cache_replay_canary_hit_measurement.v1",
                                 "observed_hits": 1,
                                 "holdout_count": 1,
                                 "raw_request_id": "req-observed-cache-secret",
@@ -5855,7 +5855,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
         cache = next(row for row in loop["levers"] if row["lever"] == "cache")
         self.assertEqual(cache["state"], "measured-savings")
-        self.assertEqual(cache["evidence_source"], "agentflow.openai_cache_replay_impact.v1")
+        self.assertEqual(cache["evidence_source"], "tokenclaw.openai_cache_replay_impact.v1")
         self.assertEqual(cache["applied_count"], 2)
         self.assertEqual(cache["holdout_count"], 1)
         self.assertEqual(cache["actual_hits"], 1)
@@ -5864,7 +5864,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
         cache_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "cache")
-        self.assertEqual(cache_entry["evidence_schema"], "agentflow.openai_cache_replay_impact.v1")
+        self.assertEqual(cache_entry["evidence_schema"], "tokenclaw.openai_cache_replay_impact.v1")
         self.assertEqual(cache_entry["current_status"], "holdout")
         self.assertEqual(cache_entry["next_action"], "collect_more_applied_and_holdout_cache_replay_evidence")
         self.assertEqual(cache_entry["actual_hits"], 1)
@@ -5886,9 +5886,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "calls": 50,
                 "cache_hits": 0,
                 "request_shape_rollup_candidates": {
-                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
                     "cache_replayability_dry_run": {
-                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                         "summary": {
                             "replay_ready_cohort_count": 1,
                             "projected_hits": 35,
@@ -5909,7 +5909,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     },
                 },
                 "request_shape_cache_replay_evidence": {
-                    "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                    "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
                     "status": "staged-no-traffic",
                     "reason": "missing-observed-cache-replay-traffic",
                     "next_action": "collect-cache-replay-canary-traffic",
@@ -5974,7 +5974,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
         cache = next(row for row in loop["levers"] if row["lever"] == "cache")
         self.assertEqual(cache["state"], "canary-staged")
-        self.assertEqual(cache["evidence_source"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache["evidence_source"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(cache["next_action"], "collect-cache-replay-canary-traffic")
         self.assertEqual(cache["fingerprint_next_action"], "stage-cache-replay-canary")
         self.assertEqual(cache["projected_hits"], 35)
@@ -5982,11 +5982,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
         cache_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "cache")
-        self.assertEqual(cache_entry["evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache_entry["evidence_schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(cache_entry["current_status"], "staged")
         self.assertEqual(cache_entry["next_action"], "collect-cache-replay-canary-traffic")
         self.assertEqual(cache_entry["fingerprint_next_action"], "stage-cache-replay-canary")
-        self.assertEqual(cache_entry["fingerprint_evidence_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(cache_entry["fingerprint_evidence_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(cache_entry["fingerprint_cohort_bucket"], "cache:10_99")
         self.assertEqual(cache_entry["lifecycle_progressed_from_next_action"], "stage-cache-replay-canary")
         self.assertEqual(cache_entry["projected_hits"], 35)
@@ -6004,9 +6004,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 50,
                 "request_shape_rollup_candidates": {
-                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
                     "cache_replayability_dry_run": {
-                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                         "summary": {"replay_ready_cohort_count": 1, "projected_hits": 35},
                         "cohorts": [
                             {
@@ -6021,7 +6021,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     },
                 },
                 "request_shape_cache_replay_evidence": {
-                    "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                    "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
                     "status": "observed",
                     "reason": "cache-replay-canary-evidence-observed",
                     "next_action": "review-cache-replay-canary-promotion-readiness",
@@ -6071,7 +6071,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
         cache = next(row for row in loop["levers"] if row["lever"] == "cache")
         self.assertEqual(cache["state"], "measured-savings")
-        self.assertEqual(cache["evidence_source"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache["evidence_source"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(cache["next_action"], "review-cache-replay-canary-promotion-readiness")
         self.assertEqual(cache["applied_count"], 2)
         self.assertEqual(cache["holdout_count"], 1)
@@ -6083,14 +6083,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(cache_entry["current_status"], "holdout")
         self.assertEqual(cache_entry["next_action"], "review-cache-replay-canary-promotion-readiness")
         self.assertEqual(cache_entry["fingerprint_next_action"], "stage-cache-replay-canary")
-        self.assertEqual(cache_entry["fingerprint_evidence_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(cache_entry["fingerprint_evidence_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(cache_entry["fingerprint_cohort_bucket"], "cache:10_99")
         self.assertEqual(cache_entry["actual_hits"], 1)
         self.assertAlmostEqual(cache_entry["actual_saved_cost_usd"], 0.012345)
 
     def test_cache_replay_ledger_advances_review_action_from_policy_decision(self):
         evidence = {
-            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
             "status": "observed",
             "reason": "cache-replay-canary-evidence-observed",
             "next_action": "review-cache-replay-canary-promotion-readiness",
@@ -6142,7 +6142,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             },
         }
         policy_decision = {
-            "schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_policy_decision.v1",
             "status": "decided",
             "decision": "keep-staged",
             "promotion_decision": "keep-staged-warmup",
@@ -6214,11 +6214,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             issues=[
                 issue(
                     537,
-                    "Stage cache replay canary from evidence-to-activation ledger (evidence 243c92b5d91f)",
+                    "Stage cache replay canary from evidence-to-activation ledger (evidence 9616e8ca2ad3)",
                     ["backlog", "status:ready", "cache"],
                     state="CLOSED",
                     closed="2026-06-15T23:14:38Z",
-                    body="Fingerprint: activation:243c92b5d91f9149\nNext action: `stage-cache-replay-canary`\n",
+                    body="Fingerprint: activation:9616e8ca2ad382bd\nNext action: `stage-cache-replay-canary`\n",
                 ),
                 issue(
                     622,
@@ -6226,7 +6226,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     ["backlog", "status:ready", "cache"],
                     state="CLOSED",
                     closed="2026-06-17T12:00:00Z",
-                    body="Advanced cache replay warmup for fingerprint activation:243c92b5d91f9149.\n",
+                    body="Advanced cache replay warmup for fingerprint activation:9616e8ca2ad382bd.\n",
                 ),
             ],
             stats={
@@ -6241,12 +6241,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         stats_summary = plan["evidence"]["stats_summary"]
         self.assertEqual(
             stats_summary["request_shape_cache_replay_policy_decision"]["schema"],
-            "agentflow.request_shape_cache_replay_policy_decision.v1",
+            "tokenclaw.request_shape_cache_replay_policy_decision.v1",
         )
         loop = stats_summary["evidence_to_activation_loop"]
         cache = next(row for row in loop["levers"] if row["lever"] == "cache")
-        self.assertEqual(cache["evidence_source"], "agentflow.request_shape_cache_replay_policy_decision.v1")
-        self.assertEqual(cache["source_evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache["evidence_source"], "tokenclaw.request_shape_cache_replay_policy_decision.v1")
+        self.assertEqual(cache["source_evidence_schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(cache["state"], "replay-ready")
         self.assertEqual(cache["next_action"], "keep-cache-replay-canary-staged")
         self.assertEqual(cache["policy_decision"], "keep-staged")
@@ -6261,14 +6261,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         ledger = stats_summary["evidence_to_activation_next_action_ledger"]
         cache_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "cache")
-        self.assertEqual(cache_entry["evidence_schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
-        self.assertEqual(cache_entry["source_evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache_entry["evidence_schema"], "tokenclaw.request_shape_cache_replay_policy_decision.v1")
+        self.assertEqual(cache_entry["source_evidence_schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(cache_entry["current_status"], "holdout")
         self.assertEqual(cache_entry["next_action"], "keep-cache-replay-canary-staged")
         self.assertEqual(cache_entry["fingerprint_next_action"], "stage-cache-replay-canary")
-        self.assertEqual(cache_entry["fingerprint_evidence_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(cache_entry["fingerprint_evidence_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(cache_entry["fingerprint_cohort_bucket"], "cache:10_99")
-        self.assertEqual(cache_entry["fingerprint"], "activation:243c92b5d91f9149")
+        self.assertEqual(cache_entry["fingerprint"], "activation:9616e8ca2ad382bd")
         self.assertEqual(cache_entry["policy_decision"], "keep-staged")
         self.assertEqual(cache_entry["promotion_readiness"], "keep-staged-warmup")
         self.assertEqual(cache_entry["issue_status"], "closed-issue-seen")
@@ -6279,7 +6279,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(cache_entry["target_local_rule_file"], "cache_rules.yaml")
         self.assertEqual(
             cache_entry["duplicate_suppression"]["schema"],
-            "agentflow.request_shape_cache_replay_warmup_carry_forward_duplicate_suppression.v1",
+            "tokenclaw.request_shape_cache_replay_warmup_carry_forward_duplicate_suppression.v1",
         )
         self.assertTrue(cache_entry["duplicate_suppression"]["suppresses_new_cache_replay_stage_issue"])
         self.assertTrue(cache_entry["duplicate_suppression"]["suppresses_closed_stage_replay_predecessor_titles"])
@@ -6290,11 +6290,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
         self.assertIn(
-            "Record cache replay canary warmup carry-forward in evidence ledger (evidence 243c92b5d91f)",
+            "Record cache replay canary warmup carry-forward in evidence ledger (evidence 9616e8ca2ad3)",
             titles,
         )
         self.assertNotIn(
-            "Stage cache replay canary from evidence-to-activation ledger (evidence 243c92b5d91f)",
+            "Stage cache replay canary from evidence-to-activation ledger (evidence 9616e8ca2ad3)",
             titles,
         )
         ledger_issue = next(
@@ -6312,7 +6312,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_cache_replay_retirement_policy_decision_is_superseded_in_ledger(self):
         evidence = {
-            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
             "status": "observed",
             "staged_canary_count": 1,
             "staged_canaries": [
@@ -6340,7 +6340,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             "applied_miss_blocker_breakdown": [{"value": "first-seen-cache-warmup", "count": 28}],
         }
         policy_decision = {
-            "schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_policy_decision.v1",
             "decision": "retire-staged-no-repeat",
             "promotion_decision": "retire-staged-no-repeat",
             "promotion_readiness": "retire-staged-no-repeat",
@@ -6352,7 +6352,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ],
             "next_action": "retire-cache-replay-canary-no-repeat",
             "duplicate_suppression": {
-                "schema": "agentflow.request_shape_cache_replay_policy_decision_duplicate_suppression.v1",
+                "schema": "tokenclaw.request_shape_cache_replay_policy_decision_duplicate_suppression.v1",
                 "reason": "synthetic-hit-recovery-proven-live-traffic-no-repeat-retired",
                 "suppresses_generic_replay_ready_issue": True,
                 "suppresses_new_cache_replay_stage_issue": True,
@@ -6404,7 +6404,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_stale_cache_replay_rollback_no_traffic_retires_successor(self):
         evidence = {
-            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
             "status": "staged-stale-no-traffic",
             "reason": "stale-cache-replay-evidence",
             "staged_canary_count": 1,
@@ -6440,7 +6440,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             },
         }
         policy_decision = {
-            "schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_policy_decision.v1",
             "decision": "rollback",
             "promotion_decision": "keep-blocked",
             "promotion_readiness": "rollback-required",
@@ -6454,7 +6454,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ],
             "next_action": "rollback-cache-replay-rule",
             "duplicate_suppression": {
-                "schema": "agentflow.request_shape_cache_replay_policy_decision_duplicate_suppression.v1",
+                "schema": "tokenclaw.request_shape_cache_replay_policy_decision_duplicate_suppression.v1",
                 "reason": "rollback-required",
                 "suppresses_generic_cache_replay_activation_issue": True,
                 "suppresses_generic_replay_ready_issue": True,
@@ -6508,7 +6508,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(cache_entry["emits_cache_apply_action"])
         self.assertFalse(cache_entry["policy_files_written"])
         self.assertEqual(cache_entry["projected_saved_usd"], 0.075373)
-        self.assertEqual(cache_entry["source_evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache_entry["source_evidence_schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(
             cache_entry["duplicate_suppression"]["reason"],
             "rollback-stale-no-traffic-retired",
@@ -6566,7 +6566,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "crunch_savings_usd": 0.0,
                 "crunch_tokens_saved": 0,
                 "old_context_summary_opportunity": {
-                    "schema": "agentflow.old_context_summary_opportunity.v1",
+                    "schema": "tokenclaw.old_context_summary_opportunity.v1",
                     "summary": {
                         "scanned_call_count": 500,
                         "candidate_count": 4,
@@ -6592,7 +6592,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
 
         signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
-        self.assertEqual(signal["schema"], "agentflow.crunch_savings_signal.v1")
+        self.assertEqual(signal["schema"], "tokenclaw.crunch_savings_signal.v1")
         self.assertEqual(signal["status"], "projected-savings-ranked")
         self.assertEqual(signal["top_report"]["report_key"], "old_context_summary_opportunity")
         self.assertEqual(signal["top_report"]["projected_saved_usd"], 0.42)
@@ -6696,10 +6696,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "crunch_savings_usd": 0.0,
                 "crunch_tokens_saved": 0,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 30, "rollup_count": 1},
                     "crunch_opportunity_dry_run": {
-                        "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                        "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
                         "status": "ranked",
                         "summary": {
                             "candidate_count": 1,
@@ -6712,11 +6712,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "top_next_action": "stage-repeated-context-crunch-canary",
                         },
                         "activation_follow_up": {
-                            "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
+                            "schema": "tokenclaw.request_shape_crunch_activation_follow_up.v1",
                             "activation_state": "activation-ready",
                             "next_action": "stage-repeated-context-crunch-canary",
                             "report_key": "request_shape_crunch_opportunity",
-                            "evidence_schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                            "evidence_schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
                             "projected_saved_chars": 48000,
                             "projected_saved_tokens": 12000,
                             "projected_saved_usd": 0.036,
@@ -6748,7 +6748,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
         self.assertEqual(signal["status"], "projected-savings-ranked")
         self.assertEqual(signal["top_report"]["report_key"], "request_shape_crunch_opportunity")
-        self.assertEqual(signal["top_report"]["schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertEqual(signal["top_report"]["schema"], "tokenclaw.request_shape_crunch_opportunity_dry_run.v1")
         self.assertEqual(signal["top_report"]["projected_saved_tokens"], 12000)
         self.assertEqual(signal["top_report"]["projected_saved_usd"], 0.036)
         self.assertEqual(signal["top_report"]["recommended_action_count"], 1)
@@ -6777,10 +6777,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "crunch_savings_usd": 0.0,
                 "crunch_tokens_saved": 0,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 30, "rollup_count": 1},
                     "crunch_opportunity_dry_run": {
-                        "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                        "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
                         "status": "canary-staged",
                         "summary": {
                             "candidate_count": 1,
@@ -6792,13 +6792,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "top_next_action": "measure-repeated-context-crunch-canary-impact",
                         },
                         "activation_follow_up": {
-                            "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
+                            "schema": "tokenclaw.request_shape_crunch_activation_follow_up.v1",
                             "activation_state": "measurement-required",
                             "next_action": "measure-repeated-context-crunch-canary-impact",
                             "no_op_reason": "matching-repeated-context-crunch-canary-already-staged",
                             "canary_already_staged": True,
                             "duplicate_suppression": {
-                                "schema": "agentflow.request_shape_crunch_follow_up_duplicate_suppression.v1",
+                                "schema": "tokenclaw.request_shape_crunch_follow_up_duplicate_suppression.v1",
                                 "suppresses_new_stage_action": True,
                                 "reason": "matching-repeated-context-crunch-canary-already-staged",
                                 "matching_local_policy": "crunch_rules",
@@ -6835,10 +6835,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "crunch_savings_usd": 0.0,
                 "crunch_tokens_saved": 0,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 30, "rollup_count": 1},
                     "crunch_canary_impact": {
-                        "schema": "agentflow.request_shape_crunch_canary_impact.v1",
+                        "schema": "tokenclaw.request_shape_crunch_canary_impact.v1",
                         "status": "widen-ready",
                         "summary": {
                             "candidate_count": 1,
@@ -6862,7 +6862,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "status": "candidates-ranked",
                         "summary": {
                             "ranked_candidate_count": 1,
@@ -6871,7 +6871,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         },
                         "blocker_cohorts": [
                             {
-                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                                 "local_action_family": "crunch",
                                 "next_action": "stage-repeated-context-crunch-canary",
                                 "readiness_state": "activation-ready",
@@ -6894,7 +6894,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "crunch_opportunity_dry_run": {
-                        "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                        "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
                         "status": "ranked",
                         "summary": {
                             "candidate_count": 1,
@@ -6914,7 +6914,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
         self.assertEqual(signal["top_report"]["report_key"], "request_shape_crunch_canary_impact")
-        self.assertEqual(signal["top_report"]["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(signal["top_report"]["schema"], "tokenclaw.request_shape_crunch_canary_impact.v1")
         self.assertEqual(signal["top_report"]["applied_count"], 6)
         self.assertEqual(signal["top_report"]["matched_count"], 12)
         self.assertEqual(signal["top_report"]["projected_saved_tokens"], 6000)
@@ -6927,7 +6927,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(request_shape_stage["blocker_codes"], [])
         self.assertEqual(
             request_shape_stage["activation_follow_up_evidence_schema"],
-            "agentflow.request_shape_crunch_canary_impact.v1",
+            "tokenclaw.request_shape_crunch_canary_impact.v1",
         )
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
         request_shape_entry = next(item for item in ledger["entries"] if item["lever"] == "request-shape-rollups")
@@ -6950,10 +6950,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "crunch_savings_usd": 0.0,
                 "crunch_tokens_saved": 0,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 30, "rollup_count": 1},
                     "crunch_policy_decision": {
-                        "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                        "schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                         "status": "decided",
                         "decision": "widen",
                         "graduation_decision": "widen",
@@ -6985,7 +6985,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "crunch_canary_impact": {
-                        "schema": "agentflow.request_shape_crunch_canary_impact.v1",
+                        "schema": "tokenclaw.request_shape_crunch_canary_impact.v1",
                         "status": "widen-ready",
                         "summary": {
                             "candidate_count": 1,
@@ -6999,7 +6999,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "status": "candidates-ranked",
                         "summary": {
                             "ranked_candidate_count": 1,
@@ -7008,7 +7008,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         },
                         "blocker_cohorts": [
                             {
-                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                                 "local_action_family": "crunch",
                                 "next_action": "stage-repeated-context-crunch-canary",
                                 "readiness_state": "activation-ready",
@@ -7034,7 +7034,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         signal = stats_summary["crunch_savings_signal"]
         self.assertEqual(signal["status"], "policy-decision-emitted")
         self.assertEqual(signal["top_report"]["report_key"], "request_shape_crunch_policy_decision")
-        self.assertEqual(signal["top_report"]["schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(signal["top_report"]["schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
         self.assertEqual(signal["top_report"]["decision"], "widen")
         self.assertEqual(signal["top_report"]["next_action"], "widen")
         self.assertEqual(signal["top_report"]["projected_saved_tokens"], 6000)
@@ -7047,7 +7047,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(request_shape_stage["next_action"], "widen")
         self.assertEqual(
             request_shape_stage["activation_follow_up_evidence_schema"],
-            "agentflow.request_shape_crunch_policy_decision.v1",
+            "tokenclaw.request_shape_crunch_policy_decision.v1",
         )
         rendered = json.dumps(plan)
         self.assertNotIn("raw-policy-secret", rendered)
@@ -7063,7 +7063,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "crunch_chars_saved": 0,
                 "crunched_count": 0,
                 "active_crunch_rule_coverage": {
-                    "schema": "agentflow.active_crunch_rule_coverage.v1",
+                    "schema": "tokenclaw.active_crunch_rule_coverage.v1",
                     "status": "observed",
                     "rule_file": "crunch_rules.yaml",
                     "target_local_policy": "crunch_rules",
@@ -7103,7 +7103,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
 
         signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
-        self.assertEqual(signal["schema"], "agentflow.crunch_savings_signal.v1")
+        self.assertEqual(signal["schema"], "tokenclaw.crunch_savings_signal.v1")
         self.assertEqual(signal["status"], "observed-savings-ranked")
         self.assertEqual(signal["observed"]["source"], "active_crunch_rule_coverage")
         self.assertEqual(signal["observed"]["crunched_count"], 7)
@@ -7134,7 +7134,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "crunch_chars_saved": 0,
                 "crunched_count": 0,
                 "active_crunch_rule_coverage": {
-                    "schema": "agentflow.active_crunch_rule_coverage.v1",
+                    "schema": "tokenclaw.active_crunch_rule_coverage.v1",
                     "status": "no-applied-coverage",
                     "rule_file": "crunch_rules.yaml",
                     "summary": {
@@ -7180,7 +7180,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "crunch_chars_saved": 0,
                 "crunched_count": 0,
                 "active_crunch_rule_coverage": {
-                    "schema": "agentflow.active_crunch_rule_coverage.v1",
+                    "schema": "tokenclaw.active_crunch_rule_coverage.v1",
                     "status": "observed",
                     "rule_file": "crunch_rules.yaml",
                     "target_local_policy": "crunch_rules",
@@ -7209,7 +7209,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "decision": "widen",
                             "graduation_decision": "widen",
                             "decision_id": "request-shape-crunch-policy-decision:public",
-                            "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                            "source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                             "applied_count": 26,
                             "holdout_count": 17,
                             "observed_saved_chars": 6590776,
@@ -7222,10 +7222,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 1000, "rollup_count": 40},
                     "crunch_policy_decision": {
-                        "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                        "schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                         "status": "decided",
                         "decision": "widen",
                         "graduation_decision": "widen",
@@ -7243,7 +7243,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "status": "candidates-ranked",
                         "summary": {
                             "ranked_candidate_count": 1,
@@ -7252,7 +7252,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         },
                         "blocker_cohorts": [
                             {
-                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                                 "local_action_family": "crunch",
                                 "next_action": "stage-repeated-context-crunch-canary",
                                 "readiness_state": "activation-ready",
@@ -7286,7 +7286,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(entry["state"], "measured-active")
         self.assertEqual(entry["current_status"], "applied")
         self.assertEqual(entry["next_action"], "rank-observed-crunch-family-follow-up")
-        self.assertEqual(entry["activation_follow_up_evidence_schema"], "agentflow.active_crunch_rule_coverage.v1")
+        self.assertEqual(entry["activation_follow_up_evidence_schema"], "tokenclaw.active_crunch_rule_coverage.v1")
         self.assertEqual(entry["applied_count"], 26)
         self.assertEqual(entry["holdout_count"], 17)
         self.assertEqual(entry["active_rule_count"], 1)
@@ -7294,7 +7294,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(entry["active_rule_ref"], "request-shape-crunch-canary:public-rule")
         self.assertEqual(entry["active_rule_source"], "local-manual")
         self.assertEqual(entry["active_rule_decision_id"], "request-shape-crunch-policy-decision:public")
-        self.assertEqual(entry["active_rule_source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(entry["active_rule_source_evidence_schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
         self.assertEqual(entry["projected_saved_usd"], 4.943049)
         self.assertTrue(ledger["privacy"]["metadata_only"])
         self.assertTrue(ledger["privacy"]["aggregate_only"])
@@ -7315,10 +7315,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "crunch_chars_saved": 0,
                 "crunched_count": 0,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 1000, "rollup_count": 33},
                     "crunch_activation_evidence": {
-                        "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                        "schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
                         "status": "active-rule-evidence-observed",
                         "decision": "widen",
                         "graduation_decision": "widen",
@@ -7367,13 +7367,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                                 "policy_source": "local-manual",
                                 "decision": "widen",
                                 "decision_id": decision_id,
-                                "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                "source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                                 "metadata_only": True,
                                 "aggregate_only": True,
                             }
                         ],
                         "duplicate_suppression": {
-                            "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                            "schema": "tokenclaw.request_shape_crunch_keep_active_duplicate_suppression.v1",
                             "suppresses_new_activation_issue": True,
                             "suppresses_generic_crunch_activation_issue": True,
                             "reason": "repeated-context-crunch-active-at-max-rollout",
@@ -7387,7 +7387,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "crunch_policy_decision": {
-                        "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                        "schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                         "status": "decided",
                         "decision": "widen",
                         "graduation_decision": "widen",
@@ -7405,7 +7405,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "status": "candidates-ranked",
                         "summary": {
                             "ranked_candidate_count": 1,
@@ -7414,7 +7414,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         },
                         "blocker_cohorts": [
                             {
-                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                                 "local_action_family": "crunch",
                                 "next_action": "measure-repeated-context-crunch-canary-impact",
                                 "readiness_state": "measurement-required",
@@ -7457,18 +7457,18 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(signal["top_report"]["missing_measurements"], [])
         self.assertTrue(signal["top_report"]["duplicate_suppression"]["suppresses_new_activation_issue"])
         local_outcome_summary = stats_summary["local_activation_outcome_summary"]
-        self.assertEqual(local_outcome_summary["schema"], "agentflow.local_activation_outcome_summary.v1")
+        self.assertEqual(local_outcome_summary["schema"], "tokenclaw.local_activation_outcome_summary.v1")
         self.assertEqual(local_outcome_summary["status"], "tracked")
         self.assertTrue(local_outcome_summary["read_only"])
         self.assertFalse(local_outcome_summary["provider_calls_made"])
         self.assertFalse(local_outcome_summary["managed_server_calls_made"])
         self.assertEqual(local_outcome_summary["summary"]["policy_decision_families"], ["crunch"])
         keep_active_outcome = local_outcome_summary["outcome_summaries"][0]
-        self.assertEqual(keep_active_outcome["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(keep_active_outcome["source_evidence_schema"], "tokenclaw.request_shape_crunch_activation_evidence.v1")
         self.assertEqual(keep_active_outcome["source_decision_id"], decision_id)
         self.assertEqual(keep_active_outcome["active_rule_ref"], "request-shape-crunch-canary:public-rule")
         self.assertEqual(keep_active_outcome["active_rule_source"], "local-manual")
-        self.assertEqual(keep_active_outcome["active_rule_source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(keep_active_outcome["active_rule_source_evidence_schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
         self.assertEqual(keep_active_outcome["target_local_rule_file"], "crunch_rules.yaml")
         self.assertEqual(keep_active_outcome["target_local_policy_section"], "crunch.rules")
         self.assertEqual(keep_active_outcome["outcome"], "promote-full")
@@ -7502,7 +7502,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         crunch_stage = next(item for item in loop["levers"] if item["lever"] == "crunch")
         self.assertEqual(crunch_stage["state"], "measured-active")
         self.assertEqual(crunch_stage["next_action"], "promote-full-repeated-context-crunch-rule")
-        self.assertEqual(crunch_stage["activation_follow_up_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(crunch_stage["activation_follow_up_evidence_schema"], "tokenclaw.request_shape_crunch_activation_evidence.v1")
         self.assertEqual(crunch_stage["applied_count"], 107)
         self.assertEqual(crunch_stage["holdout_count"], 40)
         self.assertEqual(crunch_stage["safety_stop_count"], 0)
@@ -7560,7 +7560,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(entry["post_max_rollout_status"], "post-max-rollout-full-rollout-ready")
         self.assertEqual(entry["post_max_rollout_decision"], "promote-full")
         self.assertEqual(entry["post_max_rollout_next_action"], "promote-full-repeated-context-crunch-rule")
-        self.assertEqual(entry["active_rule_source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(entry["active_rule_source_evidence_schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
         self.assertTrue(entry["duplicate_suppression"]["suppresses_new_activation_issue"])
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("raw-request-secret", rendered)
@@ -7581,9 +7581,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 2530,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
                     "crunch_activation_evidence": {
-                        "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                        "schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
                         "status": "active-rule-evidence-observed",
                         "decision": "widen",
                         "graduation_decision": "widen",
@@ -7611,7 +7611,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "active_rule_ref": "local-repeated-context-crunch-full-rollout-public",
                             "active_rule_source": "local-manual",
                             "active_rule_decision_id": decision_id,
-                            "active_rule_source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                            "active_rule_source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                             "activation_state": "full-rollout-active",
                             "activation_mode": "active-local-policy",
                             "follow_up_status": "full-rollout-outcome-recorded",
@@ -7643,13 +7643,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                                 "policy_source": "local-manual",
                                 "decision": "widen",
                                 "decision_id": decision_id,
-                                "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                                "source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                                 "metadata_only": True,
                                 "aggregate_only": True,
                             }
                         ],
                         "duplicate_suppression": {
-                            "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                            "schema": "tokenclaw.request_shape_crunch_keep_active_duplicate_suppression.v1",
                             "suppresses_new_activation_issue": True,
                             "suppresses_generic_crunch_activation_issue": True,
                             "reason": "repeated-context-crunch-full-rollout-active",
@@ -7739,17 +7739,17 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 2484,
                 "evidence_to_activation_next_action_ledger": {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
                     "status": "tracked",
                     "entries": [
                         {
-                            "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                            "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                             "fingerprint": "activation:f5f6eae5f0a0081a",
                             "rank": 1,
                             "lever": "crunch",
                             "local_action_family": "crunch",
-                            "evidence_schema": "agentflow.crunch_savings_signal.v1",
-                            "activation_follow_up_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                            "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
+                            "activation_follow_up_evidence_schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
                             "current_status": "full-rollout",
                             "state": "full-rollout-active",
                             "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
@@ -7779,12 +7779,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "issue_status": "closed-issue-seen",
                             "prior_issue": {
                                 "number": 644,
-                                "repo": "lutzkuen/agentflow",
+                                "repo": "lutzkuen/tokenclaw",
                                 "title": closed_title,
-                                "url": "https://github.com/lutzkuen/agentflow/issues/644",
+                                "url": "https://github.com/lutzkuen/tokenclaw/issues/644",
                             },
                             "duplicate_suppression": {
-                                "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                                "schema": "tokenclaw.request_shape_crunch_keep_active_duplicate_suppression.v1",
                                 "fingerprint": "activation:00e25680f3fed407",
                                 "matching_local_policy": "crunch_rules",
                                 "reason": "repeated-context-crunch-full-rollout-active",
@@ -7800,13 +7800,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "local_activation_outcome_summary": {
-                    "schema": "agentflow.local_activation_outcome_summary.v1",
+                    "schema": "tokenclaw.local_activation_outcome_summary.v1",
                     "status": "tracked",
                     "outcome_summaries": [
                         {
-                            "schema": "agentflow.local_activation_outcome_summary_row.v1",
+                            "schema": "tokenclaw.local_activation_outcome_summary_row.v1",
                             "local_action_family": "crunch",
-                            "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                            "source_evidence_schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
                             "source_decision_id": "request-shape-crunch-policy-decision:9db327d1abdec766",
                             "outcome": "keep-active",
                             "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
@@ -7833,7 +7833,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "post_max_rollout_reason_codes": ["full-rollout-policy-active"],
                             "full_rollout_active": True,
                             "coverage": {
-                                "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+                                "schema": "tokenclaw.local_activation_outcome_decision_coverage.v1",
                                 "metadata_only": True,
                                 "aggregate_only": True,
                                 "applied_count": 107,
@@ -7847,7 +7847,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                                 "request_id": "raw-measurement-request-secret",
                             },
                             "duplicate_suppression": {
-                                "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                                "schema": "tokenclaw.request_shape_crunch_keep_active_duplicate_suppression.v1",
                                 "reason": "repeated-context-crunch-full-rollout-active",
                                 "suppresses_generic_crunch_activation_issue": True,
                                 "suppresses_new_activation_issue": True,
@@ -7869,7 +7869,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         stats_summary = plan["evidence"]["stats_summary"]
         measurement = stats_summary["full_rollout_crunch_activation_measurement"]
-        self.assertEqual(measurement["schema"], "agentflow.full_rollout_crunch_activation_measurement.v1")
+        self.assertEqual(measurement["schema"], "tokenclaw.full_rollout_crunch_activation_measurement.v1")
         self.assertEqual(measurement["status"], "progress-recorded")
         self.assertEqual(measurement["ledger_fingerprint"], "activation:f5f6eae5f0a0081a")
         self.assertEqual(measurement["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
@@ -7888,7 +7888,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertAlmostEqual(measurement["projected_savings_usd"], 25.818387)
         self.assertFalse(measurement["stale_evidence"]["stale"])
         gate = measurement["keep_active_regression_gate"]
-        self.assertEqual(gate["schema"], "agentflow.full_rollout_crunch_keep_active_regression_gate.v1")
+        self.assertEqual(gate["schema"], "tokenclaw.full_rollout_crunch_keep_active_regression_gate.v1")
         self.assertEqual(gate["state"], "keep-active")
         self.assertTrue(gate["gate_passed"])
         self.assertEqual(gate["deterministic_next_action"], "keep-active")
@@ -7903,7 +7903,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(counters["safety_stop_count"], 0)
         self.assertFalse(counters["stale_evidence"]["stale"])
         durable_outcome = measurement["durable_full_rollout_outcome"]
-        self.assertEqual(durable_outcome["schema"], "agentflow.full_rollout_crunch_activation_outcome.v1")
+        self.assertEqual(durable_outcome["schema"], "tokenclaw.full_rollout_crunch_activation_outcome.v1")
         self.assertTrue(durable_outcome["durable_outcome_ledger_entry"])
         self.assertEqual(durable_outcome["ledger_fingerprint"], "activation:f5f6eae5f0a0081a")
         self.assertEqual(durable_outcome["outcome"], "keep-active")
@@ -7968,17 +7968,17 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 400,
                 "evidence_to_activation_next_action_ledger": {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
                     "status": "tracked",
                     "entries": [
                         {
-                            "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                            "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                             "fingerprint": "activation:rollback-required-test",
                             "rank": 1,
                             "lever": "crunch",
                             "local_action_family": "crunch",
-                            "evidence_schema": "agentflow.crunch_savings_signal.v1",
-                            "activation_follow_up_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                            "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
+                            "activation_follow_up_evidence_schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
                             "current_status": "full-rollout",
                             "state": "full-rollout-active",
                             "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
@@ -8007,11 +8007,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "local_activation_outcome_summary": {
-                    "schema": "agentflow.local_activation_outcome_summary.v1",
+                    "schema": "tokenclaw.local_activation_outcome_summary.v1",
                     "status": "tracked",
                     "outcome_summaries": [
                         {
-                            "schema": "agentflow.local_activation_outcome_summary_row.v1",
+                            "schema": "tokenclaw.local_activation_outcome_summary_row.v1",
                             "local_action_family": "crunch",
                             "outcome": "keep-active",
                             "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
@@ -8063,17 +8063,17 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 500,
                 "evidence_to_activation_next_action_ledger": {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
                     "status": "tracked",
                     "entries": [
                         {
-                            "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                            "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                             "fingerprint": "activation:full-rollout-keep-active",
                             "rank": 1,
                             "lever": "crunch",
                             "local_action_family": "crunch",
-                            "evidence_schema": "agentflow.crunch_savings_signal.v1",
-                            "activation_follow_up_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                            "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
+                            "activation_follow_up_evidence_schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
                             "current_status": "full-rollout",
                             "state": "full-rollout-active",
                             "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
@@ -8101,7 +8101,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "active_rule_ref": "local-repeated-context-crunch-current",
                             "active_rule_source": "local-manual",
                             "duplicate_suppression": {
-                                "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                                "schema": "tokenclaw.request_shape_crunch_keep_active_duplicate_suppression.v1",
                                 "reason": "repeated-context-crunch-full-rollout-active",
                                 "suppresses_generic_crunch_activation_issue": True,
                                 "suppresses_new_activation_issue": True,
@@ -8110,12 +8110,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             },
                         },
                         {
-                            "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                            "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                             "fingerprint": "activation:stage-next-cohort",
                             "rank": 2,
                             "lever": "crunch",
                             "local_action_family": "crunch",
-                            "evidence_schema": "agentflow.request_shape_follow_up_candidates.v1",
+                            "evidence_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                             "current_status": "projected",
                             "state": "activation-ready",
                             "next_action": "stage-repeated-context-crunch-canary",
@@ -8139,13 +8139,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "local_activation_outcome_summary": {
-                    "schema": "agentflow.local_activation_outcome_summary.v1",
+                    "schema": "tokenclaw.local_activation_outcome_summary.v1",
                     "status": "tracked",
                     "outcome_summaries": [
                         {
-                            "schema": "agentflow.local_activation_outcome_summary_row.v1",
+                            "schema": "tokenclaw.local_activation_outcome_summary_row.v1",
                             "local_action_family": "crunch",
-                            "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                            "source_evidence_schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
                             "outcome": "keep-active",
                             "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
                             "applied_count": 107,
@@ -8182,7 +8182,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(gate["deterministic_next_action"], "keep-active")
 
         ranking = measurement["post_full_rollout_cohort_ranking"]
-        self.assertEqual(ranking["schema"], "agentflow.full_rollout_crunch_post_rollout_cohort_ranking.v1")
+        self.assertEqual(ranking["schema"], "tokenclaw.full_rollout_crunch_post_rollout_cohort_ranking.v1")
         self.assertEqual(ranking["current_rule_decision"], "keep-active")
         self.assertEqual(ranking["current_rule_realized_savings_usd"], 25.818387)
         self.assertGreaterEqual(ranking["summary"]["ranked_cohort_count"], 2)
@@ -8210,14 +8210,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
     def test_issue_677_suppressed_post_full_rollout_crunch_cohorts_do_not_recreate_active_rule(self):
         keep_active_gate = {
-            "schema": "agentflow.full_rollout_crunch_keep_active_regression_gate.v1",
+            "schema": "tokenclaw.full_rollout_crunch_keep_active_regression_gate.v1",
             "state": "keep-active",
             "deterministic_next_action": "keep-active",
         }
         ranking = _full_rollout_crunch_post_rollout_cohort_ranking(
             ledger_entries=[
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "fingerprint": "activation:current-full-rollout",
                     "rank": 1,
                     "lever": "crunch",
@@ -8232,7 +8232,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "crunch_savings_usd": 25.8185,
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "fingerprint": "activation:suppressed-stage",
                     "rank": 2,
                     "lever": "crunch",
@@ -8243,7 +8243,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "sample_count": 91,
                     "projected_saved_usd": 0.453,
                     "duplicate_suppression": {
-                        "schema": "agentflow.request_shape_crunch_follow_up_duplicate_suppression.v1",
+                        "schema": "tokenclaw.request_shape_crunch_follow_up_duplicate_suppression.v1",
                         "reason": "matching-repeated-context-crunch-canary-already-staged-in-local-policy",
                         "suppresses_new_stage_action": True,
                         "metadata_only": True,
@@ -8252,7 +8252,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "raw_prompt": "raw suppressed stage prompt must not leak",
                 },
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "fingerprint": "activation:suppressed-widen",
                     "rank": 3,
                     "lever": "crunch",
@@ -8264,7 +8264,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "holdout_count": 8,
                     "projected_saved_usd": 0.275,
                     "duplicate_suppression": {
-                        "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                        "schema": "tokenclaw.request_shape_crunch_keep_active_duplicate_suppression.v1",
                         "reason": "repeated-context-crunch-full-rollout-active",
                         "suppresses_new_activation_issue": True,
                         "metadata_only": True,
@@ -8279,7 +8279,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(ranking)
-        self.assertEqual(ranking["schema"], "agentflow.full_rollout_crunch_post_rollout_cohort_ranking.v1")
+        self.assertEqual(ranking["schema"], "tokenclaw.full_rollout_crunch_post_rollout_cohort_ranking.v1")
         self.assertEqual(ranking["next_cohort_recommendation"]["cohort_decision"], "no-op")
         self.assertEqual(ranking["next_cohort_recommendation"]["recommended_next_action"], "keep-current-rule-only")
         self.assertEqual(
@@ -8319,7 +8319,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 2483,
                 "managed_recommendations": {
-                    "schema": "agentflow.managed_recommendations.v1",
+                    "schema": "tokenclaw.managed_recommendations.v1",
                     "summary": {
                         "window_calls": 400,
                         "metadata_rows": 40,
@@ -8362,7 +8362,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
 
         signal = plan["evidence"]["stats_summary"]["managed_recommendation_health"]
-        self.assertEqual(signal["schema"], "agentflow.managed_recommendation_handoff_health.v1")
+        self.assertEqual(signal["schema"], "tokenclaw.managed_recommendation_handoff_health.v1")
         self.assertEqual(signal["status"], "omission-reasons-ranked")
         self.assertEqual(signal["summary"]["local_file_backed_count"], 1)
         self.assertGreaterEqual(signal["summary"]["no_local_representation_count"], 1)
@@ -8463,7 +8463,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 2714,
                 "managed_recommendations": {
-                    "schema": "agentflow.managed_recommendations.v1",
+                    "schema": "tokenclaw.managed_recommendations.v1",
                     "summary": {
                         "window_calls": 2714,
                         "metadata_rows": 50,
@@ -8485,7 +8485,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
 
         signal = plan["evidence"]["stats_summary"]["managed_recommendation_health"]
-        self.assertEqual(signal["schema"], "agentflow.managed_recommendation_handoff_health.v1")
+        self.assertEqual(signal["schema"], "tokenclaw.managed_recommendation_handoff_health.v1")
         self.assertEqual(signal["status"], "omission-reasons-ranked")
 
         self.assertIn("omitted_local_action_reason", signal)
@@ -8520,7 +8520,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 2767,
                 "request_shape_crunch_opportunity": {
-                    "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                    "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
                     "status": "projected-savings-ranked",
                     "summary": {
                         "rows_considered": 2767,
@@ -8566,7 +8566,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hits": 0,
                 "cache_hit_rate": 0.0,
                 "request_shape_crunch_opportunity": {
-                    "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                    "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
                     "status": "projected-savings-ranked",
                     "summary": {
                         "rows_considered": 749,
@@ -8682,7 +8682,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hits": 0,
                 "cache_hit_rate": 0.0,
                 "managed_recommendations": {
-                    "schema": "agentflow.managed_recommendations.v1",
+                    "schema": "tokenclaw.managed_recommendations.v1",
                     "current_config": {"enabled": False},
                     "summary": {
                         "window_calls": 2873,
@@ -8696,7 +8696,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "recommendation_health": {"rows": []},
                 },
                 "request_shape_crunch_opportunity": {
-                    "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                    "schema": "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
                     "status": "projected-savings-ranked",
                     "summary": {
                         "rows_considered": 749,
@@ -8743,7 +8743,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 2483,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {
                         "rows_considered": 40,
                         "rollup_count": 2,
@@ -8806,7 +8806,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
 
         signal = plan["evidence"]["stats_summary"]["request_shape_rollup_candidates"]
-        self.assertEqual(signal["schema"], "agentflow.request_shape_rollup_candidate_signal.v1")
+        self.assertEqual(signal["schema"], "tokenclaw.request_shape_rollup_candidate_signal.v1")
         self.assertEqual(signal["status"], "candidates-ranked")
         self.assertEqual(signal["summary"]["ranked_candidate_count"], 2)
         self.assertEqual(signal["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
@@ -8866,7 +8866,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hits": 0,
                 "cache_hit_rate": 0.0,
                 "cache_zero_hit_blocker_ladder": {
-                    "schema": "agentflow.cache_zero_hit_blocker_ladder.v1",
+                    "schema": "tokenclaw.cache_zero_hit_blocker_ladder.v1",
                     "summary": {
                         "scanned_rows": 1000,
                         "cache_hits": 0,
@@ -8920,10 +8920,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 0,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 0, "rollup_count": 0},
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "status": "no-source-traffic",
                         "summary": {
                             "rows_considered": 0,
@@ -8942,12 +8942,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "local_activation_next_action_queue": {
-                    "schema": "agentflow.local_activation_next_action_queue.v1",
+                    "schema": "tokenclaw.local_activation_next_action_queue.v1",
                     "successor_actions": [
                         {
-                            "schema": "agentflow.local_activation_successor_action.v1",
+                            "schema": "tokenclaw.local_activation_successor_action.v1",
                             "fingerprint": "successor:b0b263d5e08fab75",
-                            "source_fingerprint": "activation:916550da3307b6a3",
+                            "source_fingerprint": "activation:c83096a9fc19c07d",
                             "source_ledger_rank": 1,
                             "lever": "request-shape-rollups",
                             "local_action_family": "cohort-ranking",
@@ -8978,9 +8978,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         stats_summary = plan["evidence"]["stats_summary"]
         signal = stats_summary["request_shape_rollup_candidates"]
-        self.assertEqual(signal["schema"], "agentflow.request_shape_rollup_candidate_signal.v1")
+        self.assertEqual(signal["schema"], "tokenclaw.request_shape_rollup_candidate_signal.v1")
         self.assertEqual(signal["status"], "evidence-gap-ranked")
-        self.assertEqual(signal["source_schema"], "agentflow.request_shape_follow_up_candidates.v1")
+        self.assertEqual(signal["source_schema"], "tokenclaw.request_shape_follow_up_candidates.v1")
         self.assertEqual(signal["summary"]["rollup_count"], 1)
         self.assertEqual(signal["summary"]["ranked_candidate_count"], 1)
         self.assertEqual(
@@ -8989,7 +8989,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
         self.assertEqual(signal["missing_measurements"], [])
         top = signal["top_candidate"]
-        self.assertEqual(top["source_fingerprint"], "activation:916550da3307b6a3")
+        self.assertEqual(top["source_fingerprint"], "activation:c83096a9fc19c07d")
         self.assertEqual(top["local_action_family"], "cohort-ranking")
         self.assertEqual(top["next_action"], "emit-request-shape-rollups")
         self.assertEqual(top["readiness_state"], "blocked")
@@ -9004,7 +9004,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             for item in stats_summary["evidence_to_activation_next_action_ledger"]["entries"]
             if item["lever"] == "request-shape-rollups"
         )
-        self.assertEqual(ledger_entry["fingerprint"], "activation:916550da3307b6a3")
+        self.assertEqual(ledger_entry["fingerprint"], "activation:c83096a9fc19c07d")
         self.assertEqual(ledger_entry["current_status"], "blocked")
         self.assertEqual(ledger_entry["blocker_codes"], ["no-source-traffic-for-request-shape-rollups"])
         self.assertEqual(ledger_entry["next_action"], "emit-request-shape-rollups")
@@ -9014,7 +9014,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             for item in stats_summary["local_activation_next_action_queue"]["entries"]
             if item["lever"] == "request-shape-rollups"
         )
-        self.assertEqual(queue_entry["fingerprint"], "activation:916550da3307b6a3")
+        self.assertEqual(queue_entry["fingerprint"], "activation:c83096a9fc19c07d")
         self.assertEqual(queue_entry["unblock_reason"], "no-source-traffic-for-request-shape-rollups")
 
     def test_request_shape_replayability_dry_run_names_cache_blocker_before_zero_hit(self):
@@ -9025,19 +9025,19 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hits": 0,
                 "cache_hit_rate": 0.0,
                 "cache_replay_cohort_ranking": {
-                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "schema": "tokenclaw.cache_replay_plateau_cohort_ranking.v1",
                     "summary": {"candidate_rows": 0},
                     "cohorts": [],
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "cache_zero_hit_blocker_ladder": {
-                    "schema": "agentflow.cache_zero_hit_blocker_ladder.v1",
+                    "schema": "tokenclaw.cache_zero_hit_blocker_ladder.v1",
                     "summary": {"top_blocker_code": "zero-cache-hits", "scanned_rows": 100},
                     "ladder": [{"blocker_code": "zero-cache-hits", "count": 100}],
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 12, "rollup_count": 1},
                     "rollups": [
                         {
@@ -9063,7 +9063,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         }
                     ],
                     "cache_replayability_dry_run": {
-                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                         "status": "ranked",
                         "summary": {
                             "cohort_count": 1,
@@ -9096,7 +9096,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         stats_summary = plan["evidence"]["stats_summary"]
         loop = stats_summary["evidence_to_activation_loop"]
         cache_stage = next(row for row in loop["levers"] if row["lever"] == "cache")
-        self.assertEqual(cache_stage["evidence_source"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(cache_stage["evidence_source"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(cache_stage["next_action"], "resolve-cache-replayability-blocker")
         self.assertIn("invalidation-evidence-missing", cache_stage["blocker_codes"])
         self.assertNotIn("zero-cache-hits", cache_stage["blocker_codes"])
@@ -9112,11 +9112,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hits": 1,
                 "cache_hit_rate": 0.000295,
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 999, "rollup_count": 32},
                     "rollups": [],
                     "cache_replayability_dry_run": {
-                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                         "status": "ranked",
                         "summary": {
                             "cohort_count": 32,
@@ -9183,7 +9183,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             },
                         ],
                         "skipped_openai_blockers": {
-                            "schema": "agentflow.request_shape_skipped_openai_cache_replay_blockers.v1",
+                            "schema": "tokenclaw.request_shape_skipped_openai_cache_replay_blockers.v1",
                             "status": "ranked",
                             "next_action": "add-invalidation-evidence",
                             "summary": {
@@ -9215,7 +9215,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             ],
                             "cohorts": [
                                 {
-                                    "schema": "agentflow.request_shape_skipped_openai_cache_replay_blocker.v1",
+                                    "schema": "tokenclaw.request_shape_skipped_openai_cache_replay_blocker.v1",
                                     "rank": 1,
                                     "provider_family": "openai",
                                     "source_surface": "openai_responses",
@@ -9256,7 +9256,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "privacy": {"metadata_only": True, "aggregate_only": True},
                         },
                         "tool_replay_evidence": {
-                            "schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                            "schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                             "status": "ranked",
                             "next_action": "collect-file-invalidation-evidence",
                             "summary": {
@@ -9291,7 +9291,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             ],
                             "cohorts": [
                                 {
-                                    "schema": "agentflow.request_shape_tool_cache_replay_evidence_row.v1",
+                                    "schema": "tokenclaw.request_shape_tool_cache_replay_evidence_row.v1",
                                     "rank": 1,
                                     "provider_family": "openai",
                                     "source_surface": "openai_responses",
@@ -9343,13 +9343,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         stats_summary = plan["evidence"]["stats_summary"]
         shape_signal = stats_summary["request_shape_rollup_candidates"]
         skipped = shape_signal["cache_replayability_dry_run"]["skipped_openai_blockers"]
-        self.assertEqual(skipped["schema"], "agentflow.request_shape_skipped_openai_cache_replay_blockers.v1")
+        self.assertEqual(skipped["schema"], "tokenclaw.request_shape_skipped_openai_cache_replay_blockers.v1")
         self.assertEqual(skipped["summary"]["top_blocker_code"], "invalidation-evidence-missing")
         self.assertEqual(skipped["summary"]["affected_rows"], 891)
         self.assertTrue(skipped["privacy"]["metadata_only"])
         self.assertTrue(skipped["privacy"]["aggregate_only"])
         tool_replay = shape_signal["cache_replayability_dry_run"]["tool_replay_evidence"]
-        self.assertEqual(tool_replay["schema"], "agentflow.request_shape_tool_cache_replay_evidence.v1")
+        self.assertEqual(tool_replay["schema"], "tokenclaw.request_shape_tool_cache_replay_evidence.v1")
         self.assertEqual(tool_replay["summary"]["tools_present_replay_evidence_rows"], 30)
         self.assertEqual(tool_replay["summary"]["generic_tools_present_blocker_reduced_rows"], 30)
         self.assertTrue(tool_replay["acceptance"]["reduces_generic_tools_present_blocker"])
@@ -9360,7 +9360,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         tool_cache_entry = next(
             entry
             for entry in queue["entries"]
-            if entry["evidence_schema"] == "agentflow.request_shape_tool_cache_replay_evidence.v1"
+            if entry["evidence_schema"] == "tokenclaw.request_shape_tool_cache_replay_evidence.v1"
         )
         self.assertEqual(tool_cache_entry["next_action"], "collect-file-invalidation-evidence")
         self.assertEqual(tool_cache_entry["affected_rows"], 30)
@@ -9433,7 +9433,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hits": 0,
                 "cache_hit_rate": 0.0,
                 "cache_zero_hit_blocker_ladder": {
-                    "schema": "agentflow.cache_zero_hit_blocker_ladder.v1",
+                    "schema": "tokenclaw.cache_zero_hit_blocker_ladder.v1",
                     "summary": {
                         "top_blocker_code": "zero-cache-hits",
                         "scanned_rows": 100,
@@ -9443,11 +9443,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "privacy": {"metadata_only": True, "aggregate_only": True},
                 },
                 "request_shape_rollups": {
-                    "schema": "agentflow.request_shape_rollups.v1",
+                    "schema": "tokenclaw.request_shape_rollups.v1",
                     "summary": {"rows_considered": 56, "rollup_count": 1},
                     "rollups": [],
                     "follow_up_candidates": {
-                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                         "status": "ranked",
                         "summary": {
                             "ranked_candidate_count": 1,
@@ -9456,7 +9456,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         },
                         "candidates": [
                             {
-                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                                 "provider_surface_bucket": "openai/openai_responses/responses",
                                 "provider_family": "openai",
                                 "source_surface": "openai_responses",
@@ -9488,7 +9488,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "privacy": {"metadata_only": True, "aggregate_only": True},
                     },
                     "cache_replayability_dry_run": {
-                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                         "status": "ranked",
                         "summary": {
                             "cohort_count": 1,
@@ -9535,7 +9535,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         loop = stats_summary["evidence_to_activation_loop"]
         cache_stage = next(row for row in loop["levers"] if row["lever"] == "cache")
         self.assertEqual(cache_stage["state"], "replay-ready")
-        self.assertEqual(cache_stage["evidence_source"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(cache_stage["evidence_source"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(cache_stage["next_action"], "stage-cache-replay-canary")
         self.assertEqual(cache_stage["projected_hits"], 55)
         self.assertNotIn("zero-cache-hits", cache_stage["blocker_codes"])
@@ -9560,7 +9560,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(shape_signal["summary"]["top_next_action"], "stage-cache-replay-canary")
         self.assertEqual(shape_signal["summary"]["top_local_action_family"], "cache")
         top_shape = shape_signal["top_candidate"]
-        self.assertEqual(top_shape["schema"], "agentflow.request_shape_blocker_cohort.v1")
+        self.assertEqual(top_shape["schema"], "tokenclaw.request_shape_blocker_cohort.v1")
         self.assertEqual(top_shape["rank"], 1)
         self.assertEqual(top_shape["local_action_family"], "cache")
         self.assertEqual(top_shape["readiness_state"], "activation-ready")
@@ -9594,7 +9594,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hits": 0,
                 "cache_hit_rate": 0.0,
                 "cache_replay_cohort_ranking": {
-                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "schema": "tokenclaw.cache_replay_plateau_cohort_ranking.v1",
                     "summary": {
                         "candidate_rows": 3,
                         "activation_ready_count": 1,
@@ -9639,7 +9639,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 50,
                 "openai_canary_impact": {
-                    "schema": "agentflow.openai_canary_impact.v1",
+                    "schema": "tokenclaw.openai_canary_impact.v1",
                     "status": "matched",
                     "summary": {
                         "candidate_count": 1,
@@ -9720,7 +9720,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 50,
                 "openai_canary_impact": {
-                    "schema": "agentflow.openai_canary_impact.v1",
+                    "schema": "tokenclaw.openai_canary_impact.v1",
                     "status": "matched",
                     "summary": {
                         "candidate_count": 1,
@@ -9830,7 +9830,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             stats={
                 "calls": 50,
                 "openai_canary_impact": {
-                    "schema": "agentflow.openai_canary_impact.v1",
+                    "schema": "tokenclaw.openai_canary_impact.v1",
                     "status": "matched",
                     "summary": {"candidate_count": 1},
                     "candidates": [
@@ -9965,12 +9965,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(entry["durable_action_ledger_entry"])
         self.assertEqual(
             entry["diagnostic_fingerprint"],
-            "agentflow.repeated-diagnostic.missing-dependency-evidence.v1",
+            "tokenclaw.repeated-diagnostic.missing-dependency-evidence.v1",
         )
         self.assertIn("sanitized_source_report", entry["needed_resolution"])
         self.assertEqual(
             entry["missing_dependency_evidence_review"]["schema"],
-            "agentflow.activation_feedback_missing_dependency_evidence_review.v1",
+            "tokenclaw.activation_feedback_missing_dependency_evidence_review.v1",
         )
         self.assertTrue(entry["missing_dependency_evidence_review"]["privacy"]["metadata_only"])
         suppression = plan["evidence"]["issue_proposal_suppression"]
@@ -10063,7 +10063,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 stats={
                     "calls": 50,
                     "openai_canary_impact": {
-                        "schema": "agentflow.openai_canary_impact.v1",
+                        "schema": "tokenclaw.openai_canary_impact.v1",
                         "status": "matched",
                         "candidates": [
                             {
@@ -10085,7 +10085,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             }
                         ],
                         "activation_lifecycle_feedback": {
-                            "schema": "agentflow.activation_staged_lifecycle_feedback_summary.v1",
+                            "schema": "tokenclaw.activation_staged_lifecycle_feedback_summary.v1",
                             "queue_rows": 1,
                             "family_event_count": 3,
                             "state_breakdown": [{"value": "healthy_canary", "count": 1}],
@@ -10270,7 +10270,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             ledger_entries[0]["diagnostic_fingerprint"],
-            "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
+            "tokenclaw.repeated-diagnostic.activation-feedback-blocker-review.v1",
         )
         self.assertTrue(ledger_entries[0]["durable_action_ledger_entry"])
         self.assertEqual(ledger_entries[0]["review_status"], "resolved-to-keep-blocked")
@@ -10364,7 +10364,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         diagnostics = plan["evidence"]["repeated_diagnostics"]
         diagnostic = next(item for item in diagnostics if item.get("reason") == "activation-feedback-blocker-review")
         classification = diagnostic["activation_feedback_diagnostic_classification"]
-        self.assertEqual(classification["schema"], "agentflow.activation_feedback_diagnostic_classification.v1")
+        self.assertEqual(classification["schema"], "tokenclaw.activation_feedback_diagnostic_classification.v1")
         self.assertEqual(classification["status"], "new-sanitized-evidence")
         self.assertEqual(classification["decision"], "emit-bounded-successor-input")
         self.assertEqual(diagnostic["example"], "metadata-only activation-feedback diagnostic evidence")
@@ -10392,7 +10392,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("keep_blocked_reason", entry)
         self.assertEqual(
             entry["diagnostic_fingerprint"],
-            "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
+            "tokenclaw.repeated-diagnostic.activation-feedback-blocker-review.v1",
         )
         self.assertTrue(entry["privacy"]["metadata_only"])
         self.assertFalse(entry["privacy"]["provider_bodies_included"])
@@ -10457,7 +10457,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "request_id=req-port-secret"
             ),
             (
-                "Test verdict: PASS. Verified AGENTFLOW_PORT=4001 legacy smoke also started "
+                "Test verdict: PASS. Verified TOKENCLAW_PORT=4001 legacy smoke also started "
                 "session_id=session-port-secret"
             ),
         ]
@@ -10499,7 +10499,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             deploy["diagnostic_fingerprint"],
-            "agentflow.repeated-diagnostic.live-service-deploy-failed-after-development.v1",
+            "tokenclaw.repeated-diagnostic.live-service-deploy-failed-after-development.v1",
         )
         self.assertFalse(deploy["managed_preview_required"])
         self.assertTrue(deploy["durable_action_ledger_entry"])
@@ -10519,7 +10519,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         )
         self.assertEqual(
             port["diagnostic_fingerprint"],
-            "agentflow.repeated-diagnostic.pass-verified-tokenclaw-port.v1",
+            "tokenclaw.repeated-diagnostic.pass-verified-tokenclaw-port.v1",
         )
         self.assertTrue(port["activation_feedback_diagnostic_classification"]["privacy"]["metadata_only"])
         self.assertFalse(port["managed_preview_required"])
@@ -10611,7 +10611,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 entry["keep_blocked_reason"],
                 "resolved-activation-feedback-pass-diagnostic-suppressed",
             )
-            self.assertTrue(entry["diagnostic_fingerprint"].startswith("agentflow.repeated-diagnostic.pass"))
+            self.assertTrue(entry["diagnostic_fingerprint"].startswith("tokenclaw.repeated-diagnostic.pass"))
             self.assertTrue(entry["durable_action_ledger_entry"])
             self.assertTrue(entry["activation_feedback_diagnostic_classification"]["privacy"]["metadata_only"])
             self.assertTrue(entry["privacy"]["metadata_only"])
@@ -10800,7 +10800,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertGreater(entry["evidence_age_hours"], 72.0)
         self.assertEqual(entry["max_evidence_age_hours"], 72.0)
         gate = entry["activation_feedback_freshness_gate"]
-        self.assertEqual(gate["schema"], "agentflow.activation_feedback_evidence_freshness_gate.v1")
+        self.assertEqual(gate["schema"], "tokenclaw.activation_feedback_evidence_freshness_gate.v1")
         self.assertEqual(gate["status"], "stale-blocked")
         self.assertEqual(gate["deterministic_decision"], "stale-blocked")
         self.assertEqual(gate["evidence_timestamp"], "2020-01-01T00:00:00Z")
@@ -10846,7 +10846,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         plan = build_research_plan(
             issues=[
                 {
-                    "repo": "lutzkuen/agentflow",
+                    "repo": "lutzkuen/tokenclaw",
                     "number": 9,
                     "title": "Raw prompt must not leak",
                     "state": "OPEN",
@@ -10918,7 +10918,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
             side_effect=fake_run,
         ):
             enriched = cli._attach_recent_closed_github_issues_for_research(
-                [issue(1, "Ready", ["status:ready"], repo="lutzkuen/agentflow")],
+                [issue(1, "Ready", ["status:ready"], repo="lutzkuen/tokenclaw")],
                 trusted_author="lutzkuen",
             )
 
@@ -10945,21 +10945,21 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stderr.getvalue(), "")
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.orchestrator_research_plan.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.orchestrator_research_plan.v1")
         self.assertTrue(payload["research_trigger"]["should_run"])
 
     def test_cli_attaches_stored_managed_preview_outcomes_to_successor_queue(self):
         ledger = {
-            "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
             "status": "tracked",
             "entries": [
                 {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                     "rank": 1,
                     "fingerprint": "activation:cli-preview-routing",
                     "lever": "routing",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                    "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                     "state": "review",
                     "current_status": "review",
                     "issue_worthy_status": "ready",
@@ -10977,7 +10977,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             preview_now = datetime.now(timezone.utc)
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             queue = build_local_activation_next_action_queue(
                 {"evidence_to_activation_next_action_ledger": ledger}
             )
@@ -10991,7 +10991,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
 
             request_payload = build_managed_activation_preview_request(queue, now=preview_now)
             response_payload = {
-                "schema": "agentflow.managed_activation_preview_response.v1",
+                "schema": "tokenclaw.managed_activation_preview_response.v1",
                 "decisions": [
                     {
                         "handoff_ref": request_payload["rows"][0]["handoff_ref"],
@@ -11070,16 +11070,16 @@ class OrchestratorResearchCliTests(unittest.TestCase):
 
     def test_cli_refreshes_empty_managed_preview_outcomes_from_successor_queue(self):
         queue = {
-            "schema": "agentflow.local_activation_next_action_queue.v1",
+            "schema": "tokenclaw.local_activation_next_action_queue.v1",
             "status": "ranked",
             "entries": [
                 {
-                    "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                    "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
                     "rank": 1,
                     "fingerprint": "activation:cli-refresh-cache",
                     "lever": "cache",
                     "local_action_family": "cache",
-                    "evidence_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                    "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
                     "current_status": "blocked",
                     "state": "blocked",
                     "successor_status": "keep-blocked",
@@ -11090,7 +11090,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
                     "projected_savings_usd": 0.075373,
                     "managed_preview_required": True,
                     "managed_preview_gate": {
-                        "schema": "agentflow.preview_verified_activation_successor_gate.v1",
+                        "schema": "tokenclaw.preview_verified_activation_successor_gate.v1",
                         "required": True,
                         "status": "no-data-preview-health",
                         "verified": False,
@@ -11112,7 +11112,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             SQLiteStore(db_path).conn.close()
             issues_path = Path(tmp) / "issues.json"
             stats_path = Path(tmp) / "stats.json"
@@ -11166,7 +11166,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
 
     def test_cli_builds_request_shape_rollups_from_stats_db(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = SQLiteStore(db_path)
             try:
                 for cost in (0.02, 0.03):
@@ -11232,7 +11232,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "")
         payload = json.loads(stdout.getvalue())
         signal = payload["evidence"]["stats_summary"]["request_shape_rollup_candidates"]
-        self.assertEqual(signal["schema"], "agentflow.request_shape_rollup_candidate_signal.v1")
+        self.assertEqual(signal["schema"], "tokenclaw.request_shape_rollup_candidate_signal.v1")
         self.assertEqual(signal["status"], "candidates-ranked")
         self.assertEqual(signal["summary"]["rows_considered"], 2)
         self.assertGreaterEqual(signal["summary"]["ranked_candidate_count"], 1)
@@ -11246,7 +11246,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
 
     def test_cli_enriches_staged_request_shape_cache_replay_evidence_from_local_policy(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             config_dir = Path(tmp) / "config"
             store = SQLiteStore(db_path)
             try:
@@ -11322,7 +11322,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
             stdout = io.StringIO()
             stderr = io.StringIO()
 
-            with patch.dict("os.environ", {"AGENTFLOW_CONFIG_DIR": str(config_dir)}, clear=False):
+            with patch.dict("os.environ", {"TOKENCLAW_CONFIG_DIR": str(config_dir)}, clear=False):
                 code = cli.orchestrator_research_cli(
                     ["--issues-json", str(issues_path), "--stats-json", str(stats_path), "--threshold", "3"],
                     stdout=stdout,
@@ -11334,7 +11334,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         stats_summary = payload["evidence"]["stats_summary"]
         evidence = stats_summary["request_shape_cache_replay_evidence"]
-        self.assertEqual(evidence["schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(evidence["schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(evidence["status"], "staged-no-traffic")
         self.assertEqual(evidence["next_action"], "collect-cache-replay-canary-traffic")
         self.assertEqual(evidence["staged_canary_count"], 1)
@@ -11379,7 +11379,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         self.assertNotIn("unclassified-skip-or-blocker", reasons)
         self.assertIn("safety-stop", reasons)
         safety_burndown = plan["evidence"]["activation_safety_stop_burndown"]
-        self.assertEqual(safety_burndown["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(safety_burndown["schema"], "tokenclaw.activation_safety_stop_burndown.v1")
         self.assertEqual(safety_burndown["summary"]["top_blocker_code"], "safety-stop")
         self.assertEqual(
             safety_burndown["summary"]["top_keep_blocked_reason"],
@@ -11438,7 +11438,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         safety_rows = [
             row
             for row in report["blockers"]
-            if row.get("evidence_source") == "agentflow.activation_safety_stop_burndown.v1"
+            if row.get("evidence_source") == "tokenclaw.activation_safety_stop_burndown.v1"
         ]
         self.assertTrue(safety_rows)
         self.assertEqual(
@@ -11488,7 +11488,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
         keep_blocked = [
             entry for entry in ledger["entries"]
-            if entry.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
+            if entry.get("evidence_schema") == "tokenclaw.activation_safety_stop_burndown.v1"
         ]
         self.assertTrue(keep_blocked)
         self.assertEqual(keep_blocked[0]["current_status"], "keep-blocked")
@@ -11505,7 +11505,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         self.assertIn("safer_threshold", keep_blocked[0]["needed_resolution"])
         self.assertIn("rollback_proof", keep_blocked[0]["needed_resolution"])
         unblock = keep_blocked[0]["unblock_criteria"]
-        self.assertEqual(unblock["schema"], "agentflow.activation_feedback_safety_stop_unblock_criteria.v1")
+        self.assertEqual(unblock["schema"], "tokenclaw.activation_feedback_safety_stop_unblock_criteria.v1")
         self.assertEqual(unblock["status"], "blocked")
         self.assertFalse(unblock["safety_stop_count_zero"])
         self.assertFalse(unblock["applied_coverage_present"])
@@ -11561,7 +11561,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         suppressed = suppression["suppressed"][-1]
         self.assertEqual(
             suppressed["fingerprint"],
-            "agentflow.repeated-diagnostic.missing-dependency-evidence.v1",
+            "tokenclaw.repeated-diagnostic.missing-dependency-evidence.v1",
         )
         self.assertEqual(suppressed["suppression_kind"], "durable-keep-blocked-ledger-record")
         self.assertEqual(
@@ -11581,7 +11581,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         )
         self.assertEqual(
             _diagnostic_fingerprint("safety-stop"),
-            "agentflow.repeated-diagnostic.safety-stop.v1",
+            "tokenclaw.repeated-diagnostic.safety-stop.v1",
         )
         self.assertNotEqual(
             _diagnostic_fingerprint("safety-stop"),
@@ -11613,7 +11613,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         self.assertEqual(entry["current_status"], "keep-blocked")
         self.assertEqual(entry["state"], "keep-blocked")
         self.assertEqual(entry["local_action_family"], "activation-feedback")
-        self.assertEqual(entry["evidence_schema"], "agentflow.orchestrator_research_log_diagnostics.v1")
+        self.assertEqual(entry["evidence_schema"], "tokenclaw.orchestrator_research_log_diagnostics.v1")
         self.assertEqual(entry["review_status"], "resolved-to-narrower-blocker")
         self.assertIn("dependency_evidence_summary", entry["needed_resolution"])
         self.assertTrue(entry["privacy"]["metadata_only"])
@@ -11638,7 +11638,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         )
 
         ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
-        self.assertEqual(ledger["schema"], "agentflow.evidence_to_activation_next_action_ledger.v1")
+        self.assertEqual(ledger["schema"], "tokenclaw.evidence_to_activation_next_action_ledger.v1")
         self.assertTrue(ledger["privacy"]["metadata_only"])
         self.assertTrue(ledger["privacy"]["aggregate_only"])
 
@@ -11653,14 +11653,14 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         af_entry = af_entries[0]
         self.assertEqual(
             af_entry["diagnostic_fingerprint"],
-            "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
+            "tokenclaw.repeated-diagnostic.activation-feedback-blocker-review.v1",
         )
         self.assertEqual(
             af_entry["next_action"],
             "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence",
         )
         self.assertEqual(af_entry["local_action_family"], "activation-feedback")
-        self.assertEqual(af_entry["evidence_schema"], "agentflow.orchestrator_research_log_diagnostics.v1")
+        self.assertEqual(af_entry["evidence_schema"], "tokenclaw.orchestrator_research_log_diagnostics.v1")
         self.assertTrue(af_entry.get("fingerprint"), "durable stable fingerprint must be non-empty")
         self.assertEqual(af_entry.get("state"), "keep-blocked")
         self.assertEqual(af_entry.get("current_status"), "keep-blocked")
@@ -11673,7 +11673,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         # Keep-blocked safety-stop ledger entry with keep_blocked_reason.
         safety_entries = [
             entry for entry in ledger["entries"]
-            if entry.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
+            if entry.get("evidence_schema") == "tokenclaw.activation_safety_stop_burndown.v1"
         ]
         self.assertTrue(safety_entries, "expected a safety-stop ledger entry")
         self.assertEqual(safety_entries[0]["current_status"], "keep-blocked")

@@ -43,7 +43,7 @@ def _log_call(store: Store, **overrides):
 class LocalActivationOutcomeSummaryTests(unittest.TestCase):
     def test_summary_exports_feature_only_routing_crunch_and_cache_outcomes(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_call(
@@ -95,7 +95,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["schema"], "agentflow.local_activation_outcome_summary.v1")
+        self.assertEqual(report["schema"], "tokenclaw.local_activation_outcome_summary.v1")
         self.assertEqual(report["status"], "tracked")
         self.assertFalse(report["provider_calls_made"])
         self.assertFalse(report["managed_server_calls_made"])
@@ -131,7 +131,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
     def test_summary_merges_cache_and_crunch_policy_decision_reports(self):
         crunch_decision = {
-            "schema": "agentflow.request_shape_crunch_policy_decision.v1",
+            "schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
             "status": "decided",
             "decision": "widen",
             "graduation_decision": "widen",
@@ -153,7 +153,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
                     "safety_stop_count": 0,
                 },
                 "coverage": {
-                    "schema": "agentflow.request_shape_crunch_canary_coverage.v1",
+                    "schema": "tokenclaw.request_shape_crunch_canary_coverage.v1",
                     "observed_count": 74,
                     "applied_count": 7,
                     "holdout_count": 8,
@@ -177,7 +177,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
             "privacy": {"metadata_only": True, "aggregate_only": True},
         }
         cache_decision = {
-            "schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_policy_decision.v1",
             "status": "decided",
             "decision": "widen",
             "top_decision": {
@@ -200,7 +200,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
                     "aggregate_only": True,
                 },
                 "coverage": {
-                    "schema": "agentflow.request_shape_cache_replay_policy_decision_coverage.v1",
+                    "schema": "tokenclaw.request_shape_cache_replay_policy_decision_coverage.v1",
                     "has_applied_coverage": True,
                     "has_holdout_coverage": True,
                     "metadata_only": True,
@@ -223,7 +223,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 report = build_local_activation_outcome_summary(
@@ -235,13 +235,13 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["schema"], "agentflow.local_activation_outcome_summary.v1")
+        self.assertEqual(report["schema"], "tokenclaw.local_activation_outcome_summary.v1")
         self.assertEqual(report["egress_guard"]["status"], "passed")
         self.assertEqual(report["summary"]["policy_decision_report_count"], 2)
         self.assertEqual(report["summary"]["policy_decision_families"], ["cache", "crunch"])
 
         by_family = {row["local_action_family"]: row for row in report["outcome_summaries"]}
-        self.assertEqual(by_family["crunch"]["source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(by_family["crunch"]["source_evidence_schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
         self.assertEqual(by_family["crunch"]["source_decision"], "widen")
         self.assertEqual(by_family["crunch"]["graduation_decision"], "widen")
         self.assertEqual(by_family["crunch"]["applied_count"], 7)
@@ -252,7 +252,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertTrue(by_family["crunch"]["coverage"]["metadata_only"])
         self.assertTrue(by_family["crunch"]["coverage"]["aggregate_only"])
 
-        self.assertEqual(by_family["cache"]["source_evidence_schema"], "agentflow.request_shape_cache_replay_policy_decision.v1")
+        self.assertEqual(by_family["cache"]["source_evidence_schema"], "tokenclaw.request_shape_cache_replay_policy_decision.v1")
         self.assertEqual(by_family["cache"]["source_decision"], "widen")
         self.assertEqual(by_family["cache"]["applied_count"], 6)
         self.assertEqual(by_family["cache"]["holdout_count"], 5)
@@ -264,7 +264,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
     def test_summary_emits_keep_active_outcome_for_crunch_activation_evidence(self):
         activation_evidence = {
-            "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+            "schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
             "status": "active-rule-evidence-observed",
             "decision": "widen",
             "graduation_decision": "widen",
@@ -311,7 +311,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
                     "policy_source": "local-manual",
                     "decision": "widen",
                     "decision_id": "request-shape-crunch-policy-decision:fixture",
-                    "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                     "metadata_only": True,
                     "aggregate_only": True,
                 }
@@ -320,7 +320,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 report = build_local_activation_outcome_summary(
@@ -332,14 +332,14 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["schema"], "agentflow.local_activation_outcome_summary.v1")
+        self.assertEqual(report["schema"], "tokenclaw.local_activation_outcome_summary.v1")
         self.assertEqual(report["status"], "tracked")
         self.assertEqual(report["egress_guard"]["status"], "passed")
         self.assertEqual(report["summary"]["policy_decision_report_count"], 1)
         self.assertEqual(report["summary"]["policy_decision_families"], ["crunch"])
         by_family = {row["local_action_family"]: row for row in report["outcome_summaries"]}
         crunch = by_family["crunch"]
-        self.assertEqual(crunch["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(crunch["source_evidence_schema"], "tokenclaw.request_shape_crunch_activation_evidence.v1")
         self.assertEqual(crunch["source_decision"], "widen")
         self.assertEqual(crunch["outcome"], "promote-full")
         self.assertEqual(crunch["next_action"], "promote-full-repeated-context-crunch-rule")
@@ -371,7 +371,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
     def test_summary_keeps_post_widening_crunch_active_at_max_rollout_with_coverage(self):
         activation_evidence = {
-            "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+            "schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
             "status": "active-rule-evidence-observed",
             "decision": "widen",
             "graduation_decision": "widen",
@@ -420,13 +420,13 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
                     "policy_source": "local-manual",
                     "decision": "widen",
                     "decision_id": "request-shape-crunch-policy-decision:9c21d88a7c434d6f",
-                    "source_evidence_schema": "agentflow.request_shape_crunch_policy_decision.v1",
+                    "source_evidence_schema": "tokenclaw.request_shape_crunch_policy_decision.v1",
                     "metadata_only": True,
                     "aggregate_only": True,
                 }
             ],
             "duplicate_suppression": {
-                "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                "schema": "tokenclaw.request_shape_crunch_keep_active_duplicate_suppression.v1",
                 "fingerprint": "activation:post-widening-test",
                 "matching_local_policy": "crunch_rules",
                 "reason": "repeated-context-crunch-active-at-max-rollout",
@@ -441,7 +441,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 for _ in range(3):
@@ -506,7 +506,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
     def test_summary_exports_cache_replay_warmup_lifecycle_outcome(self):
         cache_evidence = {
-            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
             "status": "observed",
             "reason": "cache-replay-canary-evidence-observed",
             "next_action": "review-cache-replay-canary-promotion-readiness",
@@ -549,7 +549,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 report = build_local_activation_outcome_summary(
@@ -561,12 +561,12 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["schema"], "agentflow.local_activation_outcome_summary.v1")
+        self.assertEqual(report["schema"], "tokenclaw.local_activation_outcome_summary.v1")
         self.assertEqual(report["egress_guard"]["status"], "passed")
         self.assertEqual(report["summary"]["policy_decision_families"], ["cache"])
         by_family = {row["local_action_family"]: row for row in report["outcome_summaries"]}
         cache = by_family["cache"]
-        self.assertEqual(cache["source_evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache["source_evidence_schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(cache["local_action_family"], "cache")
         self.assertEqual(cache["applied_count"], 24)
         self.assertEqual(cache["holdout_count"], 16)
@@ -587,7 +587,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
     def test_summary_exports_cache_replay_hit_recovery_lifecycle_outcome(self):
         cache_evidence = {
-            "schema": "agentflow.request_shape_cache_replay_evidence.v1",
+            "schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
             "status": "observed",
             "reason": "cache-replay-canary-evidence-observed",
             "next_action": "review-cache-replay-canary-promotion-readiness",
@@ -623,7 +623,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 report = build_local_activation_outcome_summary(
@@ -637,7 +637,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
         cache = {row["local_action_family"]: row for row in report["outcome_summaries"]}["cache"]
         self.assertEqual(report["egress_guard"]["status"], "passed")
-        self.assertEqual(cache["source_evidence_schema"], "agentflow.request_shape_cache_replay_evidence.v1")
+        self.assertEqual(cache["source_evidence_schema"], "tokenclaw.request_shape_cache_replay_evidence.v1")
         self.assertEqual(cache["applied_count"], 28)
         self.assertEqual(cache["holdout_count"], 16)
         self.assertEqual(cache["miss_count"], 24)
@@ -651,7 +651,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
     def test_summary_exports_full_rollout_crunch_activation_outcome(self):
         crunch_evidence = {
-            "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+            "schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
             "status": "active-rule-evidence-observed",
             "decision": "widen",
             "graduation_decision": "widen",
@@ -689,11 +689,11 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
                     "rule_ref": "local-repeated-context-crunch-canary-test",
                     "policy_source": "local-manual",
                     "decision_id": "request-shape-crunch-policy-decision:test",
-                    "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                    "source_evidence_schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
                 }
             ],
             "duplicate_suppression": {
-                "schema": "agentflow.request_shape_crunch_keep_active_duplicate_suppression.v1",
+                "schema": "tokenclaw.request_shape_crunch_keep_active_duplicate_suppression.v1",
                 "fingerprint": "activation:full-rollout-test",
                 "matching_local_policy": "crunch_rules",
                 "reason": "repeated-context-crunch-full-rollout-active",
@@ -708,7 +708,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 report = build_local_activation_outcome_summary(
@@ -721,7 +721,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
                 store.conn.close()
 
         crunch = {row["local_action_family"]: row for row in report["outcome_summaries"]}["crunch"]
-        self.assertEqual(crunch["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(crunch["source_evidence_schema"], "tokenclaw.request_shape_crunch_activation_evidence.v1")
         self.assertEqual(crunch["outcome"], "keep-active")
         self.assertEqual(crunch["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
         self.assertTrue(crunch["full_rollout_active"])
@@ -732,7 +732,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertEqual(crunch["observed_saved_tokens"], 8_606_129)
         self.assertAlmostEqual(crunch["observed_savings_usd"], 25.818387)
         gate = crunch["keep_active_regression_gate"]
-        self.assertEqual(gate["schema"], "agentflow.full_rollout_crunch_keep_active_regression_gate.v1")
+        self.assertEqual(gate["schema"], "tokenclaw.full_rollout_crunch_keep_active_regression_gate.v1")
         self.assertEqual(gate["state"], "keep-active")
         self.assertTrue(gate["gate_passed"])
         self.assertEqual(gate["deterministic_next_action"], "keep-active")
@@ -745,11 +745,11 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
         self.assertEqual(report["summary"]["outcome_ledger_entry_count"], 1)
         self.assertEqual(len(report["outcome_ledger_entries"]), 1)
         ledger_entry = report["outcome_ledger_entries"][0]
-        self.assertEqual(ledger_entry["schema"], "agentflow.local_activation_outcome_ledger_entry.v1")
+        self.assertEqual(ledger_entry["schema"], "tokenclaw.local_activation_outcome_ledger_entry.v1")
         self.assertTrue(ledger_entry["durable_outcome_ledger_entry"])
         self.assertTrue(str(ledger_entry["ledger_ref"]).startswith("activation:"))
         self.assertEqual(ledger_entry["local_action_family"], "crunch")
-        self.assertEqual(ledger_entry["source_evidence_schema"], "agentflow.request_shape_crunch_activation_evidence.v1")
+        self.assertEqual(ledger_entry["source_evidence_schema"], "tokenclaw.request_shape_crunch_activation_evidence.v1")
         self.assertEqual(ledger_entry["source_decision_id"], "request-shape-crunch-policy-decision:test")
         self.assertEqual(ledger_entry["outcome"], "keep-active")
         self.assertEqual(ledger_entry["next_action"], "measure-full-rollout-repeated-context-crunch-outcomes")
@@ -779,7 +779,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
     def test_summary_exports_full_rollout_crunch_rollback_gate(self):
         crunch_evidence = {
-            "schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+            "schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
             "status": "active-rule-evidence-observed",
             "decision": "widen",
             "graduation_decision": "widen",
@@ -818,14 +818,14 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
                     "rule_ref": "local-repeated-context-crunch-canary-rollback-test",
                     "policy_source": "local-manual",
                     "decision_id": "request-shape-crunch-policy-decision:rollback-test",
-                    "source_evidence_schema": "agentflow.request_shape_crunch_activation_evidence.v1",
+                    "source_evidence_schema": "tokenclaw.request_shape_crunch_activation_evidence.v1",
                 }
             ],
             "privacy": {"metadata_only": True, "aggregate_only": True},
         }
 
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 report = build_local_activation_outcome_summary(
@@ -869,7 +869,7 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
     def test_cli_emits_local_activation_outcome_summary(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_call(
@@ -888,6 +888,6 @@ class LocalActivationOutcomeSummaryTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.local_activation_outcome_summary.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.local_activation_outcome_summary.v1")
         self.assertEqual(payload["egress_guard"]["status"], "passed")
         self.assertEqual(payload["summary"]["local_action_family_count"], 3)

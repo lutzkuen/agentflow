@@ -7,22 +7,22 @@ from typing import Any
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_routing_narrow_canary_review.v1"
-DRAFT_SCHEMA = "agentflow.openai_routing_narrow_canary_draft.v1"
-OMISSION_SCHEMA = "agentflow.openai_routing_narrow_canary_omission.v1"
-RECOVERY_PLAN_SCHEMA = "agentflow.openai_routing_recovery_plan.v1"
-RECOVERY_OPTION_SCHEMA = "agentflow.openai_routing_recovery_option.v1"
-RECOVERY_COVERAGE_SCHEMA = "agentflow.openai_routing_recovery_coverage.v1"
-RECOVERY_ROLLBACK_SCHEMA = "agentflow.openai_routing_recovery_rollback_no_write.v1"
-RECOVERY_STALE_EVIDENCE_SCHEMA = "agentflow.openai_routing_recovery_stale_evidence.v1"
-MANAGED_PREVIEW_AGREEMENT_SCHEMA = "agentflow.openai_routing_managed_preview_agreement.v1"
-MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "agentflow.openai_routing_managed_preview_health_gate.v1"
-RECOVERY_SIZING_SCHEMA = "agentflow.openai_routing_recovery_sizing.v1"
-PATHWAY_OUTCOME_SCHEMA = "agentflow.local_routing_pathway_outcome_feedback.v1"
-PATHWAY_OUTCOME_ROW_SCHEMA = "agentflow.local_routing_pathway_outcome_feedback_row.v1"
+SCHEMA = "tokenclaw.openai_routing_narrow_canary_review.v1"
+DRAFT_SCHEMA = "tokenclaw.openai_routing_narrow_canary_draft.v1"
+OMISSION_SCHEMA = "tokenclaw.openai_routing_narrow_canary_omission.v1"
+RECOVERY_PLAN_SCHEMA = "tokenclaw.openai_routing_recovery_plan.v1"
+RECOVERY_OPTION_SCHEMA = "tokenclaw.openai_routing_recovery_option.v1"
+RECOVERY_COVERAGE_SCHEMA = "tokenclaw.openai_routing_recovery_coverage.v1"
+RECOVERY_ROLLBACK_SCHEMA = "tokenclaw.openai_routing_recovery_rollback_no_write.v1"
+RECOVERY_STALE_EVIDENCE_SCHEMA = "tokenclaw.openai_routing_recovery_stale_evidence.v1"
+MANAGED_PREVIEW_AGREEMENT_SCHEMA = "tokenclaw.openai_routing_managed_preview_agreement.v1"
+MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "tokenclaw.openai_routing_managed_preview_health_gate.v1"
+RECOVERY_SIZING_SCHEMA = "tokenclaw.openai_routing_recovery_sizing.v1"
+PATHWAY_OUTCOME_SCHEMA = "tokenclaw.local_routing_pathway_outcome_feedback.v1"
+PATHWAY_OUTCOME_ROW_SCHEMA = "tokenclaw.local_routing_pathway_outcome_feedback_row.v1"
 ROUTING_PREVIEW_EVIDENCE_SCHEMAS = {
-    "agentflow.openai_routing_promotion_decision_report.v1",
-    "agentflow.pass_through_routing_activation_candidates.v1",
+    "tokenclaw.openai_routing_promotion_decision_report.v1",
+    "tokenclaw.pass_through_routing_activation_candidates.v1",
     PATHWAY_OUTCOME_SCHEMA,
     PATHWAY_OUTCOME_ROW_SCHEMA,
 }
@@ -449,7 +449,7 @@ def _semantic_recovery_classification(cohort: dict[str, Any]) -> dict[str, Any]:
         classification = "keep-blocked"
         next_action = action_next or "keep-openai-routing-blocked"
     return {
-        "schema": "agentflow.openai_routing_semantic_regression_recovery_classification.v1",
+        "schema": "tokenclaw.openai_routing_semantic_regression_recovery_classification.v1",
         "observed": observed,
         "classification": classification,
         "action_classification": action_classification or None,
@@ -753,7 +753,7 @@ def _cohort_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     lifecycle = bucket.get("openai_canary_lifecycle_evidence") if isinstance(bucket.get("openai_canary_lifecycle_evidence"), dict) else {}
     counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
     return {
-        "source_schema": "agentflow.pass_through_routing_activation_candidates.v1",
+        "source_schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
         "rank": bucket.get("rank"),
         "provider": bucket.get("provider"),
         "source_surface": bucket.get("source_surface") or "openai_responses",
@@ -780,7 +780,7 @@ def _cohort_from_promotion_decision(decision: dict[str, Any]) -> dict[str, Any]:
     lifecycle = decision.get("lifecycle") if isinstance(decision.get("lifecycle"), dict) else {}
     candidate_set = decision.get("candidate_set") if isinstance(decision.get("candidate_set"), dict) else {}
     return {
-        "source_schema": "agentflow.openai_routing_promotion_decision.v1",
+        "source_schema": "tokenclaw.openai_routing_promotion_decision.v1",
         "provider": "openai",
         "source_surface": target.get("source_surface"),
         "endpoint": target.get("endpoint"),
@@ -857,7 +857,7 @@ def _successor_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
         for row in rows
         if isinstance(row, dict)
         and _string(row.get("local_action_family")).lower() == "routing"
-        and _string(row.get("evidence_schema")) == "agentflow.openai_routing_promotion_decision_report.v1"
+        and _string(row.get("evidence_schema")) == "tokenclaw.openai_routing_promotion_decision_report.v1"
     ]
 
 
@@ -919,7 +919,7 @@ def _cohorts_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:
         return [_cohort_from_promotion_decision(item) for item in report["decisions"] if isinstance(item, dict)]
     if isinstance(report.get("promotion_decision"), dict):
         return [_cohort_from_promotion_decision(report["promotion_decision"])]
-    if report.get("schema") == "agentflow.pass_through_routing_activation_candidates.v1" and isinstance(report.get("buckets"), list):
+    if report.get("schema") == "tokenclaw.pass_through_routing_activation_candidates.v1" and isinstance(report.get("buckets"), list):
         return [
             _cohort_from_pass_through_bucket(item)
             for item in report["buckets"]
@@ -1116,7 +1116,7 @@ def _draft_for_cohort(
         },
         "proposed_routing_canary": generic_canary,
         "rollback_condition": {
-            "schema": "agentflow.openai_routing_narrow_canary_rollback_condition.v1",
+            "schema": "tokenclaw.openai_routing_narrow_canary_rollback_condition.v1",
             "rollback_action_type": policy_target["rollback_action_type"],
             "rollback_canary_fraction": 0.0,
             "rollback_holdout_fraction": 0.0,
@@ -1154,7 +1154,7 @@ def _draft_for_cohort(
 def _normalized_review_report(report: dict[str, Any]) -> dict[str, Any]:
     def relevant_stats(stats: dict[str, Any], source_schema: Any) -> dict[str, Any]:
         return {
-            "schema": "agentflow.openai_routing_narrow_canary_review_input.v1",
+            "schema": "tokenclaw.openai_routing_narrow_canary_review_input.v1",
             "source_report_schema": source_schema,
             "openai_routing_promotion_decision": stats.get("openai_routing_promotion_decision")
             if isinstance(stats.get("openai_routing_promotion_decision"), dict)

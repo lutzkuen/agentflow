@@ -14,11 +14,11 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import stable_json, utc_now
 
 
-SCHEMA = "agentflow.local_routing_pathway_outcome_feedback.v1"
-ROW_SCHEMA = "agentflow.local_routing_pathway_outcome_feedback_row.v1"
-PRIVACY_SCHEMA = "agentflow.local_routing_pathway_outcome_feedback_privacy.v1"
-SEMANTIC_QUALITY_SCHEMA = "agentflow.local_routing_pathway_semantic_quality_outcome.v1"
-LIFECYCLE_SCHEMA = "agentflow.local_routing_pathway_lifecycle_counts.v1"
+SCHEMA = "tokenclaw.local_routing_pathway_outcome_feedback.v1"
+ROW_SCHEMA = "tokenclaw.local_routing_pathway_outcome_feedback_row.v1"
+PRIVACY_SCHEMA = "tokenclaw.local_routing_pathway_outcome_feedback_privacy.v1"
+SEMANTIC_QUALITY_SCHEMA = "tokenclaw.local_routing_pathway_semantic_quality_outcome.v1"
+LIFECYCLE_SCHEMA = "tokenclaw.local_routing_pathway_lifecycle_counts.v1"
 DEFAULT_STALE_AFTER_HOURS = 72.0
 DEFAULT_MIN_SEMANTIC_COMPARISONS = 20
 DEFAULT_MIN_SEMANTIC_PASS_RATE = 0.90
@@ -97,7 +97,7 @@ def _parse_utc(value: Any) -> datetime | None:
 
 
 def _candidate_rows(source: dict[str, Any], *, stale_after_hours: float) -> list[dict[str, Any]]:
-    if source.get("schema") == "agentflow.managed_routing_pathway_shadow_candidates.v1":
+    if source.get("schema") == "tokenclaw.managed_routing_pathway_shadow_candidates.v1":
         rows: list[dict[str, Any]] = []
         for key in ("accepted", "blocked", "stale", "omitted"):
             values = source.get(key)
@@ -496,7 +496,7 @@ def build_local_routing_pathway_outcome_feedback(
     }
     violations = managed_egress_violations(report)
     report["egress_guard"] = {
-        "schema": "agentflow.managed_egress_guard.v1",
+        "schema": "tokenclaw.managed_egress_guard.v1",
         "status": "passed" if not violations else "blocked",
         "blocked": bool(violations),
         "violation_count": len(violations),

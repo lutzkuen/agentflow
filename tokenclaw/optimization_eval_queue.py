@@ -11,9 +11,9 @@ from tokenclaw.optimization_eval_plan import build_optimization_eval_plan
 from tokenclaw.optimization_shadow_eval import run_optimization_shadow_eval
 from tokenclaw.store import stable_json, utc_now
 
-SCHEMA = "agentflow.optimization_eval_queue_run.v1"
-PROMOTION_BACKFILL_SCHEMA = "agentflow.optimization_promotion_eval_backfill.v1"
-PROMOTION_RECOMMENDATION_QUEUE_SCHEMA = "agentflow.promotion_recommendation_eval_queue.v1"
+SCHEMA = "tokenclaw.optimization_eval_queue_run.v1"
+PROMOTION_BACKFILL_SCHEMA = "tokenclaw.optimization_promotion_eval_backfill.v1"
+PROMOTION_RECOMMENDATION_QUEUE_SCHEMA = "tokenclaw.promotion_recommendation_eval_queue.v1"
 
 _LOCAL_REPLAY_LEVELS = {
     "local-exact-response",
@@ -210,7 +210,7 @@ def _promotion_eval_task(candidate: dict[str, Any], *, backfill_reason_codes: li
     eval_evidence = candidate.get("eval_evidence") if isinstance(candidate.get("eval_evidence"), dict) else {}
     thresholds = candidate.get("thresholds") if isinstance(candidate.get("thresholds"), dict) else {}
     return {
-        "schema": "agentflow.optimization_promotion_eval_task.v1",
+        "schema": "tokenclaw.optimization_promotion_eval_task.v1",
         "candidate_id": str(candidate.get("candidate_id") or "unknown"),
         "optimization_family": str(candidate.get("optimization_family") or "unknown"),
         "action_family": str(candidate.get("action_family") or "unknown"),
@@ -328,7 +328,7 @@ def _promotion_recommendation_eval_task(candidate: dict[str, Any]) -> dict[str, 
     evidence = candidate.get("evidence_summary") if isinstance(candidate.get("evidence_summary"), dict) else {}
     action_family = _safe_text(candidate.get("local_action_family"))
     return {
-        "schema": "agentflow.promotion_recommendation_eval_task.v1",
+        "schema": "tokenclaw.promotion_recommendation_eval_task.v1",
         "candidate_id": _recommendation_candidate_id(candidate),
         "recommendation_id": _safe_text(candidate.get("recommendation_id"), default="unknown-recommendation"),
         "source": "promotion-blocker-recommendation",
@@ -402,7 +402,7 @@ def queue_promotion_recommendation_eval_tasks(
             for reason in noop_reasons:
                 noop_counts[reason] += 1
             noops.append({
-                "schema": "agentflow.promotion_recommendation_eval_noop.v1",
+                "schema": "tokenclaw.promotion_recommendation_eval_noop.v1",
                 "id": result_id,
                 "recommendation_id": recommendation_id,
                 "candidate_id": task["candidate_id"],
@@ -419,7 +419,7 @@ def queue_promotion_recommendation_eval_tasks(
             skipped.append({"recommendation_id": recommendation_id, "reason": "limit-exceeded", "local_action_family": action_family})
             continue
         queued.append({
-            "schema": "agentflow.promotion_recommendation_eval_queue_row.v1",
+            "schema": "tokenclaw.promotion_recommendation_eval_queue_row.v1",
             "id": result_id,
             "created_at": generated_at,
             "status_class": "queued",
@@ -621,7 +621,7 @@ def backfill_promotion_eval_tasks(
         for task in tasks:
             reason_codes = sorted(set(["eval-queued", *task["backfill_reason_codes"]]))
             result = {
-                "schema": "agentflow.optimization_promotion_eval_queue_row.v1",
+                "schema": "tokenclaw.optimization_promotion_eval_queue_row.v1",
                 "run_id": run_id,
                 "created_at": generated_at,
                 "status_class": "queued",

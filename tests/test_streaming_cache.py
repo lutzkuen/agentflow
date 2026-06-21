@@ -189,21 +189,21 @@ class FakeEmptyErrorClient:
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
 class StreamingCacheTest(unittest.TestCase):
     ENV_KEYS = (
-        "AGENTFLOW_CACHE",
-        "AGENTFLOW_CACHE_TOOL_CALLS",
-        "AGENTFLOW_SEMANTIC_CACHE",
-        "AGENTFLOW_SEMANTIC_THRESHOLD",
-        "AGENTFLOW_CACHE_RULES",
-        "AGENTFLOW_CACHE_CANARY_POLICY",
-        "AGENTFLOW_CACHE_FILE_WATCH",
-        "AGENTFLOW_CACHE_WATCH_ROOT",
-        "AGENTFLOW_CACHE_WATCH_MAX_PATHS",
-        "AGENTFLOW_CACHE_CAPTURE_CANDIDATES",
-        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP",
-        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
-        "AGENTFLOW_POLICY_EVENTS",
-        "AGENTFLOW_POLICY_EVENTS_LOG",
-        "AGENTFLOW_RECOMMENDATION_ENABLED",
+        "TOKENCLAW_CACHE",
+        "TOKENCLAW_CACHE_TOOL_CALLS",
+        "TOKENCLAW_SEMANTIC_CACHE",
+        "TOKENCLAW_SEMANTIC_THRESHOLD",
+        "TOKENCLAW_CACHE_RULES",
+        "TOKENCLAW_CACHE_CANARY_POLICY",
+        "TOKENCLAW_CACHE_FILE_WATCH",
+        "TOKENCLAW_CACHE_WATCH_ROOT",
+        "TOKENCLAW_CACHE_WATCH_MAX_PATHS",
+        "TOKENCLAW_CACHE_CAPTURE_CANDIDATES",
+        "TOKENCLAW_PATTERN_CANARY_SAFETY_STOP",
+        "TOKENCLAW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
+        "TOKENCLAW_POLICY_EVENTS",
+        "TOKENCLAW_POLICY_EVENTS_LOG",
+        "TOKENCLAW_RECOMMENDATION_ENABLED",
     )
 
     def setUp(self):
@@ -380,7 +380,7 @@ class StreamingCacheTest(unittest.TestCase):
             "candidate_id": "streaming-static-candidate",
             "conditions": conditions,
             "rollout": {
-                "schema": "agentflow.pattern_policy_rollout.v1",
+                "schema": "tokenclaw.pattern_policy_rollout.v1",
                 "recommendation_mode": "canary-only",
                 "canary_enabled": True,
                 "canary_fraction": canary_fraction,
@@ -809,8 +809,8 @@ class StreamingCacheTest(unittest.TestCase):
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
-        self.assertEqual(first.headers["x-agentflow-cache"], "skip-streaming")
-        self.assertEqual(second.headers["x-agentflow-cache"], "skip-streaming")
+        self.assertEqual(first.headers["x-tokenclaw-cache"], "skip-streaming")
+        self.assertEqual(second.headers["x-tokenclaw-cache"], "skip-streaming")
         self.assertEqual(first_body, b"".join(STREAM_FRAMES))
         self.assertEqual(second_body, first_body)
         self.assertEqual(FakeAsyncClient.calls, 2)
@@ -845,8 +845,8 @@ class StreamingCacheTest(unittest.TestCase):
 
             self.assertEqual(first.status_code, 200)
             self.assertEqual(second.status_code, 200)
-            self.assertEqual(first.headers["x-agentflow-cache"], "miss")
-            self.assertEqual(second.headers["x-agentflow-cache"], "hit")
+            self.assertEqual(first.headers["x-tokenclaw-cache"], "miss")
+            self.assertEqual(second.headers["x-tokenclaw-cache"], "hit")
             self.assertEqual(first_body, b"".join(STREAM_FRAMES))
             self.assertEqual(second_body, first_body)
             self.assertEqual(FakeAsyncClient.calls, 1)
@@ -899,7 +899,7 @@ class StreamingCacheTest(unittest.TestCase):
                 client = TestClient(server.app)
                 for _ in range(6):
                     with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as response:
-                        cache_headers.append(response.headers["x-agentflow-cache"])
+                        cache_headers.append(response.headers["x-tokenclaw-cache"])
                         bodies.append(b"".join(response.iter_bytes()))
 
             self.assertEqual(cache_headers, [
@@ -962,8 +962,8 @@ class StreamingCacheTest(unittest.TestCase):
                 with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as second:
                     second_body = b"".join(second.iter_bytes())
 
-            self.assertEqual(first.headers["x-agentflow-cache"], "skip-streaming")
-            self.assertEqual(second.headers["x-agentflow-cache"], "skip-streaming")
+            self.assertEqual(first.headers["x-tokenclaw-cache"], "skip-streaming")
+            self.assertEqual(second.headers["x-tokenclaw-cache"], "skip-streaming")
             self.assertEqual(first_body, b"".join(STREAM_FRAMES))
             self.assertEqual(second_body, first_body)
             self.assertEqual(FakeAsyncClient.calls, 2)
@@ -997,7 +997,7 @@ class StreamingCacheTest(unittest.TestCase):
                 with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as response:
                     body = b"".join(response.iter_bytes())
 
-            self.assertEqual(response.headers["x-agentflow-cache"], "skip-streaming")
+            self.assertEqual(response.headers["x-tokenclaw-cache"], "skip-streaming")
             self.assertEqual(body, b"".join(STREAM_FRAMES))
             self.assertEqual(FakeAsyncClient.calls, 1)
             [row] = server.store.conn.execute("select cache_hit, cache_json from calls").fetchall()
@@ -1034,7 +1034,7 @@ class StreamingCacheTest(unittest.TestCase):
                 with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as response:
                     body = b"".join(response.iter_bytes())
 
-            self.assertEqual(response.headers["x-agentflow-cache"], "skip-streaming")
+            self.assertEqual(response.headers["x-tokenclaw-cache"], "skip-streaming")
             self.assertEqual(body, b"".join(STREAM_FRAMES))
             self.assertEqual(FakeAsyncClient.calls, 1)
             [row] = server.store.conn.execute("select cache_hit, cache_json from calls").fetchall()
@@ -1109,7 +1109,7 @@ class StreamingCacheTest(unittest.TestCase):
                         body = b"".join(response.iter_bytes())
 
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.headers["x-agentflow-cache"], "hit")
+                self.assertEqual(response.headers["x-tokenclaw-cache"], "hit")
                 self.assertEqual(body, b"".join(STREAM_FRAMES))
                 self.assertEqual(FakeAsyncClient.calls, 0)
                 [row] = server.store.conn.execute(
@@ -1183,7 +1183,7 @@ class StreamingCacheTest(unittest.TestCase):
                         body = b"".join(response.iter_bytes())
 
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.headers["x-agentflow-cache"], "skip-streaming")
+                self.assertEqual(response.headers["x-tokenclaw-cache"], "skip-streaming")
                 self.assertEqual(body, b"".join(STREAM_FRAMES))
                 self.assertEqual(FakeAsyncClient.calls, 1)
                 [row] = server.store.conn.execute("select cache_hit, cache_json from calls").fetchall()
@@ -1266,7 +1266,7 @@ class StreamingCacheTest(unittest.TestCase):
                         body = b"".join(response.iter_bytes())
 
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.headers["x-agentflow-cache"], "skip-streaming")
+                self.assertEqual(response.headers["x-tokenclaw-cache"], "skip-streaming")
                 self.assertEqual(body, b"".join(STREAM_FRAMES))
                 self.assertEqual(FakeAsyncClient.calls, 1)
                 [row] = server.store.conn.execute("select cache_hit, cache_json from calls").fetchall()
@@ -1308,8 +1308,8 @@ class StreamingCacheTest(unittest.TestCase):
                 with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as second:
                     second_body = b"".join(second.iter_bytes())
 
-            self.assertEqual(first.headers["x-agentflow-cache"], "skip-streaming")
-            self.assertEqual(second.headers["x-agentflow-cache"], "skip-streaming")
+            self.assertEqual(first.headers["x-tokenclaw-cache"], "skip-streaming")
+            self.assertEqual(second.headers["x-tokenclaw-cache"], "skip-streaming")
             self.assertEqual(first_body, b"".join(STREAM_FRAMES))
             self.assertEqual(second_body, first_body)
             self.assertEqual(FakeAsyncClient.calls, 2)
@@ -1345,7 +1345,7 @@ class StreamingCacheTest(unittest.TestCase):
                     str(seed_body.get("model")),
                     len(json.dumps(seed_body)),
                     {
-                        "agentflow_cache_type": "sse-stream",
+                        "tokenclaw_cache_type": "sse-stream",
                         "version": 1,
                         "provider": "anthropic",
                         "frames_b64": [base64.b64encode(b"cached garbage\n\n").decode("ascii")],
@@ -1365,7 +1365,7 @@ class StreamingCacheTest(unittest.TestCase):
                     body = b"".join(response.iter_bytes())
 
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.headers["x-agentflow-cache"], "miss")
+            self.assertEqual(response.headers["x-tokenclaw-cache"], "miss")
             self.assertEqual(body, b"".join(STREAM_FRAMES))
             self.assertEqual(FakeAsyncClient.calls, 1)
 
@@ -1414,9 +1414,9 @@ class StreamingCacheTest(unittest.TestCase):
                     with client.stream("POST", "/v1/messages", json=request_body) as third:
                         third_body = b"".join(third.iter_bytes())
 
-                self.assertEqual(first.headers["x-agentflow-cache"], "skip-streaming")
-                self.assertEqual(second.headers["x-agentflow-cache"], "skip-streaming")
-                self.assertEqual(third.headers["x-agentflow-cache"], "skip-streaming")
+                self.assertEqual(first.headers["x-tokenclaw-cache"], "skip-streaming")
+                self.assertEqual(second.headers["x-tokenclaw-cache"], "skip-streaming")
+                self.assertEqual(third.headers["x-tokenclaw-cache"], "skip-streaming")
                 self.assertEqual(first_body, b"".join(STREAM_FRAMES))
                 self.assertEqual(second_body, first_body)
                 self.assertEqual(third_body, first_body)

@@ -28,14 +28,14 @@ NOW = datetime(2026, 6, 19, 5, 30, tzinfo=timezone.utc)
 
 def _routing_pathway_source():
     return {
-        "schema": "agentflow.policy_decision.v1",
+        "schema": "tokenclaw.policy_decision.v1",
         "generated_at": "2026-06-20T08:00:00+00:00",
         "routing_pathway_matrix": {
-            "schema": "agentflow.routing_pathway_matrix.v1",
+            "schema": "tokenclaw.routing_pathway_matrix.v1",
             "generated_at": "2026-06-20T08:00:00+00:00",
             "pathways": [
                 {
-                    "schema": "agentflow.routing_pathway_matrix_entry.v1",
+                    "schema": "tokenclaw.routing_pathway_matrix_entry.v1",
                     "rank": 1,
                     "pathway_id": "pathway-openai-tool-light",
                     "source_surface": "openai_responses",
@@ -106,16 +106,16 @@ def _log_openai_pathway_canary_call(store, *, cohort: str, created_at: str) -> N
 
 def _executor_fixture_plan():
     ledger = {
-        "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+        "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
         "status": "tracked",
         "entries": [
             {
-                "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                 "rank": 1,
                 "fingerprint": "activation:crunch",
                 "lever": "crunch",
                 "local_action_family": "crunch",
-                "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
                 "current_status": "full-rollout",
                 "state": "full-rollout-active",
                 "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
@@ -138,12 +138,12 @@ def _executor_fixture_plan():
                 },
             },
             {
-                "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                 "rank": 2,
                 "fingerprint": "activation:openai-routing",
                 "lever": "routing",
                 "local_action_family": "routing",
-                "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                 "current_status": "keep-blocked",
                 "state": "keep-blocked",
                 "next_action": "review-openai-routing-canary-blockers",
@@ -162,12 +162,12 @@ def _executor_fixture_plan():
                 "request_id": "req-routing-secret",
             },
             {
-                "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                 "rank": 3,
                 "fingerprint": "activation:anthropic-safety-stop",
                 "lever": "activation-feedback",
                 "local_action_family": "routing",
-                "evidence_schema": "agentflow.activation_safety_stop_burndown.v1",
+                "evidence_schema": "tokenclaw.activation_safety_stop_burndown.v1",
                 "current_status": "keep-blocked",
                 "state": "keep-blocked",
                 "next_action": "keep-anthropic-routing-blocked-until-safety-stop-burndown",
@@ -187,12 +187,12 @@ def _executor_fixture_plan():
                 "session_id": "session-anthropic-secret",
             },
             {
-                "schema": "agentflow.evidence_to_activation_next_action_ledger_entry.v1",
+                "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
                 "rank": 4,
                 "fingerprint": "activation:tool-cache",
                 "lever": "cache",
                 "local_action_family": "cache",
-                "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "evidence_schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                 "current_status": "blocked",
                 "state": "missing-evidence",
                 "next_action": "collect-file-invalidation-evidence",
@@ -217,7 +217,7 @@ def _executor_fixture_plan():
         "privacy": {"metadata_only": True, "aggregate_only": True},
     }
     return {
-        "schema": "agentflow.orchestrator_research_plan.v1",
+        "schema": "tokenclaw.orchestrator_research_plan.v1",
         "generated_at": NOW.isoformat(),
         "evidence": {"stats_summary": {"evidence_to_activation_next_action_ledger": ledger}},
     }
@@ -225,7 +225,7 @@ def _executor_fixture_plan():
 
 def _full_rollout_gate(state="keep-active", next_action="keep-active", reason_codes=None):
     return {
-        "schema": "agentflow.full_rollout_crunch_keep_active_regression_gate.v1",
+        "schema": "tokenclaw.full_rollout_crunch_keep_active_regression_gate.v1",
         "state": state,
         "gate_passed": state == "keep-active",
         "deterministic_next_action": next_action,
@@ -234,7 +234,7 @@ def _full_rollout_gate(state="keep-active", next_action="keep-active", reason_co
         "target_local_policy_section": "crunch.rules",
         "target_local_rule_file": "crunch_rules.yaml",
         "regression_counters": {
-            "schema": "agentflow.full_rollout_crunch_keep_active_regression_counters.v1",
+            "schema": "tokenclaw.full_rollout_crunch_keep_active_regression_counters.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "applied_count": 107,
@@ -263,13 +263,13 @@ def _full_rollout_gate(state="keep-active", next_action="keep-active", reason_co
 def _full_rollout_queue_entry(*, gate=None, outcome="keep-active"):
     gate = gate or _full_rollout_gate()
     return {
-        "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+        "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
         "rank": 1,
         "ledger_rank": 1,
         "fingerprint": "activation:f5f6eae5f0a0081a",
         "lever": "crunch",
         "local_action_family": "crunch",
-        "evidence_schema": "agentflow.crunch_savings_signal.v1",
+        "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
         "current_status": "full-rollout",
         "state": "full-rollout-active",
         "next_action": "measure-full-rollout-repeated-context-crunch-outcomes",
@@ -298,7 +298,7 @@ def _full_rollout_queue_entry(*, gate=None, outcome="keep-active"):
         "full_rollout_successor_next_action": "keep-current-rule-only" if outcome == "keep-active" else gate["next_action"],
         "full_rollout_successor_no_op_reason": "no-unsuppressed-post-full-rollout-crunch-cohort",
         "full_rollout_activation_outcome": {
-            "schema": "agentflow.full_rollout_crunch_activation_outcome.v1",
+            "schema": "tokenclaw.full_rollout_crunch_activation_outcome.v1",
             "durable_outcome_ledger_entry": True,
             "ledger_fingerprint": "activation:f5f6eae5f0a0081a",
             "ledger_rank": 1,
@@ -331,12 +331,12 @@ def _full_rollout_queue_entry(*, gate=None, outcome="keep-active"):
 
 def _full_rollout_queue_plan(entry):
     return {
-        "schema": "agentflow.local_activation_next_action_queue.v1",
+        "schema": "tokenclaw.local_activation_next_action_queue.v1",
         "status": "ranked",
         "entries": [entry],
         "successor_actions": [
             {
-                "schema": "agentflow.local_activation_successor_action.v1",
+                "schema": "tokenclaw.local_activation_successor_action.v1",
                 "rank": 1,
                 "fingerprint": "successor:stale-precomputed-row",
                 "source_fingerprint": entry["fingerprint"],
@@ -357,13 +357,13 @@ def _executor_handoff_fixture_plan():
     plan["entries"].extend(
         [
             {
-                "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
                 "rank": 2,
                 "ledger_rank": 2,
                 "fingerprint": "activation:openai-routing-blocked",
                 "lever": "routing",
                 "local_action_family": "routing",
-                "evidence_schema": "agentflow.pass_through_routing_activation_candidates.v1",
+                "evidence_schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
                 "current_status": "keep-blocked",
                 "state": "keep-blocked",
                 "successor_status": "keep-blocked",
@@ -381,13 +381,13 @@ def _executor_handoff_fixture_plan():
                 "request_id": "req-openai-routing-secret",
             },
             {
-                "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
                 "rank": 3,
                 "ledger_rank": 3,
                 "fingerprint": "activation:routing-blocked",
                 "lever": "routing",
                 "local_action_family": "routing",
-                "evidence_schema": "agentflow.activation_safety_stop_burndown.v1",
+                "evidence_schema": "tokenclaw.activation_safety_stop_burndown.v1",
                 "current_status": "keep-blocked",
                 "state": "keep-blocked",
                 "successor_status": "keep-blocked",
@@ -406,13 +406,13 @@ def _executor_handoff_fixture_plan():
                 "session_id": "session-routing-secret",
             },
             {
-                "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
                 "rank": 4,
                 "ledger_rank": 4,
                 "fingerprint": "activation:cache-review",
                 "lever": "cache",
                 "local_action_family": "cache",
-                "evidence_schema": "agentflow.request_shape_cache_replay_policy_decision.v1",
+                "evidence_schema": "tokenclaw.request_shape_cache_replay_policy_decision.v1",
                 "current_status": "review",
                 "state": "review",
                 "successor_status": "review-only",
@@ -439,7 +439,7 @@ def _executor_handoff_fixture_plan():
 
 def _preview_required_successor_queue_plan():
     gate = {
-        "schema": "agentflow.preview_verified_activation_successor_gate.v1",
+        "schema": "tokenclaw.preview_verified_activation_successor_gate.v1",
         "required": True,
         "status": "no-data-preview-health",
         "verified": False,
@@ -452,7 +452,7 @@ def _preview_required_successor_queue_plan():
         "privacy": {"metadata_only": True, "aggregate_only": True, "review_only": True},
     }
     common = {
-        "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+        "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
         "current_status": "keep-blocked",
         "state": "keep-blocked",
         "successor_status": "keep-blocked",
@@ -463,7 +463,7 @@ def _preview_required_successor_queue_plan():
         "privacy": {"metadata_only": True, "aggregate_only": True},
     }
     return {
-        "schema": "agentflow.local_activation_next_action_queue.v1",
+        "schema": "tokenclaw.local_activation_next_action_queue.v1",
         "status": "ranked",
         "entries": [
             {
@@ -472,7 +472,7 @@ def _preview_required_successor_queue_plan():
                 "fingerprint": "activation:preview-routing",
                 "lever": "routing",
                 "local_action_family": "routing",
-                "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                 "blocker_codes": ["semantic-quality-regression-observed"],
                 "source_surface": "openai_responses",
                 "endpoint": "responses",
@@ -486,7 +486,7 @@ def _preview_required_successor_queue_plan():
                 "fingerprint": "activation:preview-cache",
                 "lever": "cache",
                 "local_action_family": "cache",
-                "evidence_schema": "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "evidence_schema": "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                 "blocker_codes": ["invalidation-evidence-missing"],
                 "source_surface": "openai_responses",
                 "endpoint": "responses",
@@ -498,7 +498,7 @@ def _preview_required_successor_queue_plan():
                 "fingerprint": "activation:preview-feedback",
                 "lever": "activation-feedback",
                 "local_action_family": "activation-feedback",
-                "evidence_schema": "agentflow.orchestrator_research_log_diagnostics.v1",
+                "evidence_schema": "tokenclaw.orchestrator_research_log_diagnostics.v1",
                 "blocker_codes": ["safety-stop"],
                 "diagnostic_class": "safety-stop",
                 "diagnostic_reason": "safety-stop",
@@ -512,7 +512,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
     def test_executor_plan_selects_one_safe_review_action(self):
         result = build_local_activation_executor_plan(_executor_fixture_plan(), now=NOW)
 
-        self.assertEqual(result["schema"], "agentflow.local_activation_executor_plan.v1")
+        self.assertEqual(result["schema"], "tokenclaw.local_activation_executor_plan.v1")
         self.assertEqual(result["status"], "ranked")
         self.assertEqual(result["summary"]["selected_action_count"], 1)
         self.assertEqual(result["summary"]["selected_executor_action_class"], "review-only")
@@ -581,7 +581,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.local_activation_executor_plan.v1")
+        self.assertEqual(result["schema"], "tokenclaw.local_activation_executor_plan.v1")
         self.assertEqual(result["summary"]["selected_action_count"], 1)
         self.assertEqual(result["selected_action"]["executor_next_action"], "review-openai-routing-canary-blockers")
 
@@ -591,7 +591,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
             now=NOW,
         )
 
-        self.assertEqual(result["schema"], "agentflow.local_activation_managed_handoff.v1")
+        self.assertEqual(result["schema"], "tokenclaw.local_activation_managed_handoff.v1")
         self.assertEqual(result["status"], "exported")
         self.assertEqual(result["summary"]["handoff_row_count"], 4)
         self.assertFalse(result["provider_calls_made"])
@@ -668,14 +668,14 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.local_activation_managed_handoff.v1")
+        self.assertEqual(result["schema"], "tokenclaw.local_activation_managed_handoff.v1")
         self.assertEqual(result["summary"]["handoff_row_count"], 4)
         self.assertEqual(result["egress_guard"]["status"], "passed")
 
     def test_managed_activation_preview_request_is_feature_only(self):
         result = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
 
-        self.assertEqual(result["schema"], "agentflow.managed_activation_preview_request.v1")
+        self.assertEqual(result["schema"], "tokenclaw.managed_activation_preview_request.v1")
         self.assertEqual(result["summary"]["handoff_row_count"], 4)
         self.assertIn("activation-feedback", result["supported_local_action_families"])
         self.assertFalse(result["provider_calls_made"])
@@ -689,7 +689,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
     def test_managed_activation_preview_request_marks_preview_required_successors(self):
         result = build_managed_activation_preview_request(_preview_required_successor_queue_plan(), now=NOW)
 
-        self.assertEqual(result["schema"], "agentflow.managed_activation_preview_request.v1")
+        self.assertEqual(result["schema"], "tokenclaw.managed_activation_preview_request.v1")
         self.assertEqual(result["summary"]["handoff_row_count"], 3)
         self.assertEqual(result["summary"]["preview_required_row_count"], 3)
         required_counts = {
@@ -723,7 +723,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         first_ref = request_payload["rows"][0]["handoff_ref"]
         second_ref = request_payload["rows"][1]["handoff_ref"]
         response_payload = {
-            "schema": "agentflow.managed_activation_preview_response.v1",
+            "schema": "tokenclaw.managed_activation_preview_response.v1",
             "decisions": [
                 {
                     "handoff_ref": first_ref,
@@ -748,7 +748,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
             fetch={"status": "ok", "status_code": 200, "managed_server_calls_made": True},
         )
 
-        self.assertEqual(result["schema"], "agentflow.managed_activation_preview_result.v1")
+        self.assertEqual(result["schema"], "tokenclaw.managed_activation_preview_result.v1")
         self.assertEqual(result["status"], "previewed")
         self.assertEqual(result["coverage"]["handoff_row_count"], 4)
         self.assertEqual(result["coverage"]["preview_decision_count"], 2)
@@ -774,7 +774,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         request_payload = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
         rows = request_payload["rows"]
         response_payload = {
-            "schema": "agentflow.managed_activation_preview_response.v1",
+            "schema": "tokenclaw.managed_activation_preview_response.v1",
             "decisions": [
                 {
                     "handoff_ref": rows[0]["handoff_ref"],
@@ -806,7 +806,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         )
 
         with TemporaryDirectory() as tmpdir:
-            store = Store(str(Path(tmpdir) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmpdir) / "tokenclaw.sqlite3"))
             try:
                 first = persist_managed_activation_preview_outcomes(store, preview_result, now=NOW)
                 second = persist_managed_activation_preview_outcomes(store, preview_result, now=NOW + timedelta(minutes=5))
@@ -819,7 +819,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(first["schema"], "agentflow.managed_activation_preview_outcomes.v1")
+        self.assertEqual(first["schema"], "tokenclaw.managed_activation_preview_outcomes.v1")
         self.assertEqual(first["import"]["imported_count"], 4)
         self.assertEqual(first["import"]["created_count"], 4)
         self.assertEqual(first["summary"]["stored_preview_outcome_count"], 4)
@@ -854,7 +854,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         request_payload = build_managed_activation_preview_request(_executor_handoff_fixture_plan(), now=NOW)
         rows = request_payload["rows"]
         response_payload = {
-            "schema": "agentflow.managed_activation_preview_response.v1",
+            "schema": "tokenclaw.managed_activation_preview_response.v1",
             "status": "previewed",
             "decisions": [
                 {
@@ -902,7 +902,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         )
 
         with TemporaryDirectory() as tmpdir:
-            store = Store(str(Path(tmpdir) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmpdir) / "tokenclaw.sqlite3"))
             try:
                 report = persist_managed_activation_preview_outcomes(store, preview_result, now=NOW)
             finally:
@@ -925,10 +925,10 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
     def test_managed_activation_preview_outcomes_preserve_cache_rollback_guidance(self):
         preview_result = {
-            "schema": "agentflow.managed_activation_preview_result.v1",
+            "schema": "tokenclaw.managed_activation_preview_result.v1",
             "generated_at": NOW.isoformat(),
             "preview_request": {
-                "schema": "agentflow.managed_activation_preview_request.v1",
+                "schema": "tokenclaw.managed_activation_preview_request.v1",
                 "generated_at": NOW.isoformat(),
                 "rows": [
                     {
@@ -936,7 +936,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
                         "source_activation_ref": "activation-ref:cache-rollback",
                         "source_successor_ref": "successor-ref:cache-rollback",
                         "local_action_family": "cache",
-                        "evidence_schema": "agentflow.request_shape_cache_replay_evidence.v1",
+                        "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
                         "current_status": "blocked",
                         "executor_action_class": "keep-blocked",
                         "executor_next_action": "rollback-cache-replay-rule",
@@ -945,7 +945,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
                 ],
             },
             "preview": {
-                "schema": "agentflow.managed_activation_preview_response.v1",
+                "schema": "tokenclaw.managed_activation_preview_response.v1",
                 "decisions": [
                     {
                         "handoff_ref": "handoff:cache-rollback",
@@ -971,7 +971,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmpdir:
-            store = Store(str(Path(tmpdir) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmpdir) / "tokenclaw.sqlite3"))
             try:
                 report = persist_managed_activation_preview_outcomes(store, preview_result, now=NOW)
             finally:
@@ -998,10 +998,10 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
     def test_managed_activation_preview_outcomes_preserve_crunch_preview_fields(self):
         preview_result = {
-            "schema": "agentflow.managed_activation_preview_result.v1",
+            "schema": "tokenclaw.managed_activation_preview_result.v1",
             "generated_at": NOW.isoformat(),
             "preview_request": {
-                "schema": "agentflow.managed_activation_preview_request.v1",
+                "schema": "tokenclaw.managed_activation_preview_request.v1",
                 "generated_at": NOW.isoformat(),
                 "rows": [
                     {
@@ -1009,7 +1009,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
                         "source_activation_ref": "activation-ref:crunch-preview",
                         "source_successor_ref": "successor-ref:crunch-preview",
                         "local_action_family": "crunch",
-                        "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                        "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
                         "current_status": "ready",
                         "executor_action_class": "review-only",
                         "executor_next_action": "rank-repeated-context-crunch-dry-run",
@@ -1021,7 +1021,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
                 ],
             },
             "preview": {
-                "schema": "agentflow.managed_activation_preview_response.v1",
+                "schema": "tokenclaw.managed_activation_preview_response.v1",
                 "decisions": [
                     {
                         "handoff_ref": "handoff:crunch-preview",
@@ -1064,7 +1064,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmpdir:
-            store = Store(str(Path(tmpdir) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmpdir) / "tokenclaw.sqlite3"))
             try:
                 report = persist_managed_activation_preview_outcomes(store, preview_result, now=NOW)
             finally:
@@ -1093,7 +1093,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         preview_result = build_managed_activation_preview_result(
             request_payload,
             response_payload={
-                "schema": "agentflow.managed_activation_preview_response.v1",
+                "schema": "tokenclaw.managed_activation_preview_response.v1",
                 "decisions": [
                     {
                         "handoff_ref": request_payload["rows"][0]["handoff_ref"],
@@ -1107,7 +1107,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         )
 
         with TemporaryDirectory() as tmpdir:
-            db_path = str(Path(tmpdir) / "agentflow.sqlite3")
+            db_path = str(Path(tmpdir) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 persist_managed_activation_preview_outcomes(store, preview_result, now=NOW)
@@ -1119,7 +1119,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
-        self.assertEqual(payload["schema"], "agentflow.managed_activation_preview_outcomes.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.managed_activation_preview_outcomes.v1")
         self.assertEqual(payload["summary"]["stored_preview_outcome_count"], 4)
         self.assertEqual(payload["summary"]["missing_preview_decision_count"], 3)
         self.assertFalse(payload["summary"]["policy_files_written"])
@@ -1136,7 +1136,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.managed_activation_preview_result.v1")
+        self.assertEqual(result["schema"], "tokenclaw.managed_activation_preview_result.v1")
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["fetch"]["reason"], "managed-preview-url-not-configured")
         self.assertFalse(result["coverage"]["managed_server_calls_made"])
@@ -1155,7 +1155,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
     def test_managed_activation_preview_cli_persists_no_data_health_without_url(self):
         with TemporaryDirectory() as tmpdir:
             plan_path = Path(tmpdir) / "plan.json"
-            db_path = Path(tmpdir) / "agentflow.sqlite3"
+            db_path = Path(tmpdir) / "tokenclaw.sqlite3"
             plan_path.write_text(json.dumps(_executor_handoff_fixture_plan()), encoding="utf-8")
             stdout = io.StringIO()
 
@@ -1175,7 +1175,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         stored = result["stored_preview_outcomes"]
         self.assertEqual(code, 0)
         self.assertEqual(result["status"], "skipped")
-        self.assertEqual(stored["schema"], "agentflow.managed_activation_preview_outcomes.v1")
+        self.assertEqual(stored["schema"], "tokenclaw.managed_activation_preview_outcomes.v1")
         self.assertEqual(stored["import"]["imported_count"], 4)
         self.assertEqual(stored["summary"]["stored_preview_outcome_count"], 4)
         self.assertEqual(stored["summary"]["no_data_preview_health_count"], 4)
@@ -1206,7 +1206,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
 
     def test_unavailable_preview_refresh_persists_successor_queue_health_rows(self):
         with TemporaryDirectory() as tmpdir:
-            store = Store(str(Path(tmpdir) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmpdir) / "tokenclaw.sqlite3"))
             try:
                 first = persist_unavailable_managed_activation_preview_outcomes(
                     store,
@@ -1223,8 +1223,8 @@ class LocalActivationExecutorTest(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(first["schema"], "agentflow.managed_activation_preview_outcomes.v1")
-        self.assertEqual(first["refresh"]["schema"], "agentflow.managed_activation_preview_refresh_status.v1")
+        self.assertEqual(first["schema"], "tokenclaw.managed_activation_preview_outcomes.v1")
+        self.assertEqual(first["refresh"]["schema"], "tokenclaw.managed_activation_preview_refresh_status.v1")
         self.assertEqual(first["refresh"]["status"], "unavailable")
         self.assertEqual(first["refresh"]["reason"], "managed-preview-refresh-not-configured")
         self.assertEqual(first["refresh"]["submitted_row_count"], 3)
@@ -1254,7 +1254,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
     def test_managed_activation_preview_cli_posts_opt_in_payload(self):
         with TemporaryDirectory() as tmpdir:
             plan_path = Path(tmpdir) / "plan.json"
-            db_path = Path(tmpdir) / "agentflow.sqlite3"
+            db_path = Path(tmpdir) / "tokenclaw.sqlite3"
             plan_path.write_text(json.dumps(_executor_handoff_fixture_plan()), encoding="utf-8")
             stdout = io.StringIO()
             response = Mock()
@@ -1264,7 +1264,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
             def response_json():
                 posted = post_mock.call_args.kwargs["json"]
                 return {
-                    "schema": "agentflow.managed_activation_preview_response.v1",
+                    "schema": "tokenclaw.managed_activation_preview_response.v1",
                     "decisions": [
                         {
                             "handoff_ref": posted["rows"][0]["handoff_ref"],
@@ -1296,7 +1296,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         result = json.loads(stdout.getvalue())
         self.assertEqual(post_mock.call_count, 1)
         posted = post_mock.call_args.kwargs["json"]
-        self.assertEqual(posted["schema"], "agentflow.managed_activation_preview_request.v1")
+        self.assertEqual(posted["schema"], "tokenclaw.managed_activation_preview_request.v1")
         self.assertEqual(posted["summary"]["handoff_row_count"], 4)
         self.assertEqual(managed_egress_violations(posted), [])
         self.assertEqual(result["status"], "previewed")
@@ -1317,7 +1317,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             plan_path = Path(tmpdir) / "plan.json"
             pathway_path = Path(tmpdir) / "pathway.json"
-            db_path = Path(tmpdir) / "agentflow.sqlite3"
+            db_path = Path(tmpdir) / "tokenclaw.sqlite3"
             plan_path.write_text(json.dumps(_executor_handoff_fixture_plan()), encoding="utf-8")
             pathway_path.write_text(json.dumps(_routing_pathway_source()), encoding="utf-8")
             store = Store(str(db_path))
@@ -1343,13 +1343,13 @@ class LocalActivationExecutorTest(unittest.TestCase):
                 response.text = "{}"
                 if url.endswith("/v1/managed-routing-pathway-outcomes"):
                     response.json.return_value = {
-                        "schema": "agentflow.managed_routing_pathway_outcomes_stored.v1",
+                        "schema": "tokenclaw.managed_routing_pathway_outcomes_stored.v1",
                         "accepted": True,
                         "accepted_count": len(json["outcomes"]),
                     }
                     return response
                 response.json.return_value = {
-                    "schema": "agentflow.managed_activation_preview_response.v1",
+                    "schema": "tokenclaw.managed_activation_preview_response.v1",
                     "decisions": [
                         {
                             "handoff_ref": json["rows"][0]["handoff_ref"],
@@ -1391,7 +1391,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
             "https://managed.example.test/v1/local-activation-outcome-policy-decision-previews",
         )
         outcome_payload = outcome_call.kwargs["json"]
-        self.assertEqual(outcome_payload["schema"], "agentflow.managed_routing_pathway_outcomes.v1")
+        self.assertEqual(outcome_payload["schema"], "tokenclaw.managed_routing_pathway_outcomes.v1")
         self.assertEqual(outcome_payload["summary"]["outcome_count"], 1)
         self.assertEqual(outcome_payload["summary"]["applied_count"], 1)
         self.assertEqual(outcome_payload["summary"]["holdout_count"], 1)
@@ -1448,7 +1448,7 @@ class LocalActivationExecutorTest(unittest.TestCase):
         duplicate.pop("keep_active_regression_gate")
         duplicate["fingerprint"] = "activation:duplicate-rollup"
         duplicate["lever"] = "request-shape-rollups"
-        duplicate["evidence_schema"] = "agentflow.request_shape_follow_up_candidates.v1"
+        duplicate["evidence_schema"] = "tokenclaw.request_shape_follow_up_candidates.v1"
         plan = _full_rollout_queue_plan(entry)
         plan["entries"].append(duplicate)
 

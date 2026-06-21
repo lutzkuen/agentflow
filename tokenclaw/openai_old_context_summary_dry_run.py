@@ -10,7 +10,7 @@ from tokenclaw.pricing import estimate_cost, pricing_basis
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_old_context_summary_dry_run.v1"
+SCHEMA = "tokenclaw.openai_old_context_summary_dry_run.v1"
 TOKEN_CHARS = 4
 
 DEFAULT_SUMMARY_PROVIDER = "openai"
@@ -96,9 +96,9 @@ def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _summary_provider_configured() -> bool:
-    if _env_bool("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED", False):
+    if _env_bool("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED", False):
         return True
-    return bool(os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"))
+    return bool(os.getenv("TOKENCLAW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"))
 
 
 def _policy(
@@ -107,30 +107,30 @@ def _policy(
     summary_model: str | None = None,
 ) -> dict[str, Any]:
     provider_ready = _summary_provider_configured() if summary_provider_configured is None else bool(summary_provider_configured)
-    canary_fraction = min(1.0, _env_float("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_CANARY_FRACTION", 0.0))
-    holdout_fraction = min(1.0, _env_float("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_HOLDOUT_FRACTION", 1.0))
+    canary_fraction = min(1.0, _env_float("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_CANARY_FRACTION", 0.0))
+    holdout_fraction = min(1.0, _env_float("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_HOLDOUT_FRACTION", 1.0))
     return {
-        "schema": "agentflow.openai_old_context_summary_dry_run_policy.v1",
+        "schema": "tokenclaw.openai_old_context_summary_dry_run_policy.v1",
         "read_only": True,
         "provider_calls_made": False,
-        "summary_provider": os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER") or DEFAULT_SUMMARY_PROVIDER,
+        "summary_provider": os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER") or DEFAULT_SUMMARY_PROVIDER,
         "summary_provider_configured": provider_ready,
-        "summary_model": summary_model or os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MODEL") or DEFAULT_SUMMARY_MODEL,
-        "min_request_chars": _env_int("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS", DEFAULT_MIN_REQUEST_CHARS),
-        "min_source_chars": _env_int("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MIN_SOURCE_CHARS", DEFAULT_MIN_SOURCE_CHARS),
-        "max_source_chars": _env_int("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS", DEFAULT_MAX_SOURCE_CHARS),
-        "keep_recent_items": _env_int("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_KEEP_RECENT_ITEMS", DEFAULT_KEEP_RECENT_ITEMS),
-        "max_summary_chars": _env_int("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS", DEFAULT_MAX_SUMMARY_CHARS),
+        "summary_model": summary_model or os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MODEL") or DEFAULT_SUMMARY_MODEL,
+        "min_request_chars": _env_int("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS", DEFAULT_MIN_REQUEST_CHARS),
+        "min_source_chars": _env_int("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MIN_SOURCE_CHARS", DEFAULT_MIN_SOURCE_CHARS),
+        "max_source_chars": _env_int("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS", DEFAULT_MAX_SOURCE_CHARS),
+        "keep_recent_items": _env_int("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_KEEP_RECENT_ITEMS", DEFAULT_KEEP_RECENT_ITEMS),
+        "max_summary_chars": _env_int("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS", DEFAULT_MAX_SUMMARY_CHARS),
         "summary_compression_ratio": _env_float(
-            "AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_COMPRESSION_RATIO",
+            "TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_COMPRESSION_RATIO",
             DEFAULT_SUMMARY_COMPRESSION_RATIO,
         ),
         "max_summary_cost_usd": _env_float(
-            "AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_COST_USD",
+            "TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_COST_USD",
             DEFAULT_MAX_SUMMARY_COST_USD,
         ),
-        "supported_endpoints": list(_env_csv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENDPOINTS", DEFAULT_SUPPORTED_ENDPOINTS)),
-        "blocked_categories": list(_env_csv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_BLOCKED_CATEGORIES", DEFAULT_BLOCKED_CATEGORIES)),
+        "supported_endpoints": list(_env_csv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_ENDPOINTS", DEFAULT_SUPPORTED_ENDPOINTS)),
+        "blocked_categories": list(_env_csv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_BLOCKED_CATEGORIES", DEFAULT_BLOCKED_CATEGORIES)),
         "canary": {
             "enabled": canary_fraction > 0.0,
             "canary_fraction": canary_fraction,
@@ -337,7 +337,7 @@ def _projection(
         "projected_gross_savings_usd": round(gross, 8),
         "projected_net_savings_usd": round(gross - summary_cost, 8),
         "summary_request_shape": {
-            "schema": "agentflow.openai_old_context_summary_request_shape.v1",
+            "schema": "tokenclaw.openai_old_context_summary_request_shape.v1",
             "provider": policy.get("summary_provider"),
             "model": policy.get("summary_model"),
             "endpoint": endpoint,

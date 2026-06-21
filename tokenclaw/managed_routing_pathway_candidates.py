@@ -10,13 +10,13 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import stable_json, utc_now
 
 
-SCHEMA = "agentflow.managed_routing_pathway_shadow_candidates.v1"
-CANDIDATE_SCHEMA = "agentflow.managed_routing_pathway_shadow_candidate.v1"
-ROW_SCHEMA = "agentflow.managed_routing_pathway_matrix_row_review.v1"
-GROUP_SCHEMA = "agentflow.managed_routing_pathway_shadow_candidate_group.v1"
-PRIVACY_SCHEMA = "agentflow.managed_routing_pathway_shadow_candidates_privacy.v1"
-MATRIX_SCHEMA = "agentflow.routing_pathway_matrix.v1"
-MATRIX_ENTRY_SCHEMA = "agentflow.routing_pathway_matrix_entry.v1"
+SCHEMA = "tokenclaw.managed_routing_pathway_shadow_candidates.v1"
+CANDIDATE_SCHEMA = "tokenclaw.managed_routing_pathway_shadow_candidate.v1"
+ROW_SCHEMA = "tokenclaw.managed_routing_pathway_matrix_row_review.v1"
+GROUP_SCHEMA = "tokenclaw.managed_routing_pathway_shadow_candidate_group.v1"
+PRIVACY_SCHEMA = "tokenclaw.managed_routing_pathway_shadow_candidates_privacy.v1"
+MATRIX_SCHEMA = "tokenclaw.routing_pathway_matrix.v1"
+MATRIX_ENTRY_SCHEMA = "tokenclaw.routing_pathway_matrix_entry.v1"
 DEFAULT_STALE_AFTER_HOURS = 72.0
 
 SUPPORTED_EXECUTORS = {
@@ -161,7 +161,7 @@ def _executor_compatibility(row: dict[str, Any]) -> dict[str, Any]:
     if executor is None:
         reason_codes.append("unsupported-local-routing-executor")
     return {
-        "schema": "agentflow.managed_routing_pathway_local_executor_compatibility.v1",
+        "schema": "tokenclaw.managed_routing_pathway_local_executor_compatibility.v1",
         "compatible": executor is not None,
         "local_executor": executor,
         "supported_local_action_families": ["routing"],
@@ -373,7 +373,7 @@ def build_managed_routing_pathway_shadow_candidates(
     }
     violations = managed_egress_violations(result)
     result["egress_guard"] = {
-        "schema": "agentflow.managed_egress_guard.v1",
+        "schema": "tokenclaw.managed_egress_guard.v1",
         "status": "passed" if not violations else "blocked",
         "blocked": bool(violations),
         "violation_count": len(violations),

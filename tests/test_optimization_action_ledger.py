@@ -44,7 +44,7 @@ FORBIDDEN_KEYS = (
 class OptimizationActionLedgerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -142,7 +142,7 @@ class OptimizationActionLedgerTests(unittest.TestCase):
                 "pattern_hashes": ["sha256:raw-ledger-pattern-secret"],
             },
             "openai_optimization_governor": {
-                "schema": "agentflow.openai_optimization_governor.v1",
+                "schema": "tokenclaw.openai_optimization_governor.v1",
                 "selected_action_families": ["routing"],
                 "family_status": {
                     "routing": {"eligible": True, "selected": True, "policy_source": "local-manual"},
@@ -205,7 +205,7 @@ class OptimizationActionLedgerTests(unittest.TestCase):
             cache_meta=cache_meta,
         )
 
-        self.assertEqual(ledger["schema"], "agentflow.optimization_action_ledger.v1")
+        self.assertEqual(ledger["schema"], "tokenclaw.optimization_action_ledger.v1")
         by_family = {entry["family"]: entry for entry in ledger["entries"]}
         self.assertEqual(by_family["routing"]["status"], "applied")
         self.assertEqual(by_family["old_context_summary"]["status"], "suppressed")
@@ -220,7 +220,7 @@ class OptimizationActionLedgerTests(unittest.TestCase):
 
     def test_report_summarizes_recent_rows_by_family_status_reason_without_raw_payloads(self) -> None:
         governor = {
-            "schema": "agentflow.openai_optimization_governor.v1",
+            "schema": "tokenclaw.openai_optimization_governor.v1",
             "selected_action_families": ["routing"],
             "family_status": {
                 "routing": {"eligible": True, "selected": True, "policy_source": "local-manual"},
@@ -275,7 +275,7 @@ class OptimizationActionLedgerTests(unittest.TestCase):
 
         report = build_optimization_action_ledger_report(self.store, limit=20)
 
-        self.assertEqual(report["schema"], "agentflow.optimization_action_ledger_report.v1")
+        self.assertEqual(report["schema"], "tokenclaw.optimization_action_ledger_report.v1")
         self.assertEqual(report["sampled_call_count"], 3)
         self.assertGreaterEqual(report["entry_count"], 6)
         status_counts = {
@@ -313,7 +313,7 @@ class OptimizationActionLedgerTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
 
         self.assertEqual(code, 0)
-        self.assertEqual(payload["schema"], "agentflow.optimization_action_ledger_report.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.optimization_action_ledger_report.v1")
         self.assertEqual(payload["sampled_call_count"], 1)
         self.assertEqual(payload["family_status_counts"][0]["family"], "routing")
         self._assert_private(payload)

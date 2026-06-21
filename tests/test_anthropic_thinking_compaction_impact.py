@@ -27,7 +27,7 @@ def _compaction_meta(
     planned_tokens: int = 0,
 ) -> dict:
     meta = {
-        "schema": "agentflow.anthropic_thinking_history_compaction_decision.v1",
+        "schema": "tokenclaw.anthropic_thinking_history_compaction_decision.v1",
         "enabled": True,
         "status": status,
         "reason": reason,
@@ -44,7 +44,7 @@ def _compaction_meta(
         "planned_saved_chars": planned_tokens * 4,
         "canary": {"cohort": cohort, "selected": applied, "reason": reason},
         "lifecycle_feedback": {
-            "schema": "agentflow.anthropic_thinking_history_compaction_lifecycle_feedback.v1",
+            "schema": "tokenclaw.anthropic_thinking_history_compaction_lifecycle_feedback.v1",
             "status": status if status != "bypass" else "safety_stop",
             "cohort": cohort,
             "candidate_id": f"raw-lifecycle-{RAW_SECRET}",
@@ -55,7 +55,7 @@ def _compaction_meta(
     if status == "bypass":
         meta["safety_stop_state"] = "stopped"
         meta["safety_stop"] = {
-            "schema": "agentflow.anthropic_thinking_history_compaction_safety_stop.v1",
+            "schema": "tokenclaw.anthropic_thinking_history_compaction_safety_stop.v1",
             "reason": "local-canary-safety-stop",
             "triggers": [{"metric": "error_rate", "value": 1.0, "threshold": 0.2}],
             "raw_payload_included": False,
@@ -146,7 +146,7 @@ def _log_call(
 class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
     def test_report_summarizes_lifecycle_impact_and_budget_feedback_without_content(self) -> None:
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -206,7 +206,7 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(payload["schema"], "agentflow.anthropic_thinking_compaction_impact.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.anthropic_thinking_compaction_impact.v1")
         self.assertEqual(payload["summary"]["applied_count"], 2)
         self.assertEqual(payload["summary"]["holdout_count"], 1)
         self.assertEqual(payload["summary"]["skipped_count"], 1)
@@ -225,7 +225,7 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
         self.assertGreater(payload["summary"]["tokens_saved_est"], 0)
         self.assertGreater(payload["summary"]["projected_holdout_savings_usd"], 0)
         coverage = payload["summary"]["lifecycle_coverage"]
-        self.assertEqual(coverage["schema"], "agentflow.anthropic_thinking_compaction_lifecycle_coverage.v1")
+        self.assertEqual(coverage["schema"], "tokenclaw.anthropic_thinking_compaction_lifecycle_coverage.v1")
         self.assertEqual(coverage["observed_count"], 5)
         self.assertEqual(coverage["applied_count"], 2)
         self.assertEqual(coverage["holdout_count"], 1)
@@ -278,7 +278,7 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
 
     def test_cli_and_dashboard_endpoint_are_content_free(self) -> None:
         with TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "agentflow.sqlite3"
+            db_path = Path(tmp) / "tokenclaw.sqlite3"
             store = Store(str(db_path))
             try:
                 _log_call(
@@ -320,17 +320,17 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
                     full_stats_ttl_s=0,
                 )
                 with TestClient(app) as client:
-                    response = client.get("/agentflow/stats/anthropic-thinking-compaction-impact?limit=10")
-                    dashboard = client.get("/agentflow/dashboard")
+                    response = client.get("/tokenclaw/stats/anthropic-thinking-compaction-impact?limit=10")
+                    dashboard = client.get("/tokenclaw/dashboard")
             finally:
                 dashboard_store.conn.close()
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(dashboard.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["schema"], "agentflow.anthropic_thinking_compaction_impact.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.anthropic_thinking_compaction_impact.v1")
             self.assertIn("Thinking-compaction impact", dashboard.text)
-            self.assertIn("/agentflow/stats/anthropic-thinking-compaction-impact?limit=500", dashboard.text)
+            self.assertIn("/tokenclaw/stats/anthropic-thinking-compaction-impact?limit=500", dashboard.text)
             rendered = stdout.getvalue() + json.dumps(payload, sort_keys=True) + dashboard.text
             self.assertNotIn(RAW_SECRET, rendered)
             self.assertNotIn("raw-session-id", rendered)
@@ -338,7 +338,7 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
 
     def test_report_recommends_widen_when_canary_has_positive_impact(self) -> None:
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,

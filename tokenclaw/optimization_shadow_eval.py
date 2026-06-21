@@ -8,8 +8,8 @@ from typing import Any
 
 from tokenclaw.store import stable_json, utc_now
 
-SCHEMA = "agentflow.optimization_shadow_eval.v1"
-RESULT_SCHEMA = "agentflow.optimization_shadow_eval_result.v1"
+SCHEMA = "tokenclaw.optimization_shadow_eval.v1"
+RESULT_SCHEMA = "tokenclaw.optimization_shadow_eval_result.v1"
 
 _FEATURE_ONLY_REPLAY_LEVELS = {
     "features_only",

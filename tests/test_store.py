@@ -12,42 +12,42 @@ from tokenclaw.store import PostgresConnection, SQLiteStore, Store, stable_json,
 
 class StoreBackendTest(unittest.TestCase):
     def setUp(self):
-        self.saved_database_url = os.environ.get("AGENTFLOW_DATABASE_URL")
-        self.saved_busy_timeout = os.environ.get("AGENTFLOW_SQLITE_BUSY_TIMEOUT_MS")
-        self.saved_wal = os.environ.get("AGENTFLOW_SQLITE_WAL")
-        self.saved_retention_days = os.environ.get("AGENTFLOW_SQLITE_RETENTION_DAYS")
-        self.saved_retention_enabled = os.environ.get("AGENTFLOW_SQLITE_RETENTION_ENABLED")
-        os.environ.pop("AGENTFLOW_DATABASE_URL", None)
-        os.environ.pop("AGENTFLOW_SQLITE_BUSY_TIMEOUT_MS", None)
-        os.environ.pop("AGENTFLOW_SQLITE_WAL", None)
-        os.environ.pop("AGENTFLOW_SQLITE_RETENTION_DAYS", None)
-        os.environ.pop("AGENTFLOW_SQLITE_RETENTION_ENABLED", None)
+        self.saved_database_url = os.environ.get("TOKENCLAW_DATABASE_URL")
+        self.saved_busy_timeout = os.environ.get("TOKENCLAW_SQLITE_BUSY_TIMEOUT_MS")
+        self.saved_wal = os.environ.get("TOKENCLAW_SQLITE_WAL")
+        self.saved_retention_days = os.environ.get("TOKENCLAW_SQLITE_RETENTION_DAYS")
+        self.saved_retention_enabled = os.environ.get("TOKENCLAW_SQLITE_RETENTION_ENABLED")
+        os.environ.pop("TOKENCLAW_DATABASE_URL", None)
+        os.environ.pop("TOKENCLAW_SQLITE_BUSY_TIMEOUT_MS", None)
+        os.environ.pop("TOKENCLAW_SQLITE_WAL", None)
+        os.environ.pop("TOKENCLAW_SQLITE_RETENTION_DAYS", None)
+        os.environ.pop("TOKENCLAW_SQLITE_RETENTION_ENABLED", None)
 
     def tearDown(self):
         if self.saved_database_url is None:
-            os.environ.pop("AGENTFLOW_DATABASE_URL", None)
+            os.environ.pop("TOKENCLAW_DATABASE_URL", None)
         else:
-            os.environ["AGENTFLOW_DATABASE_URL"] = self.saved_database_url
+            os.environ["TOKENCLAW_DATABASE_URL"] = self.saved_database_url
         if self.saved_busy_timeout is None:
-            os.environ.pop("AGENTFLOW_SQLITE_BUSY_TIMEOUT_MS", None)
+            os.environ.pop("TOKENCLAW_SQLITE_BUSY_TIMEOUT_MS", None)
         else:
-            os.environ["AGENTFLOW_SQLITE_BUSY_TIMEOUT_MS"] = self.saved_busy_timeout
+            os.environ["TOKENCLAW_SQLITE_BUSY_TIMEOUT_MS"] = self.saved_busy_timeout
         if self.saved_wal is None:
-            os.environ.pop("AGENTFLOW_SQLITE_WAL", None)
+            os.environ.pop("TOKENCLAW_SQLITE_WAL", None)
         else:
-            os.environ["AGENTFLOW_SQLITE_WAL"] = self.saved_wal
+            os.environ["TOKENCLAW_SQLITE_WAL"] = self.saved_wal
         if self.saved_retention_days is None:
-            os.environ.pop("AGENTFLOW_SQLITE_RETENTION_DAYS", None)
+            os.environ.pop("TOKENCLAW_SQLITE_RETENTION_DAYS", None)
         else:
-            os.environ["AGENTFLOW_SQLITE_RETENTION_DAYS"] = self.saved_retention_days
+            os.environ["TOKENCLAW_SQLITE_RETENTION_DAYS"] = self.saved_retention_days
         if self.saved_retention_enabled is None:
-            os.environ.pop("AGENTFLOW_SQLITE_RETENTION_ENABLED", None)
+            os.environ.pop("TOKENCLAW_SQLITE_RETENTION_ENABLED", None)
         else:
-            os.environ["AGENTFLOW_SQLITE_RETENTION_ENABLED"] = self.saved_retention_enabled
+            os.environ["TOKENCLAW_SQLITE_RETENTION_ENABLED"] = self.saved_retention_enabled
 
     def test_store_uses_sqlite_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 self.assertIsInstance(store, SQLiteStore)
                 self.assertEqual(store.backend, "sqlite")
@@ -56,14 +56,14 @@ class StoreBackendTest(unittest.TestCase):
                 store.conn.close()
 
     def test_invalid_database_url_is_rejected_before_driver_import(self):
-        os.environ["AGENTFLOW_DATABASE_URL"] = "mysql://localhost/agentflow"
+        os.environ["TOKENCLAW_DATABASE_URL"] = "mysql://localhost/tokenclaw"
 
         with self.assertRaisesRegex(ValueError, "postgresql:// or postgres://"):
             Store()
 
     def test_concurrent_sqlite_reads_and_writes_use_store_interface(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 def write_call(i):
                     store.log_call(
@@ -101,7 +101,7 @@ class StoreBackendTest(unittest.TestCase):
 
     def test_log_call_records_policy_decision_blocker_when_metadata_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 store.log_call(
                     id="missing-policy-decision",
@@ -130,7 +130,7 @@ class StoreBackendTest(unittest.TestCase):
                 ).fetchone()
                 self.assertEqual(row["source_surface"], "anthropic_messages")
                 managed = json.loads(row["routing_json"])["managed_recommendation"]
-                self.assertEqual(managed["schema"], "agentflow.managed_policy_decision_evaluation.v1")
+                self.assertEqual(managed["schema"], "tokenclaw.managed_policy_decision_evaluation.v1")
                 self.assertEqual(managed["status"], "skipped-local-blocker")
                 self.assertEqual(managed["reason"], "policy-decision-metadata-missing")
                 self.assertTrue(managed["coverage_denominator_included"])
@@ -143,7 +143,7 @@ class StoreBackendTest(unittest.TestCase):
 
     def test_log_call_defaults_routing_outcome_label_to_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 columns = {
                     row["name"]
@@ -182,7 +182,7 @@ class StoreBackendTest(unittest.TestCase):
 
     def test_log_call_extracts_managed_routing_json_for_dashboard_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 columns = {
                     row["name"]
@@ -208,7 +208,7 @@ class StoreBackendTest(unittest.TestCase):
                     routing_json=stable_json({
                         "reason": "managed route",
                         "managed_recommendation": {
-                            "schema": "agentflow.managed_policy_decision_evaluation.v1",
+                            "schema": "tokenclaw.managed_policy_decision_evaluation.v1",
                             "enabled": True,
                             "status": "received",
                             "policy_id": "managed-route-1",
@@ -238,7 +238,7 @@ class StoreBackendTest(unittest.TestCase):
         now = datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc)
         older = (now - timedelta(seconds=120)).isoformat()
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 store.log_call(
                     id="safe-call",
@@ -276,7 +276,7 @@ class StoreBackendTest(unittest.TestCase):
         now = datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc)
         base = now - timedelta(seconds=180)
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 cases = [
                     ("http-error", "session-error", 500, 0, {"reason": "test"}, 0),
@@ -327,7 +327,7 @@ class StoreBackendTest(unittest.TestCase):
     def test_finalize_outcome_labels_keeps_recent_or_sessionless_calls_unknown(self):
         now = datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for call_id, created_at, session_id in (
                     ("recent-call", now - timedelta(seconds=30), "session-recent"),
@@ -371,10 +371,10 @@ class StoreBackendTest(unittest.TestCase):
 
     def test_log_call_preserves_existing_managed_policy_decision_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 managed = {
-                    "schema": "agentflow.policy_decision.v1",
+                    "schema": "tokenclaw.policy_decision.v1",
                     "status": "received",
                     "policy_id": "policy-1",
                     "applied": True,
@@ -412,7 +412,7 @@ class StoreBackendTest(unittest.TestCase):
 
     def test_codex_turn_start_records_policy_decision_blocker_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 store.log_codex_app_event(
                     id="codex-turn-start",
@@ -449,7 +449,7 @@ class StoreBackendTest(unittest.TestCase):
 
     def test_sqlite_store_enables_busy_timeout_wal_and_dashboard_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 busy_timeout = store.conn.execute("pragma busy_timeout").fetchone()[0]
                 journal_mode = store.conn.execute("pragma journal_mode").fetchone()[0]
@@ -467,20 +467,20 @@ class StoreBackendTest(unittest.TestCase):
                 self.assertIn("idx_codex_app_events_created_at", indexes)
                 self.assertIn("idx_codex_app_events_start_recent", indexes)
                 self.assertIn("idx_codex_app_events_response_lookup", indexes)
-                self.assertIn("idx_agentflow_sqlite_maintenance_runs_recent", indexes)
+                self.assertIn("idx_tokenclaw_sqlite_maintenance_runs_recent", indexes)
             finally:
                 store.conn.close()
 
     def test_sqlite_retention_defaults_to_seven_days_and_can_be_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 status = store.sqlite_retention_status()
                 self.assertTrue(status["enabled"])
                 self.assertEqual(status["retention_days"], 7)
                 self.assertEqual(status["configured_by"], "local-default")
 
-                os.environ["AGENTFLOW_SQLITE_RETENTION_DAYS"] = "0"
+                os.environ["TOKENCLAW_SQLITE_RETENTION_DAYS"] = "0"
                 disabled = store.sqlite_retention_status()
                 self.assertFalse(disabled["enabled"])
                 self.assertIsNone(disabled["retention_days"])
@@ -492,7 +492,7 @@ class StoreBackendTest(unittest.TestCase):
         old = (now - timedelta(days=9)).isoformat()
         recent = (now - timedelta(days=2)).isoformat()
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for call_id, created_at in (("old-call", old), ("recent-call", recent)):
                     store.log_call(
@@ -570,7 +570,7 @@ class StoreBackendTest(unittest.TestCase):
         now = datetime(2026, 6, 13, 8, 0, tzinfo=timezone.utc)
         old = (now - timedelta(days=10)).isoformat()
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 for status in ("queued", "retryable-error", "sending", "sent", "error", "dropped-after-limit"):
                     store.enqueue_managed_outcome_feedback(
@@ -598,7 +598,7 @@ class StoreBackendTest(unittest.TestCase):
 
     def test_dashboard_codex_event_plans_use_created_at_and_turn_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 recent_plan = " ".join(
                     row["detail"]
@@ -647,7 +647,7 @@ class StoreBackendTest(unittest.TestCase):
 
     def test_sqlite_wal_allows_dashboard_reads_during_writer_transaction(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             writer_store = Store(db_path)
             reader_store = Store(db_path)
             raw_writer = sqlite3.connect(db_path, timeout=0.1)

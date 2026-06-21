@@ -329,16 +329,16 @@ request_shape_repeated_context_canaries:
   # including raw prompts, provider bodies, request IDs, session IDs, cache
   # keys, file paths, or tool payloads.
   enabled: true
-  schema: agentflow.request_shape_repeated_context_canaries.v1
+  schema: tokenclaw.request_shape_repeated_context_canaries.v1
   rules:
     - id: local-repeated-context-crunch-canary-a8814a13d90e
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:anthropic:messages:tool-result:2170d814fddee961
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-        - agentflow.request_shape_crunch_opportunity_dry_run.v1
-        - agentflow.request_shape_follow_up_candidates.v1
+        - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+        - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
         - thinking-routing-guard
@@ -357,7 +357,7 @@ request_shape_repeated_context_canaries:
         cache_status: skipped
         routing_status: passthrough
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: false
         full_rollout_enabled: true
         full_rollout_fraction: 1.0
@@ -389,12 +389,12 @@ request_shape_repeated_context_canaries:
         previous_max_rollout_fraction: 0.3
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       policy_decision:
-        schema: agentflow.request_shape_crunch_policy_decision_rule_metadata.v1
+        schema: tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1
         decision_id: request-shape-crunch-policy-decision:9db327d1abdec766
         application_fingerprint: request-shape-crunch-policy-apply:75827313ac09173d
         full_rollout_fingerprint: request-shape-crunch-full-rollout:14f7e956d029d0a3
-        source_evidence_schema: agentflow.request_shape_crunch_activation_evidence.v1
-        source_policy_decision_schema: agentflow.request_shape_crunch_policy_decision.v1
+        source_evidence_schema: tokenclaw.request_shape_crunch_activation_evidence.v1
+        source_policy_decision_schema: tokenclaw.request_shape_crunch_policy_decision.v1
         decision: promote-full
         graduation_decision: promote-full
         applied_count: 107
@@ -412,7 +412,7 @@ request_shape_repeated_context_canaries:
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_policy_decision_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_policy_decision_rollback_metadata.v1
         present: true
         required_for_promotion: true
         selected_decision: promote-full
@@ -450,7 +450,7 @@ request_shape_repeated_context_canaries:
           policy_files_written: false
       widened_at: '2026-06-16T00:32:20.548432+00:00'
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -465,18 +465,18 @@ request_shape_repeated_context_canaries:
           - thinking-routing-guard
           - tool-call-cache-disabled
           - unsupported-streaming-shape
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
     - id: local-repeated-context-crunch-canary-54e7cc8762d8
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:anthropic:messages:tool-result:eff32bb1c0af6b98
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-      - agentflow.request_shape_crunch_opportunity_dry_run.v1
-      - agentflow.request_shape_follow_up_candidates.v1
+      - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+      - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
       - thinking-routing-guard
@@ -495,7 +495,7 @@ request_shape_repeated_context_canaries:
         cache_status: skipped
         routing_status: passthrough
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: true
         canary_fraction: 0.1
         holdout_fraction: 0.1
@@ -524,7 +524,7 @@ request_shape_repeated_context_canaries:
         max_rollout_fraction: 0.1
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -539,12 +539,12 @@ request_shape_repeated_context_canaries:
         - thinking-routing-guard
         - tool-call-cache-disabled
         - unsupported-streaming-shape
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollback_metadata.v1
         present: true
         required_for_promotion: true
         rollback_action_type: disable_repeated_context_crunch_canary
@@ -589,10 +589,10 @@ request_shape_repeated_context_canaries:
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:anthropic:unknown:tool-heavy:6088ebf4cf9f60b0
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-      - agentflow.request_shape_crunch_opportunity_dry_run.v1
-      - agentflow.request_shape_follow_up_candidates.v1
+      - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+      - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
       - tool-call-cache-disabled
@@ -610,7 +610,7 @@ request_shape_repeated_context_canaries:
         cache_status: skipped
         routing_status: passthrough
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: true
         canary_fraction: 0.1
         holdout_fraction: 0.1
@@ -639,7 +639,7 @@ request_shape_repeated_context_canaries:
         max_rollout_fraction: 0.1
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -653,12 +653,12 @@ request_shape_repeated_context_canaries:
         evidence_blocker_codes:
         - tool-call-cache-disabled
         - unsupported-streaming-shape
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollback_metadata.v1
         present: true
         required_for_promotion: true
         rollback_action_type: disable_repeated_context_crunch_canary
@@ -703,10 +703,10 @@ request_shape_repeated_context_canaries:
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:anthropic:unknown:tool-heavy:3447fcd2761fae84
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-      - agentflow.request_shape_crunch_opportunity_dry_run.v1
-      - agentflow.request_shape_follow_up_candidates.v1
+      - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+      - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
       - thinking-routing-guard
@@ -725,7 +725,7 @@ request_shape_repeated_context_canaries:
         cache_status: skipped
         routing_status: passthrough
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: true
         canary_fraction: 0.1
         holdout_fraction: 0.1
@@ -754,7 +754,7 @@ request_shape_repeated_context_canaries:
         max_rollout_fraction: 0.1
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -769,12 +769,12 @@ request_shape_repeated_context_canaries:
         - thinking-routing-guard
         - tool-call-cache-disabled
         - unsupported-streaming-shape
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollback_metadata.v1
         present: true
         required_for_promotion: true
         rollback_action_type: disable_repeated_context_crunch_canary
@@ -819,10 +819,10 @@ request_shape_repeated_context_canaries:
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:anthropic:messages:tool-heavy:f636b9a34c9fbb3f
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-      - agentflow.request_shape_crunch_opportunity_dry_run.v1
-      - agentflow.request_shape_follow_up_candidates.v1
+      - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+      - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
       - tool-call-cache-disabled
@@ -840,7 +840,7 @@ request_shape_repeated_context_canaries:
         cache_status: skipped
         routing_status: passthrough
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: false
         full_rollout_enabled: true
         full_rollout_fraction: 1.0
@@ -872,12 +872,12 @@ request_shape_repeated_context_canaries:
         previous_max_rollout_fraction: 0.2
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       policy_decision:
-        schema: agentflow.request_shape_crunch_policy_decision_rule_metadata.v1
+        schema: tokenclaw.request_shape_crunch_policy_decision_rule_metadata.v1
         decision_id: request-shape-crunch-policy-decision:9c21d88a7c434d6f
         application_fingerprint: request-shape-crunch-policy-apply:5c8c4099f69eb61f
         full_rollout_fingerprint: request-shape-crunch-full-rollout:3038b0e4f4e5710e
-        source_evidence_schema: agentflow.request_shape_crunch_activation_evidence.v1
-        source_policy_decision_schema: agentflow.request_shape_crunch_policy_decision.v1
+        source_evidence_schema: tokenclaw.request_shape_crunch_activation_evidence.v1
+        source_policy_decision_schema: tokenclaw.request_shape_crunch_policy_decision.v1
         decision: promote-full
         graduation_decision: promote-full
         applied_count: 1
@@ -895,7 +895,7 @@ request_shape_repeated_context_canaries:
         metadata_only: true
         aggregate_only: true
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -909,12 +909,12 @@ request_shape_repeated_context_canaries:
         evidence_blocker_codes:
         - tool-call-cache-disabled
         - unsupported-streaming-shape
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_policy_decision_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_policy_decision_rollback_metadata.v1
         present: true
         required_for_promotion: true
         selected_decision: promote-full
@@ -976,10 +976,10 @@ request_shape_repeated_context_canaries:
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:anthropic:messages:tool-heavy:197a7341f3c94418
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-      - agentflow.request_shape_crunch_opportunity_dry_run.v1
-      - agentflow.request_shape_follow_up_candidates.v1
+      - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+      - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
       - thinking-routing-guard
@@ -998,7 +998,7 @@ request_shape_repeated_context_canaries:
         cache_status: skipped
         routing_status: passthrough
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: true
         canary_fraction: 0.1
         holdout_fraction: 0.1
@@ -1027,7 +1027,7 @@ request_shape_repeated_context_canaries:
         max_rollout_fraction: 0.1
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -1042,12 +1042,12 @@ request_shape_repeated_context_canaries:
         - thinking-routing-guard
         - tool-call-cache-disabled
         - unsupported-streaming-shape
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollback_metadata.v1
         present: true
         required_for_promotion: true
         rollback_action_type: disable_repeated_context_crunch_canary
@@ -1092,10 +1092,10 @@ request_shape_repeated_context_canaries:
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:openai:responses:tool-light:ef8677934acee536
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-      - agentflow.request_shape_crunch_opportunity_dry_run.v1
-      - agentflow.request_shape_follow_up_candidates.v1
+      - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+      - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
       - tool-call-cache-disabled
@@ -1112,7 +1112,7 @@ request_shape_repeated_context_canaries:
         cache_status: skipped
         routing_status: passthrough
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: true
         canary_fraction: 0.1
         holdout_fraction: 0.1
@@ -1141,7 +1141,7 @@ request_shape_repeated_context_canaries:
         max_rollout_fraction: 0.1
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -1154,12 +1154,12 @@ request_shape_repeated_context_canaries:
         projected_safety_stopped_count: 0
         evidence_blocker_codes:
         - tool-call-cache-disabled
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollback_metadata.v1
         present: true
         required_for_promotion: true
         rollback_action_type: disable_repeated_context_crunch_canary
@@ -1204,10 +1204,10 @@ request_shape_repeated_context_canaries:
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:anthropic:unknown:tool-heavy:49e798099f42d92e
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-      - agentflow.request_shape_crunch_opportunity_dry_run.v1
-      - agentflow.request_shape_follow_up_candidates.v1
+      - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+      - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
       - thinking-routing-guard
@@ -1226,7 +1226,7 @@ request_shape_repeated_context_canaries:
         cache_status: skipped
         routing_status: passthrough
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: true
         canary_fraction: 0.1
         holdout_fraction: 0.1
@@ -1255,7 +1255,7 @@ request_shape_repeated_context_canaries:
         max_rollout_fraction: 0.1
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -1270,12 +1270,12 @@ request_shape_repeated_context_canaries:
         - thinking-routing-guard
         - tool-call-cache-disabled
         - unsupported-streaming-shape
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollback_metadata.v1
         present: true
         required_for_promotion: true
         rollback_action_type: disable_repeated_context_crunch_canary
@@ -1320,10 +1320,10 @@ request_shape_repeated_context_canaries:
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:anthropic:messages:tool-heavy:9996c8d2414b9584
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-      - agentflow.request_shape_crunch_opportunity_dry_run.v1
-      - agentflow.request_shape_follow_up_candidates.v1
+      - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+      - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
       - thinking-routing-guard
@@ -1342,7 +1342,7 @@ request_shape_repeated_context_canaries:
         cache_status: skipped
         routing_status: passthrough
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: true
         canary_fraction: 0.1
         holdout_fraction: 0.1
@@ -1371,7 +1371,7 @@ request_shape_repeated_context_canaries:
         max_rollout_fraction: 0.1
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -1386,12 +1386,12 @@ request_shape_repeated_context_canaries:
         - thinking-routing-guard
         - tool-call-cache-disabled
         - unsupported-streaming-shape
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollback_metadata.v1
         present: true
         required_for_promotion: true
         rollback_action_type: disable_repeated_context_crunch_canary
@@ -1436,10 +1436,10 @@ request_shape_repeated_context_canaries:
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:openai:responses:chat:2525fe103170ca18
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-      - agentflow.request_shape_crunch_opportunity_dry_run.v1
-      - agentflow.request_shape_follow_up_candidates.v1
+      - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+      - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
       - exact-cache-miss
@@ -1456,7 +1456,7 @@ request_shape_repeated_context_canaries:
         cache_status: miss
         routing_status: passthrough
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: true
         canary_fraction: 0.1
         holdout_fraction: 0.1
@@ -1485,7 +1485,7 @@ request_shape_repeated_context_canaries:
         max_rollout_fraction: 0.1
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -1498,12 +1498,12 @@ request_shape_repeated_context_canaries:
         projected_safety_stopped_count: 0
         evidence_blocker_codes:
         - exact-cache-miss
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollback_metadata.v1
         present: true
         required_for_promotion: true
         rollback_action_type: disable_repeated_context_crunch_canary
@@ -1548,10 +1548,10 @@ request_shape_repeated_context_canaries:
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:openai:responses:tool-light:e9a73fac07aaee1c
-      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schema: tokenclaw.request_shape_rollup_row.v1
       source_evidence_schemas:
-      - agentflow.request_shape_crunch_opportunity_dry_run.v1
-      - agentflow.request_shape_follow_up_candidates.v1
+      - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
+      - tokenclaw.request_shape_follow_up_candidates.v1
       local_only_reason: file-backed-local-policy-no-managed-dependency
       evidence_blocker_codes:
       - cache-skipped
@@ -1568,7 +1568,7 @@ request_shape_repeated_context_canaries:
         cache_status: skipped
         routing_status: routed
       rollout:
-        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollout.v1
         canary_enabled: true
         canary_fraction: 0.1
         holdout_fraction: 0.1
@@ -1597,7 +1597,7 @@ request_shape_repeated_context_canaries:
         max_rollout_fraction: 0.1
         records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
       lifecycle_metadata:
-        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_stage_lifecycle_metadata.v1
         emits_applied: true
         emits_holdout: true
         emits_skipped: true
@@ -1610,12 +1610,12 @@ request_shape_repeated_context_canaries:
         projected_safety_stopped_count: 0
         evidence_blocker_codes:
         - cache-skipped
-        impact_report: agentflow.request_shape_crunch_canary_impact.v1
-        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        impact_report: tokenclaw.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: tokenclaw.request_shape_crunch_canary_lifecycle.v1
         metadata_only: true
         aggregate_only: true
       rollback_metadata:
-        schema: agentflow.request_shape_crunch_canary_rollback_metadata.v1
+        schema: tokenclaw.request_shape_crunch_canary_rollback_metadata.v1
         present: true
         required_for_promotion: true
         rollback_action_type: disable_repeated_context_crunch_canary

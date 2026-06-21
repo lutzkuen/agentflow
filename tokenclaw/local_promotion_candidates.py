@@ -7,8 +7,8 @@ from typing import Any
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.local_promotion_candidates.v1"
-CANDIDATE_SCHEMA = "agentflow.local_promotion_candidate.v1"
+SCHEMA = "tokenclaw.local_promotion_candidates.v1"
+CANDIDATE_SCHEMA = "tokenclaw.local_promotion_candidate.v1"
 
 READY_VERDICTS = {"promote", "promotion-ready", "widen", "widen-ready"}
 NON_BLOCKING_REASON_CODES = {"target-savings-met", "canary-full-coverage", "promotion-ready", "widen-ready"}

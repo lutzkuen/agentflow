@@ -1,5 +1,5 @@
 # AgentFlow default routing rules.
-# Copy to ~/.agentflow/routing_rules.yaml (or set AGENTFLOW_ROUTING_RULES) to customize.
+# Copy to ~/.tokenclaw/routing_rules.yaml (or set TOKENCLAW_ROUTING_RULES) to customize.
 #
 # Rules are evaluated top-to-bottom; first match wins.
 # All conditions in a rule must match. Omitted conditions always match.
@@ -73,7 +73,7 @@ phase_canary:
   max_text_chars: 0
   canary_fraction: 0.10
   holdout_fraction: 0.10
-  salt: agentflow-phase-opus-sonnet-canary-v1
+  salt: tokenclaw-phase-opus-sonnet-canary-v1
   cohort_unit: session
   safety_gates:
     block_thinking_history: false
@@ -123,7 +123,7 @@ openai_canary:
   max_input_tokens_est: 4000
   canary_fraction: 0.15
   holdout_fraction: 0.10
-  salt: agentflow-openai-routing-canary-v1
+  salt: tokenclaw-openai-routing-canary-v1
   cohort_unit: request_features_sequence
   safety_stop:
     enabled: true
@@ -156,11 +156,11 @@ rules:
     route_to: "gpt-5.4-mini"
     reason: "promoted OpenAI gpt-5.4 tool-light routing rule"
   metadata:
-    schema: agentflow.openai_routing_promotion_rule_metadata.v1
+    schema: tokenclaw.openai_routing_promotion_rule_metadata.v1
     source: openai_routing_promotion_decision
     promoted_from_canary: true
     promotion_source_policy_id: local-openai-routing-canary-v1
-    source_evidence_schema: agentflow.openai_routing_promotion_decision_report.v1
+    source_evidence_schema: tokenclaw.openai_routing_promotion_decision_report.v1
     target_local_policy_section: routing.rules
     target_local_rule_file: routing_rules.yaml
     promotion_decision:
@@ -236,7 +236,7 @@ rules:
     text_chars_gte: 10000
     text_chars_lte: 30000
     has_tools: false
-    env_flag: "AGENTFLOW_ROUTE_MIDSIZE"
+    env_flag: "TOKENCLAW_ROUTE_MIDSIZE"
     category_not_in:
       - code-gen
       - thinking
@@ -250,4 +250,4 @@ rules:
     has_tools: true
   action:
     route_to: sonnet
-    reason: "small tool request Opus routed to Sonnet; disable with AGENTFLOW_ROUTING=0 if unsafe"
+    reason: "small tool request Opus routed to Sonnet; disable with TOKENCLAW_ROUTING=0 if unsafe"

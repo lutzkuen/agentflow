@@ -18,8 +18,8 @@ from tokenclaw.pricing import estimate_cost, pricing_basis
 from tokenclaw.store import stable_json, utc_now
 
 
-SCHEMA = "agentflow.openai_optimization_draft_dry_run.v1"
-LIFECYCLE_SCHEMA = "agentflow.openai_optimization_draft_dry_run_lifecycle_feedback.v1"
+SCHEMA = "tokenclaw.openai_optimization_draft_dry_run.v1"
+LIFECYCLE_SCHEMA = "tokenclaw.openai_optimization_draft_dry_run_lifecycle_feedback.v1"
 RAW_FIELD_NAMES = {
     "authorization",
     "body",
@@ -589,7 +589,7 @@ async def queue_openai_optimization_draft_dry_run_feedback(store_obj: Any, resul
         flush_immediately=False,
     )
     return {
-        "schema": "agentflow.openai_optimization_draft_dry_run_feedback_queue.v1",
+        "schema": "tokenclaw.openai_optimization_draft_dry_run_feedback_queue.v1",
         "source_surface": LIFECYCLE_SOURCE_SURFACE,
         "status": meta.get("status"),
         "reason": meta.get("reason"),
@@ -643,11 +643,11 @@ async def dry_run_openai_optimization_draft(
     governor_suppressed = Counter()
 
     previous_env = {
-        "AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_CANARY_FRACTION": os.environ.get("AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_CANARY_FRACTION"),
-        "AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_HOLDOUT_FRACTION": os.environ.get("AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_HOLDOUT_FRACTION"),
+        "TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_CANARY_FRACTION": os.environ.get("TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_CANARY_FRACTION"),
+        "TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_HOLDOUT_FRACTION": os.environ.get("TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_HOLDOUT_FRACTION"),
     }
-    os.environ["AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_CANARY_FRACTION"] = str(max(0.0, min(1.0, canary_fraction)))
-    os.environ["AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_HOLDOUT_FRACTION"] = str(max(0.0, min(1.0, holdout_fraction)))
+    os.environ["TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_CANARY_FRACTION"] = str(max(0.0, min(1.0, canary_fraction)))
+    os.environ["TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_HOLDOUT_FRACTION"] = str(max(0.0, min(1.0, holdout_fraction)))
     try:
         for unit in rows:
             routing_meta, routing_decision = _routing_candidate(unit, route_policy, actions.get("routing"), canary_fraction=canary_fraction, holdout_fraction=holdout_fraction)

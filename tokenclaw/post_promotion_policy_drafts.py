@@ -10,10 +10,10 @@ from tokenclaw.post_promotion_priority_delta_review import SCHEMA as PRIORITY_RE
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.post_promotion_policy_draft_dry_run.v1"
-DRAFT_SCHEMA = "agentflow.post_promotion_policy_draft.v1"
-OMISSION_SCHEMA = "agentflow.post_promotion_policy_draft_omission.v1"
-IMPACT_GATE_SCHEMA = "agentflow.post_promotion_policy_draft_impact_gate.v1"
+SCHEMA = "tokenclaw.post_promotion_policy_draft_dry_run.v1"
+DRAFT_SCHEMA = "tokenclaw.post_promotion_policy_draft.v1"
+OMISSION_SCHEMA = "tokenclaw.post_promotion_policy_draft_omission.v1"
+IMPACT_GATE_SCHEMA = "tokenclaw.post_promotion_policy_draft_impact_gate.v1"
 
 _VALID_ACTIONS = {"widen-local-policy", "collect-holdout-evidence", "rollback-local-policy", "keep-blocked"}
 _VALID_FAMILIES = {"routing", "cache", "crunch"}
@@ -86,27 +86,27 @@ _FAMILY_POLICY = {
     "routing": {
         "target_local_rule_file": "routing_rules.yaml",
         "target_local_policy_section": "routing.rules",
-        "review_command": "agentflow-post-promotion-policy-draft-dry-run",
-        "family_review_command": "agentflow-routing-promotion-draft-dry-run",
-        "apply_preview_command": "agentflow-policy-draft-stage --section routing <reviewed-draft.json>",
+        "review_command": "tokenclaw-post-promotion-policy-draft-dry-run",
+        "family_review_command": "tokenclaw-routing-promotion-draft-dry-run",
+        "apply_preview_command": "tokenclaw-policy-draft-stage --section routing <reviewed-draft.json>",
         "widen_operation": "widen_existing_routing_rule",
         "rollback_action_type": "disable_rule",
     },
     "cache": {
         "target_local_rule_file": "cache_rules.yaml",
         "target_local_policy_section": "cache.pattern_rules",
-        "review_command": "agentflow-post-promotion-policy-draft-dry-run",
-        "family_review_command": "agentflow-cache-promotion-draft-dry-run",
-        "apply_preview_command": "agentflow-policy-draft-stage --section cache <reviewed-draft.json>",
+        "review_command": "tokenclaw-post-promotion-policy-draft-dry-run",
+        "family_review_command": "tokenclaw-cache-promotion-draft-dry-run",
+        "apply_preview_command": "tokenclaw-policy-draft-stage --section cache <reviewed-draft.json>",
         "widen_operation": "widen_existing_cache_pattern_rule",
         "rollback_action_type": "disable_rule",
     },
     "crunch": {
         "target_local_rule_file": "crunch_rules.yaml",
         "target_local_policy_section": "anthropic_thinking_history_compaction.rules",
-        "review_command": "agentflow-post-promotion-policy-draft-dry-run",
-        "family_review_command": "agentflow-crunch-promotion-draft-dry-run",
-        "apply_preview_command": "agentflow-policy-draft-stage --section crunch <reviewed-draft.json>",
+        "review_command": "tokenclaw-post-promotion-policy-draft-dry-run",
+        "family_review_command": "tokenclaw-crunch-promotion-draft-dry-run",
+        "apply_preview_command": "tokenclaw-policy-draft-stage --section crunch <reviewed-draft.json>",
         "widen_operation": "widen_existing_crunch_rule",
         "rollback_action_type": "disable_rule",
     },
@@ -304,7 +304,7 @@ def _policy_meta(family: str) -> dict[str, Any] | None:
 def _evidence_summary(candidate: dict[str, Any]) -> dict[str, Any]:
     source = candidate.get("evidence_summary") if isinstance(candidate.get("evidence_summary"), dict) else {}
     return {
-        "schema": "agentflow.post_promotion_policy_draft_evidence_summary.v1",
+        "schema": "tokenclaw.post_promotion_policy_draft_evidence_summary.v1",
         "delta_id": _candidate_id(candidate),
         "source_review_schema": PRIORITY_REVIEW_SCHEMA,
         "rank": _as_int(candidate.get("rank")),
@@ -482,7 +482,7 @@ def _impact_gate(
 
 def _review_metadata(candidate: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "agentflow.post_promotion_policy_draft_review_metadata.v1",
+        "schema": "tokenclaw.post_promotion_policy_draft_review_metadata.v1",
         "required": True,
         "source": "post-promotion-priority-delta-review",
         "recommendation_source": "managed-recommended",
@@ -511,7 +511,7 @@ def _widen_draft(
     holdout = _bounded_fraction(holdout_fraction, 0.10)
     rule_id = _rule_id(candidate, "widen-local-policy")
     patch = {
-        "schema": "agentflow.post_promotion_local_policy_patch.v1",
+        "schema": "tokenclaw.post_promotion_local_policy_patch.v1",
         "operation": policy["widen_operation"],
         "requires_existing_compatible_rule": True,
         "target_rule_selector": {
@@ -547,7 +547,7 @@ def _widen_draft(
         "proposed_policy_patch": patch,
         "evidence_summary": evidence,
         "dry_run_impact_estimate": {
-            "schema": "agentflow.post_promotion_policy_draft_impact_estimate.v1",
+            "schema": "tokenclaw.post_promotion_policy_draft_impact_estimate.v1",
             "affected_call_count": impact_gate["affected_call_count"],
             "affected_row_count": impact_gate["affected_row_count"],
             "savings_delta_usd": evidence["savings_delta_usd"],
@@ -559,7 +559,7 @@ def _widen_draft(
         },
         "dry_run_impact_gate": impact_gate,
         "rollback_metadata": {
-            "schema": "agentflow.post_promotion_policy_draft_rollback_metadata.v1",
+            "schema": "tokenclaw.post_promotion_policy_draft_rollback_metadata.v1",
             "rollback_action_type": policy["rollback_action_type"],
             "preserve_previous_rule_required": True,
             "preserve_operator_rule_history": True,
@@ -583,7 +583,7 @@ def _rollback_draft(
     evidence = _evidence_summary(candidate)
     rule_id = _rule_id(candidate, "rollback-local-policy")
     patch = {
-        "schema": "agentflow.post_promotion_local_policy_patch.v1",
+        "schema": "tokenclaw.post_promotion_local_policy_patch.v1",
         "operation": "rollback_existing_rule",
         "rollback_action_type": policy["rollback_action_type"],
         "requires_existing_compatible_rule": True,
@@ -619,7 +619,7 @@ def _rollback_draft(
         "proposed_policy_patch": patch,
         "evidence_summary": evidence,
         "dry_run_impact_estimate": {
-            "schema": "agentflow.post_promotion_policy_draft_impact_estimate.v1",
+            "schema": "tokenclaw.post_promotion_policy_draft_impact_estimate.v1",
             "affected_call_count": impact_gate["affected_call_count"],
             "affected_row_count": impact_gate["affected_row_count"],
             "savings_delta_usd": evidence["savings_delta_usd"],
@@ -630,7 +630,7 @@ def _rollback_draft(
         },
         "dry_run_impact_gate": impact_gate,
         "rollback_metadata": {
-            "schema": "agentflow.post_promotion_policy_draft_rollback_metadata.v1",
+            "schema": "tokenclaw.post_promotion_policy_draft_rollback_metadata.v1",
             "rollback_action_type": policy["rollback_action_type"],
             "preserve_previous_rule_required": True,
             "preserve_operator_rule_history": True,
@@ -651,7 +651,7 @@ def _omission(
     policy = _policy_meta(family) or {
         "target_local_rule_file": f"{family}_rules.yaml",
         "target_local_policy_section": f"{family}.rules",
-        "review_command": "agentflow-post-promotion-policy-draft-dry-run",
+        "review_command": "tokenclaw-post-promotion-policy-draft-dry-run",
         "family_review_command": "",
         "apply_preview_command": "",
     }

@@ -6,8 +6,8 @@ from typing import Any
 from tokenclaw.optimization_coordinator import build_optimization_coordinator
 
 
-ENFORCEMENT_ENV = "AGENTFLOW_OPTIMIZATION_COORDINATOR_ENFORCEMENT"
-SCHEMA = "agentflow.optimization_coordinator_enforcement.v1"
+ENFORCEMENT_ENV = "TOKENCLAW_OPTIMIZATION_COORDINATOR_ENFORCEMENT"
+SCHEMA = "tokenclaw.optimization_coordinator_enforcement.v1"
 SUPPRESSION_REASON = "conflicts-with-coordinator-selection"
 MANAGED_SOURCES = {"managed-recommended", "managed-enforced"}
 CRUNCH_FAMILY_KEYS = {

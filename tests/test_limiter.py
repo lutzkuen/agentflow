@@ -34,7 +34,7 @@ class TierLimiterTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.tier, "sonnet")
         self.assertGreaterEqual(ctx.exception.retry_after, 1)
-        self.assertEqual(tier_backoff_headers(ctx.exception, "claude-sonnet-4-6")["x-agentflow-routed-model"], "claude-sonnet-4-6")
+        self.assertEqual(tier_backoff_headers(ctx.exception, "claude-sonnet-4-6")["x-tokenclaw-routed-model"], "claude-sonnet-4-6")
         self.assertEqual(tier_backoff_payload(ctx.exception)["error"]["type"], "rate_limit_error")
 
     def test_record_backoff_keeps_longer_existing_window(self):

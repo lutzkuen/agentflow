@@ -20,7 +20,7 @@ def _terminal_meta(
 ) -> dict:
     applied = cohort == "canary_applied"
     return {
-        "schema": "agentflow.terminal_output_compaction_decision.v1",
+        "schema": "tokenclaw.terminal_output_compaction_decision.v1",
         "enabled": True,
         "status": "applied" if applied else "holdout",
         "reason": reason or ("terminal-output-compaction-applied" if applied else "canary_holdout"),
@@ -31,7 +31,7 @@ def _terminal_meta(
         "candidate_id": candidate_id,
         "category": "tool-result",
         "canary": {
-            "schema": "agentflow.terminal_output_compaction_canary_decision.v1",
+            "schema": "tokenclaw.terminal_output_compaction_canary_decision.v1",
             "enabled": True,
             "selected": applied,
             "status": "applied" if applied else "holdout",
@@ -114,7 +114,7 @@ def _log_terminal_call(
 class TerminalOutputCompactionImpactTests(unittest.TestCase):
     def _with_store(self):
         tmp = TemporaryDirectory()
-        store = Store(str(Path(tmp.name) / "agentflow.sqlite3"))
+        store = Store(str(Path(tmp.name) / "tokenclaw.sqlite3"))
         return tmp, store
 
     def test_impact_report_promotes_positive_applied_vs_holdout_metadata(self):
@@ -129,7 +129,7 @@ class TerminalOutputCompactionImpactTests(unittest.TestCase):
             store.conn.close()
             tmp.cleanup()
 
-        self.assertEqual(report["schema"], "agentflow.terminal_output_compaction_impact.v1")
+        self.assertEqual(report["schema"], "tokenclaw.terminal_output_compaction_impact.v1")
         self.assertEqual(report["summary"]["applied_count"], 2)
         self.assertEqual(report["summary"]["holdout_count"], 1)
         self.assertGreater(report["summary"]["net_savings_usd"], 0)
@@ -209,7 +209,7 @@ class TerminalOutputCompactionImpactTests(unittest.TestCase):
 
     def test_impact_report_and_cli_are_content_free(self):
         tmp, store = self._with_store()
-        db_path = str(Path(tmp.name) / "agentflow.sqlite3")
+        db_path = str(Path(tmp.name) / "tokenclaw.sqlite3")
         try:
             _log_terminal_call(
                 store,
@@ -245,7 +245,7 @@ class TerminalOutputCompactionImpactTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         cli_payload = json.loads(stdout.getvalue())
-        self.assertEqual(cli_payload["schema"], "agentflow.terminal_output_compaction_impact.v1")
+        self.assertEqual(cli_payload["schema"], "tokenclaw.terminal_output_compaction_impact.v1")
         self.assertFalse(report["privacy"]["raw_request_bodies_included"])
         self.assertFalse(report["privacy"]["raw_terminal_text_included"])
         self.assertFalse(report["privacy"]["session_ids_included"])

@@ -16,9 +16,9 @@ from tokenclaw.optimization_rollout_review import (
 from tokenclaw.store import utc_now
 
 
-PROMOTION_CANARY_APPLY_SCHEMA = "agentflow.optimization_promotion_canary_apply.v1"
-PROMOTION_CANARY_DECISION_SCHEMA = "agentflow.optimization_promotion_canary_decision.v1"
-PROMOTION_CANARY_SAFETY_SCHEMA = "agentflow.optimization_promotion_canary_safety_stop.v1"
+PROMOTION_CANARY_APPLY_SCHEMA = "tokenclaw.optimization_promotion_canary_apply.v1"
+PROMOTION_CANARY_DECISION_SCHEMA = "tokenclaw.optimization_promotion_canary_decision.v1"
+PROMOTION_CANARY_SAFETY_SCHEMA = "tokenclaw.optimization_promotion_canary_safety_stop.v1"
 
 _POLICY_SECTION_FILES = {
     "routing": "routing_rules.yaml",
@@ -753,7 +753,7 @@ def _crunch_pattern_rule(action: dict[str, Any], *, existing: dict[str, Any] | N
     safety_update = local_update.get("safety_stop") if isinstance(local_update.get("safety_stop"), dict) else {}
     existing_rollout = existing.get("rollout") if isinstance(existing, dict) and isinstance(existing.get("rollout"), dict) else {}
     rollout: dict[str, Any] = {
-        "schema": "agentflow.pattern_policy_rollout.v1",
+        "schema": "tokenclaw.pattern_policy_rollout.v1",
         "recommendation_mode": "canary",
         "canary_enabled": not disabled,
         "canary_fraction": 0.0 if disabled else _as_float(action.get("canary_fraction")),
@@ -938,7 +938,7 @@ def _cache_pattern_rule(action: dict[str, Any], *, existing: dict[str, Any] | No
     safety_update = local_update.get("safety_stop") if isinstance(local_update.get("safety_stop"), dict) else {}
     existing_rollout = existing.get("rollout") if isinstance(existing, dict) and isinstance(existing.get("rollout"), dict) else {}
     rollout: dict[str, Any] = {
-        "schema": "agentflow.pattern_policy_rollout.v1",
+        "schema": "tokenclaw.pattern_policy_rollout.v1",
         "recommendation_mode": "canary",
         "canary_enabled": not disabled,
         "canary_fraction": 0.0 if disabled else _as_float(action.get("canary_fraction")),

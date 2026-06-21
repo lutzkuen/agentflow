@@ -8,10 +8,10 @@ from typing import Any
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.post_promotion_priority_delta_review.v1"
-DELTA_SCHEMA = "agentflow.post_promotion_priority_delta_candidate.v1"
-GROUP_SCHEMA = "agentflow.post_promotion_priority_delta_group.v1"
-EXPECTED_SOURCE_SCHEMA = "agentflow.post_promotion_policy_priority_deltas.v1"
+SCHEMA = "tokenclaw.post_promotion_priority_delta_review.v1"
+DELTA_SCHEMA = "tokenclaw.post_promotion_priority_delta_candidate.v1"
+GROUP_SCHEMA = "tokenclaw.post_promotion_priority_delta_group.v1"
+EXPECTED_SOURCE_SCHEMA = "tokenclaw.post_promotion_policy_priority_deltas.v1"
 
 _VALID_NEXT_ACTIONS = {"widen-local-policy", "collect-holdout-evidence", "rollback-local-policy", "keep-blocked"}
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,199}$")
@@ -308,7 +308,7 @@ def _holdout_evidence_successor(candidate: dict[str, Any]) -> dict[str, Any] | N
     current_holdout_fraction = _candidate_float(candidate, "current_holdout_fraction", "holdout_fraction") or 0.0
     required_holdout_fraction = _candidate_float(candidate, "required_holdout_fraction", "minimum_holdout_fraction", "min_holdout_fraction") or 0.10
     return {
-        "schema": "agentflow.post_promotion_holdout_evidence_successor.v1",
+        "schema": "tokenclaw.post_promotion_holdout_evidence_successor.v1",
         "status": "needs-holdout-evidence",
         "reason": "missing-holdout-coverage",
         "original_next_action": "widen-local-policy",

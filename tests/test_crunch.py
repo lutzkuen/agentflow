@@ -51,28 +51,28 @@ def _thinking_body(
 
 class CrunchRulesTest(unittest.TestCase):
     ENV_KEYS = (
-        "AGENTFLOW_CRUNCH",
-        "AGENTFLOW_CRUNCH_THRESHOLD_CHARS",
-        "AGENTFLOW_PROMPT_CACHE",
-        "AGENTFLOW_PROMPT_CACHE_MIN_CHARS",
-        "AGENTFLOW_CRUNCH_RULES",
-        "AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT",
-        "AGENTFLOW_HAIKU_SUMMARY_MODEL",
-        "AGENTFLOW_HAIKU_SUMMARY_MIN_REQUEST_CHARS",
-        "AGENTFLOW_HAIKU_SUMMARY_MIN_SUMMARIZED_CHARS",
-        "AGENTFLOW_HAIKU_SUMMARY_MAX_TURNS",
-        "AGENTFLOW_HAIKU_SUMMARY_KEEP_RECENT_TURNS",
-        "AGENTFLOW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS",
-        "AGENTFLOW_HAIKU_SUMMARY_MAX_SOURCE_CHARS",
-        "AGENTFLOW_ENHANCED_CRUNCH_MODE",
-        "AGENTFLOW_ENHANCED_CRUNCH_MODEL",
-        "AGENTFLOW_ENHANCED_CRUNCH_MODEL_FAMILY",
-        "AGENTFLOW_ENHANCED_CRUNCH_ENDPOINT_URL",
-        "AGENTFLOW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD",
-        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP",
-        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
-        "AGENTFLOW_POLICY_EVENTS",
-        "AGENTFLOW_POLICY_EVENTS_LOG",
+        "TOKENCLAW_CRUNCH",
+        "TOKENCLAW_CRUNCH_THRESHOLD_CHARS",
+        "TOKENCLAW_PROMPT_CACHE",
+        "TOKENCLAW_PROMPT_CACHE_MIN_CHARS",
+        "TOKENCLAW_CRUNCH_RULES",
+        "TOKENCLAW_HAIKU_SUMMARIZE_OLD_CONTEXT",
+        "TOKENCLAW_HAIKU_SUMMARY_MODEL",
+        "TOKENCLAW_HAIKU_SUMMARY_MIN_REQUEST_CHARS",
+        "TOKENCLAW_HAIKU_SUMMARY_MIN_SUMMARIZED_CHARS",
+        "TOKENCLAW_HAIKU_SUMMARY_MAX_TURNS",
+        "TOKENCLAW_HAIKU_SUMMARY_KEEP_RECENT_TURNS",
+        "TOKENCLAW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS",
+        "TOKENCLAW_HAIKU_SUMMARY_MAX_SOURCE_CHARS",
+        "TOKENCLAW_ENHANCED_CRUNCH_MODE",
+        "TOKENCLAW_ENHANCED_CRUNCH_MODEL",
+        "TOKENCLAW_ENHANCED_CRUNCH_MODEL_FAMILY",
+        "TOKENCLAW_ENHANCED_CRUNCH_ENDPOINT_URL",
+        "TOKENCLAW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD",
+        "TOKENCLAW_PATTERN_CANARY_SAFETY_STOP",
+        "TOKENCLAW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
+        "TOKENCLAW_POLICY_EVENTS",
+        "TOKENCLAW_POLICY_EVENTS_LOG",
         "HOME",
     )
 
@@ -98,11 +98,11 @@ class CrunchRulesTest(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "AGENTFLOW_CRUNCH": "1",
-                "AGENTFLOW_CRUNCH_THRESHOLD_CHARS": "24000",
-                "AGENTFLOW_PROMPT_CACHE": "1",
-                "AGENTFLOW_PROMPT_CACHE_MIN_CHARS": "4096",
-                "AGENTFLOW_CRUNCH_RULES": "",
+                "TOKENCLAW_CRUNCH": "1",
+                "TOKENCLAW_CRUNCH_THRESHOLD_CHARS": "24000",
+                "TOKENCLAW_PROMPT_CACHE": "1",
+                "TOKENCLAW_PROMPT_CACHE_MIN_CHARS": "4096",
+                "TOKENCLAW_CRUNCH_RULES": "",
             },
         ):
             manual = importlib.reload(crunch_module)
@@ -236,7 +236,7 @@ class CrunchRulesTest(unittest.TestCase):
         )
 
         thinking_meta = meta["anthropic_thinking_history"]
-        self.assertEqual(thinking_meta["schema"], "agentflow.anthropic_thinking_history_metadata.v1")
+        self.assertEqual(thinking_meta["schema"], "tokenclaw.anthropic_thinking_history_metadata.v1")
         self.assertEqual(thinking_meta["status"], "ready")
         self.assertEqual(thinking_meta["reason"], "ready-for-thinking-compaction-planning")
         self.assertEqual(thinking_meta["thinking_block_count"], 2)
@@ -580,9 +580,9 @@ request_shape_repeated_context_canaries:
       enabled: true
       policy_source: local-manual
       cohort_id: request-shape-crunch:anthropic:messages:tool-result:test
-      source_evidence_schema: agentflow.request_shape_crunch_opportunity_dry_run.v1
+      source_evidence_schema: tokenclaw.request_shape_crunch_opportunity_dry_run.v1
       source_evidence_schemas:
-        - agentflow.request_shape_crunch_opportunity_dry_run.v1
+        - tokenclaw.request_shape_crunch_opportunity_dry_run.v1
       projected_saved_tokens: 1234
       projected_saved_usd: 0.0037
       staged_at: '2026-06-16T18:00:00+00:00'
@@ -660,7 +660,7 @@ request_shape_repeated_context_canaries:
             self.assertEqual(holdout_lifecycle["cohort"], "canary_holdout")
             self.assertEqual(applied_lifecycle["policy_id"], "local-repeated-context-crunch-canary-test")
             self.assertEqual(applied_lifecycle["staged_at"], "2026-06-16T18:00:00+00:00")
-            self.assertEqual(applied_lifecycle["source_evidence_schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
+            self.assertEqual(applied_lifecycle["source_evidence_schema"], "tokenclaw.request_shape_crunch_opportunity_dry_run.v1")
             self.assertEqual(applied_lifecycle["projected_saved_tokens"], 1234)
             self.assertEqual(applied_meta["applied_count"], 1)
             self.assertEqual(holdout_meta["holdout_count"], 1)
@@ -720,7 +720,7 @@ old_context_summarization:
             self.assertNotIn("4811", rendered)
 
     def test_managed_enhanced_summary_hint_falls_back_without_local_provider(self):
-        with patch.dict(os.environ, {"AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT": "0"}):
+        with patch.dict(os.environ, {"TOKENCLAW_HAIKU_SUMMARIZE_OLD_CONTEXT": "0"}):
             manual = importlib.reload(crunch_module)
         body = {
             "model": "claude-sonnet-4-6",
@@ -925,7 +925,7 @@ pattern_rules:
       keep_recent_matches: 0
       min_text_chars: 1000
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: canary-only
       canary_enabled: true
       canary_fraction: 0.10
@@ -973,7 +973,7 @@ pattern_rules:
             tmp_path = Path(tmp)
             config = tmp_path / "config"
             config.mkdir()
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(tmp_path / "policy_events.jsonl")
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(tmp_path / "policy_events.jsonl")
             scaffold = (
                 "Reviewed risky canary scaffold section.\n"
                 + "\n".join(f"risky canary instruction line {i}" for i in range(80))
@@ -994,7 +994,7 @@ pattern_rules:
       keep_recent_matches: 0
       min_text_chars: 1000
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: canary-only
       canary_enabled: true
       canary_fraction: 1.0
@@ -1012,7 +1012,7 @@ pattern_rules:
             )
             os.chdir(tmp_path)
             manual = importlib.reload(crunch_module)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             body = {
                 "model": "claude-sonnet-4-6",
                 "messages": [{"role": "user", "content": scaffold}],
@@ -1054,7 +1054,7 @@ pattern_rules:
                                     "applied_count": 1,
                                     "saved_chars": 1200,
                                     "canary": {
-                                        "schema": "agentflow.pattern_canary_decision.v1",
+                                        "schema": "tokenclaw.pattern_canary_decision.v1",
                                         "enabled": True,
                                         "selected": True,
                                         "status": "applied",
@@ -1681,17 +1681,17 @@ repeated_provider_scaffolding:
     def test_terminal_log_boilerplate_simplifies_shell_prompts_without_dropping_commands(self):
         manual = importlib.reload(crunch_module)
         terminal = "\n".join([
-            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ python -m unittest tests.test_alpha",
+            "lutz@dev:/very/long/workspace/path/tokenclaw/subproject/current-run$ python -m unittest tests.test_alpha",
             "Ran 4 tests in 0.12s",
-            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ git status --short",
+            "lutz@dev:/very/long/workspace/path/tokenclaw/subproject/current-run$ git status --short",
             " M tokenclaw/crunch.py",
-            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ python -m unittest tests.test_beta",
+            "lutz@dev:/very/long/workspace/path/tokenclaw/subproject/current-run$ python -m unittest tests.test_beta",
             "Ran 8 tests in 0.18s",
-            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ echo done",
+            "lutz@dev:/very/long/workspace/path/tokenclaw/subproject/current-run$ echo done",
             "done",
-            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ python -m unittest tests.test_gamma",
+            "lutz@dev:/very/long/workspace/path/tokenclaw/subproject/current-run$ python -m unittest tests.test_gamma",
             "Ran 2 tests in 0.03s",
-            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ python -m unittest tests.test_delta",
+            "lutz@dev:/very/long/workspace/path/tokenclaw/subproject/current-run$ python -m unittest tests.test_delta",
             "Ran 1 test in 0.01s",
         ])
         body = {"messages": [{"role": "user", "content": terminal}]}
@@ -1704,7 +1704,7 @@ repeated_provider_scaffolding:
         self.assertIn("command: python -m unittest tests.test_alpha", text)
         self.assertIn("command: git status --short", text)
         self.assertIn("command: echo done", text)
-        self.assertNotIn("lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$", text)
+        self.assertNotIn("lutz@dev:/very/long/workspace/path/tokenclaw/subproject/current-run$", text)
 
     def test_terminal_log_boilerplate_collapses_repeated_shebangs_and_test_markers(self):
         manual = importlib.reload(crunch_module)
@@ -1893,7 +1893,7 @@ thinking_deduplication:
         self.assertTrue(meta["safety_stop"]["enabled"])
 
     def test_old_context_summarization_legacy_env_can_disable_canary_policy(self):
-        with patch.dict(os.environ, {"AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT": "0"}):
+        with patch.dict(os.environ, {"TOKENCLAW_HAIKU_SUMMARIZE_OLD_CONTEXT": "0"}):
             manual = importlib.reload(crunch_module)
             plan, meta = manual.old_context_summary_plan(
                 {"messages": [{"role": "user", "content": "old text " * 10000}]},

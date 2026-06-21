@@ -20,7 +20,7 @@ pattern_rules:
     candidate_id: request-shape-cache-replay:responses:chat:8e210a2f5680d16d
     description: Local OpenAI Responses exact-cache replay canary staged from aggregate request-shape evidence.
     target_cache_policy:
-      schema: agentflow.request_shape_cache_replay_target_policy.v1
+      schema: tokenclaw.request_shape_cache_replay_target_policy.v1
       policy_section: cache.pattern_rules
       target_local_policy: cache_rules
       target_local_rule_file: cache_rules.yaml
@@ -54,7 +54,7 @@ pattern_rules:
       min_call_count: 2
       ttl_seconds: 3600
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: openai-cache-replay-request-shape-canary
       canary_enabled: true
       canary_fraction: 0.10
@@ -71,8 +71,8 @@ pattern_rules:
         - cache_replay_canary
         - invalidation_reason
     graduation:
-      schema: agentflow.request_shape_cache_replay_shape_activation.v1
-      source_schema: agentflow.request_shape_cache_replayability_dry_run.v1
+      schema: tokenclaw.request_shape_cache_replay_shape_activation.v1
+      source_schema: tokenclaw.request_shape_cache_replayability_dry_run.v1
       source_reason: replay-ready-exact-non-tool-shape
       cohort_id: request-shape-cache-replay:responses:chat:8e210a2f5680d16d
       source_surface: openai_responses
@@ -112,7 +112,7 @@ pattern_rules:
     candidate_id: request-shape-cache-replay:responses:chat:21ea87daf8319e93
     description: Local OpenAI Responses exact-cache replay canary staged from aggregate request-shape evidence.
     target_cache_policy:
-      schema: agentflow.request_shape_cache_replay_target_policy.v1
+      schema: tokenclaw.request_shape_cache_replay_target_policy.v1
       policy_section: cache.pattern_rules
       target_local_policy: cache_rules
       target_local_rule_file: cache_rules.yaml
@@ -146,7 +146,7 @@ pattern_rules:
       min_call_count: 2
       ttl_seconds: 3600
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: openai-cache-replay-request-shape-canary
       canary_enabled: true
       canary_fraction: 0.10
@@ -163,8 +163,8 @@ pattern_rules:
         - cache_replay_canary
         - invalidation_reason
     graduation:
-      schema: agentflow.request_shape_cache_replay_shape_activation.v1
-      source_schema: agentflow.request_shape_cache_replayability_dry_run.v1
+      schema: tokenclaw.request_shape_cache_replay_shape_activation.v1
+      source_schema: tokenclaw.request_shape_cache_replayability_dry_run.v1
       source_reason: replay-ready-exact-non-tool-shape
       cohort_id: request-shape-cache-replay:responses:chat:21ea87daf8319e93
       source_surface: openai_responses
@@ -203,7 +203,7 @@ pattern_rules:
     candidate_id: request-shape-cache-replay:responses:chat:5f65035aa6826d9d
     description: Local OpenAI Responses exact-cache replay canary staged from aggregate request-shape evidence.
     target_cache_policy:
-      schema: agentflow.request_shape_cache_replay_target_policy.v1
+      schema: tokenclaw.request_shape_cache_replay_target_policy.v1
       policy_section: cache.pattern_rules
       target_local_policy: cache_rules
       target_local_rule_file: cache_rules.yaml
@@ -237,7 +237,7 @@ pattern_rules:
       min_call_count: 2
       ttl_seconds: 3600
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: openai-cache-replay-request-shape-canary
       canary_enabled: true
       canary_fraction: 0.10
@@ -254,8 +254,8 @@ pattern_rules:
         - cache_replay_canary
         - invalidation_reason
     graduation:
-      schema: agentflow.request_shape_cache_replay_shape_activation.v1
-      source_schema: agentflow.request_shape_cache_replayability_dry_run.v1
+      schema: tokenclaw.request_shape_cache_replay_shape_activation.v1
+      source_schema: tokenclaw.request_shape_cache_replayability_dry_run.v1
       source_reason: replay-ready-exact-non-tool-shape
       cohort_id: request-shape-cache-replay:responses:chat:5f65035aa6826d9d
       source_surface: openai_responses
@@ -294,7 +294,7 @@ pattern_rules:
     candidate_id: request-shape-cache-replay:responses:short-completion:0f7c0ff018d1a643
     description: Local OpenAI Responses exact-cache replay canary staged from aggregate request-shape evidence.
     target_cache_policy:
-      schema: agentflow.request_shape_cache_replay_target_policy.v1
+      schema: tokenclaw.request_shape_cache_replay_target_policy.v1
       policy_section: cache.pattern_rules
       target_local_policy: cache_rules
       target_local_rule_file: cache_rules.yaml
@@ -333,7 +333,7 @@ pattern_rules:
       min_call_count: 2
       ttl_seconds: 3600
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: openai-cache-replay-request-shape-canary
       canary_enabled: true
       canary_fraction: 0.10
@@ -350,8 +350,8 @@ pattern_rules:
         - cache_replay_canary
         - invalidation_reason
     graduation:
-      schema: agentflow.request_shape_cache_replay_shape_activation.v1
-      source_schema: agentflow.request_shape_cache_replayability_dry_run.v1
+      schema: tokenclaw.request_shape_cache_replay_shape_activation.v1
+      source_schema: tokenclaw.request_shape_cache_replayability_dry_run.v1
       source_reason: replay-ready-exact-non-tool-shape
       cohort_id: request-shape-cache-replay:responses:short-completion:0f7c0ff018d1a643
       source_surface: openai_responses
@@ -390,7 +390,7 @@ pattern_rules:
     candidate_id: request-shape-cache-replay:responses:short-completion:4108b2eae3135ddb
     description: Local OpenAI Responses exact-cache replay canary staged from aggregate request-shape evidence.
     target_cache_policy:
-      schema: agentflow.request_shape_cache_replay_target_policy.v1
+      schema: tokenclaw.request_shape_cache_replay_target_policy.v1
       policy_section: cache.pattern_rules
       target_local_policy: cache_rules
       target_local_rule_file: cache_rules.yaml
@@ -429,7 +429,7 @@ pattern_rules:
       min_call_count: 2
       ttl_seconds: 3600
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: openai-cache-replay-request-shape-canary
       canary_enabled: true
       canary_fraction: 0.10
@@ -446,8 +446,8 @@ pattern_rules:
         - cache_replay_canary
         - invalidation_reason
     graduation:
-      schema: agentflow.request_shape_cache_replay_shape_activation.v1
-      source_schema: agentflow.request_shape_cache_replayability_dry_run.v1
+      schema: tokenclaw.request_shape_cache_replay_shape_activation.v1
+      source_schema: tokenclaw.request_shape_cache_replayability_dry_run.v1
       source_reason: replay-ready-exact-non-tool-shape
       cohort_id: request-shape-cache-replay:responses:short-completion:4108b2eae3135ddb
       source_surface: openai_responses
@@ -501,7 +501,7 @@ pattern_rules:
       user_specific_hint: false
       exact_cache_candidate_hint: true
     rollout:
-      schema: agentflow.pattern_policy_rollout.v1
+      schema: tokenclaw.pattern_policy_rollout.v1
       recommendation_mode: canary-only
       canary_enabled: true
       canary_fraction: 1.0

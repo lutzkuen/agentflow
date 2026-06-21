@@ -11,25 +11,25 @@ from tokenclaw.public_metadata import public_id
 from tokenclaw.pricing import estimate_cost, pricing_basis
 
 
-SCHEMA = "agentflow.orchestrator_research_plan.v1"
-ACTIVATION_BURNDOWN_SCHEMA = "agentflow.activation_burndown.v1"
-ACTIVATION_BURNDOWN_ROW_SCHEMA = "agentflow.activation_burndown_row.v1"
-EVIDENCE_TO_ACTIVATION_BURNDOWN_SCHEMA = "agentflow.evidence_to_activation_burndown.v1"
-EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger.v1"
-EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger_entry.v1"
-LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "agentflow.local_activation_next_action_queue.v1"
-LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "agentflow.local_activation_next_action_queue_entry.v1"
-LOCAL_ACTIVATION_SUCCESSOR_ACTION_SCHEMA = "agentflow.local_activation_successor_action.v1"
-LOCAL_ACTIVATION_SUCCESSOR_DECISION_SCHEMA = "agentflow.local_activation_successor_decision.v1"
-PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA = "agentflow.preview_verified_activation_successor_gate.v1"
-MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "agentflow.managed_activation_preview_health_gate.v1"
-ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA = "agentflow.activation_feedback_evidence_freshness_gate.v1"
-OPENAI_ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "agentflow.openai_routing_active_local_policy_outcome_gate.v1"
-FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA = "agentflow.full_rollout_crunch_activation_measurement.v1"
-FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA = "agentflow.full_rollout_crunch_keep_active_regression_gate.v1"
-FULL_ROLLOUT_CRUNCH_ACTIVATION_OUTCOME_SCHEMA = "agentflow.full_rollout_crunch_activation_outcome.v1"
-FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_SCHEMA = "agentflow.full_rollout_crunch_post_rollout_cohort_ranking.v1"
-FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_ENTRY_SCHEMA = "agentflow.full_rollout_crunch_post_rollout_cohort_ranking_entry.v1"
+SCHEMA = "tokenclaw.orchestrator_research_plan.v1"
+ACTIVATION_BURNDOWN_SCHEMA = "tokenclaw.activation_burndown.v1"
+ACTIVATION_BURNDOWN_ROW_SCHEMA = "tokenclaw.activation_burndown_row.v1"
+EVIDENCE_TO_ACTIVATION_BURNDOWN_SCHEMA = "tokenclaw.evidence_to_activation_burndown.v1"
+EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA = "tokenclaw.evidence_to_activation_next_action_ledger.v1"
+EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1"
+LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "tokenclaw.local_activation_next_action_queue.v1"
+LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "tokenclaw.local_activation_next_action_queue_entry.v1"
+LOCAL_ACTIVATION_SUCCESSOR_ACTION_SCHEMA = "tokenclaw.local_activation_successor_action.v1"
+LOCAL_ACTIVATION_SUCCESSOR_DECISION_SCHEMA = "tokenclaw.local_activation_successor_decision.v1"
+PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA = "tokenclaw.preview_verified_activation_successor_gate.v1"
+MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "tokenclaw.managed_activation_preview_health_gate.v1"
+ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA = "tokenclaw.activation_feedback_evidence_freshness_gate.v1"
+OPENAI_ACTIVE_LOCAL_POLICY_OUTCOME_GATE_SCHEMA = "tokenclaw.openai_routing_active_local_policy_outcome_gate.v1"
+FULL_ROLLOUT_CRUNCH_ACTIVATION_MEASUREMENT_SCHEMA = "tokenclaw.full_rollout_crunch_activation_measurement.v1"
+FULL_ROLLOUT_CRUNCH_KEEP_ACTIVE_GATE_SCHEMA = "tokenclaw.full_rollout_crunch_keep_active_regression_gate.v1"
+FULL_ROLLOUT_CRUNCH_ACTIVATION_OUTCOME_SCHEMA = "tokenclaw.full_rollout_crunch_activation_outcome.v1"
+FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_SCHEMA = "tokenclaw.full_rollout_crunch_post_rollout_cohort_ranking.v1"
+FULL_ROLLOUT_CRUNCH_POST_ROLLOUT_RANKING_ENTRY_SCHEMA = "tokenclaw.full_rollout_crunch_post_rollout_cohort_ranking_entry.v1"
 LOW_BACKLOG_MILESTONE_TITLE = "Rank next savings milestone from local telemetry evidence gaps"
 OPENAI_MIN_HOLDOUT_VOLUME = 10
 
@@ -171,7 +171,7 @@ _METADATA_ONLY_TRUE_RE = re.compile(r"metadata[-_ ]only\s*[:=]\s*(?:true|1|yes)"
 _AGGREGATE_ONLY_TRUE_RE = re.compile(r"aggregate[-_ ]only\s*[:=]\s*(?:true|1|yes)", re.IGNORECASE)
 _NEXT_ACTION_RE = re.compile(r"next[-_ ]action\s*[:=]\s*[\"']?([A-Za-z0-9_.:-]+)", re.IGNORECASE)
 _PASS_VERIFIED_TOKENCLAW_PORT_RE = re.compile(
-    r"\bpass\b.*\bverified\b.*\b(?:tokenclaw|agentflow)[-_ ]?port\b",
+    r"\bpass\b.*\bverified\b.*\b(?:tokenclaw|tokenclaw)[-_ ]?port\b",
     re.IGNORECASE,
 )
 
@@ -192,7 +192,7 @@ def _activation_feedback_diagnostic_metadata_from_line(line: str, reason: str) -
     if _ACTIVATION_FEEDBACK_HUMAN_REVIEW_REQUIRED_RE.search(line):
         return {
             "activation_feedback_diagnostic_classification": {
-                "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+                "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
                 "status": "human-review-required",
                 "decision": "keep-blocked",
                 "reason": "human-review-required",
@@ -215,7 +215,7 @@ def _activation_feedback_diagnostic_metadata_from_line(line: str, reason: str) -
     privacy["metadata_only"] = metadata_only or privacy["metadata_only"]
     privacy["aggregate_only"] = aggregate_only or privacy["aggregate_only"]
     classification = {
-        "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+        "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
         "status": "new-sanitized-evidence",
         "decision": "emit-bounded-successor-input",
         "reason": "new-sanitized-evidence",
@@ -259,7 +259,7 @@ def _is_resolved_pass_diagnostic(reason: Any, diagnostic_class: Any = None) -> b
             continue
         if text in _PASS_DIAGNOSTIC_REASONS:
             return True
-        if text.startswith("pass-") and "verified-tokenclaw-port" not in text and "verified-agentflow-port" not in text:
+        if text.startswith("pass-") and "verified-tokenclaw-port" not in text and "verified-tokenclaw-port" not in text:
             return True
         if text.endswith("-passed"):
             return True
@@ -396,7 +396,7 @@ _DIAGNOSTIC_TAXONOMY: tuple[dict[str, Any], ...] = (
         "aliases": (
             "pass-verified-tokenclaw-port",
             "pass-verified-tokenclaw-port-4001",
-            "pass-verified-agentflow-port",
+            "pass-verified-tokenclaw-port",
             "verified-tokenclaw-port",
             "verified-tokenclaw-port-4001",
         ),
@@ -688,7 +688,7 @@ def _diagnostic_taxonomy(reason: Any) -> dict[str, Any] | None:
     if (
         (text.startswith("pass-") or text.endswith("-passed"))
         and "verified-tokenclaw-port" not in text
-        and "verified-agentflow-port" not in text
+        and "verified-tokenclaw-port" not in text
     ):
         return None
     for entry in _DIAGNOSTIC_TAXONOMY:
@@ -741,7 +741,7 @@ def _actionable_diagnostics(diagnostics: list[dict[str, Any]]) -> list[dict[str,
 
 def _diagnostic_fingerprint(diagnostic_class: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "-", diagnostic_class.lower().strip()).strip("-")
-    return f"agentflow.repeated-diagnostic.{normalized}.v1"
+    return f"tokenclaw.repeated-diagnostic.{normalized}.v1"
 
 
 def _sample_count_bucket(value: Any) -> str:
@@ -1110,7 +1110,7 @@ def _activation_feedback_freshness_gate(
         "age_hours": age_hours,
         "max_age_hours": max_age_hours,
         "lifecycle_source": sanitize_value(lifecycle_context.get("source") or "orchestrator-log-diagnostic"),
-        "source_schema": sanitize_value(lifecycle_context.get("report_schema") or "agentflow.orchestrator_research_log_diagnostics.v1"),
+        "source_schema": sanitize_value(lifecycle_context.get("report_schema") or "tokenclaw.orchestrator_research_log_diagnostics.v1"),
         "reason": sanitize_value(reason or "stale-evidence"),
         "privacy": _candidate_privacy(),
     }
@@ -1146,7 +1146,7 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
     stage: dict[str, Any] = {
         "lever": source_lever,
         "state": "blocked",
-        "evidence_source": "agentflow.orchestrator_research_log_diagnostics.v1",
+        "evidence_source": "tokenclaw.orchestrator_research_log_diagnostics.v1",
         "local_action_family": source_lever if source_lever in {"routing", "cache", "crunch"} else "activation-feedback",
         "next_action": "classify-activation-feedback-blocker-for-local-action-ledger",
         "blocker_codes": [reason],
@@ -1191,7 +1191,7 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                 "diagnostic_reason": pass_reason,
                 "diagnostic_fingerprint": _diagnostic_fingerprint(pass_reason),
                 "activation_feedback_diagnostic_classification": {
-                    "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+                    "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
                     "status": "resolved-pass-diagnostic-suppressed",
                     "decision": "suppress",
                     "reason": _RESOLVED_ACTIVATION_FEEDBACK_PASS_KEEP_BLOCKED_REASON,
@@ -1292,7 +1292,7 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                 "durable_action_ledger_entry": True,
                 "dependency_evidence_status": "missing-sanitized-source-report",
                 "missing_dependency_evidence_review": {
-                    "schema": "agentflow.activation_feedback_missing_dependency_evidence_review.v1",
+                    "schema": "tokenclaw.activation_feedback_missing_dependency_evidence_review.v1",
                     "status": "blocked",
                     "reason": _ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_KEEP_BLOCKED_REASON,
                     "next_action": _ACTIVATION_FEEDBACK_MISSING_DEPENDENCY_NEXT_ACTION,
@@ -1326,7 +1326,7 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                 "policy_files_written": False,
                 "managed_dependency": "optional",
                 "local_action_representation": {
-                    "schema": "agentflow.activation_feedback_local_action_representation.v1",
+                    "schema": "tokenclaw.activation_feedback_local_action_representation.v1",
                     "status": "represented",
                     "representation_kind": "review-only-no-op",
                     "review_artifact": "evidence-to-activation-next-action-ledger",
@@ -1406,7 +1406,7 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                 "managed_preview_required": False,
                 "policy_files_written": False,
                 "activation_feedback_diagnostic_classification": {
-                    "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+                    "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
                     "status": "deploy-health-keep-blocked",
                     "decision": "keep-blocked",
                     "reason": _ACTIVATION_FEEDBACK_DEPLOY_FAILURE_KEEP_BLOCKED_REASON,
@@ -1435,7 +1435,7 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                 "managed_preview_required": False,
                 "policy_files_written": False,
                 "activation_feedback_diagnostic_classification": {
-                    "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+                    "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
                     "status": "dev-port-smoke-recorded",
                     "decision": "keep-blocked",
                     "reason": _ACTIVATION_FEEDBACK_PORT_VERIFIED_KEEP_BLOCKED_REASON,
@@ -1507,7 +1507,7 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                     "needed_resolution": ["new_sanitized_evidence", "bounded_local_action_issue"],
                     "durable_action_ledger_entry": True,
                     "activation_feedback_diagnostic_classification": {
-                        "schema": "agentflow.activation_feedback_diagnostic_classification.v1",
+                        "schema": "tokenclaw.activation_feedback_diagnostic_classification.v1",
                         "status": "already-resolved-keep-blocked",
                         "decision": "keep-blocked",
                         "reason": _ACTIVATION_FEEDBACK_BLOCKER_KEEP_BLOCKED_REASON,
@@ -1632,7 +1632,7 @@ def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
         "local_action_family": action_family,
         "state": next_state,
         "status": group.get("status") or ("blocked" if next_state == "keep-blocked" else next_state),
-        "evidence_source": "agentflow.activation_safety_stop_burndown.v1",
+        "evidence_source": "tokenclaw.activation_safety_stop_burndown.v1",
         "durable_action_ledger_entry": True,
         "next_action": group.get("next_action") or "review-activation-feedback-safety-stop-and-record-keep-blocked-reason",
         "blocker_codes": [reason],
@@ -1940,7 +1940,7 @@ def _promotion_blocker_next_action_status(stats: dict[str, Any]) -> dict[str, An
     if not top_action and candidate_count <= 0 and str(report.get("status") or "") in {"", "no-data", "unavailable"}:
         return None
     return {
-        "schema": "agentflow.promotion_blocker_next_action_research_status.v1",
+        "schema": "tokenclaw.promotion_blocker_next_action_research_status.v1",
         "source_schema": sanitize_value(report.get("schema")),
         "source_status": sanitize_value(report.get("status") or "available"),
         "summary": {
@@ -2112,7 +2112,7 @@ def _post_promotion_priority_status(stats: dict[str, Any]) -> dict[str, Any] | N
     if not top_action and candidate_count <= 0 and str(report.get("status") or "") in {"", "no-data", "unavailable"}:
         return None
     return {
-        "schema": "agentflow.post_promotion_priority_delta_research_status.v1",
+        "schema": "tokenclaw.post_promotion_priority_delta_research_status.v1",
         "source_schema": sanitize_value(report.get("schema")),
         "source_status": sanitize_value(report.get("status") or "available"),
         "summary": {
@@ -2763,7 +2763,7 @@ def _aggregate_crunch_report_rollup(
         status = "no-positive-projection"
     return {
         "report_key": "aggregate_crunch_measurement",
-        "schema": "agentflow.aggregate_crunch_measurement.v1",
+        "schema": "tokenclaw.aggregate_crunch_measurement.v1",
         "status": status,
         "rows_considered": calls,
         "candidate_count": crunched_count,
@@ -2967,7 +2967,7 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     return {
-        "schema": "agentflow.crunch_savings_signal.v1",
+        "schema": "tokenclaw.crunch_savings_signal.v1",
         "status": status,
         "calls": calls,
         "observed": {
@@ -3249,7 +3249,7 @@ def _managed_local_file_backed_handoff_outcomes(
             generic_missing = True
         outcomes.append(
             {
-                "schema": "agentflow.managed_recommendation_local_file_backed_handoff_outcome.v1",
+                "schema": "tokenclaw.managed_recommendation_local_file_backed_handoff_outcome.v1",
                 "rank": _to_int(row.get("rank")) or len(outcomes) + 1,
                 "outcome": "local-file-backed-handoff-recorded",
                 "source": sanitize_value(row.get("source") or "unknown"),
@@ -3276,7 +3276,7 @@ def _managed_local_file_backed_handoff_outcomes(
         }
     )
     duplicate_suppression = {
-        "schema": "agentflow.managed_recommendation_handoff_duplicate_suppression.v1",
+        "schema": "tokenclaw.managed_recommendation_handoff_duplicate_suppression.v1",
         "suppresses_generic_missing_health_issue": bool(outcomes and generic_missing),
         "reason": (
             "local-file-backed-handoff-outcome-recorded"
@@ -3425,7 +3425,7 @@ def _managed_recommendation_health_signal(
     omitted_local_action_reason = top_reason or None
     top_local_file_backed_exists = bool(top_repr.get("exists")) if isinstance(top_repr, dict) else None
     return {
-        "schema": "agentflow.managed_recommendation_handoff_health.v1",
+        "schema": "tokenclaw.managed_recommendation_handoff_health.v1",
         "status": status,
         "source_schema": report_schema,
         "calls": calls,
@@ -3479,7 +3479,7 @@ def build_managed_recommendation_handoff_report(stats: dict[str, Any] | None) ->
     signal = summary.get("managed_recommendation_health")
     if not isinstance(signal, dict):
         signal = {
-            "schema": "agentflow.managed_recommendation_handoff_health.v1",
+            "schema": "tokenclaw.managed_recommendation_handoff_health.v1",
             "status": "no-local-traffic",
             "source_schema": None,
             "calls": 0,
@@ -3504,7 +3504,7 @@ def build_managed_recommendation_handoff_report(stats: dict[str, Any] | None) ->
             "top_local_file_backed_handoff_outcome": None,
             "local_file_backed_handoff_outcomes": [],
             "duplicate_suppression": {
-                "schema": "agentflow.managed_recommendation_handoff_duplicate_suppression.v1",
+                "schema": "tokenclaw.managed_recommendation_handoff_duplicate_suppression.v1",
                 "suppresses_generic_missing_health_issue": False,
                 "reason": "no-local-traffic",
                 "covered_local_action_families": [],
@@ -3547,7 +3547,7 @@ def _request_shape_report(stats: dict[str, Any]) -> dict[str, Any] | None:
 
 def _local_activation_outcome_privacy() -> dict[str, Any]:
     return {
-        "schema": "agentflow.local_activation_outcome_summary_privacy.v1",
+        "schema": "tokenclaw.local_activation_outcome_summary_privacy.v1",
         "feature_only": True,
         "metadata_only": True,
         "aggregate_only": True,
@@ -3606,7 +3606,7 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
         sanitize_value(report.get("duplicate_suppression"))
         if isinstance(report.get("duplicate_suppression"), dict)
         else {
-            "schema": "agentflow.local_activation_keep_active_duplicate_suppression.v1",
+            "schema": "tokenclaw.local_activation_keep_active_duplicate_suppression.v1",
             "suppresses_new_activation_issue": True,
             "suppresses_generic_crunch_activation_issue": True,
             "reason": "repeated-context-crunch-active-at-max-rollout",
@@ -3631,7 +3631,7 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
     )
     row_count = applied_count + holdout_count + skipped_count
     coverage = {
-        "schema": "agentflow.local_activation_outcome_decision_coverage.v1",
+        "schema": "tokenclaw.local_activation_outcome_decision_coverage.v1",
         "source_schema": sanitize_value(report.get("schema")),
         "metadata_only": True,
         "aggregate_only": True,
@@ -3681,7 +3681,7 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
     outcome_value = post_max_decision if post_max_decision in {"promote-full", "keep-capped", "rollback"} else "keep-active"
     next_action_value = post_max_next_action or "keep-active"
     outcome = {
-        "schema": "agentflow.local_activation_outcome_summary_row.v1",
+        "schema": "tokenclaw.local_activation_outcome_summary_row.v1",
         "policy_section": "crunch",
         "local_action_family": "crunch",
         "local_file_backed_representation": {
@@ -3747,7 +3747,7 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
     }
     privacy = _local_activation_outcome_privacy()
     return {
-        "schema": "agentflow.local_activation_outcome_summary.v1",
+        "schema": "tokenclaw.local_activation_outcome_summary.v1",
         "status": "tracked",
         "read_only": True,
         "provider_calls_made": False,
@@ -3776,7 +3776,7 @@ def _local_activation_keep_active_outcome_summary(stats_summary: dict[str, Any])
         },
         "privacy": privacy,
         "egress_guard": {
-            "schema": "agentflow.managed_egress_guard.v1",
+            "schema": "tokenclaw.managed_egress_guard.v1",
             "status": "passed",
             "blocked": False,
             "violation_count": 0,
@@ -3882,7 +3882,7 @@ def _full_rollout_crunch_keep_active_gate(
         "target_local_policy_section": sanitize_value(target_local_policy_section or "crunch.rules"),
         "target_local_rule_file": sanitize_value(target_local_rule_file or "crunch_rules.yaml"),
         "regression_counters": {
-            "schema": "agentflow.full_rollout_crunch_keep_active_regression_counters.v1",
+            "schema": "tokenclaw.full_rollout_crunch_keep_active_regression_counters.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "applied_count": applied_count,
@@ -3978,7 +3978,7 @@ def _openai_routing_active_policy_outcome_gate(
         "target_local_rule_file": sanitize_value(target_local_rule_file),
         "savings_per_1000_calls_usd": round(float(savings_per_1000_calls_usd), 8),
         "regression_counters": {
-            "schema": "agentflow.openai_routing_active_local_policy_regression_counters.v1",
+            "schema": "tokenclaw.openai_routing_active_local_policy_regression_counters.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "applied_count": applied_count,
@@ -4114,7 +4114,7 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
         skipped_count = _to_int(entry.get("skipped_count"))
         observed_count = applied_count + holdout_count + skipped_count
         regression_counters = {
-            "schema": "agentflow.full_rollout_crunch_post_rollout_regression_counters.v1",
+            "schema": "tokenclaw.full_rollout_crunch_post_rollout_regression_counters.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "fallback_count": _to_int(entry.get("fallback_count")),
@@ -4227,7 +4227,7 @@ def _full_rollout_crunch_post_rollout_cohort_ranking(
         "current_rule_realized_savings_usd": round(observed_savings, 8),
         "next_cohort_recommendation": sanitize_value(
             {
-                "schema": "agentflow.full_rollout_crunch_next_cohort_recommendation.v1",
+                "schema": "tokenclaw.full_rollout_crunch_next_cohort_recommendation.v1",
                 "metadata_only": True,
                 "aggregate_only": True,
                 "cohort_decision": next_candidate.get("cohort_decision"),
@@ -4422,7 +4422,7 @@ def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -
     projected_saved_tokens = _to_int(local_row.get("projected_saved_tokens") or entry.get("projected_saved_tokens"))
     stale_source = entry.get("stale_evidence") if isinstance(entry.get("stale_evidence"), dict) else {}
     stale_evidence = {
-        "schema": "agentflow.full_rollout_crunch_activation_stale_evidence.v1",
+        "schema": "tokenclaw.full_rollout_crunch_activation_stale_evidence.v1",
         "metadata_only": True,
         "aggregate_only": True,
         "stale": bool(stale_source.get("stale", False)),
@@ -4536,7 +4536,7 @@ def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -
         "post_max_rollout_next_action": sanitize_value(local_row.get("post_max_rollout_next_action") or entry.get("post_max_rollout_next_action")),
         "post_max_rollout_reason_codes": sanitize_value(local_row.get("post_max_rollout_reason_codes") or entry.get("post_max_rollout_reason_codes")),
         "coverage": {
-            "schema": "agentflow.full_rollout_crunch_activation_measurement_coverage.v1",
+            "schema": "tokenclaw.full_rollout_crunch_activation_measurement_coverage.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "applied_count": _to_int(coverage.get("applied_count") or local_row.get("applied_count") or entry.get("applied_count")),
@@ -4560,7 +4560,7 @@ def _full_rollout_crunch_activation_measurement(stats_summary: dict[str, Any]) -
         ),
         "duplicate_suppression": sanitize_value(duplicate_suppression),
         "closed_predecessor_suppression": {
-            "schema": "agentflow.full_rollout_crunch_activation_predecessor_suppression.v1",
+            "schema": "tokenclaw.full_rollout_crunch_activation_predecessor_suppression.v1",
             "metadata_only": True,
             "aggregate_only": True,
             "closed_prior_issue_seen": bool(closed_prior_seen),
@@ -4820,7 +4820,7 @@ def _request_shape_successor_gap_rows(stats: dict[str, Any]) -> list[dict[str, A
         )
         rows.append(
             {
-                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                "schema": "tokenclaw.request_shape_blocker_cohort.v1",
                 "fingerprint": fingerprint,
                 "source_fingerprint": sanitize_value(source_fingerprint),
                 "source_queue_rank": _to_int(source.get("rank")),
@@ -4865,14 +4865,14 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
         gap_rows = _request_shape_successor_gap_rows(stats)
         if gap_rows:
             ranked = [
-                _request_shape_candidate_row(row, source_schema="agentflow.request_shape_follow_up_candidates.v1", rank=index)
+                _request_shape_candidate_row(row, source_schema="tokenclaw.request_shape_follow_up_candidates.v1", rank=index)
                 for index, row in enumerate(gap_rows, start=1)
             ]
             top = ranked[0]
             return {
-                "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
                 "status": "evidence-gap-ranked",
-                "source_schema": "agentflow.request_shape_follow_up_candidates.v1",
+                "source_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                 "summary": {
                     "calls": calls,
                     "rows_considered": 0,
@@ -4897,7 +4897,7 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
         if calls <= 0:
             return None
         return {
-            "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+            "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
             "status": "missing-request-shape-rollups",
             "source_schema": None,
             "summary": {
@@ -5008,7 +5008,7 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             "snapshot_max_age_hours": snapshot_freshness.get("max_age_hours"),
         }
         return {
-            "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+            "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
             "status": "snapshot-stale" if stale else "snapshot-reused",
             "source_schema": sanitize_value(snapshot.get("source_schema") or report.get("schema")),
             "source_snapshot_schema": sanitize_value(snapshot.get("schema")),
@@ -5036,7 +5036,7 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
     )
     status = "evidence-gap-ranked" if evidence_gap_ranked else "candidates-ranked" if clean_ranked else "no-request-shape-candidates"
     result = {
-        "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+        "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
         "status": status,
         "source_schema": sanitize_value(source_schema),
         "summary": {
@@ -6291,7 +6291,7 @@ def _is_request_shape_rollup_successor(entry: dict[str, Any], outcome: dict[str,
     return bool(
         family == "cohort-ranking"
         or lever == "request-shape-rollups"
-        or evidence_schema == "agentflow.request_shape_follow_up_candidates.v1"
+        or evidence_schema == "tokenclaw.request_shape_follow_up_candidates.v1"
         or next_action == "emit-request-shape-rollups"
         or "ranked_request_shape_rollup" in blockers
     )
@@ -6350,11 +6350,11 @@ def _is_repeated_context_crunch_successor(entry: dict[str, Any], outcome: dict[s
         and (
             evidence_schema
             in {
-                "agentflow.crunch_savings_signal.v1",
-                "agentflow.request_shape_crunch_opportunity_dry_run.v1",
-                "agentflow.request_shape_crunch_canary_impact.v1",
-                "agentflow.request_shape_crunch_policy_decision.v1",
-                "agentflow.request_shape_crunch_activation_evidence.v1",
+                "tokenclaw.crunch_savings_signal.v1",
+                "tokenclaw.request_shape_crunch_opportunity_dry_run.v1",
+                "tokenclaw.request_shape_crunch_canary_impact.v1",
+                "tokenclaw.request_shape_crunch_policy_decision.v1",
+                "tokenclaw.request_shape_crunch_activation_evidence.v1",
             }
             or "repeated-context-crunch" in next_action
             or "repeated-context-crunch" in cohort_class
@@ -6417,7 +6417,7 @@ def _managed_preview_local_executor_gate(entry: dict[str, Any]) -> dict[str, Any
         or action_status in {"keep-current-rule", "suppress-duplicate", "keep-blocked"}
     )
     return {
-        "schema": "agentflow.preview_verified_successor_local_executor_gate.v1",
+        "schema": "tokenclaw.preview_verified_successor_local_executor_gate.v1",
         "passed": passed,
         "policy_write_candidate": policy_write_candidate,
         "policy_files_written": False,
@@ -6596,7 +6596,7 @@ def _cache_rollback_guidance_from_outcome(outcome: dict[str, Any]) -> dict[str, 
     if not rollback_required and not guidance:
         return None
     clean = {
-        "schema": "agentflow.local_activation_cache_rollback_guidance.v1",
+        "schema": "tokenclaw.local_activation_cache_rollback_guidance.v1",
         "rollback_required": True,
         "promotion_readiness": sanitize_value(
             outcome.get("promotion_readiness")
@@ -7497,7 +7497,7 @@ def _openai_routing_recovery_proposal_from_rows(
     status_text = "ready" if status_label == "status:ready" else "blocked"
     next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "review-openai-routing-canary-blockers")
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": title,
         "labels": _activation_successor_issue_labels(action, status_label),
         "proposal_source": "preview-verified-activation-successor",
@@ -7548,7 +7548,7 @@ def _is_tool_cache_dependency_successor(action: dict[str, Any]) -> bool:
     return bool(
         family == "cache"
         and (
-            evidence_schema == "agentflow.request_shape_tool_cache_replay_evidence.v1"
+            evidence_schema == "tokenclaw.request_shape_tool_cache_replay_evidence.v1"
             or str(action.get("dependency_evidence_class") or "")
             or str(action.get("dependency_evidence_decision") or "")
             or "invalidation-evidence-missing" in blockers
@@ -7672,7 +7672,7 @@ def _tool_cache_dependency_proposal_from_rows(
     action_fingerprint = str(decision.get("successor_action_fingerprint") or action.get("fingerprint") or "").strip()
     next_action = str(decision.get("recommended_next_action") or action.get("recommended_next_action") or "collect-file-invalidation-evidence")
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": title,
         "labels": _activation_successor_issue_labels(action, "status:ready"),
         "proposal_source": "preview-verified-activation-successor",
@@ -7768,7 +7768,7 @@ def _activation_successor_proposal_from_rows(
         evidence.append(f"Target local policy section: {action.get('target_local_policy_section')}")
 
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": title,
         "labels": _activation_successor_issue_labels(action, status_label),
         "proposal_source": "preview-verified-activation-successor",
@@ -7854,7 +7854,7 @@ def _activation_feedback_diagnostic_proposal_from_rows(
         _activation_successor_privacy_evidence(action, decision),
     ]
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": title,
         "labels": _activation_successor_issue_labels(action, "status:ready"),
         "proposal_source": "bounded-activation-feedback-successor",
@@ -8241,7 +8241,7 @@ def _queue_rank_basis(entry: dict[str, Any]) -> dict[str, Any]:
     age = _queue_evidence_age_hours(entry)
     max_age = _queue_max_evidence_age_hours(entry)
     basis = {
-        "schema": "agentflow.local_activation_successor_rank_basis.v1",
+        "schema": "tokenclaw.local_activation_successor_rank_basis.v1",
         "rank_bucket": _queue_adjusted_rank_bucket({**entry, "freshness_state": freshness_state}),
         "freshness_state": freshness_state,
         "freshness_multiplier": multiplier,
@@ -8286,7 +8286,7 @@ def _apply_queue_duplicate_fingerprint_suppression(entries: list[dict[str, Any]]
         entry["duplicate_suppression_reason"] = "duplicate-successor-fingerprint"
         entry["issue_worthy_status"] = "suppressed"
         entry["duplicate_suppression"] = {
-            "schema": "agentflow.local_activation_successor_duplicate_suppression.v1",
+            "schema": "tokenclaw.local_activation_successor_duplicate_suppression.v1",
             "reason": "duplicate-successor-fingerprint",
             "suppresses_duplicate_successor_issue": True,
             "metadata_only": True,
@@ -8525,7 +8525,7 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
     if not isinstance(ledger, dict):
         safety_stop_burndown = (
             stats_summary
-            if stats_summary.get("schema") == "agentflow.activation_safety_stop_burndown.v1"
+            if stats_summary.get("schema") == "tokenclaw.activation_safety_stop_burndown.v1"
             else stats_summary.get("activation_safety_stop_burndown")
             if isinstance(stats_summary.get("activation_safety_stop_burndown"), dict)
             else None
@@ -9111,7 +9111,7 @@ def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
             "activation_gate": "anthropic-routing-safety-stop-burndown",
         }
         duplicate_suppression = {
-            "schema": "agentflow.anthropic_routing_activation_issue_duplicate_suppression.v1",
+            "schema": "tokenclaw.anthropic_routing_activation_issue_duplicate_suppression.v1",
             "reason": "anthropic-routing-safety-stop-burndown-not-cleared",
             "fingerprint": public_id(json.dumps(suppression_material, sort_keys=True), prefix="activation"),
             "suppresses_new_activation_issue": True,
@@ -9362,11 +9362,11 @@ def _request_shape_tool_cache_dependency_stages(stats_summary: dict[str, Any]) -
             {
                 "lever": "cache",
                 "state": "missing-evidence",
-                "evidence_source": report.get("schema") or "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "evidence_source": report.get("schema") or "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                 "local_action_family": "cache",
                 "next_action": next_action,
                 "fingerprint_next_action": next_action,
-                "fingerprint_evidence_source": report.get("schema") or "agentflow.request_shape_tool_cache_replay_evidence.v1",
+                "fingerprint_evidence_source": report.get("schema") or "tokenclaw.request_shape_tool_cache_replay_evidence.v1",
                 "fingerprint_cohort_bucket": sanitize_value(cohort_bucket),
                 "blocker_codes": sanitize_value(blocker_codes),
                 "sample_count": sample_count,
@@ -9386,7 +9386,7 @@ def _request_shape_tool_cache_dependency_stages(stats_summary: dict[str, Any]) -
                 "dependency_evidence_reason": sanitize_value(reason),
                 "evidence_state": sanitize_value(evidence_state),
                 "dependency_evidence_review": {
-                    "schema": "agentflow.openai_tool_cache_dependency_next_action.v1",
+                    "schema": "tokenclaw.openai_tool_cache_dependency_next_action.v1",
                     "status": sanitize_value(dependency_status),
                     "evidence_class": sanitize_value(evidence_class),
                     "decision": sanitize_value(decision_value),
@@ -9517,7 +9517,7 @@ def _cache_replay_warmup_duplicate_suppression(
     suppression = dict(existing)
     suppression.setdefault(
         "schema",
-        "agentflow.request_shape_cache_replay_warmup_carry_forward_duplicate_suppression.v1",
+        "tokenclaw.request_shape_cache_replay_warmup_carry_forward_duplicate_suppression.v1",
     )
     suppression.setdefault("reason", reason or "cache-replay-canary-warmup-carry-forward")
     suppression.setdefault("metadata_only", True)
@@ -9565,7 +9565,7 @@ def _cache_replay_stale_no_traffic_duplicate_suppression(
         else {}
     )
     suppression = dict(existing)
-    suppression["schema"] = "agentflow.request_shape_cache_replay_stale_no_traffic_retirement_duplicate_suppression.v1"
+    suppression["schema"] = "tokenclaw.request_shape_cache_replay_stale_no_traffic_retirement_duplicate_suppression.v1"
     suppression["reason"] = "rollback-stale-no-traffic-retired"
     suppression["metadata_only"] = True
     suppression["aggregate_only"] = True
@@ -9750,7 +9750,7 @@ def _request_shape_cache_replay_policy_decision_loop_stage(stats_summary: dict[s
         "local_action_family": "cache",
         "next_action": next_action,
         "fingerprint_next_action": "stage-cache-replay-canary",
-        "fingerprint_evidence_source": "agentflow.request_shape_cache_replayability_dry_run.v1",
+        "fingerprint_evidence_source": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
         "fingerprint_cohort_bucket": sanitize_value(f"cache:{_sample_count_bucket(fingerprint_sample_count)}"),
         "blocker_codes": sanitize_value(blockers),
         "sample_count": sample_count,
@@ -9853,7 +9853,7 @@ def _request_shape_cache_replay_evidence_loop_stage(stats_summary: dict[str, Any
         "local_action_family": "cache",
         "next_action": next_action,
         "fingerprint_next_action": "stage-cache-replay-canary",
-        "fingerprint_evidence_source": "agentflow.request_shape_cache_replayability_dry_run.v1",
+        "fingerprint_evidence_source": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
         "fingerprint_cohort_bucket": sanitize_value(f"cache:{_sample_count_bucket(fingerprint_sample_count)}"),
         "blocker_codes": [] if state in {"measured-savings", "canary-staged", "replay-ready"} else blockers,
         "sample_count": sample_count,
@@ -10370,7 +10370,7 @@ def _evidence_to_activation_loop(stats_summary: dict[str, Any]) -> dict[str, Any
         status = "missing-evidence"
 
     return {
-        "schema": "agentflow.evidence_to_activation_savings_loop.v1",
+        "schema": "tokenclaw.evidence_to_activation_savings_loop.v1",
         "status": status,
         "summary": {
             "tracked_lever_count": len(stages),
@@ -10482,7 +10482,7 @@ def _burndown_row_from_safety_stop_group(group: dict[str, Any]) -> dict[str, Any
         "next_state_reason": sanitize_value(group.get("next_state_reason") or blocker),
         "keep_blocked_reason": sanitize_value(group.get("keep_blocked_reason") or blocker),
         "needed_resolution": sanitize_value(needed),
-        "evidence_source": "agentflow.activation_safety_stop_burndown.v1",
+        "evidence_source": "tokenclaw.activation_safety_stop_burndown.v1",
         "sample_count": count,
         "savings_per_1000_calls_usd": 0.0,
         "projected_saved_usd": round(_to_float(group.get("savings_estimate_usd")), 8),
@@ -10598,7 +10598,7 @@ def _burndown_rows_from_promotion_feedback(feedback: dict[str, Any]) -> list[dic
             "state": state,
             "next_action": _promotion_feedback_next_action(state, representative.get("status"), representative.get("recommendation")),
             "blocker_codes": sanitize_value(blocker_codes),
-            "evidence_source": sanitize_value(feedback.get("schema") or "agentflow.promotion_outcome_feedback_summary.v1"),
+            "evidence_source": sanitize_value(feedback.get("schema") or "tokenclaw.promotion_outcome_feedback_summary.v1"),
             "source": "promotion-outcome-feedback",
             "entry_count": len(family_entries),
             "sample_count": applied + holdout + skipped + bypassed + safety_stops,
@@ -10924,7 +10924,7 @@ def _aggregate_openai_canary_lifecycle_evidence(row: dict[str, Any], *, sample_c
         blockers["stale-evidence"] = observed or sample_count
 
     return {
-        "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+        "schema": "tokenclaw.openai_routing_canary_lifecycle_evidence.v1",
         "status": "matched" if observed else "no-openai-canary-metadata",
         "observed_count": observed,
         "cohort_counts": {
@@ -11073,7 +11073,7 @@ def _aggregate_anthropic_canary_lifecycle_evidence(row: dict[str, Any], *, sampl
         safety_next_action = str(safety_stop_breakdown[0].get("next_action") or "").strip() or None
 
     return {
-        "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+        "schema": "tokenclaw.anthropic_routing_canary_lifecycle_evidence.v1",
         "status": "matched" if observed else "no-anthropic-canary-metadata",
         "observed_count": observed,
         "cohort_counts": {
@@ -11558,7 +11558,7 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
         ranked.append(item)
     top = ranked[0] if ranked else {}
     return {
-        "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+        "schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
         "summary": {
             "routing_rows_scanned": total_rows,
             "pass_through_rows": pass_through_rows,
@@ -11775,7 +11775,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
         "policy_files_written": False,
     }
     candidate_set = {
-        "schema": "agentflow.openai_routing_candidate_set_metadata.v1",
+        "schema": "tokenclaw.openai_routing_candidate_set_metadata.v1",
         "candidate_count": len(candidate_ids),
         "candidate_fingerprint": public_id("|".join(sorted(candidate_ids)), prefix="openai-routing-candidates"),
         "candidate_ids_included": False,
@@ -11812,7 +11812,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
             target_local_rule_file="routing_rules.yaml",
         )
         active_outcome = {
-            "schema": "agentflow.openai_routing_active_local_policy_outcome.v1",
+            "schema": "tokenclaw.openai_routing_active_local_policy_outcome.v1",
             "status": "active-local-policy",
             "state": "active-local-policy",
             "current_status": "applied",
@@ -11842,7 +11842,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
             "fallback_count": fallback_count,
             "retry_count": retry_count,
             "regression_counters": {
-                "schema": "agentflow.openai_routing_active_local_policy_regression_counters.v1",
+                "schema": "tokenclaw.openai_routing_active_local_policy_regression_counters.v1",
                 "error_count": error_count,
                 "fallback_count": fallback_count,
                 "retry_count": retry_count,
@@ -11855,7 +11855,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
             "outcome_gate": outcome_gate,
             "active_rule_regression_gate": outcome_gate,
             "coverage": {
-                "schema": "agentflow.openai_routing_active_local_policy_coverage.v1",
+                "schema": "tokenclaw.openai_routing_active_local_policy_coverage.v1",
                 "matched_count": matched_count,
                 "observed_count": observed_count,
                 "applied_count": applied,
@@ -11874,7 +11874,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
             "privacy": privacy,
         }
     decision_payload = {
-        "schema": "agentflow.openai_routing_promotion_decision.v1",
+        "schema": "tokenclaw.openai_routing_promotion_decision.v1",
         "decision": decision,
         "promotion_ready": decision == "promote",
         "next_action": next_action,
@@ -11890,7 +11890,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
         "projected_savings_usd": round(projected_savings_usd, 6),
         "savings_per_1000_calls_usd": savings_per_1000,
         "lifecycle": {
-            "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+            "schema": "tokenclaw.openai_routing_canary_lifecycle_evidence.v1",
             "status": "matched" if observed_count else "no-openai-canary-metadata",
             "observed_count": observed_count,
             "cohort_counts": cohort_counts,
@@ -11912,7 +11912,7 @@ def _openai_routing_promotion_decision_from_pass_through(report: dict[str, Any])
         "privacy": privacy,
     }
     return {
-        "schema": "agentflow.openai_routing_promotion_decision_report.v1",
+        "schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
         "source_report_schema": report.get("schema"),
         "target": decision_payload["target"],
         "decision": decision,
@@ -11996,7 +11996,7 @@ def _disabled_openai_local_policy_rule(target: dict[str, Any]) -> dict[str, Any]
         metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
         reason = str(rule.get("disabled_reason") or "disabled-local-policy")
         return {
-            "schema": "agentflow.openai_routing_disabled_local_policy_rule.v1",
+            "schema": "tokenclaw.openai_routing_disabled_local_policy_rule.v1",
             "status": "disabled-local-policy",
             "reason": reason,
             "policy_source": str(rule.get("policy_source") or metadata.get("policy_source") or "local-promoted"),
@@ -12028,7 +12028,7 @@ def _candidate(
     projected_savings_signal: dict[str, Any],
     confidence: str,
     sequencing: str,
-    repo: str = "lutzkuen/agentflow",
+    repo: str = "lutzkuen/tokenclaw",
     safety_status: str = "review-required",
     score: float = 0.0,
 ) -> dict[str, Any]:
@@ -12051,7 +12051,7 @@ _GOLDEN_PATH_READINESS_DIMENSIONS = {
     "openai_codex_local_capture": "OpenAI-compatible or Codex traffic can be captured locally",
     "safe_local_savings_action": "one local savings action can be safely applied",
     "metadata_only_outcome_evidence": "outcome evidence can be logged metadata-only",
-    "agentflow_savings_reporting": "AgentFlow-generated savings can be reported separately from provider discounts",
+    "tokenclaw_savings_reporting": "AgentFlow-generated savings can be reported separately from provider discounts",
     "rollback_safety_visibility": "rollback/safety state is visible",
     "user_explainability": "the dashboard or demo command can explain the state to a user",
 }
@@ -12062,7 +12062,7 @@ def _golden_path_dimension_score(dimension: str | None) -> int:
         "safe_local_savings_action": 0,
         "rollback_safety_visibility": 1,
         "metadata_only_outcome_evidence": 2,
-        "agentflow_savings_reporting": 3,
+        "tokenclaw_savings_reporting": 3,
         "openai_codex_local_capture": 4,
         "user_explainability": 5,
     }.get(str(dimension or ""), 99)
@@ -12095,7 +12095,7 @@ def _candidate_golden_path_readiness_dimension(candidate: dict[str, Any]) -> str
     if lever == "cache" and any(token in combined for token in ("zero-cache", "cache", "replay", "invalidation")):
         return "metadata_only_outcome_evidence"
     if lever == "crunch" and any(token in combined for token in ("savings", "saved", "projected")):
-        return "agentflow_savings_reporting"
+        return "tokenclaw_savings_reporting"
     if lever == "routing" and "missing-routing-breakdown" in blocker:
         return "openai_codex_local_capture"
     if lever == "request-shape-rollups" and "report-missing" in blocker:
@@ -12255,7 +12255,7 @@ def _routing_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
             }
             if safety_stop_blocked:
                 projected_signal["activation_gate"] = {
-                    "schema": "agentflow.anthropic_routing_activation_issue_gate.v1",
+                    "schema": "tokenclaw.anthropic_routing_activation_issue_gate.v1",
                     "status": "suppressed-until-safety-stop-burndown-clears",
                     "safety_stop_count": safety_stop_count,
                     "applied_count": applied_count,
@@ -12510,7 +12510,7 @@ def _crunch_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         return None
     status = str(signal.get("status") or "")
     signal_payload = dict(signal) if signal else {
-        "schema": "agentflow.crunch_savings_signal.v1",
+        "schema": "tokenclaw.crunch_savings_signal.v1",
         "status": "observed-savings-ranked" if today_savings > 0 else "missing-crunch-measurement",
         "calls": calls,
         "observed": {
@@ -12881,8 +12881,8 @@ def _proposal_golden_path_readiness_dimension(proposal: dict[str, Any]) -> str |
         return "safe_local_savings_action"
     if any(token in text for token in ("outcome evidence", "metadata-only", "applied/holdout", "applied", "holdout", "lifecycle", "measure")):
         return "metadata_only_outcome_evidence"
-    if any(token in text for token in ("agentflow-generated savings", "provider prompt-cache", "savings separately", "savings demo", "crunch savings")):
-        return "agentflow_savings_reporting"
+    if any(token in text for token in ("tokenclaw-generated savings", "provider prompt-cache", "savings separately", "savings demo", "crunch savings")):
+        return "tokenclaw_savings_reporting"
     if any(token in text for token in ("openai-compatible", "codex traffic", "openai traffic", "openai api", "openai responses")):
         return "openai_codex_local_capture"
     return None
@@ -12897,7 +12897,7 @@ def _proposal_product_loop_impact(dimension: str, proposal: dict[str, Any]) -> s
         action = "keeps the product loop safe by making rollback, blocker, safety-stop, or quality-regression state explicit before more traffic is widened."
     elif dimension == "metadata_only_outcome_evidence":
         action = "turns the next step into metadata-only applied, holdout, lifecycle, or outcome evidence that later runs can rank without raw content."
-    elif dimension == "agentflow_savings_reporting":
+    elif dimension == "tokenclaw_savings_reporting":
         action = "helps separate AgentFlow-generated savings from provider discounts so a user can see whether AgentFlow itself created value."
     elif dimension == "openai_codex_local_capture":
         action = "improves local capture or classification of OpenAI-compatible or Codex traffic before savings are claimed."
@@ -12934,7 +12934,7 @@ def _finalize_create_issue_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
             body = f"{body.rstrip()}\n\n{label_section.rstrip()}\n"
     finalized["body"] = body
     finalized["title"] = redact_text(str(finalized.get("title") or ""))
-    finalized["repo"] = redact_text(str(finalized.get("repo") or "lutzkuen/agentflow"))
+    finalized["repo"] = redact_text(str(finalized.get("repo") or "lutzkuen/tokenclaw"))
     return finalized
 
 
@@ -12949,7 +12949,7 @@ def _filter_golden_path_ready_proposals(
             suppressed.append(
                 {
                     "title": sanitize_value(proposal.get("title")),
-                    "repo": sanitize_value(proposal.get("repo") or "lutzkuen/agentflow"),
+                    "repo": sanitize_value(proposal.get("repo") or "lutzkuen/tokenclaw"),
                     "reason": "candidate-does-not-improve-openai-codex-golden-path-readiness",
                     "suppression_kind": "generic-telemetry-churn",
                 }
@@ -13141,7 +13141,7 @@ def _dedupe_create_issue_proposals_with_metadata(
         if len(deduped) >= max_count:
             break
     metadata = {
-        "schema": "agentflow.research_issue_proposal_suppression.v1",
+        "schema": "tokenclaw.research_issue_proposal_suppression.v1",
         "suppressed_count": len(suppressed),
         "closed_prior_issue_count": sum(1 for item in suppressed if item.get("suppression_kind") == "closed-prior-issue"),
         "suppressed_closed_predecessor_count": sum(
@@ -13263,7 +13263,7 @@ def _proposal_from_optimization_candidate(candidate: dict[str, Any]) -> dict[str
         f"Projected savings signal: {json.dumps(signal, sort_keys=True)}",
     ]
     return {
-        "repo": candidate.get("repo") or "lutzkuen/agentflow",
+        "repo": candidate.get("repo") or "lutzkuen/tokenclaw",
         "title": title,
         "labels": _candidate_labels(candidate),
         "golden_path_readiness_dimension": candidate.get("golden_path_readiness_dimension"),
@@ -13391,7 +13391,7 @@ def _proposal_from_low_backlog(
         top = diagnostics[0]
         evidence.append(f"Top repeated diagnostic is non-actionable evidence: {top['reason']} ({top['count']} observations).")
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": LOW_BACKLOG_MILESTONE_TITLE,
         "labels": _default_issue_labels("priority:p1"),
         "body": _issue_body(
@@ -13524,7 +13524,7 @@ def _next_backlog_milestone(
             {
                 "rank": rank,
                 "title": sanitize_value(title),
-                "repo": sanitize_value(proposal.get("repo") or "lutzkuen/agentflow"),
+                "repo": sanitize_value(proposal.get("repo") or "lutzkuen/tokenclaw"),
                 "lever": lever,
                 "priority": priority,
                 "labels": labels,
@@ -13559,7 +13559,7 @@ def _next_backlog_milestone(
     top_lever = sanitize_value(top_candidate.get("lever")) if top_candidate is not None else None
     top_blocker = sanitize_value(top_candidate.get("blocker")) if top_candidate is not None else None
     return {
-        "schema": "agentflow.next_backlog_milestone.v1",
+        "schema": "tokenclaw.next_backlog_milestone.v1",
         "status": "ready" if issue_rows else "empty",
         "summary": {
             "proposal_count": len(issue_rows),
@@ -13638,7 +13638,7 @@ def _proposal_from_promotion_blocker_next_action(stats_summary: dict[str, Any]) 
         labels.append(family_label)
     labels.append("privacy")
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": title,
         "labels": list(dict.fromkeys(labels)),
         "body": _issue_body(
@@ -13742,7 +13742,7 @@ def _proposal_from_post_promotion_priority_deltas(stats_summary: dict[str, Any])
         )
 
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": title,
         "labels": list(dict.fromkeys(labels)),
         "body": _issue_body(
@@ -13926,7 +13926,7 @@ def _proposal_from_evidence_to_activation_ledger(stats_summary: dict[str, Any]) 
     if entry.get("duplicate_suppression"):
         entry_evidence.append(f"Duplicate suppression: {json.dumps(entry.get('duplicate_suppression') or {}, sort_keys=True)}")
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": title,
         "labels": list(dict.fromkeys(labels)),
         "body": _issue_body(
@@ -14010,7 +14010,7 @@ def _proposal_from_repeated_diagnostic(
             evidence.append(f"Ledger verification check: {ledger_verification_check}")
     if is_bounded_human_review:
         evidence.extend([
-            "Source schema: agentflow.orchestrator_research_log_diagnostics.v1",
+            "Source schema: tokenclaw.orchestrator_research_log_diagnostics.v1",
             f"Report key: repeated_diagnostics.{diagnostic_class}",
             "Privacy: metadata-only, telemetry_profile=metadata-only, no raw prompts, no provider bodies, no request or session IDs",
         ])
@@ -14027,7 +14027,7 @@ def _proposal_from_repeated_diagnostic(
             ]
         )
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": f"Turn repeated {title_reason} diagnostics into an actionable optimization issue",
         "labels": _default_issue_labels("priority:p2"),
         "body": _issue_body(
@@ -14104,7 +14104,7 @@ def _repeated_diagnostic_comment_for_issue(
         sequencing="Use before creating duplicate replacement issues for the same diagnostic pattern.",
     )
     return {
-        "repo": issue.get("repo") or "lutzkuen/agentflow",
+        "repo": issue.get("repo") or "lutzkuen/tokenclaw",
         "number": _issue_number(issue),
         "action": "comment",
         "body": body,
@@ -14516,7 +14516,7 @@ def _proposal_from_cache_replay_blocker(stats_summary: dict[str, Any]) -> dict[s
         "Generated and follow-up evidence remains aggregate-only and excludes prompts, provider bodies, file paths, cache keys, request IDs, and session IDs.",
     ]
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": title,
         "labels": ["backlog", "status:ready", "priority:p1", "core-feature", "correctness", "cache", "privacy"],
         "body": _issue_body(
@@ -14608,7 +14608,7 @@ def _proposal_from_openai_routing_canary_feedback(stats_summary: dict[str, Any])
         evidence.append(f"Warning codes: {', '.join(warning_codes)}")
 
     return {
-        "repo": "lutzkuen/agentflow",
+        "repo": "lutzkuen/tokenclaw",
         "title": title,
         "labels": labels,
         "body": _issue_body(
@@ -14754,7 +14754,7 @@ def build_research_plan(
     comment_issues: list[dict[str, Any]] = []
     close_issues: list[dict[str, Any]] = []
     proposal_suppression = {
-        "schema": "agentflow.research_issue_proposal_suppression.v1",
+        "schema": "tokenclaw.research_issue_proposal_suppression.v1",
         "suppressed_count": 0,
         "closed_prior_issue_count": 0,
         "open_existing_issue_count": 0,
@@ -14859,7 +14859,7 @@ def build_research_plan(
         )
     else:
         next_backlog_milestone = {
-            "schema": "agentflow.next_backlog_milestone.v1",
+            "schema": "tokenclaw.next_backlog_milestone.v1",
             "status": "not-needed",
             "summary": {
                 "proposal_count": 0,

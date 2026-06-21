@@ -13,9 +13,9 @@ from tokenclaw.policy_workbench import validate_staged_policy_draft
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.managed_activation_bundle_import.v1"
-STAGED_ENTRY_SCHEMA = "agentflow.managed_activation_policy_draft_entry.v1"
-SUPPORTED_INPUT_SCHEMA = "agentflow.local_activation_outcome_policy_bundle_drafts.v1"
+SCHEMA = "tokenclaw.managed_activation_bundle_import.v1"
+STAGED_ENTRY_SCHEMA = "tokenclaw.managed_activation_policy_draft_entry.v1"
+SUPPORTED_INPUT_SCHEMA = "tokenclaw.local_activation_outcome_policy_bundle_drafts.v1"
 SUPPORTED_FAMILIES = {"cache", "crunch"}
 RULE_FILES = {
     "cache": "cache_rules.yaml",
@@ -238,7 +238,7 @@ def _error_result(error_type: str, message: str, *, errors: list[dict[str, str]]
 
 def _action_skip(action: dict[str, Any], reason: str, *, message: str | None = None) -> dict[str, Any]:
     return {
-        "schema": "agentflow.managed_activation_bundle_import_skip.v1",
+        "schema": "tokenclaw.managed_activation_bundle_import_skip.v1",
         "status": "skipped",
         "reason_code": reason,
         "reason_codes": [reason],
@@ -387,7 +387,7 @@ async def stage_managed_activation_bundle(
     for action in actions:
         if not isinstance(action, dict):
             skipped.append({
-                "schema": "agentflow.managed_activation_bundle_import_skip.v1",
+                "schema": "tokenclaw.managed_activation_bundle_import_skip.v1",
                 "status": "skipped",
                 "reason_code": "invalid-action",
                 "reason_codes": ["invalid-action"],
@@ -421,7 +421,7 @@ async def stage_managed_activation_bundle(
             draft_id=draft_id,
             workspace=workspace,
             metadata={
-                "schema": "agentflow.managed_activation_bundle_import_metadata.v1",
+                "schema": "tokenclaw.managed_activation_bundle_import_metadata.v1",
                 "source": "managed-activation-bundle-import",
                 "bundle_id": bundle.get("bundle_id"),
                 "policy_source": "managed-recommended",
@@ -438,7 +438,7 @@ async def stage_managed_activation_bundle(
                 db_path=db_path,
             )
         row = {
-            "schema": "agentflow.managed_activation_bundle_import_staged.v1",
+            "schema": "tokenclaw.managed_activation_bundle_import_staged.v1",
             "status": "staged" if stage.get("ok") else "rejected",
             "local_action_family": family,
             "policy_section": family,

@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 import yaml
 
-SCHEMA = "agentflow.local_savings_rule_drill.v1"
+SCHEMA = "tokenclaw.local_savings_rule_drill.v1"
 FIXTURE_RULE_ID = "fixture-openai-routing-rollback-drill"
 FIXTURE_REQUESTED_MODEL = "gpt-5.4"
 FIXTURE_TARGET_MODEL = "gpt-5.4-mini"
@@ -106,8 +106,8 @@ def _fixture_request() -> dict[str, Any]:
         "model": FIXTURE_REQUESTED_MODEL,
         "stream": False,
         "input": "AgentFlow local savings rollback drill fixture.",
-        "_agentflow_source_surface": "openai_responses",
-        "_agentflow_endpoint": "responses",
+        "_tokenclaw_source_surface": "openai_responses",
+        "_tokenclaw_endpoint": "responses",
     }
 
 
@@ -157,7 +157,7 @@ async def _run_drill() -> dict[str, Any]:
     from tokenclaw.policy_workbench import apply_validated_policy_draft, rollback_policy_apply
 
     try:
-        with tempfile.TemporaryDirectory(prefix="agentflow-rule-drill-") as tmpdir:
+        with tempfile.TemporaryDirectory(prefix="tokenclaw-rule-drill-") as tmpdir:
             root = Path(tmpdir)
             config_dir = root / "config"
             workspace = root / "drafts"
@@ -167,12 +167,12 @@ async def _run_drill() -> dict[str, Any]:
             routing_path.write_text(yaml.safe_dump(_clean_routing_yaml(), sort_keys=False), encoding="utf-8")
 
             env = {
-                "AGENTFLOW_CONFIG_DIR": str(config_dir),
-                "AGENTFLOW_POLICY_CONFIG_DIR": str(config_dir),
-                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
-                "AGENTFLOW_ROUTING_RULES": None,
-                "AGENTFLOW_ROUTING": "1",
-                "AGENTFLOW_OPENAI_ROUTING": "0",
+                "TOKENCLAW_CONFIG_DIR": str(config_dir),
+                "TOKENCLAW_POLICY_CONFIG_DIR": str(config_dir),
+                "TOKENCLAW_POLICY_EVENTS_LOG": str(event_log),
+                "TOKENCLAW_ROUTING_RULES": None,
+                "TOKENCLAW_ROUTING": "1",
+                "TOKENCLAW_OPENAI_ROUTING": "0",
             }
             with _temporary_env(env):
                 await reload_policy_modules()

@@ -32,8 +32,8 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import stable_json, utc_now
 
 
-SCHEMA = "agentflow.codex_terminal_transcript_compaction_dry_run.v1"
-PLAN_SCHEMA = "agentflow.codex_terminal_transcript_compaction_plan.v1"
+SCHEMA = "tokenclaw.codex_terminal_transcript_compaction_dry_run.v1"
+PLAN_SCHEMA = "tokenclaw.codex_terminal_transcript_compaction_plan.v1"
 DEFAULT_AVG_TERMINAL_LINE_CHARS = 100
 
 _STALE_REASONS = {
@@ -575,7 +575,7 @@ def build_codex_terminal_transcript_compaction_dry_run(
         "generated_at": utc_now(),
         "lookback_turn_limit": capped_limit,
         "policy": {
-            "schema": "agentflow.codex_terminal_transcript_compaction_policy.v1",
+            "schema": "tokenclaw.codex_terminal_transcript_compaction_policy.v1",
             "rule_count": len(rules),
             "runtime_mutation_enabled": False,
             "default_apply": False,

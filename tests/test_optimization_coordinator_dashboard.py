@@ -26,7 +26,7 @@ FORBIDDEN_VALUES = (
 class OptimizationCoordinatorDashboardTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -119,7 +119,7 @@ class OptimizationCoordinatorDashboardTests(unittest.TestCase):
 
     def _coordinator_meta(self, *, selected: str = "routing", suppressed: list[dict[str, object]] | None = None, reason_codes: list[str] | None = None) -> dict[str, object]:
         decision = {
-            "schema": "agentflow.optimization_coordinator.v1",
+            "schema": "tokenclaw.optimization_coordinator.v1",
             "selected_family": selected,
             "selected_action_family": selected,
             "suppressed_families": suppressed or [],
@@ -146,7 +146,7 @@ class OptimizationCoordinatorDashboardTests(unittest.TestCase):
         return {
             "optimization_coordinator": decision,
             "optimization_coordinator_enforcement": {
-                "schema": "agentflow.optimization_coordinator_enforcement.v1",
+                "schema": "tokenclaw.optimization_coordinator_enforcement.v1",
                 "enabled": True,
                 "status": "applied",
                 "selected_family": selected,
@@ -157,10 +157,10 @@ class OptimizationCoordinatorDashboardTests(unittest.TestCase):
         }
 
     def test_disabled_state_without_coordinator_metadata(self) -> None:
-        with patch.dict(os.environ, {"AGENTFLOW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "0"}):
+        with patch.dict(os.environ, {"TOKENCLAW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "0"}):
             report = self._report()
 
-        self.assertEqual(report["schema"], "agentflow.optimization_coordinator_dashboard.v1")
+        self.assertEqual(report["schema"], "tokenclaw.optimization_coordinator_dashboard.v1")
         self.assertEqual(report["state"], "disabled")
         self.assertFalse(report["capabilities"]["enforcement_enabled"])
         self.assertTrue(report["read_only"])
@@ -170,7 +170,7 @@ class OptimizationCoordinatorDashboardTests(unittest.TestCase):
     def test_dry_run_only_state_when_action_ledger_exists_without_runtime_metadata(self) -> None:
         self._log_call()
 
-        with patch.dict(os.environ, {"AGENTFLOW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "0"}):
+        with patch.dict(os.environ, {"TOKENCLAW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "0"}):
             report = self._report()
 
         self.assertEqual(report["state"], "dry-run-only")
@@ -190,7 +190,7 @@ class OptimizationCoordinatorDashboardTests(unittest.TestCase):
             }
         )
 
-        with patch.dict(os.environ, {"AGENTFLOW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "0"}):
+        with patch.dict(os.environ, {"TOKENCLAW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "0"}):
             report = self._report()
 
         dry_run = report["dry_run_summary"]
@@ -204,7 +204,7 @@ class OptimizationCoordinatorDashboardTests(unittest.TestCase):
     def test_active_selection_state_counts_runtime_selection(self) -> None:
         self._log_call(routing_meta=self._coordinator_meta(selected="routing"))
 
-        with patch.dict(os.environ, {"AGENTFLOW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "1"}):
             report = self._report()
 
         self.assertEqual(report["state"], "active-selection")
@@ -224,7 +224,7 @@ class OptimizationCoordinatorDashboardTests(unittest.TestCase):
             retry_count=3,
         )
 
-        with patch.dict(os.environ, {"AGENTFLOW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "1"}):
             report = self._report()
 
         self.assertEqual(report["state"], "conflict-observed")
@@ -239,7 +239,7 @@ class OptimizationCoordinatorDashboardTests(unittest.TestCase):
     def test_safety_stop_state_counts_safety_reasons(self) -> None:
         self._log_call(routing_meta=self._coordinator_meta(selected="routing", reason_codes=["safety-stop-priority"]))
 
-        with patch.dict(os.environ, {"AGENTFLOW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "1"}):
+        with patch.dict(os.environ, {"TOKENCLAW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "1"}):
             report = self._report()
 
         self.assertEqual(report["state"], "safety-stop")

@@ -10,7 +10,7 @@ from tokenclaw.pricing import codex_app_model, codex_app_processing_mode, estima
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.codex_terminal_transcript_opportunity.v1"
+SCHEMA = "tokenclaw.codex_terminal_transcript_opportunity.v1"
 
 _FRACTION_MIDPOINTS = {
     "none": 0.0,
@@ -468,7 +468,7 @@ def build_codex_terminal_transcript_opportunity_report(
         "min_input_chars": input_floor,
         "min_terminal_chars": terminal_floor,
         "projection_policy": {
-            "schema": "agentflow.codex_terminal_transcript_projection_policy.v1",
+            "schema": "tokenclaw.codex_terminal_transcript_projection_policy.v1",
             "provider_calls_made": False,
             "managed_server_calls_made": False,
             "default_apply": False,

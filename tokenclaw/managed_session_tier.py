@@ -27,9 +27,9 @@ from tokenclaw.router import HAIKU_DEFAULT, OPUS_DEFAULT, SONNET_DEFAULT
 
 
 SESSION_TIER_PATH = "/v1/session-tier"
-SESSION_TIER_REQUEST_SCHEMA = "agentflow.session_tier_request.v1"
-SESSION_TIER_DECISION_SCHEMA = "agentflow.session_tier_decision.v1"
-SESSION_TIER_ENABLED_ENV = "AGENTFLOW_SESSION_TIER_ENABLED"
+SESSION_TIER_REQUEST_SCHEMA = "tokenclaw.session_tier_request.v1"
+SESSION_TIER_DECISION_SCHEMA = "tokenclaw.session_tier_decision.v1"
+SESSION_TIER_ENABLED_ENV = "TOKENCLAW_SESSION_TIER_ENABLED"
 
 _SESSION_TIER_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -54,7 +54,7 @@ def count_tool_definitions(body: dict[str, Any]) -> int:
 
 def _base_meta() -> dict[str, Any]:
     return {
-        "schema": "agentflow.local_session_tier_decision_meta.v1",
+        "schema": "tokenclaw.local_session_tier_decision_meta.v1",
         "endpoint": SESSION_TIER_PATH,
         "enabled": session_tier_enabled(),
         "auth_configured": managed_auth_configured(),

@@ -10,9 +10,9 @@ from tokenclaw.store import stable_json
 from tokenclaw.terminal_features import terminal_log_features_from_text
 
 
-OPENAI_FEATURE_SUMMARY_SCHEMA = "agentflow.openai_feature_summary.v1"
-OPENAI_OUTCOME_SUMMARY_SCHEMA = "agentflow.openai_outcome_summary.v1"
-OPENAI_PREFLIGHT_SCHEMA = "agentflow.openai_preflight_feature_unit.v1"
+OPENAI_FEATURE_SUMMARY_SCHEMA = "tokenclaw.openai_feature_summary.v1"
+OPENAI_OUTCOME_SUMMARY_SCHEMA = "tokenclaw.openai_outcome_summary.v1"
+OPENAI_PREFLIGHT_SCHEMA = "tokenclaw.openai_preflight_feature_unit.v1"
 
 CHAR_BUCKETS = (
     (2_000, "lt_2k_chars"),
@@ -336,7 +336,7 @@ def build_openai_request_feature_unit(
         session_id=session_id,
     )
     unit.update({
-        "schema": "agentflow.openai_optimization_unit.v1",
+        "schema": "tokenclaw.openai_optimization_unit.v1",
         "provider": "openai",
         "endpoint": openai_endpoint(path),
         "requested_model_family": openai_model_family(requested_model),
@@ -453,7 +453,7 @@ def build_openai_outcome_feature_unit(
         error=error,
     )
     unit.update({
-        "schema": "agentflow.openai_outcome_unit.v1",
+        "schema": "tokenclaw.openai_outcome_unit.v1",
         "endpoint": openai_endpoint(path),
         "requested_model_family": openai_model_family(requested_model),
         "routed_model_family": openai_model_family(routed_model),

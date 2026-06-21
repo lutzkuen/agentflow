@@ -130,7 +130,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
         })
 
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 seen: set[str] = set()
                 with patch.object(router, "ROUTING_PHASE_CANARY", policy), patch.object(router, "ROUTING_RULES_SOURCE", "local-default"):
@@ -159,7 +159,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["schema"], "agentflow.anthropic_routing_canary_lifecycle_report.v1")
+        self.assertEqual(report["schema"], "tokenclaw.anthropic_routing_canary_lifecycle_report.v1")
         self.assertEqual(report["summary"]["canary_applied_count"], 1)
         self.assertEqual(report["summary"]["canary_holdout_count"], 1)
         self.assertEqual(report["summary"]["safety_stopped_count"], 1)
@@ -283,7 +283,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
 
     def test_claude_canary_impact_reports_widen_cli_and_dashboard_json_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._log_claude_canary_call(store, cohort="canary_applied", suffix="a1", stripped_params=["thinking", "effort"], dangerous_meta=True)
@@ -309,14 +309,14 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
                             "max_concurrent_per_tier": 2,
                         },
                     )
-                    endpoint_payload = TestClient(app).get("/agentflow/stats/claude-canary-impact?limit=10")
+                    endpoint_payload = TestClient(app).get("/tokenclaw/stats/claude-canary-impact?limit=10")
             finally:
                 store.conn.close()
 
             cli_output = io.StringIO()
             exit_code = cli.claude_canary_impact_cli(["--db", db_path, "--limit", "10"], stdout=cli_output)
 
-        self.assertEqual(impact["schema"], "agentflow.claude_canary_impact.v1")
+        self.assertEqual(impact["schema"], "tokenclaw.claude_canary_impact.v1")
         self.assertEqual(impact["summary"]["observed_claude_canary_metadata_row_count"], 3)
         self.assertEqual(impact["summary"]["canary_applied_count"], 2)
         self.assertEqual(impact["summary"]["canary_holdout_count"], 1)
@@ -334,18 +334,18 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         cli_payload = json.loads(cli_output.getvalue())
-        self.assertEqual(cli_payload["schema"], "agentflow.claude_canary_impact.v1")
+        self.assertEqual(cli_payload["schema"], "tokenclaw.claude_canary_impact.v1")
         _assert_privacy_clean(self, cli_payload)
 
         if HAS_RUNTIME_DEPS:
-            self.assertEqual(stats_payload["schema"], "agentflow.claude_canary_impact.v1")
+            self.assertEqual(stats_payload["schema"], "tokenclaw.claude_canary_impact.v1")
             self.assertEqual(endpoint_payload.status_code, 200)
-            self.assertEqual(endpoint_payload.json()["schema"], "agentflow.claude_canary_impact.v1")
+            self.assertEqual(endpoint_payload.json()["schema"], "tokenclaw.claude_canary_impact.v1")
             _assert_privacy_clean(self, endpoint_payload.json())
 
     def test_anthropic_routing_lifecycle_report_covers_holdout_thinking_guard_fallback_and_stale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._log_claude_canary_call(store, candidate_id="candidate-lifecycle", cohort="canary_applied", suffix="a1", dangerous_meta=True)
@@ -399,7 +399,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
                 stdout=cli_output,
             )
 
-        self.assertEqual(report["schema"], "agentflow.anthropic_routing_canary_lifecycle_report.v1")
+        self.assertEqual(report["schema"], "tokenclaw.anthropic_routing_canary_lifecycle_report.v1")
         self.assertEqual(report["summary"]["canary_applied_count"], 4)
         self.assertEqual(report["summary"]["canary_holdout_count"], 2)
         self.assertEqual(report["summary"]["safety_stopped_count"], 1)
@@ -408,7 +408,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
 
         by_candidate = {candidate["candidate_id"]: candidate for candidate in report["candidates"]}
         lifecycle = by_candidate["candidate-lifecycle"]["anthropic_canary_lifecycle_evidence"]
-        self.assertEqual(lifecycle["schema"], "agentflow.anthropic_routing_canary_lifecycle_evidence.v1")
+        self.assertEqual(lifecycle["schema"], "tokenclaw.anthropic_routing_canary_lifecycle_evidence.v1")
         self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 2)
         self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 1)
         self.assertEqual(lifecycle["cohort_counts"]["safety_stopped"], 1)
@@ -428,7 +428,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
         self.assertIn("thinking-routing-guard", lifecycle["blocker_codes"])
         self.assertIn("thinking-history-blocked", lifecycle["blocker_codes"])
         rollback_guard = lifecycle["rollback_guard_metadata"]
-        self.assertEqual(rollback_guard["schema"], "agentflow.anthropic_routing_canary_rollback_guard.v1")
+        self.assertEqual(rollback_guard["schema"], "tokenclaw.anthropic_routing_canary_rollback_guard.v1")
         self.assertEqual(rollback_guard["rule_id"], "test-claude-phase-canary")
         self.assertEqual(rollback_guard["cohort_counts"]["canary_applied"], 2)
         self.assertEqual(rollback_guard["cohort_counts"]["canary_holdout"], 1)
@@ -447,13 +447,13 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         cli_payload = json.loads(cli_output.getvalue())
-        self.assertEqual(cli_payload["schema"], "agentflow.anthropic_routing_canary_lifecycle_report.v1")
+        self.assertEqual(cli_payload["schema"], "tokenclaw.anthropic_routing_canary_lifecycle_report.v1")
         _assert_privacy_clean(self, report)
         _assert_privacy_clean(self, cli_payload)
 
     def test_anthropic_routing_lifecycle_report_keep_blocks_zero_coverage_safety_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 self._log_claude_canary_call(
                     store,
@@ -525,7 +525,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
         for scenario, expected_verdict, expected_reason in scenarios:
             with self.subTest(scenario=scenario):
                 with tempfile.TemporaryDirectory() as tmp:
-                    store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+                    store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
                     try:
                         candidate_id = f"candidate-{scenario}"
                         if scenario == "insufficient":
@@ -572,7 +572,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
 
     def test_claude_canary_impact_holds_on_provider_adoption_regression(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 self._log_claude_canary_call(store, cohort="canary_applied", suffix="a1")
                 self._log_claude_canary_call(store, cohort="canary_holdout", suffix="h1", cost_est=0.003, cost_baseline=0.003)
@@ -649,7 +649,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
 class ClaudeCanaryActionTests(unittest.TestCase):
     def _candidate(self, *, verdict: str, candidate_id: str = "claude-action-candidate", canary_fraction: float = 0.5, holdout_fraction: float = 0.25, reason_codes: list[str] | None = None) -> dict:
         return {
-            "schema": "agentflow.claude_canary_promotion_verdict.v1",
+            "schema": "tokenclaw.claude_canary_promotion_verdict.v1",
             "candidate_id": candidate_id,
             "rule_id": "test-claude-phase-canary",
             "policy_id": "test-claude-phase-canary",
@@ -687,7 +687,7 @@ class ClaudeCanaryActionTests(unittest.TestCase):
 
     def _impact(self, candidates: list[dict]) -> dict:
         return {
-            "schema": "agentflow.claude_canary_impact.v1",
+            "schema": "tokenclaw.claude_canary_impact.v1",
             "generated_at": "2026-06-10T05:00:00+00:00",
             "read_only": True,
             "wrote_local_files": False,
@@ -713,7 +713,7 @@ class ClaudeCanaryActionTests(unittest.TestCase):
             preserved_holdout_fraction=0.20,
         )
 
-        self.assertEqual(actions["schema"], "agentflow.claude_canary_rollout_actions.v1")
+        self.assertEqual(actions["schema"], "tokenclaw.claude_canary_rollout_actions.v1")
         by_id = {action["target_candidate_id"]: action for action in actions["actions"]}
         self.assertEqual(by_id["candidate-widen"]["action_type"], "widen")
         self.assertEqual(by_id["candidate-widen"]["canary_fraction"], 0.8)
@@ -769,8 +769,8 @@ class ClaudeCanaryActionTests(unittest.TestCase):
             self.assertEqual(dry_run["files"][0]["path"], str(routing_file))
             self.assertTrue(dry_run["files"][0]["changed"])
 
-            old_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(event_log)
+            old_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(event_log)
             try:
                 output = io.StringIO()
                 code = cli.claude_canary_actions_apply_cli(
@@ -780,9 +780,9 @@ class ClaudeCanaryActionTests(unittest.TestCase):
                 )
             finally:
                 if old_log is None:
-                    os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+                    os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
                 else:
-                    os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_log
+                    os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = old_log
 
             self.assertEqual(code, 0)
             result = json.loads(output.getvalue())
@@ -832,8 +832,8 @@ class ClaudeCanaryActionTests(unittest.TestCase):
             self.assertEqual(plan["summary"]["promotion_action_count"], 1)
             self.assertEqual(plan["actions"][0]["permanent_rule"]["metadata"]["target_candidate_id"], "candidate-promote")
 
-            old_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(event_log)
+            old_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(event_log)
             try:
                 output = io.StringIO()
                 code = cli.routing_canary_promote_cli(
@@ -843,9 +843,9 @@ class ClaudeCanaryActionTests(unittest.TestCase):
                 )
             finally:
                 if old_log is None:
-                    os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+                    os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
                 else:
-                    os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_log
+                    os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = old_log
 
             self.assertEqual(code, 0)
             result = json.loads(output.getvalue())
@@ -857,8 +857,8 @@ class ClaudeCanaryActionTests(unittest.TestCase):
             self.assertTrue(written["rules"][0]["metadata"]["promoted_from_canary"])
             self.assertNotIn("canary", written["rules"][0])
 
-            old_rules = os.environ.get("AGENTFLOW_ROUTING_RULES")
-            os.environ["AGENTFLOW_ROUTING_RULES"] = str(routing_file)
+            old_rules = os.environ.get("TOKENCLAW_ROUTING_RULES")
+            os.environ["TOKENCLAW_ROUTING_RULES"] = str(routing_file)
             try:
                 import tokenclaw.router as router_module
 
@@ -876,9 +876,9 @@ class ClaudeCanaryActionTests(unittest.TestCase):
                 routed, meta = manual_router.route_model(body)
             finally:
                 if old_rules is None:
-                    os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
+                    os.environ.pop("TOKENCLAW_ROUTING_RULES", None)
                 else:
-                    os.environ["AGENTFLOW_ROUTING_RULES"] = old_rules
+                    os.environ["TOKENCLAW_ROUTING_RULES"] = old_rules
                 import tokenclaw.router as router_module
 
                 importlib.reload(router_module)

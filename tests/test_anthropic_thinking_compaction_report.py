@@ -124,7 +124,7 @@ def _log_call(
 class AnthropicThinkingCompactionReportTests(unittest.TestCase):
     def test_report_measures_metadata_only_thinking_candidates_privately(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(store, "thinking-1", created_at="2026-06-13T00:00:00+00:00")
                 _log_call(store, "thinking-2", created_at="2026-06-13T00:01:00+00:00", text_chars=121_000)
@@ -140,7 +140,7 @@ class AnthropicThinkingCompactionReportTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(payload["schema"], "agentflow.anthropic_thinking_compaction_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.anthropic_thinking_compaction_opportunity.v1")
         self.assertEqual(payload["summary"]["metadata_candidate_count"], 2)
         self.assertEqual(payload["summary"]["body_verified_candidate_count"], 0)
         self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
@@ -159,7 +159,7 @@ class AnthropicThinkingCompactionReportTests(unittest.TestCase):
 
     def test_report_uses_local_body_counts_without_emitting_thinking_text(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -201,7 +201,7 @@ class AnthropicThinkingCompactionReportTests(unittest.TestCase):
 
     def test_report_blocks_active_and_unverified_body_contexts_privately(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -229,7 +229,7 @@ class AnthropicThinkingCompactionReportTests(unittest.TestCase):
 
     def test_cli_emits_anthropic_thinking_opportunity_report(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_call(
@@ -246,7 +246,7 @@ class AnthropicThinkingCompactionReportTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.anthropic_thinking_compaction_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.anthropic_thinking_compaction_opportunity.v1")
         self.assertEqual(payload["summary"]["metadata_candidate_count"], 1)
         self.assertNotIn("raw-cli-thinking-secret", stdout.getvalue())
 

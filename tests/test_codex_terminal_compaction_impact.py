@@ -155,7 +155,7 @@ def _log_codex_turn(
 class CodexTerminalTranscriptImpactTests(unittest.TestCase):
     def test_impact_report_promotes_positive_applied_vs_holdout_metadata(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_codex_turn(store, "a1", cohort="canary_applied", response_latency_ms=900)
                 _log_codex_turn(store, "a2", cohort="canary_applied", response_latency_ms=950)
@@ -164,7 +164,7 @@ class CodexTerminalTranscriptImpactTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["schema"], "agentflow.codex_terminal_transcript_compaction_impact.v1")
+        self.assertEqual(report["schema"], "tokenclaw.codex_terminal_transcript_compaction_impact.v1")
         self.assertEqual(report["summary"]["applied_count"], 2)
         self.assertEqual(report["summary"]["holdout_count"], 1)
         self.assertGreater(report["summary"]["net_savings_usd"], 0)
@@ -175,7 +175,7 @@ class CodexTerminalTranscriptImpactTests(unittest.TestCase):
 
     def test_impact_report_holds_on_negative_savings(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_codex_turn(store, "a1", cohort="canary_applied", saved_chars=-400)
                 _log_codex_turn(store, "a2", cohort="canary_applied", saved_chars=-400)
@@ -190,7 +190,7 @@ class CodexTerminalTranscriptImpactTests(unittest.TestCase):
 
     def test_impact_report_rolls_back_on_error_regression(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_codex_turn(store, "a1", cohort="canary_applied", response_error_code=-32603)
                 _log_codex_turn(store, "a2", cohort="canary_applied", response_error_code=-32603)
@@ -212,7 +212,7 @@ class CodexTerminalTranscriptImpactTests(unittest.TestCase):
 
     def test_impact_report_marks_insufficient_evidence(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_codex_turn(store, "a1", cohort="canary_applied")
                 report = build_codex_terminal_transcript_compaction_impact_report(store, limit=10)
@@ -226,7 +226,7 @@ class CodexTerminalTranscriptImpactTests(unittest.TestCase):
 
     def test_report_cli_and_lifecycle_payload_are_content_free(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_codex_turn(
@@ -256,12 +256,12 @@ class CodexTerminalTranscriptImpactTests(unittest.TestCase):
                 store.conn.close()
 
             stdout = io.StringIO()
-            with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "0"}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "0"}, clear=False):
                 code = cli.codex_terminal_transcript_impact_cli(["--db", db_path, "--limit", "10"], stdout=stdout)
 
         self.assertEqual(code, 0)
         cli_payload = json.loads(stdout.getvalue())
-        self.assertEqual(cli_payload["schema"], "agentflow.codex_terminal_transcript_compaction_impact.v1")
+        self.assertEqual(cli_payload["schema"], "tokenclaw.codex_terminal_transcript_compaction_impact.v1")
         self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload["metadata"]["schema"], FEEDBACK_SCHEMA)
@@ -286,7 +286,7 @@ class CodexTerminalTranscriptImpactTests(unittest.TestCase):
 
     def test_lifecycle_feedback_queues_offline_and_status_is_payload_free(self):
         result = {
-            "schema": "agentflow.codex_terminal_transcript_compaction_impact.v1",
+            "schema": "tokenclaw.codex_terminal_transcript_compaction_impact.v1",
             "ok": True,
             "read_only": True,
             "summary": {"applied_count": 2, "holdout_count": 1, "candidate_group_count": 1},
@@ -314,9 +314,9 @@ class CodexTerminalTranscriptImpactTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
-                with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "0"}, clear=False):
+                with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "0"}, clear=False):
                     meta = asyncio.run(
                         queue_codex_terminal_transcript_lifecycle_feedback(
                             store,

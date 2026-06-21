@@ -10,8 +10,8 @@ import yaml
 
 from tokenclaw.pricing import estimate_cost
 
-SCHEMA = "agentflow.phase_routing_opportunity.v1"
-DRY_RUN_SCHEMA = "agentflow.phase_routing_dry_run.v1"
+SCHEMA = "tokenclaw.phase_routing_opportunity.v1"
+DRY_RUN_SCHEMA = "tokenclaw.phase_routing_dry_run.v1"
 SAFE_DOWNGRADE_PHASES = {"tool-execution", "summary"}
 TOKEN_CHARS = 4
 
@@ -69,11 +69,11 @@ def _target_for_requested(model: Any) -> tuple[str | None, str | None]:
 def _resolve_route_to(route_to: Any) -> str:
     value = str(route_to or "").strip()
     if value == "haiku":
-        return os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
+        return os.getenv("TOKENCLAW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
     if value == "sonnet":
-        return os.getenv("AGENTFLOW_SONNET_MODEL", "claude-sonnet-4-6")
+        return os.getenv("TOKENCLAW_SONNET_MODEL", "claude-sonnet-4-6")
     if value == "opus":
-        return os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4-5")
+        return os.getenv("TOKENCLAW_OPUS_MODEL", "claude-opus-4-5")
     return value
 
 

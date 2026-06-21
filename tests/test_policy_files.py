@@ -60,17 +60,17 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.old_cwd = os.getcwd()
         os.chdir(self.tmp.name)
-        self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        self.old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
         self.old_home = os.environ.get("HOME")
         os.environ["HOME"] = self.tmp.name
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
         asyncio.run(reload_policy_modules())
 
     def tearDown(self):
         if self.old_event_log is None:
-            os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
         else:
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = self.old_event_log
         if self.old_home is None:
             os.environ.pop("HOME", None)
         else:
@@ -82,11 +82,11 @@ class PolicyFileStatusTest(unittest.TestCase):
     def test_policy_bundle_exports_effective_default_policy_state(self):
         bundle = asyncio.run(build_policy_bundle())
 
-        self.assertEqual(bundle["schema"], "agentflow.policy_bundle.v1")
-        self.assertEqual(bundle["generator"]["name"], "agentflow-proxy")
+        self.assertEqual(bundle["schema"], "tokenclaw.policy_bundle.v1")
+        self.assertEqual(bundle["generator"]["name"], "tokenclaw-proxy")
         self.assertEqual(bundle["generator"]["mode"], "local-offline")
         self.assertFalse(bundle["managed_optimizer"]["enabled"])
-        self.assertEqual(bundle["policies"]["schema"], "agentflow.policy_state.v1")
+        self.assertEqual(bundle["policies"]["schema"], "tokenclaw.policy_state.v1")
         self.assertEqual(bundle["policies"]["summary"]["policy_count"], 5)
         self.assertFalse(bundle["policies"]["summary"]["reload_required"])
         self.assertEqual(bundle["policies"]["summary"]["reload_required_sections"], [])
@@ -127,7 +127,7 @@ class PolicyFileStatusTest(unittest.TestCase):
         result = validate_policy_bundle(bundle)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["schema"], "agentflow.policy_bundle_validation.v1")
+        self.assertEqual(result["schema"], "tokenclaw.policy_bundle_validation.v1")
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["provenance"]["status"], "not-configured")
 
@@ -307,7 +307,7 @@ instruction_section_deduplication:
 """,
                 encoding="utf-8",
             )
-            with patch.dict(os.environ, {"AGENTFLOW_CRUNCH_RULES": str(rules_path)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_CRUNCH_RULES": str(rules_path)}, clear=False):
                 asyncio.run(reload_policy_modules())
                 try:
                     bundle = asyncio.run(build_policy_bundle())
@@ -373,7 +373,7 @@ instruction_section_deduplication:
     def _managed_policy_bundle(self):
         bundle = asyncio.run(build_policy_bundle())
         bundle["recommendation"] = {
-            "schema": "agentflow.policy_bundle_recommendation.v1",
+            "schema": "tokenclaw.policy_bundle_recommendation.v1",
             "policy_source": "managed-recommended",
             "candidate_ids": ["candidate-route-chat"],
             "candidate_count": 1,
@@ -409,7 +409,7 @@ instruction_section_deduplication:
         signed = attach_policy_bundle_provenance(
             self._managed_policy_bundle(),
             secret=secret,
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="managed-dev",
             key_id="test-key",
             generated_at="2026-06-08T12:00:00+00:00",
@@ -422,7 +422,7 @@ instruction_section_deduplication:
         self.assertTrue(validation["ok"])
         self.assertEqual(validation["provenance"]["status"], "verified")
         self.assertTrue(validation["provenance"]["managed_bundle"])
-        self.assertEqual(validation["provenance"]["issuer"], "agentflow-server")
+        self.assertEqual(validation["provenance"]["issuer"], "tokenclaw-server")
         self.assertTrue(review["ok"])
         self.assertEqual(review["provenance"]["status"], "verified")
 
@@ -431,7 +431,7 @@ instruction_section_deduplication:
         signed = attach_policy_bundle_provenance(
             self._managed_policy_bundle(),
             secret=secret,
-            issuer="agentflow-server",
+            issuer="tokenclaw-server",
             server_id="managed-dev",
             key_id="test-key",
             generated_at="2026-06-08T12:00:00+00:00",
@@ -647,7 +647,7 @@ instruction_section_deduplication:
         current = asyncio.run(build_policy_bundle())
         proposed = json.loads(json.dumps(current))
         proposed["recommendation"] = {
-            "schema": "agentflow.policy_bundle_recommendation.v1",
+            "schema": "tokenclaw.policy_bundle_recommendation.v1",
             "policy_source": "managed-recommended",
             "candidate_ids": [
                 "pattern-crunch-representable",
@@ -760,7 +760,7 @@ instruction_section_deduplication:
         self.assertIn("cache", result["section_reviews"])
         crunch_review = result["section_reviews"]["crunch"]
         cache_review = result["section_reviews"]["cache"]
-        self.assertEqual(crunch_review["schema"], "agentflow.pattern_candidate_review.v1")
+        self.assertEqual(crunch_review["schema"], "tokenclaw.pattern_candidate_review.v1")
         self.assertEqual(crunch_review["candidate_count"], 1)
         self.assertEqual(crunch_review["representable_candidate_count"], 1)
         self.assertEqual(crunch_review["candidates"][0]["sample_count_bucket"], "25_99")
@@ -835,10 +835,10 @@ crunch:
                 with patch.dict(
                     os.environ,
                     {
-                        "AGENTFLOW_CODEX_APP_RULES": str(rules_path),
+                        "TOKENCLAW_CODEX_APP_RULES": str(rules_path),
                         "HOME": tmp,
-                        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT": "0",
-                        "AGENTFLOW_CODEX_APP_CACHE": "0",
+                        "TOKENCLAW_CODEX_APP_SUMMARY_MODEL_HINT": "0",
+                        "TOKENCLAW_CODEX_APP_CACHE": "0",
                     },
                     clear=False,
                 ):
@@ -958,8 +958,8 @@ terminal_transcript_compaction:
     max_negative_savings_rate: 0.18
     max_error_rate_delta: 0.02
   provenance:
-    schema: agentflow.codex_terminal_transcript_compaction_policy.v1
-    issuer: local-agentflow
+    schema: tokenclaw.codex_terminal_transcript_compaction_policy.v1
+    issuer: local-tokenclaw
     server_id: "{raw_rule_path}"
     decision_hash: "{raw_rule_path}"
     verified: true
@@ -984,7 +984,7 @@ terminal_transcript_compaction:
 """,
                     encoding="utf-8",
                 )
-                with patch.dict(os.environ, {"AGENTFLOW_CODEX_APP_RULES": str(rules_path), "HOME": tmp}, clear=False):
+                with patch.dict(os.environ, {"TOKENCLAW_CODEX_APP_RULES": str(rules_path), "HOME": tmp}, clear=False):
                     importlib.reload(codex_turn_policy_module)
                     importlib.reload(stats)
                     bundle = asyncio.run(build_policy_bundle())
@@ -1108,7 +1108,7 @@ terminal_transcript_compaction:
             active_path.write_text(active_text, encoding="utf-8")
             workspace = Path(tmp) / "drafts"
 
-            with patch.dict(os.environ, {"AGENTFLOW_CACHE_RULES": str(active_path)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_CACHE_RULES": str(active_path)}, clear=False):
                 asyncio.run(reload_policy_modules())
                 try:
                     result = asyncio.run(stage_policy_draft(
@@ -1121,7 +1121,7 @@ terminal_transcript_compaction:
                     asyncio.run(reload_policy_modules())
 
             self.assertTrue(result["ok"])
-            self.assertEqual(result["schema"], "agentflow.policy_draft_stage.v1")
+            self.assertEqual(result["schema"], "tokenclaw.policy_draft_stage.v1")
             self.assertFalse(result["wrote_active_policy_files"])
             self.assertFalse(result["reloaded_modules"])
             self.assertFalse(result["provider_calls_made"])
@@ -1203,7 +1203,7 @@ terminal_transcript_compaction:
 
     def test_policy_draft_validation_failure_fixture_blocks_apply_without_active_writes(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             config_dir.mkdir()
             cache_path = config_dir / "cache_rules.yaml"
             original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
@@ -1216,7 +1216,7 @@ terminal_transcript_compaction:
             (draft_dir / "policy_bundle.json").write_text(json.dumps(exported), encoding="utf-8")
             (draft_dir / "draft.json").write_text(
                 json.dumps({
-                    "schema": "agentflow.policy_draft.v1",
+                    "schema": "tokenclaw.policy_draft.v1",
                     "draft_id": "invalid-cache",
                     "bundle_path": str(draft_dir / "policy_bundle.json"),
                     "changed": True,
@@ -1244,7 +1244,7 @@ terminal_transcript_compaction:
 
     def test_policy_draft_apply_transaction_writes_backup_reloads_and_verifies(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             config_dir.mkdir()
             cache_path = config_dir / "cache_rules.yaml"
             original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
@@ -1253,8 +1253,8 @@ terminal_transcript_compaction:
             event_log = Path(tmp) / "policy_events.jsonl"
 
             env = {
-                "AGENTFLOW_CACHE_RULES": str(cache_path),
-                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+                "TOKENCLAW_CACHE_RULES": str(cache_path),
+                "TOKENCLAW_POLICY_EVENTS_LOG": str(event_log),
             }
             with patch.dict(os.environ, env, clear=False):
                 asyncio.run(reload_policy_modules())
@@ -1279,13 +1279,13 @@ terminal_transcript_compaction:
                     asyncio.run(reload_policy_modules())
 
             self.assertTrue(result["ok"])
-            self.assertEqual(result["schema"], "agentflow.policy_draft_apply.v1")
+            self.assertEqual(result["schema"], "tokenclaw.policy_draft_apply.v1")
             self.assertEqual(result["status"], "applied")
             self.assertEqual(result["changed_sections"], ["cache"])
             self.assertTrue(result["reloaded_modules"])
             self.assertTrue(result["verification"]["ok"])
             self.assertFalse(result["restored"])
-            self.assertIn("agentflow-policy-rollback", result["rollback_command"])
+            self.assertIn("tokenclaw-policy-rollback", result["rollback_command"])
             rendered = yaml.safe_load(cache_path.read_text(encoding="utf-8"))
             self.assertEqual(rendered["semantic_cache"]["threshold"], 0.91)
             backup_path = Path(result["backups"][0]["path"])
@@ -1304,14 +1304,14 @@ terminal_transcript_compaction:
             raise RuntimeError("reload unavailable")
 
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             config_dir.mkdir()
             cache_path = config_dir / "cache_rules.yaml"
             original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
             cache_path.write_text(original, encoding="utf-8")
             workspace = Path(tmp) / "drafts"
 
-            with patch.dict(os.environ, {"AGENTFLOW_CACHE_RULES": str(cache_path)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_CACHE_RULES": str(cache_path)}, clear=False):
                 asyncio.run(reload_policy_modules())
                 try:
                     stage = asyncio.run(stage_policy_draft(
@@ -1355,14 +1355,14 @@ terminal_transcript_compaction:
             }
 
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             config_dir.mkdir()
             cache_path = config_dir / "cache_rules.yaml"
             original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
             cache_path.write_text(original, encoding="utf-8")
             workspace = Path(tmp) / "drafts"
 
-            with patch.dict(os.environ, {"AGENTFLOW_CACHE_RULES": str(cache_path)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_CACHE_RULES": str(cache_path)}, clear=False):
                 asyncio.run(reload_policy_modules())
                 try:
                     stage = asyncio.run(stage_policy_draft(
@@ -1391,7 +1391,7 @@ terminal_transcript_compaction:
 
     def test_policy_draft_apply_restores_prior_file_when_later_write_fails(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             config_dir.mkdir()
             crunch_path = config_dir / "crunch_rules.yaml"
             cache_path = config_dir / "cache_rules.yaml"
@@ -1412,8 +1412,8 @@ terminal_transcript_compaction:
             workspace = Path(tmp) / "drafts"
 
             env = {
-                "AGENTFLOW_CRUNCH_RULES": str(crunch_path),
-                "AGENTFLOW_CACHE_RULES": str(cache_path),
+                "TOKENCLAW_CRUNCH_RULES": str(crunch_path),
+                "TOKENCLAW_CACHE_RULES": str(cache_path),
             }
             with patch.dict(os.environ, env, clear=False):
                 asyncio.run(reload_policy_modules())
@@ -1462,7 +1462,7 @@ terminal_transcript_compaction:
 
     def test_policy_draft_rollback_by_apply_id_dry_run_reports_exact_files(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             config_dir.mkdir()
             cache_path = config_dir / "cache_rules.yaml"
             original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
@@ -1471,8 +1471,8 @@ terminal_transcript_compaction:
             event_log = Path(tmp) / "policy_events.jsonl"
 
             env = {
-                "AGENTFLOW_CACHE_RULES": str(cache_path),
-                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+                "TOKENCLAW_CACHE_RULES": str(cache_path),
+                "TOKENCLAW_POLICY_EVENTS_LOG": str(event_log),
             }
             with patch.dict(os.environ, env, clear=False):
                 asyncio.run(reload_policy_modules())
@@ -1505,7 +1505,7 @@ terminal_transcript_compaction:
                     asyncio.run(reload_policy_modules())
 
             self.assertTrue(rollback["ok"])
-            self.assertEqual(rollback["schema"], "agentflow.policy_draft_rollback.v1")
+            self.assertEqual(rollback["schema"], "tokenclaw.policy_draft_rollback.v1")
             self.assertEqual(rollback["status"], "dry-run")
             self.assertEqual(rollback["apply_id"], apply_result["apply_id"])
             self.assertEqual(rollback["restored_sections"], ["cache"])
@@ -1516,7 +1516,7 @@ terminal_transcript_compaction:
 
     def test_policy_draft_rollback_by_apply_id_restores_reloads_and_verifies(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             config_dir.mkdir()
             cache_path = config_dir / "cache_rules.yaml"
             original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
@@ -1525,8 +1525,8 @@ terminal_transcript_compaction:
             event_log = Path(tmp) / "policy_events.jsonl"
 
             env = {
-                "AGENTFLOW_CACHE_RULES": str(cache_path),
-                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+                "TOKENCLAW_CACHE_RULES": str(cache_path),
+                "TOKENCLAW_POLICY_EVENTS_LOG": str(event_log),
             }
             with patch.dict(os.environ, env, clear=False):
                 asyncio.run(reload_policy_modules())
@@ -1577,7 +1577,7 @@ terminal_transcript_compaction:
             raise RuntimeError("rollback reload unavailable")
 
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             config_dir.mkdir()
             cache_path = config_dir / "cache_rules.yaml"
             original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
@@ -1586,8 +1586,8 @@ terminal_transcript_compaction:
             event_log = Path(tmp) / "policy_events.jsonl"
 
             env = {
-                "AGENTFLOW_CACHE_RULES": str(cache_path),
-                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+                "TOKENCLAW_CACHE_RULES": str(cache_path),
+                "TOKENCLAW_POLICY_EVENTS_LOG": str(event_log),
             }
             with patch.dict(os.environ, env, clear=False):
                 asyncio.run(reload_policy_modules())
@@ -1629,7 +1629,7 @@ terminal_transcript_compaction:
 
     def test_policy_draft_rollback_by_apply_id_missing_backup_fails_closed(self):
         with TemporaryDirectory() as tmp:
-            config_dir = Path(tmp) / ".agentflow"
+            config_dir = Path(tmp) / ".tokenclaw"
             config_dir.mkdir()
             cache_path = config_dir / "cache_rules.yaml"
             original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
@@ -1638,8 +1638,8 @@ terminal_transcript_compaction:
             event_log = Path(tmp) / "policy_events.jsonl"
 
             env = {
-                "AGENTFLOW_CACHE_RULES": str(cache_path),
-                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+                "TOKENCLAW_CACHE_RULES": str(cache_path),
+                "TOKENCLAW_POLICY_EVENTS_LOG": str(event_log),
             }
             with patch.dict(os.environ, env, clear=False):
                 asyncio.run(reload_policy_modules())
@@ -1691,8 +1691,8 @@ rules:
 """,
                 encoding="utf-8",
             )
-            old_env = os.environ.get("AGENTFLOW_ROUTING_RULES")
-            os.environ["AGENTFLOW_ROUTING_RULES"] = str(rules_path)
+            old_env = os.environ.get("TOKENCLAW_ROUTING_RULES")
+            os.environ["TOKENCLAW_ROUTING_RULES"] = str(rules_path)
             try:
                 asyncio.run(reload_policy_modules())
                 bundle = asyncio.run(build_policy_bundle())
@@ -1705,9 +1705,9 @@ rules:
                 self.assertEqual(routing["rules"][0]["action"]["reason"], "manual bundle export test")
             finally:
                 if old_env is None:
-                    os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
+                    os.environ.pop("TOKENCLAW_ROUTING_RULES", None)
                 else:
-                    os.environ["AGENTFLOW_ROUTING_RULES"] = old_env
+                    os.environ["TOKENCLAW_ROUTING_RULES"] = old_env
                 asyncio.run(reload_policy_modules())
 
     def test_policy_file_status_marks_reload_required_after_file_change(self):
@@ -1725,8 +1725,8 @@ rules:
 """,
                 encoding="utf-8",
             )
-            old_env = os.environ.get("AGENTFLOW_ROUTING_RULES")
-            os.environ["AGENTFLOW_ROUTING_RULES"] = str(rules_path)
+            old_env = os.environ.get("TOKENCLAW_ROUTING_RULES")
+            os.environ["TOKENCLAW_ROUTING_RULES"] = str(rules_path)
             try:
                 importlib.reload(router_module)
                 first = asyncio.run(stats.stats_policies())
@@ -1763,13 +1763,13 @@ rules:
                 )
             finally:
                 if old_env is None:
-                    os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
+                    os.environ.pop("TOKENCLAW_ROUTING_RULES", None)
                 else:
-                    os.environ["AGENTFLOW_ROUTING_RULES"] = old_env
+                    os.environ["TOKENCLAW_ROUTING_RULES"] = old_env
                 importlib.reload(router_module)
 
     def test_policy_file_status_handles_missing_file_without_reload(self):
-        missing = Path("/tmp/agentflow-policy-file-status-missing.yaml")
+        missing = Path("/tmp/tokenclaw-policy-file-status-missing.yaml")
         loaded = policy_file_snapshot(missing)
 
         status = policy_file_status(missing, loaded_at=utc_now(), loaded_snapshot=loaded)
@@ -1794,11 +1794,11 @@ rules:
                 encoding="utf-8",
             )
 
-            old_env = os.environ.get("AGENTFLOW_ROUTING_RULES")
-            os.environ["AGENTFLOW_ROUTING_RULES"] = str(rules_path)
+            old_env = os.environ.get("TOKENCLAW_ROUTING_RULES")
+            os.environ["TOKENCLAW_ROUTING_RULES"] = str(rules_path)
             try:
                 first = asyncio.run(reload_policy_modules())
-                self.assertEqual(first["schema"], "agentflow.policy_reload.v1")
+                self.assertEqual(first["schema"], "tokenclaw.policy_reload.v1")
                 self.assertFalse(first["policies"]["routing"]["file"]["reload_required"])
 
                 body = {
@@ -1830,9 +1830,9 @@ rules:
                 self.assertEqual(changed_meta["reason"], "changed reload test")
             finally:
                 if old_env is None:
-                    os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
+                    os.environ.pop("TOKENCLAW_ROUTING_RULES", None)
                 else:
-                    os.environ["AGENTFLOW_ROUTING_RULES"] = old_env
+                    os.environ["TOKENCLAW_ROUTING_RULES"] = old_env
                 asyncio.run(reload_policy_modules())
 
 

@@ -11,9 +11,9 @@ from tokenclaw.public_metadata import public_id
 from tokenclaw.store import stable_json, utc_now
 
 
-SCHEMA = "agentflow.managed_activation_preview_outcomes.v1"
-OUTCOME_SCHEMA = "agentflow.managed_activation_preview_outcome.v1"
-PRIVACY_SCHEMA = "agentflow.managed_activation_preview_outcomes_privacy.v1"
+SCHEMA = "tokenclaw.managed_activation_preview_outcomes.v1"
+OUTCOME_SCHEMA = "tokenclaw.managed_activation_preview_outcome.v1"
+PRIVACY_SCHEMA = "tokenclaw.managed_activation_preview_outcomes_privacy.v1"
 DEFAULT_STALE_AFTER_HOURS = 72.0
 
 
@@ -263,7 +263,7 @@ def _cache_rollback_guidance_from_decision(decision: dict[str, Any]) -> dict[str
     if not (rollback_required or action_type or disabled_reason or target_file or target_section):
         return None
     return {
-        "schema": "agentflow.managed_cache_replay_rollback_guidance.v1",
+        "schema": "tokenclaw.managed_cache_replay_rollback_guidance.v1",
         "rollback_required": True,
         "promotion_readiness": sanitize_value(
             decision.get("promotion_readiness")
@@ -603,7 +603,7 @@ def persist_managed_activation_preview_outcomes(
         stale_after_hours=stale_after_hours,
     )
     report["import"] = {
-        "schema": "agentflow.managed_activation_preview_outcome_import.v1",
+        "schema": "tokenclaw.managed_activation_preview_outcome_import.v1",
         "imported_count": len(outcomes),
         "created_count": created_count,
         "updated_count": max(0, len(outcomes) - created_count),
@@ -689,7 +689,7 @@ def build_managed_activation_preview_outcomes_report(
     }
     violations = managed_egress_violations(result)
     result["egress_guard"] = {
-        "schema": "agentflow.managed_egress_guard.v1",
+        "schema": "tokenclaw.managed_egress_guard.v1",
         "status": "passed" if not violations else "blocked",
         "blocked": bool(violations),
         "violation_count": len(violations),
@@ -749,7 +749,7 @@ def persist_unavailable_managed_activation_preview_outcomes(
         stale_after_hours=stale_after_hours,
     )
     report["refresh"] = {
-        "schema": "agentflow.managed_activation_preview_refresh_status.v1",
+        "schema": "tokenclaw.managed_activation_preview_refresh_status.v1",
         "status": "unavailable" if status != "blocked" else "blocked",
         "reason": str(reason or "managed-preview-url-not-configured"),
         "source_schema": sanitize_value(source.get("schema")),

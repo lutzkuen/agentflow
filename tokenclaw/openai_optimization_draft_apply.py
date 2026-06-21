@@ -18,8 +18,8 @@ from tokenclaw.policy_workbench import load_staged_policy_draft
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.openai_optimization_draft_apply.v1"
-LIFECYCLE_SCHEMA = "agentflow.openai_optimization_draft_apply_lifecycle_feedback.v1"
+SCHEMA = "tokenclaw.openai_optimization_draft_apply.v1"
+LIFECYCLE_SCHEMA = "tokenclaw.openai_optimization_draft_apply_lifecycle_feedback.v1"
 SUPPORTED_SECTIONS = ("routing", "crunch", "cache")
 PRIVACY = {
     "metadata_only": True,
@@ -421,7 +421,7 @@ async def _queue_feedback(store_obj: Any, result: dict[str, Any]) -> dict[str, A
         flush_immediately=False,
     )
     return {
-        "schema": "agentflow.openai_optimization_draft_apply_feedback_queue.v1",
+        "schema": "tokenclaw.openai_optimization_draft_apply_feedback_queue.v1",
         "source_surface": LIFECYCLE_SOURCE_SURFACE,
         "status": meta.get("status"),
         "reason": meta.get("reason"),
@@ -535,7 +535,7 @@ async def apply_openai_optimization_draft(
     rollback_command = None
     if changed_sections and not dry_run:
         rollback_command = " ".join(
-            ["agentflow-policy-rollback", "--config-dir", str(config_path), "--apply-id", transaction_id]
+            ["tokenclaw-policy-rollback", "--config-dir", str(config_path), "--apply-id", transaction_id]
             + [part for section in changed_sections for part in ("--section", section)]
         )
     result = {

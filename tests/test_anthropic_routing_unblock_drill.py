@@ -13,11 +13,11 @@ from tokenclaw.store import Store
 
 def _anthropic_routing_plan() -> dict:
     return {
-        "schema": "agentflow.orchestrator_research_plan.v1",
+        "schema": "tokenclaw.orchestrator_research_plan.v1",
         "evidence": {
             "stats_summary": {
                 "pass_through_routing_report": {
-                    "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+                    "schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
                     "buckets": [
                         {
                             "rank": 1,
@@ -34,7 +34,7 @@ def _anthropic_routing_plan() -> dict:
                             "required_local_executor": "anthropic-routing-rules",
                             "estimated_savings_per_1000_calls_usd": 4.5,
                             "anthropic_canary_lifecycle_evidence": {
-                                "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+                                "schema": "tokenclaw.anthropic_routing_canary_lifecycle_evidence.v1",
                                 "status": "matched",
                                 "matched_count": 492,
                                 "observed_count": 492,
@@ -104,7 +104,7 @@ class AnthropicRoutingUnblockDrillTests(unittest.TestCase):
     def test_blocked_safety_stop_drill_records_rollback_proof_without_activation(self) -> None:
         result = build_anthropic_routing_safety_stop_unblock_drill(_anthropic_routing_plan())
 
-        self.assertEqual(result["schema"], "agentflow.anthropic_routing_safety_stop_unblock_drill.v1")
+        self.assertEqual(result["schema"], "tokenclaw.anthropic_routing_safety_stop_unblock_drill.v1")
         self.assertEqual(result["status"], "ranked")
         self.assertEqual(result["summary"]["drill_entry_count"], 1)
         self.assertEqual(result["summary"]["blocked_count"], 1)
@@ -208,7 +208,7 @@ class AnthropicRoutingUnblockDrillTests(unittest.TestCase):
 
     def test_cli_reads_plan_json_and_emits_drill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "agentflow.sqlite3"
+            db_path = Path(tmp) / "tokenclaw.sqlite3"
             store = Store(str(db_path))
             store.conn.close()
             plan_path = Path(tmp) / "plan.json"
@@ -222,7 +222,7 @@ class AnthropicRoutingUnblockDrillTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         result = json.loads(stdout.getvalue())
-        self.assertEqual(result["schema"], "agentflow.anthropic_routing_safety_stop_unblock_drill.v1")
+        self.assertEqual(result["schema"], "tokenclaw.anthropic_routing_safety_stop_unblock_drill.v1")
         self.assertEqual(result["summary"]["safety_stop_count"], 492)
         self.assertFalse(result["entries"][0]["stage_allowed"])
         self.assertFalse(result["entries"][0]["promotion_allowed"])

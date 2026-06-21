@@ -47,15 +47,15 @@ async def _reload_state(config_dir: Path) -> dict[str, object]:
 
 class ManagedActivationBundleApplyOutcomesTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        self.old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
         self.tmp = TemporaryDirectory()
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
 
     def tearDown(self) -> None:
         if self.old_event_log is None:
-            os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
         else:
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = self.old_event_log
         self.tmp.cleanup()
 
     def test_apply_skip_fail_and_rollback_produce_metadata_only_outcome_rows(self) -> None:
@@ -144,7 +144,7 @@ class ManagedActivationBundleApplyOutcomesTests(unittest.TestCase):
             self.assertGreaterEqual(len(events), 4)
 
             outcomes = build_managed_activation_bundle_apply_outcomes(events)
-            self.assertEqual(outcomes["schema"], "agentflow.managed_activation_bundle_apply_outcomes.v1")
+            self.assertEqual(outcomes["schema"], "tokenclaw.managed_activation_bundle_apply_outcomes.v1")
             self.assertEqual(outcomes["egress_guard"]["status"], "passed")
             self.assertTrue(outcomes["privacy"]["feature_only"])
             self.assertTrue(outcomes["privacy"]["metadata_only"])
@@ -181,7 +181,7 @@ class ManagedActivationBundleApplyOutcomesTests(unittest.TestCase):
                 self.assertNotIn(forbidden, rendered)
 
             with TemporaryDirectory() as db_tmp:
-                store = Store(str(Path(db_tmp) / "agentflow.sqlite3"))
+                store = Store(str(Path(db_tmp) / "tokenclaw.sqlite3"))
                 try:
                     summary = build_local_activation_outcome_summary(
                         store,
@@ -204,7 +204,7 @@ class ManagedActivationBundleApplyOutcomesTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             cli_payload = json.loads(stdout.getvalue())
-            self.assertEqual(cli_payload["schema"], "agentflow.managed_activation_bundle_apply_outcomes.v1")
+            self.assertEqual(cli_payload["schema"], "tokenclaw.managed_activation_bundle_apply_outcomes.v1")
             self.assertEqual(cli_payload["summary"]["outcome_row_count"], 4)
 
 

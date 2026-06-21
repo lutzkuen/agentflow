@@ -66,7 +66,7 @@ class OpenAIOptimizationGovernanceFixtureTests(unittest.TestCase):
             "provider_body": {"input": "raw cross-family prompt secret"},
         }
         summary_meta = {
-            "schema": "agentflow.openai_old_context_summary.v1",
+            "schema": "tokenclaw.openai_old_context_summary.v1",
             "enabled": True,
             "status": "applied",
             "applied": True,
@@ -163,7 +163,7 @@ class OpenAIOptimizationGovernanceFixtureTests(unittest.TestCase):
             },
         }
         summary_meta = {
-            "schema": "agentflow.openai_old_context_summary.v1",
+            "schema": "tokenclaw.openai_old_context_summary.v1",
             "enabled": True,
             "status": "applied",
             "applied": True,
@@ -236,7 +236,7 @@ class OpenAIOptimizationGovernanceFixtureTests(unittest.TestCase):
             },
         }
         summary_meta = {
-            "schema": "agentflow.openai_old_context_summary.v1",
+            "schema": "tokenclaw.openai_old_context_summary.v1",
             "enabled": True,
             "status": "safety_stopped",
             "applied": False,

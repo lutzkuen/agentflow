@@ -9,7 +9,7 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-FEEDBACK_SCHEMA = "agentflow.codex_terminal_transcript_compaction_lifecycle_feedback.v1"
+FEEDBACK_SCHEMA = "tokenclaw.codex_terminal_transcript_compaction_lifecycle_feedback.v1"
 SOURCE_SURFACE = "codex_terminal_transcript_lifecycle"
 
 

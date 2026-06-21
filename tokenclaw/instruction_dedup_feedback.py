@@ -9,7 +9,7 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-FEEDBACK_SCHEMA = "agentflow.instruction_dedup_lifecycle_feedback.v1"
+FEEDBACK_SCHEMA = "tokenclaw.instruction_dedup_lifecycle_feedback.v1"
 SOURCE_SURFACE = "instruction_dedup_lifecycle"
 
 

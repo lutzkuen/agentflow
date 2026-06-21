@@ -12,13 +12,13 @@ from tokenclaw.cache import cache_pattern_rules_from_policy_payload
 from tokenclaw.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
 from tokenclaw.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 from tokenclaw.openai_cache_replay_report import _as_float, _as_int, build_openai_cache_replay_report
-from tokenclaw.paths import agentflow_config_path
+from tokenclaw.paths import tokenclaw_config_path
 from tokenclaw.public_metadata import public_path_state
 from tokenclaw.store import stable_json, utc_now
 
 
-SCHEMA = "agentflow.openai_cache_replay_readiness.v1"
-PROMOTION_DECISION_SCHEMA = "agentflow.openai_cache_replay_promotion_decision.v1"
+SCHEMA = "tokenclaw.openai_cache_replay_readiness.v1"
+PROMOTION_DECISION_SCHEMA = "tokenclaw.openai_cache_replay_promotion_decision.v1"
 
 
 def _privacy_summary() -> dict[str, Any]:
@@ -75,11 +75,11 @@ def _verdict_counts(impact: dict[str, Any]) -> dict[str, int]:
 
 def _canary_policy_candidates() -> list[Path]:
     paths: list[Path] = []
-    env_path = os.getenv("AGENTFLOW_CACHE_CANARY_POLICY")
+    env_path = os.getenv("TOKENCLAW_CACHE_CANARY_POLICY")
     if env_path:
         return [Path(env_path).expanduser()]
     paths.append(Path.cwd() / "config" / "cache_canary_policy.yaml")
-    paths.append(agentflow_config_path("cache_canary_policy.yaml"))
+    paths.append(tokenclaw_config_path("cache_canary_policy.yaml"))
     return paths
 
 
@@ -129,7 +129,7 @@ def _staged_canary_policy_diagnostics(store_obj: Any, *, limit: int) -> dict[str
     path = _first_existing_canary_policy_path()
     if path is None:
         return {
-            "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
+            "schema": "tokenclaw.openai_cache_replay_staged_canary_diagnostics.v1",
             "status": "staged-policy-missing",
             "blockers": ["staged-canary-policy-missing"],
             "configured_policy_path": None,
@@ -147,7 +147,7 @@ def _staged_canary_policy_diagnostics(store_obj: Any, *, limit: int) -> dict[str
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception as exc:
         return {
-            "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
+            "schema": "tokenclaw.openai_cache_replay_staged_canary_diagnostics.v1",
             "status": "staged-policy-unreadable",
             "blockers": ["staged-canary-policy-unreadable"],
             "configured_policy_path": None,
@@ -165,7 +165,7 @@ def _staged_canary_policy_diagnostics(store_obj: Any, *, limit: int) -> dict[str
     rules = cache_pattern_rules_from_policy_payload(data)
     if not rules:
         return {
-            "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
+            "schema": "tokenclaw.openai_cache_replay_staged_canary_diagnostics.v1",
             "status": "staged-policy-empty",
             "blockers": ["staged-canary-policy-empty"],
             "configured_policy_path": None,
@@ -188,7 +188,7 @@ def _staged_canary_policy_diagnostics(store_obj: Any, *, limit: int) -> dict[str
     status, blockers = _staged_policy_status(loaded_by_runtime=loaded_by_runtime, dry_run=dry_run)
     summary = dry_run.get("summary") if isinstance(dry_run.get("summary"), dict) else {}
     return {
-        "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
+        "schema": "tokenclaw.openai_cache_replay_staged_canary_diagnostics.v1",
         "status": status,
         "blockers": blockers,
         "configured_policy_path": None,
@@ -355,7 +355,7 @@ def _invalidation_safety_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
     if safety:
         return safety
     return {
-        "schema": "agentflow.openai_cache_replay_invalidation_safety.v1",
+        "schema": "tokenclaw.openai_cache_replay_invalidation_safety.v1",
         "status": "insufficient-coverage",
         "candidate_count": 0,
         "safe_for_promotion": False,
@@ -378,7 +378,7 @@ def _hit_recovery_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
     if recovery:
         return recovery
     return {
-        "schema": "agentflow.openai_cache_replay_hit_recovery.v1",
+        "schema": "tokenclaw.openai_cache_replay_hit_recovery.v1",
         "status": "awaiting-live-hit",
         "first_real_hit_status": summary.get("first_real_hit_status"),
         "first_real_hit_observed": bool(summary.get("first_real_hit_observed")),
@@ -532,7 +532,7 @@ def _promotion_decision_from_impact(impact: dict[str, Any]) -> dict[str, Any]:
     if decision == "keep-staged" and top_applied_miss_blocker:
         reason = str(top_applied_miss_blocker)
     coverage = {
-        "schema": "agentflow.openai_cache_replay_promotion_decision_coverage.v1",
+        "schema": "tokenclaw.openai_cache_replay_promotion_decision_coverage.v1",
         "observed_replay_metadata_rows": observed_rows,
         "applied_count": applied_count,
         "holdout_count": holdout_count,
@@ -722,7 +722,7 @@ def build_openai_cache_replay_readiness_report(
             "top_blockers": _counter_rows(Counter(blocker_counts))[:6],
         },
         "lifecycle_diagnostics": {
-            "schema": "agentflow.openai_cache_replay_lifecycle_diagnostics.v1",
+            "schema": "tokenclaw.openai_cache_replay_lifecycle_diagnostics.v1",
             "observed_replay_metadata_rows": _as_int(imp.get("observed_openai_cache_replay_metadata_row_count")),
             "applied_count": _as_int(imp.get("applied_count")),
             "holdout_count": _as_int(imp.get("holdout_count")),

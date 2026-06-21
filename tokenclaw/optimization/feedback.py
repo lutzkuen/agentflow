@@ -17,7 +17,7 @@ from tokenclaw.optimization.cli_support import (
 )
 
 
-MANAGED_POLICY_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
+MANAGED_POLICY_API_KEY_ENV = "TOKENCLAW_MANAGED_API_KEY"
 
 
 def parse_utc_iso(raw: Any) -> datetime | None:
@@ -96,7 +96,7 @@ def _pattern_evidence_status(
             action = str(item.get("action_family") or "unknown")
             action_counts[action] = action_counts.get(action, 0) + 1
     return {
-        "schema": "agentflow.managed_pattern_evidence_queue_status.v1",
+        "schema": "tokenclaw.managed_pattern_evidence_queue_status.v1",
         "queue_rows": row_count,
         "evidence_items": item_count,
         "status_breakdown": breakdown_from_counts(status_counts),
@@ -127,7 +127,7 @@ def _routing_experiment_status(
     reason_counts: dict[str, int] = {}
     for row in rows:
         payload = _safe_payload_json(row)
-        if payload.get("schema") != "agentflow.routing_experiment_outcome_event.v1":
+        if payload.get("schema") != "tokenclaw.routing_experiment_outcome_event.v1":
             continue
         row_count += 1
         status = str(row.get("status") or "unknown")
@@ -141,7 +141,7 @@ def _routing_experiment_status(
             reason_text = str(reason or "unknown")
             reason_counts[reason_text] = reason_counts.get(reason_text, 0) + 1
     return {
-        "schema": "agentflow.routing_experiment_feedback_queue_status.v1",
+        "schema": "tokenclaw.routing_experiment_feedback_queue_status.v1",
         "queue_rows": row_count,
         "status_breakdown": breakdown_from_counts(status_counts),
         "endpoint_breakdown": breakdown_from_counts(endpoint_counts),
@@ -171,7 +171,7 @@ def _codex_app_canary_lifecycle_status(
     rule_candidate_counts: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
         payload = _safe_payload_json(row)
-        if payload.get("schema") != "agentflow.codex_app_canary_lifecycle_feedback.v1":
+        if payload.get("schema") != "tokenclaw.codex_app_canary_lifecycle_feedback.v1":
             continue
         row_count += 1
         raw_status = str(row.get("status") or "unknown")
@@ -232,7 +232,7 @@ def _codex_app_canary_lifecycle_status(
         key=lambda item: (-int(item["queue_rows"]), str(item["rule_id"]), str(item["candidate_id"]))
     )
     return {
-        "schema": "agentflow.codex_app_canary_lifecycle_queue_status.v1",
+        "schema": "tokenclaw.codex_app_canary_lifecycle_queue_status.v1",
         "queue_rows": row_count,
         "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
         "action_family_breakdown": breakdown_from_counts(action_counts),
@@ -314,7 +314,7 @@ def _routing_promotion_lifecycle_status(
     for row in rows:
         payload = _safe_payload_json(row)
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        if metadata.get("schema") != "agentflow.optimization_promotion_lifecycle_feedback.v1":
+        if metadata.get("schema") != "tokenclaw.optimization_promotion_lifecycle_feedback.v1":
             continue
         snapshots = [
             item
@@ -441,7 +441,7 @@ def _routing_promotion_lifecycle_status(
     candidate_breakdown.sort(key=lambda item: (-int(item["action_count"]), str(item["candidate_id"])))
 
     return {
-        "schema": "agentflow.routing_promotion_lifecycle_queue_status.v1",
+        "schema": "tokenclaw.routing_promotion_lifecycle_queue_status.v1",
         "queue_rows": row_count,
         "action_count": action_count,
         "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
@@ -485,7 +485,7 @@ def _terminal_output_compaction_lifecycle_status(
     for row in rows:
         payload = _safe_payload_json(row)
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        if metadata.get("schema") != "agentflow.terminal_output_compaction_lifecycle_feedback.v1":
+        if metadata.get("schema") != "tokenclaw.terminal_output_compaction_lifecycle_feedback.v1":
             continue
         snapshots = [item for item in metadata.get("action_snapshots") or [] if isinstance(item, dict)]
         if not snapshots:
@@ -561,7 +561,7 @@ def _terminal_output_compaction_lifecycle_status(
     candidate_breakdown.sort(key=lambda item: (-int(item["action_count"]), str(item["candidate_id"])))
 
     return {
-        "schema": "agentflow.terminal_output_compaction_lifecycle_queue_status.v1",
+        "schema": "tokenclaw.terminal_output_compaction_lifecycle_queue_status.v1",
         "queue_rows": row_count,
         "action_count": action_count,
         "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
@@ -600,7 +600,7 @@ def _codex_terminal_transcript_lifecycle_status(
     for row in rows:
         payload = _safe_payload_json(row)
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        if metadata.get("schema") != "agentflow.codex_terminal_transcript_compaction_lifecycle_feedback.v1":
+        if metadata.get("schema") != "tokenclaw.codex_terminal_transcript_compaction_lifecycle_feedback.v1":
             continue
         snapshots = [item for item in metadata.get("action_snapshots") or [] if isinstance(item, dict)]
         if not snapshots:
@@ -674,7 +674,7 @@ def _codex_terminal_transcript_lifecycle_status(
     candidate_breakdown.sort(key=lambda item: (-int(item["action_count"]), str(item["candidate_id"])))
 
     return {
-        "schema": "agentflow.codex_terminal_transcript_lifecycle_queue_status.v1",
+        "schema": "tokenclaw.codex_terminal_transcript_lifecycle_queue_status.v1",
         "queue_rows": row_count,
         "action_count": action_count,
         "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
@@ -714,7 +714,7 @@ def _openai_optimization_lifecycle_status(
 
     for row in rows:
         payload = _safe_payload_json(row)
-        if payload.get("schema") != "agentflow.openai_optimization_lifecycle_feedback.v1":
+        if payload.get("schema") != "tokenclaw.openai_optimization_lifecycle_feedback.v1":
             continue
         events = [item for item in payload.get("family_events") or [] if isinstance(item, dict)]
         if not events:
@@ -784,7 +784,7 @@ def _openai_optimization_lifecycle_status(
     family_items.sort(key=lambda item: (-int(item["event_count"]), str(item["action_family"])))
 
     return {
-        "schema": "agentflow.openai_optimization_lifecycle_queue_status.v1",
+        "schema": "tokenclaw.openai_optimization_lifecycle_queue_status.v1",
         "queue_rows": row_count,
         "family_event_count": event_count,
         "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
@@ -834,7 +834,7 @@ def _optimization_coordinator_lifecycle_status(
     for row in rows:
         payload = _safe_payload_json(row)
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        if metadata.get("schema") != "agentflow.optimization_coordinator_lifecycle_feedback.v1":
+        if metadata.get("schema") != "tokenclaw.optimization_coordinator_lifecycle_feedback.v1":
             continue
         events = [item for item in metadata.get("family_events") or [] if isinstance(item, dict)]
         if not events:
@@ -920,7 +920,7 @@ def _optimization_coordinator_lifecycle_status(
     family_items.sort(key=lambda item: (-int(item["event_count"]), str(item["action_family"])))
 
     return {
-        "schema": "agentflow.optimization_coordinator_lifecycle_queue_status.v1",
+        "schema": "tokenclaw.optimization_coordinator_lifecycle_queue_status.v1",
         "queue_rows": row_count,
         "family_event_count": family_event_count,
         "retryable_failures": retryable_failures,
@@ -961,7 +961,7 @@ def _post_promotion_action_outcome_status(
     policy_source_counts: dict[str, int] = {}
     for row in rows:
         payload = _safe_payload_json(row)
-        if payload.get("schema") != "agentflow.promotion_blocker_action_outcome_rollup_ingest.v1":
+        if payload.get("schema") != "tokenclaw.promotion_blocker_action_outcome_rollup_ingest.v1":
             continue
         row_count += 1
         queue_state = _queue_state(row.get("status"))
@@ -982,7 +982,7 @@ def _post_promotion_action_outcome_status(
                 key = str(value or "unknown")
                 target[key] = target.get(key, 0) + count
     return {
-        "schema": "agentflow.post_promotion_action_outcome_queue_status.v1",
+        "schema": "tokenclaw.post_promotion_action_outcome_queue_status.v1",
         "queue_rows": row_count,
         "rollup_count": rollup_count,
         "outcome_count": outcome_count,
@@ -1092,7 +1092,7 @@ def managed_feedback_status_result(
     optimization_coordinator_lifecycle = _optimization_coordinator_lifecycle_status(store, source_surface=source_surface)
     post_promotion_action_outcomes = _post_promotion_action_outcome_status(store, source_surface=source_surface)
     return {
-        "schema": "agentflow.managed_feedback_status.v1",
+        "schema": "tokenclaw.managed_feedback_status.v1",
         "ok": True,
         "generated_at": generated_at,
         "source_surface": source_surface,
@@ -1140,7 +1140,7 @@ def managed_feedback_status_cli(argv: Sequence[str] | None = None, *, stdout: An
     parser.add_argument(
         "--db",
         default=default_db_path(),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--source-surface", help="Optional queue source surface filter, for example codex_turn.")
     parser.add_argument("--limit", type=int, default=20, help="Maximum due queue samples to include, default: 20.")
@@ -1169,7 +1169,7 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
     parser.add_argument(
         "--db",
         default=default_db_path(),
-        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--source-surface", help="Optional queue source surface filter, for example codex_turn.")
     parser.add_argument("--limit", type=int, default=5, help="Maximum due rows to flush, default: 5, max: 100.")
@@ -1263,7 +1263,7 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
             post_promotion_rollups["reason"] = item.get("reason") or post_promotion_rollups.get("reason")
             post_promotion_rollups["attempts"] = item.get("attempts", post_promotion_rollups.get("attempts"))
     result = {
-        "schema": "agentflow.managed_feedback_flush.v1",
+        "schema": "tokenclaw.managed_feedback_flush.v1",
         "ok": True,
         "dry_run": bool(args.dry_run),
         "source_surface": args.source_surface,

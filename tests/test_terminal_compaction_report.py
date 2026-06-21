@@ -56,7 +56,7 @@ def _log_call(
         "text_chars": text_chars,
         "has_tools": category.startswith("tool"),
         "terminal_log_features": {
-            "schema": "agentflow.terminal_log_features.v1",
+            "schema": "tokenclaw.terminal_log_features.v1",
             "terminal_output_char_fraction_bucket": terminal_bucket,
             "privacy": {"metadata_only": True, "raw_terminal_text_included": False},
         },
@@ -101,7 +101,7 @@ def _log_call(
 class TerminalOutputCompactionReportTests(unittest.TestCase):
     def test_report_ranks_plateaued_anthropic_tool_result_cohorts_privately(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -132,7 +132,7 @@ class TerminalOutputCompactionReportTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.terminal_output_compaction_opportunity.v1")
         self.assertGreaterEqual(payload["summary"]["candidate_count"], 2)
         self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
         self.assertGreater(payload["summary"]["plateau_pair_count"], 0)
@@ -166,7 +166,7 @@ class TerminalOutputCompactionReportTests(unittest.TestCase):
 
     def test_cli_emits_terminal_output_compaction_report(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_call(
@@ -189,7 +189,7 @@ class TerminalOutputCompactionReportTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.terminal_output_compaction_opportunity.v1")
         self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
         rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("raw-cli-terminal-secret", rendered)

@@ -14,10 +14,10 @@ from tokenclaw.provider_adoption_gate import (
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.claude_canary_impact.v1"
-VERDICT_SCHEMA = "agentflow.claude_canary_promotion_verdict.v1"
-ANTHROPIC_LIFECYCLE_REPORT_SCHEMA = "agentflow.anthropic_routing_canary_lifecycle_report.v1"
-ANTHROPIC_LIFECYCLE_SCHEMA = "agentflow.anthropic_routing_canary_lifecycle_evidence.v1"
+SCHEMA = "tokenclaw.claude_canary_impact.v1"
+VERDICT_SCHEMA = "tokenclaw.claude_canary_promotion_verdict.v1"
+ANTHROPIC_LIFECYCLE_REPORT_SCHEMA = "tokenclaw.anthropic_routing_canary_lifecycle_report.v1"
+ANTHROPIC_LIFECYCLE_SCHEMA = "tokenclaw.anthropic_routing_canary_lifecycle_evidence.v1"
 
 _REASON_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")
 
@@ -760,7 +760,7 @@ def _anthropic_lifecycle_rollback_guard(
         }
     )
     return {
-        "schema": "agentflow.anthropic_routing_canary_rollback_guard.v1",
+        "schema": "tokenclaw.anthropic_routing_canary_rollback_guard.v1",
         "rule_id": candidate.get("rule_id") or candidate.get("policy_id"),
         "policy_id": candidate.get("policy_id"),
         "target_candidate_id": candidate.get("target_candidate_id") or candidate.get("candidate_id"),
@@ -869,7 +869,7 @@ def _anthropic_lifecycle_from_candidate(candidate: dict[str, Any]) -> dict[str, 
 def _anthropic_lifecycle_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     lifecycle = _anthropic_lifecycle_from_candidate(candidate)
     return {
-        "schema": "agentflow.anthropic_routing_canary_lifecycle_candidate.v1",
+        "schema": "tokenclaw.anthropic_routing_canary_lifecycle_candidate.v1",
         "candidate_id": candidate.get("candidate_id"),
         "target_candidate_id": candidate.get("target_candidate_id"),
         "policy_id": candidate.get("policy_id"),

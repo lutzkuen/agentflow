@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -36,22 +35,10 @@ def default_config_dir() -> Path:
     if configured:
         return safe_expanduser(configured)
     target = safe_home_dir() / ".tokenclaw"
-    _copy_legacy_config_dir_if_needed(target)
     return target
 
 
-def _copy_legacy_config_dir_if_needed(target: Path) -> None:
-    legacy = safe_home_dir() / ".agentflow"
-    if target.exists() or not legacy.exists() or not legacy.is_dir():
-        return
-    shutil.copytree(legacy, target, symlinks=True)
-    message = f"Copied legacy AgentFlow config directory from {legacy} to {target}; old directory was left intact."
-    import logging
-
-    logging.getLogger("tokenclaw").warning(message)
-
-
-def agentflow_config_path(*parts: str) -> Path:
+def tokenclaw_config_path(*parts: str) -> Path:
     return default_config_dir().joinpath(*parts)
 
 
@@ -59,4 +46,4 @@ def default_db_path() -> Path:
     configured = env("TOKENCLAW_DB")
     if configured:
         return safe_expanduser(configured.removeprefix("sqlite:///"))
-    return agentflow_config_path("tokenclaw.sqlite3")
+    return tokenclaw_config_path("tokenclaw.sqlite3")

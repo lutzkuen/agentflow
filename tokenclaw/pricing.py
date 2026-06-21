@@ -9,7 +9,7 @@ from tokenclaw.env import env
 # Approximate public list prices in USD per million tokens. Update in config/env as needed.
 PRICING_SOURCE_OPENAI = "https://developers.openai.com/api/docs/pricing"
 PRICING_VERSION_OPENAI = "2026-06-08"
-PRICING_SOURCE_ANTHROPIC = "embedded-agentflow-defaults"
+PRICING_SOURCE_ANTHROPIC = "embedded-tokenclaw-defaults"
 PRICING_VERSION_ANTHROPIC = "2026-06-08"
 DEFAULT_CODEX_APP_MODEL = "gpt-5.3-codex"
 DEFAULT_CODEX_APP_PROCESSING_MODE = "standard"
@@ -160,7 +160,7 @@ def _openai_prices_for_model(
     overrides = _openai_price_overrides(processing_mode)
     matched, prices = _match_prices(model, overrides)
     if matched and prices:
-        return matched, prices, "env:AGENTFLOW_OPENAI_MODEL_PRICES_JSON"
+        return matched, prices, "env:TOKENCLAW_OPENAI_MODEL_PRICES_JSON"
 
     table = OPENAI_PRIORITY_MODEL_PRICES if processing_mode == "priority" else OPENAI_MODEL_PRICES
     matched, prices = _match_prices(model, table)
@@ -184,7 +184,7 @@ def pricing_basis(
         if prices:
             in_per_m, out_per_m, cached_in_per_m = prices
         return {
-            "schema": "agentflow.pricing_basis.v1",
+            "schema": "tokenclaw.pricing_basis.v1",
             "provider": "openai",
             "model": model,
             "matched_model": matched_model,
@@ -203,7 +203,7 @@ def pricing_basis(
     in_per_m = prices[0] if prices else None
     out_per_m = prices[1] if prices else None
     return {
-        "schema": "agentflow.pricing_basis.v1",
+        "schema": "tokenclaw.pricing_basis.v1",
         "provider": "anthropic",
         "model": model,
         "matched_model": matched_model,
@@ -269,7 +269,7 @@ def provider_prompt_cache_accounting(
         actual_provider_cache_cost = cached_read_cost + creation_cost
 
     return {
-        "schema": "agentflow.provider_prompt_cache_accounting.v1",
+        "schema": "tokenclaw.provider_prompt_cache_accounting.v1",
         "provider": basis["provider"],
         "model": model,
         "matched_model": basis.get("matched_model"),

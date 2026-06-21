@@ -12,13 +12,13 @@ from tokenclaw.store import stable_json
 from tokenclaw.terminal_features import TERMINAL_LOG_FEATURE_SCHEMA, terminal_log_features_from_text
 
 
-PATTERN_MODULES_SCHEMA = "agentflow.local_pattern_modules.v1"
-PATTERN_MODULE_FEATURES_SCHEMA = "agentflow.local_pattern_module_features.v1"
-TOOL_RESULT_FEATURE_SCHEMA = "agentflow.tool_result_features.v1"
-DIFF_FEATURE_SCHEMA = "agentflow.diff_features.v1"
-GENERATED_ARTIFACT_FEATURE_SCHEMA = "agentflow.generated_artifact_features.v1"
-TABULAR_DATA_FEATURE_SCHEMA = "agentflow.tabular_data_features.v1"
-CACHEABILITY_FEATURE_SCHEMA = "agentflow.cacheability_features.v1"
+PATTERN_MODULES_SCHEMA = "tokenclaw.local_pattern_modules.v1"
+PATTERN_MODULE_FEATURES_SCHEMA = "tokenclaw.local_pattern_module_features.v1"
+TOOL_RESULT_FEATURE_SCHEMA = "tokenclaw.tool_result_features.v1"
+DIFF_FEATURE_SCHEMA = "tokenclaw.diff_features.v1"
+GENERATED_ARTIFACT_FEATURE_SCHEMA = "tokenclaw.generated_artifact_features.v1"
+TABULAR_DATA_FEATURE_SCHEMA = "tokenclaw.tabular_data_features.v1"
+CACHEABILITY_FEATURE_SCHEMA = "tokenclaw.cacheability_features.v1"
 TOKEN_CHARS = 4
 
 
@@ -190,7 +190,7 @@ class PatternCrunchResult:
 class LocalPatternModule:
     family = "unknown"
     version = "1"
-    feature_schema = "agentflow.local_pattern_module.generic_features.v1"
+    feature_schema = "tokenclaw.local_pattern_module.generic_features.v1"
     enabled_by_default = True
     supports_local_crunch = False
 
@@ -219,7 +219,7 @@ class LocalPatternModule:
         saved_chars: int,
     ) -> dict[str, Any]:
         return {
-            "schema": "agentflow.local_pattern_module_outcome.v1",
+            "schema": "tokenclaw.local_pattern_module_outcome.v1",
             "family": self.family,
             "version": self.version,
             "status": status,
@@ -1266,7 +1266,7 @@ def _safe_feature_entry(module: LocalPatternModule, features: dict[str, Any]) ->
 
 def _privacy_guard_meta(violations: list[dict[str, str]]) -> dict[str, Any]:
     return {
-        "schema": "agentflow.local_pattern_module_privacy_guard.v1",
+        "schema": "tokenclaw.local_pattern_module_privacy_guard.v1",
         "safe": not violations,
         "violation_count": len(violations),
         "blocked_keys": sorted({item.get("key", "unknown") for item in violations}),

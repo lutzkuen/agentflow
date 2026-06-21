@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 from tokenclaw.env import env, env_any
-from tokenclaw.paths import default_db_path as agentflow_default_db_path
+from tokenclaw.paths import default_db_path as tokenclaw_default_db_path
 from tokenclaw.paths import default_config_dir as tokenclaw_default_config_dir
 
 
@@ -18,7 +18,7 @@ def default_config_dir() -> str:
 
 
 def default_db_path() -> str:
-    return env("TOKENCLAW_DATABASE_URL") or env("TOKENCLAW_DB", str(agentflow_default_db_path()))
+    return env("TOKENCLAW_DATABASE_URL") or env("TOKENCLAW_DB", str(tokenclaw_default_db_path()))
 
 
 def default_stats_url() -> str:

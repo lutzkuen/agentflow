@@ -92,7 +92,7 @@ class CodexTerminalTranscriptDryRunTests(unittest.TestCase):
                 "requested_model": "gpt-5.4",
                 "workflow_phase": "tool_execution",
                 "terminal_log_features": {
-                    "schema": "agentflow.terminal_log_features.v1",
+                    "schema": "tokenclaw.terminal_log_features.v1",
                     "terminal_output_char_fraction_bucket": "gte_75pct",
                     "log_line_fraction_bucket": "gte_75pct",
                     "stack_trace_present": True,
@@ -125,7 +125,7 @@ class CodexTerminalTranscriptDryRunTests(unittest.TestCase):
                 "policy_source": "local-default",
             }),
             event_window_json=stable_json({
-                "schema": "agentflow.codex_app_event_window.v1",
+                "schema": "tokenclaw.codex_app_event_window.v1",
                 "workflow_phase": "tool_execution",
                 "input_text_chars": 40_000,
                 "method_counts": {
@@ -187,7 +187,7 @@ class CodexTerminalTranscriptDryRunTests(unittest.TestCase):
 
     def test_dry_run_returns_holdout_plan_blockers_and_sanitized_metadata(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 self._log_candidate_turn(store)
                 self._log_blocked_turn(store)
@@ -199,7 +199,7 @@ class CodexTerminalTranscriptDryRunTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(payload["schema"], "agentflow.codex_terminal_transcript_compaction_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.codex_terminal_transcript_compaction_dry_run.v1")
         self.assertTrue(payload["dry_run"])
         self.assertTrue(payload["read_only"])
         self.assertFalse(payload["policy"]["runtime_mutation_enabled"])
@@ -245,7 +245,7 @@ class CodexTerminalTranscriptDryRunTests(unittest.TestCase):
 
     def test_cli_emits_codex_terminal_transcript_dry_run(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 self._log_candidate_turn(store)
@@ -260,7 +260,7 @@ class CodexTerminalTranscriptDryRunTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.codex_terminal_transcript_compaction_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.codex_terminal_transcript_compaction_dry_run.v1")
         self.assertEqual(payload["summary"]["planned_candidate_count"], 1)
         self.assertEqual(payload["summary"]["holdout_candidate_count"], 1)
         self.assertNotIn(RAW_REQUEST_ID, stdout.getvalue())
@@ -281,7 +281,7 @@ class CodexTerminalTranscriptDryRunTests(unittest.TestCase):
         terminal_policy["conditions"][raw_condition_key] = raw_condition_value
 
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 self._log_candidate_turn(store)
                 payload = build_codex_terminal_transcript_compaction_dry_run(

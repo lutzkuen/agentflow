@@ -146,8 +146,8 @@ class OptimizationCoordinatorEnforcementTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
-                "AGENTFLOW_OPTIMIZATION_COORDINATOR_HOLDOUT_FRACTION": "1",
-                "AGENTFLOW_OPTIMIZATION_COORDINATOR_CANARY_FRACTION": "0",
+                "TOKENCLAW_OPTIMIZATION_COORDINATOR_HOLDOUT_FRACTION": "1",
+                "TOKENCLAW_OPTIMIZATION_COORDINATOR_CANARY_FRACTION": "0",
             },
         ):
             enforcement = enforce_optimization_coordinator(

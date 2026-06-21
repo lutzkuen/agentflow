@@ -42,7 +42,7 @@ FORBIDDEN_KEYS = (
 class OptimizationCoordinatorDryRunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -128,7 +128,7 @@ class OptimizationCoordinatorDryRunTests(unittest.TestCase):
 
     def _rollout_bundle(self) -> dict[str, object]:
         return {
-            "schema": "agentflow.optimization_rollout_actions.v1",
+            "schema": "tokenclaw.optimization_rollout_actions.v1",
             "local_executor_compatibility": {"compatible": True},
             "privacy_summary": {
                 "metadata_only": True,
@@ -143,7 +143,7 @@ class OptimizationCoordinatorDryRunTests(unittest.TestCase):
             },
             "actions": [
                 {
-                    "schema": "agentflow.optimization_rollout_action.v1",
+                    "schema": "tokenclaw.optimization_rollout_action.v1",
                     "action_id": "rollout-action-secret",
                     "action_type": "widen",
                     "target_candidate_id": "routing-candidate",
@@ -241,7 +241,7 @@ class OptimizationCoordinatorDryRunTests(unittest.TestCase):
             examples=5,
         )
 
-        self.assertEqual(report["schema"], "agentflow.optimization_coordinator_dry_run.v1")
+        self.assertEqual(report["schema"], "tokenclaw.optimization_coordinator_dry_run.v1")
         self.assertTrue(report["ok"])
         self.assertEqual(report["sampled_call_count"], 1)
         self.assertEqual(report["rows_with_rollout_action_candidates"], 1)
@@ -443,7 +443,7 @@ class OptimizationCoordinatorDryRunTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
 
         self.assertEqual(code, 0)
-        self.assertEqual(payload["schema"], "agentflow.optimization_coordinator_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.optimization_coordinator_dry_run.v1")
         self.assertEqual(payload["managed_rollout_actions"]["action_count"], 1)
         self._assert_private(payload)
 

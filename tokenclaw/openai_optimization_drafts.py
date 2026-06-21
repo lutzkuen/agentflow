@@ -12,8 +12,8 @@ from tokenclaw.policy_files import POLICY_DRAFT_STAGE_SCHEMA, stage_policy_draft
 from tokenclaw.store import utc_now
 
 
-OPENAI_OPTIMIZATION_DRAFT_METADATA_SCHEMA = "agentflow.openai_optimization_review_draft_metadata.v1"
-OPENAI_OPTIMIZATION_DRAFT_VALIDATION_SCHEMA = "agentflow.openai_optimization_review_draft_validation.v1"
+OPENAI_OPTIMIZATION_DRAFT_METADATA_SCHEMA = "tokenclaw.openai_optimization_review_draft_metadata.v1"
+OPENAI_OPTIMIZATION_DRAFT_VALIDATION_SCHEMA = "tokenclaw.openai_optimization_review_draft_validation.v1"
 SUPPORTED_ACTION_FAMILIES = {"routing", "old_context_summarization", "cache"}
 RAW_EXACT_KEYS = {
     "api_key",
@@ -101,7 +101,7 @@ def is_openai_optimization_review_payload(payload: Any) -> bool:
         return False
     if isinstance(payload.get("openai_optimization"), dict):
         return True
-    if payload.get("schema") == "agentflow.policy_bundle_fetch_review.v1":
+    if payload.get("schema") == "tokenclaw.policy_bundle_fetch_review.v1":
         bundle = payload.get("bundle")
         return isinstance(bundle, dict) and isinstance(bundle.get("openai_optimization"), dict)
     return False
@@ -323,7 +323,7 @@ def _managed_meta(action: dict[str, Any], index: int) -> dict[str, Any]:
     return {
         key: value
         for key, value in {
-            "schema": "agentflow.openai_optimization_review_action_local_metadata.v1",
+            "schema": "tokenclaw.openai_optimization_review_action_local_metadata.v1",
             "action_id": action.get("action_id"),
             "target_candidate_id": _target_candidate_id(action, index),
             "action_family": action.get("action_family"),
@@ -513,7 +513,7 @@ def _attach_local_draft_provenance_if_configured(bundle: dict[str, Any]) -> dict
     return attach_policy_bundle_provenance(
         bundle,
         secret=secret,
-        issuer="agentflow-proxy",
+        issuer="tokenclaw-proxy",
         server_id="local-draft-stager",
         key_id=key_id,
     )
@@ -557,7 +557,7 @@ async def stage_openai_optimization_review_draft(
 ) -> dict[str, Any]:
     from tokenclaw.policy_bundle import build_policy_bundle
 
-    bundle = payload.get("bundle") if isinstance(payload, dict) and payload.get("schema") == "agentflow.policy_bundle_fetch_review.v1" else payload
+    bundle = payload.get("bundle") if isinstance(payload, dict) and payload.get("schema") == "tokenclaw.policy_bundle_fetch_review.v1" else payload
     validation = _validate_review_bundle(bundle)
     if not validation["ok"]:
         return _error_result(
@@ -582,7 +582,7 @@ async def stage_openai_optimization_review_draft(
         "note": "Selected managed OpenAI optimization actions were staged as inactive local policy drafts.",
     }
     proposed["recommendation"] = {
-        "schema": "agentflow.policy_bundle_recommendation.v1",
+        "schema": "tokenclaw.policy_bundle_recommendation.v1",
         "policy_source": "managed-recommended",
         "recommendation_mode": "local-draft-openai-optimization-review",
         "required_local_review": True,

@@ -29,7 +29,7 @@ def _promotion_report(
     report = build_local_promotion_candidates_from_reports(
         {
             "claude_routing_impact": {
-                "schema": "agentflow.claude_canary_impact.v1",
+                "schema": "tokenclaw.claude_canary_impact.v1",
                 "status": "matched",
                 "candidates": [
                     {

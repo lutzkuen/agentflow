@@ -90,13 +90,13 @@ class DashboardImportTests(unittest.TestCase):
                 no_op_reason = "full-rollout-policy-active"
                 reason_codes = ["managed-preview-agrees"]
             outcome = {
-                "schema": "agentflow.managed_activation_preview_outcome.v1",
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                 "outcome_fingerprint": f"managed-preview-outcome:test-{index}",
                 "handoff_ref": f"handoff-secret-{index}",
                 "preview_ref": f"preview-secret-{index}",
                 "preview_generated_at": preview_generated_at,
                 "local_action_family": family,
-                "evidence_schema": "agentflow.test_preview.v1",
+                "evidence_schema": "tokenclaw.test_preview.v1",
                 "decision": "no-op" if classification != "missing-preview-decision" else "missing",
                 "decision_status": classification,
                 "classification": classification,
@@ -181,16 +181,16 @@ class DashboardImportTests(unittest.TestCase):
     def test_dashboard_app_uses_injected_store_and_preserves_routes(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         event_tmp = tempfile.TemporaryDirectory()
-        old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
-        old_promotion_blocker_review = os.environ.get("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")
-        old_priority_review = os.environ.get("AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH")
-        old_priority_dry_run = os.environ.get("AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH")
-        old_priority_flush = os.environ.get("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH")
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
-        os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = str(Path(event_tmp.name) / "missing_promotion_blocker_review.json")
-        os.environ["AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = str(Path(event_tmp.name) / "missing_post_promotion_priority_review.json")
-        os.environ["AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = str(Path(event_tmp.name) / "missing_post_promotion_policy_draft_dry_run.json")
-        os.environ["AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = str(Path(event_tmp.name) / "missing_post_promotion_outcome_flush_status.json")
+        old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        old_promotion_blocker_review = os.environ.get("TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH")
+        old_priority_review = os.environ.get("TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH")
+        old_priority_dry_run = os.environ.get("TOKENCLAW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH")
+        old_priority_flush = os.environ.get("TOKENCLAW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        os.environ["TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH"] = str(Path(event_tmp.name) / "missing_promotion_blocker_review.json")
+        os.environ["TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = str(Path(event_tmp.name) / "missing_post_promotion_priority_review.json")
+        os.environ["TOKENCLAW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = str(Path(event_tmp.name) / "missing_post_promotion_policy_draft_dry_run.json")
+        os.environ["TOKENCLAW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = str(Path(event_tmp.name) / "missing_post_promotion_outcome_flush_status.json")
         store = Store(tmp.name)
         try:
             from tokenclaw.policy_events import log_policy_event
@@ -210,43 +210,43 @@ class DashboardImportTests(unittest.TestCase):
             client = TestClient(app)
 
             health = client.get("/health")
-            stats = client.get("/agentflow/stats")
+            stats = client.get("/tokenclaw/stats")
             tokenclaw_stats = client.get("/tokenclaw/stats")
-            policies = client.get("/agentflow/stats/policies")
-            policy_workbench = client.get("/agentflow/stats/policy-workbench")
-            policy_events = client.get("/agentflow/stats/policy-events")
-            codex_effectiveness = client.get("/agentflow/stats/codex-effectiveness")
-            codex_readiness = client.get("/agentflow/stats/codex-readiness")
-            codex_canary_impact = client.get("/agentflow/stats/codex-canary-impact")
-            openai_scoreboard = client.get("/agentflow/stats/openai-scoreboard")
-            managed_openai_activation = client.get("/agentflow/stats/managed-openai-activation")
-            openai_optimization_readiness = client.get("/agentflow/stats/openai-optimization-readiness")
-            openai_canary_readiness = client.get("/agentflow/stats/openai-canary-readiness")
-            claude_canary_impact = client.get("/agentflow/stats/claude-canary-impact")
-            claude_routing_funnel = client.get("/agentflow/stats/claude-routing-promotion-funnel")
-            openai_old_context_summary = client.get("/agentflow/stats/openai-old-context-summary")
-            openai_cache_replay_readiness = client.get("/agentflow/stats/openai-cache-replay-readiness")
-            cache_replay_activation_health = client.get("/agentflow/stats/cache-replay-activation-health")
-            streaming_cache_hit_recovery = client.get("/agentflow/stats/streaming-cache-hit-recovery")
-            terminal_output_compaction = client.get("/agentflow/stats/terminal-output-compaction")
-            repeated_scaffold_opportunity = client.get("/agentflow/stats/repeated-scaffold-opportunity")
-            instruction_dedup_opportunity = client.get("/agentflow/stats/instruction-dedup-opportunity")
-            instruction_dedup_impact = client.get("/agentflow/stats/instruction-dedup-impact")
-            repeated_scaffold_impact = client.get("/agentflow/stats/repeated-scaffold-impact")
-            repeated_scaffold_activation = client.get("/agentflow/stats/repeated-scaffold-activation")
-            scaffold_rollout_health = client.get("/agentflow/stats/scaffold-rollout-health")
-            optimization_eval_queue = client.get("/agentflow/stats/optimization-eval-queue")
-            optimization_coordinator = client.get("/agentflow/stats/optimization-coordinator")
-            optimization_promotion_funnel = client.get("/agentflow/stats/optimization-promotion-funnel")
-            promotion_blocker_next_actions = client.get("/agentflow/stats/promotion-blocker-next-actions")
-            post_promotion_deltas = client.get("/agentflow/stats/post-promotion-deltas")
-            post_promotion_priority_handoff = client.get("/agentflow/stats/post-promotion-priority-handoff")
-            rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
-            local_pattern_coverage = client.get("/agentflow/stats/local-pattern-coverage")
-            phase_routing = client.get("/agentflow/stats/phase-routing")
-            safety = client.get("/agentflow/stats/safety")
-            admin_reload = client.post("/agentflow/admin/reload-policies")
-            dashboard = client.get("/agentflow/dashboard")
+            policies = client.get("/tokenclaw/stats/policies")
+            policy_workbench = client.get("/tokenclaw/stats/policy-workbench")
+            policy_events = client.get("/tokenclaw/stats/policy-events")
+            codex_effectiveness = client.get("/tokenclaw/stats/codex-effectiveness")
+            codex_readiness = client.get("/tokenclaw/stats/codex-readiness")
+            codex_canary_impact = client.get("/tokenclaw/stats/codex-canary-impact")
+            openai_scoreboard = client.get("/tokenclaw/stats/openai-scoreboard")
+            managed_openai_activation = client.get("/tokenclaw/stats/managed-openai-activation")
+            openai_optimization_readiness = client.get("/tokenclaw/stats/openai-optimization-readiness")
+            openai_canary_readiness = client.get("/tokenclaw/stats/openai-canary-readiness")
+            claude_canary_impact = client.get("/tokenclaw/stats/claude-canary-impact")
+            claude_routing_funnel = client.get("/tokenclaw/stats/claude-routing-promotion-funnel")
+            openai_old_context_summary = client.get("/tokenclaw/stats/openai-old-context-summary")
+            openai_cache_replay_readiness = client.get("/tokenclaw/stats/openai-cache-replay-readiness")
+            cache_replay_activation_health = client.get("/tokenclaw/stats/cache-replay-activation-health")
+            streaming_cache_hit_recovery = client.get("/tokenclaw/stats/streaming-cache-hit-recovery")
+            terminal_output_compaction = client.get("/tokenclaw/stats/terminal-output-compaction")
+            repeated_scaffold_opportunity = client.get("/tokenclaw/stats/repeated-scaffold-opportunity")
+            instruction_dedup_opportunity = client.get("/tokenclaw/stats/instruction-dedup-opportunity")
+            instruction_dedup_impact = client.get("/tokenclaw/stats/instruction-dedup-impact")
+            repeated_scaffold_impact = client.get("/tokenclaw/stats/repeated-scaffold-impact")
+            repeated_scaffold_activation = client.get("/tokenclaw/stats/repeated-scaffold-activation")
+            scaffold_rollout_health = client.get("/tokenclaw/stats/scaffold-rollout-health")
+            optimization_eval_queue = client.get("/tokenclaw/stats/optimization-eval-queue")
+            optimization_coordinator = client.get("/tokenclaw/stats/optimization-coordinator")
+            optimization_promotion_funnel = client.get("/tokenclaw/stats/optimization-promotion-funnel")
+            promotion_blocker_next_actions = client.get("/tokenclaw/stats/promotion-blocker-next-actions")
+            post_promotion_deltas = client.get("/tokenclaw/stats/post-promotion-deltas")
+            post_promotion_priority_handoff = client.get("/tokenclaw/stats/post-promotion-priority-handoff")
+            rollout_readiness = client.get("/tokenclaw/stats/rollout-actions/readiness")
+            local_pattern_coverage = client.get("/tokenclaw/stats/local-pattern-coverage")
+            phase_routing = client.get("/tokenclaw/stats/phase-routing")
+            safety = client.get("/tokenclaw/stats/safety")
+            admin_reload = client.post("/tokenclaw/admin/reload-policies")
+            dashboard = client.get("/tokenclaw/dashboard")
             tokenclaw_dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(health.status_code, 200)
@@ -261,70 +261,70 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(tokenclaw_dashboard.text, dashboard.text)
             self.assertEqual(policies.status_code, 200)
             self.assertEqual(policy_workbench.status_code, 200)
-            self.assertEqual(policy_workbench.json()["schema"], "agentflow.policy_workbench_readiness.v1")
+            self.assertEqual(policy_workbench.json()["schema"], "tokenclaw.policy_workbench_readiness.v1")
             self.assertTrue(policy_workbench.json()["read_only"])
             self.assertFalse(policy_workbench.json()["mutating_dashboard_endpoints"])
             self.assertFalse(policy_workbench.json()["privacy"]["dashboard_mutations_available"])
             self.assertFalse(policy_workbench.json()["privacy"]["provider_calls_made"])
             self.assertEqual(policy_events.status_code, 200)
-            self.assertEqual(policy_events.json()["schema"], "agentflow.policy_events.v1")
+            self.assertEqual(policy_events.json()["schema"], "tokenclaw.policy_events.v1")
             self.assertEqual(policy_events.json()["events"][0]["action"], "validate")
             self.assertEqual(codex_effectiveness.status_code, 200)
-            self.assertEqual(codex_effectiveness.json()["schema"], "agentflow.codex_app_effectiveness.v1")
+            self.assertEqual(codex_effectiveness.json()["schema"], "tokenclaw.codex_app_effectiveness.v1")
             self.assertFalse(codex_effectiveness.json()["privacy"]["raw_prompts_included"])
             self.assertEqual(codex_readiness.status_code, 200)
-            self.assertEqual(codex_readiness.json()["schema"], "agentflow.codex_optimization_readiness.v1")
+            self.assertEqual(codex_readiness.json()["schema"], "tokenclaw.codex_optimization_readiness.v1")
             self.assertFalse(codex_readiness.json()["privacy"]["raw_prompts_included"])
             self.assertFalse(codex_readiness.json()["privacy"]["request_ids_included"])
             self.assertEqual(codex_canary_impact.status_code, 200)
-            self.assertEqual(codex_canary_impact.json()["schema"], "agentflow.codex_app_canary_impact_by_rule.v1")
+            self.assertEqual(codex_canary_impact.json()["schema"], "tokenclaw.codex_app_canary_impact_by_rule.v1")
             self.assertFalse(codex_canary_impact.json()["privacy"]["request_ids_included"])
             self.assertEqual(openai_scoreboard.status_code, 200)
-            self.assertEqual(openai_scoreboard.json()["schema"], "agentflow.openai_optimization_scoreboard.v1")
+            self.assertEqual(openai_scoreboard.json()["schema"], "tokenclaw.openai_optimization_scoreboard.v1")
             self.assertFalse(openai_scoreboard.json()["privacy"]["provider_calls_made"])
             self.assertEqual(managed_openai_activation.status_code, 200)
-            self.assertEqual(managed_openai_activation.json()["schema"], "agentflow.managed_openai_activation.v1")
+            self.assertEqual(managed_openai_activation.json()["schema"], "tokenclaw.managed_openai_activation.v1")
             self.assertTrue(managed_openai_activation.json()["read_only"])
             self.assertFalse(managed_openai_activation.json()["privacy"]["provider_calls_made"])
             self.assertFalse(managed_openai_activation.json()["privacy"]["request_ids_included"])
             self.assertFalse(managed_openai_activation.json()["privacy"]["cache_keys_included"])
             self.assertEqual(openai_optimization_readiness.status_code, 200)
-            self.assertEqual(openai_optimization_readiness.json()["schema"], "agentflow.openai_optimization_readiness.v1")
+            self.assertEqual(openai_optimization_readiness.json()["schema"], "tokenclaw.openai_optimization_readiness.v1")
             self.assertTrue(openai_optimization_readiness.json()["read_only"])
             self.assertFalse(openai_optimization_readiness.json()["privacy"]["provider_calls_made"])
             self.assertFalse(openai_optimization_readiness.json()["privacy"]["request_ids_included"])
             self.assertEqual(openai_canary_readiness.status_code, 200)
-            self.assertEqual(openai_canary_readiness.json()["schema"], "agentflow.openai_canary_readiness.v1")
+            self.assertEqual(openai_canary_readiness.json()["schema"], "tokenclaw.openai_canary_readiness.v1")
             self.assertEqual(openai_canary_readiness.json()["state"], "collecting_evidence")
             self.assertFalse(openai_canary_readiness.json()["privacy"]["provider_calls_made"])
             self.assertEqual(claude_canary_impact.status_code, 200)
-            self.assertEqual(claude_canary_impact.json()["schema"], "agentflow.claude_canary_impact.v1")
+            self.assertEqual(claude_canary_impact.json()["schema"], "tokenclaw.claude_canary_impact.v1")
             self.assertFalse(claude_canary_impact.json()["privacy"]["provider_calls_made"])
             self.assertFalse(claude_canary_impact.json()["privacy"]["request_ids_included"])
             self.assertEqual(claude_routing_funnel.status_code, 200)
-            self.assertEqual(claude_routing_funnel.json()["schema"], "agentflow.claude_routing_promotion_funnel.v1")
+            self.assertEqual(claude_routing_funnel.json()["schema"], "tokenclaw.claude_routing_promotion_funnel.v1")
             self.assertTrue(claude_routing_funnel.json()["read_only"])
             self.assertFalse(claude_routing_funnel.json()["privacy"]["provider_calls_made"])
             self.assertFalse(claude_routing_funnel.json()["privacy"]["request_ids_included"])
             self.assertEqual(openai_old_context_summary.status_code, 200)
-            self.assertEqual(openai_old_context_summary.json()["schema"], "agentflow.openai_old_context_summary_opportunity.v1")
+            self.assertEqual(openai_old_context_summary.json()["schema"], "tokenclaw.openai_old_context_summary_opportunity.v1")
             self.assertFalse(openai_old_context_summary.json()["local_policy"]["enabled"])
             self.assertFalse(openai_old_context_summary.json()["local_policy"]["rule_file"]["rule_path_included"])
             self.assertFalse(openai_old_context_summary.json()["privacy"]["provider_calls_made"])
             self.assertFalse(openai_old_context_summary.json()["privacy"]["raw_request_bodies_included"])
             self.assertEqual(openai_cache_replay_readiness.status_code, 200)
-            self.assertEqual(openai_cache_replay_readiness.json()["schema"], "agentflow.openai_cache_replay_readiness.v1")
+            self.assertEqual(openai_cache_replay_readiness.json()["schema"], "tokenclaw.openai_cache_replay_readiness.v1")
             self.assertFalse(openai_cache_replay_readiness.json()["privacy"]["provider_calls_made"])
             self.assertFalse(openai_cache_replay_readiness.json()["privacy"]["raw_request_bodies_included"])
             self.assertFalse(openai_cache_replay_readiness.json()["privacy"]["cache_keys_included"])
             self.assertEqual(cache_replay_activation_health.status_code, 200)
-            self.assertEqual(cache_replay_activation_health.json()["schema"], "agentflow.cache_replay_activation_health.v1")
+            self.assertEqual(cache_replay_activation_health.json()["schema"], "tokenclaw.cache_replay_activation_health.v1")
             self.assertTrue(cache_replay_activation_health.json()["read_only"])
             self.assertFalse(cache_replay_activation_health.json()["privacy"]["provider_calls_made"])
             self.assertFalse(cache_replay_activation_health.json()["privacy"]["raw_request_bodies_included"])
             self.assertFalse(cache_replay_activation_health.json()["privacy"]["cache_keys_included"])
             self.assertEqual(streaming_cache_hit_recovery.status_code, 200)
-            self.assertEqual(streaming_cache_hit_recovery.json()["schema"], "agentflow.streaming_cache_hit_recovery.v1")
+            self.assertEqual(streaming_cache_hit_recovery.json()["schema"], "tokenclaw.streaming_cache_hit_recovery.v1")
             self.assertTrue(streaming_cache_hit_recovery.json()["read_only"])
             self.assertFalse(streaming_cache_hit_recovery.json()["privacy"]["provider_calls_made"])
             self.assertFalse(streaming_cache_hit_recovery.json()["privacy"]["raw_request_bodies_included"])
@@ -332,7 +332,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(streaming_cache_hit_recovery.json()["privacy"]["request_ids_included"])
             self.assertFalse(streaming_cache_hit_recovery.json()["privacy"]["session_ids_included"])
             self.assertEqual(terminal_output_compaction.status_code, 200)
-            self.assertEqual(terminal_output_compaction.json()["schema"], "agentflow.terminal_output_compaction_readiness.v1")
+            self.assertEqual(terminal_output_compaction.json()["schema"], "tokenclaw.terminal_output_compaction_readiness.v1")
             self.assertTrue(terminal_output_compaction.json()["read_only"])
             self.assertFalse(terminal_output_compaction.json()["privacy"]["provider_calls_made"])
             self.assertFalse(terminal_output_compaction.json()["privacy"]["raw_terminal_lines_included"])
@@ -343,14 +343,14 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(terminal_output_compaction.json()["privacy"]["cache_keys_included"])
             self.assertFalse(terminal_output_compaction.json()["privacy"]["policy_file_contents_included"])
             self.assertEqual(repeated_scaffold_opportunity.status_code, 200)
-            self.assertEqual(repeated_scaffold_opportunity.json()["schema"], "agentflow.repeated_scaffold_opportunity.v1")
+            self.assertEqual(repeated_scaffold_opportunity.json()["schema"], "tokenclaw.repeated_scaffold_opportunity.v1")
             self.assertEqual(repeated_scaffold_opportunity.json()["summary"]["candidate_count"], 0)
             self.assertFalse(repeated_scaffold_opportunity.json()["privacy"]["raw_request_bodies_included"])
             self.assertFalse(repeated_scaffold_opportunity.json()["privacy"]["request_ids_included"])
             self.assertFalse(repeated_scaffold_opportunity.json()["privacy"]["session_ids_included"])
             self.assertFalse(repeated_scaffold_opportunity.json()["privacy"]["cache_keys_included"])
             self.assertEqual(instruction_dedup_opportunity.status_code, 200)
-            self.assertEqual(instruction_dedup_opportunity.json()["schema"], "agentflow.instruction_dedup_opportunity.v1")
+            self.assertEqual(instruction_dedup_opportunity.json()["schema"], "tokenclaw.instruction_dedup_opportunity.v1")
             self.assertEqual(instruction_dedup_opportunity.json()["summary"]["candidate_count"], 0)
             self.assertTrue(instruction_dedup_opportunity.json()["read_only"])
             self.assertFalse(instruction_dedup_opportunity.json()["privacy"]["raw_instruction_text_included"])
@@ -361,7 +361,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(instruction_dedup_opportunity.json()["privacy"]["thread_ids_included"])
             self.assertFalse(instruction_dedup_opportunity.json()["privacy"]["cache_keys_included"])
             self.assertEqual(instruction_dedup_impact.status_code, 200)
-            self.assertEqual(instruction_dedup_impact.json()["schema"], "agentflow.instruction_dedup_impact.v1")
+            self.assertEqual(instruction_dedup_impact.json()["schema"], "tokenclaw.instruction_dedup_impact.v1")
             self.assertEqual(instruction_dedup_impact.json()["status"], "no-instruction-dedup-canary-metadata")
             self.assertTrue(instruction_dedup_impact.json()["read_only"])
             self.assertFalse(instruction_dedup_impact.json()["privacy"]["raw_instruction_text_included"])
@@ -372,11 +372,11 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(instruction_dedup_impact.json()["privacy"]["cache_keys_included"])
             self.assertFalse(instruction_dedup_impact.json()["managed_lifecycle_feedback_queue"]["privacy"]["payload_json_included"])
             self.assertEqual(repeated_scaffold_impact.status_code, 200)
-            self.assertEqual(repeated_scaffold_impact.json()["schema"], "agentflow.repeated_scaffold_impact.v1")
+            self.assertEqual(repeated_scaffold_impact.json()["schema"], "tokenclaw.repeated_scaffold_impact.v1")
             self.assertEqual(repeated_scaffold_impact.json()["status"], "no-repeated-scaffold-canary-metadata")
             self.assertEqual(
                 repeated_scaffold_impact.json()["managed_lifecycle_feedback_queue"]["schema"],
-                "agentflow.repeated_scaffold_lifecycle_feedback_queue_status.v1",
+                "tokenclaw.repeated_scaffold_lifecycle_feedback_queue_status.v1",
             )
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["provider_calls_made"])
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["raw_request_bodies_included"])
@@ -385,23 +385,23 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["cache_keys_included"])
             self.assertFalse(repeated_scaffold_impact.json()["managed_lifecycle_feedback_queue"]["privacy"]["payload_json_included"])
             self.assertEqual(repeated_scaffold_activation.status_code, 200)
-            self.assertEqual(repeated_scaffold_activation.json()["schema"], "agentflow.repeated_scaffold_activation.v1")
+            self.assertEqual(repeated_scaffold_activation.json()["schema"], "tokenclaw.repeated_scaffold_activation.v1")
             self.assertEqual(repeated_scaffold_activation.json()["status"], "no-activation-metadata")
             self.assertFalse(repeated_scaffold_activation.json()["privacy"]["provider_calls_made"])
             self.assertFalse(repeated_scaffold_activation.json()["privacy"]["raw_request_bodies_included"])
             self.assertFalse(repeated_scaffold_activation.json()["privacy"]["optimization_unit_ids_included"])
             self.assertFalse(repeated_scaffold_activation.json()["privacy"]["feedback_payloads_included"])
             self.assertEqual(scaffold_rollout_health.status_code, 200)
-            self.assertEqual(scaffold_rollout_health.json()["schema"], "agentflow.scaffold_rollout_health.v1")
+            self.assertEqual(scaffold_rollout_health.json()["schema"], "tokenclaw.scaffold_rollout_health.v1")
             self.assertTrue(scaffold_rollout_health.json()["read_only"])
             self.assertFalse(scaffold_rollout_health.json()["privacy"]["provider_calls_made"])
             self.assertFalse(scaffold_rollout_health.json()["privacy"]["raw_action_payloads_included"])
             self.assertFalse(scaffold_rollout_health.json()["privacy"]["yaml_contents_included"])
             self.assertEqual(optimization_eval_queue.status_code, 200)
-            self.assertEqual(optimization_eval_queue.json()["schema"], "agentflow.optimization_eval_queue.v1")
+            self.assertEqual(optimization_eval_queue.json()["schema"], "tokenclaw.optimization_eval_queue.v1")
             self.assertFalse(optimization_eval_queue.json()["privacy"]["provider_calls_made"])
             self.assertEqual(optimization_coordinator.status_code, 200)
-            self.assertEqual(optimization_coordinator.json()["schema"], "agentflow.optimization_coordinator_dashboard.v1")
+            self.assertEqual(optimization_coordinator.json()["schema"], "tokenclaw.optimization_coordinator_dashboard.v1")
             self.assertTrue(optimization_coordinator.json()["read_only"])
             self.assertFalse(optimization_coordinator.json()["privacy"]["provider_calls_made"])
             self.assertFalse(optimization_coordinator.json()["privacy"]["raw_prompts_included"])
@@ -413,15 +413,15 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(optimization_coordinator.json()["privacy"]["session_ids_included"])
             self.assertFalse(optimization_coordinator.json()["privacy"]["policy_file_contents_included"])
             self.assertEqual(optimization_promotion_funnel.status_code, 200)
-            self.assertEqual(optimization_promotion_funnel.json()["schema"], "agentflow.optimization_promotion_funnel.v1")
+            self.assertEqual(optimization_promotion_funnel.json()["schema"], "tokenclaw.optimization_promotion_funnel.v1")
             self.assertFalse(optimization_promotion_funnel.json()["privacy"]["provider_calls_made"])
             self.assertEqual(promotion_blocker_next_actions.status_code, 200)
-            self.assertEqual(promotion_blocker_next_actions.json()["schema"], "agentflow.promotion_blocker_next_actions_dashboard.v1")
+            self.assertEqual(promotion_blocker_next_actions.json()["schema"], "tokenclaw.promotion_blocker_next_actions_dashboard.v1")
             self.assertEqual(promotion_blocker_next_actions.json()["status"], "no-data")
             self.assertFalse(promotion_blocker_next_actions.json()["privacy"]["provider_calls_made"])
             self.assertFalse(promotion_blocker_next_actions.json()["privacy"]["managed_server_calls_made"])
             self.assertEqual(post_promotion_deltas.status_code, 200)
-            self.assertEqual(post_promotion_deltas.json()["schema"], "agentflow.post_promotion_blocker_deltas_dashboard.v1")
+            self.assertEqual(post_promotion_deltas.json()["schema"], "tokenclaw.post_promotion_blocker_deltas_dashboard.v1")
             self.assertEqual(post_promotion_deltas.json()["status"], "no-feedback")
             self.assertFalse(post_promotion_deltas.json()["privacy"]["provider_calls_made"])
             self.assertFalse(post_promotion_deltas.json()["privacy"]["managed_server_calls_made"])
@@ -432,11 +432,11 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(post_promotion_deltas.json()["privacy"]["cache_keys_included"])
             self.assertFalse(post_promotion_deltas.json()["privacy"]["file_paths_included"])
             self.assertEqual(post_promotion_priority_handoff.status_code, 200)
-            self.assertEqual(post_promotion_priority_handoff.json()["schema"], "agentflow.post_promotion_priority_handoff_dashboard.v1")
+            self.assertEqual(post_promotion_priority_handoff.json()["schema"], "tokenclaw.post_promotion_priority_handoff_dashboard.v1")
             self.assertEqual(post_promotion_priority_handoff.json()["status"], "no-data")
             self.assertEqual(post_promotion_priority_handoff.json()["summary"]["top_next_action"], None)
             self.assertEqual(post_promotion_priority_handoff.json()["summary"]["freshness_state"], "no-artifacts")
-            self.assertIn("agentflow-post-promotion-priority-delta-review", post_promotion_priority_handoff.json()["summary"]["next_safe_command"])
+            self.assertIn("tokenclaw-post-promotion-priority-delta-review", post_promotion_priority_handoff.json()["summary"]["next_safe_command"])
             self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["provider_calls_made"])
             self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["managed_server_calls_made"])
             self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["raw_prompts_included"])
@@ -446,22 +446,22 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["cache_keys_included"])
             self.assertFalse(post_promotion_priority_handoff.json()["privacy"]["file_paths_included"])
             self.assertEqual(rollout_readiness.status_code, 200)
-            self.assertEqual(rollout_readiness.json()["schema"], "agentflow.rollout_actions_readiness.v1")
+            self.assertEqual(rollout_readiness.json()["schema"], "tokenclaw.rollout_actions_readiness.v1")
             self.assertFalse(rollout_readiness.json()["privacy"]["raw_action_payloads_included"])
             self.assertEqual(local_pattern_coverage.status_code, 200)
-            self.assertEqual(local_pattern_coverage.json()["schema"], "agentflow.local_pattern_coverage.v1")
+            self.assertEqual(local_pattern_coverage.json()["schema"], "tokenclaw.local_pattern_coverage.v1")
             self.assertFalse(local_pattern_coverage.json()["privacy"]["raw_prompts_included"])
             self.assertEqual(phase_routing.status_code, 200)
-            self.assertEqual(phase_routing.json()["schema"], "agentflow.phase_routing_dashboard.v1")
+            self.assertEqual(phase_routing.json()["schema"], "tokenclaw.phase_routing_dashboard.v1")
             self.assertFalse(phase_routing.json()["privacy"]["raw_prompts_included"])
             self.assertEqual(safety.status_code, 200)
-            self.assertEqual(safety.json()["schema"], "agentflow.safety_privacy.v1")
+            self.assertEqual(safety.json()["schema"], "tokenclaw.safety_privacy.v1")
             self.assertFalse(safety.json()["privacy"]["raw_prompts_included"])
             policy_json = policies.json()
-            self.assertEqual(policy_json["schema"], "agentflow.policy_state.v1")
+            self.assertEqual(policy_json["schema"], "tokenclaw.policy_state.v1")
             self.assertIn("summary", policy_json)
             self.assertIn("workbench", policy_json)
-            self.assertEqual(policy_json["workbench"]["schema"], "agentflow.policy_workbench_readiness.v1")
+            self.assertEqual(policy_json["workbench"]["schema"], "tokenclaw.policy_workbench_readiness.v1")
             self.assertFalse(policy_json["workbench"]["privacy"]["raw_prompts_included"])
             self.assertIn("reload_required", policy_json["summary"])
             self.assertIn("reload_required_sections", policy_json["summary"])
@@ -497,9 +497,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(dashboard.status_code, 200)
             self.assertIn("AgentFlow", dashboard.text)
             self.assertIn("Policies", dashboard.text)
-            self.assertIn("/agentflow/stats/policies", dashboard.text)
-            self.assertIn("/agentflow/stats/policy-workbench", dashboard.text)
-            self.assertIn("/agentflow/stats/policy-events", dashboard.text)
+            self.assertIn("/tokenclaw/stats/policies", dashboard.text)
+            self.assertIn("/tokenclaw/stats/policy-workbench", dashboard.text)
+            self.assertIn("/tokenclaw/stats/policy-events", dashboard.text)
             self.assertIn("Policy workbench readiness", dashboard.text)
             self.assertIn("policy-workbench-tbody", dashboard.text)
             self.assertIn("Policy workbench events", dashboard.text)
@@ -508,39 +508,39 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("Policy reload summary", dashboard.text)
             self.assertIn("policy-summary-tbody", dashboard.text)
             self.assertIn("Codex rules", dashboard.text)
-            self.assertIn("/agentflow/stats/codex-readiness", dashboard.text)
+            self.assertIn("/tokenclaw/stats/codex-readiness", dashboard.text)
             self.assertIn("Codex optimization readiness", dashboard.text)
             self.assertIn("codex-readiness-tbody", dashboard.text)
             self.assertIn("Codex exact-cache canary impact", dashboard.text)
             self.assertIn("codex-cache-readiness-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/codex-canary-impact", dashboard.text)
+            self.assertIn("/tokenclaw/stats/codex-canary-impact", dashboard.text)
             self.assertIn("Codex canary impact by rule", dashboard.text)
             self.assertIn("codex-canary-impact-tbody", dashboard.text)
             self.assertIn("Recent policy events", dashboard.text)
             self.assertIn("Safety / privacy status", dashboard.text)
-            self.assertIn("/agentflow/stats/safety", dashboard.text)
+            self.assertIn("/tokenclaw/stats/safety", dashboard.text)
             self.assertIn("safety-warnings-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/rollout-actions/readiness", dashboard.text)
+            self.assertIn("/tokenclaw/stats/rollout-actions/readiness", dashboard.text)
             self.assertIn("Rollout-action readiness", dashboard.text)
             self.assertIn("rollout-readiness-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/local-pattern-coverage", dashboard.text)
+            self.assertIn("/tokenclaw/stats/local-pattern-coverage", dashboard.text)
             self.assertIn("Local pattern coverage", dashboard.text)
             self.assertIn("local-pattern-coverage-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/phase-routing", dashboard.text)
+            self.assertIn("/tokenclaw/stats/phase-routing", dashboard.text)
             self.assertIn("Phase-routing rollout health", dashboard.text)
             self.assertIn("phase-routing-health-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/optimization-eval-queue", dashboard.text)
+            self.assertIn("/tokenclaw/stats/optimization-eval-queue", dashboard.text)
             self.assertIn("Optimization eval and promotion candidates", dashboard.text)
             self.assertIn("optimization-eval-candidates-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/optimization-coordinator", dashboard.text)
+            self.assertIn("/tokenclaw/stats/optimization-coordinator", dashboard.text)
             self.assertIn("Cross-family coordinator state", dashboard.text)
             self.assertIn("optimization-coordinator-summary-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/optimization-promotion-funnel", dashboard.text)
+            self.assertIn("/tokenclaw/stats/optimization-promotion-funnel", dashboard.text)
             self.assertIn("Optimization promotion canary impact", dashboard.text)
             self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/promotion-blocker-next-actions", dashboard.text)
-            self.assertIn("/agentflow/stats/post-promotion-deltas", dashboard.text)
-            self.assertIn("/agentflow/stats/post-promotion-priority-handoff", dashboard.text)
+            self.assertIn("/tokenclaw/stats/promotion-blocker-next-actions", dashboard.text)
+            self.assertIn("/tokenclaw/stats/post-promotion-deltas", dashboard.text)
+            self.assertIn("/tokenclaw/stats/post-promotion-priority-handoff", dashboard.text)
             self.assertIn("Promotion blocker next actions", dashboard.text)
             self.assertIn("promotion-blocker-summary-tbody", dashboard.text)
             self.assertIn("promotion-blocker-groups-tbody", dashboard.text)
@@ -549,11 +549,11 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("Post-promotion priority handoff health", dashboard.text)
             self.assertIn("post-promotion-priority-handoff-tbody", dashboard.text)
             self.assertIn("post-promotion-priority-handoff-sources-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/claude-routing-promotion-funnel", dashboard.text)
+            self.assertIn("/tokenclaw/stats/claude-routing-promotion-funnel", dashboard.text)
             self.assertIn("Claude routing promotion funnel", dashboard.text)
             self.assertIn("claude-routing-funnel-candidates-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/openai-optimization-readiness", dashboard.text)
-            self.assertIn("/agentflow/stats/managed-openai-activation", dashboard.text)
+            self.assertIn("/tokenclaw/stats/openai-optimization-readiness", dashboard.text)
+            self.assertIn("/tokenclaw/stats/managed-openai-activation", dashboard.text)
             self.assertIn("Managed OpenAI activation", dashboard.text)
             self.assertIn("managed-openai-activation-tbody", dashboard.text)
             self.assertIn("managed-openai-activation-families-tbody", dashboard.text)
@@ -561,29 +561,29 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("openai-optimization-readiness-summary-tbody", dashboard.text)
             self.assertIn("openai-optimization-readiness-families-tbody", dashboard.text)
             self.assertIn("openai-optimization-readiness-conflicts-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/openai-canary-readiness", dashboard.text)
+            self.assertIn("/tokenclaw/stats/openai-canary-readiness", dashboard.text)
             self.assertIn("OpenAI local canary readiness", dashboard.text)
             self.assertIn("openai-canary-readiness-summary-tbody", dashboard.text)
             self.assertIn("openai-canary-readiness-candidates-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/openai-old-context-summary", dashboard.text)
+            self.assertIn("/tokenclaw/stats/openai-old-context-summary", dashboard.text)
             self.assertIn("OpenAI old-context summary readiness", dashboard.text)
             self.assertIn("openai-old-context-summary-readiness-tbody", dashboard.text)
             self.assertIn("OpenAI old-context summary endpoint impact", dashboard.text)
             self.assertIn("openai-old-context-summary-groups-tbody", dashboard.text)
             self.assertIn("OpenAI old-context summary quality gates", dashboard.text)
             self.assertIn("openai-old-context-summary-quality-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/openai-cache-replay-readiness", dashboard.text)
+            self.assertIn("/tokenclaw/stats/openai-cache-replay-readiness", dashboard.text)
             self.assertIn("OpenAI cache replay readiness", dashboard.text)
             self.assertIn("openai-cache-replay-readiness-tbody", dashboard.text)
             self.assertIn("OpenAI cache replay impact gates", dashboard.text)
             self.assertIn("openai-cache-replay-impact-gates-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/cache-replay-activation-health", dashboard.text)
+            self.assertIn("/tokenclaw/stats/cache-replay-activation-health", dashboard.text)
             self.assertIn("Cache replay activation health", dashboard.text)
             self.assertIn("cache-replay-activation-health-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/repeated-scaffold-opportunity", dashboard.text)
-            self.assertIn("/agentflow/stats/repeated-scaffold-impact", dashboard.text)
-            self.assertIn("/agentflow/stats/repeated-scaffold-activation", dashboard.text)
-            self.assertIn("/agentflow/stats/scaffold-rollout-health", dashboard.text)
+            self.assertIn("/tokenclaw/stats/repeated-scaffold-opportunity", dashboard.text)
+            self.assertIn("/tokenclaw/stats/repeated-scaffold-impact", dashboard.text)
+            self.assertIn("/tokenclaw/stats/repeated-scaffold-activation", dashboard.text)
+            self.assertIn("/tokenclaw/stats/scaffold-rollout-health", dashboard.text)
             self.assertIn("Scaffold crunch", dashboard.text)
             self.assertIn("Managed scaffold rollout", dashboard.text)
             self.assertIn("scaffold-rollout-health-tbody", dashboard.text)
@@ -604,25 +604,25 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("No repeated-scaffold canary impact metadata yet", dashboard.text)
         finally:
             if old_event_log is None:
-                os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+                os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
             else:
-                os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
+                os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = old_event_log
             if old_promotion_blocker_review is None:
-                os.environ.pop("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH", None)
+                os.environ.pop("TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH", None)
             else:
-                os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = old_promotion_blocker_review
+                os.environ["TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH"] = old_promotion_blocker_review
             if old_priority_review is None:
-                os.environ.pop("AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH", None)
+                os.environ.pop("TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH", None)
             else:
-                os.environ["AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = old_priority_review
+                os.environ["TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = old_priority_review
             if old_priority_dry_run is None:
-                os.environ.pop("AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH", None)
+                os.environ.pop("TOKENCLAW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH", None)
             else:
-                os.environ["AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = old_priority_dry_run
+                os.environ["TOKENCLAW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = old_priority_dry_run
             if old_priority_flush is None:
-                os.environ.pop("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH", None)
+                os.environ.pop("TOKENCLAW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH", None)
             else:
-                os.environ["AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = old_priority_flush
+                os.environ["TOKENCLAW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = old_priority_flush
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
@@ -630,15 +630,15 @@ class DashboardImportTests(unittest.TestCase):
     def test_promotion_blocker_next_actions_dashboard_endpoint_uses_local_review_fixture(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         work_tmp = tempfile.TemporaryDirectory()
-        old_review_path = os.environ.get("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")
+        old_review_path = os.environ.get("TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH")
         review_path = Path(work_tmp.name) / "promotion_blocker_review.json"
-        os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = str(review_path)
+        os.environ["TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH"] = str(review_path)
         store = Store(tmp.name)
         try:
             from tokenclaw.promotion_blocker_review import build_promotion_blocker_recommendation_review
 
             payload = {
-                "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+                "schema": "tokenclaw.promotion_blocker_next_action_recommendations.v1",
                 "recommendations": [
                     {
                         "recommendation_id": "promotion-blocker-next-action:openai:routing:eval-missing",
@@ -708,12 +708,12 @@ class DashboardImportTests(unittest.TestCase):
             )
             client = TestClient(app)
 
-            response = client.get("/agentflow/stats/promotion-blocker-next-actions?limit=20")
-            dashboard = client.get("/agentflow/dashboard")
+            response = client.get("/tokenclaw/stats/promotion-blocker-next-actions?limit=20")
+            dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             data = response.json()
-            self.assertEqual(data["schema"], "agentflow.promotion_blocker_next_actions_dashboard.v1")
+            self.assertEqual(data["schema"], "tokenclaw.promotion_blocker_next_actions_dashboard.v1")
             self.assertEqual(data["status"], "available")
             self.assertEqual(data["summary"]["review_candidate_count"], 2)
             self.assertEqual(data["summary"]["recommended_count"], 1)
@@ -760,9 +760,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("promotion-blocker-commands-tbody", dashboard.text)
         finally:
             if old_review_path is None:
-                os.environ.pop("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH", None)
+                os.environ.pop("TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH", None)
             else:
-                os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = old_review_path
+                os.environ["TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH"] = old_review_path
             store.conn.close()
             tmp.close()
             work_tmp.cleanup()
@@ -770,22 +770,22 @@ class DashboardImportTests(unittest.TestCase):
     def test_post_promotion_priority_handoff_endpoint_uses_review_dry_run_and_flush_fixtures(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         work_tmp = tempfile.TemporaryDirectory()
-        old_priority_review = os.environ.get("AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH")
-        old_priority_dry_run = os.environ.get("AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH")
-        old_priority_flush = os.environ.get("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH")
+        old_priority_review = os.environ.get("TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH")
+        old_priority_dry_run = os.environ.get("TOKENCLAW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH")
+        old_priority_flush = os.environ.get("TOKENCLAW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH")
         review_path = Path(work_tmp.name) / "priority_review.json"
         dry_run_path = Path(work_tmp.name) / "policy_draft_dry_run.json"
         flush_path = Path(work_tmp.name) / "outcome_flush.json"
-        os.environ["AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = str(review_path)
-        os.environ["AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = str(dry_run_path)
-        os.environ["AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = str(flush_path)
+        os.environ["TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = str(review_path)
+        os.environ["TOKENCLAW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = str(dry_run_path)
+        os.environ["TOKENCLAW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = str(flush_path)
         store = Store(tmp.name)
         try:
             from tokenclaw.post_promotion_policy_drafts import build_post_promotion_policy_drafts
             from tokenclaw.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
 
             priority_payload = {
-                "schema": "agentflow.post_promotion_policy_priority_deltas.v1",
+                "schema": "tokenclaw.post_promotion_policy_priority_deltas.v1",
                 "deltas": [
                     {
                         "delta_id": "secret-priority-routing-delta",
@@ -846,12 +846,12 @@ class DashboardImportTests(unittest.TestCase):
             review = build_post_promotion_priority_delta_review(priority_payload, limit=10)
             dry_run = build_post_promotion_policy_drafts(review)
             flush = {
-                "schema": "agentflow.managed_feedback_flush.v1",
+                "schema": "tokenclaw.managed_feedback_flush.v1",
                 "ok": True,
                 "generated_at": utc_now(),
                 "flush": {"status": "completed", "reason": "ok", "sent": 1},
                 "post_promotion_action_outcome_rollups": {
-                    "schema": "agentflow.post_promotion_action_outcome_rollup_flush_status.v1",
+                    "schema": "tokenclaw.post_promotion_action_outcome_rollup_flush_status.v1",
                     "status": "flushed",
                     "reason": "sent",
                     "rollup_count": 2,
@@ -873,12 +873,12 @@ class DashboardImportTests(unittest.TestCase):
             )
             client = TestClient(app)
 
-            response = client.get("/agentflow/stats/post-promotion-priority-handoff")
-            dashboard = client.get("/agentflow/dashboard")
+            response = client.get("/tokenclaw/stats/post-promotion-priority-handoff")
+            dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             data = response.json()
-            self.assertEqual(data["schema"], "agentflow.post_promotion_priority_handoff_dashboard.v1")
+            self.assertEqual(data["schema"], "tokenclaw.post_promotion_priority_handoff_dashboard.v1")
             self.assertEqual(data["status"], "available")
             self.assertEqual(data["summary"]["priority_review_candidate_count"], 3)
             self.assertEqual(data["summary"]["top_next_action"], "widen-local-policy")
@@ -890,7 +890,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(data["summary"]["outcome_flush_status"], "flushed")
             self.assertEqual(data["summary"]["outcome_rollup_count"], 2)
             self.assertEqual(data["summary"]["freshness_state"], "fresh")
-            self.assertIn("agentflow-post-promotion-policy-draft-dry-run", data["summary"]["next_safe_command"])
+            self.assertIn("tokenclaw-post-promotion-policy-draft-dry-run", data["summary"]["next_safe_command"])
             self.assertEqual(data["next_action_counts"][0]["value"], "keep-blocked")
             self.assertEqual({row["value"] for row in data["status_counts"]}, {"recommended", "noop"})
             self.assertEqual({row["value"] for row in data["no_op_reason_counts"]}, {"low-confidence", "stale-evidence"})
@@ -923,17 +923,17 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("post-promotion-priority-handoff-sources-tbody", dashboard.text)
         finally:
             if old_priority_review is None:
-                os.environ.pop("AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH", None)
+                os.environ.pop("TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH", None)
             else:
-                os.environ["AGENTFLOW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = old_priority_review
+                os.environ["TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH"] = old_priority_review
             if old_priority_dry_run is None:
-                os.environ.pop("AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH", None)
+                os.environ.pop("TOKENCLAW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH", None)
             else:
-                os.environ["AGENTFLOW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = old_priority_dry_run
+                os.environ["TOKENCLAW_POST_PROMOTION_POLICY_DRAFT_DRY_RUN_PATH"] = old_priority_dry_run
             if old_priority_flush is None:
-                os.environ.pop("AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH", None)
+                os.environ.pop("TOKENCLAW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH", None)
             else:
-                os.environ["AGENTFLOW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = old_priority_flush
+                os.environ["TOKENCLAW_POST_PROMOTION_OUTCOME_FLUSH_STATUS_PATH"] = old_priority_flush
             store.conn.close()
             tmp.close()
             work_tmp.cleanup()
@@ -945,7 +945,7 @@ class DashboardImportTests(unittest.TestCase):
             for index, entry in enumerate(
                 [
                     {
-                        "schema": "agentflow.promotion_outcome_feedback_entry.v1",
+                        "schema": "tokenclaw.promotion_outcome_feedback_entry.v1",
                         "id": "raw-routing-entry-id",
                         "created_at": "2026-06-15T00:00:00+00:00",
                         "policy_id": "raw-routing-policy-secret",
@@ -964,7 +964,7 @@ class DashboardImportTests(unittest.TestCase):
                         "privacy": {"raw_prompts_included": False},
                     },
                     {
-                        "schema": "agentflow.promotion_outcome_feedback_entry.v1",
+                        "schema": "tokenclaw.promotion_outcome_feedback_entry.v1",
                         "id": "raw-cache-entry-id",
                         "created_at": "2026-06-15T00:01:00+00:00",
                         "policy_id": "raw-cache-policy-secret",
@@ -983,7 +983,7 @@ class DashboardImportTests(unittest.TestCase):
                         "privacy": {"raw_prompts_included": False},
                     },
                     {
-                        "schema": "agentflow.promotion_outcome_feedback_entry.v1",
+                        "schema": "tokenclaw.promotion_outcome_feedback_entry.v1",
                         "id": "raw-crunch-entry-id",
                         "created_at": "2026-06-15T00:02:00+00:00",
                         "policy_id": "raw-crunch-policy-secret",
@@ -1022,7 +1022,7 @@ class DashboardImportTests(unittest.TestCase):
                     rule_id=entry["rule_id"],
                     candidate_id=entry["candidate_id"],
                     action_id=entry["action_id"],
-                    source_evidence_schema="agentflow.optimization_promotion_rollout_actions.v1",
+                    source_evidence_schema="tokenclaw.optimization_promotion_rollout_actions.v1",
                     status=entry["status"],
                     recommendation=entry["recommendation"],
                     rollback_needed=1 if entry.get("rollback_needed") else 0,
@@ -1048,15 +1048,15 @@ class DashboardImportTests(unittest.TestCase):
             )
             client = TestClient(app)
 
-            response = client.get("/agentflow/stats/post-promotion-deltas?limit=100")
-            dashboard = client.get("/agentflow/dashboard")
+            response = client.get("/tokenclaw/stats/post-promotion-deltas?limit=100")
+            dashboard = client.get("/tokenclaw/dashboard")
         finally:
             store.conn.close()
             tmp.close()
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data["schema"], "agentflow.post_promotion_blocker_deltas_dashboard.v1")
+        self.assertEqual(data["schema"], "tokenclaw.post_promotion_blocker_deltas_dashboard.v1")
         self.assertEqual(data["status"], "available")
         self.assertEqual(data["summary"]["family_count"], 3)
         self.assertEqual(data["summary"]["entry_count"], 3)
@@ -1118,7 +1118,7 @@ class DashboardImportTests(unittest.TestCase):
         html = stats_views.dashboard_html()
         scripts = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
         self.assertTrue(scripts)
-        self.assertIn("/agentflow/stats/full", scripts[-1])
+        self.assertIn("/tokenclaw/stats/full", scripts[-1])
 
         with tempfile.NamedTemporaryFile("w", suffix=".js") as script_file:
             script_file.write("\n".join(scripts))
@@ -1136,10 +1136,10 @@ class DashboardImportTests(unittest.TestCase):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         event_tmp = tempfile.TemporaryDirectory()
         policy_tmp = tempfile.TemporaryDirectory()
-        old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
-        old_canary_policy = os.environ.get("AGENTFLOW_SCAFFOLD_CANARY_POLICY")
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
-        os.environ["AGENTFLOW_SCAFFOLD_CANARY_POLICY"] = str(Path(policy_tmp.name) / "scaffold_canary_policy.yaml")
+        old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        old_canary_policy = os.environ.get("TOKENCLAW_SCAFFOLD_CANARY_POLICY")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        os.environ["TOKENCLAW_SCAFFOLD_CANARY_POLICY"] = str(Path(policy_tmp.name) / "scaffold_canary_policy.yaml")
         store = Store(tmp.name)
 
         def log_call(
@@ -1238,7 +1238,7 @@ class DashboardImportTests(unittest.TestCase):
             return {
                 "changed": applied,
                 "repeated_provider_scaffolding": {
-                    "schema": "agentflow.repeated_provider_scaffolding.v1",
+                    "schema": "tokenclaw.repeated_provider_scaffolding.v1",
                     "enabled": True,
                     "status": "applied" if applied else "skipped",
                     "reason": "repeated-provider-scaffolding-crunched" if applied else "canary_holdout",
@@ -1288,9 +1288,9 @@ class DashboardImportTests(unittest.TestCase):
             crunch_json=repeated_scaffold_crunch("canary_holdout", 0),
             routing_extra=managed_repeated_scaffold,
         )
-        Path(os.environ["AGENTFLOW_SCAFFOLD_CANARY_POLICY"]).write_text(
+        Path(os.environ["TOKENCLAW_SCAFFOLD_CANARY_POLICY"]).write_text(
             "\n".join([
-                "schema: agentflow.scaffold_canary_policy.v1",
+                "schema: tokenclaw.scaffold_canary_policy.v1",
                 "policy_source: managed-recommended",
                 "repeated_provider_scaffolding:",
                 "  enabled: true",
@@ -1329,15 +1329,15 @@ class DashboardImportTests(unittest.TestCase):
             )
             client = TestClient(app)
 
-            opportunity_response = client.get("/agentflow/stats/repeated-scaffold-opportunity?limit=20")
-            impact_response = client.get("/agentflow/stats/repeated-scaffold-impact?limit=20")
-            activation_response = client.get("/agentflow/stats/repeated-scaffold-activation?limit=20")
-            rollout_health_response = client.get("/agentflow/stats/scaffold-rollout-health?limit=20")
-            dashboard = client.get("/agentflow/dashboard")
+            opportunity_response = client.get("/tokenclaw/stats/repeated-scaffold-opportunity?limit=20")
+            impact_response = client.get("/tokenclaw/stats/repeated-scaffold-impact?limit=20")
+            activation_response = client.get("/tokenclaw/stats/repeated-scaffold-activation?limit=20")
+            rollout_health_response = client.get("/tokenclaw/stats/scaffold-rollout-health?limit=20")
+            dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(opportunity_response.status_code, 200)
             opportunity = opportunity_response.json()
-            self.assertEqual(opportunity["schema"], "agentflow.repeated_scaffold_opportunity.v1")
+            self.assertEqual(opportunity["schema"], "tokenclaw.repeated_scaffold_opportunity.v1")
             self.assertGreaterEqual(opportunity["summary"]["candidate_count"], 1)
             self.assertGreater(opportunity["summary"]["projected_saved_tokens"], 0)
             self.assertGreaterEqual(opportunity["candidates"][0]["matched_count"], 2)
@@ -1348,7 +1348,7 @@ class DashboardImportTests(unittest.TestCase):
 
             self.assertEqual(impact_response.status_code, 200)
             impact = impact_response.json()
-            self.assertEqual(impact["schema"], "agentflow.repeated_scaffold_impact.v1")
+            self.assertEqual(impact["schema"], "tokenclaw.repeated_scaffold_impact.v1")
             self.assertEqual(impact["status"], "matched")
             self.assertEqual(impact["summary"]["applied_count"], 2)
             self.assertEqual(impact["summary"]["holdout_count"], 1)
@@ -1361,7 +1361,7 @@ class DashboardImportTests(unittest.TestCase):
 
             self.assertEqual(activation_response.status_code, 200)
             activation = activation_response.json()
-            self.assertEqual(activation["schema"], "agentflow.repeated_scaffold_activation.v1")
+            self.assertEqual(activation["schema"], "tokenclaw.repeated_scaffold_activation.v1")
             self.assertEqual(activation["summary"]["repeated_scaffold_recommended_count"], 3)
             self.assertEqual(activation["summary"]["applied_count"], 2)
             self.assertEqual(activation["summary"]["holdout_count"], 1)
@@ -1372,7 +1372,7 @@ class DashboardImportTests(unittest.TestCase):
 
             self.assertEqual(rollout_health_response.status_code, 200)
             rollout = rollout_health_response.json()
-            self.assertEqual(rollout["schema"], "agentflow.scaffold_rollout_health.v1")
+            self.assertEqual(rollout["schema"], "tokenclaw.scaffold_rollout_health.v1")
             self.assertEqual(rollout["status"], "canary-active")
             self.assertEqual(rollout["summary"]["last_fetch_status"], "ok")
             self.assertEqual(rollout["summary"]["action_count"], 3)
@@ -1414,13 +1414,13 @@ class DashboardImportTests(unittest.TestCase):
                 self.assertNotIn(forbidden, rendered)
         finally:
             if old_event_log is None:
-                os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+                os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
             else:
-                os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
+                os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = old_event_log
             if old_canary_policy is None:
-                os.environ.pop("AGENTFLOW_SCAFFOLD_CANARY_POLICY", None)
+                os.environ.pop("TOKENCLAW_SCAFFOLD_CANARY_POLICY", None)
             else:
-                os.environ["AGENTFLOW_SCAFFOLD_CANARY_POLICY"] = old_canary_policy
+                os.environ["TOKENCLAW_SCAFFOLD_CANARY_POLICY"] = old_canary_policy
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
@@ -1517,13 +1517,13 @@ class DashboardImportTests(unittest.TestCase):
             )
             client = TestClient(app)
             with patch.object(crunch, "CRUNCH_RULES_PATH", policy_tmp.name):
-                response = client.get("/agentflow/stats/terminal-output-compaction?opportunity_limit=10&impact_limit=10")
-                dashboard_response = client.get("/agentflow/dashboard")
+                response = client.get("/tokenclaw/stats/terminal-output-compaction?opportunity_limit=10&impact_limit=10")
+                dashboard_response = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(dashboard_response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_readiness.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.terminal_output_compaction_readiness.v1")
             self.assertTrue(payload["read_only"])
             self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
             self.assertEqual(payload["summary"]["opportunity_candidate_count"], 1)
@@ -1532,7 +1532,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["policy"]["rule_file"]["policy_file_contents_included"])
             self.assertIn("Terminal-output compaction readiness", dashboard_response.text)
             self.assertIn("terminal-compaction-summary-tbody", dashboard_response.text)
-            self.assertIn("fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=250&impact_limit=100')", dashboard_response.text)
+            self.assertIn("fetch('/tokenclaw/stats/terminal-output-compaction?opportunity_limit=250&impact_limit=100')", dashboard_response.text)
             self.assertFalse(payload["privacy"]["raw_terminal_lines_included"])
             self.assertFalse(payload["privacy"]["raw_terminal_text_included"])
             self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
@@ -1608,7 +1608,7 @@ class DashboardImportTests(unittest.TestCase):
 
             def log_activation_call(call_id, *, status, cohort, reason, changed, tokens_saved=0, planned_tokens=1200):
                 terminal_meta = {
-                    "schema": "agentflow.terminal_output_compaction_decision.v1",
+                    "schema": "tokenclaw.terminal_output_compaction_decision.v1",
                     "enabled": True,
                     "status": status,
                     "reason": reason,
@@ -1620,7 +1620,7 @@ class DashboardImportTests(unittest.TestCase):
                     "action_id": "raw activation action secret",
                     "category": "tool-result",
                     "canary": {
-                        "schema": "agentflow.terminal_output_compaction_canary_decision.v1",
+                        "schema": "tokenclaw.terminal_output_compaction_canary_decision.v1",
                         "enabled": True,
                         "selected": changed,
                         "status": status,
@@ -1772,13 +1772,13 @@ class DashboardImportTests(unittest.TestCase):
                 patch.object(crunch, "TERMINAL_OUTPUT_COMPACTION_POLICY", policy),
                 patch.object(crunch, "CRUNCH_RULES_PATH", policy_tmp.name),
             ):
-                response = client.get("/agentflow/stats/terminal-output-compaction-activation?limit=20")
-                dashboard_response = client.get("/agentflow/dashboard")
+                response = client.get("/tokenclaw/stats/terminal-output-compaction-activation?limit=20")
+                dashboard_response = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(dashboard_response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_activation.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.terminal_output_compaction_activation.v1")
             self.assertTrue(payload["read_only"])
             self.assertEqual(payload["status"], "rollback-ready")
             self.assertGreaterEqual(payload["summary"]["active_rule_count"], 1)
@@ -1793,7 +1793,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["lifecycle_feedback"]["payload_json_included"])
             self.assertIn("Terminal-output compaction activation", dashboard_response.text)
             self.assertIn("terminal-compaction-activation-tbody", dashboard_response.text)
-            self.assertIn("fetch('/agentflow/stats/terminal-output-compaction-activation?opportunity_limit=250&impact_limit=100')", dashboard_response.text)
+            self.assertIn("fetch('/tokenclaw/stats/terminal-output-compaction-activation?opportunity_limit=250&impact_limit=100')", dashboard_response.text)
             self.assertFalse(payload["privacy"]["raw_terminal_lines_included"])
             self.assertFalse(payload["privacy"]["raw_terminal_text_included"])
             self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
@@ -1830,10 +1830,10 @@ class DashboardImportTests(unittest.TestCase):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         event_tmp = tempfile.TemporaryDirectory()
         draft_tmp = tempfile.TemporaryDirectory()
-        old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
-        old_draft_dir = os.environ.get("AGENTFLOW_POLICY_DRAFT_DIR")
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
-        os.environ["AGENTFLOW_POLICY_DRAFT_DIR"] = draft_tmp.name
+        old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        old_draft_dir = os.environ.get("TOKENCLAW_POLICY_DRAFT_DIR")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        os.environ["TOKENCLAW_POLICY_DRAFT_DIR"] = draft_tmp.name
         store = Store(tmp.name)
         try:
             from tokenclaw.policy_events import log_policy_event
@@ -1874,7 +1874,7 @@ class DashboardImportTests(unittest.TestCase):
             (draft_dir / "draft.json").write_text(
                 json.dumps(
                     {
-                        "schema": "agentflow.policy_draft.v1",
+                        "schema": "tokenclaw.policy_draft.v1",
                         "draft_id": "openai-activation-fixture",
                         "created_at": "2026-06-11T20:10:00+00:00",
                         "changed": True,
@@ -1882,7 +1882,7 @@ class DashboardImportTests(unittest.TestCase):
                         "change_count": 2,
                         "metadata": {
                             "openai_optimization_review": {
-                                "schema": "agentflow.openai_optimization_review_draft_metadata.v1",
+                                "schema": "tokenclaw.openai_optimization_review_draft_metadata.v1",
                                 "source": "openai_optimization_review_bundle",
                                 "selected_action_count": 2,
                                 "suppressed_action_count": 1,
@@ -1936,7 +1936,7 @@ class DashboardImportTests(unittest.TestCase):
                 endpoint="/v1/policy-events",
                 optimization_unit_id=44,
                 payload_json=json.dumps({
-                    "schema": "agentflow.openai_optimization_draft_dry_run_lifecycle_feedback.v1",
+                    "schema": "tokenclaw.openai_optimization_draft_dry_run_lifecycle_feedback.v1",
                     "raw_prompt": "raw queued feedback prompt must stay hidden",
                     "provider_body": "raw provider body must stay hidden",
                 }),
@@ -1954,12 +1954,12 @@ class DashboardImportTests(unittest.TestCase):
                 full_stats_ttl_s=0,
             )
             client = TestClient(app)
-            response = client.get("/agentflow/stats/managed-openai-activation")
-            dashboard = client.get("/agentflow/dashboard")
+            response = client.get("/tokenclaw/stats/managed-openai-activation")
+            dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["schema"], "agentflow.managed_openai_activation.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.managed_openai_activation.v1")
             self.assertEqual(payload["status"], "feedback-due")
             self.assertEqual(payload["summary"]["selected_action_count"], 2)
             self.assertEqual(payload["summary"]["suppressed_action_count"], 1)
@@ -1999,13 +1999,13 @@ class DashboardImportTests(unittest.TestCase):
                 self.assertNotIn(forbidden, rendered)
         finally:
             if old_event_log is None:
-                os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+                os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
             else:
-                os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
+                os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = old_event_log
             if old_draft_dir is None:
-                os.environ.pop("AGENTFLOW_POLICY_DRAFT_DIR", None)
+                os.environ.pop("TOKENCLAW_POLICY_DRAFT_DIR", None)
             else:
-                os.environ["AGENTFLOW_POLICY_DRAFT_DIR"] = old_draft_dir
+                os.environ["TOKENCLAW_POLICY_DRAFT_DIR"] = old_draft_dir
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
@@ -2017,7 +2017,7 @@ class DashboardImportTests(unittest.TestCase):
         try:
             def feature(endpoint="responses", source_surface="openai_responses"):
                 return {
-                    "schema": "agentflow.openai_feature_summary.v1",
+                    "schema": "tokenclaw.openai_feature_summary.v1",
                     "provider": "openai",
                     "source_surface": source_surface,
                     "endpoint": endpoint,
@@ -2042,7 +2042,7 @@ class DashboardImportTests(unittest.TestCase):
 
             def summary_meta(cohort, status, candidate_id):
                 return {
-                    "schema": "agentflow.openai_old_context_summary.v1",
+                    "schema": "tokenclaw.openai_old_context_summary.v1",
                     "enabled": True,
                     "status": status,
                     "applied": status == "applied",
@@ -2132,9 +2132,9 @@ class DashboardImportTests(unittest.TestCase):
             )
             client = TestClient(app)
 
-            with patch.dict(os.environ, {"AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED": "1"}):
-                payload = client.get("/agentflow/stats/openai-old-context-summary?limit=10")
-            dashboard = client.get("/agentflow/dashboard")
+            with patch.dict(os.environ, {"TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED": "1"}):
+                payload = client.get("/tokenclaw/stats/openai-old-context-summary?limit=10")
+            dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(payload.status_code, 200)
             data = payload.json()
@@ -2176,7 +2176,7 @@ class DashboardImportTests(unittest.TestCase):
         draft_dir.mkdir(parents=True)
         (draft_dir / "draft.json").write_text(
             json.dumps({
-                "schema": "agentflow.policy_draft.v1",
+                "schema": "tokenclaw.policy_draft.v1",
                 "draft_id": "draft-one",
                 "created_at": "2026-06-10T20:00:00+00:00",
                 "requested_section": "cache",
@@ -2202,8 +2202,8 @@ class DashboardImportTests(unittest.TestCase):
         )
 
         env = {
-            "AGENTFLOW_POLICY_DRAFT_DIR": str(workspace),
-            "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+            "TOKENCLAW_POLICY_DRAFT_DIR": str(workspace),
+            "TOKENCLAW_POLICY_EVENTS_LOG": str(event_log),
         }
         with patch.dict(os.environ, env, clear=False):
             log_policy_event(
@@ -2297,15 +2297,15 @@ class DashboardImportTests(unittest.TestCase):
                 },
             )
             client = TestClient(app)
-            response = client.get("/agentflow/stats/policy-workbench")
-            policies = client.get("/agentflow/stats/policies")
+            response = client.get("/tokenclaw/stats/policy-workbench")
+            policies = client.get("/tokenclaw/stats/policies")
             reload_required = asyncio.run(stats_views.stats_policy_workbench_readiness({
                 "summary": {"reload_required_sections": ["cache"]},
             }))
 
         payload = response.json()
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["schema"], "agentflow.policy_workbench_readiness.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_workbench_readiness.v1")
         self.assertEqual(payload["staged_drafts"]["count"], 1)
         self.assertEqual(payload["staged_drafts"]["latest"]["draft_id"], "draft-one")
         self.assertFalse(payload["staged_drafts"]["latest"]["workspace_path_included"])
@@ -2358,7 +2358,7 @@ class DashboardImportTests(unittest.TestCase):
             blockers=None,
         ):
             return {
-                "schema": "agentflow.optimization_eval_plan_row.v1",
+                "schema": "tokenclaw.optimization_eval_plan_row.v1",
                 "candidate_id": candidate_id,
                 "optimization_family": optimization_family,
                 "action_family": action_family,
@@ -2411,7 +2411,7 @@ class DashboardImportTests(unittest.TestCase):
             }
 
         fake_plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 plan_row("queue-widen"),
                 plan_row("queue-hold", applied_error_rate=0.1),
@@ -2472,12 +2472,12 @@ class DashboardImportTests(unittest.TestCase):
             )
             client = TestClient(app)
             with patch("tokenclaw.optimization_eval_plan.build_optimization_eval_plan", fake_build_optimization_eval_plan):
-                response = client.get("/agentflow/stats/optimization-eval-queue?limit=50")
-                dashboard = client.get("/agentflow/dashboard")
+                response = client.get("/tokenclaw/stats/optimization-eval-queue?limit=50")
+                dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["schema"], "agentflow.optimization_eval_queue.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.optimization_eval_queue.v1")
             by_candidate = {row["candidate_id"]: row for row in payload["candidates"]}
             self.assertEqual(by_candidate["queue-widen"]["verdict"], "widen")
             self.assertEqual(by_candidate["queue-hold"]["verdict"], "hold")
@@ -2538,8 +2538,8 @@ class DashboardImportTests(unittest.TestCase):
     def test_optimization_promotion_funnel_endpoint_and_dashboard_are_metadata_only(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         event_tmp = tempfile.TemporaryDirectory()
-        old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
         store = Store(tmp.name)
 
         def plan_row(
@@ -2553,7 +2553,7 @@ class DashboardImportTests(unittest.TestCase):
             blocker_reason_codes=None,
         ):
             return {
-                "schema": "agentflow.optimization_eval_plan_row.v1",
+                "schema": "tokenclaw.optimization_eval_plan_row.v1",
                 "candidate_id": candidate_id,
                 "optimization_family": optimization_family,
                 "action_family": action_family,
@@ -2584,7 +2584,7 @@ class DashboardImportTests(unittest.TestCase):
             }
 
         fake_plan = {
-            "schema": "agentflow.optimization_eval_plan.v1",
+            "schema": "tokenclaw.optimization_eval_plan.v1",
             "plans": [
                 plan_row("promotion-widen", applied=2, holdout=1, projected=0.05),
                 plan_row("promotion-eval-passed", projected=0.03),
@@ -2718,7 +2718,7 @@ class DashboardImportTests(unittest.TestCase):
                     "event_type": "impact",
                     "occurred_at": "2026-06-10T05:15:00+00:00",
                     "metadata": {
-                        "schema": "agentflow.optimization_promotion_lifecycle_feedback.v1",
+                        "schema": "tokenclaw.optimization_promotion_lifecycle_feedback.v1",
                         "command": "optimization-promotion-impact",
                         "candidate_ids": ["promotion-crunch-pending"],
                         "action_ids": ["promotion-action-promotion-crunch-pending"],
@@ -2764,13 +2764,13 @@ class DashboardImportTests(unittest.TestCase):
             )
             client = TestClient(app)
             with patch("tokenclaw.optimization_eval_plan.build_optimization_eval_plan", fake_build_optimization_eval_plan):
-                response = client.get("/agentflow/stats/optimization-promotion-funnel?limit=50")
-                action_response = client.get("/agentflow/stats/optimization-promotion-actions?limit=3")
-                dashboard = client.get("/agentflow/dashboard")
+                response = client.get("/tokenclaw/stats/optimization-promotion-funnel?limit=50")
+                action_response = client.get("/tokenclaw/stats/optimization-promotion-actions?limit=3")
+                dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["schema"], "agentflow.optimization_promotion_funnel.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.optimization_promotion_funnel.v1")
             self.assertFalse(payload["privacy"]["raw_prompts_included"])
             self.assertFalse(payload["privacy"]["request_ids_included"])
             self.assertFalse(payload["privacy"]["cache_keys_included"])
@@ -2810,7 +2810,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("Next command", dashboard.text)
             self.assertEqual(action_response.status_code, 200)
             action_payload = action_response.json()
-            self.assertEqual(action_payload["schema"], "agentflow.optimization_promotion_actions_dashboard.v1")
+            self.assertEqual(action_payload["schema"], "tokenclaw.optimization_promotion_actions_dashboard.v1")
             self.assertEqual(action_payload["limit"], 3)
             self.assertLessEqual(len(action_payload["actions"]), 3)
             self.assertLessEqual(len(action_payload["omission_buckets"]), 3)
@@ -2832,7 +2832,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertNotIn('"action_id"', action_rendered)
             self.assertIn("Promotion-ready actions", dashboard.text)
             self.assertIn("optimization-promotion-actions-tbody", dashboard.text)
-            self.assertIn("/agentflow/stats/optimization-promotion-actions?limit=50", dashboard.text)
+            self.assertIn("/tokenclaw/stats/optimization-promotion-actions?limit=50", dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + json.dumps(action_payload, sort_keys=True) + dashboard.text
             for forbidden in (
@@ -2861,9 +2861,9 @@ class DashboardImportTests(unittest.TestCase):
                 self.assertNotIn(forbidden, rendered)
         finally:
             if old_event_log is None:
-                os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+                os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
             else:
-                os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
+                os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = old_event_log
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
@@ -3021,13 +3021,13 @@ class DashboardImportTests(unittest.TestCase):
                 full_stats_ttl_s=0,
             )
             client = TestClient(app)
-            response = client.get("/agentflow/stats/claude-routing-promotion-funnel?limit=50")
-            yield_response = client.get("/agentflow/stats/post-fix-shadow-yield?window_hours=0&limit=50")
-            dashboard = client.get("/agentflow/dashboard")
+            response = client.get("/tokenclaw/stats/claude-routing-promotion-funnel?limit=50")
+            yield_response = client.get("/tokenclaw/stats/post-fix-shadow-yield?window_hours=0&limit=50")
+            dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["schema"], "agentflow.claude_routing_promotion_funnel.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.claude_routing_promotion_funnel.v1")
             self.assertTrue(payload["read_only"])
             self.assertFalse(payload["provider_calls_made"])
             self.assertFalse(payload["managed_server_calls_made"])
@@ -3045,14 +3045,14 @@ class DashboardImportTests(unittest.TestCase):
             self.assertTrue(any(row["canary_widened_count"] >= 1 for row in payload["candidates"]))
             self.assertEqual(yield_response.status_code, 200)
             yield_payload = yield_response.json()
-            self.assertEqual(yield_payload["schema"], "agentflow.post_fix_shadow_yield.v1")
+            self.assertEqual(yield_payload["schema"], "tokenclaw.post_fix_shadow_yield.v1")
             self.assertGreaterEqual(yield_payload["summary"]["sample_count"], 3)
             self.assertGreaterEqual(yield_payload["summary"]["compared_count"], 3)
             self.assertFalse(yield_payload["privacy"]["raw_prompts_included"])
             self.assertFalse(yield_payload["privacy"]["request_ids_included"])
             self.assertEqual(dashboard.status_code, 200)
             self.assertIn("Claude routing promotion funnel", dashboard.text)
-            self.assertIn("/agentflow/stats/claude-routing-promotion-funnel", dashboard.text)
+            self.assertIn("/tokenclaw/stats/claude-routing-promotion-funnel", dashboard.text)
             self.assertIn("claude-routing-funnel-candidates-tbody", dashboard.text)
             self.assertIn("post-fix-shadow-yield-tbody", dashboard.text)
 
@@ -3102,7 +3102,7 @@ class DashboardImportTests(unittest.TestCase):
             ]
             modules = [
                 {
-                    "schema": "agentflow.local_pattern_module_outcome.v1",
+                    "schema": "tokenclaw.local_pattern_module_outcome.v1",
                     "family": family,
                     "version": "test",
                     "enabled": True,
@@ -3118,7 +3118,7 @@ class DashboardImportTests(unittest.TestCase):
                     "privacy_guard": {"safe": True, "violation_count": 0, "blocked_keys": [], "raw_values_logged": False},
                     "feature_summary": {
                         "family": family,
-                        "feature_schema": f"agentflow.{family}.fixture_features.v1",
+                        "feature_schema": f"tokenclaw.{family}.fixture_features.v1",
                         "raw_content_included": False,
                     },
                 }
@@ -3129,7 +3129,7 @@ class DashboardImportTests(unittest.TestCase):
                 "saved_chars": 64,
                 "tokens_saved_est": 16,
                 "pattern_modules": {
-                    "schema": "agentflow.local_pattern_modules.v1",
+                    "schema": "tokenclaw.local_pattern_modules.v1",
                     "registered_count": len(families),
                     "enabled_count": len(families),
                     "detected_count": len(families),
@@ -3138,15 +3138,15 @@ class DashboardImportTests(unittest.TestCase):
                     "bypass_count": 0,
                     "modules": modules,
                     "server_features": {
-                        "schema": "agentflow.local_pattern_module_features.v1",
+                        "schema": "tokenclaw.local_pattern_module_features.v1",
                         "module_feature_count": len(families),
                         "features": [
                             {
                                 "family": family,
                                 "version": "test",
-                                "feature_schema": f"agentflow.{family}.fixture_features.v1",
+                                "feature_schema": f"tokenclaw.{family}.fixture_features.v1",
                                 "features": {
-                                    "schema": f"agentflow.{family}.fixture_features.v1",
+                                    "schema": f"tokenclaw.{family}.fixture_features.v1",
                                     "module_family": family,
                                     "detected": True,
                                     "privacy": {"metadata_only": True, "raw_content_included": False},
@@ -3167,7 +3167,7 @@ class DashboardImportTests(unittest.TestCase):
             routing_json = {
                 "category": "tool-result",
                 "managed_pattern_features": {
-                    "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                    "schema": "tokenclaw.managed_pattern_feature_diagnostics.v1",
                     "present": True,
                     "pattern_hash_count": 3,
                     "pattern_hashes": [
@@ -3227,11 +3227,11 @@ class DashboardImportTests(unittest.TestCase):
             )
             client = TestClient(app)
 
-            response = client.get("/agentflow/stats/local-pattern-coverage?limit=50")
+            response = client.get("/tokenclaw/stats/local-pattern-coverage?limit=50")
 
             self.assertEqual(response.status_code, 200)
             data = response.json()
-            self.assertEqual(data["schema"], "agentflow.local_pattern_coverage.v1")
+            self.assertEqual(data["schema"], "tokenclaw.local_pattern_coverage.v1")
             self.assertFalse(data["privacy"]["raw_prompts_included"])
             self.assertFalse(data["privacy"]["raw_tool_payloads_included"])
             by_family = {row["family"]: row for row in data["families"]}
@@ -3250,8 +3250,8 @@ class DashboardImportTests(unittest.TestCase):
     def test_rollout_action_readiness_endpoint_summarizes_metadata_only(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         event_tmp = tempfile.TemporaryDirectory()
-        old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
         store = Store(tmp.name)
         try:
             from tokenclaw.policy_events import log_policy_event
@@ -3330,7 +3330,7 @@ class DashboardImportTests(unittest.TestCase):
                     "bundle_hash": "sha256:" + ("c" * 64),
                     "action_ids": ["must-not-render-action-id"],
                     "metadata": {
-                        "schema": "agentflow.rollout_action_lifecycle_metadata.v1",
+                        "schema": "tokenclaw.rollout_action_lifecycle_metadata.v1",
                         "command": "rollout-actions-dry-run",
                         "local_result_status": "ok",
                         "dry_run": True,
@@ -3384,12 +3384,12 @@ class DashboardImportTests(unittest.TestCase):
                 full_stats_ttl_s=0,
             )
             client = TestClient(app)
-            response = client.get("/agentflow/stats/rollout-actions/readiness")
-            dashboard = client.get("/agentflow/dashboard")
+            response = client.get("/tokenclaw/stats/rollout-actions/readiness")
+            dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["schema"], "agentflow.rollout_actions_readiness.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.rollout_actions_readiness.v1")
             self.assertEqual(payload["summary"]["pending_lifecycle_feedback_count"], 1)
             self.assertEqual(payload["summary"]["due_lifecycle_feedback_count"], 1)
             self.assertEqual(payload["summary"]["affected_metadata_row_count"], 9)
@@ -3417,9 +3417,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertNotIn("/tmp/local-yaml-config", rendered)
         finally:
             if old_event_log is None:
-                os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+                os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
             else:
-                os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
+                os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = old_event_log
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
@@ -3428,12 +3428,12 @@ class DashboardImportTests(unittest.TestCase):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         store = Store(tmp.name)
         env = {
-            "AGENTFLOW_LOG_BODIES": "1",
-            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-            "AGENTFLOW_RECOMMENDATION_SERVER_URL": "https://user:supersecret@managed.test/v1/recommendation?api_key=managedsecret&mode=dev",
-            "AGENTFLOW_POLICY_BUNDLE_RECOMMENDATION_URL": "https://managed.test/v1/policy-bundle-recommendation?token=policysecret",
-            "AGENTFLOW_MANAGED_API_KEY": "",
-            "AGENTFLOW_POLICY_EVENTS": "0",
+            "TOKENCLAW_LOG_BODIES": "1",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_RECOMMENDATION_SERVER_URL": "https://user:supersecret@managed.test/v1/recommendation?api_key=managedsecret&mode=dev",
+            "TOKENCLAW_POLICY_BUNDLE_RECOMMENDATION_URL": "https://managed.test/v1/policy-bundle-recommendation?token=policysecret",
+            "TOKENCLAW_MANAGED_API_KEY": "",
+            "TOKENCLAW_POLICY_EVENTS": "0",
         }
         try:
             with patch.dict(os.environ, env, clear=False):
@@ -3448,7 +3448,7 @@ class DashboardImportTests(unittest.TestCase):
                     full_stats_ttl_s=0,
                 )
                 client = TestClient(app)
-                response = client.get("/agentflow/stats/safety")
+                response = client.get("/tokenclaw/stats/safety")
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
@@ -3537,9 +3537,9 @@ class DashboardImportTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
-                    "AGENTFLOW_MANAGED_API_KEY": "test-key",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_MANAGED_API_KEY": "test-key",
                 },
                 clear=False,
             ):
@@ -3552,8 +3552,8 @@ class DashboardImportTests(unittest.TestCase):
                     full_stats_ttl_s=0,
                 )
                 client = TestClient(app)
-                response = client.get("/agentflow/stats/safety")
-                dashboard = client.get("/agentflow/dashboard")
+                response = client.get("/tokenclaw/stats/safety")
+                dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
@@ -3616,12 +3616,12 @@ class DashboardImportTests(unittest.TestCase):
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                     responses = await asyncio.gather(
-                        client.get("/agentflow/stats/full"),
-                        client.get("/agentflow/stats/full"),
-                        client.get("/agentflow/stats/full"),
+                        client.get("/tokenclaw/stats/full"),
+                        client.get("/tokenclaw/stats/full"),
+                        client.get("/tokenclaw/stats/full"),
                     )
                     warm_start = time.perf_counter()
-                    cached = await client.get("/agentflow/stats/full")
+                    cached = await client.get("/tokenclaw/stats/full")
                     warm_seconds = time.perf_counter() - warm_start
                     return responses, cached, warm_seconds
 
@@ -3644,11 +3644,11 @@ class DashboardImportTests(unittest.TestCase):
         store = Store(tmp.name)
         plan_path = Path(plan_tmp.name)
         plan_payload = {
-            "schema": "agentflow.orchestrator_research_plan.v1",
+            "schema": "tokenclaw.orchestrator_research_plan.v1",
             "generated_at": "2026-06-15T10:00:00+00:00",
             "evidence": {
                 "evidence_to_activation_next_action_ledger": {
-                    "schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
                     "status": "tracked",
                     "summary": {
                         "tracked_entry_count": 1,
@@ -3670,7 +3670,7 @@ class DashboardImportTests(unittest.TestCase):
                             "blocker_codes": ["repeated-context-crunch-opportunity"],
                             "sample_count": 431,
                             "projected_saved_usd": 2.899322,
-                            "evidence_schema": "agentflow.request_shape_follow_up_candidates.v1",
+                            "evidence_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
                             "cohort_bucket": "request-shape-rollups:100_999",
                             "expected_savings_path": "Move request-shape rollups into the next repeated-context replay, routing, or crunch cohort issue.",
                             "raw_prompt": "raw prompt must not render",
@@ -3697,7 +3697,7 @@ class DashboardImportTests(unittest.TestCase):
         try:
             json.dump(plan_payload, plan_tmp)
             plan_tmp.close()
-            with patch.dict(os.environ, {"AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path)}, clear=False):
+            with patch.dict(os.environ, {"TOKENCLAW_RESEARCH_PLAN_JSON": str(plan_path)}, clear=False):
                 app = create_dashboard_app(
                     store_obj=lambda: store,
                     default_db=tmp.name,
@@ -3707,12 +3707,12 @@ class DashboardImportTests(unittest.TestCase):
                     full_stats_ttl_s=0,
                 )
                 client = TestClient(app)
-                response = client.get("/agentflow/stats/evidence-to-activation-next-actions?limit=5")
-                dashboard = client.get("/agentflow/dashboard")
+                response = client.get("/tokenclaw/stats/evidence-to-activation-next-actions?limit=5")
+                dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["schema"], "agentflow.dashboard_evidence_to_activation_next_actions.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.dashboard_evidence_to_activation_next_actions.v1")
             self.assertEqual(payload["status"], "tracked")
             self.assertEqual(payload["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
             self.assertEqual(payload["entries"][0]["lever"], "crunch")
@@ -3753,14 +3753,14 @@ class DashboardImportTests(unittest.TestCase):
         store = Store(tmp.name)
         plan_path = Path(plan_tmp.name)
         plan_payload = {
-            "schema": "agentflow.orchestrator_research_plan.v1",
+            "schema": "tokenclaw.orchestrator_research_plan.v1",
             "generated_at": "2026-06-18T07:00:00+00:00",
             "evidence": {
                 "stats_summary": {
                     "local_activation_next_action_queue": {
-                        "schema": "agentflow.local_activation_next_action_queue.v1",
+                        "schema": "tokenclaw.local_activation_next_action_queue.v1",
                         "status": "ranked",
-                        "source_schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                        "source_schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
                         "summary": {
                             "queued_action_count": 2,
                             "top_lever": "crunch",
@@ -3773,7 +3773,7 @@ class DashboardImportTests(unittest.TestCase):
                             "top_savings_per_1000_calls_usd": 10.39388,
                             "top_freshness_adjusted_savings_per_1000_calls_usd": 10.39388,
                             "top_rank_basis": {
-                                "schema": "agentflow.local_activation_successor_rank_basis.v1",
+                                "schema": "tokenclaw.local_activation_successor_rank_basis.v1",
                                 "rank_bucket": 0,
                                 "freshness_state": "fresh",
                                 "freshness_adjusted_savings_per_1000_calls_usd": 10.39388,
@@ -3790,7 +3790,7 @@ class DashboardImportTests(unittest.TestCase):
                         },
                         "entries": [
                             {
-                                "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                                "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
                                 "rank": 1,
                                 "ledger_rank": 1,
                                 "fingerprint": "activation:queue-secret-fingerprint",
@@ -3806,7 +3806,7 @@ class DashboardImportTests(unittest.TestCase):
                                 "freshness_adjusted_savings_per_1000_calls_usd": 10.39388,
                                 "savings_per_1000_calls_usd": 10.39388,
                                 "rank_basis": {
-                                    "schema": "agentflow.local_activation_successor_rank_basis.v1",
+                                    "schema": "tokenclaw.local_activation_successor_rank_basis.v1",
                                     "rank_bucket": 0,
                                     "freshness_state": "fresh",
                                     "freshness_adjusted_savings_per_1000_calls_usd": 10.39388,
@@ -3821,7 +3821,7 @@ class DashboardImportTests(unittest.TestCase):
                                 "projected_savings_usd": 25.818387,
                                 "target_local_rule_file": "crunch_rules.yaml",
                                 "target_local_policy_section": "crunch.rules",
-                                "evidence_schema": "agentflow.crunch_savings_signal.v1",
+                                "evidence_schema": "tokenclaw.crunch_savings_signal.v1",
                                 "expected_savings_path": "Move crunch opportunity evidence into activation follow-up.",
                                 "raw_prompt": "raw prompt must not render",
                                 "request_id": "req-queue-secret",
@@ -3831,7 +3831,7 @@ class DashboardImportTests(unittest.TestCase):
                                 "privacy": {"metadata_only": True, "aggregate_only": True},
                             },
                             {
-                                "schema": "agentflow.local_activation_next_action_queue_entry.v1",
+                                "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
                                 "rank": 2,
                                 "ledger_rank": 3,
                                 "lever": "routing",
@@ -3871,8 +3871,8 @@ class DashboardImportTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
-                    "AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path),
+                    "TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "TOKENCLAW_RESEARCH_PLAN_JSON": str(plan_path),
                 },
                 clear=False,
             ):
@@ -3885,15 +3885,15 @@ class DashboardImportTests(unittest.TestCase):
                     full_stats_ttl_s=0,
                 )
                 client = TestClient(app)
-                response = client.get("/agentflow/stats/local-activation-next-action-queue?limit=1")
-                full_response = client.get("/agentflow/stats/full")
-                dashboard = client.get("/agentflow/dashboard")
+                response = client.get("/tokenclaw/stats/local-activation-next-action-queue?limit=1")
+                full_response = client.get("/tokenclaw/stats/full")
+                dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(full_response.status_code, 200)
             payload = response.json()
             full_payload = full_response.json()
-            self.assertEqual(payload["schema"], "agentflow.dashboard_local_activation_next_action_queue.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.dashboard_local_activation_next_action_queue.v1")
             self.assertEqual(payload["status"], "ranked")
             self.assertEqual(payload["summary"]["queued_action_count"], 2)
             self.assertEqual(len(payload["entries"]), 1)
@@ -3905,13 +3905,13 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(payload["entries"][0]["rank_basis"]["rank_bucket"], 0)
             self.assertEqual(payload["summary"]["top_freshness_state"], "fresh")
             self.assertEqual(payload["summary"]["top_savings_per_1000_calls_usd"], 10.39388)
-            self.assertEqual(full_payload["activation_burndown"]["schema"], "agentflow.dashboard_local_activation_next_action_queue.v1")
+            self.assertEqual(full_payload["activation_burndown"]["schema"], "tokenclaw.dashboard_local_activation_next_action_queue.v1")
             self.assertEqual(full_payload["activation_burndown"]["summary"]["queued_action_count"], 2)
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["lever"], "crunch")
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["target_local_rule_file"], "crunch_rules.yaml")
             self.assertIn("activation_burndown", full_payload["summary"])
             coverage = payload["managed_preview_coverage"]
-            self.assertEqual(coverage["schema"], "agentflow.dashboard_managed_activation_preview_coverage.v1")
+            self.assertEqual(coverage["schema"], "tokenclaw.dashboard_managed_activation_preview_coverage.v1")
             self.assertEqual(coverage["status"], "tracked")
             self.assertEqual(coverage["preview_data_status"], "fresh")
             self.assertEqual(coverage["lookback_limit"], 200)
@@ -3987,12 +3987,12 @@ class DashboardImportTests(unittest.TestCase):
         store = Store(tmp.name)
         plan_path = Path(plan_tmp.name)
         plan_payload = {
-            "schema": "agentflow.orchestrator_research_plan.v1",
+            "schema": "tokenclaw.orchestrator_research_plan.v1",
             "generated_at": "2026-06-19T19:30:00+00:00",
             "evidence": {
                 "stats_summary": {
                     "local_activation_next_action_queue": {
-                        "schema": "agentflow.local_activation_next_action_queue.v1",
+                        "schema": "tokenclaw.local_activation_next_action_queue.v1",
                         "status": "ranked",
                         "summary": {"queued_action_count": 0, "successor_action_count": 0},
                         "entries": [],
@@ -4017,8 +4017,8 @@ class DashboardImportTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
-                    "AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path),
+                    "TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "TOKENCLAW_RESEARCH_PLAN_JSON": str(plan_path),
                 },
                 clear=False,
             ):
@@ -4031,9 +4031,9 @@ class DashboardImportTests(unittest.TestCase):
                     full_stats_ttl_s=0,
                 )
                 client = TestClient(app)
-                queue_response = client.get("/agentflow/stats/local-activation-next-action-queue?limit=5")
-                full_response = client.get("/agentflow/stats/full")
-                dashboard = client.get("/agentflow/dashboard")
+                queue_response = client.get("/tokenclaw/stats/local-activation-next-action-queue?limit=5")
+                full_response = client.get("/tokenclaw/stats/full")
+                dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(queue_response.status_code, 200)
             self.assertEqual(full_response.status_code, 200)
@@ -4042,7 +4042,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(queue_payload["status"], "empty")
             self.assertEqual(queue_payload["summary"]["queued_action_count"], 0)
             health = full_payload["activation_successor_queue_health"]
-            self.assertEqual(health["schema"], "agentflow.activation_successor_queue_health.v1")
+            self.assertEqual(health["schema"], "tokenclaw.activation_successor_queue_health.v1")
             self.assertEqual(health["status"], "empty")
             self.assertEqual(health["summary"]["top_projected_savings_usd"], 0.0)
             self.assertIn(health["summary"]["top_next_action"], (None, ""))
@@ -4072,7 +4072,7 @@ class DashboardImportTests(unittest.TestCase):
         plan_path = Path(plan_tmp.name)
         actions = [
             {
-                "schema": "agentflow.local_activation_successor_action.v1",
+                "schema": "tokenclaw.local_activation_successor_action.v1",
                 "fingerprint": "successor:ready-secret-action",
                 "source_fingerprint": "activation:ready-secret-fingerprint",
                 "local_action_family": "routing",
@@ -4092,7 +4092,7 @@ class DashboardImportTests(unittest.TestCase):
                 "file_path": "/tmp/preview-secret-project/file.py",
             },
             {
-                "schema": "agentflow.local_activation_successor_action.v1",
+                "schema": "tokenclaw.local_activation_successor_action.v1",
                 "fingerprint": "successor:blocked-secret-action",
                 "source_fingerprint": "activation:blocked-secret-fingerprint",
                 "local_action_family": "cache",
@@ -4104,7 +4104,7 @@ class DashboardImportTests(unittest.TestCase):
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
             {
-                "schema": "agentflow.local_activation_successor_action.v1",
+                "schema": "tokenclaw.local_activation_successor_action.v1",
                 "fingerprint": "successor:stale-secret-action",
                 "source_fingerprint": "activation:stale-secret-fingerprint",
                 "local_action_family": "crunch",
@@ -4116,7 +4116,7 @@ class DashboardImportTests(unittest.TestCase):
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
             {
-                "schema": "agentflow.local_activation_successor_action.v1",
+                "schema": "tokenclaw.local_activation_successor_action.v1",
                 "fingerprint": "successor:nodata-secret-action",
                 "source_fingerprint": "activation:nodata-secret-fingerprint",
                 "local_action_family": "activation-feedback",
@@ -4127,7 +4127,7 @@ class DashboardImportTests(unittest.TestCase):
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
             {
-                "schema": "agentflow.local_activation_successor_action.v1",
+                "schema": "tokenclaw.local_activation_successor_action.v1",
                 "fingerprint": "successor:suppressed-secret-action",
                 "source_fingerprint": "activation:suppressed-secret-fingerprint",
                 "local_action_family": "crunch",
@@ -4140,7 +4140,7 @@ class DashboardImportTests(unittest.TestCase):
         ]
         decisions = [
             {
-                "schema": "agentflow.local_activation_successor_decision.v1",
+                "schema": "tokenclaw.local_activation_successor_decision.v1",
                 "source_fingerprint": "activation:ready-secret-fingerprint",
                 "successor_action_fingerprint": "successor:ready-secret-action",
                 "local_action_family": "routing",
@@ -4153,7 +4153,7 @@ class DashboardImportTests(unittest.TestCase):
                 "request_id": "req-decision-secret",
             },
             {
-                "schema": "agentflow.local_activation_successor_decision.v1",
+                "schema": "tokenclaw.local_activation_successor_decision.v1",
                 "source_fingerprint": "activation:blocked-secret-fingerprint",
                 "successor_action_fingerprint": "successor:blocked-secret-action",
                 "local_action_family": "cache",
@@ -4166,7 +4166,7 @@ class DashboardImportTests(unittest.TestCase):
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
             {
-                "schema": "agentflow.local_activation_successor_decision.v1",
+                "schema": "tokenclaw.local_activation_successor_decision.v1",
                 "source_fingerprint": "activation:stale-secret-fingerprint",
                 "successor_action_fingerprint": "successor:stale-secret-action",
                 "local_action_family": "crunch",
@@ -4178,7 +4178,7 @@ class DashboardImportTests(unittest.TestCase):
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
             {
-                "schema": "agentflow.local_activation_successor_decision.v1",
+                "schema": "tokenclaw.local_activation_successor_decision.v1",
                 "source_fingerprint": "activation:nodata-secret-fingerprint",
                 "successor_action_fingerprint": "successor:nodata-secret-action",
                 "local_action_family": "activation-feedback",
@@ -4190,7 +4190,7 @@ class DashboardImportTests(unittest.TestCase):
                 "privacy": {"metadata_only": True, "aggregate_only": True},
             },
             {
-                "schema": "agentflow.local_activation_successor_decision.v1",
+                "schema": "tokenclaw.local_activation_successor_decision.v1",
                 "source_fingerprint": "activation:suppressed-secret-fingerprint",
                 "successor_action_fingerprint": "successor:suppressed-secret-action",
                 "local_action_family": "crunch",
@@ -4203,14 +4203,14 @@ class DashboardImportTests(unittest.TestCase):
             },
         ]
         plan_payload = {
-            "schema": "agentflow.orchestrator_research_plan.v1",
+            "schema": "tokenclaw.orchestrator_research_plan.v1",
             "generated_at": "2026-06-19T18:30:00+00:00",
             "evidence": {
                 "stats_summary": {
                     "local_activation_next_action_queue": {
-                        "schema": "agentflow.local_activation_next_action_queue.v1",
+                        "schema": "tokenclaw.local_activation_next_action_queue.v1",
                         "status": "ranked",
-                        "source_schema": "agentflow.evidence_to_activation_next_action_ledger.v1",
+                        "source_schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
                         "summary": {"successor_decision_count": 5},
                         "entries": [],
                         "successor_actions": actions,
@@ -4236,8 +4236,8 @@ class DashboardImportTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
-                    "AGENTFLOW_RESEARCH_PLAN_JSON": str(plan_path),
+                    "TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "TOKENCLAW_RESEARCH_PLAN_JSON": str(plan_path),
                 },
                 clear=False,
             ):
@@ -4250,15 +4250,15 @@ class DashboardImportTests(unittest.TestCase):
                     full_stats_ttl_s=0,
                 )
                 client = TestClient(app)
-                response = client.get("/agentflow/stats/preview-gated-activation-issue-queue?limit=3")
-                full_response = client.get("/agentflow/stats/full")
-                dashboard = client.get("/agentflow/dashboard")
+                response = client.get("/tokenclaw/stats/preview-gated-activation-issue-queue?limit=3")
+                full_response = client.get("/tokenclaw/stats/full")
+                dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(full_response.status_code, 200)
             payload = response.json()
             full_payload = full_response.json()
-            self.assertEqual(payload["schema"], "agentflow.dashboard_preview_gated_activation_issue_queue.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.dashboard_preview_gated_activation_issue_queue.v1")
             self.assertEqual(payload["status"], "ranked")
             self.assertEqual(payload["summary"]["successor_decision_count"], 5)
             self.assertEqual(payload["summary"]["ready_count"], 1)
@@ -4279,7 +4279,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["session_ids_included"])
             self.assertFalse(payload["privacy"]["cache_keys_included"])
             health = full_payload["activation_successor_queue_health"]
-            self.assertEqual(health["schema"], "agentflow.activation_successor_queue_health.v1")
+            self.assertEqual(health["schema"], "tokenclaw.activation_successor_queue_health.v1")
             self.assertEqual(health["status"], "ranked")
             self.assertEqual(health["summary"]["top_local_action_family"], "routing")
             self.assertEqual(health["summary"]["top_next_action"], "draft-openai-routing-recovery-canary")
@@ -4324,8 +4324,8 @@ class DashboardImportTests(unittest.TestCase):
     def test_evidence_activation_plan_discovery_includes_ops_sibling_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            package_root = root / "agentflow-runs" / "worktrees" / "run"
-            ops_plan = root / "agentflow_ops" / "runs" / "research" / "latest.plan.json"
+            package_root = root / "tokenclaw-runs" / "worktrees" / "run"
+            ops_plan = root / "tokenclaw_ops" / "runs" / "research" / "latest.plan.json"
             package_root.mkdir(parents=True)
             ops_plan.parent.mkdir(parents=True)
             ops_plan.write_text("{}", encoding="utf-8")
@@ -4333,9 +4333,9 @@ class DashboardImportTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
-                    "AGENTFLOW_RESEARCH_PLAN_JSON": "",
-                    "AGENTFLOW_OPS_ROOT": "",
+                    "TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": "",
+                    "TOKENCLAW_RESEARCH_PLAN_JSON": "",
+                    "TOKENCLAW_OPS_ROOT": "",
                 },
                 clear=False,
             ):

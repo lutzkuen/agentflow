@@ -10,7 +10,7 @@ INTERNAL_PROXY_ERROR_TYPE = "tokenclaw_error"
 
 
 def debug_proxy_errors_enabled() -> bool:
-    return os.getenv("AGENTFLOW_DEBUG_PROXY_ERRORS", "0") == "1"
+    return os.getenv("TOKENCLAW_DEBUG_PROXY_ERRORS", "0") == "1"
 
 
 def public_proxy_error_message(exc: BaseException | None = None) -> str:

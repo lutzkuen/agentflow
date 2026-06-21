@@ -74,7 +74,7 @@ def _log_call(store, suffix, *, requested_model, routed_model, category, routing
 class PhaseRoutingReportTests(unittest.TestCase):
     def test_report_groups_phase_opportunity_blockers_and_privacy(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -126,7 +126,7 @@ class PhaseRoutingReportTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(result["schema"], "agentflow.phase_routing_opportunity.v1")
+        self.assertEqual(result["schema"], "tokenclaw.phase_routing_opportunity.v1")
         self.assertEqual(result["sampled_call_count"], 4)
         self.assertEqual(result["summary"]["candidate_count"], 1)
         self.assertEqual(result["summary"]["current_routed_count"], 1)
@@ -168,7 +168,7 @@ class PhaseRoutingReportTests(unittest.TestCase):
 
     def test_cli_reads_seeded_db(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_call(
@@ -212,7 +212,7 @@ rules:
                 encoding="utf-8",
             )
             before_policy_text = policy_path.read_text(encoding="utf-8")
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_call(
@@ -271,7 +271,7 @@ rules:
             self.assertEqual(policy_path.read_text(encoding="utf-8"), before_policy_text)
             payload = json.loads(stdout.getvalue())
 
-        self.assertEqual(payload["schema"], "agentflow.phase_routing_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.phase_routing_dry_run.v1")
         self.assertTrue(payload["dry_run"])
         self.assertFalse(payload["wrote_local_files"])
         self.assertFalse(payload["altered_provider_routing"])
@@ -293,7 +293,7 @@ rules:
 
     def test_dry_run_accepts_managed_bundle_candidate_and_shadow_exclusion(self):
         managed_bundle = {
-            "schema": "agentflow.policy_bundle.v1",
+            "schema": "tokenclaw.policy_bundle.v1",
             "policies": {
                 "routing": {
                     "policy_source": "managed-recommended",
@@ -317,7 +317,7 @@ rules:
         }
 
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -348,7 +348,7 @@ rules:
             finally:
                 store.conn.close()
 
-        self.assertEqual(result["schema"], "agentflow.phase_routing_dry_run.v1")
+        self.assertEqual(result["schema"], "tokenclaw.phase_routing_dry_run.v1")
         self.assertEqual(result["policy_source"], "managed-recommended")
         self.assertEqual(result["summary"]["candidate_rule_ids"], ["phase-candidate-summary"])
         self.assertEqual(result["summary"]["matched_count"], 2)
@@ -371,7 +371,7 @@ rules:
       reason: phase dry-run route
 """
         with tempfile.TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             policy_path = Path(tmp) / "routing.yaml"
             policy_path.write_text(policy_text, encoding="utf-8")
             store = Store(db_path)
@@ -396,9 +396,9 @@ rules:
             with patch.dict(
                 os.environ,
                 {
-                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
-                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
-                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS": "3",
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS": "3",
                 },
                 clear=False,
             ):
@@ -418,14 +418,14 @@ rules:
 
             self.assertEqual(code, 0)
             payload = json.loads(stdout.getvalue())
-            self.assertEqual(payload["schema"], "agentflow.phase_routing_dry_run.v1")
+            self.assertEqual(payload["schema"], "tokenclaw.phase_routing_dry_run.v1")
             self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "retryable-error")
             self.assertEqual(payload["managed_lifecycle_feedback"]["endpoint"], "/v1/policy-events")
             self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
             self.assertTrue(payload["managed_server_calls_made"])
             self.assertEqual(FailingManagedFeedbackClient.calls[0]["url"], "http://managed.test/v1/policy-events")
             sent = FailingManagedFeedbackClient.calls[0]["json"]
-            self.assertEqual(sent["metadata"]["schema"], "agentflow.phase_routing_lifecycle_metadata.v1")
+            self.assertEqual(sent["metadata"]["schema"], "tokenclaw.phase_routing_lifecycle_metadata.v1")
             self.assertEqual(sent["metadata"]["lifecycle_kind"], "phase_routing")
             self.assertEqual(sent["metadata"]["candidate_rule_ids"], ["phase-dry-run-rule"])
             self.assertFalse(sent["metadata"]["privacy"]["raw_prompts_included"])

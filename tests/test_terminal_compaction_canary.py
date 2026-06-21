@@ -114,8 +114,8 @@ terminal_output_compaction:
       candidate_id: terminal-compaction-candidate-123
       action_id: terminal-compaction-rollout-action-123
       provenance:
-        schema: agentflow.policy_decision_provenance.v1
-        issuer: agentflow-server
+        schema: tokenclaw.policy_decision_provenance.v1
+        issuer: tokenclaw-server
         server_id: managed-prod
         key_id: managed-key-2026-06
         decision_hash: sha256:manageddecision
@@ -213,10 +213,10 @@ terminal_output_compaction:
 
 class TerminalOutputCompactionCanaryTests(unittest.TestCase):
     ENV_KEYS = (
-        "AGENTFLOW_CRUNCH",
-        "AGENTFLOW_CRUNCH_RULES",
-        "AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT",
-        "AGENTFLOW_POLICY_EVENTS_LOG",
+        "TOKENCLAW_CRUNCH",
+        "TOKENCLAW_CRUNCH_RULES",
+        "TOKENCLAW_HAIKU_SUMMARIZE_OLD_CONTEXT",
+        "TOKENCLAW_POLICY_EVENTS_LOG",
         "HOME",
     )
 
@@ -350,7 +350,7 @@ class TerminalOutputCompactionCanaryTests(unittest.TestCase):
         self.assertEqual(terminal_meta["action_id"], "terminal-compaction-rollout-action-123")
         self.assertEqual(terminal_meta["policy_source"], "managed-recommended")
         self.assertEqual(terminal_meta["canary"]["cohort"], "canary_applied")
-        self.assertEqual(terminal_meta["provenance"]["issuer"], "agentflow-server")
+        self.assertEqual(terminal_meta["provenance"]["issuer"], "tokenclaw-server")
         self.assertEqual(terminal_meta["provenance"]["decision_hash"], "sha256:manageddecision")
         self.assertEqual(terminal_meta["configured_rule_count"], 2)
         self.assertEqual(terminal_meta["evaluated_rules"][0]["status"], "skipped")
@@ -449,7 +449,7 @@ class TerminalOutputCompactionCanaryTests(unittest.TestCase):
             _write_rules(config, fraction=1.0, min_samples=2, max_error_rate=0.5)
             os.chdir(tmp_path)
             manual = importlib.reload(crunch_module)
-            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
             body = _tool_result_body("RAW_SAFETY_SECRET")
 
             healthy, healthy_meta = manual.crunch_body(body, store_obj=store)
@@ -476,13 +476,13 @@ class TerminalOutputCompactionCanaryTests(unittest.TestCase):
                     crunch_json=stable_json({
                         "changed": True,
                         "terminal_output_compaction": {
-                            "schema": "agentflow.terminal_output_compaction_decision.v1",
+                            "schema": "tokenclaw.terminal_output_compaction_decision.v1",
                             "rule_id": "local-terminal-output-compaction-canary",
                             "status": "applied",
                             "applied": True,
                             "tokens_saved_est": 1200,
                             "canary": {
-                                "schema": "agentflow.terminal_output_compaction_canary_decision.v1",
+                                "schema": "tokenclaw.terminal_output_compaction_canary_decision.v1",
                                 "enabled": True,
                                 "selected": True,
                                 "status": "applied",

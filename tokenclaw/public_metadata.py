@@ -41,8 +41,8 @@ def public_path_state(path: str | os.PathLike[str] | None) -> dict[str, Any]:
         }
     expanded = os.path.abspath(os.path.expanduser(str(path)))
     home = os.path.abspath(os.path.expanduser("~"))
-    if expanded.startswith(os.path.join(home, ".agentflow") + os.sep):
-        path_class = "local-agentflow-home"
+    if expanded.startswith(os.path.join(home, ".tokenclaw") + os.sep):
+        path_class = "local-tokenclaw-home"
     elif expanded.startswith("/tmp/") or expanded.startswith("/var/tmp/"):
         path_class = "local-temp"
     elif Path(expanded).is_absolute():

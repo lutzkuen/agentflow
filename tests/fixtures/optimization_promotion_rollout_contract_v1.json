@@ -1,9 +1,9 @@
 {
-  "schema": "agentflow.optimization_promotion_rollout_contract_fixture.v1",
+  "schema": "tokenclaw.optimization_promotion_rollout_contract_fixture.v1",
   "fixture_version": "2026-06-10",
   "description": "Metadata-only contract fixture shared by local promotion rollout tests and managed optimizer rollout tests.",
   "managed_rollout_bundle": {
-    "schema": "agentflow.optimization_rollout_actions.v1",
+    "schema": "tokenclaw.optimization_rollout_actions.v1",
     "generated_at": "2026-06-10T05:00:00+00:00",
     "expires_at": "2026-06-11T05:00:00+00:00",
     "tenant_scope": "current-authenticated-tenant",
@@ -35,7 +35,7 @@
     },
     "actions": [
       {
-        "schema": "agentflow.optimization_rollout_action.v1",
+        "schema": "tokenclaw.optimization_rollout_action.v1",
         "action_id": "optimization-rollout-action:fixture-routing",
         "action_type": "widen",
         "target_candidate_id": "fixture-routing-candidate",
@@ -78,7 +78,7 @@
           "sample_count": 3
         },
         "action": {
-          "schema": "agentflow.openai_rollout_action.v1",
+          "schema": "tokenclaw.openai_rollout_action.v1",
           "target_rule_id": "fixture-openai-routing-rule",
           "proposed_edit": {
             "rule_id": "fixture-openai-routing-rule",
@@ -106,7 +106,7 @@
         }
       },
       {
-        "schema": "agentflow.optimization_rollout_action.v1",
+        "schema": "tokenclaw.optimization_rollout_action.v1",
         "action_id": "optimization-rollout-action:fixture-cache",
         "action_type": "hold",
         "target_candidate_id": "fixture-cache-candidate",
@@ -145,7 +145,7 @@
           "replayability_level": "features_only"
         },
         "action": {
-          "schema": "agentflow.cache_rollout_action.v1",
+          "schema": "tokenclaw.cache_rollout_action.v1",
           "target_rule_id": "fixture-cache-replay-rule",
           "proposed_edit": {
             "rule_id": "fixture-cache-replay-rule",
@@ -176,7 +176,7 @@
     ],
     "omitted_actions": [
       {
-        "schema": "agentflow.optimization_rollout_omitted_action.v1",
+        "schema": "tokenclaw.optimization_rollout_omitted_action.v1",
         "status": "omitted",
         "reason": "unsupported-local-policy-section",
         "target_candidate_id": "fixture-unsupported-candidate",
@@ -212,7 +212,7 @@
     }
   },
   "promotion_report": {
-    "schema": "agentflow.optimization_promotion_report.v1",
+    "schema": "tokenclaw.optimization_promotion_report.v1",
     "candidates": [
       {
         "candidate_id": "fixture-routing-candidate",
@@ -379,7 +379,7 @@
     "applied_files": [],
     "local_tool_version": "0.1.0",
     "metadata": {
-      "schema": "agentflow.rollout_action_lifecycle_metadata.v1",
+      "schema": "tokenclaw.rollout_action_lifecycle_metadata.v1",
       "lifecycle_kind": "optimization_promotion_rollout",
       "command": "optimization-promotion-canaries-apply",
       "local_result_status": "ok",

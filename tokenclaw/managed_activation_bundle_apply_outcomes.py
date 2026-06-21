@@ -9,9 +9,9 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.managed_activation_bundle_apply_outcomes.v1"
-ROW_SCHEMA = "agentflow.managed_activation_bundle_apply_outcome_row.v1"
-PRIVACY_SCHEMA = "agentflow.managed_activation_bundle_apply_outcome_privacy.v1"
+SCHEMA = "tokenclaw.managed_activation_bundle_apply_outcomes.v1"
+ROW_SCHEMA = "tokenclaw.managed_activation_bundle_apply_outcome_row.v1"
+PRIVACY_SCHEMA = "tokenclaw.managed_activation_bundle_apply_outcome_privacy.v1"
 
 APPLY_EVENT_SOURCE = "managed-activation-bundle-apply"
 SUPPORTED_FAMILIES = ("cache", "crunch")
@@ -211,7 +211,7 @@ def build_managed_activation_bundle_apply_outcomes(
     }
     violations = managed_egress_violations(result)
     result["egress_guard"] = {
-        "schema": "agentflow.managed_egress_guard.v1",
+        "schema": "tokenclaw.managed_egress_guard.v1",
         "status": "passed" if not violations else "blocked",
         "blocked": bool(violations),
         "violation_count": len(violations),

@@ -9,10 +9,10 @@ from tokenclaw.promotion_safety import classify_family_safety_stop_reason
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.promotion_blocker_recommendation_review.v1"
-CANDIDATE_SCHEMA = "agentflow.promotion_blocker_review_candidate.v1"
-GROUP_SCHEMA = "agentflow.promotion_blocker_review_group.v1"
-EXPECTED_SOURCE_SCHEMA = "agentflow.promotion_blocker_next_action_recommendations.v1"
+SCHEMA = "tokenclaw.promotion_blocker_recommendation_review.v1"
+CANDIDATE_SCHEMA = "tokenclaw.promotion_blocker_review_candidate.v1"
+GROUP_SCHEMA = "tokenclaw.promotion_blocker_review_group.v1"
+EXPECTED_SOURCE_SCHEMA = "tokenclaw.promotion_blocker_next_action_recommendations.v1"
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,199}$")
 _ABSOLUTE_PATH_RE = re.compile(r"(^/[^/])|([A-Za-z]:\\\\)|(^\\\\\\\\)")

@@ -87,15 +87,15 @@ RAW_FEATURE_KEYS = {
 }
 
 LIFECYCLE_METADATA_COMMAND_SCHEMAS = {
-    "agentflow.old_context_summary_lifecycle_metadata.v1",
-    "agentflow.phase_routing_lifecycle_metadata.v1",
-    "agentflow.optimization_promotion_lifecycle_feedback.v1",
-    "agentflow.optimization_coordinator_lifecycle_feedback.v1",
-    "agentflow.repeated_scaffold_lifecycle_feedback.v1",
-    "agentflow.instruction_dedup_lifecycle_feedback.v1",
-    "agentflow.codex_terminal_transcript_compaction_lifecycle_feedback.v1",
-    "agentflow.rollout_action_lifecycle_metadata.v1",
-    "agentflow.terminal_output_compaction_lifecycle_feedback.v1",
+    "tokenclaw.old_context_summary_lifecycle_metadata.v1",
+    "tokenclaw.phase_routing_lifecycle_metadata.v1",
+    "tokenclaw.optimization_promotion_lifecycle_feedback.v1",
+    "tokenclaw.optimization_coordinator_lifecycle_feedback.v1",
+    "tokenclaw.repeated_scaffold_lifecycle_feedback.v1",
+    "tokenclaw.instruction_dedup_lifecycle_feedback.v1",
+    "tokenclaw.codex_terminal_transcript_compaction_lifecycle_feedback.v1",
+    "tokenclaw.rollout_action_lifecycle_metadata.v1",
+    "tokenclaw.terminal_output_compaction_lifecycle_feedback.v1",
 }
 
 
@@ -158,7 +158,7 @@ def managed_egress_blocked_meta(
         "fallback": "local-policy",
         "applied": False,
         "egress_guard": {
-            "schema": "agentflow.managed_egress_guard.v1",
+            "schema": "tokenclaw.managed_egress_guard.v1",
             "blocked": True,
             "violation_count": len(violations),
             "blocked_keys": blocked_keys,

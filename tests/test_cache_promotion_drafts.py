@@ -16,7 +16,7 @@ def _promotion_report(*, ready: bool = True, blocker: str | None = None, has_too
     report = build_local_promotion_candidates_from_reports(
         {
             "cache_impact": {
-                "schema": "agentflow.openai_cache_replay_impact.v1",
+                "schema": "tokenclaw.openai_cache_replay_impact.v1",
                 "status": "matched",
                 "candidates": [
                     {
@@ -30,7 +30,7 @@ def _promotion_report(*, ready: bool = True, blocker: str | None = None, has_too
                         "has_tools": has_tools,
                         "text_bucket": "2k_8k_chars",
                         "token_bucket": "500_2k_tokens",
-                        "replay_source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "replay_source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                         "readiness": "replay-ready",
                         "replay_ready": True,
                         "sample_count": 8,
@@ -72,9 +72,9 @@ def _projected_replay_ready_report(*, blocker: str | None = None) -> dict:
         {
             "cache_impact": {},
             "request_shape_rollups": {
-                "schema": "agentflow.request_shape_rollups.v1",
+                "schema": "tokenclaw.request_shape_rollups.v1",
                 "cache_replayability_dry_run": {
-                    "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                    "schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
                     "status": "ranked",
                     "cohorts": [
                         {
@@ -192,7 +192,7 @@ class CachePromotionDraftTests(unittest.TestCase):
         self.assertEqual(result["summary"]["draft_count"], 1)
         self.assertEqual(result["summary"]["projected_hits"], 55)
         draft = result["drafts"][0]
-        self.assertEqual(draft["evidence_summary"]["source_evidence_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(draft["evidence_summary"]["source_evidence_schema"], "tokenclaw.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(draft["evidence_summary"]["sample_count"], 56)
         self.assertEqual(draft["evidence_summary"]["applied_count"], 0)
         self.assertEqual(draft["holdout_fraction"], 0.2)

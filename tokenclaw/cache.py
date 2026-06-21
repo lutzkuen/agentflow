@@ -20,7 +20,7 @@ from tokenclaw.pattern_safety import (
     evaluate_pattern_canary_safety_stop,
     log_pattern_canary_safety_stop,
 )
-from tokenclaw.paths import agentflow_config_path, safe_home_dir
+from tokenclaw.paths import tokenclaw_config_path, safe_home_dir
 from tokenclaw.policy_files import policy_file_snapshot, utc_now
 from tokenclaw.store import stable_json
 
@@ -74,13 +74,13 @@ def _default_cache_policy() -> dict[str, Any]:
 
 
 def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
-    new_name = env_name.replace("AGENTFLOW_", "TOKENCLAW_", 1) if env_name.startswith("AGENTFLOW_") else env_name
+    new_name = env_name.replace("TOKENCLAW_", "TOKENCLAW_", 1) if env_name.startswith("TOKENCLAW_") else env_name
     env_path = env(new_name)
     candidates: list[Path] = []
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / filename)
-    candidates.append(agentflow_config_path(filename))
+    candidates.append(tokenclaw_config_path(filename))
     return candidates
 
 
@@ -96,7 +96,7 @@ def _first_existing_cache_canary_policy_path() -> Path | None:
     if env_path:
         path = Path(env_path)
         return path if path.exists() else None
-    return _first_existing_rule_path("cache_canary_policy.yaml", "AGENTFLOW_CACHE_CANARY_POLICY")
+    return _first_existing_rule_path("cache_canary_policy.yaml", "TOKENCLAW_CACHE_CANARY_POLICY")
 
 
 def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
@@ -427,7 +427,7 @@ def _load_cache_policy() -> tuple[dict[str, Any], str, str]:
     loaded_policy: dict[str, Any] | None = None
     loaded_source = "local-default"
     loaded_path: str | None = None
-    for path in _manual_rule_candidates("cache_rules.yaml", "AGENTFLOW_CACHE_RULES"):
+    for path in _manual_rule_candidates("cache_rules.yaml", "TOKENCLAW_CACHE_RULES"):
         if not path.exists():
             continue
         with open(path, encoding="utf-8") as f:
@@ -917,7 +917,7 @@ def _attach_skipped_cache_replay_canary(meta: dict[str, Any], selected_skip: dic
         meta["canary_cohort"] = selected_skip["canary"].get("cohort")
     if reason == "canary_holdout":
         meta["cache_replay_canary"] = {
-            "schema": "agentflow.cache_replay_canary_decision.v1",
+            "schema": "tokenclaw.cache_replay_canary_decision.v1",
             "rule_id": selected_skip.get("rule_id"),
             "candidate_id": selected_skip.get("candidate_id"),
             "policy_source": selected_skip.get("policy_source"),
@@ -930,7 +930,7 @@ def _attach_skipped_cache_replay_canary(meta: dict[str, Any], selected_skip: dic
         }
         return
     meta["cache_replay_canary"] = {
-        "schema": "agentflow.cache_replay_canary_decision.v1",
+        "schema": "tokenclaw.cache_replay_canary_decision.v1",
         "rule_id": selected_skip.get("rule_id"),
         "candidate_id": selected_skip.get("candidate_id"),
         "policy_source": selected_skip.get("policy_source"),
@@ -1014,7 +1014,7 @@ def cache_replay_canary_decision(
     canary = pattern_rule.get("canary") if isinstance(pattern_rule.get("canary"), dict) else None
     scope = str(pattern_rule.get("scope") or "session")
     decision: dict[str, Any] = {
-        "schema": "agentflow.cache_replay_canary_decision.v1",
+        "schema": "tokenclaw.cache_replay_canary_decision.v1",
         "rule_id": pattern_rule.get("rule_id"),
         "candidate_id": pattern_rule.get("candidate_id"),
         "policy_source": pattern_rule.get("policy_source"),
@@ -1206,7 +1206,7 @@ def build_cache_replay_lifecycle_feedback(
         else:
             status_class = "server_error"
     event: dict[str, Any] = {
-        "schema": "agentflow.cache_replay_lifecycle_feedback.v1",
+        "schema": "tokenclaw.cache_replay_lifecycle_feedback.v1",
         "provider": provider,
         "source_surface": source_surface,
         "policy_id": _cache_replay_public_id(
@@ -1631,7 +1631,7 @@ def cache_file_dependency_fingerprint(
     normalized.sort(key=lambda item: str(item["path_sha256"]))
     fingerprint = f"sha256:{sha256_text(stable_json(normalized))}" if normalized else None
     return {
-        "schema": "agentflow.cache_file_dependency_fingerprint.v1",
+        "schema": "tokenclaw.cache_file_dependency_fingerprint.v1",
         "fingerprint_sha256": fingerprint,
         "fingerprint_available": bool(fingerprint),
         "snapshot_count": int(audit.get("snapshot_count") or len(normalized)),
@@ -1736,7 +1736,7 @@ def cache_file_dependency_audit(
     elif cap_trimmed:
         capture_reason = "dependency-cap-trimmed"
     return {
-        "schema": "agentflow.cache_file_dependency_audit.v1",
+        "schema": "tokenclaw.cache_file_dependency_audit.v1",
         "file_watch_enabled": bool(watch_enabled),
         "snapshot_root_policy": _dependency_root_policy(watch_root),
         "root_path_included": False,
@@ -1914,7 +1914,7 @@ def stream_cache_payload(
     output_text: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "agentflow_cache_type": "sse-stream",
+        "tokenclaw_cache_type": "sse-stream",
         "version": 1,
         "provider": provider,
         "frames_b64": [base64.b64encode(frame).decode("ascii") for frame in frames],
@@ -1927,7 +1927,7 @@ def stream_cache_payload(
 def is_stream_cache_payload(payload: Any, *, provider: str | None = None) -> bool:
     if not isinstance(payload, dict):
         return False
-    if payload.get("agentflow_cache_type") != "sse-stream":
+    if payload.get("tokenclaw_cache_type") != "sse-stream":
         return False
     if provider is not None and payload.get("provider") != provider:
         return False
@@ -1960,7 +1960,7 @@ def stream_cache_sse_metadata(frames: list[bytes], *, provider: str | None = Non
         if event_name:
             event_counts[event_name] = event_counts.get(event_name, 0) + 1
     metadata = {
-        "schema": "agentflow.stream_cache_sse.v1",
+        "schema": "tokenclaw.stream_cache_sse.v1",
         "media_type": "text/event-stream",
         "frame_count": len(frames),
         "event_counts": event_counts,
@@ -1976,7 +1976,7 @@ def stream_cache_sse_metadata(frames: list[bytes], *, provider: str | None = Non
 
 def validate_stream_cache_payload(payload: Any, *, provider: str | None = None) -> tuple[list[bytes], dict[str, Any]]:
     validation = {
-        "schema": "agentflow.stream_cache_validation.v1",
+        "schema": "tokenclaw.stream_cache_validation.v1",
         "valid": False,
         "reason": "invalid-envelope",
         "provider": provider,

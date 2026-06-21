@@ -11,7 +11,7 @@ from tokenclaw.pricing import codex_app_model, codex_app_processing_mode, estima
 from tokenclaw.store import Store
 
 
-CODEX_APP_DRY_RUN_SCHEMA = "agentflow.codex_app_policy_dry_run.v1"
+CODEX_APP_DRY_RUN_SCHEMA = "tokenclaw.codex_app_policy_dry_run.v1"
 SUPPORTED_CONDITIONS = {
     "app_family",
     "granularity",

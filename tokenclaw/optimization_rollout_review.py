@@ -18,12 +18,12 @@ from tokenclaw.policy_bundle import (
 from tokenclaw.store import utc_now
 
 
-OPTIMIZATION_ROLLOUT_ACTIONS_SCHEMA = "agentflow.optimization_rollout_actions.v1"
-OPTIMIZATION_ROLLOUT_ACTION_SCHEMA = "agentflow.optimization_rollout_action.v1"
-OPTIMIZATION_ROLLOUT_OMITTED_ACTION_SCHEMA = "agentflow.optimization_rollout_omitted_action.v1"
-OPTIMIZATION_ROLLOUT_ACTION_REVIEW_SCHEMA = "agentflow.optimization_rollout_actions_review.v1"
-OPTIMIZATION_ROLLOUT_ACTION_VALIDATION_SCHEMA = "agentflow.optimization_rollout_actions_validation.v1"
-OPTIMIZATION_ROLLOUT_ACTION_PROVENANCE_SCHEMA = "agentflow.optimization_rollout_actions_provenance_verification.v1"
+OPTIMIZATION_ROLLOUT_ACTIONS_SCHEMA = "tokenclaw.optimization_rollout_actions.v1"
+OPTIMIZATION_ROLLOUT_ACTION_SCHEMA = "tokenclaw.optimization_rollout_action.v1"
+OPTIMIZATION_ROLLOUT_OMITTED_ACTION_SCHEMA = "tokenclaw.optimization_rollout_omitted_action.v1"
+OPTIMIZATION_ROLLOUT_ACTION_REVIEW_SCHEMA = "tokenclaw.optimization_rollout_actions_review.v1"
+OPTIMIZATION_ROLLOUT_ACTION_VALIDATION_SCHEMA = "tokenclaw.optimization_rollout_actions_validation.v1"
+OPTIMIZATION_ROLLOUT_ACTION_PROVENANCE_SCHEMA = "tokenclaw.optimization_rollout_actions_provenance_verification.v1"
 
 SUPPORTED_LOCAL_ACTION_FAMILIES = {"routing", "crunch", "cache", "old_context_summarization"}
 SUPPORTED_POLICY_SECTIONS = {"routing", "crunch", "cache", "old_context_summarization"}

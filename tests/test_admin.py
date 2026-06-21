@@ -19,14 +19,14 @@ if HAS_RUNTIME_DEPS:
 class AdminRouterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
-        self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
-        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+        self.old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
 
     def tearDown(self):
         if self.old_event_log is None:
-            os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
         else:
-            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+            os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = self.old_event_log
         self.tmp.cleanup()
 
     def test_reload_route_is_loopback_only(self):
@@ -34,7 +34,7 @@ class AdminRouterTests(unittest.TestCase):
         app.include_router(create_admin_router())
 
         remote = TestClient(app, client=("192.168.1.50", 50000))
-        blocked = remote.post("/agentflow/admin/reload-policies")
+        blocked = remote.post("/tokenclaw/admin/reload-policies")
 
         self.assertEqual(blocked.status_code, 403)
         self.assertFalse(blocked.json()["ok"])
@@ -49,15 +49,15 @@ class AdminRouterTests(unittest.TestCase):
         app.include_router(create_admin_router(after_reload=after_reload))
 
         local = TestClient(app, client=("127.0.0.1", 50000))
-        response = local.post("/agentflow/admin/reload-policies")
+        response = local.post("/tokenclaw/admin/reload-policies")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["schema"], "agentflow.policy_reload.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_reload.v1")
         self.assertEqual(callbacks, ["called"])
         self.assertIn("tokenclaw.router", payload["reloaded_modules"])
-        self.assertEqual(payload["policies"]["schema"], "agentflow.policy_state.v1")
+        self.assertEqual(payload["policies"]["schema"], "tokenclaw.policy_state.v1")
         self.assertIn("routing", payload["policies"])
         self.assertIn("crunch", payload["policies"])
         self.assertIn("cache", payload["policies"])
@@ -74,7 +74,7 @@ class AdminRouterTests(unittest.TestCase):
 
         remote = TestClient(app, client=("192.168.1.50", 50000))
         blocked = remote.post(
-            "/agentflow/admin/policy-drafts/stage",
+            "/tokenclaw/admin/policy-drafts/stage",
             json={"section": "cache", "policy": {"semantic_cache": {"threshold": 0.91}}},
         )
 
@@ -90,11 +90,11 @@ class AdminRouterTests(unittest.TestCase):
 
         remote = TestClient(app, client=("192.168.1.50", 50000))
         cases = [
-            ("/agentflow/admin/reload-policies", {}),
-            ("/agentflow/admin/policy-drafts/stage", {"section": "cache", "policy": {"semantic_cache": {"threshold": 0.91}}}),
-            ("/agentflow/admin/policy-drafts/validate", {"draft": "draft-one"}),
-            ("/agentflow/admin/policy-drafts/apply", {"draft": "draft-one"}),
-            ("/agentflow/admin/policy-drafts/rollback", {"apply_id": "apply-one"}),
+            ("/tokenclaw/admin/reload-policies", {}),
+            ("/tokenclaw/admin/policy-drafts/stage", {"section": "cache", "policy": {"semantic_cache": {"threshold": 0.91}}}),
+            ("/tokenclaw/admin/policy-drafts/validate", {"draft": "draft-one"}),
+            ("/tokenclaw/admin/policy-drafts/apply", {"draft": "draft-one"}),
+            ("/tokenclaw/admin/policy-drafts/rollback", {"apply_id": "apply-one"}),
         ]
 
         for path, payload in cases:
@@ -104,7 +104,7 @@ class AdminRouterTests(unittest.TestCase):
                 data = response.json()
                 self.assertFalse(data["ok"])
                 self.assertEqual(data["error"]["type"], "forbidden")
-                if path != "/agentflow/admin/reload-policies":
+                if path != "/tokenclaw/admin/reload-policies":
                     self.assertFalse(data["wrote_active_policy_files"])
                     self.assertFalse(data["provider_calls_made"])
                     self.assertFalse(data["managed_server_calls_made"])
@@ -116,7 +116,7 @@ class AdminRouterTests(unittest.TestCase):
         local = TestClient(app, client=("127.0.0.1", 50000))
         workspace = str(Path(self.tmp.name) / "drafts")
         response = local.post(
-            "/agentflow/admin/policy-drafts/stage",
+            "/tokenclaw/admin/policy-drafts/stage",
             json={
                 "section": "cache",
                 "policy": {"semantic_cache": {"enabled": True, "threshold": 0.91}},
@@ -128,7 +128,7 @@ class AdminRouterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["schema"], "agentflow.policy_draft_stage.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.policy_draft_stage.v1")
         self.assertEqual(payload["draft_id"], "admin-cache-draft")
         self.assertFalse(payload["wrote_active_policy_files"])
         self.assertFalse(payload["reloaded_modules"])
@@ -151,7 +151,7 @@ class AdminRouterTests(unittest.TestCase):
 
         local = TestClient(app, client=("127.0.0.1", 50000))
         response = local.post(
-            "/agentflow/admin/policy-drafts/stage",
+            "/tokenclaw/admin/policy-drafts/stage",
             json={
                 "section": "cache",
                 "policy": {"raw_request": {"prompt": "do not stage"}},

@@ -129,5 +129,5 @@ def tier_backoff_payload(exc: TierBackoffActive) -> dict[str, Any]:
 def tier_backoff_headers(exc: TierBackoffActive, model: str) -> dict[str, str]:
     return {
         "retry-after": str(exc.retry_after),
-        "x-agentflow-routed-model": model,
+        "x-tokenclaw-routed-model": model,
     }

@@ -9,7 +9,7 @@ from tokenclaw.optimization_action_ledger import build_optimization_action_ledge
 from tokenclaw.public_metadata import public_id, public_label
 
 
-SCHEMA = "agentflow.optimization_coordinator.v1"
+SCHEMA = "tokenclaw.optimization_coordinator.v1"
 PRIORITY = (
     "cache_replay",
     "routing",
@@ -212,13 +212,13 @@ def _cohort(
 ) -> dict[str, Any]:
     entries = ledger.get("entries") if isinstance(ledger.get("entries"), list) else []
     first = entries[0] if entries and isinstance(entries[0], dict) else {}
-    salt = local_salt if local_salt is not None else os.getenv("AGENTFLOW_OPTIMIZATION_COORDINATOR_SALT", "agentflow-optimization-coordinator-v1")
+    salt = local_salt if local_salt is not None else os.getenv("TOKENCLAW_OPTIMIZATION_COORDINATOR_SALT", "tokenclaw-optimization-coordinator-v1")
     canary = _float_0_1(
-        canary_fraction if canary_fraction is not None else os.getenv("AGENTFLOW_OPTIMIZATION_COORDINATOR_CANARY_FRACTION"),
+        canary_fraction if canary_fraction is not None else os.getenv("TOKENCLAW_OPTIMIZATION_COORDINATOR_CANARY_FRACTION"),
         1.0,
     )
     holdout = _float_0_1(
-        holdout_fraction if holdout_fraction is not None else os.getenv("AGENTFLOW_OPTIMIZATION_COORDINATOR_HOLDOUT_FRACTION"),
+        holdout_fraction if holdout_fraction is not None else os.getenv("TOKENCLAW_OPTIMIZATION_COORDINATOR_HOLDOUT_FRACTION"),
         0.0,
     )
     if canary + holdout > 1.0:

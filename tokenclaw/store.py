@@ -138,7 +138,7 @@ def _routing_experiment_coverage_meta(
         coverage_class = "out-of-scope"
 
     return {
-        "schema": "agentflow.routing_experiment_decision.v1",
+        "schema": "tokenclaw.routing_experiment_decision.v1",
         "status": status,
         "sampled": False,
         "reason": reason,
@@ -249,7 +249,7 @@ def _managed_policy_decision_coverage_meta(
         reason = "codex-app-event-not-turn-start"
 
     return {
-        "schema": "agentflow.managed_policy_decision_evaluation.v1",
+        "schema": "tokenclaw.managed_policy_decision_evaluation.v1",
         "status": status,
         "reason": reason,
         "coverage_class": "blocked" if in_scope else "out-of-scope",
@@ -383,7 +383,7 @@ def _cache_file_dependency_audit_from_rows(rows: list[Any]) -> dict[str, Any]:
         invalidation_reason = "dependency-missing"
     safe = bool(count > 0 and not (changed or deleted or created or missing))
     return {
-        "schema": "agentflow.cache_file_dependency_audit.v1",
+        "schema": "tokenclaw.cache_file_dependency_audit.v1",
         "file_watch_enabled": True,
         "snapshot_root_policy": "stored-local-paths",
         "root_path_included": False,
@@ -448,9 +448,9 @@ def _parse_utc_iso(raw: Any) -> datetime | None:
 
 
 def sqlite_retention_days_from_env() -> int | None:
-    if not _env_bool("AGENTFLOW_SQLITE_RETENTION_ENABLED", True):
+    if not _env_bool("TOKENCLAW_SQLITE_RETENTION_ENABLED", True):
         return None
-    raw = os.getenv("AGENTFLOW_SQLITE_RETENTION_DAYS")
+    raw = os.getenv("TOKENCLAW_SQLITE_RETENTION_DAYS")
     if raw is None:
         return DEFAULT_SQLITE_RETENTION_DAYS
     cleaned = raw.strip().lower()
@@ -464,9 +464,9 @@ def sqlite_retention_days_from_env() -> int | None:
 
 
 def _configure_sqlite_connection(conn: sqlite3.Connection, path: str) -> None:
-    busy_timeout_ms = max(0, _env_int("AGENTFLOW_SQLITE_BUSY_TIMEOUT_MS", 5000))
+    busy_timeout_ms = max(0, _env_int("TOKENCLAW_SQLITE_BUSY_TIMEOUT_MS", 5000))
     conn.execute(f"pragma busy_timeout = {busy_timeout_ms}")
-    if _env_bool("AGENTFLOW_SQLITE_WAL", True) and path not in {"", ":memory:"}:
+    if _env_bool("TOKENCLAW_SQLITE_WAL", True) and path not in {"", ":memory:"}:
         try:
             conn.execute("pragma journal_mode = WAL")
             conn.execute("pragma synchronous = NORMAL")
@@ -604,7 +604,7 @@ class SQLiteStore:
         self.database_url = f"sqlite:///{path}"
         self._lock = threading.RLock()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        timeout_s = max(0.0, _env_int("AGENTFLOW_SQLITE_BUSY_TIMEOUT_MS", 5000) / 1000.0)
+        timeout_s = max(0.0, _env_int("TOKENCLAW_SQLITE_BUSY_TIMEOUT_MS", 5000) / 1000.0)
         self._raw_conn = sqlite3.connect(path, check_same_thread=False, timeout=timeout_s)
         _configure_sqlite_connection(self._raw_conn, path)
         self._raw_conn.row_factory = sqlite3.Row
@@ -921,7 +921,7 @@ class SQLiteStore:
             )
             """)
             cur.execute("""
-            create table if not exists agentflow_sqlite_maintenance_runs (
+            create table if not exists tokenclaw_sqlite_maintenance_runs (
               id text primary key,
               created_at text not null,
               action text not null,
@@ -998,8 +998,8 @@ class SQLiteStore:
             on managed_activation_preview_outcomes(local_action_family, classification, updated_at)
             """)
             cur.execute("""
-            create index if not exists idx_agentflow_sqlite_maintenance_runs_recent
-            on agentflow_sqlite_maintenance_runs(created_at)
+            create index if not exists idx_tokenclaw_sqlite_maintenance_runs_recent
+            on tokenclaw_sqlite_maintenance_runs(created_at)
             """)
             self.conn.commit()
 
@@ -1240,7 +1240,7 @@ class SQLiteStore:
                 counts[label] += 1
             self.conn.commit()
         return {
-            "schema": "agentflow.routing_outcome_label_finalization.v1",
+            "schema": "tokenclaw.routing_outcome_label_finalization.v1",
             "older_than_seconds": ttl_seconds,
             "cutoff_at": cutoff,
             "candidate_count": len(rows),
@@ -1297,16 +1297,16 @@ class SQLiteStore:
         days = sqlite_retention_days_from_env()
         last_run = self.latest_sqlite_maintenance_run()
         return {
-            "schema": "agentflow.sqlite_retention_status.v1",
+            "schema": "tokenclaw.sqlite_retention_status.v1",
             "backend": self.backend,
             "enabled": bool(days is not None and self.backend == "sqlite"),
             "retention_days": days,
             "default_retention_days": DEFAULT_SQLITE_RETENTION_DAYS,
             "configured_by": (
-                "env:AGENTFLOW_SQLITE_RETENTION_ENABLED"
-                if os.getenv("AGENTFLOW_SQLITE_RETENTION_ENABLED") is not None
-                else "env:AGENTFLOW_SQLITE_RETENTION_DAYS"
-                if os.getenv("AGENTFLOW_SQLITE_RETENTION_DAYS") is not None
+                "env:TOKENCLAW_SQLITE_RETENTION_ENABLED"
+                if os.getenv("TOKENCLAW_SQLITE_RETENTION_ENABLED") is not None
+                else "env:TOKENCLAW_SQLITE_RETENTION_DAYS"
+                if os.getenv("TOKENCLAW_SQLITE_RETENTION_DAYS") is not None
                 else "local-default"
             ),
             "last_run": last_run,
@@ -1322,7 +1322,7 @@ class SQLiteStore:
                 select id, created_at, action, retention_days, cutoff_at, disabled,
                        dry_run, deleted_rows_json, total_deleted_rows, analyze_ran,
                        optimize_ran, vacuum_ran, maintenance_json
-                from agentflow_sqlite_maintenance_runs
+                from tokenclaw_sqlite_maintenance_runs
                 order by created_at desc
                 limit 1
                 """
@@ -1380,7 +1380,7 @@ class SQLiteStore:
     ) -> dict[str, Any]:
         if self.backend != "sqlite":
             return {
-                "schema": "agentflow.sqlite_maintenance_run.v1",
+                "schema": "tokenclaw.sqlite_maintenance_run.v1",
                 "backend": self.backend,
                 "status": "unsupported",
                 "enabled": False,
@@ -1443,7 +1443,7 @@ class SQLiteStore:
                 "provider_request_path_delayed": False,
             }
             result = {
-                "schema": "agentflow.sqlite_maintenance_run.v1",
+                "schema": "tokenclaw.sqlite_maintenance_run.v1",
                 "backend": self.backend,
                 "id": uuid4().hex,
                 "created_at": now_iso,
@@ -1463,7 +1463,7 @@ class SQLiteStore:
             if record:
                 self.conn.execute(
                     """
-                    insert into agentflow_sqlite_maintenance_runs(
+                    insert into tokenclaw_sqlite_maintenance_runs(
                       id, created_at, action, retention_days, cutoff_at, disabled,
                       dry_run, deleted_rows_json, total_deleted_rows, analyze_ran,
                       optimize_ran, vacuum_ran, maintenance_json

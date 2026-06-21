@@ -11,7 +11,7 @@ from typing import Any
 
 from tokenclaw.env import env
 from tokenclaw.policy_files import policy_file_snapshot, utc_now
-from tokenclaw.paths import agentflow_config_path
+from tokenclaw.paths import tokenclaw_config_path
 from tokenclaw.pricing import pricing_basis
 from tokenclaw.pattern_rollout import (
     PATTERN_ROLLOUT_SCHEMA,
@@ -46,9 +46,9 @@ ENHANCED_CRUNCH_PROVIDER_MODES = {
     "customer_controlled_endpoint",
 }
 
-CRUNCH_RULE_TAXONOMY_SCHEMA = "agentflow.crunch_rule_taxonomy.v1"
-CRUNCH_RULE_DECISION_SCHEMA = "agentflow.crunch_rule_decision.v1"
-CRUNCH_RULE_GROUP_BREAKDOWN_SCHEMA = "agentflow.crunch_rule_group_breakdown.v1"
+CRUNCH_RULE_TAXONOMY_SCHEMA = "tokenclaw.crunch_rule_taxonomy.v1"
+CRUNCH_RULE_DECISION_SCHEMA = "tokenclaw.crunch_rule_decision.v1"
+CRUNCH_RULE_GROUP_BREAKDOWN_SCHEMA = "tokenclaw.crunch_rule_group_breakdown.v1"
 CRUNCH_CANARY_STATES = {"off", "shadow", "canary", "active", "held", "rollback"}
 
 CRUNCH_RULE_CATALOG: dict[str, dict[str, Any]] = {
@@ -640,7 +640,7 @@ def _default_crunch_policy() -> dict[str, Any]:
         "pattern_rules": [],
         "request_shape_repeated_context_canaries": {
             "enabled": False,
-            "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+            "schema": "tokenclaw.request_shape_repeated_context_canaries.v1",
             "rules": [],
         },
         "repeated_provider_scaffolding": {
@@ -687,7 +687,7 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / filename)
-    candidates.append(agentflow_config_path(filename))
+    candidates.append(tokenclaw_config_path(filename))
     return candidates
 
 
@@ -699,7 +699,7 @@ def _first_existing_rule_path(filename: str, env_name: str) -> Path | None:
 
 
 def _apply_scaffold_canary_overlay(policy: dict[str, Any], *, base_source: str) -> str | None:
-    path = _first_existing_rule_path("scaffold_canary_policy.yaml", "AGENTFLOW_SCAFFOLD_CANARY_POLICY")
+    path = _first_existing_rule_path("scaffold_canary_policy.yaml", "TOKENCLAW_SCAFFOLD_CANARY_POLICY")
     if path is None:
         return None
     with open(path, encoding="utf-8") as f:
@@ -722,7 +722,7 @@ def _apply_scaffold_canary_overlay(policy: dict[str, Any], *, base_source: str) 
 
 
 def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
-    for path in _manual_rule_candidates("crunch_rules.yaml", "AGENTFLOW_CRUNCH_RULES"):
+    for path in _manual_rule_candidates("crunch_rules.yaml", "TOKENCLAW_CRUNCH_RULES"):
         if not path.exists():
             continue
         with open(path, encoding="utf-8") as f:
@@ -1801,7 +1801,7 @@ def _parse_request_shape_repeated_context_canary_rules_yaml(
             "evidence_blocker_codes": [public_label(code, "unknown") for code in _list_of_strings(item.get("evidence_blocker_codes"))],
             "conditions": _sanitize_request_shape_canary_conditions(item.get("conditions")),
             "rollout": {
-                "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+                "schema": "tokenclaw.request_shape_crunch_canary_rollout.v1",
                 "canary_enabled": _as_bool(rollout.get("canary_enabled"), True),
                 "full_rollout_enabled": full_rollout_enabled,
                 "full_rollout_fraction": full_rollout_fraction,
@@ -2110,7 +2110,7 @@ def enhanced_crunch_provider_public_meta(managed_profile: dict[str, Any] | None 
     model_family = provider.get("model_family") or (summary or {}).get("model_family")
     state = "configured" if configured else ("fallback-not-configured" if recommended else "disabled")
     return {
-        "schema": "agentflow.enhanced_crunch_provider.v1",
+        "schema": "tokenclaw.enhanced_crunch_provider.v1",
         "recommended": recommended,
         "configured": configured,
         "state": state,
@@ -2170,8 +2170,8 @@ def _jaccard(a: frozenset, b: frozenset) -> float:
     return len(a & b) / union
 
 
-TOOL_RESULT_DEDUP_SCHEMA = "agentflow.near_duplicate_tool_result_dedup.v1"
-TOOL_RESULT_DEDUP_SAFETY_SCHEMA = "agentflow.near_duplicate_tool_result_safety_stop.v1"
+TOOL_RESULT_DEDUP_SCHEMA = "tokenclaw.near_duplicate_tool_result_dedup.v1"
+TOOL_RESULT_DEDUP_SAFETY_SCHEMA = "tokenclaw.near_duplicate_tool_result_safety_stop.v1"
 TOOL_RESULT_DEDUP_MIN_CHARS = 2000
 TOOL_RESULT_DEDUP_SIMILARITY_THRESHOLD = 0.95
 TOOL_RESULT_DEDUP_KEEP_RECENT_TURNS = 2
@@ -2456,7 +2456,7 @@ def _request_shape_repeated_context_features(
 def _request_shape_repeated_context_canary_base_meta(enabled: bool, reason: str) -> dict[str, Any]:
     rules = REQUEST_SHAPE_REPEATED_CONTEXT_CANARIES_POLICY.get("rules")
     return {
-        "schema": "agentflow.request_shape_repeated_context_crunch_canary_runtime.v1",
+        "schema": "tokenclaw.request_shape_repeated_context_crunch_canary_runtime.v1",
         "enabled": bool(enabled),
         "status": "skipped",
         "reason": reason,
@@ -2839,7 +2839,7 @@ def build_anthropic_thinking_history_metadata(
 ) -> dict[str, Any]:
     """Build bounded local diagnostics for Anthropic thinking-history compaction planning."""
     meta: dict[str, Any] = {
-        "schema": "agentflow.anthropic_thinking_history_metadata.v1",
+        "schema": "tokenclaw.anthropic_thinking_history_metadata.v1",
         "status": "blocked",
         "reason": "not-evaluated",
         "provider": provider,
@@ -2878,7 +2878,7 @@ def build_anthropic_thinking_history_metadata(
         "history_block_absence_reason": None,
         "route_crunch_mismatch_explained": False,
         "diagnosis": {
-            "schema": "agentflow.anthropic_thinking_history_diagnosis.v1",
+            "schema": "tokenclaw.anthropic_thinking_history_diagnosis.v1",
             "status": "not-evaluated",
             "reason": "not-evaluated",
             "thinking_signal_kind": "none",
@@ -3332,7 +3332,7 @@ def _effective_repeated_provider_scaffolding_policy(
 
 def _provider_scaffolding_meta(policy: dict[str, Any], status: str, reason: str) -> dict[str, Any]:
     return {
-        "schema": "agentflow.repeated_provider_scaffolding.v1",
+        "schema": "tokenclaw.repeated_provider_scaffolding.v1",
         "enabled": bool(policy.get("enabled")),
         "status": status,
         "reason": reason,
@@ -3690,7 +3690,7 @@ def _set_instruction_dedup_entry(entry: dict[str, Any], text: str) -> None:
 
 def _instruction_dedup_meta(policy: dict[str, Any], status: str, reason: str) -> dict[str, Any]:
     return {
-        "schema": "agentflow.instruction_section_deduplication.v1",
+        "schema": "tokenclaw.instruction_section_deduplication.v1",
         "enabled": bool(policy.get("enabled")),
         "status": status,
         "reason": reason,
@@ -3858,7 +3858,7 @@ def _instruction_dedup_safety_stop(
     if not reasons:
         return None
     return {
-        "schema": "agentflow.instruction_section_dedup_safety_stop.v1",
+        "schema": "tokenclaw.instruction_section_dedup_safety_stop.v1",
         "status": "safety_stopped",
         "reason_codes": reasons,
         "sample_count": samples,
@@ -5137,7 +5137,7 @@ def old_context_summary_plan(
     }
     plan = {
         "source_hash": source_hash,
-        "cache_key": "agentflow-old-context-summary\n" + source_hash,
+        "cache_key": "tokenclaw-old-context-summary\n" + source_hash,
         "summary_request": summary_request,
         "placement": placement,
         "candidate_indexes": [c["index"] for c in candidates],
@@ -5260,7 +5260,7 @@ def _old_context_summary_preservation_check(
     tool_protocol_preserved = original_tool_protocol == summarized_tool_protocol
     recent_turns_preserved = original_recent == summarized_recent
     return {
-        "schema": "agentflow.old_context_summary_preservation_check.v1",
+        "schema": "tokenclaw.old_context_summary_preservation_check.v1",
         "ok": tool_protocol_preserved and recent_turns_preserved,
         "tool_protocol_blocks_preserved": tool_protocol_preserved,
         "recent_turns_preserved": recent_turns_preserved,
@@ -5278,7 +5278,7 @@ def _summary_canary_decision(body: dict[str, Any], plan: dict[str, Any], *, poli
     if candidate_id is None:
         candidate_id = policy.get("candidate_id")
     base: dict[str, Any] = {
-        "schema": "agentflow.old_context_summary_canary_decision.v1",
+        "schema": "tokenclaw.old_context_summary_canary_decision.v1",
         "enabled": public["enabled"],
         "selected": True,
         "status": "full",
@@ -5488,7 +5488,7 @@ def evaluate_old_context_summary_safety_stop(store_obj: Any | None) -> dict[str,
     if not triggers:
         return None
     return {
-        "schema": "agentflow.old_context_summary_safety_stop.v1",
+        "schema": "tokenclaw.old_context_summary_safety_stop.v1",
         "stopped": True,
         "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
         "rule_id": OLD_CONTEXT_SUMMARY_RULE_ID,
@@ -5539,7 +5539,7 @@ def _anthropic_thinking_compaction_public_policy(
     fraction = max(0.0, min(1.0, float(canary.get("fraction", 0.0))))
     holdout_fraction = max(0.0, min(1.0, float(canary.get("holdout_fraction", max(0.0, 1.0 - fraction)))))
     public = {
-        "schema": "agentflow.anthropic_thinking_history_compaction_policy.v1",
+        "schema": "tokenclaw.anthropic_thinking_history_compaction_policy.v1",
         "enabled": _as_bool(policy.get("enabled"), False),
         "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
         "rule_path": CRUNCH_RULES_PATH,
@@ -5602,7 +5602,7 @@ def anthropic_thinking_compaction_effective_policy() -> dict[str, Any]:
 def _anthropic_thinking_compaction_base_meta(status: str, reason: str, *, policy: dict[str, Any] | None = None) -> dict[str, Any]:
     public = _anthropic_thinking_compaction_public_policy(policy, include_salt=False)
     return {
-        "schema": "agentflow.anthropic_thinking_history_compaction_decision.v1",
+        "schema": "tokenclaw.anthropic_thinking_history_compaction_decision.v1",
         "enabled": public["enabled"],
         "status": status,
         "reason": reason,
@@ -5824,7 +5824,7 @@ def _anthropic_thinking_compaction_canary_decision(
         pattern_hashes=[],
         features=features,
     )
-    decision["schema"] = "agentflow.anthropic_thinking_history_compaction_canary_decision.v1"
+    decision["schema"] = "tokenclaw.anthropic_thinking_history_compaction_canary_decision.v1"
     decision["holdout_fraction"] = canary["holdout_fraction"]
     decision.pop("salt", None)
     decision["salt_included"] = False
@@ -5924,7 +5924,7 @@ def evaluate_anthropic_thinking_compaction_safety_stop(
     if not triggers:
         return None
     return {
-        "schema": "agentflow.anthropic_thinking_history_compaction_safety_stop.v1",
+        "schema": "tokenclaw.anthropic_thinking_history_compaction_safety_stop.v1",
         "stopped": True,
         "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
         "rule_id": public["rule_id"],
@@ -6056,7 +6056,7 @@ def _apply_anthropic_thinking_history_compaction_canary(
             "evaluated_rules": evaluated_rules,
             "configured_rule_count": len(_anthropic_thinking_candidate_policies(base_policy)),
             "lifecycle_feedback": {
-                "schema": "agentflow.anthropic_thinking_history_compaction_lifecycle_feedback.v1",
+                "schema": "tokenclaw.anthropic_thinking_history_compaction_lifecycle_feedback.v1",
                 "status": "policy_validation_error",
                 "cohort": "blocked",
                 "candidate_id": None,
@@ -6129,7 +6129,7 @@ def _apply_anthropic_thinking_history_compaction_canary(
         "evaluated_rules": evaluated_rules,
         "configured_rule_count": len(_anthropic_thinking_candidate_policies(base_policy)),
         "lifecycle_feedback": {
-            "schema": "agentflow.anthropic_thinking_history_compaction_lifecycle_feedback.v1",
+            "schema": "tokenclaw.anthropic_thinking_history_compaction_lifecycle_feedback.v1",
             "status": "planned",
             "cohort": "pending",
             "candidate_id": public_id(candidate_id, prefix="candidate"),
@@ -6214,7 +6214,7 @@ def _terminal_output_compaction_public_policy(
     fraction = max(0.0, min(1.0, float(canary.get("fraction", 0.0))))
     holdout_fraction = max(0.0, min(1.0, float(canary.get("holdout_fraction", max(0.0, 1.0 - fraction)))))
     public = {
-        "schema": "agentflow.terminal_output_compaction_policy.v1",
+        "schema": "tokenclaw.terminal_output_compaction_policy.v1",
         "enabled": _as_bool(policy.get("enabled"), False),
         "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
         "rule_path": CRUNCH_RULES_PATH,
@@ -6273,7 +6273,7 @@ def terminal_output_compaction_effective_policy() -> dict[str, Any]:
 def _terminal_output_compaction_base_meta(status: str, reason: str, *, policy: dict[str, Any] | None = None) -> dict[str, Any]:
     public = _terminal_output_compaction_public_policy(policy)
     return {
-        "schema": "agentflow.terminal_output_compaction_decision.v1",
+        "schema": "tokenclaw.terminal_output_compaction_decision.v1",
         "enabled": public["enabled"],
         "status": status,
         "reason": reason,
@@ -6332,7 +6332,7 @@ def _terminal_output_compaction_canary_decision(
         pattern_hashes=[],
         features=features,
     )
-    decision["schema"] = "agentflow.terminal_output_compaction_canary_decision.v1"
+    decision["schema"] = "tokenclaw.terminal_output_compaction_canary_decision.v1"
     decision["holdout_fraction"] = canary["holdout_fraction"]
     decision["raw_request_body_included"] = False
     decision["raw_terminal_text_included"] = False
@@ -6427,7 +6427,7 @@ def evaluate_terminal_output_compaction_safety_stop(
     if not triggers:
         return None
     return {
-        "schema": "agentflow.terminal_output_compaction_safety_stop.v1",
+        "schema": "tokenclaw.terminal_output_compaction_safety_stop.v1",
         "stopped": True,
         "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
         "rule_id": public["rule_id"],

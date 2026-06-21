@@ -20,7 +20,7 @@ class PricingTest(unittest.TestCase):
             cache_read_tokens=2_000,
         )
 
-        self.assertEqual(accounting["pricing_source"], "embedded-agentflow-defaults")
+        self.assertEqual(accounting["pricing_source"], "embedded-tokenclaw-defaults")
         self.assertEqual(accounting["pricing_version"], "2026-06-08")
         self.assertEqual(accounting["input_usd_per_million"], 3.0)
         self.assertAlmostEqual(accounting["cached_input_usd_per_million"], 0.3, places=8)
@@ -89,7 +89,7 @@ class PricingTest(unittest.TestCase):
 
     def test_openai_unknown_model_can_be_configured_with_env_price(self):
         override = '{"future-codex":{"input":2.0,"cached_input":0.2,"output":16.0}}'
-        with patch.dict("os.environ", {"AGENTFLOW_OPENAI_MODEL_PRICES_JSON": override}):
+        with patch.dict("os.environ", {"TOKENCLAW_OPENAI_MODEL_PRICES_JSON": override}):
             cost = estimate_cost(
                 "future-codex",
                 input_tokens=1_000_000,
@@ -101,7 +101,7 @@ class PricingTest(unittest.TestCase):
 
         self.assertAlmostEqual(cost, 2.7, places=6)
         self.assertTrue(basis["cost_known"])
-        self.assertEqual(basis["source"], "env:AGENTFLOW_OPENAI_MODEL_PRICES_JSON")
+        self.assertEqual(basis["source"], "env:TOKENCLAW_OPENAI_MODEL_PRICES_JSON")
 
     def test_default_codex_app_pricing_basis_uses_current_model(self):
         with patch.dict("os.environ", {}, clear=True):
@@ -116,7 +116,7 @@ class PricingTest(unittest.TestCase):
         self.assertEqual(basis["output_usd_per_million"], 14.0)
 
     def test_codex_app_model_env_override_is_exposed_in_basis(self):
-        with patch.dict("os.environ", {"AGENTFLOW_CODEX_APP_MODEL": "future-codex"}, clear=True):
+        with patch.dict("os.environ", {"TOKENCLAW_CODEX_APP_MODEL": "future-codex"}, clear=True):
             basis = codex_app_pricing_basis()
 
         self.assertEqual(basis["model"], "future-codex")

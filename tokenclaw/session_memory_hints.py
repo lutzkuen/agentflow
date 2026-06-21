@@ -6,7 +6,7 @@ from typing import Any
 
 from tokenclaw.session_phase_memory import build_session_phase_memory_for_session
 
-SCHEMA = "agentflow.session_memory_optimization_hints.v1"
+SCHEMA = "tokenclaw.session_memory_optimization_hints.v1"
 TOKEN_CHARS = 4
 SAFE_MEMORY_BLOCKERS = {"context_plateau_active"}
 UNSAFE_MEMORY_BLOCKERS = {
@@ -230,7 +230,7 @@ def _cache_replay_proposal(
     # Cost is a coarse bucket only. The report layer can add observed-cost aggregates from local metadata.
     projected_cost = (cache_tokens if eligible else 0) * 0.000003
     return {
-        "schema": "agentflow.session_memory_cache_replay_proposal.v1",
+        "schema": "tokenclaw.session_memory_cache_replay_proposal.v1",
         "status": status,
         "reason": cache_reason,
         "proposal_id": f"session-memory-cache-replay:{fingerprint.removeprefix('sha256:')}",

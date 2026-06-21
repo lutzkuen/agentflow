@@ -13,8 +13,8 @@ from tokenclaw.pricing import estimate_blended_input_savings, estimate_cost
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.repeated_scaffold_impact.v1"
-VERDICT_SCHEMA = "agentflow.repeated_scaffold_promotion_verdict.v1"
+SCHEMA = "tokenclaw.repeated_scaffold_impact.v1"
+VERDICT_SCHEMA = "tokenclaw.repeated_scaffold_promotion_verdict.v1"
 TOKEN_CHARS = 4
 
 _REASON_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")

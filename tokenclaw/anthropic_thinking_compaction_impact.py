@@ -13,8 +13,8 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.anthropic_thinking_compaction_impact.v1"
-FEEDBACK_SCHEMA = "agentflow.anthropic_thinking_compaction_budget_feedback.v1"
+SCHEMA = "tokenclaw.anthropic_thinking_compaction_impact.v1"
+FEEDBACK_SCHEMA = "tokenclaw.anthropic_thinking_compaction_budget_feedback.v1"
 
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,95}$")
 
@@ -552,7 +552,7 @@ def _impact_decision(candidates: list[dict[str, Any]]) -> dict[str, Any]:
         for reason in item.get("reason_codes") or []:
             reasons[str(reason)] += 1
     return {
-        "schema": "agentflow.anthropic_thinking_compaction_canary_impact_decision.v1",
+        "schema": "tokenclaw.anthropic_thinking_compaction_canary_impact_decision.v1",
         "decision": selected,
         "decision_breakdown": _breakdown(decisions),
         "reason_code_counts": _breakdown(reasons),
@@ -657,7 +657,7 @@ def build_anthropic_thinking_compaction_impact_report(
     )
     applied_before_chars = sum(_as_int(((row.get("cohorts") or {}).get("applied") or {}).get("before_chars")) for row in candidates)
     lifecycle_coverage = {
-        "schema": "agentflow.anthropic_thinking_compaction_lifecycle_coverage.v1",
+        "schema": "tokenclaw.anthropic_thinking_compaction_lifecycle_coverage.v1",
         "observed_count": coverage_total,
         "applied_count": applied_count,
         "holdout_count": holdout_count,

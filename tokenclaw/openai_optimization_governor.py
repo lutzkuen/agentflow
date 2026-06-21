@@ -7,8 +7,8 @@ from typing import Any
 from tokenclaw.optimization.openai_features import openai_endpoint
 
 
-SCHEMA = "agentflow.openai_optimization_governor.v1"
-LIFECYCLE_SCHEMA = "agentflow.openai_optimization_lifecycle_feedback.v1"
+SCHEMA = "tokenclaw.openai_optimization_governor.v1"
+LIFECYCLE_SCHEMA = "tokenclaw.openai_optimization_lifecycle_feedback.v1"
 LIFECYCLE_SOURCE_SURFACE = "openai_optimization_lifecycle"
 FAMILIES = ("routing", "old_context_summary", "cache_replay")
 PRIORITY = ("routing", "old_context_summary", "cache_replay")
@@ -567,7 +567,7 @@ def build_openai_optimization_lifecycle_event(
 
 def openai_optimization_lifecycle_public_meta(meta: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "agentflow.openai_optimization_lifecycle_feedback_queue_meta.v1",
+        "schema": "tokenclaw.openai_optimization_lifecycle_feedback_queue_meta.v1",
         "enabled": bool(meta.get("enabled")),
         "status": meta.get("status"),
         "reason": meta.get("reason"),
@@ -592,14 +592,14 @@ def _governor_canary(
     session_id: str | None,
 ) -> dict[str, Any]:
     canary_fraction = _float_0_1(
-        os.getenv("AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_CANARY_FRACTION"),
+        os.getenv("TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_CANARY_FRACTION"),
         1.0,
     )
     holdout_fraction = _float_0_1(
-        os.getenv("AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_HOLDOUT_FRACTION"),
+        os.getenv("TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_HOLDOUT_FRACTION"),
         0.0,
     )
-    salt = os.getenv("AGENTFLOW_OPENAI_OPTIMIZATION_GOVERNOR_SALT", "agentflow-openai-optimization-governor-v1")
+    salt = os.getenv("TOKENCLAW_OPENAI_OPTIMIZATION_GOVERNOR_SALT", "tokenclaw-openai-optimization-governor-v1")
     session_hash = ""
     if session_id:
         session_hash, _ = _hash_value([salt, "session", session_id])

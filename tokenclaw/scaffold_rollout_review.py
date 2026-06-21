@@ -12,16 +12,16 @@ from tokenclaw.pattern_rollout import PATTERN_ROLLOUT_SCHEMA
 from tokenclaw.store import stable_json, utc_now
 
 
-SCAFFOLD_ROLLOUT_ACTIONS_REVIEW_SCHEMA = "agentflow.scaffold_rollout_actions_fetch_review.v1"
-SCAFFOLD_ROLLOUT_ACTIONS_APPLY_SCHEMA = "agentflow.scaffold_rollout_actions_apply.v1"
-SCAFFOLD_CANARY_POLICY_SCHEMA = "agentflow.scaffold_canary_policy.v1"
+SCAFFOLD_ROLLOUT_ACTIONS_REVIEW_SCHEMA = "tokenclaw.scaffold_rollout_actions_fetch_review.v1"
+SCAFFOLD_ROLLOUT_ACTIONS_APPLY_SCHEMA = "tokenclaw.scaffold_rollout_actions_apply.v1"
+SCAFFOLD_CANARY_POLICY_SCHEMA = "tokenclaw.scaffold_canary_policy.v1"
 SCAFFOLD_CANARY_POLICY_FILE = "scaffold_canary_policy.yaml"
 SCAFFOLD_LOCAL_CRUNCH_RULES_FILE = "crunch_rules.yaml"
 
 _REPEATED_SCAFFOLD_ACTION_TYPE = "review-local-repeated-scaffold-crunch-rule"
 _REPEATED_SCAFFOLD_CANDIDATE_FAMILY = "repeated-scaffold-crunch-policy-rule"
-_OPTIMIZATION_ROLLOUT_ACTIONS_SCHEMA = "agentflow.optimization_rollout_actions.v1"
-_OPTIMIZATION_ROLLOUT_ACTION_SCHEMA = "agentflow.optimization_rollout_action.v1"
+_OPTIMIZATION_ROLLOUT_ACTIONS_SCHEMA = "tokenclaw.optimization_rollout_actions.v1"
+_OPTIMIZATION_ROLLOUT_ACTION_SCHEMA = "tokenclaw.optimization_rollout_action.v1"
 _REPEATED_SCAFFOLD_DECISIONS = {"widen", "promote", "hold", "rollback", "suppress"}
 _REPEATED_SCAFFOLD_ROLLBACK_DECISIONS = {"rollback", "suppress"}
 _RAW_LIKE_KEY_PARTS = (
@@ -321,7 +321,7 @@ def validate_scaffold_rollout_bundle(bundle: Any) -> dict[str, Any]:
     if not isinstance(bundle, dict):
         _add_error(errors, "$", "scaffold rollout bundle must be a JSON object")
         return {
-            "schema": "agentflow.scaffold_rollout_actions_validation.v1",
+            "schema": "tokenclaw.scaffold_rollout_actions_validation.v1",
             "ok": False,
             "bundle_schema": None,
             "action_count": 0,
@@ -402,7 +402,7 @@ def validate_scaffold_rollout_bundle(bundle: Any) -> dict[str, Any]:
             warnings.append({"path": str(warning.get("path") or "$.provenance"), "message": str(warning.get("message") or "provenance was not verified")})
 
     return {
-        "schema": "agentflow.scaffold_rollout_actions_validation.v1",
+        "schema": "tokenclaw.scaffold_rollout_actions_validation.v1",
         "ok": not errors,
         "bundle_schema": bundle.get("schema"),
         "action_count": len(actions) + len(omitted_actions),
@@ -448,7 +448,7 @@ def _repeated_scaffold_lifecycle_action(action: dict[str, Any]) -> tuple[dict[st
         "reason_codes": _safe_reason_codes(action),
         "policy_source": "managed-recommended",
         "rollout_action": {
-            "schema": "agentflow.repeated_scaffold_rollout_action.v1",
+            "schema": "tokenclaw.repeated_scaffold_rollout_action.v1",
             "action_id": action.get("action_id"),
             "action_type": action.get("action_type") or decision,
             "next_action": decision,
@@ -556,7 +556,7 @@ def _repeated_scaffold_rule_from_action(action: dict[str, Any]) -> tuple[dict[st
             ],
         },
         "rollout_action": {
-            "schema": "agentflow.repeated_scaffold_rollout_action.v1",
+            "schema": "tokenclaw.repeated_scaffold_rollout_action.v1",
             "action_id": action.get("action_id"),
             "action_type": action.get("action_type"),
             "next_action": decision,

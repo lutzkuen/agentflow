@@ -29,13 +29,13 @@ from tokenclaw.openai_old_context_summary_dry_run import (
     _metadata_text_chars,
     _projection,
 )
-from tokenclaw.paths import agentflow_config_path
+from tokenclaw.paths import tokenclaw_config_path
 from tokenclaw.optimization.openai_features import openai_endpoint
 from tokenclaw.store import stable_json
 
 
-SCHEMA = "agentflow.openai_old_context_summary.v1"
-SUMMARY_CACHE_SCHEMA = "agentflow.openai_old_context_summary_cache.v1"
+SCHEMA = "tokenclaw.openai_old_context_summary.v1"
+SUMMARY_CACHE_SCHEMA = "tokenclaw.openai_old_context_summary_cache.v1"
 SUMMARY_MARKER = "AgentFlow summary of earlier OpenAI context"
 
 SummaryFetcher = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -65,14 +65,14 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / filename)
-    candidates.append(agentflow_config_path(filename))
+    candidates.append(tokenclaw_config_path(filename))
     candidates.append(Path(__file__).parent / filename)
     return candidates
 
 
 def default_openai_old_context_summary_policy() -> dict[str, Any]:
     return {
-        "schema": "agentflow.openai_old_context_summary_policy.v1",
+        "schema": "tokenclaw.openai_old_context_summary_policy.v1",
         "enabled": False,
         "rule_id": "local-openai-old-context-summary",
         "summary_provider": DEFAULT_SUMMARY_PROVIDER,
@@ -158,7 +158,7 @@ def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> None:
 
 def load_openai_old_context_summary_policy() -> dict[str, Any]:
     policy = default_openai_old_context_summary_policy()
-    for path in _manual_rule_candidates("crunch_rules.yaml", "AGENTFLOW_CRUNCH_RULES"):
+    for path in _manual_rule_candidates("crunch_rules.yaml", "TOKENCLAW_CRUNCH_RULES"):
         if not path.exists():
             continue
         with open(path, encoding="utf-8") as f:
@@ -184,34 +184,34 @@ def load_openai_old_context_summary_policy() -> dict[str, Any]:
             policy["rule_path"] = str(path)
             break
 
-    if os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED") is not None:
-        policy["enabled"] = _env_bool("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", bool(policy["enabled"]))
-    if os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MODEL"):
-        policy["summary_model"] = str(os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MODEL"))
+    if os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED") is not None:
+        policy["enabled"] = _env_bool("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", bool(policy["enabled"]))
+    if os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MODEL"):
+        policy["summary_model"] = str(os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MODEL"))
     env_thresholds = {
-        "AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS": "min_request_chars",
-        "AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MIN_SOURCE_CHARS": "min_source_chars",
-        "AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS": "max_source_chars",
-        "AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_KEEP_RECENT_ITEMS": "keep_recent_items",
-        "AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS": "max_summary_chars",
+        "TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS": "min_request_chars",
+        "TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MIN_SOURCE_CHARS": "min_source_chars",
+        "TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS": "max_source_chars",
+        "TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_KEEP_RECENT_ITEMS": "keep_recent_items",
+        "TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS": "max_summary_chars",
     }
     for env_name, key in env_thresholds.items():
         if os.getenv(env_name) is not None:
             policy[key] = max(0, int(os.getenv(env_name, "0")))
-    if os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_COST_USD") is not None:
+    if os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_COST_USD") is not None:
         policy["max_summary_cost_usd"] = max(
             0.0,
-            float(os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_COST_USD", "0")),
+            float(os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_MAX_SUMMARY_COST_USD", "0")),
         )
-    if os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_CANARY_FRACTION") is not None:
+    if os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_CANARY_FRACTION") is not None:
         policy["canary"]["canary_fraction"] = max(
             0.0,
-            min(1.0, float(os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_CANARY_FRACTION", "0"))),
+            min(1.0, float(os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_CANARY_FRACTION", "0"))),
         )
-    if os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_HOLDOUT_FRACTION") is not None:
+    if os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_HOLDOUT_FRACTION") is not None:
         policy["canary"]["holdout_fraction"] = max(
             0.0,
-            min(1.0, float(os.getenv("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_HOLDOUT_FRACTION", "1"))),
+            min(1.0, float(os.getenv("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_HOLDOUT_FRACTION", "1"))),
         )
     return policy
 

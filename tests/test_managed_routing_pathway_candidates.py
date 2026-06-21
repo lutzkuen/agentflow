@@ -16,15 +16,15 @@ from tokenclaw.managed_routing_pathway_candidates import (
 class ManagedRoutingPathwayCandidateTests(unittest.TestCase):
     def _source(self, *, generated_at: str = "2026-06-20T01:00:00+00:00") -> dict[str, object]:
         return {
-            "schema": "agentflow.policy_decision.v1",
+            "schema": "tokenclaw.policy_decision.v1",
             "generated_at": generated_at,
             "routing_pathway_matrix": {
-                "schema": "agentflow.routing_pathway_matrix.v1",
+                "schema": "tokenclaw.routing_pathway_matrix.v1",
                 "generated_at": generated_at,
                 "status": "recommended",
                 "pathways": [
                     {
-                        "schema": "agentflow.routing_pathway_matrix_entry.v1",
+                        "schema": "tokenclaw.routing_pathway_matrix_entry.v1",
                         "rank": 1,
                         "pathway_id": "pathway-openai-tool-light",
                         "pathway_type": "adjacent_downroute",
@@ -48,7 +48,7 @@ class ManagedRoutingPathwayCandidateTests(unittest.TestCase):
                         "reason_codes": ["routing-pathway-shadow"],
                     },
                     {
-                        "schema": "agentflow.routing_pathway_matrix_entry.v1",
+                        "schema": "tokenclaw.routing_pathway_matrix_entry.v1",
                         "rank": 2,
                         "pathway_id": "pathway-codex-summary",
                         "pathway_type": "adjacent_downroute",
@@ -72,7 +72,7 @@ class ManagedRoutingPathwayCandidateTests(unittest.TestCase):
                         "reason_codes": ["routing-pathway-canary"],
                     },
                     {
-                        "schema": "agentflow.routing_pathway_matrix_entry.v1",
+                        "schema": "tokenclaw.routing_pathway_matrix_entry.v1",
                         "rank": 3,
                         "pathway_id": "pathway-openai-hold",
                         "pathway_type": "aggressive_exploratory",
@@ -91,7 +91,7 @@ class ManagedRoutingPathwayCandidateTests(unittest.TestCase):
                         "reason_codes": ["adjacent-path-evidence-missing"],
                     },
                     {
-                        "schema": "agentflow.routing_pathway_matrix_entry.v1",
+                        "schema": "tokenclaw.routing_pathway_matrix_entry.v1",
                         "rank": 4,
                         "pathway_id": "pathway-anthropic-unsupported",
                         "pathway_type": "adjacent_downroute",
@@ -116,7 +116,7 @@ class ManagedRoutingPathwayCandidateTests(unittest.TestCase):
         now = datetime(2026, 6, 20, 2, 0, tzinfo=timezone.utc)
         result = build_managed_routing_pathway_shadow_candidates(self._source(), now=now)
 
-        self.assertEqual(result["schema"], "agentflow.managed_routing_pathway_shadow_candidates.v1")
+        self.assertEqual(result["schema"], "tokenclaw.managed_routing_pathway_shadow_candidates.v1")
         self.assertEqual(result["status"], "review-only")
         self.assertEqual(result["summary"]["matrix_row_count"], 4)
         self.assertEqual(result["summary"]["accepted_count"], 2)

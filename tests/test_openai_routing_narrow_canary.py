@@ -52,11 +52,11 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         candidate_fingerprint: str | None = None,
     ) -> dict[str, object]:
         outcome = {
-            "schema": "agentflow.managed_activation_preview_outcome.v1",
+            "schema": "tokenclaw.managed_activation_preview_outcome.v1",
             "handoff_ref": "managed-preview-handoff:routing",
             "preview_ref": "managed-preview:openai-routing",
             "local_action_family": "routing",
-            "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+            "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
             "decision": "review-only-recommendation",
             "classification": classification,
             "next_action": next_action,
@@ -81,7 +81,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         if candidate_fingerprint is not None:
             outcome["candidate_fingerprint"] = candidate_fingerprint
         return {
-            "schema": "agentflow.managed_activation_preview_outcomes.v1",
+            "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
             "status": "tracked",
             "outcomes": [outcome],
             "privacy": {
@@ -96,7 +96,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
 
     def _managed_health(self, *, stale: bool = False) -> dict[str, object]:
         return {
-            "schema": "agentflow.managed_activation_preview_health.v1",
+            "schema": "tokenclaw.managed_activation_preview_health.v1",
             "status": "tracked",
             "accepted_batch_count": 1,
             "previewed_row_count": 1,
@@ -127,7 +127,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         savings_per_1000: float,
     ) -> dict[str, object]:
         return {
-            "schema": "agentflow.local_routing_pathway_outcome_feedback_row.v1",
+            "schema": "tokenclaw.local_routing_pathway_outcome_feedback_row.v1",
             "status": "ready",
             "provider": "openai",
             "source_surface": source_surface,
@@ -157,15 +157,15 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
 
     def _managed_pathway_outcomes(self, *candidate_fingerprints: str) -> dict[str, object]:
         return {
-            "schema": "agentflow.managed_activation_preview_outcomes.v1",
+            "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
             "status": "tracked",
             "outcomes": [
                 {
-                    "schema": "agentflow.managed_activation_preview_outcome.v1",
+                    "schema": "tokenclaw.managed_activation_preview_outcome.v1",
                     "handoff_ref": f"managed-preview-handoff:{candidate_fingerprint}",
                     "preview_ref": f"managed-preview:{candidate_fingerprint}",
                     "local_action_family": "routing",
-                    "evidence_schema": "agentflow.local_routing_pathway_outcome_feedback_row.v1",
+                    "evidence_schema": "tokenclaw.local_routing_pathway_outcome_feedback_row.v1",
                     "decision": "review-only-recommendation",
                     "classification": "review-only",
                     "next_action": "stage-narrow-routing-canary",
@@ -202,7 +202,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
 
     def _semantic_recovery_action(self) -> dict[str, object]:
         return {
-            "schema": "agentflow.openai_routing_semantic_regression_action.v1",
+            "schema": "tokenclaw.openai_routing_semantic_regression_action.v1",
             "observed": True,
             "status": "classified",
             "action_classification": "narrow-canary-shape",
@@ -212,7 +212,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
 
     def test_mixed_regressed_and_clean_cohorts_emit_one_review_only_narrower_canary(self) -> None:
         report = {
-            "schema": "agentflow.openai_routing_semantic_regression_fixture.v1",
+            "schema": "tokenclaw.openai_routing_semantic_regression_fixture.v1",
             "generated_at": utc_now(),
             "cohorts": [
                 {
@@ -250,7 +250,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
             holdout_fraction=0.13,
         )
 
-        self.assertEqual(result["schema"], "agentflow.openai_routing_narrow_canary_review.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_routing_narrow_canary_review.v1")
         self.assertEqual(result["decision"], "draft-narrower-canary")
         self.assertEqual(result["status"], "review-only")
         self.assertEqual(result["summary"]["draft_count"], 1)
@@ -261,7 +261,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
         self.assertFalse(result["managed_server_calls_made"])
 
         draft = result["drafts"][0]
-        self.assertEqual(draft["schema"], "agentflow.openai_routing_narrow_canary_draft.v1")
+        self.assertEqual(draft["schema"], "tokenclaw.openai_routing_narrow_canary_draft.v1")
         self.assertTrue(draft["review_only"])
         self.assertFalse(draft["active_policy_changed"])
         self.assertFalse(draft["policy_files_written"])
@@ -293,7 +293,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
 
     def test_only_regressed_cohorts_keep_blocked_without_policy_writes(self) -> None:
         report = {
-            "schema": "agentflow.openai_routing_semantic_regression_fixture.v1",
+            "schema": "tokenclaw.openai_routing_semantic_regression_fixture.v1",
             "generated_at": utc_now(),
             "cohorts": [
                 self._cohort(
@@ -333,7 +333,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
 
     def test_research_plan_successor_keeps_blocked_with_preview_health_and_no_write(self) -> None:
         health_gate = {
-            "schema": "agentflow.managed_activation_preview_health_gate.v1",
+            "schema": "tokenclaw.managed_activation_preview_health_gate.v1",
             "status": "no-data-preview-health",
             "reason": "managed-preview-health-no-data",
             "next_action": "refresh-managed-activation-preview",
@@ -353,13 +353,13 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
             },
         }
         report = {
-            "schema": "agentflow.orchestrator_research_plan.v1",
+            "schema": "tokenclaw.orchestrator_research_plan.v1",
             "evidence": {
                 "stats_summary": {
                     "openai_routing_promotion_decision": {
-                        "schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                        "schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                         "promotion_decision": {
-                            "schema": "agentflow.openai_routing_promotion_decision.v1",
+                            "schema": "tokenclaw.openai_routing_promotion_decision.v1",
                             "decision": "keep-blocked",
                             "matched_count": 345,
                             "projected_savings_usd": 1.509375,
@@ -377,7 +377,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
                                 "target_local_rule_file": "routing_rules.yaml",
                             },
                             "lifecycle": {
-                                "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+                                "schema": "tokenclaw.openai_routing_canary_lifecycle_evidence.v1",
                                 "status": "matched",
                                 "applied_count": 27,
                                 "holdout_count": 23,
@@ -391,13 +391,13 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
                         },
                     },
                     "local_activation_next_action_queue": {
-                        "schema": "agentflow.local_activation_next_action_queue.v1",
+                        "schema": "tokenclaw.local_activation_next_action_queue.v1",
                         "successor_actions": [
                             {
-                                "schema": "agentflow.local_activation_successor_action.v1",
+                                "schema": "tokenclaw.local_activation_successor_action.v1",
                                 "fingerprint": "successor:a9729de3a6d5873b",
                                 "source_fingerprint": "activation:9ddae7127b2ccbaf",
-                                "evidence_schema": "agentflow.openai_routing_promotion_decision_report.v1",
+                                "evidence_schema": "tokenclaw.openai_routing_promotion_decision_report.v1",
                                 "local_action_family": "routing",
                                 "current_status": "keep-blocked",
                                 "successor_status": "keep-blocked",
@@ -414,7 +414,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
                                 "target_local_policy_section": "routing.rules",
                                 "target_local_rule_file": "routing_rules.yaml",
                                 "managed_preview_gate": {
-                                    "schema": "agentflow.preview_verified_activation_successor_gate.v1",
+                                    "schema": "tokenclaw.preview_verified_activation_successor_gate.v1",
                                     "status": "no-data-preview-health",
                                     "reason": "managed-preview-health-no-data",
                                     "verified": False,
@@ -472,7 +472,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
 
     def test_semantic_regression_recovery_drafts_only_with_managed_preview_agreement(self) -> None:
         report = {
-            "schema": "agentflow.openai_routing_semantic_regression_fixture.v1",
+            "schema": "tokenclaw.openai_routing_semantic_regression_fixture.v1",
             "generated_at": utc_now(),
             "cohorts": [
                 {
@@ -483,7 +483,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
                         reason_codes=["semantic-quality-regression-observed"],
                     ),
                     "semantic_regression_action": {
-                        "schema": "agentflow.openai_routing_semantic_regression_action.v1",
+                        "schema": "tokenclaw.openai_routing_semantic_regression_action.v1",
                         "observed": True,
                         "status": "classified",
                         "action_classification": "narrow-canary-shape",
@@ -520,7 +520,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
 
     def test_pathway_feedback_drafts_preview_agreed_openai_and_codex_canaries_without_policy_writes(self) -> None:
         report = {
-            "schema": "agentflow.local_routing_pathway_outcome_feedback.v1",
+            "schema": "tokenclaw.local_routing_pathway_outcome_feedback.v1",
             "generated_at": utc_now(),
             "outcomes": [
                 self._pathway_outcome(
@@ -615,7 +615,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
             ),
             "candidate_fingerprint": "candidate:semantic-row",
             "semantic_regression_action": {
-                "schema": "agentflow.openai_routing_semantic_regression_action.v1",
+                "schema": "tokenclaw.openai_routing_semantic_regression_action.v1",
                 "observed": True,
                 "status": "classified",
                 "action_classification": "narrow-canary-shape",
@@ -665,7 +665,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
             with self.subTest(expected_reason=expected_reason):
                 result = build_openai_routing_narrow_canary_review(
                     {
-                        "schema": "agentflow.openai_routing_semantic_regression_fixture.v1",
+                        "schema": "tokenclaw.openai_routing_semantic_regression_fixture.v1",
                         "generated_at": utc_now(),
                         "cohorts": [cohort],
                         "privacy": {"metadata_only": True, "aggregate_only": True},
@@ -682,7 +682,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
 
     def test_cleared_semantic_blocker_with_fresh_coverage_emits_review_only_recovery_plan(self) -> None:
         report = {
-            "schema": "agentflow.openai_routing_semantic_regression_fixture.v1",
+            "schema": "tokenclaw.openai_routing_semantic_regression_fixture.v1",
             "generated_at": utc_now(),
             "cohorts": [
                 {
@@ -694,7 +694,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
                     ),
                     "semantic_regression_action": self._semantic_recovery_action(),
                     "openai_canary_lifecycle_evidence": {
-                        "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+                        "schema": "tokenclaw.openai_routing_canary_lifecycle_evidence.v1",
                         "status": "matched",
                         "latest_observed_at": "2026-06-18T17:37:11.818295+00:00",
                         "applied_count": 25,
@@ -738,7 +738,7 @@ class OpenAIRoutingNarrowCanaryReviewTests(unittest.TestCase):
 
     def test_cli_reads_fixture_from_stdin(self) -> None:
         report = {
-            "schema": "agentflow.openai_routing_semantic_regression_fixture.v1",
+            "schema": "tokenclaw.openai_routing_semantic_regression_fixture.v1",
             "generated_at": utc_now(),
             "cohorts": [
                 {

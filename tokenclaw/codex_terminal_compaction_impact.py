@@ -13,8 +13,8 @@ from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.codex_terminal_transcript_compaction_impact.v1"
-ACTION_SCHEMA = "agentflow.codex_terminal_transcript_compaction_rollback_action.v1"
+SCHEMA = "tokenclaw.codex_terminal_transcript_compaction_impact.v1"
+ACTION_SCHEMA = "tokenclaw.codex_terminal_transcript_compaction_rollback_action.v1"
 
 
 def _json_obj(value: Any) -> dict[str, Any]:

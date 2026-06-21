@@ -100,7 +100,7 @@ class OpenAIHeaderForwardingTests(unittest.TestCase):
             "OpenAI-Project": "proj_123",
             "OpenAI-Beta": "realtime=v1",
             "Accept": "application/json",
-            "User-Agent": "agentflow-test",
+            "User-Agent": "tokenclaw-test",
             "Content-Type": "application/json",
             "Content-Encoding": "gzip",
         })
@@ -113,7 +113,7 @@ class OpenAIHeaderForwardingTests(unittest.TestCase):
         self.assertEqual(headers["openai-project"], "proj_123")
         self.assertEqual(headers["openai-beta"], "realtime=v1")
         self.assertEqual(headers["accept"], "application/json")
-        self.assertEqual(headers["user-agent"], "agentflow-test")
+        self.assertEqual(headers["user-agent"], "tokenclaw-test")
         self.assertEqual(headers["content-type"], "application/json")
         self.assertEqual(headers["content-encoding"], "gzip")
 
@@ -144,7 +144,7 @@ class OpenAIHeaderForwardingTests(unittest.TestCase):
             "OpenAI-Project": "proj_123",
         })
 
-        with patch.dict(os.environ, {"AGENTFLOW_OPENAI_API_KEY": "proxy-key"}, clear=False):
+        with patch.dict(os.environ, {"TOKENCLAW_OPENAI_API_KEY": "proxy-key"}, clear=False):
             headers = server.build_openai_forward_headers(request, force_json=False)
 
         self.assertEqual(headers["authorization"], "Bearer proxy-key")
@@ -168,7 +168,7 @@ class OpenAIHeaderForwardingTests(unittest.TestCase):
             "Authorization": "Bearer client-key",
             "X-Api-Key": "client-x-key",
             "OpenAI-Beta": "realtime=v1",
-            "User-Agent": "agentflow-test",
+            "User-Agent": "tokenclaw-test",
             "X-Internal-User": "alice@example.test",
             "Sec-WebSocket-Key": "handshake",
             "Connection": "upgrade",
@@ -180,7 +180,7 @@ class OpenAIHeaderForwardingTests(unittest.TestCase):
         self.assertEqual(headers["authorization"], "Bearer client-key")
         self.assertEqual(headers["x-api-key"], "client-x-key")
         self.assertEqual(headers["openai-beta"], "realtime=v1")
-        self.assertEqual(headers["user-agent"], "agentflow-test")
+        self.assertEqual(headers["user-agent"], "tokenclaw-test")
         self.assertNotIn("x-internal-user", forwarded_names)
         self.assertNotIn("sec-websocket-key", forwarded_names)
         self.assertNotIn("connection", forwarded_names)

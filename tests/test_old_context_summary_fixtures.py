@@ -20,24 +20,24 @@ from tokenclaw.store import Store, stable_json
 
 class OldContextSummaryFixtureTest(unittest.TestCase):
     ENV_KEYS = (
-        "AGENTFLOW_CRUNCH",
-        "AGENTFLOW_CRUNCH_RULES",
-        "AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT",
-        "AGENTFLOW_HAIKU_SUMMARY_MODEL",
-        "AGENTFLOW_HAIKU_SUMMARY_MIN_REQUEST_CHARS",
-        "AGENTFLOW_HAIKU_SUMMARY_MIN_SUMMARIZED_CHARS",
-        "AGENTFLOW_HAIKU_SUMMARY_MAX_TURNS",
-        "AGENTFLOW_HAIKU_SUMMARY_KEEP_RECENT_TURNS",
-        "AGENTFLOW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS",
-        "AGENTFLOW_HAIKU_SUMMARY_MAX_SOURCE_CHARS",
-        "AGENTFLOW_MANAGED_RECOMMENDATIONS",
-        "AGENTFLOW_RECOMMENDATION_ENABLED",
-        "AGENTFLOW_RECOMMENDATIONS_ENABLED",
-        "AGENTFLOW_RECOMMENDATION_SERVER_URL",
-        "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
-        "AGENTFLOW_MANAGED_API_KEY",
-        "AGENTFLOW_OLD_CONTEXT_SUMMARY_FIXTURE_REAL_MODEL",
-        "AGENTFLOW_OLD_CONTEXT_SUMMARY_FIXTURE_URL",
+        "TOKENCLAW_CRUNCH",
+        "TOKENCLAW_CRUNCH_RULES",
+        "TOKENCLAW_HAIKU_SUMMARIZE_OLD_CONTEXT",
+        "TOKENCLAW_HAIKU_SUMMARY_MODEL",
+        "TOKENCLAW_HAIKU_SUMMARY_MIN_REQUEST_CHARS",
+        "TOKENCLAW_HAIKU_SUMMARY_MIN_SUMMARIZED_CHARS",
+        "TOKENCLAW_HAIKU_SUMMARY_MAX_TURNS",
+        "TOKENCLAW_HAIKU_SUMMARY_KEEP_RECENT_TURNS",
+        "TOKENCLAW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS",
+        "TOKENCLAW_HAIKU_SUMMARY_MAX_SOURCE_CHARS",
+        "TOKENCLAW_MANAGED_RECOMMENDATIONS",
+        "TOKENCLAW_RECOMMENDATION_ENABLED",
+        "TOKENCLAW_RECOMMENDATIONS_ENABLED",
+        "TOKENCLAW_RECOMMENDATION_SERVER_URL",
+        "TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS",
+        "TOKENCLAW_MANAGED_API_KEY",
+        "TOKENCLAW_OLD_CONTEXT_SUMMARY_FIXTURE_REAL_MODEL",
+        "TOKENCLAW_OLD_CONTEXT_SUMMARY_FIXTURE_URL",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_VERSION",
@@ -109,7 +109,7 @@ old_context_summarization:
                     "role": "user",
                     "content": (
                         "OFFLINE_FIXTURE_SECRET_A must never leave metadata. "
-                        "Durable constraint: edit /repo/src/agentflow_summary.py only. "
+                        "Durable constraint: edit /repo/src/tokenclaw_summary.py only. "
                         "Unresolved TODO: keep the fixtures offline. "
                     )
                     * 30,
@@ -117,7 +117,7 @@ old_context_summarization:
                 {
                     "role": "assistant",
                     "content": (
-                        "Decision: preserve the path /repo/src/agentflow_summary.py "
+                        "Decision: preserve the path /repo/src/tokenclaw_summary.py "
                         "and the offline-only TODO in later turns. "
                     )
                     * 30,
@@ -128,11 +128,11 @@ old_context_summarization:
         }
 
     async def _synthetic_fixture_fetch(self, summary_request):
-        if os.getenv("AGENTFLOW_OLD_CONTEXT_SUMMARY_FIXTURE_REAL_MODEL") == "1":
+        if os.getenv("TOKENCLAW_OLD_CONTEXT_SUMMARY_FIXTURE_REAL_MODEL") == "1":
             return await self._real_fixture_fetch(summary_request)
         return {
             "summary": (
-                "Keep /repo/src/agentflow_summary.py. "
+                "Keep /repo/src/tokenclaw_summary.py. "
                 "Unresolved TODO: keep the fixtures offline."
             ),
             "summary_input_tokens": 100,
@@ -142,10 +142,10 @@ old_context_summarization:
         }
 
     async def _real_fixture_fetch(self, summary_request):
-        url = os.getenv("AGENTFLOW_OLD_CONTEXT_SUMMARY_FIXTURE_URL")
+        url = os.getenv("TOKENCLAW_OLD_CONTEXT_SUMMARY_FIXTURE_URL")
         api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")
         if not url or not api_key:
-            self.skipTest("real summary fixture requires AGENTFLOW_OLD_CONTEXT_SUMMARY_FIXTURE_URL and an Anthropic API key")
+            self.skipTest("real summary fixture requires TOKENCLAW_OLD_CONTEXT_SUMMARY_FIXTURE_URL and an Anthropic API key")
         import httpx
 
         headers = {
@@ -228,7 +228,7 @@ old_context_summarization:
         self.assertEqual(meta["status"], "applied")
         self.assertEqual(meta["reason"], "summary-created")
         self.assertEqual(meta["eligible_turns"], 2)
-        self.assertIn("/repo/src/agentflow_summary.py", summarized["system"][0]["text"])
+        self.assertIn("/repo/src/tokenclaw_summary.py", summarized["system"][0]["text"])
         self.assertIn("Unresolved TODO: keep the fixtures offline.", summarized["system"][0]["text"])
         self.assertIn("RECENT_USER_TOKEN", rendered)
         self.assertIn("RECENT_ASSISTANT_TOKEN", rendered)
@@ -321,7 +321,7 @@ old_context_summarization:
     def test_fixture_metadata_and_managed_event_do_not_include_raw_context_or_summary(self):
         manual = self._load_manual_crunch(self._summary_rules(keep_recent_turns=2, max_summary_chars=180))
         body = self._durable_non_tool_body()
-        store = Store(str(Path.cwd() / "agentflow.sqlite3"))
+        store = Store(str(Path.cwd() / "tokenclaw.sqlite3"))
 
         summarized, meta = asyncio.run(manual.maybe_summarize_old_context(
             body,
@@ -355,7 +355,7 @@ old_context_summarization:
         rendered_event = stable_json(event)
         for forbidden in (
             "OFFLINE_FIXTURE_SECRET_A",
-            "Keep /repo/src/agentflow_summary.py",
+            "Keep /repo/src/tokenclaw_summary.py",
             "Unresolved TODO: keep the fixtures offline.",
             stable_json(body),
             stable_json(summarized),
@@ -376,7 +376,7 @@ old_context_summarization:
         body = self._durable_non_tool_body()
         raw_forbidden = (
             "OFFLINE_FIXTURE_SECRET_A",
-            "/repo/src/agentflow_summary.py",
+            "/repo/src/tokenclaw_summary.py",
             "RAW_PROVIDER_BODY_SECRET",
             "RAW_GENERATED_SUMMARY_SECRET",
             "cache-key-old-context-secret",
@@ -441,7 +441,7 @@ old_context_summarization:
             self._assert_feedback_metadata_only(feedback, raw_forbidden)
 
         os.chdir(self.home.name)
-        with patch.dict(os.environ, {"AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT": "0"}):
+        with patch.dict(os.environ, {"TOKENCLAW_HAIKU_SUMMARIZE_OLD_CONTEXT": "0"}):
             default_manual = importlib.reload(crunch_module)
         managed_profile = {
             "policy_source": "managed-recommended",
@@ -537,7 +537,7 @@ old_context_summarization:
         payload = cli._old_context_summary_lifecycle_payload(
             "dry-run",
             {
-                "schema": "agentflow.old_context_summary_dry_run.v1",
+                "schema": "tokenclaw.old_context_summary_dry_run.v1",
                 "ok": True,
                 "dry_run": True,
                 "read_only": True,

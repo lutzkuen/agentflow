@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from tokenclaw.paths import agentflow_config_path, safe_expanduser
+from tokenclaw.paths import tokenclaw_config_path, safe_expanduser
 
 
 def utc_now() -> str:
@@ -81,8 +81,8 @@ def policy_file_status(
     }
 
 
-POLICY_DRAFT_SCHEMA = "agentflow.policy_draft.v1"
-POLICY_DRAFT_STAGE_SCHEMA = "agentflow.policy_draft_stage.v1"
+POLICY_DRAFT_SCHEMA = "tokenclaw.policy_draft.v1"
+POLICY_DRAFT_STAGE_SCHEMA = "tokenclaw.policy_draft_stage.v1"
 POLICY_DRAFT_SECTIONS = (
     "routing",
     "crunch",
@@ -173,7 +173,7 @@ def _safe_draft_id(value: str | None, payload: Any) -> str:
 def _draft_workspace_root(path: str | Path | None = None) -> Path:
     if path is not None:
         return safe_expanduser(path)
-    return agentflow_config_path("policy_drafts")
+    return tokenclaw_config_path("policy_drafts")
 
 
 def _json_clone(value: Any) -> Any:
@@ -211,7 +211,7 @@ def parse_policy_payload(raw: str, *, path: str = "$") -> tuple[Any | None, dict
         parsed = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
         return None, {
-            "schema": "agentflow.policy_payload_parse_error.v1",
+            "schema": "tokenclaw.policy_payload_parse_error.v1",
             "ok": False,
             "errors": [{"path": path, "message": f"invalid YAML/JSON: {exc}"}],
         }

@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 
-PROMPT_DIFFICULTY_FEATURE_SCHEMA = "agentflow.prompt_difficulty_features.v1"
+PROMPT_DIFFICULTY_FEATURE_SCHEMA = "tokenclaw.prompt_difficulty_features.v1"
 
 _WORD_RE = re.compile(r"[a-z0-9_]+(?:[-'][a-z0-9_]+)?", re.IGNORECASE)
 _QUESTION_RE = re.compile(r"\?")

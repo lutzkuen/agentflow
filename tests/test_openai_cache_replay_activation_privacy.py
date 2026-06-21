@@ -78,7 +78,7 @@ _CANDIDATE_ID = "activation-cache-replay-candidate"
 
 def _canary_meta(*, cohort: str = "canary_applied", selected: bool = True) -> dict:
     return {
-        "schema": "agentflow.pattern_canary_decision.v1",
+        "schema": "tokenclaw.pattern_canary_decision.v1",
         "enabled": True,
         "selected": selected,
         "cohort": cohort,
@@ -129,7 +129,7 @@ def _raw_like_extra() -> dict:
 class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -217,7 +217,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
 
     def _activation_health(self) -> dict:
         result = asyncio.run(stats_cache_replay_activation_health(self.store, limit=50, scan_limit=500))
-        self.assertEqual(result["schema"], "agentflow.cache_replay_activation_health.v1")
+        self.assertEqual(result["schema"], "tokenclaw.cache_replay_activation_health.v1")
         self.assertTrue(result["read_only"])
         privacy = result["privacy"]
         self.assertFalse(privacy["raw_prompts_included"])
@@ -240,7 +240,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
     def test_stable_dependency_replay_hit_is_metadata_only(self) -> None:
         rule = _pattern_rule()
         replay_canary = {
-            "schema": "agentflow.cache_replay_canary_decision.v1",
+            "schema": "tokenclaw.cache_replay_canary_decision.v1",
             "rule_id": _RULE_ID,
             "candidate_id": _CANDIDATE_ID,
             "policy_source": "managed-recommended",
@@ -278,7 +278,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
                     "skip_reasons": [{**holdout_rule}],
                 },
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": _RULE_ID,
                     "candidate_id": _CANDIDATE_ID,
                     "status": "holdout",
@@ -342,7 +342,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
     def test_stale_dependency_bypass_activation_state_is_hold(self) -> None:
         rule = _pattern_rule(cohort="canary_applied", reason="dependency-changed")
         dep_audit = {
-            "schema": "agentflow.cache_file_dependency_audit.v1",
+            "schema": "tokenclaw.cache_file_dependency_audit.v1",
             "file_watch_enabled": True,
             "snapshot_root_policy": "stored-local-paths",
             "root_path_included": False,
@@ -363,7 +363,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
                 "pattern_rule": rule,
                 "file_dependency_audit": dep_audit,
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": _RULE_ID,
                     "candidate_id": _CANDIDATE_ID,
                     "status": "invalidated",
@@ -426,7 +426,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
     def test_missing_dependency_evidence_fails_closed(self) -> None:
         rule = _pattern_rule(cohort="canary_applied", reason="file-dependency-missing")
         missing_audit = {
-            "schema": "agentflow.cache_file_dependency_audit.v1",
+            "schema": "tokenclaw.cache_file_dependency_audit.v1",
             "file_watch_enabled": True,
             "snapshot_root_policy": "stored-local-paths",
             "root_path_included": False,
@@ -448,7 +448,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
                 "pattern_rule": rule,
                 "file_dependency_audit": missing_audit,
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": _RULE_ID,
                     "candidate_id": _CANDIDATE_ID,
                     "status": "bypassed",
@@ -494,7 +494,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
                     "sse": {"raw_activation_sse_data_secret": "raw-activation-sse-data-secret"},
                 },
                 "cache_replay_canary": {
-                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
                     "rule_id": _RULE_ID,
                     "candidate_id": _CANDIDATE_ID,
                     "status": "bypassed",
@@ -603,7 +603,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
                         "skip_reasons": [{**holdout_rule}],
                     },
                     "cache_replay_canary": {
-                        "schema": "agentflow.cache_replay_canary_decision.v1",
+                        "schema": "tokenclaw.cache_replay_canary_decision.v1",
                         "rule_id": _RULE_ID,
                         "candidate_id": _CANDIDATE_ID,
                         "status": "holdout",
@@ -746,7 +746,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
                 cache_extra={
                     "pattern_rule": rule,
                     "cache_replay_canary": {
-                        "schema": "agentflow.cache_replay_canary_decision.v1",
+                        "schema": "tokenclaw.cache_replay_canary_decision.v1",
                         "rule_id": _RULE_ID,
                         "candidate_id": _CANDIDATE_ID,
                         "status": "applied",
@@ -864,7 +864,7 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
     def test_dashboard_cache_replay_activation_health_endpoint_privacy(self) -> None:
         rule = _pattern_rule()
         replay_canary = {
-            "schema": "agentflow.cache_replay_canary_decision.v1",
+            "schema": "tokenclaw.cache_replay_canary_decision.v1",
             "rule_id": _RULE_ID,
             "candidate_id": _CANDIDATE_ID,
             "status": "applied",
@@ -918,11 +918,11 @@ class DependencyAwareCacheReplayActivationPrivacyTest(unittest.TestCase):
             },
         )
         client = TestClient(app, raise_server_exceptions=True)
-        response = client.get("/agentflow/stats/cache-replay-activation-health?limit=50&scan_limit=500")
+        response = client.get("/tokenclaw/stats/cache-replay-activation-health?limit=50&scan_limit=500")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
 
-        self.assertEqual(payload["schema"], "agentflow.cache_replay_activation_health.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.cache_replay_activation_health.v1")
         self.assertTrue(payload["read_only"])
 
         privacy = payload["privacy"]

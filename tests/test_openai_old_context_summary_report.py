@@ -20,7 +20,7 @@ from tokenclaw.store import SQLiteStore, stable_json, utc_now
 class OpenAIOldContextSummaryReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -38,7 +38,7 @@ class OpenAIOldContextSummaryReportTests(unittest.TestCase):
         older_bucket: str = "32k_128k_chars",
     ) -> dict[str, object]:
         return {
-            "schema": "agentflow.openai_feature_summary.v1",
+            "schema": "tokenclaw.openai_feature_summary.v1",
             "provider": "openai",
             "source_surface": source_surface,
             "endpoint": endpoint,
@@ -167,7 +167,7 @@ class OpenAIOldContextSummaryReportTests(unittest.TestCase):
         reason_codes: list[str] | None = None,
     ) -> dict[str, object]:
         meta: dict[str, object] = {
-            "schema": "agentflow.openai_old_context_summary.v1",
+            "schema": "tokenclaw.openai_old_context_summary.v1",
             "enabled": enabled,
             "status": status,
             "applied": status == "applied",
@@ -262,7 +262,7 @@ class OpenAIOldContextSummaryReportTests(unittest.TestCase):
             summary_model="gpt-5-mini",
         )
 
-        self.assertEqual(result["schema"], "agentflow.openai_old_context_summary_opportunity.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_old_context_summary_opportunity.v1")
         self.assertEqual(result["summary"]["openai_call_count"], 4)
         self.assertEqual(result["summary"]["feature_row_count"], 3)
         self.assertEqual(result["summary"]["openai_old_context_summary_metadata_row_count"], 0)
@@ -322,9 +322,9 @@ class OpenAIOldContextSummaryReportTests(unittest.TestCase):
     def test_stats_wrapper_and_cli_emit_report(self) -> None:
         self._log_openai_call()
 
-        with mock.patch.dict(os.environ, {"AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED": "1"}):
+        with mock.patch.dict(os.environ, {"TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED": "1"}):
             result = asyncio.run(stats_openai_old_context_summary_report(self.store, limit=10))
-            self.assertEqual(result["schema"], "agentflow.openai_old_context_summary_opportunity.v1")
+            self.assertEqual(result["schema"], "tokenclaw.openai_old_context_summary_opportunity.v1")
 
             output = io.StringIO()
             exit_code = cli.openai_old_context_summary_report_cli(
@@ -334,7 +334,7 @@ class OpenAIOldContextSummaryReportTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.openai_old_context_summary_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_old_context_summary_opportunity.v1")
         self.assertEqual(payload["summary"]["openai_call_count"], 1)
         self.assertNotIn("secret-openai-session", output.getvalue())
 

@@ -12,7 +12,7 @@ from typing import Any, Callable
 import yaml
 
 from tokenclaw.crunch import build_embedding, sha256_text
-from tokenclaw.paths import agentflow_config_path
+from tokenclaw.paths import tokenclaw_config_path
 from tokenclaw.policy_files import policy_file_snapshot, utc_now
 from tokenclaw.store import cosine_similarity, stable_json
 
@@ -277,7 +277,7 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / filename)
-    candidates.append(agentflow_config_path(filename))
+    candidates.append(tokenclaw_config_path(filename))
     return candidates
 
 
@@ -442,7 +442,7 @@ def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str
 
 
 def _load_experiment_policy() -> tuple[dict[str, Any], str, str]:
-    for path in _manual_rule_candidates("routing_experiments.yaml", "AGENTFLOW_ROUTING_EXPERIMENTS"):
+    for path in _manual_rule_candidates("routing_experiments.yaml", "TOKENCLAW_ROUTING_EXPERIMENTS"):
         if not path.exists():
             continue
         with open(path, encoding="utf-8") as f:
@@ -458,22 +458,22 @@ def _load_experiment_policy() -> tuple[dict[str, Any], str, str]:
         if isinstance(data, dict):
             policy = _apply_policy_yaml(policy, data)
 
-    policy["enabled"] = os.getenv("AGENTFLOW_ROUTING_EXPERIMENTS_ENABLED", "1" if policy["enabled"] else "0") != "0"
+    policy["enabled"] = os.getenv("TOKENCLAW_ROUTING_EXPERIMENTS_ENABLED", "1" if policy["enabled"] else "0") != "0"
     policy["kill_switch"] = os.getenv(
-        "AGENTFLOW_ROUTING_EXPERIMENT_KILL_SWITCH",
+        "TOKENCLAW_ROUTING_EXPERIMENT_KILL_SWITCH",
         "1" if policy.get("kill_switch") else "0",
     ) != "0"
     policy["sample_rate"] = max(
         0.0,
-        min(1.0, float(os.getenv("AGENTFLOW_ROUTING_EXPERIMENT_SAMPLE_RATE", str(policy["sample_rate"])))),
+        min(1.0, float(os.getenv("TOKENCLAW_ROUTING_EXPERIMENT_SAMPLE_RATE", str(policy["sample_rate"])))),
     )
     policy["daily_budget_usd"] = max(
         0.0,
-        float(os.getenv("AGENTFLOW_ROUTING_EXPERIMENT_DAILY_BUDGET_USD", str(policy["daily_budget_usd"]))),
+        float(os.getenv("TOKENCLAW_ROUTING_EXPERIMENT_DAILY_BUDGET_USD", str(policy["daily_budget_usd"]))),
     )
     policy["similarity_threshold"] = max(
         0.0,
-        min(1.0, float(os.getenv("AGENTFLOW_ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD", str(policy["similarity_threshold"])))),
+        min(1.0, float(os.getenv("TOKENCLAW_ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD", str(policy["similarity_threshold"])))),
     )
     return policy, "local-default", str(defaults_path)
 
@@ -494,7 +494,7 @@ ROUTING_PROMOTION_MIN_COMPARED_COVERAGE = 0.80
 ROUTING_PROMOTION_MIN_PASS_RATE = 0.90
 ROUTING_PROMOTION_MAX_SHADOW_ERROR_RATE = 0.05
 ROUTING_PROMOTION_MAX_PRIMARY_ERROR_RATE = 0.05
-ROUTING_PROMOTION_SCHEMA = "agentflow.routing_experiment_promotion_verdict.v1"
+ROUTING_PROMOTION_SCHEMA = "tokenclaw.routing_experiment_promotion_verdict.v1"
 
 
 def _override_matches(
@@ -979,7 +979,7 @@ def routing_experiment_decision(
     budget_remaining = max(0.0, budget_limit - budget_spent)
 
     meta = {
-        "schema": "agentflow.routing_experiment_decision.v1",
+        "schema": "tokenclaw.routing_experiment_decision.v1",
         "enabled": ROUTING_EXPERIMENT_ENABLED,
         "mode": mode,
         "kill_switch": bool(ROUTING_EXPERIMENT_POLICY.get("kill_switch")),
@@ -1396,7 +1396,7 @@ def routing_experiment_feedback_features(
     if compared and comparison.get("passed_threshold"):
         reason_codes.append("passed")
     return {
-        "schema": "agentflow.routing_experiment_feedback.v1",
+        "schema": "tokenclaw.routing_experiment_feedback.v1",
         "experiment_id": experiment_id,
         "sampled": bool(experiment_meta.get("sampled")),
         "mode": experiment_meta.get("mode") or "applied_routed_down",
@@ -1477,7 +1477,7 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
         if item is not None
     ]
     event = {
-        "schema": "agentflow.routing_experiment_outcome_event.v1",
+        "schema": "tokenclaw.routing_experiment_outcome_event.v1",
         "event_type": "routing_experiment_outcome",
         "generated_at": utc_now(),
         "source_surface": source_surface,
@@ -1486,7 +1486,7 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
         "workflow_phase": feedback_features.get("workflow_phase") or "unknown",
         "category": feedback_features.get("category") or "unknown",
         "candidate": {
-            "schema": "agentflow.routing_experiment_candidate.v1",
+            "schema": "tokenclaw.routing_experiment_candidate.v1",
             "mode": mode,
             "counterfactual": counterfactual,
             "shadow_only": shadow_only,
@@ -1503,7 +1503,7 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
             "shadow_model_family": shadow_family,
         },
         "outcome": {
-            "schema": "agentflow.routing_experiment_outcome_summary.v1",
+            "schema": "tokenclaw.routing_experiment_outcome_summary.v1",
             "mode": mode,
             "counterfactual": counterfactual,
             "shadow_only": shadow_only,
@@ -1524,7 +1524,7 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
         },
         "reason_codes": reason_codes,
         "routing": {
-            "schema": "agentflow.routing_experiment_routing_basis.v1",
+            "schema": "tokenclaw.routing_experiment_routing_basis.v1",
             "routing_reason": feedback_features.get("routing_reason"),
         },
         "privacy": {
@@ -1832,7 +1832,7 @@ def _build_shadow_eligibility_projection(conn: Any) -> dict[str, Any]:
         if item["provider"] == "anthropic" and item["source_surface"] == "anthropic_messages" and item["stream"]
     ]
     return {
-        "schema": "agentflow.routing_experiment_eligibility_projection.v1",
+        "schema": "tokenclaw.routing_experiment_eligibility_projection.v1",
         "observed_window_limit": 5000,
         "global_min_text_chars": global_min,
         "global_max_text_chars": global_max,
@@ -2232,7 +2232,7 @@ def build_post_fix_shadow_yield_report(
         )
     )
     return {
-        "schema": "agentflow.post_fix_shadow_yield.v1",
+        "schema": "tokenclaw.post_fix_shadow_yield.v1",
         "generated_at": utc_now(),
         "read_only": True,
         "provider_calls_made": False,
@@ -2570,7 +2570,7 @@ def _build_claude_shadow_yield_report(
         _increment_count(promotion_freshness_counts, freshness, fallback="unknown")
 
     return {
-        "schema": "agentflow.claude_shadow_routing_yield.v1",
+        "schema": "tokenclaw.claude_shadow_routing_yield.v1",
         "provider": provider,
         "source_surface": source_surface,
         "observed_window_limit": max(1, int(observed_limit)),
@@ -2953,7 +2953,7 @@ def build_routing_experiment_report(
         limit=limit,
     )
     return {
-        "schema": "agentflow.routing_experiment_report.v1",
+        "schema": "tokenclaw.routing_experiment_report.v1",
         "generated_at": utc_now(),
         "policy": {
             "profile_id": str(ROUTING_EXPERIMENT_POLICY.get("profile_id") or ""),

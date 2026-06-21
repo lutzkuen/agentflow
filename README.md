@@ -341,7 +341,7 @@ Run the OpenAI-compatible proxy directly:
 tokenclaw-proxy --provider openai --openai-auth-mode proxy --host 127.0.0.1 --port 4003
 ```
 
-`--openai-auth-mode proxy` means TokenClaw uses `AGENTFLOW_OPENAI_API_KEY` or
+`--openai-auth-mode proxy` means TokenClaw uses `TOKENCLAW_OPENAI_API_KEY` or
 `OPENAI_API_KEY` from the proxy environment when forwarding upstream. Use
 `--openai-auth-mode client` if you want each client request's `Authorization`
 header to be forwarded.
@@ -394,7 +394,7 @@ The dashboard tells you:
 ## Codex traffic
 
 Codex API-key traffic uses the OpenAI-compatible local proxy through `tokenclaw activate codex`.
-For OAuth/subscription unattended worker runs, use direct Codex execution (`AGENTFLOW_CODEX_TRANSPORT=exec`).
+For OAuth/subscription unattended worker runs, use direct Codex execution (`TOKENCLAW_CODEX_TRANSPORT=exec`).
 The previous experimental Codex app-server relay on ports 4013 and 4014 has been retired.
 
 Inspect recent Codex/OpenAI-compatible traffic through normal stats and dashboard commands:
@@ -410,7 +410,7 @@ tokenclaw stats
 - Enable raw body logging only for local debugging:
 
 ```bash
-export AGENTFLOW_LOG_BODIES=1
+export TOKENCLAW_LOG_BODIES=1
 ```
 
 - Keep proxy ports on `127.0.0.1` unless you add your own network/auth boundary.
@@ -422,28 +422,28 @@ export AGENTFLOW_LOG_BODIES=1
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `AGENTFLOW_DB` | `~/.tokenclaw/tokenclaw.sqlite3` | Local SQLite metadata DB |
-| `AGENTFLOW_DATABASE_URL` | unset | Use Postgres instead of SQLite |
-| `AGENTFLOW_CACHE` | `1` | Enable exact local cache where safe |
-| `AGENTFLOW_CACHE_TOOL_CALLS` | `0` | Cache tool-call requests only if you accept the risk |
-| `AGENTFLOW_ROUTING` | `1` | Enable local model routing |
-| `AGENTFLOW_LOG_BODIES` | `0` | Store raw request/response bodies |
-| `AGENTFLOW_HOST` | `0.0.0.0` | Proxy host default |
-| `AGENTFLOW_PORT` | `4000` | Proxy port default |
-| `AGENTFLOW_DASHBOARD_HOST` | `0.0.0.0` | Standalone dashboard host |
-| `AGENTFLOW_DASHBOARD_PORT` | `4002` | Standalone dashboard port |
-| `AGENTFLOW_RECOMMENDATIONS_ENABLED` | `0` | Enable metadata-only managed recommendation calls |
-| `AGENTFLOW_RECOMMENDATION_SERVER_URL` | unset | Managed optimizer URL for recommendation and policy-decision calls |
-| `AGENTFLOW_POLICY_DECISIONS_ENABLED` | `0` | Use managed `/v1/policy-decision` responses for local actions |
-| `AGENTFLOW_POLICY_DECISION_MIN_CONFIDENCE` | `0.75` | Minimum managed routing confidence before local apply |
-| `AGENTFLOW_POLICY_DECISION_CANARY_FRACTION` | `0.0` | Fraction of eligible managed routing decisions to apply |
-| `AGENTFLOW_MANAGED_API_KEY` | unset | Bearer token for non-loopback managed servers |
+| `TOKENCLAW_DB` | `~/.tokenclaw/tokenclaw.sqlite3` | Local SQLite metadata DB |
+| `TOKENCLAW_DATABASE_URL` | unset | Use Postgres instead of SQLite |
+| `TOKENCLAW_CACHE` | `1` | Enable exact local cache where safe |
+| `TOKENCLAW_CACHE_TOOL_CALLS` | `0` | Cache tool-call requests only if you accept the risk |
+| `TOKENCLAW_ROUTING` | `1` | Enable local model routing |
+| `TOKENCLAW_LOG_BODIES` | `0` | Store raw request/response bodies |
+| `TOKENCLAW_HOST` | `0.0.0.0` | Proxy host default |
+| `TOKENCLAW_PORT` | `4000` | Proxy port default |
+| `TOKENCLAW_DASHBOARD_HOST` | `0.0.0.0` | Standalone dashboard host |
+| `TOKENCLAW_DASHBOARD_PORT` | `4002` | Standalone dashboard port |
+| `TOKENCLAW_RECOMMENDATIONS_ENABLED` | `0` | Enable metadata-only managed recommendation calls |
+| `TOKENCLAW_RECOMMENDATION_SERVER_URL` | unset | Managed optimizer URL for recommendation and policy-decision calls |
+| `TOKENCLAW_POLICY_DECISIONS_ENABLED` | `0` | Use managed `/v1/policy-decision` responses for local actions |
+| `TOKENCLAW_POLICY_DECISION_MIN_CONFIDENCE` | `0.75` | Minimum managed routing confidence before local apply |
+| `TOKENCLAW_POLICY_DECISION_CANARY_FRACTION` | `0.0` | Fraction of eligible managed routing decisions to apply |
+| `TOKENCLAW_MANAGED_API_KEY` | unset | Bearer token for non-loopback managed servers |
 
-For local managed-server development, set `AGENTFLOW_RECOMMENDATION_SERVER_URL=http://127.0.0.1:4100`.
-That URL is treated as loopback-only and does not require `AGENTFLOW_MANAGED_API_KEY`.
+For local managed-server development, set `TOKENCLAW_RECOMMENDATION_SERVER_URL=http://127.0.0.1:4100`.
+That URL is treated as loopback-only and does not require `TOKENCLAW_MANAGED_API_KEY`.
 Remote managed servers still require an API key. Managed calls send derived
 feature metadata only; provider request bodies stay local. The legacy singular
-switches `AGENTFLOW_RECOMMENDATION_ENABLED` and `AGENTFLOW_POLICY_DECISION_ENABLED`
+switches `TOKENCLAW_RECOMMENDATION_ENABLED` and `TOKENCLAW_POLICY_DECISION_ENABLED`
 are still accepted for existing installations.
 
 ## Local cache rules
@@ -451,7 +451,7 @@ are still accepted for existing installations.
 Cache policy is loaded from the first existing path in this order:
 
 ```text
-AGENTFLOW_CACHE_RULES
+TOKENCLAW_CACHE_RULES
 config/cache_rules.yaml
 ~/.tokenclaw/cache_rules.yaml
 bundled tokenclaw/cache_rules.yaml

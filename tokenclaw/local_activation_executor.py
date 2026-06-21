@@ -13,15 +13,15 @@ from tokenclaw.managed_egress import managed_egress_violations
 from tokenclaw.public_metadata import public_id
 
 
-SCHEMA = "agentflow.local_activation_executor_plan.v1"
-ENTRY_SCHEMA = "agentflow.local_activation_executor_plan_entry.v1"
-PRIVACY_SCHEMA = "agentflow.local_activation_executor_privacy.v1"
-HANDOFF_SCHEMA = "agentflow.local_activation_managed_handoff.v1"
-HANDOFF_ROW_SCHEMA = "agentflow.local_activation_managed_handoff_row.v1"
-HANDOFF_PRIVACY_SCHEMA = "agentflow.local_activation_managed_handoff_privacy.v1"
-PREVIEW_REQUEST_SCHEMA = "agentflow.managed_activation_preview_request.v1"
-PREVIEW_RESULT_SCHEMA = "agentflow.managed_activation_preview_result.v1"
-PREVIEW_DECISION_SCHEMA = "agentflow.managed_activation_preview_decision.v1"
+SCHEMA = "tokenclaw.local_activation_executor_plan.v1"
+ENTRY_SCHEMA = "tokenclaw.local_activation_executor_plan_entry.v1"
+PRIVACY_SCHEMA = "tokenclaw.local_activation_executor_privacy.v1"
+HANDOFF_SCHEMA = "tokenclaw.local_activation_managed_handoff.v1"
+HANDOFF_ROW_SCHEMA = "tokenclaw.local_activation_managed_handoff_row.v1"
+HANDOFF_PRIVACY_SCHEMA = "tokenclaw.local_activation_managed_handoff_privacy.v1"
+PREVIEW_REQUEST_SCHEMA = "tokenclaw.managed_activation_preview_request.v1"
+PREVIEW_RESULT_SCHEMA = "tokenclaw.managed_activation_preview_result.v1"
+PREVIEW_DECISION_SCHEMA = "tokenclaw.managed_activation_preview_decision.v1"
 
 SAFE_SELECTABLE_CLASSES = {"draft-local-policy", "review-only", "retire"}
 SUPPORTED_PREVIEW_LOCAL_ACTION_FAMILIES = ["routing", "crunch", "cache", "activation-feedback"]
@@ -89,16 +89,16 @@ def _handoff_privacy() -> dict[str, Any]:
 
 def _input_to_burndown(source: dict[str, Any], *, now: datetime | None) -> dict[str, Any]:
     schema = str(source.get("schema") or "")
-    if schema == "agentflow.activation_burndown.v1":
+    if schema == "tokenclaw.activation_burndown.v1":
         return source
-    if schema == "agentflow.local_activation_next_action_queue.v1":
+    if schema == "tokenclaw.local_activation_next_action_queue.v1":
         source = {
-            "schema": "agentflow.orchestrator_research_plan.v1",
+            "schema": "tokenclaw.orchestrator_research_plan.v1",
             "evidence": {"stats_summary": {"local_activation_next_action_queue": source}},
         }
-    elif schema == "agentflow.evidence_to_activation_next_action_ledger.v1":
+    elif schema == "tokenclaw.evidence_to_activation_next_action_ledger.v1":
         source = {
-            "schema": "agentflow.orchestrator_research_plan.v1",
+            "schema": "tokenclaw.orchestrator_research_plan.v1",
             "evidence": {"stats_summary": {"evidence_to_activation_next_action_ledger": source}},
         }
     return build_activation_burndown_report(source, now=now)
@@ -697,7 +697,7 @@ def build_local_activation_executor_managed_handoff(
     result = sanitize_value(result)
     violations = managed_egress_violations(result)
     result["egress_guard"] = {
-        "schema": "agentflow.managed_egress_guard.v1",
+        "schema": "tokenclaw.managed_egress_guard.v1",
         "status": "passed" if not violations else "blocked",
         "blocked": bool(violations),
         "violation_count": len(violations),
@@ -763,7 +763,7 @@ def build_managed_activation_preview_request(
     result = sanitize_value(result)
     violations = managed_egress_violations(result)
     result["egress_guard"] = {
-        "schema": "agentflow.managed_egress_guard.v1",
+        "schema": "tokenclaw.managed_egress_guard.v1",
         "status": "passed" if not violations else "blocked",
         "blocked": bool(violations),
         "violation_count": len(violations),
@@ -910,12 +910,12 @@ def build_managed_activation_preview_result(
             "managed_server_calls_made": False,
         }),
         "preview": {
-            "schema": "agentflow.managed_activation_preview_decisions.v1",
+            "schema": "tokenclaw.managed_activation_preview_decisions.v1",
             "decision_count": len(decisions),
             "decisions": decisions,
         },
         "coverage": {
-            "schema": "agentflow.managed_activation_preview_coverage.v1",
+            "schema": "tokenclaw.managed_activation_preview_coverage.v1",
             "handoff_row_count": len(rows),
             "preview_decision_count": len(decisions),
             "matched_handoff_ref_count": len(matched_refs),
@@ -953,7 +953,7 @@ def build_managed_activation_preview_result(
     result = sanitize_value(result)
     violations = managed_egress_violations(result)
     result["egress_guard"] = {
-        "schema": "agentflow.managed_egress_guard.v1",
+        "schema": "tokenclaw.managed_egress_guard.v1",
         "status": "passed" if not violations else "blocked",
         "blocked": bool(violations),
         "violation_count": len(violations),

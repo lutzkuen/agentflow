@@ -11,7 +11,7 @@ from tokenclaw.pricing import estimate_cost
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.repeated_scaffold_opportunity.v1"
+SCHEMA = "tokenclaw.repeated_scaffold_opportunity.v1"
 TOKEN_CHARS = 4
 MIN_LINE_CHARS = 48
 MIN_SEGMENT_CHARS = 220
@@ -578,7 +578,7 @@ def build_repeated_scaffold_opportunity_report(
             "projected_saved_usd": round(sum(_as_float(item.get("projected_saved_usd")) for item in candidates), 6),
         },
         "projection_policy": {
-            "schema": "agentflow.repeated_scaffold_projection_policy.v1",
+            "schema": "tokenclaw.repeated_scaffold_projection_policy.v1",
             "provider_calls_made": False,
             "managed_server_calls_made": False,
             "raw_body_required": False,

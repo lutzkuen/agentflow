@@ -17,7 +17,7 @@ from tokenclaw.store import SQLiteStore, stable_json, utc_now
 class OpenAIRoutingReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -203,7 +203,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
 
         result = build_openai_routing_report(self.store, limit=50)
 
-        self.assertEqual(result["schema"], "agentflow.openai_routing_opportunity.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_routing_opportunity.v1")
         self.assertEqual(result["summary"]["openai_call_count"], 14)
         self.assertGreaterEqual(result["summary"]["candidate_count"], 2)
         self.assertEqual(result["summary"]["current_routed_count"], 0)
@@ -342,7 +342,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(candidate["target_model"], "gpt-5.4-mini")
         self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
         lifecycle = candidate["openai_canary_lifecycle_evidence"]
-        self.assertEqual(lifecycle["schema"], "agentflow.openai_routing_canary_lifecycle_evidence.v1")
+        self.assertEqual(lifecycle["schema"], "tokenclaw.openai_routing_canary_lifecycle_evidence.v1")
         self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 3)
         self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 2)
         self.assertEqual(lifecycle["cohort_counts"]["safety_stopped"], 1)
@@ -691,13 +691,13 @@ class OpenAIRoutingReportTests(unittest.TestCase):
 
         result = build_openai_routing_promotion_decision_report(self.store, limit=20)
 
-        self.assertEqual(result["schema"], "agentflow.openai_routing_promotion_decision_report.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_routing_promotion_decision_report.v1")
         self.assertEqual(result["decision"], "active-local-policy")
         self.assertFalse(result["promotion_ready"])
         self.assertEqual(result["summary"]["decision_count"], 1)
         self.assertEqual(len(result["decisions"]), 1)
         decision = result["promotion_decision"]
-        self.assertEqual(decision["schema"], "agentflow.openai_routing_promotion_decision.v1")
+        self.assertEqual(decision["schema"], "tokenclaw.openai_routing_promotion_decision.v1")
         self.assertEqual(decision["decision"], "active-local-policy")
         self.assertEqual(decision["promotion_verdict"], "active-local-policy")
         self.assertEqual(
@@ -740,13 +740,13 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(active["target_local_policy_section"], "routing.rules")
         self.assertEqual(active["target_local_rule_file"], "routing_rules.yaml")
         rollback = decision["rollback_metadata"]
-        self.assertEqual(rollback["schema"], "agentflow.openai_routing_promotion_rollback_metadata.v1")
+        self.assertEqual(rollback["schema"], "tokenclaw.openai_routing_promotion_rollback_metadata.v1")
         self.assertEqual(rollback["rollback_action_type"], "disable_openai_routing_rule")
         self.assertTrue(rollback["required_for_promotion"])
         self.assertEqual(rollback["target_local_rule_file"], "routing_rules.yaml")
         self.assertFalse(rollback["policy_files_written"])
         suppression = decision["duplicate_suppression"]
-        self.assertEqual(suppression["schema"], "agentflow.openai_routing_promotion_duplicate_suppression.v1")
+        self.assertEqual(suppression["schema"], "tokenclaw.openai_routing_promotion_duplicate_suppression.v1")
         self.assertTrue(suppression["suppresses_generic_routing_activation_issue"])
         self.assertTrue(suppression["suppresses_new_openai_routing_promotion_issue"])
         self.assertFalse(decision["privacy"]["provider_calls_made"])
@@ -755,7 +755,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertFalse(decision["privacy"]["individual_candidate_ids_included"])
 
         outcome = decision["active_local_policy_outcome"]
-        self.assertEqual(outcome["schema"], "agentflow.openai_routing_active_local_policy_outcome.v1")
+        self.assertEqual(outcome["schema"], "tokenclaw.openai_routing_active_local_policy_outcome.v1")
         self.assertEqual(outcome["status"], "active-local-policy")
         self.assertEqual(outcome["state"], "active-local-policy")
         self.assertEqual(outcome["current_status"], "applied")
@@ -775,7 +775,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(outcome["fallback_count"], 0)
         self.assertEqual(outcome["retry_count"], 0)
         self.assertGreater(outcome["savings_per_1000_calls_usd"], 0)
-        self.assertEqual(outcome["savings_deltas"]["schema"], "agentflow.openai_routing_active_local_policy_savings_deltas.v1")
+        self.assertEqual(outcome["savings_deltas"]["schema"], "tokenclaw.openai_routing_active_local_policy_savings_deltas.v1")
         self.assertEqual(outcome["savings_deltas"]["applied_count"], 7)
         self.assertEqual(outcome["savings_deltas"]["holdout_count"], 7)
         self.assertGreater(outcome["applied_realized_savings_usd"], 0)
@@ -789,7 +789,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(outcome["regression_counters"]["retry_count"], 0)
         self.assertEqual(outcome["regression_counters"]["safety_stop_count"], 0)
         gate = outcome["outcome_gate"]
-        self.assertEqual(gate["schema"], "agentflow.openai_routing_active_local_policy_outcome_gate.v1")
+        self.assertEqual(gate["schema"], "tokenclaw.openai_routing_active_local_policy_outcome_gate.v1")
         self.assertEqual(gate["state"], "keep-active")
         self.assertEqual(gate["deterministic_next_action"], "keep-active")
         self.assertEqual(gate["decision_options"], ["keep-active", "review-stale-evidence", "rollback-required", "keep-blocked"])
@@ -798,7 +798,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertGreater(gate["savings_per_1000_calls_usd"], 0)
         self.assertFalse(gate["regression_counters"]["stale_evidence"]["stale"])
         canary_outcome = outcome["routing_canary_outcome"]
-        self.assertEqual(canary_outcome["schema"], "agentflow.openai_routing_canary_outcome.v1")
+        self.assertEqual(canary_outcome["schema"], "tokenclaw.openai_routing_canary_outcome.v1")
         self.assertEqual(canary_outcome["next_action"], "widen")
         self.assertEqual(canary_outcome["decision_options"], ["widen", "hold", "rollback", "collect_more"])
         self.assertEqual(canary_outcome["reason_codes"], ["no-regression-routing-canary"])
@@ -810,7 +810,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertFalse(canary_outcome["privacy"]["raw_prompts_included"])
         self.assertFalse(canary_outcome["privacy"]["provider_bodies_included"])
         rollback_outcome = outcome["rollback_metadata"]
-        self.assertEqual(rollback_outcome["schema"], "agentflow.openai_routing_active_local_policy_rollback_metadata.v1")
+        self.assertEqual(rollback_outcome["schema"], "tokenclaw.openai_routing_active_local_policy_rollback_metadata.v1")
         self.assertEqual(rollback_outcome["rollback_action_type"], "disable_openai_routing_rule")
         self.assertEqual(rollback_outcome["target_rule_id"], "[REDACTED_ID]")
         self.assertFalse(rollback_outcome["rule_id_included"])
@@ -841,7 +841,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.openai_routing_promotion_decision_report.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_routing_promotion_decision_report.v1")
         self.assertEqual(payload["decision"], "active-local-policy")
         self.assertEqual(payload["promotion_verdict"], "active-local-policy")
         self.assertEqual(payload["summary"]["applied_count"], 7)
@@ -863,8 +863,8 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertGreater(payload["summary"]["active_local_policy_realized_savings_usd"], 0)
         self.assertGreater(payload["summary"]["active_local_policy_applied_minus_holdout_realized_savings_avg_usd"], 0)
         self.assertIsNotNone(payload["summary"]["active_local_policy_evidence_age_hours"])
-        self.assertEqual(payload["active_local_policy_outcomes"][0]["schema"], "agentflow.openai_routing_active_local_policy_outcome.v1")
-        self.assertEqual(payload["routing_canary_outcomes"][0]["schema"], "agentflow.openai_routing_canary_outcome.v1")
+        self.assertEqual(payload["active_local_policy_outcomes"][0]["schema"], "tokenclaw.openai_routing_active_local_policy_outcome.v1")
+        self.assertEqual(payload["routing_canary_outcomes"][0]["schema"], "tokenclaw.openai_routing_canary_outcome.v1")
         self.assertFalse(payload["privacy"]["individual_candidate_ids_included"])
 
     def test_targeted_report_emits_semantic_regression_lifecycle_review(self) -> None:
@@ -908,7 +908,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         result = build_openai_routing_promotion_decision_report(self.store, limit=20)
 
         review = result["routing_lifecycle_review"]
-        self.assertEqual(review["schema"], "agentflow.openai_routing_lifecycle_review.v1")
+        self.assertEqual(review["schema"], "tokenclaw.openai_routing_lifecycle_review.v1")
         self.assertEqual(review["next_action"], "rollback-required")
         self.assertEqual(review["deterministic_next_action"], "rollback-required")
         self.assertEqual(review["target_local_policy_section"], "routing.rules")
@@ -928,7 +928,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertTrue(semantic["disabled_local_policy_rule_present"])
         self.assertEqual(semantic["disabled_local_policy_reason"], "semantic-quality-regression-observed")
         action = review["semantic_regression_action"]
-        self.assertEqual(action["schema"], "agentflow.openai_routing_semantic_regression_action.v1")
+        self.assertEqual(action["schema"], "tokenclaw.openai_routing_semantic_regression_action.v1")
         self.assertTrue(action["observed"])
         self.assertEqual(action["status"], "classified")
         self.assertEqual(action["action_classification"], "rollback-required")
@@ -963,7 +963,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertTrue(result["summary"]["semantic_regression_fingerprint"].startswith("openai-routing-semantic-regression:"))
         self.assertIn("semantic-quality-regression-observed", result["summary"]["routing_lifecycle_blocker_codes"])
         disabled = result["promotion_decision"]["disabled_local_policy_rule"]
-        self.assertEqual(disabled["schema"], "agentflow.openai_routing_disabled_local_policy_rule.v1")
+        self.assertEqual(disabled["schema"], "tokenclaw.openai_routing_disabled_local_policy_rule.v1")
         self.assertEqual(disabled["reason"], "semantic-quality-regression-observed")
         self.assertFalse(disabled["rule_id_included"])
         self.assertEqual(disabled["target_rule_id"], "[REDACTED_ID]")
@@ -1498,13 +1498,13 @@ class OpenAIRoutingReportTests(unittest.TestCase):
             self._log_openai_call(category="chat", text_chars=1200)
 
         result = asyncio.run(stats_openai_routing_report(self.store, limit=10))
-        self.assertEqual(result["schema"], "agentflow.openai_routing_opportunity.v1")
+        self.assertEqual(result["schema"], "tokenclaw.openai_routing_opportunity.v1")
 
         output = io.StringIO()
         exit_code = cli.openai_routing_report_cli(["--db", self.db_path, "--limit", "10"], stdout=output)
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.openai_routing_opportunity.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.openai_routing_opportunity.v1")
         self.assertEqual(payload["summary"]["openai_call_count"], 5)
         self.assertNotIn("secret-openai-session", output.getvalue())
 

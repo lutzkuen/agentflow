@@ -6,7 +6,7 @@ from typing import Any, Iterable
 from tokenclaw.codex_turn_policy import CODEX_APP_SOURCE_SURFACE
 
 
-QUALITY_SIGNAL_SCHEMA = "agentflow.quality_signals.v1"
+QUALITY_SIGNAL_SCHEMA = "tokenclaw.quality_signals.v1"
 ABANDONED_AFTER_SECONDS = 30 * 60
 
 ADOPTION_SIGNAL_BY_STATUS = {
@@ -127,7 +127,7 @@ def _provider_adoption_summary(rows: Iterable[dict[str, Any]] | None) -> dict[st
         return None
     counts = _status_counts(sanitized_rows)
     return {
-        "schema": "agentflow.provider_adoption_quality.v1",
+        "schema": "tokenclaw.provider_adoption_quality.v1",
         "window_count": len(sanitized_rows),
         "status_counts": dict(sorted(counts.items())),
         "risk_window_count": sum(counts.get(status, 0) for status in ADOPTION_RISK_STATUSES),
@@ -419,7 +419,7 @@ def summarize_quality_signals(units: Iterable[dict[str, Any]]) -> dict[str, Any]
             signal_counts[key] = signal_counts.get(key, 0) + 1
 
     return {
-        "schema": "agentflow.quality_signal_summary.v1",
+        "schema": "tokenclaw.quality_signal_summary.v1",
         "units": units_count,
         "optimized_units": optimized_units,
         "optimized_successes": optimized_successes,

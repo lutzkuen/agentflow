@@ -1,5 +1,5 @@
 # AgentFlow default A/B routing experiment policy.
-# Copy to ~/.agentflow/routing_experiments.yaml (or set AGENTFLOW_ROUTING_EXPERIMENTS)
+# Copy to ~/.tokenclaw/routing_experiments.yaml (or set TOKENCLAW_ROUTING_EXPERIMENTS)
 # to override routing experiment sampling. The active default keeps the user-visible
 # call on the requested model and records shadow-only route-down evidence for
 # the configured cheaper candidate. routing_candidates are evidence-collection

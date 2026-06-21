@@ -166,7 +166,7 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
         near_one = _thinking_text(near_secret, marker="alpha beta gamma delta epsilon")
         near_two = near_one + " small newer suffix"
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -184,12 +184,12 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
             finally:
                 store.conn.close()
 
-        self.assertEqual(payload["schema"], "agentflow.anthropic_thinking_compaction_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.anthropic_thinking_compaction_dry_run.v1")
         self.assertEqual(payload["summary"]["planned_candidate_count"], 2)
         self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
         self.assertGreater(payload["summary"]["projected_saved_usd"], 0)
         staged = payload["policy"]["staged_local_canary"]
-        self.assertEqual(staged["schema"], "agentflow.anthropic_thinking_compaction_staged_local_canary.v1")
+        self.assertEqual(staged["schema"], "tokenclaw.anthropic_thinking_compaction_staged_local_canary.v1")
         self.assertFalse(staged["runtime_mutation_enabled"])
         self.assertEqual(staged["configured_rule_count"], 1)
         self.assertEqual(staged["rules"][0]["rule_id"], "local-repeated-context-thinking-tool-result-canary")
@@ -199,7 +199,7 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
         self.assertEqual(staged["rules"][0]["canary"]["holdout_fraction"], 1.0)
         self.assertTrue(staged["lifecycle_metadata"]["emits_applied"])
         self.assertTrue(staged["lifecycle_metadata"]["emits_holdout"])
-        self.assertEqual(staged["lifecycle_metadata"]["impact_report"], "agentflow.anthropic_thinking_compaction_impact.v1")
+        self.assertEqual(staged["lifecycle_metadata"]["impact_report"], "tokenclaw.anthropic_thinking_compaction_impact.v1")
         duplicate_kinds = {
             plan["thinking_block"]["duplicate_kind"]
             for plan in payload["plans"]
@@ -229,7 +229,7 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
 
     def test_dry_run_blocks_metadata_only_and_active_thinking_rows(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -259,7 +259,7 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
         secret = "raw-holdout-thinking-secret"
         duplicate = _thinking_text(secret)
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -302,7 +302,7 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
 
     def test_dry_run_blocks_unsupported_shapes_and_unresolved_tool_dependencies_privately(self):
         with TemporaryDirectory() as tmp:
-            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
             try:
                 _log_call(
                     store,
@@ -341,7 +341,7 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
         )
         original = copy.deepcopy(body)
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 _log_call(store, "unchanged", request_json=body)
@@ -359,7 +359,7 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
 
     def test_cli_emits_anthropic_thinking_compaction_dry_run(self):
         with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             store = Store(db_path)
             try:
                 secret = "raw-cli-thinking-secret"
@@ -376,7 +376,7 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "agentflow.anthropic_thinking_compaction_dry_run.v1")
+        self.assertEqual(payload["schema"], "tokenclaw.anthropic_thinking_compaction_dry_run.v1")
         self.assertEqual(payload["summary"]["planned_candidate_count"], 1)
         self.assertNotIn("raw-cli-thinking-secret", stdout.getvalue())
 

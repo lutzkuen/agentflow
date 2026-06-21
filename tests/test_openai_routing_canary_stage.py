@@ -28,7 +28,7 @@ from tokenclaw.store import SQLiteStore, stable_json
 class OpenAIRoutingCanaryStageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
+        self.db_path = str(Path(self.tmpdir.name) / "tokenclaw.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
@@ -215,7 +215,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
 
     def test_stages_ranked_gpt54_pass_through_bucket_with_projected_cohort_coverage(self) -> None:
         report = {
-            "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+            "schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
             "generated_at": utc_now(),
             "summary": {
                 "pass_through_rows": 223,
@@ -239,7 +239,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
                 "candidate_reason": "gpt-5.4 canary can evaluate gpt-5.4-mini on local metadata cohorts",
                 "estimated_savings_per_1000_calls_usd": 4.375,
                 "openai_canary_lifecycle_evidence": {
-                    "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+                    "schema": "tokenclaw.openai_routing_canary_lifecycle_evidence.v1",
                     "status": "no-openai-canary-metadata",
                     "observed_count": 0,
                     "cohort_counts": {
@@ -295,7 +295,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
         self.assertTrue(staged["review_intent"]["privacy_proof"]["metadata_only"])
         self.assertFalse(staged["review_intent"]["privacy_proof"]["raw_prompts_included"])
         lifecycle = staged["projected_openai_canary_lifecycle_evidence"]
-        self.assertEqual(lifecycle["schema"], "agentflow.openai_routing_canary_projected_lifecycle_coverage.v1")
+        self.assertEqual(lifecycle["schema"], "tokenclaw.openai_routing_canary_projected_lifecycle_coverage.v1")
         self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 12)
         self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 23)
         self.assertGreater(lifecycle["coverage"]["applied_rate"], 0)
@@ -312,7 +312,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
 
     def test_pass_through_bucket_with_safety_stop_is_omitted_with_counts(self) -> None:
         report = {
-            "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+            "schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
             "generated_at": utc_now(),
             "buckets": [{
                 "rank": 1,
@@ -328,7 +328,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
                 "required_local_executor": "openai-routing-canary",
                 "estimated_savings_per_1000_calls_usd": 4.375,
                 "openai_canary_lifecycle_evidence": {
-                    "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+                    "schema": "tokenclaw.openai_routing_canary_lifecycle_evidence.v1",
                     "status": "matched",
                     "observed_count": 6,
                     "cohort_counts": {
@@ -360,7 +360,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
 
     def test_applies_reviewed_openai_routing_canary_draft_to_local_yaml_with_holdout(self) -> None:
         report = {
-            "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+            "schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
             "generated_at": utc_now(),
             "buckets": [{
                 "rank": 1,
@@ -376,7 +376,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
                 "required_local_executor": "openai-routing-canary",
                 "estimated_savings_per_1000_calls_usd": 4.375,
                 "openai_canary_lifecycle_evidence": {
-                    "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+                    "schema": "tokenclaw.openai_routing_canary_lifecycle_evidence.v1",
                     "status": "no-openai-canary-metadata",
                     "cohort_counts": {
                         "canary_applied": 0,
@@ -440,7 +440,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
 
     def test_apply_refuses_safety_stopped_openai_routing_canary_draft_without_writing(self) -> None:
         report = {
-            "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+            "schema": "tokenclaw.pass_through_routing_activation_candidates.v1",
             "generated_at": utc_now(),
             "buckets": [{
                 "rank": 1,
@@ -482,7 +482,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
 
     def test_stages_promotion_blocker_routing_recommendation_as_canary_lifecycle_plan(self) -> None:
         recommendations = {
-            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "schema": "tokenclaw.promotion_blocker_next_action_recommendations.v1",
             "recommendations": [{
                 "recommendation_id": "promotion-blocker-next-action:openai:routing:canary-gpt54-mini",
                 "rank": 1,
@@ -543,7 +543,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
         ))
 
         self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
-        self.assertEqual(result["source_report_schema"], "agentflow.promotion_blocker_recommendation_review.v1")
+        self.assertEqual(result["source_report_schema"], "tokenclaw.promotion_blocker_recommendation_review.v1")
         self.assertEqual(result["summary"]["staged_count"], 1)
         self.assertEqual(result["summary"]["projected_canary_applied_count"], 12)
         self.assertEqual(result["summary"]["projected_canary_holdout_count"], 24)
@@ -571,10 +571,10 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
 
     def test_promotion_blocker_recommendation_without_file_backed_policy_is_noop(self) -> None:
         review = {
-            "schema": "agentflow.promotion_blocker_recommendation_review.v1",
+            "schema": "tokenclaw.promotion_blocker_recommendation_review.v1",
             "generated_at": utc_now(),
             "candidates": [{
-                "schema": "agentflow.promotion_blocker_review_candidate.v1",
+                "schema": "tokenclaw.promotion_blocker_review_candidate.v1",
                 "recommendation_id": "promotion-blocker-next-action:openai:routing:missing-policy",
                 "rank": 1,
                 "status": "recommended",
@@ -639,7 +639,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
             {**base, "candidate_id": "already-routed", "current_routed_count": 1},
         ]
         report = {
-            "schema": "agentflow.openai_routing_opportunity.v1",
+            "schema": "tokenclaw.openai_routing_opportunity.v1",
             "generated_at": utc_now(),
             "candidates": candidates,
             "privacy": {"metadata_only": True, "raw_prompts_included": False},
@@ -669,7 +669,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
 
     def test_cli_accepts_report_stdin_and_rejects_raw_payloads_without_leaking_values(self) -> None:
         raw_report = {
-            "schema": "agentflow.openai_routing_opportunity.v1",
+            "schema": "tokenclaw.openai_routing_opportunity.v1",
             "candidates": [{
                 "candidate_id": "raw-candidate",
                 "source_surface": "openai_responses",
@@ -697,7 +697,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
 
     def test_cli_stages_from_promotion_blocker_review_stdin(self) -> None:
         recommendations = {
-            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "schema": "tokenclaw.promotion_blocker_next_action_recommendations.v1",
             "recommendations": [{
                 "recommendation_id": "promotion-blocker-next-action:openai:routing:cli-canary",
                 "rank": 1,
@@ -753,7 +753,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
 
     def test_cli_queue_feedback_emits_metadata_only_activation_lifecycle_row(self) -> None:
         report = {
-            "schema": "agentflow.openai_routing_opportunity.v1",
+            "schema": "tokenclaw.openai_routing_opportunity.v1",
             "generated_at": utc_now(),
             "candidates": [{
                 "candidate_id": "activation-public-candidate",
@@ -776,8 +776,8 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
-                "AGENTFLOW_RECOMMENDATION_ENABLED": "0",
-                "AGENTFLOW_RECOMMENDATION_SERVER_URL": "",
+                "TOKENCLAW_RECOMMENDATION_ENABLED": "0",
+                "TOKENCLAW_RECOMMENDATION_SERVER_URL": "",
             },
             clear=False,
         ):
@@ -801,7 +801,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
         rows = self.store.managed_outcome_feedback_payload_rows(source_surface=LIFECYCLE_SOURCE_SURFACE, limit=10)
         self.assertEqual(len(rows), 1)
         event = json.loads(rows[0]["payload_json"])
-        self.assertEqual(event["schema"], "agentflow.openai_optimization_lifecycle_feedback.v1")
+        self.assertEqual(event["schema"], "tokenclaw.openai_optimization_lifecycle_feedback.v1")
         self.assertEqual(event["event_type"], "activation_staged_optimization_lifecycle")
         self.assertEqual(event["event_phase"], "stage")
         self.assertEqual(event["lifecycle_state"], "healthy_canary")

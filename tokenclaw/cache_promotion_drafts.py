@@ -10,9 +10,9 @@ from tokenclaw.pattern_rollout import PATTERN_ROLLOUT_SCHEMA
 from tokenclaw.store import utc_now
 
 
-SCHEMA = "agentflow.cache_promotion_draft_dry_run.v1"
-RULE_DRAFT_SCHEMA = "agentflow.cache_promotion_rule_draft.v1"
-OMISSION_SCHEMA = "agentflow.cache_promotion_draft_omission.v1"
+SCHEMA = "tokenclaw.cache_promotion_draft_dry_run.v1"
+RULE_DRAFT_SCHEMA = "tokenclaw.cache_promotion_rule_draft.v1"
+OMISSION_SCHEMA = "tokenclaw.cache_promotion_draft_omission.v1"
 
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,95}$")
 _FORBIDDEN_KEYS = {
@@ -312,7 +312,7 @@ def _candidate_omission_reason(candidate: dict[str, Any], *, max_evidence_age_ho
     if _bool(candidate.get("stream")):
         return "streaming-replay-not-supported"
     replay_ready_projection = (
-        _string(candidate.get("source_evidence_schema")) == "agentflow.request_shape_cache_replayability_dry_run.v1"
+        _string(candidate.get("source_evidence_schema")) == "tokenclaw.request_shape_cache_replayability_dry_run.v1"
         and (_bool(candidate.get("replay_ready")) or _string(candidate.get("readiness")) == "replay-ready")
         and not any(reason not in _REPLAY_READY_PROJECTION_ALLOWED_REASONS for reason in blockers)
     )
@@ -365,7 +365,7 @@ def _cohort_bucket(candidate: dict[str, Any]) -> str:
 def _evidence_summary(report: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     measurement = candidate.get("canary_hit_measurement") if isinstance(candidate.get("canary_hit_measurement"), dict) else {}
     return {
-        "schema": "agentflow.cache_promotion_evidence_summary.v1",
+        "schema": "tokenclaw.cache_promotion_evidence_summary.v1",
         "source_report_schema": report.get("schema"),
         "source_report_generated_at": report.get("generated_at"),
         "source_evidence_schema": candidate.get("source_evidence_schema"),
@@ -448,7 +448,7 @@ def _draft_rule(
             "provider_calls_made": False,
             "managed_server_calls_made": False,
             "invalidation_assumptions": {
-                "schema": "agentflow.cache_promotion_invalidation_assumptions.v1",
+                "schema": "tokenclaw.cache_promotion_invalidation_assumptions.v1",
                 "tool_call_caching_enabled": False,
                 "streaming_replay_enabled": False,
                 "session_scoped_keys_required": True,
@@ -477,7 +477,7 @@ def _draft_rule(
             ],
         },
         "graduation": {
-            "schema": "agentflow.cache_promotion_local_draft_metadata.v1",
+            "schema": "tokenclaw.cache_promotion_local_draft_metadata.v1",
             "source": "local_promotion_candidates",
             "target_candidate_id": candidate_id,
             "target_local_rule_file": "cache_rules.yaml",
@@ -495,14 +495,14 @@ def _draft_rule(
             "privacy": _privacy(),
         },
         "promotion": {
-            "schema": "agentflow.cache_promotion_local_draft_metadata.v1",
+            "schema": "tokenclaw.cache_promotion_local_draft_metadata.v1",
             "source": "local_promotion_candidates",
             "target_candidate_id": candidate_id,
             "target_local_rule_file": "cache_rules.yaml",
             "target_local_policy_section": "cache.pattern_rules",
             "evidence_summary": evidence,
             "dry_run_impact_estimate": {
-                "schema": "agentflow.cache_promotion_dry_run_impact_estimate.v1",
+                "schema": "tokenclaw.cache_promotion_dry_run_impact_estimate.v1",
                 "sample_count": evidence["sample_count"],
                 "applied_count": evidence["applied_count"],
                 "holdout_count": evidence["holdout_count"],

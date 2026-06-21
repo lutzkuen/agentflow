@@ -23,7 +23,7 @@ from tokenclaw.env import env, env_float
 from tokenclaw.upstream_url import redact_url as _redact_url
 
 
-POLICY_RELOAD_PATH = "/agentflow/admin/reload-policies"
+POLICY_RELOAD_PATH = "/tokenclaw/admin/reload-policies"
 
 
 def _default_policy_reload_url() -> str:
@@ -162,7 +162,7 @@ def policy_export_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) 
 
 def _validation_result_error(message: str, *, path: str = "$") -> dict[str, Any]:
     return {
-        "schema": "agentflow.policy_bundle_validation.v1",
+        "schema": "tokenclaw.policy_bundle_validation.v1",
         "ok": False,
         "bundle_schema": None,
         "errors": [{"path": path, "message": message}],
@@ -266,7 +266,7 @@ def _policy_diff_error_result(
     after_validation: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "schema": "agentflow.policy_bundle_diff.v1",
+        "schema": "tokenclaw.policy_bundle_diff.v1",
         "ok": False,
         "changed": False,
         "changed_sections": [],
@@ -330,7 +330,7 @@ def policy_diff_cli(
 
 def _policy_review_read_error_result(proposed_validation: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "agentflow.policy_bundle_review.v1",
+        "schema": "tokenclaw.policy_bundle_review.v1",
         "ok": False,
         "changed": False,
         "changed_sections": [],
@@ -340,7 +340,7 @@ def _policy_review_read_error_result(proposed_validation: dict[str, Any]) -> dic
         "current_validation": None,
         "proposed_validation": proposed_validation,
         "diff": {
-            "schema": "agentflow.policy_bundle_diff.v1",
+            "schema": "tokenclaw.policy_bundle_diff.v1",
             "ok": False,
             "changed": False,
             "changed_sections": [],
@@ -533,7 +533,7 @@ def _old_context_summary_quality_gate_feedback(
     privacy = quality_gate.get("privacy") if isinstance(quality_gate.get("privacy"), dict) else {}
 
     return {
-        "schema": "agentflow.old_context_summary_quality_gate_feedback.v1",
+        "schema": "tokenclaw.old_context_summary_quality_gate_feedback.v1",
         "quality_gate_schema": quality_gate.get("schema"),
         "candidate_id": _old_context_summary_metadata_identifier(policy.get("candidate_id")),
         "rule_id": _old_context_summary_metadata_identifier(policy.get("rule_id")),
@@ -645,7 +645,7 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
         }
         digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
         metadata = {
-            "schema": "agentflow.old_context_summary_lifecycle_metadata.v1",
+            "schema": "tokenclaw.old_context_summary_lifecycle_metadata.v1",
             "lifecycle_kind": "old_context_summarization",
             "command": "old-context-summary-quality-gate" if command == "quality-gate" else "old-context-summary-impact",
             "local_result_status": "ok" if dry_run.get("ok") else "error",
@@ -738,7 +738,7 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
     digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
     event_type = _old_context_summary_lifecycle_event_type(command, dry_run)
     metadata = {
-        "schema": "agentflow.old_context_summary_lifecycle_metadata.v1",
+        "schema": "tokenclaw.old_context_summary_lifecycle_metadata.v1",
         "lifecycle_kind": "old_context_summarization",
         "command": "policy-review" if command == "review" else "old-context-summary-dry-run",
         "local_result_status": "ok" if dry_run.get("ok") else "error",

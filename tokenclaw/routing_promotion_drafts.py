@@ -9,7 +9,7 @@ from tokenclaw.policy_files import stage_policy_draft
 from tokenclaw.store import utc_now
 
 
-ROUTING_PROMOTION_DRAFT_STAGE_SCHEMA = "agentflow.routing_promotion_draft_stage.v1"
+ROUTING_PROMOTION_DRAFT_STAGE_SCHEMA = "tokenclaw.routing_promotion_draft_stage.v1"
 ROUTING_PROMOTION_DRAFT_PRIVACY = {
     "local_only": True,
     "metadata_only": True,
@@ -255,7 +255,7 @@ def _candidate_promotion(candidate: dict[str, Any]) -> dict[str, Any]:
 
 def _omission(candidate: dict[str, Any], reason: str, *, path: str | None = None) -> dict[str, Any]:
     return {
-        "schema": "agentflow.routing_promotion_draft_omission.v1",
+        "schema": "tokenclaw.routing_promotion_draft_omission.v1",
         "status": "omitted",
         "reason": reason,
         "path": path,
@@ -319,7 +319,7 @@ def _policy_id(candidate_id: str, target_key: str) -> str:
 def _evidence_summary(report: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     promotion = _candidate_promotion(candidate)
     return {
-        "schema": "agentflow.routing_promotion_evidence_summary.v1",
+        "schema": "tokenclaw.routing_promotion_evidence_summary.v1",
         "source_report_schema": report.get("schema"),
         "source_report_generated_at": report.get("generated_at"),
         "provider": candidate.get("provider"),
@@ -422,7 +422,7 @@ def _routing_payload(
         },
         "safety_stop": _safety_stop(candidate),
         "promotion": {
-            "schema": "agentflow.routing_promotion_local_draft_metadata.v1",
+            "schema": "tokenclaw.routing_promotion_local_draft_metadata.v1",
             "source": "routing_experiment_report",
             "candidate_id": candidate_id,
             "source_surface": candidate.get("source_surface"),
@@ -488,7 +488,7 @@ def _routing_experiment_payload(
         "min_samples_for_confidence": _as_int(thresholds.get("min_samples"), 20),
         "store_response_bodies": False,
         "promotion": {
-            "schema": "agentflow.routing_promotion_shadow_sampling_draft_metadata.v1",
+            "schema": "tokenclaw.routing_promotion_shadow_sampling_draft_metadata.v1",
             "candidate_id": candidate_id,
             "evidence_summary": _evidence_summary(report, candidate),
             "privacy": ROUTING_PROMOTION_DRAFT_PRIVACY,
@@ -573,7 +573,7 @@ async def stage_routing_promotion_drafts(
     for index, candidate in enumerate(candidates):
         if not isinstance(candidate, dict):
             omitted.append({
-                "schema": "agentflow.routing_promotion_draft_omission.v1",
+                "schema": "tokenclaw.routing_promotion_draft_omission.v1",
                 "status": "omitted",
                 "reason": "invalid-candidate",
                 "path": f"$.candidates[{index}]",
@@ -609,7 +609,7 @@ async def stage_routing_promotion_drafts(
             workspace=workspace,
         )
         staged.append({
-            "schema": "agentflow.routing_promotion_staged_draft.v1",
+            "schema": "tokenclaw.routing_promotion_staged_draft.v1",
             "candidate_id": candidate_id,
             "section": section,
             "target_local_policy": "openai_canary" if "openai_canary" in payload else ("phase_canary" if "phase_canary" in payload else "policy"),
