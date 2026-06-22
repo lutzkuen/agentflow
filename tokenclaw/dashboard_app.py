@@ -552,6 +552,14 @@ def create_dashboard_router(
             lambda: stats_views.stats_local_activation_next_action_queue(limit=limit, store_obj=_store(store_obj)),
         )
 
+    @router.get("/tokenclaw/stats/activation-preview-burndown")
+    async def stats_activation_preview_burndown(limit: int = 20) -> dict[str, Any]:
+        return await cached_expensive_stats(
+            "activation-preview-burndown",
+            (int(limit),),
+            lambda: stats_views.stats_activation_preview_burndown(limit=limit, store_obj=_store(store_obj)),
+        )
+
     @router.get("/tokenclaw/stats/savings-loop-bottlenecks")
     async def stats_savings_loop_bottlenecks(limit: int = 1000) -> dict[str, Any]:
         from tokenclaw.savings_loop_bottlenecks import build_savings_loop_bottlenecks_report

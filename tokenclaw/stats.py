@@ -21954,6 +21954,11 @@ def _activation_issue_queue_reason(decision: dict[str, Any]) -> str:
 
 
 def _public_preview_gated_successor_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    preview_requirement = str(decision.get("preview_requirement") or "").strip()
+    managed_preview_required = bool(
+        decision.get("managed_preview_required")
+        or preview_requirement in {"required", "preview-required", "managed-preview-required"}
+    )
     public = {
         "source_ref": _activation_public_ref(decision.get("source_fingerprint"), prefix="activation-ref"),
         "successor_action_ref": _activation_public_ref(
@@ -21975,6 +21980,14 @@ def _public_preview_gated_successor_decision(decision: dict[str, Any]) -> dict[s
         "preview_verified": bool(decision.get("preview_verified")),
         "preview_verification_status": public_label(decision.get("preview_verification_status") or "", ""),
         "preview_verification_decision": public_label(decision.get("preview_verification_decision") or "", ""),
+        "preview_requirement": public_label(preview_requirement, ""),
+        "managed_preview_required": managed_preview_required,
+        "policy_write_candidate": bool(
+            decision.get("policy_write_candidate")
+            or decision.get("cache_apply_action_count")
+            or decision.get("draft_action_count")
+            or decision.get("dry_run_drafted")
+        ),
         "preview_omitted_reason": public_label(decision.get("preview_omitted_reason") or "", ""),
         "preview_no_op_reason": public_label(decision.get("preview_no_op_reason") or "", ""),
         "top_preview_omission_reason": public_label(decision.get("top_preview_omission_reason") or "", ""),
@@ -21982,17 +21995,25 @@ def _public_preview_gated_successor_decision(decision: dict[str, Any]) -> dict[s
             decision.get("privacy") if isinstance(decision.get("privacy"), dict) else {}
         ),
     }
-    return {key: value for key, value in public.items() if value not in (None, "", []) or key == "preview_verified"}
+    bool_keys = {"preview_verified", "managed_preview_required", "policy_write_candidate"}
+    return {key: value for key, value in public.items() if value not in (None, "", []) or key in bool_keys}
 
 
 PREVIEW_AGREEMENT_BUCKETS = (
     "agreed",
     "missing",
     "stale",
+    "unsafe",
     "omitted",
     "blocked",
     "disagreed",
     "not_previewed",
+)
+
+PREVIEW_AGREEMENT_EXTRA_COUNTS = (
+    "preview_optional",
+    "preview_required",
+    "dry_run_drafted",
 )
 
 
@@ -22004,7 +22025,9 @@ def _preview_agreement_bucket(row: dict[str, Any]) -> str:
         return "agreed"
     if row.get("preview_omitted_reason") or row.get("top_preview_omission_reason") or "omitted" in status:
         return "omitted"
-    if "disagree" in status or "failed-closed" in status or "unsafe" in status or "disagree" in verification_status:
+    if "unsafe" in status or "unsafe" in verification_status:
+        return "unsafe"
+    if "disagree" in status or "failed-closed" in status or "disagree" in verification_status:
         return "disagreed"
     if "stale" in status or "stale" in verification_status:
         return "stale"
@@ -22015,6 +22038,23 @@ def _preview_agreement_bucket(row: dict[str, Any]) -> str:
     if "blocked" in status or "blocked" in decision or "keep-blocked" in decision:
         return "blocked"
     return "blocked"
+
+
+def _preview_agreement_extra_counts(row: dict[str, Any]) -> dict[str, int]:
+    decision = str(row.get("preview_verification_decision") or row.get("decision") or "").strip().lower()
+    requirement = str(row.get("preview_requirement") or "").strip().lower()
+    managed_required = bool(row.get("managed_preview_required"))
+    policy_write_candidate = bool(row.get("policy_write_candidate"))
+    optional = (
+        decision == "preview-optional"
+        or requirement in {"optional", "preview-optional", "managed-preview-optional"}
+    )
+    required = managed_required or requirement in {"required", "preview-required", "managed-preview-required"}
+    return {
+        "preview_optional_count": int(bool(optional)),
+        "preview_required_count": int(bool(required)),
+        "dry_run_drafted_count": int(bool(policy_write_candidate or decision in {"draft", "dry-run-drafted"})),
+    }
 
 
 def _preview_agreement_reason(row: dict[str, Any]) -> str:
@@ -22057,8 +22097,12 @@ def _summary_preview_agreement_rows(summary: dict[str, Any]) -> list[dict[str, A
         total = 0
         for bucket in PREVIEW_AGREEMENT_BUCKETS:
             count = _as_int(row.get(f"{bucket}_count"))
+            if bucket == "unsafe" and not count:
+                count = _as_int(row.get("request_shape_unsafe_count")) + _as_int(row.get("crunch_preview_quality_risk_count"))
             public[f"{bucket}_count"] = count
             total += count
+        for bucket in PREVIEW_AGREEMENT_EXTRA_COUNTS:
+            public[f"{bucket}_count"] = _as_int(row.get(f"{bucket}_count"))
         if not total:
             total = sum(_as_int(row.get(key)) for key in ("stored_preview_outcome_count", "row_count", "count"))
         public["total_count"] = total
@@ -22092,6 +22136,10 @@ def _activation_preview_agreement_burndown(queue: dict[str, Any]) -> dict[str, A
             f"{bucket}_count": sum(_as_int(row.get(f"{bucket}_count")) for row in summary_rows)
             for bucket in PREVIEW_AGREEMENT_BUCKETS
         }
+        extra_totals = {
+            f"{bucket}_count": sum(_as_int(row.get(f"{bucket}_count")) for row in summary_rows)
+            for bucket in PREVIEW_AGREEMENT_EXTRA_COUNTS
+        }
         return {
             "schema": "tokenclaw.dashboard_activation_preview_agreement_burndown.v1",
             "status": "tracked" if summary_rows else "missing",
@@ -22100,6 +22148,7 @@ def _activation_preview_agreement_burndown(queue: dict[str, Any]) -> dict[str, A
                 "successor_decision_count": 0,
                 "total_count": sum(_as_int(row.get("total_count")) for row in summary_rows),
                 **total_by_bucket,
+                **extra_totals,
             },
             "families": summary_rows,
             "privacy": _local_activation_queue_privacy(queue.get("privacy") if isinstance(queue.get("privacy"), dict) else {}),
@@ -22119,6 +22168,10 @@ def _activation_preview_agreement_burndown(queue: dict[str, Any]) -> dict[str, A
                 "local_action_family": family,
                 "total_count": len(rows),
                 **{f"{bucket}_count": int(bucket_counts.get(bucket, 0)) for bucket in PREVIEW_AGREEMENT_BUCKETS},
+                **{
+                    key: sum(_preview_agreement_extra_counts(row)[key] for row in rows)
+                    for key in (f"{bucket}_count" for bucket in PREVIEW_AGREEMENT_EXTRA_COUNTS)
+                },
                 "top_preview_agreement_status": public_label(top.get("preview_agreement_status") or "not-previewed", "not-previewed"),
                 "top_reason_code": reason_counts.most_common(1)[0][0] if reason_counts else "unknown",
                 "top_next_action": public_label(top.get("recommended_next_action") or "inspect-local-evidence", "inspect-local-evidence"),
@@ -22131,6 +22184,10 @@ def _activation_preview_agreement_burndown(queue: dict[str, Any]) -> dict[str, A
         f"{bucket}_count": sum(_as_int(row.get(f"{bucket}_count")) for row in family_rows)
         for bucket in PREVIEW_AGREEMENT_BUCKETS
     }
+    extra_totals = {
+        f"{bucket}_count": sum(_as_int(row.get(f"{bucket}_count")) for row in family_rows)
+        for bucket in PREVIEW_AGREEMENT_EXTRA_COUNTS
+    }
     return {
         "schema": "tokenclaw.dashboard_activation_preview_agreement_burndown.v1",
         "status": "tracked" if family_rows else "missing",
@@ -22139,6 +22196,7 @@ def _activation_preview_agreement_burndown(queue: dict[str, Any]) -> dict[str, A
             "successor_decision_count": len(public_decisions),
             "total_count": len(public_decisions),
             **total_counts,
+            **extra_totals,
         },
         "families": family_rows,
         "privacy": _local_activation_queue_privacy(queue.get("privacy") if isinstance(queue.get("privacy"), dict) else {}),
@@ -22462,6 +22520,23 @@ async def stats_local_activation_next_action_queue(limit: int = 20, store_obj: A
     }
 
 
+async def stats_activation_preview_burndown(limit: int = 20, store_obj: Any | None = None) -> dict[str, Any]:
+    queue_payload = await stats_local_activation_next_action_queue(limit=limit, store_obj=store_obj)
+    burndown = queue_payload.get("activation_preview_agreement_burndown")
+    if not isinstance(burndown, dict):
+        burndown = _activation_preview_agreement_burndown({})
+    return {
+        **burndown,
+        "generated_at": utc_now(),
+        "queue_status": queue_payload.get("status"),
+        "queue_status_reason": queue_payload.get("status_reason"),
+        "queue_schema": queue_payload.get("queue_schema"),
+        "queue_source_schema": queue_payload.get("source_schema"),
+        "source": queue_payload.get("source") if isinstance(queue_payload.get("source"), dict) else {},
+        "managed_preview_coverage": queue_payload.get("managed_preview_coverage"),
+    }
+
+
 async def stats_preview_gated_activation_issue_queue(limit: int = 20, store_obj: Any | None = None) -> dict[str, Any]:
     del store_obj
     path = _evidence_to_activation_plan_path()
@@ -22695,7 +22770,7 @@ def dashboard_html() -> str:
   <div class="table-wrap">
   <table class="activity-table" data-table-id="activation-preview-agreement-burndown" data-filter-label="Filter activation preview agreement burndown">
     <thead><tr>
-      <th data-sort-type="text">Family</th><th data-sort-type="number">Total</th><th data-sort-type="number">Agreed</th><th data-sort-type="number">Missing</th><th data-sort-type="number">Stale</th><th data-sort-type="number">Omitted</th><th data-sort-type="number">Blocked</th><th data-sort-type="number">Disagreed</th><th data-sort-type="text">Top reason</th><th data-sort-type="text">Refs</th><th data-sort-type="text">Privacy</th>
+      <th data-sort-type="text">Family</th><th data-sort-type="number">Total</th><th data-sort-type="number">Agreed</th><th data-sort-type="number">Missing</th><th data-sort-type="number">Stale</th><th data-sort-type="number">Unsafe</th><th data-sort-type="number">Omitted</th><th data-sort-type="number">Blocked</th><th data-sort-type="number">Optional</th><th data-sort-type="number">Required</th><th data-sort-type="number">Drafted</th><th data-sort-type="number">Disagreed</th><th data-sort-type="text">Top reason</th><th data-sort-type="text">Refs</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="activation-preview-agreement-burndown-tbody"></tbody>
   </table>
@@ -27161,14 +27236,26 @@ function renderActivationPreviewAgreementBurndown(burndown){
       <td class="tokens">${(row.agreed_count||0).toLocaleString()}</td>
       <td class="tokens">${(row.missing_count||0).toLocaleString()}</td>
       <td class="tokens">${(row.stale_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.unsafe_count||0).toLocaleString()}</td>
       <td class="tokens">${(row.omitted_count||0).toLocaleString()}</td>
       <td class="tokens">${(row.blocked_count||0).toLocaleString()}<div class="sub">not previewed ${(row.not_previewed_count||0).toLocaleString()}</div></td>
+      <td class="tokens">${(row.preview_optional_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.preview_required_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.dry_run_drafted_count||0).toLocaleString()}</td>
       <td class="tokens">${(row.disagreed_count||0).toLocaleString()}</td>
       <td class="flags"><span class="badge ${row.agreed_count?'hit':row.stale_count?'routed':'miss'}">${esc(reason)}</span><div class="sub">${esc(action)}</div></td>
       <td class="model">${esc(refs)}</td>
       <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||burndown.privacy||{})}</td>
     </tr>`;
-  }).join('')||'<tr><td colspan="11" style="color:#8b949e">No activation preview agreement burndown available</td></tr>';
+  }).join('')||'<tr><td colspan="15" style="color:#8b949e">No activation preview agreement burndown available</td></tr>';
+}
+async function refreshActivationPreviewAgreementBurndown(){
+  try{
+    const r=await fetch('/tokenclaw/stats/activation-preview-burndown?limit=20');
+    const d=await r.json();
+    renderActivationPreviewAgreementBurndown(d||{});
+    applyAllDataTables();
+  }catch(e){}
 }
 async function refreshLocalActivationQueue(){
   try{
@@ -27178,7 +27265,6 @@ async function refreshLocalActivationQueue(){
     const source=d.source||{};
     const privacy=d.privacy||{};
     renderActivationSuccessorBurndown(d.successor_burndown||{});
-    renderActivationPreviewAgreementBurndown(d.activation_preview_agreement_burndown||{});
     const sourceBadges=[
       source.available?'<span class="badge hit">latest plan</span>':'<span class="badge miss">no plan</span>',
       source.configured?'<span class="badge provider">configured path</span>':'<span class="badge miss">default path</span>',
@@ -28006,7 +28092,7 @@ const tabRefreshers={
   openai:[refreshManagedOpenAIActivation,refreshOpenAIOptimizationReadiness,refreshOpenAICanaryReadiness,refreshOpenAIOldContextSummary,refreshOpenAIScoreboard],
   evalqueue:[refreshOptimizationPromotionActions,refreshOptimizationEvalQueue],
   coordinator:[refreshOptimizationCoordinator],
-  activationnext:[refreshLocalActivationQueue,refreshPreviewGatedActivationIssueQueue,refreshEvidenceActivationNextActions],
+  activationnext:[refreshLocalActivationQueue,refreshActivationPreviewAgreementBurndown,refreshPreviewGatedActivationIssueQueue,refreshEvidenceActivationNextActions],
   promotionblockers:[refreshPromotionBlockerNextActions],
   managed:[refreshManaged],
   phaserouting:[refreshRoutingCandidateLifecycleBurndown,refreshClaudeRoutingPromotionFunnel,refreshShadowRoutingPromotionReadiness,refreshOptimizationPromotionFunnel,refreshPhaseRouting],

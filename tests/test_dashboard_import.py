@@ -3806,6 +3806,8 @@ class DashboardImportTests(unittest.TestCase):
                                 "preview_agreement_status": "no-data-preview-health",
                                 "preview_verified": False,
                                 "preview_verification_status": "no-data-preview-health",
+                                "preview_requirement": "managed-preview-required",
+                                "managed_preview_required": True,
                                 "privacy": {"metadata_only": True, "aggregate_only": True},
                             },
                             {
@@ -3819,6 +3821,9 @@ class DashboardImportTests(unittest.TestCase):
                                 "preview_agreement_status": "agreed",
                                 "preview_verified": True,
                                 "preview_verification_status": "preview-agreed",
+                                "preview_requirement": "managed-preview-required",
+                                "managed_preview_required": True,
+                                "policy_write_candidate": True,
                                 "privacy": {"metadata_only": True, "aggregate_only": True},
                             },
                             {
@@ -3832,6 +3837,24 @@ class DashboardImportTests(unittest.TestCase):
                                 "preview_agreement_status": "stale-preview",
                                 "preview_verified": False,
                                 "preview_verification_status": "stale-preview",
+                                "preview_verification_decision": "preview-optional",
+                                "preview_requirement": "managed-preview-optional",
+                                "managed_preview_required": False,
+                                "privacy": {"metadata_only": True, "aggregate_only": True},
+                            },
+                            {
+                                "schema": "tokenclaw.local_activation_successor_decision.v1",
+                                "source_fingerprint": "activation:preview-secret-unsafe",
+                                "successor_action_fingerprint": "successor:preview-secret-unsafe-action",
+                                "local_action_family": "cache",
+                                "decision": "keep-blocked",
+                                "recommended_next_action": "keep-tool-cache-replay-blocked",
+                                "issue_worthy_status": "blocked",
+                                "preview_agreement_status": "unsafe-preview-side-effect",
+                                "preview_verified": False,
+                                "preview_verification_status": "unsafe-preview-side-effect",
+                                "preview_requirement": "managed-preview-required",
+                                "managed_preview_required": True,
                                 "privacy": {"metadata_only": True, "aggregate_only": True},
                             },
                             {
@@ -3991,12 +4014,15 @@ class DashboardImportTests(unittest.TestCase):
                 )
                 client = TestClient(app)
                 response = client.get("/tokenclaw/stats/local-activation-next-action-queue?limit=1")
+                preview_response = client.get("/tokenclaw/stats/activation-preview-burndown?limit=1")
                 full_response = client.get("/tokenclaw/stats/full")
                 dashboard = client.get("/tokenclaw/dashboard")
 
             self.assertEqual(response.status_code, 200)
+            self.assertEqual(preview_response.status_code, 200)
             self.assertEqual(full_response.status_code, 200)
             payload = response.json()
+            preview_payload = preview_response.json()
             full_payload = full_response.json()
             self.assertEqual(payload["schema"], "tokenclaw.dashboard_local_activation_next_action_queue.v1")
             self.assertEqual(payload["status"], "ranked")
@@ -4031,19 +4057,30 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(burndown["privacy"]["file_paths_included"])
             preview_burndown = payload["activation_preview_agreement_burndown"]
             self.assertEqual(preview_burndown["schema"], "tokenclaw.dashboard_activation_preview_agreement_burndown.v1")
-            self.assertEqual(preview_burndown["summary"]["successor_decision_count"], 4)
+            self.assertEqual(preview_payload["schema"], "tokenclaw.dashboard_activation_preview_agreement_burndown.v1")
+            self.assertEqual(preview_payload["queue_status"], "ranked")
+            self.assertEqual(preview_burndown["summary"]["successor_decision_count"], 5)
             self.assertEqual(preview_burndown["summary"]["agreed_count"], 1)
             self.assertEqual(preview_burndown["summary"]["missing_count"], 1)
             self.assertEqual(preview_burndown["summary"]["stale_count"], 1)
+            self.assertEqual(preview_burndown["summary"]["unsafe_count"], 1)
             self.assertEqual(preview_burndown["summary"]["omitted_count"], 1)
+            self.assertEqual(preview_burndown["summary"]["preview_optional_count"], 1)
+            self.assertEqual(preview_burndown["summary"]["preview_required_count"], 3)
+            self.assertEqual(preview_burndown["summary"]["dry_run_drafted_count"], 1)
+            self.assertEqual(preview_payload["summary"]["unsafe_count"], 1)
             preview_by_family = {row["local_action_family"]: row for row in preview_burndown["families"]}
             self.assertEqual(preview_by_family["cache"]["missing_count"], 1)
+            self.assertEqual(preview_by_family["cache"]["unsafe_count"], 1)
+            self.assertEqual(preview_by_family["cache"]["preview_required_count"], 2)
             self.assertEqual(preview_by_family["cache"]["top_next_action"], "refresh-managed-activation-preview")
             self.assertEqual(preview_by_family["routing"]["agreed_count"], 1)
+            self.assertEqual(preview_by_family["routing"]["dry_run_drafted_count"], 1)
             self.assertEqual(preview_by_family["routing"]["top_reason_code"], "preview-agreed")
             self.assertTrue(preview_by_family["routing"]["top_source_ref"].startswith("activation-ref:"))
             self.assertTrue(preview_by_family["routing"]["top_successor_action_ref"].startswith("successor-ref:"))
             self.assertEqual(preview_by_family["crunch"]["stale_count"], 1)
+            self.assertEqual(preview_by_family["crunch"]["preview_optional_count"], 1)
             self.assertEqual(preview_by_family["activation-feedback"]["omitted_count"], 1)
             self.assertFalse(preview_burndown["privacy"]["raw_prompts_included"])
             self.assertFalse(preview_burndown["privacy"]["provider_bodies_included"])
@@ -4056,9 +4093,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["lever"], "crunch")
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["target_local_rule_file"], "crunch_rules.yaml")
             self.assertEqual(full_payload["activation_burndown"]["successor_burndown"]["summary"]["tracked_family_count"], 3)
-            self.assertEqual(full_payload["activation_burndown"]["activation_preview_agreement_burndown"]["summary"]["successor_decision_count"], 4)
+            self.assertEqual(full_payload["activation_burndown"]["activation_preview_agreement_burndown"]["summary"]["successor_decision_count"], 5)
             self.assertEqual(full_payload["summary"]["activation_successor_burndown"]["tracked_family_count"], 3)
-            self.assertEqual(full_payload["summary"]["activation_preview_agreement_burndown"]["successor_decision_count"], 4)
+            self.assertEqual(full_payload["summary"]["activation_preview_agreement_burndown"]["successor_decision_count"], 5)
             self.assertIn("activation_burndown", full_payload["summary"])
             coverage = payload["managed_preview_coverage"]
             self.assertEqual(coverage["schema"], "tokenclaw.dashboard_managed_activation_preview_coverage.v1")
@@ -4108,7 +4145,12 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("activation-burndown-tbody", dashboard.text)
             self.assertIn("Managed preview", dashboard.text)
 
-            rendered = json.dumps(payload, sort_keys=True) + json.dumps(full_payload, sort_keys=True) + dashboard.text
+            rendered = (
+                json.dumps(payload, sort_keys=True)
+                + json.dumps(preview_payload, sort_keys=True)
+                + json.dumps(full_payload, sort_keys=True)
+                + dashboard.text
+            )
             self.assertNotIn(str(plan_path), rendered)
             self.assertNotIn("raw prompt must not render", rendered)
             self.assertNotIn("raw managed preview secret must not render", rendered)
@@ -4123,6 +4165,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertNotIn("activation:queue-secret-fingerprint", rendered)
             self.assertNotIn("activation:preview-secret-routing", rendered)
             self.assertNotIn("successor:preview-secret-routing-action", rendered)
+            self.assertNotIn("activation:preview-secret-unsafe", rendered)
+            self.assertNotIn("successor:preview-secret-unsafe-action", rendered)
         finally:
             try:
                 plan_tmp.close()
