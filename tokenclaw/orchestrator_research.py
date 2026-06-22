@@ -10501,6 +10501,7 @@ def _queue_has_rollback_required_action(entry: dict[str, Any]) -> bool:
 def _queue_freshness_state(entry: dict[str, Any]) -> str:
     gate = entry.get("managed_preview_gate") if isinstance(entry.get("managed_preview_gate"), dict) else {}
     gate_status = str(gate.get("status") or "").strip()
+    explicit_freshness = str(entry.get("freshness_state") or "").strip().lower()
     raw_statuses = [
         str(entry.get("evidence_freshness_status") or "").strip(),
         str(entry.get("freshness_state") or "").strip(),
@@ -10527,6 +10528,8 @@ def _queue_freshness_state(entry: dict[str, Any]) -> str:
         return "stale-rollback-required"
     if stale:
         return "stale"
+    if explicit_freshness in {"fresh", "snapshot-fresh"}:
+        return "fresh"
     if "no-data" in text or "missing-preview" in text or "missing-evidence" in text:
         return "no-data"
     if "fresh" in text or (age is not None and max_age is not None and max_age > 0 and age <= max_age):
@@ -10717,6 +10720,7 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "read_only",
         "status",
         "source",
+        "source_fingerprint",
         "source_surface",
         "endpoint",
         "category",

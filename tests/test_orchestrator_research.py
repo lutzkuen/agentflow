@@ -11106,6 +11106,100 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         rendered = json.dumps(plan, sort_keys=True)
         self.assertNotIn("session-secret-must-not-leak", rendered)
 
+    def test_fresh_rollups_rank_into_local_activation_successor_queue(self):
+        rollups = [
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "app_family": "generic_openai",
+                "requested_model_family": "gpt-5",
+                "routed_model_family": "gpt-5",
+                "category": "tool-result",
+                "workflow_phase": "tool-execution",
+                "stream": True,
+                "has_tools": True,
+                "text_bucket": "32k_128k_chars",
+                "token_bucket": "8k_32k_tokens",
+                "cache_status": "skipped",
+                "routing_status": "passthrough",
+                "candidate_work_classes": ["repeated_context", "crunch"],
+                "candidate_families": ["crunch_candidate"],
+                "blocker_codes": [],
+                "row_count": 24,
+                "sample_count": 24,
+                "successful_input_tokens": 240_000,
+                "projected_crunch_tokens_saved": 12_000,
+                "projected_crunch_chars_saved": 48_000,
+                "projected_crunch_savings_usd": 0.036,
+                "request_id": "raw-rollup-request-id-must-not-leak",
+                "session_id": "raw-rollup-session-id-must-not-leak",
+                "cache_key": "raw-cache-key-must-not-leak",
+                "file_path": "/tmp/private-rollup-source.py",
+            }
+        ]
+        follow_up = build_request_shape_follow_up_candidates(rollups, limit=10)
+
+        queue = build_local_activation_next_action_queue(
+            {
+                "request_shape_rollup_candidates": follow_up,
+                "managed_activation_preview_outcomes": {
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
+                    "status": "empty",
+                    "outcomes": [],
+                    "summary": {"stored_preview_outcome_count": 0},
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            }
+        )
+
+        self.assertIsNotNone(queue)
+        self.assertEqual(queue["schema"], "tokenclaw.local_activation_next_action_queue.v1")
+        self.assertEqual(queue["status"], "ranked")
+        self.assertGreaterEqual(queue["summary"]["non_duplicate_successor_action_count"], 1)
+        request_shape_entry = next(
+            entry
+            for entry in queue["entries"]
+            if entry["lever"] == "request-shape-rollups"
+            and entry["local_action_family"] == "crunch"
+        )
+        self.assertEqual(request_shape_entry["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(request_shape_entry["freshness_state"], "fresh")
+        self.assertEqual(request_shape_entry["rank_basis"]["freshness_state"], "fresh")
+        self.assertEqual(request_shape_entry["rank_basis"]["freshness_multiplier"], 1.0)
+        self.assertEqual(request_shape_entry["rank_basis"]["projected_savings_usd"], 0.036)
+        self.assertEqual(request_shape_entry["rank_basis"]["savings_per_1000_calls_usd"], 1.5)
+        self.assertGreater(request_shape_entry["freshness_adjusted_savings_per_1000_calls_usd"], 0)
+        self.assertTrue(request_shape_entry["fingerprint"].startswith("activation:"))
+        self.assertTrue(request_shape_entry["source_fingerprint"].startswith("request-shape-follow-up:"))
+        self.assertTrue(request_shape_entry["privacy"]["metadata_only"])
+        self.assertTrue(request_shape_entry["privacy"]["aggregate_only"])
+        self.assertFalse(request_shape_entry["privacy"]["request_ids_included"])
+        self.assertFalse(request_shape_entry["privacy"]["session_ids_included"])
+        self.assertFalse(request_shape_entry["privacy"]["cache_keys_included"])
+        self.assertFalse(request_shape_entry["privacy"]["file_paths_included"])
+
+        action = next(
+            action
+            for action in queue["successor_actions"]
+            if action["source_fingerprint"] == request_shape_entry["fingerprint"]
+        )
+        self.assertTrue(action["fingerprint"].startswith("successor:"))
+        self.assertEqual(action["local_action_family"], "crunch")
+        self.assertEqual(action["recommended_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(action["freshness_state"], "fresh")
+        self.assertEqual(action["rank_basis"]["savings_per_1000_calls_usd"], 1.5)
+        self.assertTrue(action["acceptance_metric"])
+        self.assertTrue(action["privacy"]["metadata_only"])
+        self.assertTrue(action["privacy"]["aggregate_only"])
+
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("raw-rollup-request-id-must-not-leak", rendered)
+        self.assertNotIn("raw-rollup-session-id-must-not-leak", rendered)
+        self.assertNotIn("raw-cache-key-must-not-leak", rendered)
+        self.assertNotIn("/tmp/private-rollup-source.py", rendered)
+
     def test_zero_hit_cache_ladder_generates_cache_replay_issue(self):
         plan = build_research_plan(
             issues=[],
