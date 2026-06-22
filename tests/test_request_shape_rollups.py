@@ -5207,6 +5207,177 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertNotIn(raw_session_id, rendered)
         self.assertNotIn(raw_path, rendered)
 
+    def test_crunch_canary_stage_consumes_ranked_activation_candidate_queue(self) -> None:
+        raw_request_id = "raw-stage-queue-request-id-must-not-leak"
+        raw_session_id = "raw-stage-queue-session-id-must-not-leak"
+        raw_path = "/tmp/private/stage-queue.py"
+        rollups = [
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "app_family": "generic_openai",
+                "requested_model_family": "gpt-5",
+                "routed_model_family": "gpt-5",
+                "category": "tool-result",
+                "workflow_phase": "tool-execution",
+                "stream": True,
+                "has_tools": True,
+                "text_bucket": "32k_128k_chars",
+                "token_bucket": "8k_32k_tokens",
+                "cache_status": "skipped",
+                "routing_status": "passthrough",
+                "candidate_work_classes": ["repeated_context", "crunch"],
+                "candidate_families": ["crunch_candidate"],
+                "blocker_codes": [],
+                "row_count": 24,
+                "sample_count": 24,
+                "successful_input_tokens": 240_000,
+                "input_tokens": 240_000,
+                "projected_crunch_tokens_saved": 12_000,
+                "projected_crunch_chars_saved": 48_000,
+                "projected_crunch_savings_usd": 0.036,
+                "request_id": raw_request_id,
+                "session_id": raw_session_id,
+                "file_path": raw_path,
+            }
+        ]
+        follow_up = build_request_shape_follow_up_candidates(rollups, limit=10)
+        queue = follow_up["activation_candidate_queue"]
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            source_rollup_report={
+                "schema": "tokenclaw.request_shape_rollups.v1",
+                "run_id": "queue-stage",
+                "summary": {"rows_considered": 24, "rollup_count": 0},
+                "follow_up_candidates": follow_up,
+                "rollups": [],
+            },
+            rules_path=rules_path,
+            rollout_fraction=0.10,
+            holdout_fraction=0.20,
+        )
+
+        self.assertEqual(report["status"], "staged")
+        self.assertEqual(report["staged_canary_count"], 1)
+        self.assertFalse(rules_path.exists())
+        self.assertTrue(report["acceptance"]["has_validation_metadata"])
+        self.assertTrue(report["acceptance"]["has_file_backed_target"])
+        self.assertTrue(report["acceptance"]["has_projected_lifecycle_split"])
+        self.assertFalse(report["privacy"]["provider_calls_made"])
+        self.assertFalse(report["privacy"]["managed_server_calls_made"])
+        self.assertFalse(report["source_report"]["crunch_opportunity_summary"]["policy_files_written"])
+        self.assertEqual(
+            report["source_report"]["crunch_opportunity_summary"]["source_schema"],
+            "tokenclaw.request_shape_local_activation_candidate_queue.v1",
+        )
+        self.assertEqual(report["source_report"]["crunch_opportunity_summary"]["source_queue_crunch_entry_count"], 1)
+        action = report["top_stage_action"]
+        self.assertEqual(action["source_evidence_schema"], "tokenclaw.request_shape_local_activation_candidate_queue_entry.v1")
+        self.assertEqual(action["source_activation_fingerprint"], queue["entries"][0]["fingerprint"])
+        self.assertEqual(action["source_activation_candidate_rank"], 1)
+        self.assertEqual(action["source_activation_candidate_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(action["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(action["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(action["conditions"]["provider_family"], "openai")
+        self.assertEqual(action["conditions"]["source_surface"], "openai_responses")
+        self.assertEqual(action["projected_saved_tokens"], 12_000)
+        self.assertEqual(action["projected_saved_usd"], 0.036)
+        self.assertTrue(action["safety_gates"]["metadata_only"])
+        self.assertTrue(action["safety_gates"]["aggregate_only"])
+        self.assertTrue(action["safety_gates"]["holdout_required"])
+        self.assertEqual(action["rollback_metadata"]["rollback_action_type"], "disable_repeated_context_crunch_canary")
+        validation = report["validation"]
+        self.assertEqual(validation["schema"], "tokenclaw.request_shape_crunch_canary_apply_batch.v1")
+        self.assertTrue(validation["ok"])
+        self.assertTrue(validation["dry_run"])
+        self.assertFalse(validation["wrote_policy_files"])
+        selection = report["activation_ready_rollup_selection"]
+        self.assertEqual(selection["drafted_count"], 1)
+        drafted = selection["rows"][0]
+        self.assertEqual(drafted["source_evidence_schema"], "tokenclaw.request_shape_local_activation_candidate_queue_entry.v1")
+        self.assertEqual(drafted["state"], "drafted")
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn(raw_request_id, rendered)
+        self.assertNotIn(raw_session_id, rendered)
+        self.assertNotIn(raw_path, rendered)
+        self.assertNotIn(str(rules_path), rendered)
+
+    def test_crunch_canary_stage_blocks_too_small_activation_queue_cohort(self) -> None:
+        queue = {
+            "schema": "tokenclaw.request_shape_local_activation_candidate_queue.v1",
+            "status": "ranked",
+            "entries": [
+                {
+                    "schema": "tokenclaw.request_shape_local_activation_candidate_queue_entry.v1",
+                    "fingerprint": "activation:too-small-crunch",
+                    "rank": 1,
+                    "local_action_family": "crunch",
+                    "recommended_next_action": "stage-repeated-context-crunch-canary",
+                    "readiness_state": "activation-ready",
+                    "provider_family": "openai",
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "app_family": "generic_openai",
+                    "requested_model_family": "gpt-5",
+                    "routed_model_family": "gpt-5",
+                    "category": "chat",
+                    "workflow_phase": "chat",
+                    "stream": False,
+                    "has_tools": False,
+                    "cache_status": "miss",
+                    "routing_status": "passthrough",
+                    "text_bucket": "32k_128k_chars",
+                    "token_bucket": "8k_32k_tokens",
+                    "sample_count": 1,
+                    "projected_saved_tokens": 800,
+                    "projected_saved_chars": 3_200,
+                    "projected_savings_usd": 0.0024,
+                    "freshness_state": "fresh",
+                    "blocker_codes": [],
+                }
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+
+        report = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            source_rollup_report={
+                "schema": "tokenclaw.request_shape_rollups.v1",
+                "run_id": "too-small-queue-stage",
+                "summary": {"rows_considered": 1, "rollup_count": 0},
+                "follow_up_candidates": {"activation_candidate_queue": queue},
+                "rollups": [],
+            },
+            rules_path=rules_path,
+        )
+
+        self.assertEqual(report["status"], "no-stageable-cohort")
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["staged_canary_count"], 0)
+        self.assertEqual(report["stage_actions"], [])
+        self.assertFalse(rules_path.exists())
+        self.assertEqual(report["source_report"]["crunch_opportunity_summary"]["source_queue_crunch_entry_count"], 1)
+        self.assertEqual(report["top_cohort"]["reason"], "insufficient-repeat-evidence")
+        self.assertIn("insufficient-repeat-evidence", report["top_cohort"]["blocker_codes"])
+        selection = report["activation_ready_rollup_selection"]
+        self.assertEqual(selection["drafted_count"], 0)
+        self.assertEqual(selection["skipped_count"], 1)
+        self.assertEqual(selection["rows"][0]["skip_reason"], "insufficient-repeat-evidence")
+        validation = report["validation"]
+        self.assertEqual(validation["schema"], "tokenclaw.request_shape_crunch_canary_apply_batch.v1")
+        self.assertFalse(validation["ok"])
+        self.assertTrue(validation["dry_run"])
+        self.assertFalse(validation["wrote_policy_files"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+        self.assertFalse(report["privacy"]["provider_calls_made"])
+        self.assertFalse(report["privacy"]["managed_server_calls_made"])
+
     def test_crunch_opportunity_dry_run_noops_for_empty_activation_candidate_queue(self) -> None:
         empty_queue = {
             "schema": "tokenclaw.request_shape_local_activation_candidate_queue.v1",

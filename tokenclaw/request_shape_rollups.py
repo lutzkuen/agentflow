@@ -4416,6 +4416,9 @@ def _request_shape_crunch_canary_action(
             FOLLOW_UP_CANDIDATES_SCHEMA,
             CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
         ],
+        "source_activation_fingerprint": cohort.get("source_activation_fingerprint"),
+        "source_activation_candidate_rank": cohort.get("source_activation_candidate_rank"),
+        "source_activation_candidate_next_action": cohort.get("source_activation_candidate_next_action"),
         "local_only_reason": "file-backed-local-policy-no-managed-dependency",
         "candidate_rule": cohort.get("candidate_rule"),
         "candidate_count": candidate_count,
@@ -5947,8 +5950,20 @@ def build_request_shape_crunch_canary_stage_report(
         )
     existing_canary_rules = _load_request_shape_crunch_canary_rules(rules_path)
     has_cohort_filter = bool(_request_shape_crunch_canary_rule_conditions(cohort_filter))
+    follow_up = rollup_report.get("follow_up_candidates") if isinstance(rollup_report.get("follow_up_candidates"), dict) else {}
+    activation_queue = (
+        follow_up.get("activation_candidate_queue")
+        if isinstance(follow_up.get("activation_candidate_queue"), dict)
+        else None
+    )
+    dry_run_source: list[dict[str, Any]] | dict[str, Any]
+    rollup_rows = [row for row in rollup_report.get("rollups") or [] if isinstance(row, dict)]
+    if isinstance(activation_queue, dict) and not rollup_rows:
+        dry_run_source = activation_queue
+    else:
+        dry_run_source = rollup_rows
     dry_run = build_request_shape_crunch_opportunity_dry_run(
-        [row for row in rollup_report.get("rollups") or [] if isinstance(row, dict)],
+        dry_run_source,
         limit=25,
         rollout_fraction=rollout_fraction,
         holdout_fraction=holdout_fraction,
@@ -6037,6 +6052,12 @@ def build_request_shape_crunch_canary_stage_report(
         "aggregate_only": True,
         "privacy": _crunch_opportunity_privacy(),
     }
+    validation_rules_path = _crunch_rules_candidate_paths(rules_path)[0]
+    validation = apply_request_shape_crunch_canary_actions(
+        actions,
+        rules_path=validation_rules_path,
+        dry_run=True,
+    )
     if actions:
         status = "staged"
         next_action = "apply-local-crunch-canary-after-review"
@@ -6092,6 +6113,7 @@ def build_request_shape_crunch_canary_stage_report(
         "top_cohort": top_cohort,
         "top_stage_cohort": top_stage_cohort,
         "duplicate_suppression": duplicate_suppression,
+        "validation": validation,
         "target_local_policy_section": "crunch.rules",
         "target_local_rule_file": "crunch_rules.yaml",
         "stage_lifecycle_projection": stage_lifecycle_projection,
@@ -6110,6 +6132,11 @@ def build_request_shape_crunch_canary_stage_report(
         },
         "acceptance": {
             "stages_one_repeated_context_crunch_canary": len(actions) == 1,
+            "has_validation_metadata": validation.get("schema") == CRUNCH_CANARY_APPLY_BATCH_SCHEMA
+            and bool(actions)
+            and bool(validation.get("ok"))
+            and bool(validation.get("dry_run"))
+            and not bool(validation.get("wrote_policy_files")),
             "reports_one_new_or_existing_repeated_context_crunch_canary": reported_canary_count == 1,
             "has_projected_tokens": bool(top_reported_canary and _as_int(top_reported_canary.get("projected_saved_tokens")) > 0),
             "has_projected_savings": bool(top_reported_canary and _as_float(top_reported_canary.get("projected_saved_usd")) > 0),
