@@ -4187,6 +4187,12 @@ def _shape_crunch_decision(row: dict[str, Any]) -> dict[str, Any]:
         blockers.add("not-large-context")
     if "crunch" not in classes and "repeated_context" not in classes:
         blockers.add("not-crunch-work-class")
+    activation_readiness = public_label(row.get("activation_candidate_readiness_state"), "")
+    if activation_readiness and activation_readiness != "activation-ready":
+        blockers.add(f"activation-candidate-{activation_readiness}")
+    freshness_state = public_label(row.get("freshness_state") or row.get("snapshot_freshness_state"), "")
+    if freshness_state in {"stale", "rollup-stale", "snapshot-stale"}:
+        blockers.add("stale-rollup-evidence")
     if _as_int(row.get("successful_input_tokens") or row.get("input_tokens")) <= 0:
         blockers.add("missing-token-metadata")
     if projected_tokens <= 0 and observed_tokens <= 0:
@@ -4200,6 +4206,10 @@ def _shape_crunch_decision(row: dict[str, Any]) -> dict[str, Any]:
         }
 
     reason_priority = (
+        "stale-rollup-evidence",
+        "activation-candidate-blocked",
+        "activation-candidate-stale",
+        "activation-candidate-missing-evidence",
         "missing-token-metadata",
         "insufficient-repeat-evidence",
         "not-large-context",
@@ -5468,8 +5478,109 @@ def _build_repeated_context_crunch_drill(
     }
 
 
+def _activation_candidate_queue_crunch_rollups(source: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not isinstance(source, dict):
+        return [], {
+            "source_schema": ROLLUP_ROW_SCHEMA,
+            "source_queue_status": None,
+            "source_queue_entry_count": 0,
+            "source_queue_crunch_entry_count": 0,
+        }
+
+    entries = source.get("entries") if isinstance(source.get("entries"), list) else []
+    rows: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if public_label(entry.get("local_action_family"), "unknown") != "crunch":
+            continue
+        sample_count = _as_int(entry.get("sample_count") or entry.get("row_count"))
+        projected_tokens = _as_int(entry.get("projected_saved_tokens"))
+        projected_chars = _as_int(entry.get("projected_saved_chars")) or projected_tokens * 4
+        estimated_input_tokens = (
+            _as_int(entry.get("successful_input_tokens"))
+            or _as_int(entry.get("input_tokens"))
+            or (
+                int(round(projected_tokens / REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE))
+                if projected_tokens > 0 and REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE > 0
+                else 0
+            )
+        )
+        blocker_codes = [
+            public_label(item, "unknown")
+            for item in entry.get("blocker_codes") or []
+            if public_label(item, "unknown") != "unknown"
+        ]
+        rows.append(
+            {
+                "schema": ROLLUP_ROW_SCHEMA,
+                "source_schema": LOCAL_ACTIVATION_CANDIDATE_QUEUE_ENTRY_SCHEMA,
+                "source_activation_fingerprint": public_label(entry.get("fingerprint"), "unknown"),
+                "source_activation_candidate_rank": _as_int(entry.get("rank")),
+                "provider_family": public_label(entry.get("provider_family"), "unknown"),
+                "source_surface": public_label(entry.get("source_surface"), "unknown"),
+                "endpoint": public_label(entry.get("endpoint"), "unknown"),
+                "app_family": public_label(entry.get("app_family"), "unknown"),
+                "requested_model_family": public_label(entry.get("requested_model_family"), "unknown"),
+                "routed_model_family": public_label(entry.get("routed_model_family"), "unknown"),
+                "category": public_label(entry.get("category"), "unknown"),
+                "workflow_phase": public_label(entry.get("workflow_phase"), "unknown"),
+                "stream": bool(entry.get("stream")),
+                "has_tools": bool(entry.get("has_tools")),
+                "cache_status": public_label(entry.get("cache_status"), "unknown"),
+                "routing_status": public_label(entry.get("routing_status"), "unknown"),
+                "text_bucket": public_label(entry.get("text_bucket"), "unknown"),
+                "token_bucket": public_label(entry.get("token_bucket"), "unknown"),
+                "candidate_work_classes": ["crunch", "repeated_context"],
+                "candidate_families": ["crunch_candidate"],
+                "blocker_codes": blocker_codes,
+                "row_count": sample_count,
+                "sample_count": sample_count,
+                "successful_input_tokens": estimated_input_tokens,
+                "input_tokens": estimated_input_tokens,
+                "projected_crunch_tokens_saved": projected_tokens,
+                "projected_crunch_chars_saved": projected_chars,
+                "projected_crunch_savings_usd": round(_as_float(entry.get("projected_savings_usd")), 8),
+                "current_crunch_tokens_saved": 0,
+                "current_crunch_chars_saved": 0,
+                "current_crunch_savings_usd": 0.0,
+                "crunch_canary_lifecycle": entry.get("crunch_canary_lifecycle")
+                if isinstance(entry.get("crunch_canary_lifecycle"), dict)
+                else {},
+                "freshness_state": public_label(entry.get("freshness_state"), "unknown"),
+                "activation_candidate_readiness_state": public_label(entry.get("readiness_state"), "unknown"),
+                "activation_candidate_next_action": public_label(entry.get("recommended_next_action"), "unknown"),
+                "privacy": _shape_follow_up_privacy(),
+            }
+        )
+    return rows, {
+        "source_schema": public_label(source.get("schema"), LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA),
+        "source_queue_status": public_label(source.get("status"), "unknown"),
+        "source_queue_entry_count": len(entries),
+        "source_queue_crunch_entry_count": len(rows),
+    }
+
+
+def _crunch_dry_run_source_rows(source: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if isinstance(source, dict) and source.get("schema") == LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA:
+        return _activation_candidate_queue_crunch_rollups(source)
+    if isinstance(source, list):
+        return [row for row in source if isinstance(row, dict)], {
+            "source_schema": ROLLUP_ROW_SCHEMA,
+            "source_queue_status": None,
+            "source_queue_entry_count": 0,
+            "source_queue_crunch_entry_count": 0,
+        }
+    return [], {
+        "source_schema": ROLLUP_ROW_SCHEMA,
+        "source_queue_status": None,
+        "source_queue_entry_count": 0,
+        "source_queue_crunch_entry_count": 0,
+    }
+
+
 def build_request_shape_crunch_opportunity_dry_run(
-    rollups: list[dict[str, Any]],
+    rollups: list[dict[str, Any]] | dict[str, Any],
     *,
     limit: int = 25,
     rollout_fraction: float = DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION,
@@ -5478,9 +5589,10 @@ def build_request_shape_crunch_opportunity_dry_run(
     max_canary_actions: int = DEFAULT_CRUNCH_CANARY_MAX_NEW_STAGE_ACTIONS,
     cohort_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    source_rows, source_metadata = _crunch_dry_run_source_rows(rollups)
     crunch_rows = [
         row
-        for row in rollups
+        for row in source_rows
         if isinstance(row, dict)
         and (
             "crunch" in {str(item) for item in row.get("candidate_work_classes") or []}
@@ -5554,7 +5666,27 @@ def build_request_shape_crunch_opportunity_dry_run(
                 "schema": "tokenclaw.request_shape_crunch_opportunity_cohort.v1",
                 "cohort_id": cohort_id,
                 "policy_id": policy_id,
+                "fingerprint": public_id(
+                    stable_json(
+                        {
+                            "schema": "tokenclaw.request_shape_crunch_opportunity_cohort.v1",
+                            "cohort_id": cohort_id,
+                            "source_activation_fingerprint": row.get("source_activation_fingerprint"),
+                            "provider_family": row.get("provider_family"),
+                            "source_surface": row.get("source_surface"),
+                            "endpoint": row.get("endpoint"),
+                            "category": row.get("category"),
+                            "workflow_phase": row.get("workflow_phase"),
+                            "text_bucket": row.get("text_bucket"),
+                            "token_bucket": row.get("token_bucket"),
+                        }
+                    ),
+                    prefix="crunch-opportunity",
+                ),
                 "source_evidence_schema": row.get("source_schema") or row.get("schema") or ROLLUP_ROW_SCHEMA,
+                "source_activation_fingerprint": row.get("source_activation_fingerprint"),
+                "source_activation_candidate_rank": row.get("source_activation_candidate_rank"),
+                "source_activation_candidate_next_action": row.get("activation_candidate_next_action"),
                 "readiness": readiness,
                 "candidate_status": candidate_status,
                 "policy_write_status": policy_write_status,
@@ -5723,10 +5855,18 @@ def build_request_shape_crunch_opportunity_dry_run(
     return {
         "schema": CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
         "status": status,
+        "source_schema": source_metadata["source_schema"],
+        "source_queue_status": source_metadata["source_queue_status"],
+        "source_queue_entry_count": source_metadata["source_queue_entry_count"],
+        "source_queue_crunch_entry_count": source_metadata["source_queue_crunch_entry_count"],
         "summary": {
             "candidate_count": len(cohorts),
             "matched_count": matched_count,
             "rows_considered": matched_count,
+            "source_schema": source_metadata["source_schema"],
+            "source_queue_status": source_metadata["source_queue_status"],
+            "source_queue_entry_count": source_metadata["source_queue_entry_count"],
+            "source_queue_crunch_entry_count": source_metadata["source_queue_crunch_entry_count"],
             "measurement_ready_cohort_count": readiness_counts.get("measurement-ready", 0),
             "canary_staged_cohort_count": readiness_counts.get("canary-staged", 0),
             "canary_applied_cohort_count": readiness_counts.get("canary-applied", 0),
@@ -12547,6 +12687,8 @@ def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, A
     retry_count = _as_int(row.get("retry_count"))
     projected_crunch_savings = _as_float(row.get("projected_crunch_savings_usd"))
     projected_crunch_tokens = _as_int(row.get("projected_crunch_tokens_saved"))
+    projected_crunch_chars = _as_int(row.get("projected_crunch_chars_saved"))
+    crunch_canary_lifecycle = _shape_crunch_lifecycle_summary(row)
     readiness = str(decision.get("readiness_state") or "unknown")
     readiness_weight = {
         "activation-ready": 500.0,
@@ -12621,9 +12763,14 @@ def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, A
         "observed_savings_usd": round(observed_savings, 6),
         "projected_hits": _as_int(decision.get("projected_hits")),
         "projected_crunch_tokens_saved": projected_crunch_tokens,
+        "projected_crunch_chars_saved": projected_crunch_chars,
         "projected_crunch_savings_usd": round(projected_crunch_savings, 6),
         "projected_saved_tokens": _as_int(decision.get("projected_saved_tokens")),
+        "projected_saved_chars": projected_crunch_chars,
         "projected_savings_usd": round(_as_float(decision.get("projected_savings_usd")), 6),
+        "successful_input_tokens": _as_int(row.get("successful_input_tokens")),
+        "input_tokens": _as_int(row.get("input_tokens")),
+        "crunch_canary_lifecycle": crunch_canary_lifecycle,
         "candidate_work_classes": classes,
         "candidate_families": families,
         "blocker_codes": sorted(public_label(item, "unknown") for item in decision.get("blocker_codes") or []),
@@ -12674,6 +12821,24 @@ def _shape_candidate_preview_requirement(decision: dict[str, Any]) -> tuple[str,
     if family in {"cache", "routing"}:
         return "managed-preview-required-before-policy-write", True
     return "managed-preview-optional", False
+
+
+def _shape_crunch_lifecycle_summary(row: dict[str, Any]) -> dict[str, Any]:
+    lifecycle = row.get("crunch_canary_lifecycle") if isinstance(row.get("crunch_canary_lifecycle"), dict) else {}
+    if not lifecycle:
+        return {}
+    return {
+        "schema": CRUNCH_CANARY_LIFECYCLE_SCHEMA,
+        "applied_count": _as_int(lifecycle.get("applied_count")),
+        "holdout_count": _as_int(lifecycle.get("holdout_count")),
+        "skipped_count": _as_int(lifecycle.get("skipped_count")),
+        "safety_stopped_count": _as_int(lifecycle.get("safety_stopped_count")),
+        "fallback_count": _as_int(lifecycle.get("fallback_count")),
+        "rollback_count": _as_int(lifecycle.get("rollback_count")),
+        "status_breakdown": lifecycle.get("status_breakdown") if isinstance(lifecycle.get("status_breakdown"), list) else [],
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
 
 
 def _shape_candidate_expected_savings_path(candidate: dict[str, Any]) -> str:
@@ -12742,9 +12907,15 @@ def _shape_activation_candidate_entry(candidate: dict[str, Any], *, rank: int) -
         "row_count": _as_int(candidate.get("row_count")),
         "projected_hits": _as_int(candidate.get("projected_hits")),
         "projected_saved_tokens": _as_int(candidate.get("projected_saved_tokens")),
+        "projected_saved_chars": _as_int(candidate.get("projected_saved_chars")),
         "projected_savings_usd": projected_savings,
         "projected_saved_usd": projected_savings,
         "savings_per_1000_calls_usd": savings_per_1000,
+        "successful_input_tokens": _as_int(candidate.get("successful_input_tokens")),
+        "input_tokens": _as_int(candidate.get("input_tokens")),
+        "crunch_canary_lifecycle": candidate.get("crunch_canary_lifecycle")
+        if isinstance(candidate.get("crunch_canary_lifecycle"), dict)
+        else {},
         "observed_savings_usd": round(_as_float(candidate.get("observed_savings_usd")), 8),
         "expected_savings_path": _shape_candidate_expected_savings_path(candidate),
         "provider_family": public_label(candidate.get("provider_family"), "unknown"),
@@ -12754,6 +12925,10 @@ def _shape_activation_candidate_entry(candidate: dict[str, Any], *, rank: int) -
         "workflow_phase": public_label(candidate.get("workflow_phase"), "unknown"),
         "stream": bool(candidate.get("stream")),
         "has_tools": bool(candidate.get("has_tools")),
+        "text_bucket": public_label(candidate.get("text_bucket"), "unknown"),
+        "token_bucket": public_label(candidate.get("token_bucket"), "unknown"),
+        "cache_status": public_label(candidate.get("cache_status"), "unknown"),
+        "routing_status": public_label(candidate.get("routing_status"), "unknown"),
         "requested_model_family": public_label(candidate.get("requested_model_family"), "unknown"),
         "routed_model_family": public_label(candidate.get("routed_model_family"), "unknown"),
         "target_local_rule_file": target_rule_file,
@@ -13916,7 +14091,17 @@ def build_request_shape_rollups_report(
         cache_replayability_dry_run,
         limit=25,
     )
-    crunch_opportunity_dry_run = build_request_shape_crunch_opportunity_dry_run(rollups, limit=25)
+    if dashboard_candidate_backfilled:
+        source = "dashboard-routing-candidates"
+    elif metadata_window_backfilled:
+        source = "recent-local-metadata-window-backfill"
+    else:
+        source = "recent-local-call-metadata"
+    follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10, source=source)
+    crunch_opportunity_dry_run = build_request_shape_crunch_opportunity_dry_run(
+        follow_up_candidates["activation_candidate_queue"],
+        limit=25,
+    )
     crunch_canary_impact = build_request_shape_crunch_canary_impact_report(
         impact_rows,
         max_evidence_age_hours=max_crunch_canary_evidence_age_hours,
@@ -13927,13 +14112,6 @@ def build_request_shape_rollups_report(
         crunch_policy_decision=crunch_policy_decision,
         crunch_canary_impact=crunch_canary_impact,
     )
-    if dashboard_candidate_backfilled:
-        source = "dashboard-routing-candidates"
-    elif metadata_window_backfilled:
-        source = "recent-local-metadata-window-backfill"
-    else:
-        source = "recent-local-call-metadata"
-    follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10, source=source)
     routing_downgrade_drills = build_request_shape_routing_downgrade_drill_report(rollups, limit=25)
     remaining_crunch_measurements = build_request_shape_crunch_remaining_measurement_report(
         follow_up_candidates=follow_up_candidates,

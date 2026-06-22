@@ -5131,6 +5131,104 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(dry_run["privacy"]["session_ids_included"])
         self.assertFalse(dry_run["privacy"]["cache_keys_included"])
 
+    def test_crunch_opportunity_dry_run_consumes_ranked_activation_candidate_queue(self) -> None:
+        raw_request_id = "raw-crunch-queue-request-id-must-not-leak"
+        raw_session_id = "raw-crunch-queue-session-id-must-not-leak"
+        raw_path = "/tmp/private/crunch-queue.py"
+        rollups = [
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "app_family": "generic_openai",
+                "requested_model_family": "gpt-5",
+                "routed_model_family": "gpt-5",
+                "category": "tool-result",
+                "workflow_phase": "tool-execution",
+                "stream": True,
+                "has_tools": True,
+                "text_bucket": "32k_128k_chars",
+                "token_bucket": "8k_32k_tokens",
+                "cache_status": "skipped",
+                "routing_status": "passthrough",
+                "candidate_work_classes": ["repeated_context", "crunch"],
+                "candidate_families": ["crunch_candidate"],
+                "blocker_codes": [],
+                "row_count": 18,
+                "sample_count": 18,
+                "successful_input_tokens": 180_000,
+                "input_tokens": 180_000,
+                "projected_crunch_tokens_saved": 9_000,
+                "projected_crunch_chars_saved": 36_000,
+                "projected_crunch_savings_usd": 0.027,
+                "request_id": raw_request_id,
+                "session_id": raw_session_id,
+                "file_path": raw_path,
+            }
+        ]
+        follow_up = build_request_shape_follow_up_candidates(rollups, limit=10)
+        queue = follow_up["activation_candidate_queue"]
+
+        dry_run = build_request_shape_crunch_opportunity_dry_run(queue)
+        repeat = build_request_shape_crunch_opportunity_dry_run(queue)
+
+        self.assertEqual(dry_run["source_schema"], "tokenclaw.request_shape_local_activation_candidate_queue.v1")
+        self.assertEqual(dry_run["source_queue_status"], "ranked")
+        self.assertEqual(dry_run["source_queue_entry_count"], 1)
+        self.assertEqual(dry_run["source_queue_crunch_entry_count"], 1)
+        self.assertEqual(dry_run["status"], "ranked")
+        self.assertEqual(dry_run["summary"]["source_queue_crunch_entry_count"], 1)
+        self.assertEqual(dry_run["summary"]["measurement_ready_cohort_count"], 1)
+        self.assertEqual(dry_run["summary"]["projected_saved_tokens"], 9_000)
+        self.assertEqual(dry_run["summary"]["projected_saved_chars"], 36_000)
+        self.assertEqual(dry_run["summary"]["projected_saved_usd"], 0.027)
+        self.assertEqual(dry_run["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(dry_run["missing_measurements"], [])
+        top = dry_run["cohorts"][0]
+        self.assertEqual(top["source_evidence_schema"], "tokenclaw.request_shape_local_activation_candidate_queue_entry.v1")
+        self.assertEqual(top["source_activation_fingerprint"], queue["entries"][0]["fingerprint"])
+        self.assertTrue(top["fingerprint"].startswith("crunch-opportunity:"))
+        self.assertEqual(top["fingerprint"], repeat["cohorts"][0]["fingerprint"])
+        self.assertEqual(top["sample_count"], 18)
+        self.assertEqual(top["projected_saved_tokens"], 9_000)
+        self.assertEqual(top["projected_saved_chars"], 36_000)
+        self.assertEqual(top["projected_saved_usd"], 0.027)
+        self.assertEqual(top["readiness"], "measurement-ready")
+        self.assertEqual(top["reason"], "repeated-context-crunch-opportunity")
+        self.assertIn("duplicate_suppression", top)
+        self.assertTrue(dry_run["privacy"]["metadata_only"])
+        self.assertTrue(dry_run["privacy"]["aggregate_only"])
+        self.assertFalse(dry_run["privacy"]["provider_calls_made"])
+        self.assertFalse(dry_run["privacy"]["managed_server_calls_made"])
+        self.assertFalse(dry_run["summary"]["policy_files_written"])
+        rendered = json.dumps(dry_run, sort_keys=True)
+        self.assertNotIn(raw_request_id, rendered)
+        self.assertNotIn(raw_session_id, rendered)
+        self.assertNotIn(raw_path, rendered)
+
+    def test_crunch_opportunity_dry_run_noops_for_empty_activation_candidate_queue(self) -> None:
+        empty_queue = {
+            "schema": "tokenclaw.request_shape_local_activation_candidate_queue.v1",
+            "status": "empty",
+            "entries": [],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        dry_run = build_request_shape_crunch_opportunity_dry_run(empty_queue)
+
+        self.assertEqual(dry_run["status"], "no-repeated-context-crunch-cohorts")
+        self.assertEqual(dry_run["source_schema"], "tokenclaw.request_shape_local_activation_candidate_queue.v1")
+        self.assertEqual(dry_run["source_queue_status"], "empty")
+        self.assertEqual(dry_run["source_queue_entry_count"], 0)
+        self.assertEqual(dry_run["source_queue_crunch_entry_count"], 0)
+        self.assertEqual(dry_run["summary"]["top_next_action"], "rank-repeated-context-crunch-dry-run")
+        self.assertIn("repeated-context-crunch-cohorts", dry_run["missing_measurements"])
+        self.assertEqual(dry_run["repeated_context_drill"]["state"], "no-source")
+        self.assertEqual(dry_run["cohorts"], [])
+        self.assertTrue(dry_run["privacy"]["metadata_only"])
+        self.assertTrue(dry_run["privacy"]["aggregate_only"])
+
     def test_crunch_opportunity_dry_run_noops_for_small_or_one_off_rollups(self) -> None:
         small_rollups = [
             {
