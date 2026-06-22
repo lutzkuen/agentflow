@@ -4647,6 +4647,11 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "holdout_count": 18,
                 "rollback_count": 0,
                 "safety_stop_count": 0,
+                "fallback_count": 1 if family == "routing" else 0,
+                "retry_count": 2 if family == "routing" else 0,
+                "error_rate_delta": 0.0,
+                "retry_rate_delta": 0.01 if family == "routing" else 0.0,
+                "fallback_rate_delta": 0.02 if family == "routing" else 0.0,
                 "canary_fraction": 0.2,
                 "holdout_fraction": 0.15,
                 "projected_saved_tokens": 32000,
@@ -4654,6 +4659,18 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "savings_per_1000_calls_usd": 3.5,
                 "target_local_rule_file": target_file,
                 "target_local_policy_section": target_section,
+                "provider_family": "openai" if family == "routing" else "unknown",
+                "source_surface": "openai_responses" if family == "routing" else "unknown",
+                "endpoint": "responses" if family == "routing" else "unknown",
+                "category": "summary" if family == "routing" else "tool-result",
+                "workflow_phase": "summary" if family == "routing" else "tool-execution",
+                "stream": False,
+                "has_tools": False,
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "requested_model": "gpt-5" if family == "routing" else None,
+                "candidate_target_model": "gpt-5-mini" if family == "routing" else None,
+                "target_reason": "preview-agreed-openai-routing-downgrade" if family == "routing" else None,
                 "managed_preview_gate": gate,
                 "policy_files_written": False,
                 "provider_calls_made": False,
@@ -4787,6 +4804,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(queue["summary"]["preview_agreed_canary_blocked_successor_count"], 4)
         self.assertEqual(queue["summary"]["preview_agreed_crunch_canary_draft_count"], 1)
         self.assertEqual(queue["summary"]["preview_agreed_routing_canary_draft_count"], 1)
+        self.assertEqual(report["summary"]["routing_canary_rule_stage_count"], 1)
+        self.assertEqual(report["summary"]["predecessor_candidate_suppression_count"], 2)
 
         drafts = {row["source_fingerprint"]: row for row in report["drafts"]}
         crunch = drafts["activation:agreed-crunch"]
@@ -4804,9 +4823,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             self.assertTrue(draft["safety_gates"]["has_holdout_coverage"])
             self.assertTrue(draft["safety_gates"]["zero_safety_stops"])
             self.assertTrue(draft["safety_gates"]["zero_rollbacks"])
+            self.assertTrue(draft["outcome_feedback"]["has_applied_coverage"])
+            self.assertTrue(draft["outcome_feedback"]["has_holdout_coverage"])
+            self.assertTrue(draft["predecessor_candidate_suppression"]["suppresses_predecessor_candidate_on_next_research_plan"])
             self.assertFalse(draft["policy_files_written"])
             self.assertFalse(draft["provider_calls_made"])
             self.assertFalse(draft["managed_server_calls_made"])
+            self.assertFalse(draft["managed_enforced"])
+            self.assertFalse(draft["authoritative_for_active_policy"])
             self.assertFalse(draft["proposed_policy_patch"]["policy_files_written"])
 
         self.assertEqual(crunch["target_local_rule_file"], "crunch_rules.yaml")
@@ -4815,6 +4839,33 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(routing["target_local_rule_file"], "routing_rules.yaml")
         self.assertEqual(routing["target_local_policy_section"], "routing.rules")
         self.assertIn("routing_rules", routing["proposed_policy_patch"])
+        routing_rule = routing["proposed_policy_patch"]["routing_rules"][0]
+        self.assertFalse(routing_rule["enabled"])
+        self.assertEqual(routing_rule["mode"], "canary")
+        self.assertTrue(routing_rule["review_only"])
+        self.assertEqual(routing_rule["requested_model"], "gpt-5")
+        self.assertEqual(routing_rule["route_to"], "gpt-5-mini")
+        self.assertEqual(routing_rule["target_model"], "gpt-5-mini")
+        self.assertEqual(routing_rule["source_policy"], "managed-recommended")
+        self.assertEqual(routing_rule["policy_source"], "local-manual")
+        self.assertFalse(routing_rule["managed_enforced"])
+        self.assertFalse(routing_rule["authoritative_for_active_policy"])
+        self.assertTrue(routing_rule["locally_executed"])
+        self.assertEqual(routing_rule["shape"]["source_surface"], "openai_responses")
+        self.assertEqual(routing_rule["shape"]["endpoint"], "responses")
+        self.assertEqual(routing_rule["shape"]["category"], "summary")
+        self.assertEqual(routing_rule["outcome_feedback"]["applied_count"], 24)
+        self.assertEqual(routing_rule["outcome_feedback"]["holdout_count"], 18)
+        self.assertEqual(routing_rule["outcome_feedback"]["fallback_count"], 1)
+        self.assertEqual(routing_rule["outcome_feedback"]["retry_count"], 2)
+        self.assertEqual(routing_rule["outcome_feedback"]["error_rate_delta"], 0.0)
+        self.assertEqual(routing_rule["outcome_feedback"]["retry_rate_delta"], 0.01)
+        self.assertEqual(routing_rule["outcome_feedback"]["fallback_rate_delta"], 0.02)
+        self.assertEqual(routing_rule["rollback_metadata"]["rollback_action_type"], "disable_preview_agreed_routing_canary")
+        self.assertFalse(routing_rule["rollback_metadata"]["policy_files_written"])
+        self.assertTrue(
+            routing_rule["predecessor_candidate_suppression"]["suppresses_predecessor_candidate_on_next_research_plan"]
+        )
 
         blockers = {row["source_fingerprint"]: row for row in report["blockers"]}
         self.assertEqual(blockers["activation:stale-crunch"]["blocked_reason"], "stale-preview")

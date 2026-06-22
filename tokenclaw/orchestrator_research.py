@@ -8954,6 +8954,163 @@ def _preview_agreed_canary_safety_gates(
     }
 
 
+def _preview_agreed_canary_outcome_feedback(
+    family: str,
+    action: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    applied_count = _to_int(action.get("applied_count") or decision.get("applied_count"))
+    holdout_count = _to_int(action.get("holdout_count") or decision.get("holdout_count"))
+    fallback_count = _to_int(action.get("fallback_count") or decision.get("fallback_count"))
+    retry_count = _to_int(action.get("retry_count") or decision.get("retry_count"))
+    safety_stop_count = _to_int(action.get("safety_stop_count") or decision.get("safety_stop_count"))
+    rollback_count = _to_int(action.get("rollback_count") or decision.get("rollback_count"))
+    projected_savings = _to_float(
+        action.get("projected_savings_usd")
+        or action.get("projected_saved_usd")
+        or decision.get("projected_savings_usd")
+        or decision.get("projected_saved_usd")
+    )
+    realized_savings = _to_float(
+        action.get("realized_savings_usd")
+        or action.get("observed_savings_usd")
+        or action.get("observed_saved_usd")
+        or decision.get("observed_saved_usd")
+    )
+    return {
+        "schema": "tokenclaw.preview_agreed_canary_outcome_feedback.v1",
+        "local_action_family": family,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "fallback_count": fallback_count,
+        "retry_count": retry_count,
+        "safety_stop_count": safety_stop_count,
+        "rollback_count": rollback_count,
+        "error_rate_delta": round(_to_float(action.get("error_rate_delta") or decision.get("error_rate_delta")), 8),
+        "retry_rate_delta": round(_to_float(action.get("retry_rate_delta") or decision.get("retry_rate_delta")), 8),
+        "fallback_rate_delta": round(_to_float(action.get("fallback_rate_delta") or decision.get("fallback_rate_delta")), 8),
+        "projected_savings_usd": round(projected_savings, 8),
+        "realized_savings_usd": round(realized_savings, 8),
+        "savings_per_1000_calls_usd": round(_to_float(action.get("savings_per_1000_calls_usd")), 8),
+        "has_applied_coverage": applied_count > 0,
+        "has_holdout_coverage": holdout_count > 0,
+        "zero_safety_stops": safety_stop_count == 0,
+        "zero_rollbacks": rollback_count == 0,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "policy_files_written": False,
+    }
+
+
+def _preview_agreed_canary_predecessor_suppression(
+    family: str,
+    action: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": "tokenclaw.preview_agreed_canary_predecessor_suppression.v1",
+        "local_action_family": family,
+        "source_fingerprint": sanitize_value(decision.get("source_fingerprint") or action.get("source_fingerprint")),
+        "successor_action_fingerprint": sanitize_value(
+            decision.get("successor_action_fingerprint") or action.get("fingerprint")
+        ),
+        "suppresses_predecessor_candidate_on_next_research_plan": True,
+        "suppression_reason": f"preview-agreed-{family}-canary-staged-for-local-outcome-feedback",
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _preview_agreed_routing_rule_metadata(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    canary_fraction: float,
+    holdout_fraction: float,
+    safety_gates: dict[str, Any],
+    outcome_feedback: dict[str, Any],
+    source_fingerprint: str,
+    successor_action_fingerprint: str,
+) -> dict[str, Any]:
+    requested_model = sanitize_value(
+        action.get("requested_model")
+        or decision.get("requested_model")
+        or action.get("requested_model_family")
+    )
+    route_to = sanitize_value(
+        action.get("candidate_target_model")
+        or action.get("target_model")
+        or decision.get("candidate_target_model")
+        or action.get("target_model_family")
+    )
+    shape = {
+        "provider_family": sanitize_value(action.get("provider_family")),
+        "source_surface": sanitize_value(action.get("source_surface")),
+        "endpoint": sanitize_value(action.get("endpoint")),
+        "category": sanitize_value(action.get("category")),
+        "workflow_phase": sanitize_value(action.get("workflow_phase")),
+        "stream": bool(action.get("stream")),
+        "has_tools": bool(action.get("has_tools")),
+        "text_bucket": sanitize_value(action.get("text_bucket")),
+        "token_bucket": sanitize_value(action.get("token_bucket")),
+    }
+    rollback_metadata = {
+        "schema": "tokenclaw.preview_agreed_routing_canary_rollback_metadata.v1",
+        "rollback_action_type": "disable_preview_agreed_routing_canary",
+        "rollback_reason_codes": [
+            "routing-quality-regression",
+            "error-rate-regression",
+            "retry-rate-regression",
+            "fallback-rate-regression",
+            "operator-rollback",
+        ],
+        "target_local_rule_file": sanitize_value(
+            action.get("target_local_rule_file")
+            or decision.get("target_local_rule_file")
+            or "routing_rules.yaml"
+        ),
+        "target_local_policy_section": sanitize_value(
+            action.get("target_local_policy_section")
+            or decision.get("target_local_policy_section")
+            or "routing.rules"
+        ),
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    return {
+        "requested_model": requested_model,
+        "route_to": route_to,
+        "target_model": route_to,
+        "candidate_target_model": route_to,
+        "target_reason": sanitize_value(action.get("target_reason") or "preview-agreed-routing-canary"),
+        "shape": sanitize_value(shape),
+        "source_policy": "managed-recommended",
+        "policy_source": "local-manual",
+        "managed_preview_source": "managed-recommended",
+        "managed_enforced": False,
+        "locally_executed": True,
+        "authoritative_for_active_policy": False,
+        "canary_fraction": canary_fraction,
+        "rollout_fraction": canary_fraction,
+        "holdout_fraction": holdout_fraction,
+        "source_fingerprint": source_fingerprint,
+        "successor_action_fingerprint": successor_action_fingerprint,
+        "safety_gates": safety_gates,
+        "outcome_feedback": outcome_feedback,
+        "rollback_metadata": rollback_metadata,
+        "review_required": True,
+        "review_only": True,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
+
+
 def _preview_agreed_canary_draft_id(
     family: str,
     action: dict[str, Any],
@@ -9022,7 +9179,36 @@ def _preview_agreed_canary_draft(
     successor_action_fingerprint = sanitize_value(
         decision.get("successor_action_fingerprint") or action.get("fingerprint")
     )
+    outcome_feedback = _preview_agreed_canary_outcome_feedback(family, action, decision)
+    predecessor_suppression = _preview_agreed_canary_predecessor_suppression(family, action, decision)
     patch_key = "crunch_rules" if family == "crunch" else "routing_rules"
+    rule = {
+        "id": _preview_agreed_canary_draft_id(family, action, decision, f"{family}-rule"),
+        "enabled": False,
+        "mode": "canary",
+        "review_only": True,
+        "canary_fraction": canary_fraction,
+        "rollout_fraction": canary_fraction,
+        "holdout_fraction": holdout_fraction,
+        "source_fingerprint": source_fingerprint,
+        "successor_action_fingerprint": successor_action_fingerprint,
+        "safety_gates": safety_gates,
+        "outcome_feedback": outcome_feedback,
+        "predecessor_candidate_suppression": predecessor_suppression,
+    }
+    if family == "routing":
+        rule.update(
+            _preview_agreed_routing_rule_metadata(
+                action,
+                decision,
+                canary_fraction=canary_fraction,
+                holdout_fraction=holdout_fraction,
+                safety_gates=safety_gates,
+                outcome_feedback=outcome_feedback,
+                source_fingerprint=source_fingerprint,
+                successor_action_fingerprint=successor_action_fingerprint,
+            )
+        )
     return sanitize_value(
         {
             "schema": PREVIEW_AGREED_CANARY_DRAFT_SCHEMA,
@@ -9051,24 +9237,13 @@ def _preview_agreed_canary_draft(
             ),
             "projected_saved_tokens": _to_int(action.get("projected_saved_tokens")),
             "safety_gates": safety_gates,
+            "outcome_feedback": outcome_feedback,
+            "predecessor_candidate_suppression": predecessor_suppression,
             "proposed_policy_patch": {
                 "schema": "tokenclaw.preview_agreed_canary_policy_patch.v1",
                 "operation": draft_action,
                 "patch_type": f"stage_preview_agreed_{family}_canary",
-                patch_key: [
-                    {
-                        "id": _preview_agreed_canary_draft_id(family, action, decision, f"{family}-rule"),
-                        "enabled": False,
-                        "mode": "canary",
-                        "review_only": True,
-                        "canary_fraction": canary_fraction,
-                        "rollout_fraction": canary_fraction,
-                        "holdout_fraction": holdout_fraction,
-                        "source_fingerprint": source_fingerprint,
-                        "successor_action_fingerprint": successor_action_fingerprint,
-                        "safety_gates": safety_gates,
-                    }
-                ],
+                patch_key: [rule],
                 "review_required": True,
                 "policy_files_written": False,
                 "provider_calls_made": False,
@@ -9078,6 +9253,8 @@ def _preview_agreed_canary_draft(
             "policy_files_written": False,
             "provider_calls_made": False,
             "managed_server_calls_made": False,
+            "managed_enforced": False,
+            "authoritative_for_active_policy": False,
             "privacy": _preview_agreed_canary_privacy(),
         }
     )
@@ -9147,6 +9324,19 @@ def build_preview_agreed_canary_drafts(
             "preview_agreed_successor_count": sum(1 for item in [*drafts, *blockers] if item.get("preview_agreement_status") == "agreed"),
             "routing_draft_count": family_counts.get("routing", 0),
             "crunch_draft_count": family_counts.get("crunch", 0),
+            "routing_canary_rule_stage_count": sum(
+                1
+                for item in drafts
+                if item.get("local_action_family") == "routing"
+                and isinstance(item.get("proposed_policy_patch"), dict)
+                and bool(item["proposed_policy_patch"].get("routing_rules"))
+            ),
+            "predecessor_candidate_suppression_count": sum(
+                1
+                for item in drafts
+                if isinstance(item.get("predecessor_candidate_suppression"), dict)
+                and bool(item["predecessor_candidate_suppression"].get("suppresses_predecessor_candidate_on_next_research_plan"))
+            ),
             "policy_files_written": False,
             "provider_calls_made": 0,
             "managed_server_calls_made": 0,
@@ -10467,8 +10657,12 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "applied_count": _to_int(entry.get("applied_count")),
         "holdout_count": _to_int(entry.get("holdout_count")),
         "fallback_count": _to_int(entry.get("fallback_count")),
+        "retry_count": _to_int(entry.get("retry_count")),
         "safety_stop_count": _to_int(entry.get("safety_stop_count")),
         "rollback_count": _to_int(entry.get("rollback_count")),
+        "error_rate_delta": round(_to_float(entry.get("error_rate_delta")), 8),
+        "retry_rate_delta": round(_to_float(entry.get("retry_rate_delta")), 8),
+        "fallback_rate_delta": round(_to_float(entry.get("fallback_rate_delta")), 8),
         "realized_savings_usd": realized,
         "projected_savings_usd": projected,
         "savings_per_1000_calls_usd": savings_per_1000,
@@ -10659,8 +10853,12 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "applied_count",
         "holdout_count",
         "fallback_count",
+        "retry_count",
         "safety_stop_count",
         "rollback_count",
+        "error_rate_delta",
+        "retry_rate_delta",
+        "fallback_rate_delta",
         "realized_savings_usd",
         "projected_savings_usd",
         "savings_per_1000_calls_usd",
