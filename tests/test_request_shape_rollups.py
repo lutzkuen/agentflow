@@ -3086,7 +3086,32 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(reobserve["schema"], "tokenclaw.request_shape_cache_replay_bounded_reobserve_window.v1")
         self.assertEqual(reobserve["status"], "rollback-required-before-reobserve")
         self.assertEqual(reobserve["decision"], "rollback-required")
+        self.assertEqual(reobserve["successor_resolution"], "rollback-required")
         self.assertEqual(reobserve["next_action"], "apply-cache-replay-rollback-before-reobserve")
+        recorded = reobserve["recorded_evidence"]
+        self.assertEqual(
+            recorded["schema"],
+            "tokenclaw.request_shape_cache_replay_reobserve_recorded_evidence.v1",
+        )
+        self.assertEqual(recorded["max_age_hours"], 72.0)
+        self.assertEqual(recorded["applied_count"], 0)
+        self.assertEqual(recorded["holdout_count"], 0)
+        self.assertEqual(recorded["observed_hits"], 0)
+        self.assertEqual(recorded["error_count"], 0)
+        self.assertEqual(recorded["fallback_count"], 0)
+        self.assertEqual(recorded["invalidation_skipped_count"], 0)
+        self.assertTrue(recorded["rollback_required"])
+        self.assertFalse(recorded["retirement_required"])
+        self.assertIn("canary_fraction", recorded)
+        self.assertIn("holdout_fraction", recorded)
+        self.assertTrue(recorded["metadata_only"])
+        self.assertTrue(recorded["aggregate_only"])
+        self.assertEqual(
+            evidence["summary"]["reobserve_window_successor_resolution"],
+            "rollback-required",
+        )
+        self.assertTrue(evidence["acceptance"]["reports_reobserve_recorded_evidence"])
+        self.assertTrue(evidence["acceptance"]["resolves_stale_successor_beyond_evidence_age"])
         self.assertEqual(reobserve["traffic_floor"]["minimum_observed_rows"], 10)
         self.assertEqual(reobserve["traffic_floor"]["minimum_applied_count"], 1)
         self.assertEqual(reobserve["traffic_floor"]["minimum_holdout_count"], 1)
@@ -3665,6 +3690,14 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(evidence["acceptance"]["reports_repeat_window_metadata"])
         self.assertEqual(decision["decision"], "keep-staged")
         self.assertEqual(decision["promotion_decision"], "keep-staged-warmup")
+        self.assertEqual(
+            decision["top_decision"]["post_rollback_observation"]["successor_resolution"],
+            "keep-staged-warmup",
+        )
+        self.assertEqual(
+            decision["summary"]["post_rollback_observation_successor_resolution"],
+            "keep-staged-warmup",
+        )
         self.assertEqual(decision["reason"], "first-seen-cache-warmup")
         self.assertEqual(decision["warmup_analysis"]["schema"], "tokenclaw.request_shape_cache_replay_warmup_analysis.v1")
         self.assertEqual(decision["top_decision"]["warmup_analysis"]["status"], evidence["warmup_analysis"]["status"])
@@ -3875,6 +3908,14 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["promotion_readiness"], "promotion-ready")
         self.assertEqual(decision["impact_recommendation"], "promotion-ready")
         self.assertEqual(decision["promotion_recommendation"], "promotion-ready")
+        self.assertEqual(
+            decision["top_decision"]["post_rollback_observation"]["successor_resolution"],
+            "fresh-applied-holdout-evidence",
+        )
+        self.assertEqual(
+            decision["summary"]["post_rollback_observation_successor_resolution"],
+            "fresh-applied-holdout-evidence",
+        )
         self.assertEqual(code, 0)
         self.assertEqual(cli_decision["schema"], "tokenclaw.request_shape_cache_replay_policy_decision.v1")
         self.assertEqual(cli_decision["decision"], "widen")
@@ -4210,6 +4251,10 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(decision["top_decision"]["promotion_decision"], "retire-staged-no-repeat")
         self.assertEqual(decision["top_decision"]["promotion_readiness"], "retire-staged-no-repeat")
         self.assertEqual(
+            decision["top_decision"]["post_rollback_observation"]["successor_resolution"],
+            "retire-staged-no-repeat",
+        )
+        self.assertEqual(
             decision["top_decision"]["promotion_decision_options"],
             ["promote", "keep-staged-warmup", "retire-staged-no-repeat", "keep-blocked"],
         )
@@ -4369,6 +4414,23 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(reobserve["schema"], "tokenclaw.request_shape_cache_replay_post_rollback_reobserve_window.v1")
         self.assertEqual(reobserve["decision"], "reobserve-after-rollback")
         self.assertEqual(reobserve["state"], "rollback-required")
+        self.assertEqual(reobserve["successor_resolution"], "rollback-required")
+        recorded = reobserve["recorded_evidence"]
+        self.assertEqual(
+            recorded["schema"],
+            "tokenclaw.request_shape_cache_replay_reobserve_recorded_evidence.v1",
+        )
+        self.assertEqual(recorded["age_hours"], 96.0)
+        self.assertTrue(recorded["rollback_required"])
+        self.assertFalse(recorded["retirement_required"])
+        self.assertTrue(recorded["metadata_only"])
+        self.assertTrue(recorded["aggregate_only"])
+        self.assertEqual(
+            decision["summary"]["post_rollback_observation_successor_resolution"],
+            "rollback-required",
+        )
+        self.assertTrue(decision["acceptance"]["reports_reobserve_recorded_evidence"])
+        self.assertTrue(decision["acceptance"]["resolves_stale_successor_beyond_evidence_age"])
         self.assertEqual(reobserve["next_state"], "reobserve-window-open")
         self.assertEqual(reobserve["next_action"], "apply-cache-replay-rollback-before-reobserve")
         self.assertEqual(reobserve["traffic_floor"]["minimum_observed_rows"], 10)

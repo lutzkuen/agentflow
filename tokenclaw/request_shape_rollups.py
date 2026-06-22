@@ -7256,6 +7256,40 @@ def _cache_replay_warmup_window_analysis(
     }
 
 
+def _cache_replay_reobserve_successor_resolution(
+    *,
+    decision: str,
+    applied_count: int,
+    holdout_count: int,
+    observed_hits: int,
+    warmup_analysis: dict[str, Any],
+) -> str:
+    """Map a reobserve-window decision to one acceptance successor outcome.
+
+    A stale staged cache replay successor must resolve to one of
+    ``rollback-required``, ``retire-staged-no-repeat``,
+    ``fresh-applied-holdout-evidence`` or ``keep-staged-warmup`` instead of
+    being left only as ``evidence-older-than-max-age``.  Decisions that simply
+    keep collecting bounded fresh traffic stay ``reobserve-window-open``.
+    """
+    if decision == "rollback-required":
+        return "rollback-required"
+    if decision == "retire-staged-no-repeat":
+        return "retire-staged-no-repeat"
+    has_applied_holdout = applied_count > 0 and holdout_count > 0
+    if has_applied_holdout and observed_hits > 0:
+        return "fresh-applied-holdout-evidence"
+    if (
+        has_applied_holdout
+        and observed_hits <= 0
+        and bool(warmup_analysis.get("warmup_only_applied_misses"))
+    ):
+        return "keep-staged-warmup"
+    if decision == "reobserve":
+        return "reobserve-window-open"
+    return "not-required"
+
+
 def _cache_replay_bounded_reobserve_window(
     *,
     status: str,
@@ -7272,8 +7306,11 @@ def _cache_replay_bounded_reobserve_window(
     projected_savings_usd: float,
     warmup_analysis: dict[str, Any],
     max_age_hours: float,
+    lifecycle_counts: dict[str, Any] | None = None,
+    age_hours: float | None = None,
 ) -> dict[str, Any]:
     top_canary = staged_canaries[0] if staged_canaries else {}
+    lifecycle_counts = lifecycle_counts or {}
     ttl_seconds = _as_int(top_canary.get("ttl_seconds"), DEFAULT_CACHE_REPLAY_CANARY_TTL_SECONDS)
     repeat_window = (
         warmup_analysis.get("repeat_window")
@@ -7327,15 +7364,50 @@ def _cache_replay_bounded_reobserve_window(
         next_action = reason or "cache-replay-reobserve-not-required"
         blocker_codes = []
         opens_after = "not-required"
+    successor_resolution = _cache_replay_reobserve_successor_resolution(
+        decision=decision,
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        observed_hits=observed_hits,
+        warmup_analysis=warmup_analysis,
+    )
+    recorded_evidence = {
+        "schema": "tokenclaw.request_shape_cache_replay_reobserve_recorded_evidence.v1",
+        "age_hours": age_hours,
+        "max_age_hours": float(max_age_hours),
+        "canary_fraction": round(_as_float(top_canary.get("canary_fraction")), 6),
+        "holdout_fraction": round(_as_float(top_canary.get("holdout_fraction")), 6),
+        "projected_hits": projected_hits,
+        "projected_savings_usd": round(projected_savings_usd, 6),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "observed_hits": observed_hits,
+        "warmup_miss_count": _as_int(warmup_analysis.get("warmup_miss_count")),
+        "non_warmup_miss_count": _as_int(warmup_analysis.get("non_warmup_miss_count")),
+        "repeat_window_status": public_label(repeat_window.get("reason") or warmup_analysis.get("status"), "unknown"),
+        "repeat_window_elapsed": bool(repeat_window.get("elapsed")),
+        "later_exact_repeat_expected": bool(repeat_window.get("later_exact_repeat_expected")),
+        "later_exact_repeat_absent": bool(repeat_window.get("later_exact_repeat_absent")),
+        "error_count": _as_int(lifecycle_counts.get("error_count")),
+        "fallback_count": _as_int(lifecycle_counts.get("fallback_count")),
+        "invalidation_skipped_count": _as_int(lifecycle_counts.get("invalidation_skipped_count")),
+        "unsupported_shape_count": _as_int(lifecycle_counts.get("unsupported_shape_count")),
+        "retirement_required": decision == "retire-staged-no-repeat",
+        "rollback_required": decision == "rollback-required",
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
     return {
         "schema": "tokenclaw.request_shape_cache_replay_bounded_reobserve_window.v1",
         "status": window_status,
         "decision": decision,
+        "successor_resolution": successor_resolution,
         "next_action": next_action,
         "reason": stale_reason if stale else reason,
         "blocker_codes": blocker_codes,
         "opens_after": opens_after,
         "stale_zero_traffic_rule_count": stale_zero_traffic_rule_count,
+        "recorded_evidence": recorded_evidence,
         "traffic_floor": traffic_floor,
         "traffic_floor_met": traffic_floor_met,
         "repeat_absent_after_floor": repeat_absent_after_floor,
@@ -7652,6 +7724,8 @@ def build_request_shape_cache_replay_evidence_report(
         projected_savings_usd=projected_savings,
         warmup_analysis=warmup_analysis,
         max_age_hours=max_age_hours,
+        lifecycle_counts=lifecycle_counts,
+        age_hours=age_hours,
     )
     return {
         "schema": REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA,
@@ -7705,6 +7779,7 @@ def build_request_shape_cache_replay_evidence_report(
             "stale_zero_traffic_rule_count": len(stale_zero_traffic_rules),
             "reobserve_window_status": reobserve_window["status"],
             "reobserve_window_decision": reobserve_window["decision"],
+            "reobserve_window_successor_resolution": reobserve_window["successor_resolution"],
             "reobserve_window_next_action": reobserve_window["next_action"],
         },
         "lifecycle_counts": lifecycle_counts,
@@ -7736,6 +7811,12 @@ def build_request_shape_cache_replay_evidence_report(
             "reports_repeat_window_metadata": isinstance(warmup_analysis.get("repeat_window"), dict),
             "reports_bounded_reobserve_window": isinstance(reobserve_window, dict),
             "reports_reobserve_traffic_floor": isinstance(reobserve_window.get("traffic_floor"), dict),
+            "reports_reobserve_recorded_evidence": isinstance(reobserve_window.get("recorded_evidence"), dict),
+            "resolves_stale_successor_beyond_evidence_age": (
+                (not stale)
+                or reobserve_window["successor_resolution"]
+                in {"rollback-required", "retire-staged-no-repeat", "fresh-applied-holdout-evidence", "keep-staged-warmup"}
+            ),
             "reobserve_window_writes_no_cache_entries": reobserve_window["cache_entries_written"] == 0,
             "reobserve_window_emits_no_cache_apply_actions": reobserve_window["cache_apply_action_count"] == 0,
             "distinguishes_first_seen_warmup_from_ineffective_replay": True,
@@ -8372,11 +8453,54 @@ def _cache_replay_policy_post_rollback_reobserve_window(
         next_state = "reobserve-window-open"
         next_action = "collect-cache-replay-canary-traffic"
         status = "reobserve-window-open"
+    if decision == "rollback":
+        successor_resolution = "rollback-required"
+    elif decision == "retire-staged-no-repeat" or repeat_absent_after_floor:
+        successor_resolution = "retire-staged-no-repeat"
+    elif promotion_readiness == "promotion-ready" or (traffic_floor_met and observed_hits > 0):
+        successor_resolution = "fresh-applied-holdout-evidence"
+    elif promotion_readiness == "keep-staged-warmup" or (
+        applied_count > 0
+        and holdout_count > 0
+        and observed_hits <= 0
+        and bool(warmup_analysis.get("warmup_only_applied_misses"))
+    ):
+        successor_resolution = "keep-staged-warmup"
+    else:
+        successor_resolution = "reobserve-window-open"
+    recorded_evidence = {
+        "schema": "tokenclaw.request_shape_cache_replay_reobserve_recorded_evidence.v1",
+        "age_hours": stale.get("age_hours") if stale.get("age_hours") is not None else metrics.get("evidence_age_hours"),
+        "max_age_hours": max_age_hours,
+        "canary_fraction": round(_as_float(top.get("canary_fraction")), 6),
+        "holdout_fraction": round(_as_float(top.get("holdout_fraction")), 6),
+        "projected_hits": metrics["projected_hits"],
+        "projected_savings_usd": metrics["projected_savings_usd"],
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "observed_hits": observed_hits,
+        "warmup_miss_count": metrics["warmup_miss_count"],
+        "non_warmup_miss_count": metrics["non_warmup_miss_count"],
+        "repeat_window_status": public_label(repeat_window.get("reason") or warmup_analysis.get("status"), "unknown"),
+        "repeat_window_elapsed": bool(repeat_window.get("elapsed")),
+        "later_exact_repeat_expected": bool(repeat_window.get("later_exact_repeat_expected")),
+        "later_exact_repeat_absent": bool(repeat_window.get("later_exact_repeat_absent")),
+        "error_count": metrics["error_count"],
+        "fallback_count": metrics["fallback_count"],
+        "invalidation_skipped_count": metrics["invalidation_skipped_count"],
+        "unsupported_shape_count": metrics["unsupported_shape_count"],
+        "retirement_required": successor_resolution == "retire-staged-no-repeat",
+        "rollback_required": decision == "rollback",
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
     return {
         "schema": "tokenclaw.request_shape_cache_replay_post_rollback_reobserve_window.v1",
         "status": status,
         "decision": "reobserve-after-rollback" if decision == "rollback" else state,
         "state": state,
+        "successor_resolution": successor_resolution,
+        "recorded_evidence": recorded_evidence,
         "next_state": next_state,
         "next_action": next_action,
         "opens_after": "rollback-applied" if decision == "rollback" else "already-open",
@@ -8760,6 +8884,7 @@ def build_request_shape_cache_replay_policy_decision_report(
             "stale_evidence": metrics["stale_evidence"],
             "post_rollback_observation_status": post_rollback_observation["status"],
             "post_rollback_observation_state": post_rollback_observation["state"],
+            "post_rollback_observation_successor_resolution": post_rollback_observation["successor_resolution"],
             "post_rollback_observation_next_state": post_rollback_observation["next_state"],
             "post_rollback_observation_next_action": post_rollback_observation["next_action"],
             "reobserve_traffic_floor_met": post_rollback_observation["traffic_floor_met"],
@@ -8819,6 +8944,12 @@ def build_request_shape_cache_replay_policy_decision_report(
             "emits_post_rollback_reobserve_window": isinstance(post_rollback_observation, dict),
             "reports_reobserve_traffic_floor": isinstance(post_rollback_observation.get("traffic_floor"), dict),
             "reports_reobserve_expiry_metadata": isinstance(post_rollback_observation.get("expiry"), dict),
+            "reports_reobserve_recorded_evidence": isinstance(post_rollback_observation.get("recorded_evidence"), dict),
+            "resolves_stale_successor_beyond_evidence_age": (
+                (not metrics["stale_evidence"])
+                or post_rollback_observation["successor_resolution"]
+                in {"rollback-required", "retire-staged-no-repeat", "fresh-applied-holdout-evidence", "keep-staged-warmup"}
+            ),
             "reports_reobserve_next_state": bool(post_rollback_observation.get("next_state")),
             "reobserve_window_writes_no_cache_entries": post_rollback_observation["cache_entries_written"] == 0,
             "reobserve_window_emits_no_cache_apply_actions": post_rollback_observation["cache_apply_action_count"] == 0,
