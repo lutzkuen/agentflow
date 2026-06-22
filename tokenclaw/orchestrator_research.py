@@ -4954,6 +4954,15 @@ def _request_shape_candidate_row(row: dict[str, Any], *, source_schema: Any, ran
         "blocker_reason": blocker_reason,
         "actionability_reason": sanitize_value(row.get("actionability_reason")),
         "next_action": next_action,
+        "recommended_next_action": sanitize_value(row.get("recommended_next_action") or next_action),
+        "freshness_state": sanitize_value(row.get("freshness_state") or "unknown"),
+        "preview_requirement": sanitize_value(row.get("preview_requirement")),
+        "managed_preview_required": bool(row.get("managed_preview_required")),
+        "duplicate_suppression_key": sanitize_value(row.get("duplicate_suppression_key")),
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "read_only": True,
         "_score": (
             count
             + cost * 1000.0
@@ -5235,6 +5244,13 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
         for row in clean_ranked
     )
     status = "evidence-gap-ranked" if evidence_gap_ranked else "candidates-ranked" if clean_ranked else "no-request-shape-candidates"
+    activation_queue = (
+        follow_up_report.get("activation_candidate_queue")
+        if isinstance(follow_up_report, dict) and isinstance(follow_up_report.get("activation_candidate_queue"), dict)
+        else follow_up_report.get("local_activation_candidate_queue")
+        if isinstance(follow_up_report, dict) and isinstance(follow_up_report.get("local_activation_candidate_queue"), dict)
+        else None
+    )
     result = {
         "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
         "status": status,
@@ -5316,6 +5332,23 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             "absolute_paths_included": False,
         },
     }
+    if isinstance(activation_queue, dict):
+        result["activation_candidate_queue"] = sanitize_value(activation_queue)
+        result["local_activation_candidate_queue"] = sanitize_value(activation_queue)
+        activation_summary = (
+            activation_queue.get("summary")
+            if isinstance(activation_queue.get("summary"), dict)
+            else {}
+        )
+        result["summary"]["activation_candidate_count"] = _to_int(
+            activation_summary.get("queued_candidate_count")
+        )
+        result["summary"]["activation_candidate_top_next_action"] = sanitize_value(
+            activation_summary.get("top_next_action")
+        )
+        result["summary"]["activation_candidate_top_freshness_state"] = sanitize_value(
+            activation_summary.get("top_freshness_state")
+        )
     if replay_dry_run is not None:
         skipped_openai_blockers = (
             replay_dry_run.get("skipped_openai_blockers")
@@ -9776,6 +9809,10 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "needed_resolution",
         "next_state",
         "next_state_reason",
+        "readiness_state",
+        "freshness_state",
+        "preview_requirement",
+        "read_only",
         "status",
         "source",
         "source_surface",
@@ -9842,6 +9879,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "promotion_recommendation",
         "impact_recommendation",
         "observed_hit_blocker",
+        "projected_saved_tokens",
+        "projected_saved_usd",
         "rollback_applied",
         "post_rollback_successor_decision",
         "post_rollback_next_action",
@@ -9943,6 +9982,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "measured_full_rollout_activation",
         "evidence_age_hours",
         "max_evidence_age_hours",
+        "projected_saved_tokens",
+        "projected_saved_usd",
         "warmup_miss_count",
         "exact_hit_count",
     }
@@ -10072,9 +10113,92 @@ def _routing_downgrade_drill_activation_entries(stats_summary: dict[str, Any]) -
     return entries
 
 
+def _request_shape_rollup_activation_entries(stats_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    shape_signal = (
+        stats_summary.get("request_shape_rollup_candidates")
+        if isinstance(stats_summary.get("request_shape_rollup_candidates"), dict)
+        else {}
+    )
+    queue = (
+        shape_signal.get("activation_candidate_queue")
+        if isinstance(shape_signal.get("activation_candidate_queue"), dict)
+        else shape_signal.get("local_activation_candidate_queue")
+        if isinstance(shape_signal.get("local_activation_candidate_queue"), dict)
+        else {}
+    )
+    rows = [row for row in queue.get("entries") or [] if isinstance(row, dict)]
+    entries: list[dict[str, Any]] = []
+    for row in rows[:20]:
+        source_fingerprint = str(row.get("source_fingerprint") or row.get("fingerprint") or "").strip()
+        if not source_fingerprint:
+            continue
+        family = sanitize_value(row.get("local_action_family") or "cohort-ranking")
+        next_action = sanitize_value(row.get("recommended_next_action") or row.get("next_action") or "inspect-local-evidence")
+        material = {
+            "schema": "tokenclaw.request_shape_rollup_activation_entry.v1",
+            "source_fingerprint": source_fingerprint,
+            "local_action_family": family,
+            "next_action": next_action,
+        }
+        entry_fingerprint = public_id(json.dumps(material, sort_keys=True), prefix="activation")
+        readiness = str(row.get("readiness_state") or row.get("state") or "").strip()
+        current_status = str(row.get("current_status") or "").strip()
+        projected = round(_to_float(row.get("projected_savings_usd") or row.get("projected_saved_usd")), 8)
+        sample_count = _to_int(row.get("sample_count") or row.get("row_count"))
+        blocker_codes = sanitize_value([str(item) for item in row.get("blocker_codes") or [] if str(item or "").strip()])
+        entry = {
+            "schema": EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA,
+            "rank": _to_int(row.get("rank")),
+            "fingerprint": entry_fingerprint,
+            "source_fingerprint": sanitize_value(source_fingerprint),
+            "lever": "request-shape-rollups",
+            "local_action_family": family,
+            "state": "ranked-evidence" if readiness == "activation-ready" else sanitize_value(readiness or row.get("state") or "blocked"),
+            "current_status": current_status or ("projected" if readiness == "activation-ready" else "blocked"),
+            "issue_worthy_status": sanitize_value(row.get("issue_worthy_status") or ("review" if readiness == "activation-ready" else "blocked")),
+            "next_action": next_action,
+            "evidence_schema": sanitize_value(row.get("evidence_schema") or queue.get("source_schema") or "tokenclaw.request_shape_local_activation_candidate_queue.v1"),
+            "source_evidence_schema": sanitize_value(row.get("source_evidence_schema") or queue.get("source_schema") or "tokenclaw.request_shape_follow_up_candidates.v1"),
+            "expected_savings_path": sanitize_value(
+                row.get("expected_savings_path")
+                or "Move fresh request-shape rollup evidence into the next local routing, crunch, or cache activation step."
+            ),
+            "blocker_codes": blocker_codes,
+            "sample_count": sample_count,
+            "projected_savings_usd": projected,
+            "projected_saved_usd": projected,
+            "projected_saved_tokens": _to_int(row.get("projected_saved_tokens")),
+            "savings_per_1000_calls_usd": round(_to_float(row.get("savings_per_1000_calls_usd")), 8),
+            "freshness_state": sanitize_value(row.get("freshness_state")),
+            "blocking_reason": sanitize_value(row.get("blocking_reason") or row.get("unblock_reason")),
+            "unblock_reason": sanitize_value(row.get("unblock_reason") or row.get("blocking_reason")),
+            "provider_family": sanitize_value(row.get("provider_family")),
+            "source_surface": sanitize_value(row.get("source_surface")),
+            "endpoint": sanitize_value(row.get("endpoint")),
+            "category": sanitize_value(row.get("category")),
+            "workflow_phase": sanitize_value(row.get("workflow_phase")),
+            "stream": bool(row.get("stream")),
+            "has_tools": bool(row.get("has_tools")),
+            "requested_model_family": sanitize_value(row.get("requested_model_family")),
+            "routed_model_family": sanitize_value(row.get("routed_model_family")),
+            "target_local_rule_file": sanitize_value(row.get("target_local_rule_file")),
+            "target_local_policy_section": sanitize_value(row.get("target_local_policy_section")),
+            "preview_requirement": sanitize_value(row.get("preview_requirement")),
+            "managed_preview_required": bool(row.get("managed_preview_required")),
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "read_only": True,
+            "privacy": _candidate_privacy(),
+        }
+        entries.append(entry)
+    return entries
+
+
 def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     """Rank local activation next actions by realized savings and unblock reason."""
     routing_downgrade_entries = _routing_downgrade_drill_activation_entries(stats_summary)
+    request_shape_rollup_entries = _request_shape_rollup_activation_entries(stats_summary)
     ledger = (
         stats_summary
         if isinstance(stats_summary.get("entries"), list)
@@ -10097,7 +10221,7 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
                 safety_stop_burndown=safety_stop_burndown,
             )
     if not isinstance(ledger, dict):
-        if not routing_downgrade_entries:
+        if not routing_downgrade_entries and not request_shape_rollup_entries:
             return None
         ledger = {
             "schema": EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA,
@@ -10107,7 +10231,7 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
         }
     entries = [
         _local_activation_next_action_queue_entry(entry)
-        for entry in [*(ledger.get("entries") or []), *routing_downgrade_entries]
+        for entry in [*(ledger.get("entries") or []), *routing_downgrade_entries, *request_shape_rollup_entries]
         if isinstance(entry, dict)
     ]
     if not entries:

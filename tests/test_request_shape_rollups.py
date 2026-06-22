@@ -94,6 +94,130 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(report["privacy"]["raw_prompts_included"])
         self.assertFalse(report["privacy"]["request_ids_included"])
 
+    def test_follow_up_candidates_emit_ranked_local_activation_candidate_queue(self):
+        rollups = [
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "app_family": "generic_openai",
+                "requested_model_family": "gpt-5",
+                "routed_model_family": "gpt-5",
+                "category": "tool-result",
+                "workflow_phase": "tool-execution",
+                "stream": True,
+                "has_tools": True,
+                "text_bucket": "32k_128k_chars",
+                "token_bucket": "8k_32k_tokens",
+                "cache_status": "skipped",
+                "routing_status": "passthrough",
+                "candidate_work_classes": ["repeated_context", "crunch"],
+                "candidate_families": ["crunch_candidate"],
+                "blocker_codes": [],
+                "row_count": 42,
+                "sample_count": 42,
+                "successful_input_tokens": 420_000,
+                "projected_crunch_tokens_saved": 21_000,
+                "projected_crunch_savings_usd": 0.063,
+                "request_id": "raw-request-id-must-not-leak",
+                "session_id": "raw-session-id-must-not-leak",
+                "file_path": "/tmp/private/rollup.py",
+            },
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "app_family": "generic_openai",
+                "requested_model_family": "gpt-5",
+                "routed_model_family": "gpt-5",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "stream": False,
+                "has_tools": False,
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "cache_status": "miss",
+                "routing_status": "passthrough",
+                "candidate_work_classes": ["replayability"],
+                "candidate_families": ["cache_replay"],
+                "blocker_codes": ["exact-cache-miss"],
+                "row_count": 16,
+                "sample_count": 16,
+                "cost_est_usd": 0.032,
+            },
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "provider_family": "anthropic",
+                "source_surface": "anthropic_messages",
+                "endpoint": "messages",
+                "app_family": "claude_code",
+                "requested_model_family": "claude-sonnet",
+                "routed_model_family": "claude-sonnet",
+                "category": "summary",
+                "workflow_phase": "summary",
+                "stream": True,
+                "has_tools": False,
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "cache_status": "skipped",
+                "routing_status": "passthrough",
+                "candidate_work_classes": ["routing"],
+                "candidate_families": ["routing_candidate"],
+                "blocker_codes": [],
+                "row_count": 8,
+                "sample_count": 8,
+            },
+        ]
+
+        report = build_request_shape_follow_up_candidates(rollups, limit=10)
+        repeat = build_request_shape_follow_up_candidates(rollups, limit=10)
+
+        self.assertEqual(report["status"], "candidates-ranked")
+        self.assertEqual(report["summary"]["rows_considered"], 66)
+        self.assertEqual(report["summary"]["activation_candidate_count"], 3)
+        queue = report["activation_candidate_queue"]
+        self.assertEqual(queue["schema"], "tokenclaw.request_shape_local_activation_candidate_queue.v1")
+        self.assertEqual(queue["status"], "ranked")
+        self.assertEqual(queue["summary"]["queued_candidate_count"], 3)
+        self.assertFalse(queue["summary"]["policy_files_written"])
+        self.assertEqual(queue["summary"]["provider_calls_made"], 0)
+        self.assertEqual(queue["summary"]["managed_server_calls_made"], 0)
+        entries = queue["entries"]
+        self.assertEqual([entry["rank"] for entry in entries], [1, 2, 3])
+        self.assertEqual([entry["fingerprint"] for entry in entries], [entry["fingerprint"] for entry in repeat["activation_candidate_queue"]["entries"]])
+        self.assertEqual(entries[0]["local_action_family"], "crunch")
+        self.assertEqual(entries[0]["recommended_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(entries[0]["projected_saved_tokens"], 21_000)
+        self.assertEqual(entries[0]["projected_savings_usd"], 0.063)
+        self.assertEqual(entries[0]["freshness_state"], "fresh")
+        self.assertEqual(entries[0]["preview_requirement"], "managed-preview-optional")
+        self.assertFalse(entries[0]["managed_preview_required"])
+        cache_entry = next(entry for entry in entries if entry["local_action_family"] == "cache")
+        self.assertEqual(cache_entry["recommended_next_action"], "stage-cache-replay-canary")
+        self.assertEqual(cache_entry["preview_requirement"], "managed-preview-required-before-policy-write")
+        self.assertTrue(cache_entry["managed_preview_required"])
+        for entry in entries:
+            self.assertTrue(entry["fingerprint"].startswith("activation:"))
+            self.assertTrue(entry["source_fingerprint"].startswith("request-shape-follow-up:"))
+            self.assertIn("expected_savings_path", entry)
+            self.assertFalse(entry["policy_files_written"])
+            self.assertFalse(entry["provider_calls_made"])
+            self.assertFalse(entry["managed_server_calls_made"])
+            self.assertTrue(entry["privacy"]["metadata_only"])
+            self.assertTrue(entry["privacy"]["aggregate_only"])
+            self.assertFalse(entry["privacy"]["raw_prompts_included"])
+            self.assertFalse(entry["privacy"]["provider_bodies_included"])
+            self.assertFalse(entry["privacy"]["request_ids_included"])
+            self.assertFalse(entry["privacy"]["session_ids_included"])
+            self.assertFalse(entry["privacy"]["cache_keys_included"])
+            self.assertFalse(entry["privacy"]["file_paths_included"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("raw-request-id-must-not-leak", rendered)
+        self.assertNotIn("raw-session-id-must-not-leak", rendered)
+        self.assertNotIn("/tmp/private/rollup.py", rendered)
+
     def test_rollups_backfill_from_recent_codex_metadata_windows_without_call_rows(self) -> None:
         raw_request_id = "raw-codex-request-id-must-not-leak"
         raw_session_id = "raw-codex-session-id-must-not-leak"

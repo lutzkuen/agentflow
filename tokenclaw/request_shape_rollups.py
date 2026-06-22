@@ -64,6 +64,8 @@ CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA = "tokenclaw.request_shape_crunch_pol
 CRUNCH_POST_MAX_ROLLOUT_DECISION_SCHEMA = "tokenclaw.request_shape_crunch_post_max_rollout_decision.v1"
 FOLLOW_UP_CANDIDATES_SCHEMA = "tokenclaw.request_shape_follow_up_candidates.v1"
 FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "tokenclaw.request_shape_blocker_cohort.v1"
+LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA = "tokenclaw.request_shape_local_activation_candidate_queue.v1"
+LOCAL_ACTIVATION_CANDIDATE_QUEUE_ENTRY_SCHEMA = "tokenclaw.request_shape_local_activation_candidate_queue_entry.v1"
 SOURCE_TRAFFIC_ACQUISITION_SCHEMA = "tokenclaw.source_traffic_acquisition_action.v1"
 DASHBOARD_ROUTING_CANDIDATE_ROLLUP_SOURCE_SCHEMA = "tokenclaw.dashboard_routing_candidate_rollups.v1"
 ROUTING_DOWNGRADE_DRILL_SCHEMA = "tokenclaw.request_shape_routing_downgrade_drills.v1"
@@ -12589,9 +12591,12 @@ def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, A
         "candidate_families": families,
     }
     digest = hashlib.sha256(stable_json(fingerprint_material).encode("utf-8")).hexdigest()[:16]
+    freshness_state = _shape_candidate_freshness_state(row)
+    preview_requirement, managed_preview_required = _shape_candidate_preview_requirement(decision)
     return {
         "schema": FOLLOW_UP_BLOCKER_COHORT_SCHEMA,
         "fingerprint": f"request-shape-follow-up:{digest}",
+        "duplicate_suppression_key": f"request-shape-follow-up:{digest}:{next_action}",
         "rank": rank,
         "provider_surface_bucket": "/".join(part for part in (provider, source_surface, endpoint) if part) or "mixed",
         "provider_family": provider,
@@ -12623,12 +12628,185 @@ def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, A
         "candidate_families": families,
         "blocker_codes": sorted(public_label(item, "unknown") for item in decision.get("blocker_codes") or []),
         "readiness_state": readiness,
+        "freshness_state": freshness_state,
+        "preview_requirement": preview_requirement,
+        "managed_preview_required": managed_preview_required,
         "actionability_reason": public_label(decision.get("actionability_reason"), "unknown"),
         "next_action": next_action,
+        "recommended_next_action": next_action,
         "local_action_family": public_label(decision.get("local_action_family"), "cohort-ranking"),
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "read_only": True,
         "aggregate_only": True,
         "privacy": _shape_follow_up_privacy(),
         "_score": score,
+    }
+
+
+def _shape_candidate_freshness_state(row: dict[str, Any]) -> str:
+    if bool(row.get("stale") or row.get("snapshot_stale")):
+        return "stale"
+    freshness = row.get("snapshot_freshness") if isinstance(row.get("snapshot_freshness"), dict) else {}
+    if freshness.get("stale") is True:
+        return "stale"
+    status = public_label(
+        row.get("freshness_state")
+        or row.get("freshness_status")
+        or freshness.get("status"),
+        "",
+    )
+    if status in {"stale", "snapshot-stale", "rollup-stale"}:
+        return "stale"
+    if status in {"fresh", "snapshot-fresh"}:
+        return "fresh"
+    if _as_int(row.get("row_count") or row.get("sample_count") or row.get("count")) > 0:
+        return "fresh"
+    return "unknown"
+
+
+def _shape_candidate_preview_requirement(decision: dict[str, Any]) -> tuple[str, bool]:
+    family = public_label(decision.get("local_action_family"), "cohort-ranking")
+    readiness = public_label(decision.get("readiness_state"), "unknown")
+    if readiness != "activation-ready":
+        return "not-required-for-ranking", False
+    if family in {"cache", "routing"}:
+        return "managed-preview-required-before-policy-write", True
+    return "managed-preview-optional", False
+
+
+def _shape_candidate_expected_savings_path(candidate: dict[str, Any]) -> str:
+    family = public_label(candidate.get("local_action_family"), "cohort-ranking")
+    action = public_label(candidate.get("recommended_next_action") or candidate.get("next_action"), "inspect-local-evidence")
+    if family == "crunch":
+        return "Convert repeated-context rollup evidence into measured local crunch canaries with holdout coverage."
+    if family == "cache":
+        return "Convert replayable request-shape cohorts into exact-cache canary or dependency evidence follow-up."
+    if family == "routing":
+        return "Convert request-shape routing cohorts into measured downgrade lifecycle evidence before policy changes."
+    return f"Keep aggregate request-shape rollups moving through `{action}` until a concrete local savings lever is selected."
+
+
+def _shape_activation_candidate_entry(candidate: dict[str, Any], *, rank: int) -> dict[str, Any]:
+    family = public_label(candidate.get("local_action_family"), "cohort-ranking")
+    next_action = public_label(candidate.get("recommended_next_action") or candidate.get("next_action"), "inspect-local-evidence")
+    source_fingerprint = str(candidate.get("fingerprint") or "").strip()
+    material = {
+        "schema": LOCAL_ACTIVATION_CANDIDATE_QUEUE_ENTRY_SCHEMA,
+        "source_fingerprint": source_fingerprint,
+        "local_action_family": family,
+        "recommended_next_action": next_action,
+    }
+    fingerprint = public_id(json.dumps(material, sort_keys=True), prefix="activation")
+    sample_count = _as_int(candidate.get("sample_count") or candidate.get("row_count"))
+    projected_savings = round(_as_float(candidate.get("projected_savings_usd")), 8)
+    savings_per_1000 = round((projected_savings / sample_count) * 1000.0, 8) if sample_count > 0 and projected_savings > 0 else 0.0
+    readiness = public_label(candidate.get("readiness_state"), "unknown")
+    blocker_codes = [
+        public_label(item, "unknown")
+        for item in candidate.get("blocker_codes") or []
+        if public_label(item, "unknown") != "unknown"
+    ]
+    state = "ranked-evidence" if readiness == "activation-ready" else readiness or "blocked"
+    current_status = "projected" if readiness == "activation-ready" else "blocked"
+    target_rule_file = {
+        "cache": "cache_rules.yaml",
+        "crunch": "crunch_rules.yaml",
+        "routing": "routing_rules.yaml",
+    }.get(family)
+    target_section = {
+        "cache": "cache.pattern_rules",
+        "crunch": "crunch.rules",
+        "routing": "routing.rules",
+    }.get(family)
+    return {
+        "schema": LOCAL_ACTIVATION_CANDIDATE_QUEUE_ENTRY_SCHEMA,
+        "rank": rank,
+        "fingerprint": fingerprint,
+        "source_fingerprint": source_fingerprint,
+        "duplicate_suppression_key": public_label(candidate.get("duplicate_suppression_key"), fingerprint),
+        "lever": "request-shape-rollups",
+        "local_action_family": family,
+        "state": state,
+        "current_status": current_status,
+        "issue_worthy_status": "review" if readiness == "activation-ready" else "blocked",
+        "readiness_state": readiness,
+        "freshness_state": public_label(candidate.get("freshness_state"), "unknown"),
+        "recommended_next_action": next_action,
+        "next_action": next_action,
+        "blocking_reason": blocker_codes[0] if blocker_codes else public_label(candidate.get("actionability_reason"), None),
+        "unblock_reason": blocker_codes[0] if blocker_codes else public_label(candidate.get("actionability_reason"), None),
+        "blocker_codes": blocker_codes,
+        "sample_count": sample_count,
+        "row_count": _as_int(candidate.get("row_count")),
+        "projected_hits": _as_int(candidate.get("projected_hits")),
+        "projected_saved_tokens": _as_int(candidate.get("projected_saved_tokens")),
+        "projected_savings_usd": projected_savings,
+        "projected_saved_usd": projected_savings,
+        "savings_per_1000_calls_usd": savings_per_1000,
+        "observed_savings_usd": round(_as_float(candidate.get("observed_savings_usd")), 8),
+        "expected_savings_path": _shape_candidate_expected_savings_path(candidate),
+        "provider_family": public_label(candidate.get("provider_family"), "unknown"),
+        "source_surface": public_label(candidate.get("source_surface"), "unknown"),
+        "endpoint": public_label(candidate.get("endpoint"), "unknown"),
+        "category": public_label(candidate.get("category"), "unknown"),
+        "workflow_phase": public_label(candidate.get("workflow_phase"), "unknown"),
+        "stream": bool(candidate.get("stream")),
+        "has_tools": bool(candidate.get("has_tools")),
+        "requested_model_family": public_label(candidate.get("requested_model_family"), "unknown"),
+        "routed_model_family": public_label(candidate.get("routed_model_family"), "unknown"),
+        "target_local_rule_file": target_rule_file,
+        "target_local_policy_section": target_section,
+        "source_evidence_schema": FOLLOW_UP_CANDIDATES_SCHEMA,
+        "evidence_schema": FOLLOW_UP_CANDIDATES_SCHEMA,
+        "preview_requirement": public_label(candidate.get("preview_requirement"), "not-required-for-ranking"),
+        "managed_preview_required": bool(candidate.get("managed_preview_required")),
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "read_only": True,
+        "privacy": _shape_follow_up_privacy(),
+    }
+
+
+def _shape_activation_candidate_queue(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    entries = [
+        _shape_activation_candidate_entry(candidate, rank=index)
+        for index, candidate in enumerate(candidates, start=1)
+    ]
+    family_counts: dict[str, int] = {}
+    freshness_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    total_projected = 0.0
+    for entry in entries:
+        sample_count = _as_int(entry.get("sample_count"))
+        total_projected += _as_float(entry.get("projected_savings_usd"))
+        _increment(family_counts, entry.get("local_action_family"), sample_count)
+        _increment(freshness_counts, entry.get("freshness_state"), sample_count)
+        _increment(action_counts, entry.get("recommended_next_action"), sample_count)
+    top = entries[0] if entries else None
+    return {
+        "schema": LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA,
+        "status": "ranked" if entries else "empty",
+        "source_schema": FOLLOW_UP_CANDIDATES_SCHEMA,
+        "read_only": True,
+        "summary": {
+            "queued_candidate_count": len(entries),
+            "top_local_action_family": top.get("local_action_family") if top else None,
+            "top_next_action": top.get("recommended_next_action") if top else None,
+            "top_freshness_state": top.get("freshness_state") if top else None,
+            "total_projected_savings_usd": round(total_projected, 8),
+            "policy_files_written": False,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "local_action_family_breakdown": _breakdown(family_counts),
+            "freshness_breakdown": _breakdown(freshness_counts),
+            "next_action_breakdown": _breakdown(action_counts),
+        },
+        "top_candidate": top,
+        "entries": entries,
+        "privacy": _shape_follow_up_privacy(),
     }
 
 
@@ -12675,6 +12853,7 @@ def build_request_shape_follow_up_candidates(
         item = dict(candidate)
         item.pop("_score", None)
         clean.append(item)
+    activation_queue = _shape_activation_candidate_queue(clean)
 
     no_source_traffic_reason = None
     if not clean and not rollups:
@@ -12711,6 +12890,9 @@ def build_request_shape_follow_up_candidates(
             "source_traffic_acquisition_status": source_traffic_acquisition["status"],
             "source_traffic_acquisition_attempted": True,
             "activation_ready_count": sum(1 for item in clean if item.get("readiness_state") == "activation-ready"),
+            "activation_candidate_count": _as_int(activation_queue["summary"].get("queued_candidate_count")),
+            "activation_candidate_top_next_action": activation_queue["summary"].get("top_next_action"),
+            "activation_candidate_top_freshness_state": activation_queue["summary"].get("top_freshness_state"),
             "class_breakdown": _breakdown(class_counts),
             "blocker_breakdown": _breakdown(blocker_counts),
             "readiness_breakdown": _breakdown(readiness_counts),
@@ -12724,6 +12906,8 @@ def build_request_shape_follow_up_candidates(
         "top_blocker_cohort": top,
         "candidates": clean,
         "blocker_cohorts": clean,
+        "activation_candidate_queue": activation_queue,
+        "local_activation_candidate_queue": activation_queue,
         "missing_measurements": missing,
         "privacy": _shape_follow_up_privacy(),
     }

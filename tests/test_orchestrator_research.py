@@ -17,6 +17,7 @@ from tokenclaw.orchestrator_research import (
     _dedupe_create_issue_proposals_with_metadata,
     _full_rollout_crunch_post_rollout_cohort_ranking,
 )
+from tokenclaw.request_shape_rollups import build_request_shape_follow_up_candidates
 from tokenclaw.store import SQLiteStore, stable_json, utc_now
 
 
@@ -12499,6 +12500,95 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("req-cli-preview-secret", rendered)
         self.assertNotIn("raw cli managed preview must not leak", rendered)
+
+    def test_local_activation_next_action_queue_consumes_request_shape_rollup_activation_candidates(self):
+        raw_request_id = "raw-rollup-request-id-must-not-leak"
+        raw_session_id = "raw-rollup-session-id-must-not-leak"
+        raw_path = "/tmp/private/request-shape.py"
+        follow_up = build_request_shape_follow_up_candidates(
+            [
+                {
+                    "schema": "tokenclaw.request_shape_rollup_row.v1",
+                    "provider_family": "openai",
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "app_family": "generic_openai",
+                    "requested_model_family": "gpt-5",
+                    "routed_model_family": "gpt-5",
+                    "category": "tool-result",
+                    "workflow_phase": "tool-execution",
+                    "stream": True,
+                    "has_tools": True,
+                    "text_bucket": "32k_128k_chars",
+                    "token_bucket": "8k_32k_tokens",
+                    "cache_status": "skipped",
+                    "routing_status": "passthrough",
+                    "candidate_work_classes": ["repeated_context", "crunch"],
+                    "candidate_families": ["crunch_candidate"],
+                    "blocker_codes": [],
+                    "row_count": 24,
+                    "sample_count": 24,
+                    "successful_input_tokens": 240_000,
+                    "projected_crunch_tokens_saved": 12_000,
+                    "projected_crunch_savings_usd": 0.036,
+                    "request_id": raw_request_id,
+                    "session_id": raw_session_id,
+                    "file_path": raw_path,
+                }
+            ],
+            limit=10,
+        )
+        stats_summary = {
+            "request_shape_rollup_candidates": {
+                "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
+                "status": "candidates-ranked",
+                "summary": {
+                    "ranked_candidate_count": 1,
+                    "activation_candidate_count": 1,
+                    "top_next_action": "stage-repeated-context-crunch-canary",
+                    "top_local_action_family": "crunch",
+                },
+                "activation_candidate_queue": follow_up["activation_candidate_queue"],
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            }
+        }
+
+        queue = build_local_activation_next_action_queue(stats_summary)
+        repeat = build_local_activation_next_action_queue(stats_summary)
+
+        self.assertIsNotNone(queue)
+        self.assertEqual(queue["schema"], "tokenclaw.local_activation_next_action_queue.v1")
+        self.assertEqual(queue["status"], "ranked")
+        self.assertEqual(queue["summary"]["queued_action_count"], 1)
+        self.assertEqual(queue["summary"]["successor_action_count"], 1)
+        self.assertEqual(queue["summary"]["top_lever"], "request-shape-rollups")
+        self.assertEqual(queue["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
+        entry = queue["entries"][0]
+        self.assertEqual(entry["local_action_family"], "crunch")
+        self.assertEqual(entry["current_status"], "projected")
+        self.assertEqual(entry["freshness_state"], "fresh")
+        self.assertEqual(entry["projected_savings_usd"], 0.036)
+        self.assertEqual(entry["projected_saved_tokens"], 12_000)
+        self.assertEqual(entry["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(
+            [item["fingerprint"] for item in queue["successor_actions"]],
+            [item["fingerprint"] for item in repeat["successor_actions"]],
+        )
+        action = queue["successor_actions"][0]
+        self.assertEqual(action["schema"], "tokenclaw.local_activation_successor_action.v1")
+        self.assertEqual(action["local_action_family"], "crunch")
+        self.assertEqual(action["recommended_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertTrue(action["fingerprint"].startswith("successor:"))
+        self.assertIn("repeated-context crunch", action["acceptance_metric"])
+        self.assertTrue(queue["privacy"]["metadata_only"])
+        self.assertTrue(queue["privacy"]["aggregate_only"])
+        self.assertFalse(queue["privacy"]["provider_calls_made"])
+        self.assertFalse(queue["privacy"]["managed_server_calls_made"])
+        self.assertFalse(queue["privacy"]["policy_files_written"])
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn(raw_request_id, rendered)
+        self.assertNotIn(raw_session_id, rendered)
+        self.assertNotIn(raw_path, rendered)
 
     def test_stored_managed_ranked_actions_prioritize_local_successors(self):
         ledger = {
