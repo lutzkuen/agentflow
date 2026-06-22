@@ -64,6 +64,7 @@ from tokenclaw.routing_experiments import (
     routing_experiment_outcome_event,
     routing_experiment_feedback_features,
     routing_experiment_decision,
+    _public_label as _public_metadata_label,
 )
 from tokenclaw.session_memory_hints import build_session_memory_optimization_hints
 from tokenclaw.recommendations import (
@@ -95,6 +96,23 @@ from tokenclaw.store import stable_json, utc_now
 
 SESSION_COST_ALERT_USD = float(os.getenv("TOKENCLAW_SESSION_COST_ALERT_USD", "5.0"))
 MAX_THINKING_BUDGET_TOKENS = int(os.getenv("TOKENCLAW_MAX_THINKING_BUDGET_TOKENS", "0"))
+
+# Anthropic rejects non-streaming requests whose ``max_tokens`` is large enough
+# that generation could exceed the 10 minute non-streaming limit, returning a
+# ``400 invalid_request_error``. Shadow comparison calls force non-streaming so
+# they can collect a full JSON body to diff, so the primary request's larger
+# ``max_tokens`` (common for Opus 4.8 streaming traffic) must be clamped down to
+# a value every model accepts without streaming. 8192 sits at or below the
+# non-streaming ceiling for all current Claude models.
+ANTHROPIC_SHADOW_NONSTREAMING_MAX_TOKENS = int(
+    os.getenv("TOKENCLAW_ANTHROPIC_SHADOW_NONSTREAMING_MAX_TOKENS", "8192")
+)
+# Upstream invalid-request messages describe the request shape (parameter names
+# and limits), not prompt content, so a short truncated copy is safe to retain
+# for diagnosing future 4xx causes without leaking raw prompts. The cap stays at
+# or below the shared metadata-label sanitizer's length threshold so a clean,
+# request-shape message survives sanitization instead of being redacted for length.
+SHADOW_HTTP_ERROR_DETAIL_MAX_CHARS = 160
 
 
 async def _queue_optimization_coordinator_lifecycle_feedback(
@@ -711,6 +729,31 @@ def _assistant_empty_content_count(body: dict[str, Any]) -> int:
     return count
 
 
+def _normalize_shadow_non_streaming_max_tokens(
+    body: dict[str, Any], diagnostics: dict[str, Any]
+) -> None:
+    """Clamp ``max_tokens`` so the forced non-streaming shadow call validates.
+
+    Anthropic returns a ``400 invalid_request_error`` for non-streaming requests
+    whose ``max_tokens`` could exceed the 10 minute non-streaming limit. The
+    shadow leg forces ``stream=False``, so a primary request built for streaming
+    with a large ``max_tokens`` (e.g. Opus 4.8 traffic) would otherwise fail
+    before any similarity evidence can be recorded.
+    """
+    ceiling = ANTHROPIC_SHADOW_NONSTREAMING_MAX_TOKENS
+    if ceiling <= 0:
+        return
+    try:
+        current = int(body.get("max_tokens"))
+    except (TypeError, ValueError):
+        return
+    if current > ceiling:
+        body["max_tokens"] = ceiling
+        diagnostics["max_tokens_clamped_for_non_streaming"] = True
+        diagnostics["max_tokens_original"] = current
+        diagnostics["max_tokens_effective"] = ceiling
+
+
 def _prepare_anthropic_shadow_request(
     request_body: dict[str, Any],
     *,
@@ -733,6 +776,7 @@ def _prepare_anthropic_shadow_request(
         "request_ids_included": False,
         "session_ids_included": False,
     }
+    _normalize_shadow_non_streaming_max_tokens(shadow_body, diagnostics)
     sanitization: dict[str, Any] = {}
     _strip_model_incompatible_params(shadow_body, sanitization, primary_model)
     if sanitization.get("stripped_params"):
@@ -776,6 +820,31 @@ def _shadow_http_error_class(status_code: int | None, response_body: dict[str, A
         if error_type and len(error_type) <= 80:
             return f"{default}:{error_type}"
     return default
+
+
+def _shadow_http_error_detail(response_body: dict[str, Any] | None) -> str | None:
+    """Return the truncated upstream error message for diagnosing 4xx shadow calls.
+
+    Anthropic ``invalid_request_error`` messages describe the offending request
+    shape (e.g. an out-of-range ``max_tokens`` or a non-streaming length limit),
+    so a short truncated copy keeps the cause diagnosable instead of collapsing
+    every 400 to its error type, without retaining prompt content.
+    """
+    if not isinstance(response_body, dict):
+        return None
+    error_obj = response_body.get("error")
+    if not isinstance(error_obj, dict):
+        return None
+    message = str(error_obj.get("message") or "").strip()
+    if not message:
+        return None
+    if len(message) > SHADOW_HTTP_ERROR_DETAIL_MAX_CHARS:
+        message = message[: SHADOW_HTTP_ERROR_DETAIL_MAX_CHARS - 1] + "…"
+    # Run the truncated message through the shared metadata-label sanitizer so any
+    # value that looks like it carries raw prompt/identifier content is redacted
+    # rather than persisted, while request-shape messages survive intact.
+    label = _public_metadata_label(message, fallback="redacted-metadata-label")
+    return label
 
 
 
@@ -867,6 +936,7 @@ async def _run_anthropic_routing_experiment(
     shadow_latency_ms: Optional[int] = None
     shadow_cost: Optional[float] = None
     error: Optional[str] = None
+    shadow_http_error_detail: Optional[str] = None
 
     shadow_started = time.time()
     if shadow_body is None:
@@ -889,6 +959,7 @@ async def _run_anthropic_routing_experiment(
             http_error_class = _shadow_http_error_class(shadow_status_code, shadow_response_body)
             if http_error_class:
                 error = http_error_class
+                shadow_http_error_detail = _shadow_http_error_detail(shadow_response_body)
         except Exception as exc:
             shadow_latency_ms = int((time.time() - shadow_started) * 1000)
             error = repr(exc)
@@ -932,6 +1003,7 @@ async def _run_anthropic_routing_experiment(
             "shadow_model": shadow_model,
             "primary_status_code": primary_status_code,
             "shadow_status_code": shadow_status_code,
+            "shadow_http_error_detail": shadow_http_error_detail,
             "primary_output_chars": comparison["primary_output_chars"],
             "shadow_output_chars": comparison["shadow_output_chars"],
             "primary_output_sha256": comparison["primary_output_sha256"],

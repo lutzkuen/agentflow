@@ -600,6 +600,103 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertEqual(candidate["compared_samples"], 0)
         self.assertIn("shadow-http-400-observed", candidate["promotion_reason_codes"])
 
+    def test_streaming_shadow_clamps_large_max_tokens_for_non_streaming(self):
+        # A streaming primary commonly carries a large max_tokens (Opus 4.8
+        # traffic). Forcing the shadow leg to non-streaming without clamping it
+        # made Anthropic reject the shadow call with a 400, so no similarity
+        # evidence was recorded. The clamp keeps the shadow request valid.
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64000,
+            "stream": True,
+            "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        }
+
+        with (
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.0)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body, b"".join(STREAM_FRAMES))
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
+        shadow_payload = FakeShadowStreamingClient.post_payloads[0]
+        self.assertFalse(shadow_payload["stream"])
+        self.assertEqual(
+            shadow_payload["max_tokens"],
+            anthropic_proxy.ANTHROPIC_SHADOW_NONSTREAMING_MAX_TOKENS,
+        )
+
+        [call] = server.store.conn.execute("select routing_json from calls").fetchall()
+        experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
+        self.assertEqual(experiment_meta["status"], "compared")
+        preflight = experiment_meta["shadow_request_preflight"]
+        self.assertTrue(preflight["max_tokens_clamped_for_non_streaming"])
+        self.assertEqual(preflight["max_tokens_original"], 64000)
+        self.assertEqual(
+            preflight["max_tokens_effective"],
+            anthropic_proxy.ANTHROPIC_SHADOW_NONSTREAMING_MAX_TOKENS,
+        )
+
+    def test_streaming_shadow_http_400_detail_is_captured_truncated(self):
+        # When the shadow leg still 4xxes, the truncated upstream message must be
+        # retained (metadata-only) so the cause is diagnosable rather than
+        # collapsed to the error type alone.
+        class FakeShadowMaxTokensErrorPostResponse:
+            status_code = 400
+            headers = {"content-type": "application/json"}
+            text = (
+                '{"error":{"type":"invalid_request_error",'
+                '"message":"max_tokens: 64000 > 8192, which is the maximum allowed for claude-sonnet-4-6"}}'
+            )
+            content = text.encode("utf-8")
+
+            def json(self):
+                return {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "max_tokens: 64000 > 8192, which is the maximum allowed for claude-sonnet-4-6",
+                    }
+                }
+
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "Shadow should 400"}],
+        }
+        FakeShadowStreamingClient.post_response = FakeShadowMaxTokensErrorPostResponse()
+
+        with (
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.0)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
+        [call] = server.store.conn.execute("select routing_json from calls").fetchall()
+        experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
+        self.assertEqual(experiment_meta["status"], "shadow-http-400")
+        self.assertEqual(experiment_meta["shadow_status_code"], 400)
+        self.assertIn(
+            "maximum allowed for claude-sonnet-4-6",
+            experiment_meta["shadow_http_error_detail"],
+        )
+        # The shared sanitizer must still redact any detail that looks like it
+        # carries raw prompt/identifier content.
+        self.assertEqual(
+            anthropic_proxy._shadow_http_error_detail(
+                {"error": {"type": "invalid_request_error", "message": "leaked raw secret prompt"}}
+            ),
+            "redacted-metadata-label",
+        )
+
     def test_streamed_tool_result_shadow_sanitizes_candidate_params(self):
         request_body = {
             "model": "claude-sonnet-4-6",
