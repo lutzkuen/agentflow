@@ -3762,7 +3762,7 @@ class DashboardImportTests(unittest.TestCase):
                         "status": "ranked",
                         "source_schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
                         "summary": {
-                            "queued_action_count": 2,
+                            "queued_action_count": 4,
                             "top_lever": "crunch",
                             "top_state": "full-rollout-active",
                             "top_current_status": "full-rollout",
@@ -3784,7 +3784,12 @@ class DashboardImportTests(unittest.TestCase):
                             "top_projected_savings_usd": 25.818387,
                             "total_realized_savings_usd": 27.55975,
                             "total_projected_savings_usd": 27.559637,
-                            "lever_counts": [{"value": "crunch", "count": 1}, {"value": "routing", "count": 1}],
+                            "lever_counts": [
+                                {"value": "cache", "count": 1},
+                                {"value": "crunch", "count": 1},
+                                {"value": "request-shape-rollups", "count": 1},
+                                {"value": "routing", "count": 1},
+                            ],
                             "status_counts": [{"value": "full-rollout", "count": 1}, {"value": "applied", "count": 1}],
                             "unblock_reason_counts": [{"value": "repeated-context-crunch-full-rollout-active", "count": 1}],
                         },
@@ -3833,7 +3838,52 @@ class DashboardImportTests(unittest.TestCase):
                             {
                                 "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
                                 "rank": 2,
+                                "ledger_rank": 2,
+                                "lever": "cache",
+                                "local_action_family": "cache",
+                                "state": "blocked",
+                                "current_status": "blocked",
+                                "next_action": "reobserve-cache-replay-after-rollback",
+                                "unblock_reason": "evidence-older-than-max-age",
+                                "blocking_reason": "evidence-older-than-max-age",
+                                "freshness_state": "stale-rollback-required",
+                                "blocker_codes": ["evidence-older-than-max-age"],
+                                "sample_count": 36,
+                                "applied_count": 0,
+                                "holdout_count": 0,
+                                "rollback_count": 1,
+                                "realized_savings_usd": 0.0,
+                                "projected_savings_usd": 0.075373,
+                                "target_local_rule_file": "cache_rules.yaml",
+                                "target_local_policy_section": "cache.pattern_rules",
+                                "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                                "privacy": {"metadata_only": True, "aggregate_only": True},
+                            },
+                            {
+                                "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
+                                "rank": 3,
                                 "ledger_rank": 3,
+                                "lever": "request-shape-rollups",
+                                "local_action_family": "source-traffic-acquisition",
+                                "state": "missing-evidence",
+                                "current_status": "blocked",
+                                "next_action": "emit-request-shape-rollups",
+                                "unblock_reason": "no-source-traffic-for-request-shape-rollups",
+                                "blocking_reason": "no-source-traffic-for-request-shape-rollups",
+                                "freshness_state": "no-data",
+                                "blocker_codes": ["no-source-traffic-for-request-shape-rollups"],
+                                "sample_count": 0,
+                                "applied_count": 0,
+                                "holdout_count": 0,
+                                "realized_savings_usd": 0.0,
+                                "projected_savings_usd": 0.0,
+                                "evidence_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
+                                "privacy": {"metadata_only": True, "aggregate_only": True},
+                            },
+                            {
+                                "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
+                                "rank": 4,
+                                "ledger_rank": 4,
                                 "lever": "routing",
                                 "local_action_family": "routing",
                                 "state": "active-local-policy",
@@ -3895,7 +3945,7 @@ class DashboardImportTests(unittest.TestCase):
             full_payload = full_response.json()
             self.assertEqual(payload["schema"], "tokenclaw.dashboard_local_activation_next_action_queue.v1")
             self.assertEqual(payload["status"], "ranked")
-            self.assertEqual(payload["summary"]["queued_action_count"], 2)
+            self.assertEqual(payload["summary"]["queued_action_count"], 4)
             self.assertEqual(len(payload["entries"]), 1)
             self.assertEqual(payload["entries"][0]["lever"], "crunch")
             self.assertEqual(payload["entries"][0]["target_local_rule_file"], "crunch_rules.yaml")
@@ -3905,10 +3955,31 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(payload["entries"][0]["rank_basis"]["rank_bucket"], 0)
             self.assertEqual(payload["summary"]["top_freshness_state"], "fresh")
             self.assertEqual(payload["summary"]["top_savings_per_1000_calls_usd"], 10.39388)
+            burndown = payload["successor_burndown"]
+            self.assertEqual(burndown["schema"], "tokenclaw.dashboard_activation_successor_burndown.v1")
+            self.assertEqual(burndown["summary"]["tracked_family_count"], 3)
+            by_family = {row["family"]: row for row in burndown["families"]}
+            self.assertEqual(by_family["source-traffic-acquisition"]["top_next_action"], "emit-request-shape-rollups")
+            self.assertEqual(by_family["source-traffic-acquisition"]["top_blocker"], "no-source-traffic-for-request-shape-rollups")
+            self.assertEqual(by_family["cache-reobserve"]["top_next_action"], "reobserve-cache-replay-after-rollback")
+            self.assertEqual(by_family["cache-reobserve"]["top_blocker"], "evidence-older-than-max-age")
+            self.assertEqual(by_family["cache-reobserve"]["projected_savings_usd"], 0.075373)
+            self.assertIn({"value": "stale", "count": 1}, by_family["cache-reobserve"]["status_counts"])
+            self.assertEqual(by_family["crunch-canary"]["applied_count"], 107)
+            self.assertEqual(by_family["crunch-canary"]["holdout_count"], 40)
+            self.assertEqual(by_family["crunch-canary"]["safety_stop_count"], 0)
+            self.assertFalse(burndown["privacy"]["raw_prompts_included"])
+            self.assertFalse(burndown["privacy"]["provider_bodies_included"])
+            self.assertFalse(burndown["privacy"]["request_ids_included"])
+            self.assertFalse(burndown["privacy"]["session_ids_included"])
+            self.assertFalse(burndown["privacy"]["cache_keys_included"])
+            self.assertFalse(burndown["privacy"]["file_paths_included"])
             self.assertEqual(full_payload["activation_burndown"]["schema"], "tokenclaw.dashboard_local_activation_next_action_queue.v1")
-            self.assertEqual(full_payload["activation_burndown"]["summary"]["queued_action_count"], 2)
+            self.assertEqual(full_payload["activation_burndown"]["summary"]["queued_action_count"], 4)
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["lever"], "crunch")
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["target_local_rule_file"], "crunch_rules.yaml")
+            self.assertEqual(full_payload["activation_burndown"]["successor_burndown"]["summary"]["tracked_family_count"], 3)
+            self.assertEqual(full_payload["summary"]["activation_successor_burndown"]["tracked_family_count"], 3)
             self.assertIn("activation_burndown", full_payload["summary"])
             coverage = payload["managed_preview_coverage"]
             self.assertEqual(coverage["schema"], "tokenclaw.dashboard_managed_activation_preview_coverage.v1")
@@ -3953,6 +4024,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(full_payload["activation_burndown"]["privacy"]["cache_keys_included"])
             self.assertIn("local-activation-queue-summary-tbody", dashboard.text)
             self.assertIn("local-activation-queue-entries-tbody", dashboard.text)
+            self.assertIn("activation-successor-burndown-tbody", dashboard.text)
             self.assertIn("activation-burndown-tbody", dashboard.text)
             self.assertIn("Managed preview", dashboard.text)
 

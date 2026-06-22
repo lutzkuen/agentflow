@@ -19519,6 +19519,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "routing_experiment_promotion_reason_counts": routing_experiment_report_summary["promotion_reason_counts"],
             "routing_experiment_promotion_ready_candidates": routing_experiment_report_summary["promotion_ready_candidates"],
             "activation_burndown": activation_burndown.get("summary", {}),
+            "activation_successor_burndown": (activation_burndown.get("successor_burndown") or {}).get("summary", {}),
             "savings_loop_bottlenecks": savings_loop_bottlenecks.get("summary", {}),
             "activation_successor_queue_health": activation_successor_queue_health.get("summary", {}),
             "managed_preview_coverage": (activation_burndown.get("managed_preview_coverage") or {}).get("summary", {}),
@@ -21147,6 +21148,7 @@ def _empty_local_activation_queue_payload(
             "unblock_reason_counts": [],
         },
         "entries": [],
+        "successor_burndown": _activation_successor_burndown([]),
         "managed_preview_coverage": managed_preview_coverage or _empty_managed_preview_coverage(
             status="disabled",
             status_reason="managed preview coverage was not requested",
@@ -21232,6 +21234,184 @@ def _public_local_activation_queue_summary(summary: dict[str, Any], entry_count:
         if not isinstance(public.get(key), list):
             public[key] = []
     return public
+
+
+ACTIVATION_SUCCESSOR_BURNDOWN_FAMILIES = (
+    "source-traffic-acquisition",
+    "cache-reobserve",
+    "crunch-canary",
+)
+
+
+def _activation_successor_family(row: dict[str, Any]) -> str | None:
+    family = str(row.get("local_action_family") or row.get("lever") or "").strip()
+    text_parts = [
+        family,
+        str(row.get("lever") or ""),
+        str(row.get("next_action") or ""),
+        str(row.get("unblock_reason") or ""),
+        str(row.get("blocking_reason") or ""),
+        str(row.get("current_status") or ""),
+        str(row.get("state") or ""),
+        str(row.get("evidence_schema") or ""),
+    ]
+    text_parts.extend(str(code or "") for code in row.get("blocker_codes") or [])
+    text = " ".join(text_parts).lower()
+    if family == "source-traffic-acquisition" or "source-traffic" in text or "no-source-traffic-for-request-shape-rollups" in text:
+        return "source-traffic-acquisition"
+    if family == "cache-reobserve" or "reobserve" in text or "rollback-cache-replay" in text or "cache-replay" in text:
+        return "cache-reobserve"
+    if family == "crunch-canary" or family == "crunch" or "crunch" in text:
+        return "crunch-canary"
+    return None
+
+
+def _activation_status_bucket(row: dict[str, Any]) -> str:
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in (
+            "freshness_state",
+            "current_status",
+            "state",
+            "issue_worthy_status",
+            "next_action",
+            "unblock_reason",
+            "blocking_reason",
+            "duplicate_suppression_status",
+        )
+    ).lower()
+    text += " " + " ".join(str(code or "").lower() for code in row.get("blocker_codes") or [])
+    if "suppressed" in text or "duplicate" in text:
+        return "suppressed"
+    if "retired" in text or "superseded" in text:
+        return "retired"
+    if "stale" in text or "evidence-older-than-max-age" in text:
+        return "stale"
+    if "rollback" in text:
+        return "rollback"
+    if _as_int(row.get("applied_count")) > 0 or "applied" in text or "active" in text or "full-rollout" in text:
+        return "applied"
+    if _as_int(row.get("holdout_count")) > 0 or "holdout" in text:
+        return "held-out"
+    if "ready" in text or "review" in text:
+        return "ready"
+    if "no-data" in text or "missing" in text or "no-source-traffic" in text:
+        return "missing"
+    if "blocked" in text or "keep-blocked" in text:
+        return "blocked"
+    return "unknown"
+
+
+def _activation_top_blocker(row: dict[str, Any]) -> str:
+    blockers = row.get("blocker_codes") if isinstance(row.get("blocker_codes"), list) else []
+    for value in blockers:
+        text = str(value or "").strip()
+        if text:
+            return public_label(text, "unknown")
+    for key in ("blocking_reason", "unblock_reason"):
+        text = str(row.get(key) or "").strip()
+        if text:
+            return public_label(text, "unknown")
+    return "none"
+
+
+def _status_count_rows(counter: Counter[str]) -> list[dict[str, Any]]:
+    ordered = [
+        "missing",
+        "stale",
+        "ready",
+        "applied",
+        "held-out",
+        "blocked",
+        "rollback",
+        "retired",
+        "suppressed",
+        "unknown",
+    ]
+    rows = [{"value": status, "count": int(counter.get(status, 0))} for status in ordered if counter.get(status, 0)]
+    rows.extend(
+        {"value": status, "count": int(count)}
+        for status, count in sorted(counter.items())
+        if status not in ordered
+    )
+    return rows
+
+
+def _activation_successor_burndown(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = {family: [] for family in ACTIVATION_SUCCESSOR_BURNDOWN_FAMILIES}
+    for row in entries:
+        family = _activation_successor_family(row)
+        if family is not None:
+            grouped[family].append(row)
+
+    rows: list[dict[str, Any]] = []
+    for family in ACTIVATION_SUCCESSOR_BURNDOWN_FAMILIES:
+        family_rows = grouped[family]
+        status_counter: Counter[str] = Counter(_activation_status_bucket(row) for row in family_rows)
+        next_counter: Counter[str] = Counter(
+            public_label(row.get("next_action") or "inspect-local-evidence", "inspect-local-evidence")
+            for row in family_rows
+        )
+        blocker_counter: Counter[str] = Counter(_activation_top_blocker(row) for row in family_rows)
+        top = sorted(
+            family_rows,
+            key=lambda row: (
+                _as_int(row.get("rank")) or 9999,
+                -_as_float(row.get("realized_savings_usd")),
+                -_as_float(row.get("projected_savings_usd")),
+                -_as_int(row.get("sample_count")),
+            ),
+        )
+        top_row = top[0] if top else {}
+        rows.append(
+            {
+                "family": family,
+                "status": "tracked" if family_rows else "missing",
+                "row_count": len(family_rows),
+                "status_counts": _status_count_rows(status_counter),
+                "top_next_action": public_label(
+                    (next_counter.most_common(1)[0][0] if next_counter else None)
+                    or top_row.get("next_action")
+                    or "none",
+                    "none",
+                ),
+                "top_blocker": public_label(
+                    (blocker_counter.most_common(1)[0][0] if blocker_counter else None)
+                    or _activation_top_blocker(top_row)
+                    or "none",
+                    "none",
+                ),
+                "sample_count": sum(_as_int(row.get("sample_count")) for row in family_rows),
+                "applied_count": sum(_as_int(row.get("applied_count")) for row in family_rows),
+                "holdout_count": sum(_as_int(row.get("holdout_count")) for row in family_rows),
+                "safety_stop_count": sum(_as_int(row.get("safety_stop_count")) for row in family_rows),
+                "rollback_count": sum(_as_int(row.get("rollback_count")) for row in family_rows),
+                "projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in family_rows), 8),
+                "realized_savings_usd": round(sum(_as_float(row.get("realized_savings_usd")) for row in family_rows), 8),
+                "top_entry_rank": _as_int(top_row.get("rank")) if top_row else 0,
+                "privacy": _local_activation_queue_privacy(),
+            }
+        )
+
+    tracked_rows = [row for row in rows if row["row_count"] > 0]
+    status_counter = Counter(row["status"] for row in rows)
+    return {
+        "schema": "tokenclaw.dashboard_activation_successor_burndown.v1",
+        "status": "tracked" if tracked_rows else "missing",
+        "summary": {
+            "tracked_family_count": len(tracked_rows),
+            "expected_family_count": len(ACTIVATION_SUCCESSOR_BURNDOWN_FAMILIES),
+            "tracked_row_count": sum(row["row_count"] for row in rows),
+            "status_counts": _status_count_rows(status_counter),
+            "total_projected_savings_usd": round(sum(row["projected_savings_usd"] for row in rows), 8),
+            "total_realized_savings_usd": round(sum(row["realized_savings_usd"] for row in rows), 8),
+            "top_family": tracked_rows[0]["family"] if tracked_rows else None,
+            "top_next_action": tracked_rows[0]["top_next_action"] if tracked_rows else None,
+            "top_blocker": tracked_rows[0]["top_blocker"] if tracked_rows else None,
+        },
+        "families": rows,
+        "privacy": _local_activation_queue_privacy(),
+    }
 
 
 def _activation_successor_health_empty(
@@ -21854,11 +22034,12 @@ async def stats_local_activation_next_action_queue(limit: int = 20, store_obj: A
         )
 
     capped = max(1, min(int(limit or 20), 50))
-    entries = [
+    all_entries = [
         _public_local_activation_queue_entry(entry, managed_preview_coverage=managed_preview_coverage)
         for entry in queue.get("entries") or []
         if isinstance(entry, dict)
-    ][:capped]
+    ]
+    entries = all_entries[:capped]
     summary = _public_local_activation_queue_summary(
         queue.get("summary") if isinstance(queue.get("summary"), dict) else {},
         len(entries),
@@ -21875,6 +22056,7 @@ async def stats_local_activation_next_action_queue(limit: int = 20, store_obj: A
         "source": {**source, "plan_generated_at": payload.get("generated_at")},
         "summary": summary,
         "entries": entries,
+        "successor_burndown": _activation_successor_burndown(all_entries),
         "managed_preview_coverage": managed_preview_coverage,
         "privacy": _local_activation_queue_privacy(queue_privacy),
     }
@@ -22090,6 +22272,17 @@ def dashboard_html() -> str:
     </tr></thead>
     <tbody id="local-activation-queue-summary-tbody"></tbody>
   </table>
+</div>
+<div class="section">
+  <h2>Activation successor evidence burndown</h2>
+  <div class="table-wrap">
+  <table class="activity-table" data-table-id="activation-successor-burndown" data-filter-label="Filter activation successor burndown">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="text">Status</th><th data-sort-type="number">Rows</th><th data-sort-type="text">Burndown</th><th data-sort-type="text">Top action</th><th data-sort-type="text">Top blocker</th><th data-sort-type="number">Coverage</th><th data-sort-type="money">Savings</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="activation-successor-burndown-tbody"></tbody>
+  </table>
+  </div>
 </div>
 <div class="section">
   <h2>Queued local actions</h2>
@@ -26424,6 +26617,28 @@ function renderActivationBurndown(d){
     </tr>`;
   }).join('')||`<tr><td colspan="10" style="color:#8b949e">${esc(burndown.status_reason||'No activation bottlenecks available')}</td></tr>`;
 }
+function renderActivationSuccessorBurndown(burndown){
+  const target=document.getElementById('activation-successor-burndown-tbody');
+  if(!target)return;
+  burndown=burndown||{};
+  const rows=burndown.families||[];
+  target.innerHTML=rows.map(row=>{
+    const statusCounts=(row.status_counts||[]).map(item=>`<span class="badge ${evidenceActivationStatusBadge(item.value)}">${esc(item.value)} ${(item.count||0).toLocaleString()}</span>`).join(' ')||'<span class="badge miss">none</span>';
+    const coverage=`samples ${(row.sample_count||0).toLocaleString()} · applied ${(row.applied_count||0).toLocaleString()} · holdout ${(row.holdout_count||0).toLocaleString()} · safety ${(row.safety_stop_count||0).toLocaleString()} · rollback ${(row.rollback_count||0).toLocaleString()}`;
+    const savings=`realized ${fmt(row.realized_savings_usd||0,6)} · projected ${fmt(row.projected_savings_usd||0,6)}`;
+    return `<tr>
+      <td><span class="badge provider">${esc(row.family||'unknown')}</span></td>
+      <td><span class="badge ${evidenceActivationStatusBadge(row.status)}">${esc(row.status||'unknown')}</span></td>
+      <td class="tokens">${(row.row_count||0).toLocaleString()}<div class="sub">top rank ${row.top_entry_rank||0}</div></td>
+      <td class="flags">${statusCounts}</td>
+      <td class="model">${esc(row.top_next_action||'none')}</td>
+      <td class="flags"><span class="badge miss">${esc(row.top_blocker||'none')}</span></td>
+      <td class="tokens">${esc(coverage)}</td>
+      <td class="savings">${esc(savings)}</td>
+      <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||burndown.privacy||{})}</td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="9" style="color:#8b949e">No activation successor evidence burndown available</td></tr>';
+}
 async function refreshLocalActivationQueue(){
   try{
     const r=await fetch('/tokenclaw/stats/local-activation-next-action-queue?limit=20');
@@ -26431,6 +26646,7 @@ async function refreshLocalActivationQueue(){
     const s=d.summary||{};
     const source=d.source||{};
     const privacy=d.privacy||{};
+    renderActivationSuccessorBurndown(d.successor_burndown||{});
     const sourceBadges=[
       source.available?'<span class="badge hit">latest plan</span>':'<span class="badge miss">no plan</span>',
       source.configured?'<span class="badge provider">configured path</span>':'<span class="badge miss">default path</span>',
