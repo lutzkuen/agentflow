@@ -73,6 +73,9 @@ SOURCE_TRAFFIC_ACQUISITION_SCHEMA = "tokenclaw.source_traffic_acquisition_action
 DASHBOARD_ROUTING_CANDIDATE_ROLLUP_SOURCE_SCHEMA = "tokenclaw.dashboard_routing_candidate_rollups.v1"
 ROUTING_DOWNGRADE_DRILL_SCHEMA = "tokenclaw.request_shape_routing_downgrade_drills.v1"
 ROUTING_DOWNGRADE_DRILL_ROW_SCHEMA = "tokenclaw.request_shape_routing_downgrade_drill.v1"
+PHASE_AWARE_ROUTING_DRY_RUN_SCHEMA = "tokenclaw.request_shape_phase_aware_routing_dry_run.v1"
+PHASE_AWARE_ROUTING_DRY_RUN_ROW_SCHEMA = "tokenclaw.request_shape_phase_aware_routing_delta.v1"
+PHASE_AWARE_ROUTING_RULE_SECTION_SCHEMA = "tokenclaw.request_shape_phase_aware_routing_rule_section.v1"
 DEPENDENCY_EVIDENCE_CLASSES = (
     "missing-dependency-evidence",
     "stable-dependency-evidence",
@@ -127,6 +130,12 @@ DEFAULT_ROUTING_DOWNGRADE_DRILL_HOLDOUT_FRACTION = 0.10
 DEFAULT_ROUTING_DOWNGRADE_DRILL_MIN_SAMPLES = 5
 DEFAULT_ROUTING_DOWNGRADE_DRILL_MAX_ERROR_RATE = 0.05
 DEFAULT_ROUTING_DOWNGRADE_DRILL_MAX_RETRY_RATE = 0.25
+DEFAULT_PHASE_AWARE_ROUTING_CANARY_FRACTION = 0.10
+DEFAULT_PHASE_AWARE_ROUTING_HOLDOUT_FRACTION = 0.10
+DEFAULT_PHASE_AWARE_ROUTING_MIN_SAMPLES = 5
+DEFAULT_PHASE_AWARE_ROUTING_MAX_ERROR_RATE = 0.05
+DEFAULT_PHASE_AWARE_ROUTING_MAX_RETRY_RATE = 0.25
+DEFAULT_PHASE_AWARE_ROUTING_MAX_FALLBACK_RATE = 0.25
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -13305,6 +13314,451 @@ def build_request_shape_routing_downgrade_drill_report(
     }
 
 
+def _phase_aware_routing_privacy() -> dict[str, Any]:
+    return _routing_downgrade_privacy()
+
+
+def _phase_aware_routing_policy_coverage(
+    *,
+    provider: str,
+    requested_model_family: str,
+    routed_model_family: str,
+    candidate_target_model: str | None,
+    source_surface: str,
+    category: str,
+    workflow_phase: str,
+    stream: bool,
+) -> dict[str, Any]:
+    """Read active-routing-policy coverage for a cohort shape (metadata-only).
+
+    Degrades to ``coverage-unknown`` when the local routing policy module is not
+    importable so the dry run never depends on routing experiments being wired.
+    Intentionally drops the policy decision's ``rule_path`` (a filesystem path)
+    to honor the metadata-only privacy contract.
+    """
+    coverage = {
+        "schema": "tokenclaw.request_shape_phase_aware_routing_policy_coverage.v1",
+        "coverage_state": "coverage-unknown",
+        "policy_decision": "unknown",
+        "policy_blocked": False,
+        "has_active_preferred_pathway": False,
+        "active_policy_target_model_family": None,
+        "policy_source": "unknown",
+    }
+    try:
+        from tokenclaw import routing_experiments
+
+        decision = routing_experiments.routing_pathway_policy_decision(
+            provider=provider,
+            requested_model=requested_model_family,
+            current_model=routed_model_family or requested_model_family,
+            target_model=candidate_target_model,
+            source_surface=source_surface,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=stream,
+        )
+    except Exception:
+        return coverage
+    if not isinstance(decision, dict):
+        return coverage
+    preferred = decision.get("preferred_pathway") if isinstance(decision.get("preferred_pathway"), dict) else None
+    policy_decision = public_label(decision.get("decision"), "unknown")
+    blocked = policy_decision == "blocked" or bool(decision.get("blocklist_match"))
+    if blocked:
+        coverage_state = "blocked-by-policy"
+    elif preferred is not None:
+        coverage_state = "covered-by-active-policy"
+    else:
+        coverage_state = "uncovered"
+    active_target = preferred.get("routed_model") if preferred else decision.get("target_model")
+    coverage.update(
+        {
+            "coverage_state": coverage_state,
+            "policy_decision": policy_decision,
+            "policy_blocked": blocked,
+            "has_active_preferred_pathway": preferred is not None,
+            "active_policy_target_model_family": (
+                _model_family(str(active_target)) if active_target else None
+            ),
+            "policy_source": public_label(decision.get("policy_source"), "unknown"),
+        }
+    )
+    return coverage
+
+
+def _phase_aware_routing_blockers(
+    row: dict[str, Any],
+    *,
+    target_model: str | None,
+    target_reason: str,
+    projection: dict[str, Any],
+    coverage: dict[str, Any],
+    min_samples: int,
+    max_error_rate: float,
+    max_retry_rate: float,
+    max_fallback_rate: float,
+) -> list[str]:
+    blockers = set(
+        _routing_drill_blockers(
+            row,
+            target_model=target_model,
+            target_reason=target_reason,
+            projection=projection,
+            min_samples=min_samples,
+            max_error_rate=max_error_rate,
+            max_retry_rate=max_retry_rate,
+        )
+    )
+    sample_count = _as_int(row.get("row_count") or row.get("sample_count"))
+    fallback_rate = _as_int(row.get("fallback_count")) / float(sample_count) if sample_count > 0 else 0.0
+    if fallback_rate > max_fallback_rate:
+        blockers.add("elevated-fallback-rate")
+    if coverage.get("policy_blocked"):
+        blockers.add("active-routing-policy-blocklist")
+    priority = {
+        "stale-request-shape-rollup": 0,
+        "active-routing-policy-blocklist": 1,
+        "thinking-routing-guard": 2,
+        "high-downgrade-risk-shape": 3,
+        "elevated-error-rate": 4,
+        "elevated-fallback-rate": 5,
+        "elevated-retry-rate": 6,
+        "too-small-routing-drill-sample": 7,
+        "non-positive-routing-savings-projection": 8,
+        "no-cheaper-anthropic-routing-target": 9,
+        "no-cheaper-openai-routing-target": 9,
+        "unknown-provider-routing-target": 9,
+        "missing-quality-evidence": 20,
+    }
+    return sorted(blockers, key=lambda code: (priority.get(code, 12), code))
+
+
+def _phase_aware_routing_rule_section(
+    *,
+    provider: str,
+    requested_model_family: str,
+    candidate_target_model: str,
+    target_model_family: str | None,
+    source_surface: str,
+    category: str,
+    workflow_phase: str,
+    stream: bool,
+    has_tools: bool,
+    text_bucket: str,
+    token_bucket: str,
+) -> dict[str, Any]:
+    """A stageable, file-backed routing-rule template for a review-ready cohort.
+
+    Shaped like a ``preferred_pathways`` entry in routing_experiments.yaml but
+    explicitly review-only: it carries no concrete request binding and is gated
+    behind the existing local promotion/stage command (no policy file writes).
+    """
+    return {
+        "schema": PHASE_AWARE_ROUTING_RULE_SECTION_SCHEMA,
+        "target_file": "routing_experiments.yaml",
+        "target_section": "preferred_pathways",
+        "stageable": True,
+        "requires_promotion_command": True,
+        "promotion_command": "tokenclaw-routing-experiments-stage",
+        "policy_files_written": False,
+        "rule_template": {
+            "provider": provider,
+            "requested_model_family": requested_model_family,
+            "routed_model": candidate_target_model,
+            "routed_model_family": target_model_family,
+            "source_surface": source_surface,
+            "category": category,
+            "workflow_phase": workflow_phase,
+            "stream": stream,
+            "has_tools": has_tools,
+            "text_bucket": text_bucket,
+            "token_bucket": token_bucket,
+            "mode": "shadow_candidate_pass_through",
+        },
+        "requires_concrete_model_binding": True,
+        "metadata_only": True,
+    }
+
+
+def build_request_shape_phase_aware_routing_dry_run(
+    rollups: list[dict[str, Any]],
+    *,
+    limit: int = 25,
+    canary_fraction: float = DEFAULT_PHASE_AWARE_ROUTING_CANARY_FRACTION,
+    holdout_fraction: float = DEFAULT_PHASE_AWARE_ROUTING_HOLDOUT_FRACTION,
+    min_samples: int = DEFAULT_PHASE_AWARE_ROUTING_MIN_SAMPLES,
+    max_error_rate: float = DEFAULT_PHASE_AWARE_ROUTING_MAX_ERROR_RATE,
+    max_retry_rate: float = DEFAULT_PHASE_AWARE_ROUTING_MAX_RETRY_RATE,
+    max_fallback_rate: float = DEFAULT_PHASE_AWARE_ROUTING_MAX_FALLBACK_RATE,
+) -> dict[str, Any]:
+    """Attach phase-aware routing dry-run deltas to ranked request-shape cohorts.
+
+    Consumes ranked request-shape rollups, compares each routing-eligible cohort
+    against the active local routing policy, and emits review-only route deltas
+    for cheaper target tiers (or explicit blocker/coverage rows). No policy file
+    is written, no provider or managed-server call is made, and a stageable
+    file-backed rule template is included only when a cohort is review-ready and
+    not already covered by the active policy.
+    """
+    capped_limit = max(1, min(_as_int(limit) or 25, 1000))
+    rows: list[dict[str, Any]] = []
+    blocker_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    phase_counts: dict[str, int] = {}
+    coverage_counts: dict[str, int] = {}
+    target_counts: dict[str, int] = {}
+    total_samples = 0
+    total_projected = 0.0
+    stageable_count = 0
+
+    for row in rollups:
+        if not isinstance(row, dict):
+            continue
+        classes = {public_label(item, "unknown") for item in row.get("candidate_work_classes") or []}
+        families = {public_label(item, "unknown") for item in row.get("candidate_families") or []}
+        routing_status = public_label(row.get("routing_status"), "unknown")
+        if "routing" not in classes and "routing_candidate" not in families and routing_status not in {"passthrough", "routed"}:
+            continue
+
+        provider = public_label(row.get("provider_family"), "unknown")
+        requested_family = public_label(row.get("requested_model_family"), "unknown")
+        routed_family = public_label(row.get("routed_model_family") or requested_family, requested_family)
+        source_surface = public_label(row.get("source_surface"), "unknown")
+        category = public_label(row.get("category"), "unknown")
+        workflow_phase = public_label(row.get("workflow_phase") or category, "unknown")
+        stream = bool(row.get("stream"))
+        has_tools = bool(row.get("has_tools"))
+        text_bucket = public_label(row.get("text_bucket"), "unknown")
+        token_bucket = public_label(row.get("token_bucket"), "unknown")
+        sample_count = _as_int(row.get("row_count") or row.get("sample_count"))
+
+        target_model, target_family, target_reason = _routing_downgrade_target(
+            provider=provider,
+            requested_model_family=requested_family,
+        )
+        projection = _routing_downgrade_projection(
+            row,
+            provider=provider,
+            requested_model=requested_family,
+            target_model=target_model or requested_family,
+            sample_count=sample_count,
+        )
+        coverage = _phase_aware_routing_policy_coverage(
+            provider=provider,
+            requested_model_family=requested_family,
+            routed_model_family=routed_family,
+            candidate_target_model=target_model,
+            source_surface=source_surface,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=stream,
+        )
+        blockers = _phase_aware_routing_blockers(
+            row,
+            target_model=target_model,
+            target_reason=target_reason,
+            projection=projection,
+            coverage=coverage,
+            min_samples=min_samples,
+            max_error_rate=max_error_rate,
+            max_retry_rate=max_retry_rate,
+            max_fallback_rate=max_fallback_rate,
+        )
+        hard_blockers = {
+            "stale-request-shape-rollup",
+            "active-routing-policy-blocklist",
+            "too-small-routing-drill-sample",
+            "non-positive-routing-savings-projection",
+            "thinking-routing-guard",
+            "high-downgrade-risk-shape",
+            "elevated-error-rate",
+            "elevated-fallback-rate",
+            "elevated-retry-rate",
+            "no-cheaper-anthropic-routing-target",
+            "no-cheaper-openai-routing-target",
+            "unknown-provider-routing-target",
+        }
+        coverage_state = public_label(coverage.get("coverage_state"), "coverage-unknown")
+        if hard_blockers.intersection(blockers):
+            status = "blocked"
+            next_action = "keep-phase-aware-route-candidate-blocked"
+        elif coverage_state == "covered-by-active-policy":
+            status = "already-covered"
+            next_action = "observe-active-routing-policy-coverage"
+        else:
+            status = "review-ready"
+            next_action = "review-phase-aware-route-canary"
+
+        is_stageable = status == "review-ready" and coverage_state in {"uncovered", "coverage-unknown"}
+        rule_section = (
+            _phase_aware_routing_rule_section(
+                provider=provider,
+                requested_model_family=requested_family,
+                candidate_target_model=target_model,
+                target_model_family=target_family,
+                source_surface=source_surface,
+                category=category,
+                workflow_phase=workflow_phase,
+                stream=stream,
+                has_tools=has_tools,
+                text_bucket=text_bucket,
+                token_bucket=token_bucket,
+            )
+            if is_stageable and target_model
+            else None
+        )
+        canary_sample_count = int(math.ceil(sample_count * canary_fraction)) if status == "review-ready" else 0
+        holdout_sample_count = int(math.ceil(sample_count * holdout_fraction)) if status == "review-ready" else 0
+        fingerprint_material = {
+            "schema": PHASE_AWARE_ROUTING_DRY_RUN_ROW_SCHEMA,
+            "provider_family": provider,
+            "source_surface": source_surface,
+            "endpoint": public_label(row.get("endpoint"), "unknown"),
+            "requested_model_family": requested_family,
+            "target_model_family": target_family,
+            "category": category,
+            "workflow_phase": workflow_phase,
+            "stream": stream,
+            "has_tools": has_tools,
+            "text_bucket": text_bucket,
+            "token_bucket": token_bucket,
+        }
+        delta = {
+            "schema": PHASE_AWARE_ROUTING_DRY_RUN_ROW_SCHEMA,
+            "fingerprint": _routing_drill_fingerprint(fingerprint_material),
+            "source_evidence_schema": row.get("source_schema") or row.get("schema") or ROLLUP_ROW_SCHEMA,
+            **fingerprint_material,
+            "candidate_id_included": False,
+            "requested_model_family": requested_family,
+            "current_model_family": routed_family,
+            "candidate_target_model": target_model,
+            "candidate_target_tier": target_family,
+            "target_reason": target_reason,
+            "routing_status": routing_status,
+            "sample_count": sample_count,
+            "row_count": sample_count,
+            "error_count": _as_int(row.get("error_count")),
+            "retry_count": _as_int(row.get("retry_count")),
+            "fallback_count": _as_int(row.get("fallback_count")),
+            "error_rate": round(_as_int(row.get("error_count")) / float(sample_count), 6) if sample_count else 0.0,
+            "retry_rate": round(_as_int(row.get("retry_count")) / float(sample_count), 6) if sample_count else 0.0,
+            "fallback_rate": round(_as_int(row.get("fallback_count")) / float(sample_count), 6) if sample_count else 0.0,
+            "input_tokens": projection["input_tokens"],
+            "output_tokens": projection["output_tokens"],
+            "projected_savings_usd": projection["projected_savings_usd"],
+            "projected_savings_per_1000_calls_usd": projection["projected_savings_per_1000_calls_usd"],
+            "recommended_canary_fraction": round(canary_fraction, 4) if status == "review-ready" else 0.0,
+            "recommended_holdout_fraction": round(holdout_fraction, 4) if status == "review-ready" else 0.0,
+            "recommended_canary_sample_count": canary_sample_count,
+            "recommended_holdout_sample_count": holdout_sample_count,
+            "active_policy_coverage": coverage,
+            "coverage_state": coverage_state,
+            "safety_reason_codes": blockers,
+            "top_blocker_code": blockers[0] if blockers else None,
+            "blocker_codes": blockers,
+            "status": status,
+            "readiness_state": status,
+            "recommended_next_action": next_action,
+            "stageable_routing_rule_section": rule_section,
+            "local_action_family": "routing",
+            "review_only": True,
+            "emits_routing_apply_action": False,
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "aggregate_only": True,
+            "privacy": _phase_aware_routing_privacy(),
+        }
+        rows.append(delta)
+        total_samples += sample_count
+        if status == "review-ready":
+            total_projected += _as_float(delta.get("projected_savings_usd"))
+        if rule_section is not None:
+            stageable_count += 1
+        _increment(status_counts, status, sample_count)
+        _increment(phase_counts, workflow_phase, sample_count)
+        _increment(coverage_counts, coverage_state, sample_count)
+        _increment(target_counts, target_family or target_reason, sample_count)
+        for blocker in blockers:
+            _increment(blocker_counts, blocker, sample_count)
+
+    rows.sort(
+        key=lambda item: (
+            item.get("status") == "review-ready",
+            item.get("stageable_routing_rule_section") is not None,
+            _as_float(item.get("projected_savings_per_1000_calls_usd")),
+            _as_int(item.get("sample_count")),
+            str(item.get("fingerprint")),
+        ),
+        reverse=True,
+    )
+    for rank, row in enumerate(rows[:capped_limit], start=1):
+        row["rank"] = rank
+
+    ranked = rows[:capped_limit]
+    top = ranked[0] if ranked else None
+    return {
+        "schema": PHASE_AWARE_ROUTING_DRY_RUN_SCHEMA,
+        "status": "ranked" if ranked else "no-phase-aware-routing-candidates",
+        "summary": {
+            "rows_considered": len([row for row in rollups if isinstance(row, dict)]),
+            "candidate_count": len(ranked),
+            "review_ready_count": sum(1 for row in ranked if row.get("status") == "review-ready"),
+            "blocked_count": sum(1 for row in ranked if row.get("status") == "blocked"),
+            "already_covered_count": sum(1 for row in ranked if row.get("status") == "already-covered"),
+            "stageable_rule_section_count": sum(
+                1 for row in ranked if row.get("stageable_routing_rule_section") is not None
+            ),
+            "sample_count": total_samples,
+            "top_fingerprint": top.get("fingerprint") if top else None,
+            "top_next_action": top.get("recommended_next_action") if top else None,
+            "top_blocker_code": top.get("top_blocker_code") if top else None,
+            "top_candidate_target_tier": top.get("candidate_target_tier") if top else None,
+            "top_projected_savings_per_1000_calls_usd": (
+                top.get("projected_savings_per_1000_calls_usd") if top else 0.0
+            ),
+            "total_projected_savings_usd": round(total_projected, 8),
+            "minimum_sample_count": min_samples,
+            "default_canary_fraction": round(canary_fraction, 4),
+            "default_holdout_fraction": round(holdout_fraction, 4),
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "policy_files_written": False,
+        },
+        "status_breakdown": _breakdown(status_counts),
+        "workflow_phase_breakdown": _breakdown(phase_counts),
+        "coverage_breakdown": _breakdown(coverage_counts),
+        "target_tier_breakdown": _breakdown(target_counts),
+        "blocker_breakdown": _breakdown(blocker_counts),
+        "top_candidate": top,
+        "candidates": ranked,
+        "acceptance": {
+            "has_stable_fingerprints": all(
+                str(row.get("fingerprint", "")).startswith("routing-drill:") for row in ranked
+            ),
+            "has_projected_savings_per_1000_calls": all(
+                "projected_savings_per_1000_calls_usd" in row for row in ranked
+            ),
+            "has_candidate_target_tier": all("candidate_target_tier" in row for row in ranked),
+            "has_safety_reason_codes": all("safety_reason_codes" in row for row in ranked),
+            "has_active_policy_coverage": all("active_policy_coverage" in row for row in ranked),
+            "has_next_action": all(row.get("recommended_next_action") for row in ranked),
+            "emits_ranked_or_blocker_rows": bool(ranked),
+            "emits_no_routing_apply_actions": all(not bool(row.get("emits_routing_apply_action")) for row in ranked),
+            "stageable_writes_gated_behind_promotion": all(
+                (row.get("stageable_routing_rule_section") or {}).get("requires_promotion_command", True)
+                for row in ranked
+                if row.get("stageable_routing_rule_section") is not None
+            ),
+            "policy_files_written": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _phase_aware_routing_privacy(),
+    }
+
+
 def _source_traffic_acquisition_attempt(
     *,
     rows_considered: int,
@@ -14989,6 +15443,7 @@ def build_request_shape_rollups_report(
         crunch_canary_impact=crunch_canary_impact,
     )
     routing_downgrade_drills = build_request_shape_routing_downgrade_drill_report(rollups, limit=25)
+    phase_aware_routing_dry_run = build_request_shape_phase_aware_routing_dry_run(rollups, limit=25)
     remaining_crunch_measurements = build_request_shape_crunch_remaining_measurement_report(
         follow_up_candidates=follow_up_candidates,
         crunch_opportunity=crunch_opportunity_dry_run,
@@ -15069,6 +15524,14 @@ def build_request_shape_rollups_report(
             "routing_downgrade_drill_top_projected_savings_per_1000_calls_usd": routing_downgrade_drills["summary"][
                 "top_projected_savings_per_1000_calls_usd"
             ],
+            "phase_aware_routing_candidate_count": phase_aware_routing_dry_run["summary"]["candidate_count"],
+            "phase_aware_routing_review_ready_count": phase_aware_routing_dry_run["summary"]["review_ready_count"],
+            "phase_aware_routing_stageable_rule_section_count": phase_aware_routing_dry_run["summary"][
+                "stageable_rule_section_count"
+            ],
+            "phase_aware_routing_top_projected_savings_per_1000_calls_usd": phase_aware_routing_dry_run["summary"][
+                "top_projected_savings_per_1000_calls_usd"
+            ],
             "remaining_crunch_measurement_count": remaining_crunch_measurements["summary"]["remaining_measurement_required_count"],
         },
         "provider_breakdown": _breakdown(provider_counts),
@@ -15078,6 +15541,7 @@ def build_request_shape_rollups_report(
         "source_traffic_acquisition": follow_up_candidates["source_traffic_acquisition"],
         "follow_up_candidates": follow_up_candidates,
         "routing_downgrade_drills": routing_downgrade_drills,
+        "phase_aware_routing_dry_run": phase_aware_routing_dry_run,
         "cache_replayability_dry_run": cache_replayability_dry_run,
         "cache_replay_blocker_classification": cache_replay_blocker_classification,
         "crunch_opportunity_dry_run": crunch_opportunity_dry_run,

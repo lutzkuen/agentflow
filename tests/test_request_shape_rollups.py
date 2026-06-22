@@ -33,6 +33,7 @@ from tokenclaw.request_shape_rollups import (
     build_request_shape_crunch_policy_decision_report,
     build_request_shape_crunch_canary_stage_report,
     build_request_shape_follow_up_candidates,
+    build_request_shape_phase_aware_routing_dry_run,
     build_request_shape_routing_downgrade_drill_report,
     build_request_shape_rollups_report,
     build_request_shape_tool_cache_replay_evidence_report,
@@ -592,6 +593,192 @@ class RequestShapeRollupTests(unittest.TestCase):
             self.assertFalse(candidate["emits_routing_apply_action"])
             self.assertFalse(candidate["policy_files_written"])
             self.assertTrue(candidate["privacy"]["metadata_only"])
+
+    @staticmethod
+    def _phase_aware_routing_decision(coverage: str):
+        def _decision(**kwargs):
+            if coverage == "covered":
+                return {
+                    "decision": "preferred-override",
+                    "allowed": True,
+                    "preferred_pathway": {"routed_model": "gpt-5-mini"},
+                    "target_model": "gpt-5-mini",
+                    "blocklist_match": None,
+                    "policy_source": "local-manual",
+                }
+            if coverage == "blocked":
+                return {
+                    "decision": "blocked",
+                    "allowed": False,
+                    "preferred_pathway": None,
+                    "target_model": kwargs.get("target_model"),
+                    "blocklist_match": {"requested_model": kwargs.get("requested_model")},
+                    "policy_source": "local-manual",
+                }
+            return {
+                "decision": "allow",
+                "allowed": True,
+                "preferred_pathway": None,
+                "target_model": kwargs.get("target_model"),
+                "blocklist_match": None,
+                "policy_source": "local-default",
+            }
+
+        return _decision
+
+    def _phase_aware_routing_rollup(self, **overrides) -> dict[str, object]:
+        row = {
+            "schema": "tokenclaw.request_shape_rollup_row.v1",
+            "source_schema": "tokenclaw.request_shape_rollups.v1",
+            "provider_family": "openai",
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "requested_model_family": "gpt-5",
+            "routed_model_family": "gpt-5",
+            "category": "chat",
+            "workflow_phase": "chat",
+            "stream": False,
+            "has_tools": False,
+            "text_bucket": "8k_32k_chars",
+            "token_bucket": "500_2k_tokens",
+            "cache_status": "miss",
+            "routing_status": "passthrough",
+            "candidate_families": ["routing_candidate"],
+            "candidate_work_classes": ["routing"],
+            "blocker_codes": [],
+            "row_count": 20,
+            "sample_count": 20,
+            "error_count": 0,
+            "retry_count": 0,
+            "fallback_count": 0,
+            "input_tokens": 20_000,
+            "successful_input_tokens": 20_000,
+            "output_tokens": 2_000,
+        }
+        row.update(overrides)
+        return row
+
+    def test_phase_aware_routing_dry_run_ranks_stageable_uncovered_candidates(self) -> None:
+        rollups = [self._phase_aware_routing_rollup()]
+        with patch.object(
+            routing_experiments,
+            "routing_pathway_policy_decision",
+            side_effect=self._phase_aware_routing_decision("uncovered"),
+        ):
+            report = build_request_shape_phase_aware_routing_dry_run(rollups)
+            repeated = build_request_shape_phase_aware_routing_dry_run(rollups)
+
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_phase_aware_routing_dry_run.v1")
+        self.assertEqual(report["status"], "ranked")
+        self.assertEqual(report["summary"]["candidate_count"], 1)
+        self.assertEqual(report["summary"]["review_ready_count"], 1)
+        self.assertEqual(report["summary"]["blocked_count"], 0)
+        self.assertEqual(report["summary"]["already_covered_count"], 0)
+        self.assertEqual(report["summary"]["stageable_rule_section_count"], 1)
+        self.assertFalse(report["summary"]["policy_files_written"])
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["fingerprint"], repeated["candidates"][0]["fingerprint"])
+        self.assertTrue(candidate["fingerprint"].startswith("routing-drill:"))
+        self.assertEqual(candidate["status"], "review-ready")
+        self.assertEqual(candidate["recommended_next_action"], "review-phase-aware-route-canary")
+        self.assertEqual(candidate["candidate_target_model"], "gpt-5-mini")
+        self.assertEqual(candidate["candidate_target_tier"], "gpt-5-mini")
+        self.assertEqual(candidate["coverage_state"], "uncovered")
+        self.assertGreater(candidate["projected_savings_per_1000_calls_usd"], 0)
+        self.assertEqual(candidate["recommended_canary_sample_count"], 2)
+        self.assertEqual(candidate["recommended_holdout_sample_count"], 2)
+        self.assertIn("safety_reason_codes", candidate)
+        self.assertEqual(candidate["active_policy_coverage"]["coverage_state"], "uncovered")
+        section = candidate["stageable_routing_rule_section"]
+        self.assertIsNotNone(section)
+        self.assertEqual(section["target_file"], "routing_experiments.yaml")
+        self.assertTrue(section["requires_promotion_command"])
+        self.assertFalse(section["policy_files_written"])
+        self.assertEqual(section["rule_template"]["routed_model"], "gpt-5-mini")
+        self.assertEqual(section["rule_template"]["workflow_phase"], "chat")
+        self.assertFalse(candidate["emits_routing_apply_action"])
+        self.assertFalse(candidate["policy_files_written"])
+        self.assertTrue(candidate["privacy"]["metadata_only"])
+        self.assertFalse(candidate["privacy"]["provider_calls_made"])
+        self.assertFalse(candidate["privacy"]["managed_server_calls_made"])
+        self.assertNotIn("rule_path", candidate["active_policy_coverage"])
+        self.assertTrue(report["acceptance"]["has_active_policy_coverage"])
+        self.assertTrue(report["acceptance"]["has_candidate_target_tier"])
+        self.assertTrue(report["acceptance"]["has_safety_reason_codes"])
+        self.assertTrue(report["acceptance"]["stageable_writes_gated_behind_promotion"])
+        self.assertTrue(report["acceptance"]["emits_no_routing_apply_actions"])
+
+    def test_phase_aware_routing_dry_run_marks_active_policy_covered_cohort(self) -> None:
+        rollups = [self._phase_aware_routing_rollup()]
+        with patch.object(
+            routing_experiments,
+            "routing_pathway_policy_decision",
+            side_effect=self._phase_aware_routing_decision("covered"),
+        ):
+            report = build_request_shape_phase_aware_routing_dry_run(rollups)
+
+        self.assertEqual(report["status"], "ranked")
+        self.assertEqual(report["summary"]["already_covered_count"], 1)
+        self.assertEqual(report["summary"]["review_ready_count"], 0)
+        self.assertEqual(report["summary"]["stageable_rule_section_count"], 0)
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["status"], "already-covered")
+        self.assertEqual(candidate["coverage_state"], "covered-by-active-policy")
+        self.assertEqual(candidate["recommended_next_action"], "observe-active-routing-policy-coverage")
+        self.assertIsNone(candidate["stageable_routing_rule_section"])
+        self.assertTrue(candidate["active_policy_coverage"]["has_active_preferred_pathway"])
+
+    def test_phase_aware_routing_dry_run_blocks_unsafe_and_policy_blocklisted_shapes(self) -> None:
+        unsafe = [
+            self._phase_aware_routing_rollup(freshness_state="stale"),
+            self._phase_aware_routing_rollup(row_count=1, sample_count=1),
+            self._phase_aware_routing_rollup(
+                category="thinking",
+                workflow_phase="thinking",
+                blocker_codes=["thinking-routing-guard"],
+            ),
+            self._phase_aware_routing_rollup(fallback_count=20),
+        ]
+        with patch.object(
+            routing_experiments,
+            "routing_pathway_policy_decision",
+            side_effect=self._phase_aware_routing_decision("uncovered"),
+        ):
+            report = build_request_shape_phase_aware_routing_dry_run(unsafe)
+        self.assertEqual(report["summary"]["blocked_count"], 4)
+        self.assertEqual(report["summary"]["review_ready_count"], 0)
+        self.assertEqual(report["summary"]["stageable_rule_section_count"], 0)
+        blockers = {row["top_blocker_code"] for row in report["candidates"]}
+        self.assertIn("stale-request-shape-rollup", blockers)
+        self.assertIn("too-small-routing-drill-sample", blockers)
+        self.assertIn("thinking-routing-guard", blockers)
+        self.assertIn("elevated-fallback-rate", blockers)
+        for candidate in report["candidates"]:
+            self.assertEqual(candidate["status"], "blocked")
+            self.assertIsNone(candidate["stageable_routing_rule_section"])
+            self.assertFalse(candidate["emits_routing_apply_action"])
+
+        with patch.object(
+            routing_experiments,
+            "routing_pathway_policy_decision",
+            side_effect=self._phase_aware_routing_decision("blocked"),
+        ):
+            blocklisted = build_request_shape_phase_aware_routing_dry_run(
+                [self._phase_aware_routing_rollup()]
+            )
+        candidate = blocklisted["candidates"][0]
+        self.assertEqual(candidate["status"], "blocked")
+        self.assertEqual(candidate["coverage_state"], "blocked-by-policy")
+        self.assertIn("active-routing-policy-blocklist", candidate["blocker_codes"])
+        self.assertIsNone(candidate["stageable_routing_rule_section"])
+
+    def test_phase_aware_routing_dry_run_handles_no_candidates(self) -> None:
+        report = build_request_shape_phase_aware_routing_dry_run([])
+        self.assertEqual(report["status"], "no-phase-aware-routing-candidates")
+        self.assertEqual(report["summary"]["candidate_count"], 0)
+        self.assertEqual(report["candidates"], [])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertFalse(report["acceptance"]["emits_ranked_or_blocker_rows"])
 
     def _cache_replay_hit_recovery_smoke(self) -> dict[str, object]:
         return {
