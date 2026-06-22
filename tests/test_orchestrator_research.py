@@ -5555,6 +5555,203 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(all(item["decision"] == "keep-blocked" for item in decisions.values()))
         self.assertTrue(all(item["privacy"]["metadata_only"] for item in decisions.values()))
 
+    def test_progressed_rollup_successors_suppress_keep_blocked_research_proposals(self):
+        def successor_action(source, family, status, blocker, *, next_action, issue_status="blocked", preview_verified=False):
+            return {
+                "schema": "tokenclaw.local_activation_successor_action.v1",
+                "fingerprint": f"successor:{source.rsplit(':', 1)[-1]}",
+                "source_fingerprint": source,
+                "lever": family,
+                "local_action_family": family,
+                "successor_status": status,
+                "current_status": status,
+                "state": status,
+                "issue_worthy_status": issue_status,
+                "recommended_next_action": next_action,
+                "unblock_reason": blocker,
+                "blocker_codes": [blocker],
+                "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1"
+                if family == "cache"
+                else "tokenclaw.crunch_savings_signal.v1"
+                if family == "crunch"
+                else "tokenclaw.orchestrator_research_log_diagnostics.v1",
+                "expected_savings_path": "Move request-shape rollup evidence into a feature-led local activation successor.",
+                "acceptance_metric": "The successor action has a stable fingerprint, concrete next action, local action family, and metadata-only privacy flags.",
+                "preview_verified": preview_verified,
+                "managed_preview_gate": {
+                    "schema": "tokenclaw.preview_verified_activation_successor_gate.v1",
+                    "status": "fresh-preview-health" if preview_verified else "no-data-preview-health",
+                    "decision": "ready" if preview_verified else "keep-blocked",
+                    "verified": preview_verified,
+                    "required": not preview_verified,
+                    "next_action": next_action if preview_verified else "refresh-managed-activation-preview",
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "privacy": {
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                    "raw_prompts_included": False,
+                    "provider_bodies_included": False,
+                    "request_ids_included": False,
+                    "session_ids_included": False,
+                    "cache_keys_included": False,
+                    "absolute_paths_included": False,
+                },
+            }
+
+        def successor_decision(action, decision_text, issue_status):
+            return {
+                "schema": "tokenclaw.local_activation_successor_decision.v1",
+                "fingerprint": f"successor-decision:{action['source_fingerprint'].rsplit(':', 1)[-1]}",
+                "source_fingerprint": action["source_fingerprint"],
+                "successor_action_fingerprint": action["fingerprint"],
+                "decision": decision_text,
+                "issue_worthy_status": issue_status,
+                "local_action_family": action["local_action_family"],
+                "recommended_next_action": action["recommended_next_action"],
+                "preview_verified": bool(action.get("preview_verified")),
+                "preview_agreement_status": "agreed" if action.get("preview_verified") else "no-data-preview-health",
+                "preview_verification_status": "fresh-preview-health" if action.get("preview_verified") else "no-data-preview-health",
+                "preview_verification_decision": decision_text,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            }
+
+        cache_action = successor_action(
+            "activation:cacheprogressed",
+            "cache",
+            "blocked",
+            "evidence-older-than-max-age",
+            next_action="refresh-managed-activation-preview",
+            issue_status="blocked",
+        )
+        pass_action = successor_action(
+            "activation:passdiagnostic",
+            "activation-feedback",
+            "blocked",
+            "pass-for-the-issue-specific-acceptance-metric",
+            next_action="refresh-managed-activation-preview",
+            issue_status="blocked",
+        )
+        pass_action["diagnostic_class"] = "pass-for-the-issue-specific-acceptance-metric"
+        pass_action["diagnostic_reason"] = "pass-for-the-issue-specific-acceptance-metric"
+        crunch_action = successor_action(
+            "activation:crunchfresh",
+            "crunch",
+            "ready",
+            "repeated-context-crunch-review-ready",
+            next_action="stage-repeated-context-crunch-canary",
+            issue_status="ready",
+            preview_verified=True,
+        )
+
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    762,
+                    "Consume managed cache rollback guidance in local activation successor decisions",
+                    ["backlog", "status:ready", "cache", "privacy"],
+                    state="CLOSED",
+                    closed="2026-06-20T08:00:00Z",
+                    body=(
+                        "Fingerprint: activation:cacheprogressed\n"
+                        "Top next action: stage-cache-replay-canary\n"
+                    ),
+                )
+            ],
+            stats={
+                "calls": 0,
+                "evidence_to_activation_next_action_ledger": {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
+                    "status": "tracked",
+                    "entries": [
+                        {
+                            "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                            "fingerprint": "activation:cacheprogressed",
+                            "lever": "cache",
+                            "local_action_family": "cache",
+                            "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                            "current_status": "blocked",
+                            "state": "blocked",
+                            "issue_worthy_status": "blocked",
+                            "next_action": "rollback-cache-replay-rule",
+                            "fingerprint_next_action": "stage-cache-replay-canary",
+                            "lifecycle_progressed_from_next_action": "stage-cache-replay-canary",
+                            "lifecycle_progressed_from_evidence_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
+                            "blocker_codes": ["evidence-older-than-max-age"],
+                            "issue_status": "closed-issue-seen",
+                            "prior_issue": {
+                                "number": 762,
+                                "repo": "lutzkuen/tokenclaw",
+                                "title": "Consume managed cache rollback guidance in local activation successor decisions",
+                                "url": "https://github.com/lutzkuen/tokenclaw/issues/762",
+                            },
+                            "raw_prompt": "raw progressed rollup prompt must not leak",
+                            "request_id": "req-progressed-secret",
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "local_activation_next_action_queue": {
+                    "schema": "tokenclaw.local_activation_next_action_queue.v1",
+                    "status": "ranked",
+                    "entries": [
+                        {
+                            "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
+                            "fingerprint": row["source_fingerprint"],
+                            "lever": row["lever"],
+                            "local_action_family": row["local_action_family"],
+                            "state": row["state"],
+                            "current_status": row["current_status"],
+                            "issue_worthy_status": row["issue_worthy_status"],
+                            "next_action": row["recommended_next_action"],
+                            "blocker_codes": row["blocker_codes"],
+                            "evidence_schema": row["evidence_schema"],
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        }
+                        for row in (cache_action, pass_action, crunch_action)
+                    ],
+                    "successor_actions": [cache_action, pass_action, crunch_action],
+                    "successor_decisions": [
+                        successor_decision(cache_action, "keep-blocked", "blocked"),
+                        successor_decision(pass_action, "keep-blocked", "blocked"),
+                        successor_decision(crunch_action, "ready", "ready"),
+                    ],
+                    "summary": {"successor_action_count": 3, "successor_decision_count": 3},
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        rendered_titles = " ".join(titles)
+        self.assertIn("Advance preview-verified crunch activation successor", rendered_titles)
+        self.assertNotIn("Keep cache activation successor blocked on evidence-older-than-max-age", rendered_titles)
+        self.assertNotIn("Keep activation-feedback activation successor blocked on pass-for-the-issue-specific-acceptance-metric", rendered_titles)
+
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["progressed_rollup_successor_suppressed_count"], 1)
+        self.assertEqual(suppression["resolved_pass_diagnostic_suppressed_count"], 1)
+        reasons = {row["reason"] for row in suppression["suppressed"]}
+        self.assertIn("progressed-rollup-successor-fingerprint", reasons)
+        self.assertIn("resolved-pass-diagnostic-successor", reasons)
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw progressed rollup prompt must not leak", rendered)
+        self.assertNotIn("req-progressed-secret", rendered)
+        self.assertFalse(plan["privacy"]["raw_prompts_included"])
+        self.assertFalse(plan["privacy"]["provider_bodies_included"])
+
     def test_tool_cache_dependency_preview_blockers_emit_safe_invalidation_drill_issue(self):
         dependency_rows = [
             (

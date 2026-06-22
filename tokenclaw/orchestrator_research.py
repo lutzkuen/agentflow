@@ -507,6 +507,19 @@ def sanitize_value(value: Any, *, key: str | None = None) -> Any:
     return value
 
 
+def _prior_issue_reference(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    reference: dict[str, Any] = {}
+    for key in ("number", "repo", "url", "state", "closed_at"):
+        if value.get(key) not in (None, "", [], {}):
+            reference[key] = sanitize_value(value.get(key), key=key)
+    labels = value.get("labels")
+    if isinstance(labels, list):
+        reference["labels"] = sanitize_value(labels[:12])
+    return reference or None
+
+
 def _parse_time(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -7592,6 +7605,14 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "blocking_reason": sanitize_value(entry.get("blocking_reason")),
         "rank_basis": sanitize_value(entry.get("rank_basis")) if isinstance(entry.get("rank_basis"), dict) else None,
         "issue_worthy_status": sanitize_value(entry.get("issue_worthy_status") or "review"),
+        "issue_status": sanitize_value(entry.get("issue_status")),
+        "prior_issue": _prior_issue_reference(entry.get("prior_issue")),
+        "lifecycle_progressed_from_next_action": sanitize_value(entry.get("lifecycle_progressed_from_next_action")),
+        "lifecycle_progressed_from_evidence_schema": sanitize_value(entry.get("lifecycle_progressed_from_evidence_schema")),
+        "lifecycle_progressed_from_cohort_bucket": sanitize_value(entry.get("lifecycle_progressed_from_cohort_bucket")),
+        "fingerprint_next_action": sanitize_value(entry.get("fingerprint_next_action")),
+        "fingerprint_evidence_schema": sanitize_value(entry.get("fingerprint_evidence_schema")),
+        "fingerprint_cohort_bucket": sanitize_value(entry.get("fingerprint_cohort_bucket")),
         "duplicate_suppression_status": sanitize_value(entry.get("duplicate_suppression_status")),
         "duplicate_suppression_reason": sanitize_value(entry.get("duplicate_suppression_reason")),
         "privacy": _successor_action_privacy(),
@@ -9269,6 +9290,184 @@ def _is_durable_keep_blocked_activation_feedback_placeholder(
     return False
 
 
+def _activation_successor_source_index(stats_summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    ledger = stats_summary.get("evidence_to_activation_next_action_ledger")
+    if not isinstance(ledger, dict):
+        return {}
+    rows: dict[str, dict[str, Any]] = {}
+    for entry in ledger.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        for key in ("fingerprint", "source_fingerprint"):
+            value = str(entry.get(key) or "").strip()
+            if value and value not in rows:
+                rows[value] = entry
+    return rows
+
+
+def _action_with_source_entry(action: dict[str, Any], source_entry: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(source_entry, dict) or not source_entry:
+        return action
+    merged = dict(action)
+    for key in (
+        "issue_status",
+        "prior_issue",
+        "lifecycle_progressed_from_next_action",
+        "lifecycle_progressed_from_evidence_schema",
+        "lifecycle_progressed_from_cohort_bucket",
+        "fingerprint_next_action",
+        "fingerprint_evidence_schema",
+        "fingerprint_cohort_bucket",
+    ):
+        if merged.get(key) in (None, "", [], {}) and source_entry.get(key) not in (None, "", [], {}):
+            merged[key] = (
+                _prior_issue_reference(source_entry.get(key))
+                if key == "prior_issue"
+                else sanitize_value(source_entry.get(key))
+            )
+    return merged
+
+
+def _activation_successor_progress_suppression(
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    source_entry: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    source_entry = source_entry if isinstance(source_entry, dict) else {}
+    source_fingerprint = str(
+        decision.get("source_fingerprint")
+        or action.get("source_fingerprint")
+        or source_entry.get("fingerprint")
+        or ""
+    ).strip()
+    family = str(action.get("local_action_family") or decision.get("local_action_family") or source_entry.get("local_action_family") or "").strip()
+    decision_text = str(decision.get("decision") or action.get("successor_status") or "").strip()
+    issue_status = str(decision.get("issue_worthy_status") or action.get("issue_worthy_status") or source_entry.get("issue_worthy_status") or "").strip()
+    status_values = {
+        decision_text,
+        issue_status,
+        str(action.get("current_status") or source_entry.get("current_status") or "").strip(),
+        str(action.get("state") or source_entry.get("state") or "").strip(),
+    }
+
+    diagnostic_reason = action.get("diagnostic_reason") or source_entry.get("diagnostic_reason")
+    diagnostic_class = action.get("diagnostic_class") or source_entry.get("diagnostic_class")
+    if family == "activation-feedback" and _is_resolved_pass_diagnostic(diagnostic_reason, diagnostic_class):
+        return {
+            "title": "activation-feedback pass diagnostic successor",
+            "repo": "lutzkuen/tokenclaw",
+            "fingerprint": sanitize_value(source_fingerprint),
+            "diagnostic_class": sanitize_value(diagnostic_class),
+            "reason": "resolved-pass-diagnostic-successor",
+            "suppression_kind": "resolved-activation-feedback-diagnostic",
+            "successor_action_fingerprint": sanitize_value(action.get("fingerprint")),
+            "recommended_next_action": sanitize_value(decision.get("recommended_next_action") or action.get("recommended_next_action")),
+            "privacy": _candidate_privacy(),
+        }
+
+    progressed_from = str(
+        source_entry.get("lifecycle_progressed_from_next_action")
+        or action.get("lifecycle_progressed_from_next_action")
+        or ""
+    ).strip()
+    fingerprint_next_action = str(
+        source_entry.get("fingerprint_next_action")
+        or action.get("fingerprint_next_action")
+        or ""
+    ).strip()
+    current_next_action = str(
+        source_entry.get("next_action")
+        or action.get("recommended_next_action")
+        or decision.get("recommended_next_action")
+        or ""
+    ).strip()
+    closed_predecessor_seen = (
+        str(source_entry.get("issue_status") or action.get("issue_status") or "") == "closed-issue-seen"
+        or isinstance(source_entry.get("prior_issue"), dict)
+        or isinstance(action.get("prior_issue"), dict)
+    )
+    progressed_next_action = bool(
+        progressed_from
+        or (fingerprint_next_action and current_next_action and fingerprint_next_action != current_next_action)
+    )
+    blocked_or_terminal = bool(
+        status_values & {
+            "blocked",
+            "keep-blocked",
+            "review-stale-preview",
+            "superseded",
+            "no-op",
+            "resolved-no-action",
+        }
+    )
+    source_schema = " ".join(
+        str(value or "")
+        for value in (
+            action.get("evidence_schema"),
+            source_entry.get("evidence_schema"),
+            action.get("source_evidence_schema"),
+            source_entry.get("source_evidence_schema"),
+        )
+    ).lower()
+    request_shape_successor = bool(
+        "request_shape" in source_schema
+        or "request-shape" in source_schema
+        or family in {"cache", "crunch", "cohort-ranking", "source-traffic-acquisition"}
+    )
+    if closed_predecessor_seen and progressed_next_action and blocked_or_terminal and request_shape_successor:
+        return {
+            "title": "progressed rollup successor",
+            "repo": "lutzkuen/tokenclaw",
+            "fingerprint": sanitize_value(source_fingerprint),
+            "reason": "progressed-rollup-successor-fingerprint",
+            "suppression_kind": "progressed-rollup-successor",
+            "prior_issue": (
+                _prior_issue_reference(source_entry.get("prior_issue") or action.get("prior_issue"))
+                if isinstance(source_entry.get("prior_issue") or action.get("prior_issue"), dict)
+                else None
+            ),
+            "lifecycle_progressed_from_next_action": sanitize_value(progressed_from or fingerprint_next_action),
+            "current_next_action": sanitize_value(current_next_action),
+            "local_action_family": sanitize_value(family),
+            "current_status": sanitize_value(action.get("current_status") or source_entry.get("current_status")),
+            "successor_status": sanitize_value(decision_text),
+            "privacy": _candidate_privacy(),
+        }
+    return None
+
+
+def _proposals_from_activation_successor_decisions_with_metadata(
+    stats_summary: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    proposals: list[dict[str, Any]] = []
+    suppressed: list[dict[str, Any]] = []
+    suppressed_sources: set[str] = set()
+    source_index = _activation_successor_source_index(stats_summary)
+    for proposal in _proposals_from_activation_successor_decisions(stats_summary, _source_index=source_index, _suppressed=suppressed):
+        proposals.append(proposal)
+    clean_suppressed: list[dict[str, Any]] = []
+    for row in suppressed:
+        fingerprint = str(row.get("fingerprint") or "")
+        if fingerprint and fingerprint in suppressed_sources:
+            continue
+        if fingerprint:
+            suppressed_sources.add(fingerprint)
+        clean_suppressed.append({key: value for key, value in row.items() if value not in (None, "", [], {})})
+    metadata = {
+        "schema": "tokenclaw.activation_successor_proposal_suppression.v1",
+        "suppressed_count": len(clean_suppressed),
+        "progressed_rollup_successor_suppressed_count": sum(
+            1 for row in clean_suppressed if row.get("suppression_kind") == "progressed-rollup-successor"
+        ),
+        "resolved_pass_diagnostic_suppressed_count": sum(
+            1 for row in clean_suppressed if row.get("suppression_kind") == "resolved-activation-feedback-diagnostic"
+        ),
+        "suppressed": clean_suppressed[:20],
+        "privacy": _candidate_privacy(),
+    }
+    return proposals, metadata
+
+
 def _activation_feedback_diagnostic_proposal_from_rows(
     action: dict[str, Any],
     decision: dict[str, Any],
@@ -9340,7 +9539,12 @@ def _activation_feedback_diagnostic_proposal_from_rows(
     }
 
 
-def _proposals_from_activation_successor_decisions(stats_summary: dict[str, Any]) -> list[dict[str, Any]]:
+def _proposals_from_activation_successor_decisions(
+    stats_summary: dict[str, Any],
+    *,
+    _source_index: dict[str, dict[str, Any]] | None = None,
+    _suppressed: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     queue = stats_summary.get("local_activation_next_action_queue")
     if not isinstance(queue, dict):
         return []
@@ -9362,6 +9566,7 @@ def _proposals_from_activation_successor_decisions(stats_summary: dict[str, Any]
     }
     proposals: list[dict[str, Any]] = []
     seen_sources: set[str] = set()
+    source_index = _source_index if isinstance(_source_index, dict) else _activation_successor_source_index(stats_summary)
     for decision in decisions:
         if not isinstance(decision, dict):
             continue
@@ -9371,6 +9576,13 @@ def _proposals_from_activation_successor_decisions(stats_summary: dict[str, Any]
         seen_sources.add(source)
         action = action_by_fingerprint.get(str(decision.get("successor_action_fingerprint") or "")) or action_by_source.get(source)
         if not isinstance(action, dict):
+            continue
+        source_entry = source_index.get(source)
+        action = _action_with_source_entry(action, source_entry)
+        progress_suppression = _activation_successor_progress_suppression(action, decision, source_entry)
+        if progress_suppression is not None:
+            if isinstance(_suppressed, list):
+                _suppressed.append(progress_suppression)
             continue
         decision_text = str(decision.get("decision") or "").strip()
         issue_status = str(decision.get("issue_worthy_status") or "").strip()
@@ -9901,6 +10113,13 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "post_rollback_reason",
         "warmup_miss_count",
         "exact_hit_count",
+        "issue_status",
+        "lifecycle_progressed_from_next_action",
+        "lifecycle_progressed_from_evidence_schema",
+        "lifecycle_progressed_from_cohort_bucket",
+        "fingerprint_next_action",
+        "fingerprint_evidence_schema",
+        "fingerprint_cohort_bucket",
     )
     for key in passthrough_keys:
         if entry.get(key) is not None:
@@ -9930,9 +10149,14 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "local_policy_patch",
         "safety_stop",
         "routing_canary_review",
+        "prior_issue",
     ):
         if isinstance(entry.get(review_key), dict):
-            clean[review_key] = sanitize_value(entry.get(review_key))
+            clean[review_key] = (
+                _prior_issue_reference(entry.get(review_key))
+                if review_key == "prior_issue"
+                else sanitize_value(entry.get(review_key))
+            )
     for list_key in ("rollback_applied_rules", "applied_rollback_rules"):
         if isinstance(entry.get(list_key), list):
             clean[list_key] = sanitize_value(entry.get(list_key))
@@ -16613,7 +16837,10 @@ def build_research_plan(
         openai_routing_proposal = _proposal_from_openai_routing_canary_feedback(summary)
         if openai_routing_proposal is not None:
             create_issues.append(openai_routing_proposal)
-        create_issues.extend(_proposals_from_activation_successor_decisions(summary))
+        activation_successor_proposals, activation_successor_suppression = (
+            _proposals_from_activation_successor_decisions_with_metadata(summary)
+        )
+        create_issues.extend(activation_successor_proposals)
         create_issues.extend(_proposals_from_optimization_candidates(optimization_candidates))
         repeated_actionable_diagnostics = [
             item for item in _actionable_diagnostics(candidate_diagnostics)
@@ -16660,6 +16887,22 @@ def build_research_plan(
             )
             proposal_suppression["activation_feedback_keep_blocked_suppressed_count"] = len(
                 activation_feedback_suppressed_diagnostics
+            )
+        if activation_successor_suppression.get("suppressed_count"):
+            suppressed_rows = activation_successor_suppression.get("suppressed")
+            if isinstance(suppressed_rows, list):
+                proposal_suppression["suppressed"].extend(suppressed_rows[:20])
+            proposal_suppression["suppressed_count"] = _to_int(proposal_suppression.get("suppressed_count")) + _to_int(
+                activation_successor_suppression.get("suppressed_count")
+            )
+            proposal_suppression["activation_successor_suppressed_count"] = _to_int(
+                activation_successor_suppression.get("suppressed_count")
+            )
+            proposal_suppression["progressed_rollup_successor_suppressed_count"] = _to_int(
+                activation_successor_suppression.get("progressed_rollup_successor_suppressed_count")
+            )
+            proposal_suppression["resolved_pass_diagnostic_suppressed_count"] = _to_int(
+                activation_successor_suppression.get("resolved_pass_diagnostic_suppressed_count")
             )
         create_issues, golden_path_suppressed = _filter_golden_path_ready_proposals(create_issues)
         if golden_path_suppressed:
