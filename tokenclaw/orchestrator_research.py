@@ -2221,6 +2221,7 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
         "promotion_outcome_feedback",
         "evidence_to_activation_loop",
         "evidence_to_activation_next_action_ledger",
+        "routing_candidate_lifecycle_burndown",
     ):
         value = stats.get(key)
         if isinstance(value, dict):
@@ -16569,6 +16570,8 @@ def build_research_plan(
         inspected_sources.append("promotion_blocker_next_action_status")
     if "evidence_to_activation_next_action_ledger" in summary:
         inspected_sources.append("evidence_to_activation_next_action_ledger")
+    if "routing_candidate_lifecycle_burndown" in summary:
+        inspected_sources.append("routing_candidate_lifecycle_burndown")
     if "full_rollout_crunch_activation_measurement" in summary:
         inspected_sources.append("full_rollout_crunch_activation_measurement")
     if "local_activation_next_action_queue" in summary:

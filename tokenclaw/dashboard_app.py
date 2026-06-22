@@ -487,6 +487,14 @@ def create_dashboard_router(
     async def stats_shadow_routing_promotion_readiness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_shadow_routing_promotion_readiness(_store(store_obj), limit=limit)
 
+    @router.get("/tokenclaw/stats/routing-candidate-lifecycle-burndown")
+    async def stats_routing_candidate_lifecycle_burndown(limit: int = 500) -> dict[str, Any]:
+        return await cached_expensive_stats(
+            "routing-candidate-lifecycle-burndown",
+            (int(limit),),
+            lambda: stats_views.stats_routing_candidate_lifecycle_burndown(_store(store_obj), limit=limit),
+        )
+
     @router.get("/tokenclaw/stats/post-fix-shadow-yield")
     async def stats_post_fix_shadow_yield(
         limit: int = 50,

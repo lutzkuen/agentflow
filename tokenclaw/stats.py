@@ -11847,6 +11847,205 @@ async def stats_shadow_routing_promotion_readiness(store_obj: Any, limit: int = 
     }
 
 
+ROUTING_CANDIDATE_LIFECYCLE_STATES = (
+    "uncovered",
+    "candidate",
+    "collecting",
+    "scored",
+    "staged",
+    "promoted",
+    "rolled-back",
+    "blocked",
+)
+
+
+def _routing_candidate_lifecycle_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "content_free": True,
+        "read_only": True,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_responses_included": False,
+        "tool_payloads_included": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "individual_candidate_ids_included": False,
+        "filesystem_paths_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "policy_files_written": False,
+    }
+
+
+def _routing_candidate_lifecycle_source(candidate_id: Any) -> str:
+    text = str(candidate_id or "")
+    if text.startswith("dashboard-"):
+        return "dashboard-added"
+    if text.startswith("routing-pathway-"):
+        return "managed-pathway"
+    if text:
+        return "configured-policy"
+    return "observed-only"
+
+
+def _routing_candidate_stage_row(stage: str, count: int, total: int, source_counts: Counter[str], blocker_counts: Counter[str]) -> dict[str, Any]:
+    blockers = _count_breakdown(dict(blocker_counts))
+    sources = _count_breakdown(dict(source_counts))
+    return {
+        "stage": stage,
+        "count": int(count),
+        "share": round(count / total, 6) if total else 0.0,
+        "source_breakdown": sources,
+        "top_blocker_reason": blockers[0]["value"] if blockers else None,
+        "top_blocker_count": blockers[0]["count"] if blockers else 0,
+        "blocker_breakdown": blockers[:8],
+        "privacy": _routing_candidate_lifecycle_privacy(),
+    }
+
+
+async def stats_routing_candidate_lifecycle_burndown(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    capped_limit = max(1, min(int(limit or 500), 1000))
+    activity = await stats_activity(store_obj, limit=min(capped_limit, 500))
+    shadow = await stats_shadow_routing_promotion_readiness(store_obj, limit=capped_limit)
+
+    state_counts: Counter[str] = Counter({state: 0 for state in ROUTING_CANDIDATE_LIFECYCLE_STATES})
+    source_counts: Counter[str] = Counter()
+    source_by_state: dict[str, Counter[str]] = {state: Counter() for state in ROUTING_CANDIDATE_LIFECYCLE_STATES}
+    blocker_counts: Counter[str] = Counter()
+    blocker_by_state: dict[str, Counter[str]] = {state: Counter() for state in ROUTING_CANDIDATE_LIFECYCLE_STATES}
+    row_examples: list[dict[str, Any]] = []
+
+    for unit in activity.get("units", []):
+        if not isinstance(unit, dict):
+            continue
+        features = unit.get("optimization_features") if isinstance(unit.get("optimization_features"), dict) else {}
+        coverage = features.get("routing_candidate") if isinstance(features.get("routing_candidate"), dict) else {}
+        status = str(coverage.get("status") or "")
+        if status != "uncovered":
+            continue
+        state_counts["uncovered"] += 1
+        source = "recent-activity"
+        reason = public_label(coverage.get("reason") or "no-routing-candidate", "no-routing-candidate")
+        source_counts[source] += 1
+        source_by_state["uncovered"][source] += 1
+        blocker_counts[reason] += 1
+        blocker_by_state["uncovered"][reason] += 1
+
+    for row in shadow.get("candidates", []):
+        if not isinstance(row, dict):
+            continue
+        candidate_id = row.get("candidate_id")
+        source = _routing_candidate_lifecycle_source(candidate_id)
+        source_counts[source] += 1
+
+        state_counts["candidate"] += 1
+        source_by_state["candidate"][source] += 1
+
+        sample_count = _as_int(row.get("sample_count"))
+        compared_count = _as_int(row.get("compared_count"))
+        canary = row.get("canary") if isinstance(row.get("canary"), dict) else {}
+        applied = _as_int(canary.get("applied_count"))
+        holdout = _as_int(canary.get("holdout_count"))
+        verdict = public_label(row.get("promotion_verdict"), "unknown")
+        readiness = public_label(row.get("readiness_status") or row.get("readiness_state"), "unknown")
+        reasons = [public_label(reason, "unknown") for reason in (row.get("reason_codes") or []) if reason]
+
+        if sample_count > 0:
+            state_counts["collecting"] += 1
+            source_by_state["collecting"][source] += 1
+        if compared_count > 0:
+            state_counts["scored"] += 1
+            source_by_state["scored"][source] += 1
+        if applied > 0 or holdout > 0:
+            state_counts["staged"] += 1
+            source_by_state["staged"][source] += 1
+        if verdict == "promote" or readiness == "ready":
+            state_counts["promoted"] += 1
+            source_by_state["promoted"][source] += 1
+        if verdict == "reject" or readiness == "regressing":
+            state_counts["rolled-back"] += 1
+            source_by_state["rolled-back"][source] += 1
+        if verdict in {"hold", "needs-more-samples", "needs_more_samples", "reject"} or readiness in {"insufficient-evidence", "regressing"}:
+            state_counts["blocked"] += 1
+            source_by_state["blocked"][source] += 1
+
+        if reasons:
+            for reason in reasons:
+                blocker_counts[reason] += 1
+                target_state = "blocked" if verdict != "promote" and readiness != "ready" else "promoted"
+                blocker_by_state[target_state][reason] += 1
+        elif sample_count <= 0:
+            blocker_counts["not-collecting-shadow-evidence"] += 1
+            blocker_by_state["blocked"]["not-collecting-shadow-evidence"] += 1
+
+        if len(row_examples) < 8:
+            row_examples.append({
+                "source": source,
+                "readiness_state": readiness,
+                "promotion_verdict": verdict,
+                "sample_count": sample_count,
+                "compared_count": compared_count,
+                "applied_count": applied,
+                "holdout_count": holdout,
+                "reason_codes": reasons[:5],
+                "candidate_id_included": False,
+            })
+
+    total = sum(state_counts.values())
+    stage_rows = [
+        _routing_candidate_stage_row(
+            state,
+            state_counts[state],
+            total,
+            source_by_state[state],
+            blocker_by_state[state],
+        )
+        for state in ROUTING_CANDIDATE_LIFECYCLE_STATES
+    ]
+    top_blockers = _count_breakdown(dict(blocker_counts))
+    return {
+        "schema": "tokenclaw.routing_candidate_lifecycle_burndown.v1",
+        "generated_at": utc_now(),
+        "status": "tracked" if total else "no-routing-candidate-lifecycle-data",
+        "limit": capped_limit,
+        "read_only": True,
+        "default_polling_bounded": True,
+        "stage_counts": {state: state_counts[state] for state in ROUTING_CANDIDATE_LIFECYCLE_STATES},
+        "lifecycle_counts": stage_rows,
+        "source_breakdown": _count_breakdown(dict(source_counts)),
+        "top_blocker_reason": top_blockers[0]["value"] if top_blockers else None,
+        "top_blocker_count": top_blockers[0]["count"] if top_blockers else 0,
+        "top_blockers": top_blockers[:10],
+        "examples": row_examples,
+        "summary": {
+            "uncovered_count": state_counts["uncovered"],
+            "candidate_count": state_counts["candidate"],
+            "collecting_count": state_counts["collecting"],
+            "scored_count": state_counts["scored"],
+            "staged_count": state_counts["staged"],
+            "promoted_count": state_counts["promoted"],
+            "rolled_back_count": state_counts["rolled-back"],
+            "blocked_count": state_counts["blocked"],
+            "dashboard_added_count": source_counts.get("dashboard-added", 0),
+            "managed_pathway_count": source_counts.get("managed-pathway", 0),
+            "configured_policy_count": source_counts.get("configured-policy", 0),
+            "recent_uncovered_activity_count": source_counts.get("recent-activity", 0),
+            "top_blocker_reason": top_blockers[0]["value"] if top_blockers else None,
+            "top_blocker_count": top_blockers[0]["count"] if top_blockers else 0,
+        },
+        "source_reports": {
+            "activity_schema": activity.get("schema"),
+            "shadow_routing_promotion_readiness_schema": shadow.get("schema"),
+            "routing_candidate_readiness_scoreboard_schema": (shadow.get("source_reports") or {}).get("routing_candidate_readiness_scoreboard_schema"),
+        },
+        "privacy": _routing_candidate_lifecycle_privacy(),
+    }
+
+
 async def stats_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
     from tokenclaw.openai_routing_report import build_openai_routing_report
 
@@ -23669,6 +23868,15 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-phaserouting">
 <div class="section">
+  <h2>Routing candidate lifecycle burndown</h2>
+  <table class="activity-table" data-table-id="routing-candidate-lifecycle-burndown" data-filter-label="Filter routing candidate lifecycle">
+    <thead><tr>
+      <th data-sort-type="text">Stage</th><th data-sort-type="number">Count</th><th data-sort-type="percent">Share</th><th data-sort-type="text">Sources</th><th data-sort-type="text">Top blocker</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="routing-candidate-lifecycle-burndown-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Phase-routing rollout health</h2>
   <table class="activity-table" data-table-id="phase-routing-health" data-filter-label="Filter phase-routing health">
     <thead><tr>
@@ -26439,6 +26647,35 @@ function keyedBreakdownBadges(items,keyName,emptyLabel){
   keyName=keyName||'reason';
   return items.slice(0,5).map(item=>`<span class="badge provider">${esc(item[keyName]||item.value||item.status||'unknown')} ${item.count!=null?Number(item.count||0).toLocaleString():''}</span>`).join(' ');
 }
+function lifecycleStageBadge(stage){
+  if(stage==='promoted')return'hit';
+  if(stage==='rolled-back')return'err';
+  if(stage==='blocked'||stage==='uncovered')return'miss';
+  if(stage==='staged'||stage==='scored')return'routed';
+  return'provider';
+}
+async function refreshRoutingCandidateLifecycleBurndown(){
+  try{
+    const r=await fetch('/tokenclaw/stats/routing-candidate-lifecycle-burndown?limit=500');
+    const d=await r.json();
+    const rows=d.lifecycle_counts||[];
+    const privacy=d.privacy||{};
+    document.getElementById('routing-candidate-lifecycle-burndown-tbody').innerHTML=rows.map(row=>{
+      const blocker=row.top_blocker_reason
+        ? `<span class="badge miss">${esc(row.top_blocker_reason)} ${Number(row.top_blocker_count||0).toLocaleString()}</span>`
+        : '<span class="badge hit">none</span>';
+      return `<tr>
+        <td><span class="badge ${lifecycleStageBadge(row.stage)}">${esc(row.stage||'unknown')}</span></td>
+        <td class="tokens">${(row.count||0).toLocaleString()}</td>
+        <td class="tokens">${fmtPctValue(row.share||0)}</td>
+        <td class="flags">${keyedBreakdownBadges(row.source_breakdown,'value','none')}</td>
+        <td class="flags">${blocker}</td>
+        <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">raw prompts omitted</span> <span class="badge hit">candidate IDs omitted</span> <span class="badge hit">bounded</span></td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="6" style="color:#8b949e">No routing candidate lifecycle metadata in this bounded window</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshClaudeRoutingPromotionFunnel(){
   try{
     const r=await fetch('/tokenclaw/stats/claude-routing-promotion-funnel?limit=1000');
@@ -27772,7 +28009,7 @@ const tabRefreshers={
   activationnext:[refreshLocalActivationQueue,refreshPreviewGatedActivationIssueQueue,refreshEvidenceActivationNextActions],
   promotionblockers:[refreshPromotionBlockerNextActions],
   managed:[refreshManaged],
-  phaserouting:[refreshClaudeRoutingPromotionFunnel,refreshShadowRoutingPromotionReadiness,refreshOptimizationPromotionFunnel,refreshPhaseRouting],
+  phaserouting:[refreshRoutingCandidateLifecycleBurndown,refreshClaudeRoutingPromotionFunnel,refreshShadowRoutingPromotionReadiness,refreshOptimizationPromotionFunnel,refreshPhaseRouting],
   phasememory:[refreshSessionPhaseMemory],
   oldcontext:[refreshSessions],
   sessions:[refreshSessions]

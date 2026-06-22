@@ -9663,6 +9663,143 @@ request_shape_repeated_context_canaries:
         self.assertFalse(coverage["privacy"]["provider_bodies_included"])
         self.assertFalse(coverage["privacy"]["request_ids_included"])
 
+    def test_routing_candidate_lifecycle_burndown_endpoint_dashboard_and_research_handoff(self):
+        policy = {
+            "profile_id": "test-routing-lifecycle-burndown",
+            "mode": "shadow_candidate_pass_through",
+            "sample_rate": 0.25,
+            "daily_budget_usd": 10.0,
+            "min_samples_for_confidence": 3,
+            "providers": ["openai"],
+            "source_surfaces": ["codex_turn"],
+            "model_pairs": [],
+            "routing_candidates": [
+                {
+                    "candidate_id": "dashboard-codex-summary",
+                    "requested_model": "gpt-5-codex",
+                    "routed_model": "gpt-5-mini",
+                    "provider": "openai",
+                    "source_surface": "codex_turn",
+                    "category": "codex-ready",
+                    "workflow_phase": "summary",
+                },
+                {
+                    "candidate_id": "routing-pathway-candidate:managed-regressing",
+                    "requested_model": "gpt-5-codex",
+                    "routed_model": "gpt-5-mini",
+                    "provider": "openai",
+                    "source_surface": "codex_turn",
+                    "category": "codex-regressing",
+                    "workflow_phase": "summary",
+                },
+            ],
+            "categories": [],
+            "workflow_phases": [],
+        }
+        with patch.multiple(
+            routing_experiments,
+            ROUTING_EXPERIMENT_ENABLED=True,
+            ROUTING_EXPERIMENT_MIN_SAMPLES=3,
+            ROUTING_EXPERIMENT_SAMPLE_RATE=0.25,
+            ROUTING_EXPERIMENT_DAILY_BUDGET_USD=10.0,
+            ROUTING_EXPERIMENT_POLICY=policy,
+        ):
+            server.store.log_call(
+                id="call-uncovered-routing-lifecycle",
+                created_at=utc_now(),
+                path="/v1/messages",
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                requested_model="claude-opus-9-9",
+                routed_model=None,
+                stream=0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=123,
+                input_tokens_est=3000,
+                output_tokens_est=100,
+                actual_input_tokens=3000,
+                actual_output_tokens=100,
+                cost_est_usd=0.01,
+                cost_baseline_usd=0.01,
+                category="chat",
+                routing_json=stable_json({
+                    "requested_model": "claude-opus-9-9",
+                    "routed_model": "claude-opus-9-9",
+                    "category": "chat",
+                    "workflow_phase": "planning",
+                    "text_chars": 12000,
+                }),
+                cache_json=stable_json({"status": "miss"}),
+            )
+            for idx in range(3):
+                self._log_shadow_routing_promotion_sample(
+                    candidate="dashboard-ready",
+                    idx=idx,
+                    category="codex-ready",
+                    experiment_extra={"candidate_id": "dashboard-codex-summary"},
+                )
+                self._log_shadow_routing_promotion_sample(
+                    candidate="managed-regressing",
+                    idx=idx,
+                    category="codex-regressing",
+                    passed=False,
+                    experiment_extra={"candidate_id": "routing-pathway-candidate:managed-regressing"},
+                )
+
+            result = asyncio.run(stats_views.stats_routing_candidate_lifecycle_burndown(server.store, limit=100))
+            app = create_dashboard_app(
+                store_obj=server.store,
+                default_db=self.tmp.name,
+                upstream="https://api.example.invalid",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            endpoint = client.get("/tokenclaw/stats/routing-candidate-lifecycle-burndown?limit=100")
+            html = client.get("/tokenclaw/dashboard")
+
+        self.assertEqual(result["schema"], "tokenclaw.routing_candidate_lifecycle_burndown.v1")
+        self.assertEqual(endpoint.status_code, 200)
+        self.assertEqual(html.status_code, 200)
+        self.assertGreaterEqual(result["summary"]["uncovered_count"], 1)
+        self.assertGreaterEqual(result["summary"]["candidate_count"], 2)
+        self.assertGreaterEqual(result["summary"]["collecting_count"], 2)
+        self.assertGreaterEqual(result["summary"]["scored_count"], 2)
+        self.assertGreaterEqual(result["summary"]["staged_count"], 2)
+        self.assertGreaterEqual(result["summary"]["promoted_count"], 1)
+        self.assertGreaterEqual(result["summary"]["rolled_back_count"], 1)
+        self.assertGreaterEqual(result["summary"]["blocked_count"], 1)
+        self.assertEqual(result["summary"]["dashboard_added_count"], 1)
+        self.assertEqual(result["summary"]["managed_pathway_count"], 1)
+        self.assertTrue(result["privacy"]["metadata_only"])
+        self.assertFalse(result["privacy"]["provider_calls_made"])
+        self.assertFalse(result["privacy"]["request_ids_included"])
+        rendered = json.dumps(result, sort_keys=True) + endpoint.text + html.text
+        self.assertIn("Routing candidate lifecycle burndown", html.text)
+        self.assertIn("routing-candidate-lifecycle-burndown-tbody", html.text)
+        self.assertIn("fetch('/tokenclaw/stats/routing-candidate-lifecycle-burndown?limit=500')", html.text)
+        self.assertIn("dashboard-added", rendered)
+        self.assertIn("managed-pathway", rendered)
+        self._assert_shadow_promotion_forbidden_absent(rendered)
+
+        from tokenclaw.orchestrator_research import build_research_plan
+
+        plan = build_research_plan(
+            issues=[],
+            stats={"routing_candidate_lifecycle_burndown": result},
+            threshold=3,
+            trusted_author="lutzkuen",
+        )
+        stats_summary = plan["evidence"]["stats_summary"]
+        self.assertIn("routing_candidate_lifecycle_burndown", stats_summary)
+        self.assertIn("routing_candidate_lifecycle_burndown", plan["evidence"]["inspected_sources"])
+        self.assertEqual(
+            stats_summary["routing_candidate_lifecycle_burndown"]["summary"]["top_blocker_reason"],
+            result["summary"]["top_blocker_reason"],
+        )
+
     def test_dashboard_exposes_terminal_output_compaction_readiness_panel(self):
         html = stats_views.dashboard_html()
 
