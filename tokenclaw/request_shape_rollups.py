@@ -5769,17 +5769,32 @@ def _crunch_dry_run_source_rows(source: Any) -> tuple[list[dict[str, Any]], dict
     if isinstance(source, dict) and source.get("schema") == "tokenclaw.local_activation_next_action_queue.v1":
         return _local_activation_successor_crunch_rollups(source)
     if isinstance(source, list):
-        return [row for row in source if isinstance(row, dict)], {
-            "source_schema": ROLLUP_ROW_SCHEMA,
+        rows = [row for row in source if isinstance(row, dict)]
+        source_schemas = {
+            public_label(row.get("source_schema") or row.get("schema"), "unknown")
+            for row in rows
+            if public_label(row.get("source_schema") or row.get("schema"), "unknown") != "unknown"
+        }
+        source_schema = source_schemas.pop() if len(source_schemas) == 1 else ROLLUP_ROW_SCHEMA
+        fresh_plateau_rows = [
+            row
+            for row in rows
+            if (row.get("source_schema") or row.get("schema")) == CONTEXT_PLATEAU_ROLLUP_ROW_SCHEMA
+            and public_label(row.get("source_rollup_freshness_state") or row.get("freshness_state"), "unknown") == "fresh"
+        ]
+        return rows, {
+            "source_schema": source_schema,
             "source_queue_status": None,
             "source_queue_entry_count": 0,
             "source_queue_crunch_entry_count": 0,
+            "fresh_plateau_rollup_count": len(fresh_plateau_rows),
         }
     return [], {
         "source_schema": ROLLUP_ROW_SCHEMA,
         "source_queue_status": None,
         "source_queue_entry_count": 0,
         "source_queue_crunch_entry_count": 0,
+        "fresh_plateau_rollup_count": 0,
     }
 
 
@@ -5828,6 +5843,11 @@ def build_request_shape_crunch_opportunity_dry_run(
             continue
         decision = _shape_crunch_decision(row)
         row_count = _as_int(row.get("row_count") or row.get("count"))
+        source_evidence_schema = row.get("source_schema") or row.get("schema") or ROLLUP_ROW_SCHEMA
+        source_rollup_freshness = public_label(
+            row.get("source_rollup_freshness_state") or row.get("freshness_state"),
+            "unknown",
+        )
         classes = sorted({public_label(item, "unknown") for item in row.get("candidate_work_classes") or []})
         readiness = str(decision["readiness"])
         reason = str(decision["reason"])
@@ -5887,7 +5907,14 @@ def build_request_shape_crunch_opportunity_dry_run(
                     ),
                     prefix="crunch-opportunity",
                 ),
-                "source_evidence_schema": row.get("source_schema") or row.get("schema") or ROLLUP_ROW_SCHEMA,
+                "source_evidence_schema": source_evidence_schema,
+                "source_rollup_freshness_state": source_rollup_freshness,
+                "fresh_plateau_rollup": (
+                    source_evidence_schema == CONTEXT_PLATEAU_ROLLUP_ROW_SCHEMA
+                    and source_rollup_freshness == "fresh"
+                ),
+                "context_plateau_pair_count": _as_int(row.get("context_plateau_pair_count")),
+                "context_plateau_session_count": _as_int(row.get("context_plateau_session_count")),
                 "source_activation_fingerprint": row.get("source_activation_fingerprint"),
                 "source_activation_candidate_rank": row.get("source_activation_candidate_rank"),
                 "source_activation_candidate_next_action": row.get("activation_candidate_next_action"),
@@ -6055,6 +6082,39 @@ def build_request_shape_crunch_opportunity_dry_run(
         matched_count=matched_count,
         has_cohort_filter=bool(filter_conditions),
     )
+    fresh_plateau_candidate_count = sum(1 for cohort in cohorts if bool(cohort.get("fresh_plateau_rollup")))
+    fresh_plateau_stageable_count = sum(1 for cohort in stageable_cohorts if bool(cohort.get("fresh_plateau_rollup")))
+    has_recommended_action = len(recommended_actions) > 0
+    has_holdout_plan = any(_as_float(action.get("holdout_fraction")) > 0 for action in recommended_actions)
+    has_safety_stop_fields = any(
+        isinstance(action.get("safety_gates"), dict)
+        and bool(action["safety_gates"].get("records_applied_holdout_skipped_safety_stopped_fallback_rollback"))
+        and isinstance(action.get("rollback_metadata"), dict)
+        for action in recommended_actions
+    )
+    has_target_rule_section = any(
+        action.get("target_local_policy_section") == "crunch.rules"
+        and action.get("target_local_rule_file") == "crunch_rules.yaml"
+        for action in recommended_actions
+    )
+    has_duplicate_suppression = all(
+        isinstance(action.get("duplicate_suppression"), dict) for action in recommended_actions
+    ) if recommended_actions else False
+    acceptance = {
+        "schema": "tokenclaw.request_shape_crunch_opportunity_acceptance.v1",
+        "emits_ranked_candidate_from_fresh_plateau_rollups": fresh_plateau_stageable_count > 0 and has_recommended_action,
+        "fresh_plateau_candidate_count": fresh_plateau_candidate_count,
+        "fresh_plateau_stageable_count": fresh_plateau_stageable_count,
+        "has_projected_saved_tokens": projected_tokens > 0,
+        "has_projected_saved_usd": projected_savings > 0,
+        "has_holdout_plan": has_holdout_plan,
+        "has_safety_stop_fields": has_safety_stop_fields,
+        "has_target_local_rule_section": has_target_rule_section,
+        "has_duplicate_suppression": has_duplicate_suppression,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "policy_files_written": False,
+    }
 
     return {
         "schema": CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
@@ -6071,6 +6131,9 @@ def build_request_shape_crunch_opportunity_dry_run(
             "source_queue_status": source_metadata["source_queue_status"],
             "source_queue_entry_count": source_metadata["source_queue_entry_count"],
             "source_queue_crunch_entry_count": source_metadata["source_queue_crunch_entry_count"],
+            "fresh_plateau_rollup_count": _as_int(source_metadata.get("fresh_plateau_rollup_count")),
+            "fresh_plateau_candidate_count": fresh_plateau_candidate_count,
+            "fresh_plateau_stageable_count": fresh_plateau_stageable_count,
             "measurement_ready_cohort_count": readiness_counts.get("measurement-ready", 0),
             "canary_staged_cohort_count": readiness_counts.get("canary-staged", 0),
             "canary_applied_cohort_count": readiness_counts.get("canary-applied", 0),
@@ -6109,6 +6172,7 @@ def build_request_shape_crunch_opportunity_dry_run(
             "tool_cache_replay_enabled": False,
             "streaming_replay_enabled": False,
         },
+        "acceptance": acceptance,
         "activation_follow_up": activation_follow_up,
         "repeated_context_drill": repeated_context_drill,
         "recommended_actions": recommended_actions,
@@ -14124,6 +14188,8 @@ def _context_plateau_rollup_groups(stats: dict[str, Any]) -> list[dict[str, Any]
                 "sample_count": 0,
                 "context_plateau_pair_count": 0,
                 "context_plateau_session_count": 0,
+                "freshness_state": "fresh",
+                "source_rollup_freshness_state": "fresh",
                 "error_count": 0,
                 "retry_count": 0,
                 "cache_hit_count": 0,
@@ -14328,6 +14394,13 @@ def _snapshot_safe_rollup_row(row: dict[str, Any], *, source_schema: str | None 
         "candidate_families": _public_label_list(row.get("candidate_families")),
         "candidate_work_classes": _public_label_list(row.get("candidate_work_classes")),
         "blocker_codes": _public_label_list(row.get("blocker_codes")),
+        "freshness_state": public_label(row.get("freshness_state"), "unknown"),
+        "source_rollup_freshness_state": public_label(
+            row.get("source_rollup_freshness_state") or row.get("freshness_state"),
+            "unknown",
+        ),
+        "context_plateau_pair_count": _as_int(row.get("context_plateau_pair_count")),
+        "context_plateau_session_count": _as_int(row.get("context_plateau_session_count")),
         "row_count": _as_int(row.get("row_count")),
         "sample_count": _as_int(row.get("row_count") or row.get("sample_count")),
         "error_count": _as_int(row.get("error_count")),

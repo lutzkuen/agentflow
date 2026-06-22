@@ -5993,6 +5993,82 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(drill["ranked_cohorts"], [])
         self.assertEqual(dry_run["summary"]["repeated_context_drill_state"], "no-source")
 
+    def test_crunch_opportunity_dry_run_stages_fresh_plateau_rollup_candidates(self) -> None:
+        report = build_context_plateau_crunch_rollup_report(
+            {
+                "context_plateaus": [
+                    {
+                        "session_id": "raw-session-id-must-not-leak",
+                        "source_surface": "anthropic_messages",
+                        "app_family": "claude-code",
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "calls": 24,
+                        "plateau_pairs": 18,
+                        "median_text_chars": 96_000,
+                        "p90_text_chars": 118_000,
+                        "cost_usd": 0.72,
+                        "cache_read_savings_usd": 0.18,
+                        "crunch_saved_chars": 4_000,
+                    }
+                ],
+            },
+            limit=10,
+        )
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        dry_run = report["crunch_opportunity_dry_run"]
+
+        self.assertEqual(dry_run["schema"], "tokenclaw.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertEqual(dry_run["source_schema"], "tokenclaw.context_plateau_crunch_rollup_row.v1")
+        self.assertEqual(dry_run["status"], "ranked")
+        self.assertEqual(dry_run["summary"]["fresh_plateau_rollup_count"], 1)
+        self.assertEqual(dry_run["summary"]["fresh_plateau_candidate_count"], 1)
+        self.assertEqual(dry_run["summary"]["fresh_plateau_stageable_count"], 1)
+        self.assertGreater(dry_run["summary"]["projected_saved_tokens"], 0)
+        self.assertGreater(dry_run["summary"]["projected_saved_usd"], 0)
+        self.assertEqual(dry_run["summary"]["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(dry_run["summary"]["target_local_rule_file"], "crunch_rules.yaml")
+
+        acceptance = dry_run["acceptance"]
+        self.assertTrue(acceptance["emits_ranked_candidate_from_fresh_plateau_rollups"])
+        self.assertTrue(acceptance["has_projected_saved_tokens"])
+        self.assertTrue(acceptance["has_projected_saved_usd"])
+        self.assertTrue(acceptance["has_holdout_plan"])
+        self.assertTrue(acceptance["has_safety_stop_fields"])
+        self.assertTrue(acceptance["has_target_local_rule_section"])
+        self.assertTrue(acceptance["has_duplicate_suppression"])
+        self.assertTrue(acceptance["metadata_only"])
+        self.assertTrue(acceptance["aggregate_only"])
+        self.assertFalse(acceptance["policy_files_written"])
+
+        cohort = dry_run["cohorts"][0]
+        self.assertTrue(cohort["fresh_plateau_rollup"])
+        self.assertEqual(cohort["source_evidence_schema"], "tokenclaw.context_plateau_crunch_rollup_row.v1")
+        self.assertEqual(cohort["source_rollup_freshness_state"], "fresh")
+        self.assertEqual(cohort["context_plateau_pair_count"], 18)
+        self.assertEqual(cohort["context_plateau_session_count"], 1)
+        self.assertEqual(cohort["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(cohort["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertIn("duplicate_suppression", cohort)
+        self.assertTrue(cohort["privacy"]["metadata_only"])
+        self.assertTrue(cohort["privacy"]["aggregate_only"])
+
+        action = dry_run["recommended_actions"][0]
+        self.assertEqual(action["canary_fraction"], 0.1)
+        self.assertEqual(action["holdout_fraction"], 0.1)
+        self.assertEqual(action["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(action["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertTrue(action["safety_gates"]["records_applied_holdout_skipped_safety_stopped_fallback_rollback"])
+        self.assertTrue(action["duplicate_suppression"]["metadata_only"])
+        self.assertFalse(dry_run["summary"]["policy_files_written"])
+        self.assertTrue(dry_run["privacy"]["metadata_only"])
+        self.assertTrue(dry_run["privacy"]["aggregate_only"])
+
+        rendered = json.dumps(dry_run, sort_keys=True)
+        self.assertNotIn("raw-session-id-must-not-leak", rendered)
+
     def test_crunch_canary_stage_report_targets_anthropic_thinking_tool_result_cohort(self) -> None:
         for cost in (0.08, 0.07, 0.09):
             self._log_call(
