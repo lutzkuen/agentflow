@@ -448,6 +448,97 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(preview["cache_entries_written"], 0)
         self.assertTrue(report["acceptance"]["stable_without_live_repeat_or_observed_hit_preview_is_noop"])
 
+    def test_tool_cache_stable_streaming_dependency_with_repeat_proof_stays_blocked(self) -> None:
+        cohorts = [
+            {
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "tool-light",
+                "workflow_phase": "tool-light",
+                "stream": True,
+                "has_tools": True,
+                "cache_status": "skipped",
+                "routing_status": "passthrough",
+                "readiness": "skipped",
+                "reason": "safe-invalidation-evidence-present",
+                "blockers": [
+                    "safe-invalidation-evidence-present",
+                    "streaming-replay-not-supported",
+                    "tools-present",
+                ],
+                "row_count": 12,
+                "projected_hits": 8,
+                "projected_savings_usd": 0.02,
+                "cache_hit_count": 1,
+                "file_dependency_status": "stable",
+                "file_dependency_fingerprint_available": True,
+                "file_dependency_audit": self._dependency_audit(safe=True, fingerprint_available=True),
+            }
+        ]
+
+        report = build_request_shape_tool_cache_replay_evidence_report(
+            cohorts,
+            limit=10,
+            managed_preview_outcomes=self._managed_tool_cache_preview_outcomes(),
+        )
+
+        self.assertEqual(report["summary"]["stable_dependency_evidence_rows"], 12)
+        self.assertEqual(report["summary"]["review_ready_rows"], 0)
+        self.assertEqual(report["summary"]["review_only_candidate_count"], 0)
+        self.assertEqual(report["summary"]["stageable_after_review_rows"], 0)
+        self.assertEqual(report["summary"]["cache_apply_action_count"], 0)
+        self.assertEqual(report["summary"]["cache_entries_written"], 0)
+        self.assertFalse(report["summary"]["policy_files_written"])
+        self.assertTrue(report["acceptance"]["reports_dependency_fingerprint_coverage_after_capture"])
+        self.assertTrue(report["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
+        self.assertTrue(report["acceptance"]["emits_no_cache_apply_actions"])
+        self.assertTrue(report["acceptance"]["tool_and_streaming_replay_remain_disabled"])
+        self.assertTrue(report["acceptance"]["streaming_candidates_do_not_become_review_ready"])
+        self.assertTrue(report["acceptance"]["streaming_shapes_do_not_become_review_ready_previews"])
+        self.assertTrue(report["acceptance"]["review_ready_previews_require_stable_dependency_and_proof"])
+
+        review = report["review_only_candidates"]
+        self.assertEqual(review["summary"]["review_ready_rows"], 0)
+        self.assertEqual(review["summary"]["blocked_rows"], 12)
+        self.assertTrue(review["acceptance"]["streaming_candidates_do_not_become_review_ready"])
+        candidate = review["candidates"][0]
+        self.assertEqual(candidate["candidate_status"], "blocked")
+        self.assertEqual(candidate["candidate_decision"], "no-op-streaming-replay-not-supported")
+        self.assertEqual(candidate["blocker_reason"], "streaming-replay-not-supported")
+        self.assertEqual(candidate["next_action"], "stage-streaming-replay-buffer-fixture")
+        self.assertEqual(candidate["readiness_gate"]["gate_status"], "streaming-replay-not-supported")
+        self.assertTrue(candidate["replay_proof"]["proof_available"])
+        self.assertFalse(candidate["review_only"])
+        self.assertFalse(candidate["stageable_after_review"])
+        self.assertFalse(candidate["stage_allowed"])
+        self.assertFalse(candidate["tool_cache_replay_enabled"])
+        self.assertFalse(candidate["streaming_replay_enabled"])
+        self.assertFalse(candidate["emits_cache_apply_action"])
+        self.assertEqual(candidate["cache_entries_written"], 0)
+        self.assertFalse(candidate["policy_files_written"])
+
+        previews = report["managed_local_replay_previews"]
+        self.assertEqual(previews["summary"]["review_ready_preview_rows"], 0)
+        self.assertEqual(previews["summary"]["blocked_preview_rows"], 12)
+        self.assertTrue(previews["acceptance"]["streaming_shapes_do_not_become_review_ready_previews"])
+        preview = previews["previews"][0]
+        self.assertEqual(preview["preview_status"], "blocked")
+        self.assertEqual(preview["preview_decision"], "keep-blocked")
+        self.assertEqual(preview["blocker_reason"], "streaming-replay-not-supported")
+        self.assertFalse(preview["tool_cache_replay_enabled"])
+        self.assertFalse(preview["streaming_replay_enabled"])
+        self.assertFalse(preview["emits_cache_apply_action"])
+        self.assertEqual(preview["cache_entries_written"], 0)
+        self.assertFalse(preview["policy_files_written"])
+
+        coverage = report["dependency_fingerprint_coverage"]
+        self.assertEqual(coverage["summary"]["stable_dependency_evidence_rows"], 12)
+        self.assertEqual(coverage["summary"]["file_dependency_fingerprint_available_rows"], 12)
+        self.assertEqual(coverage["summary"]["safe_invalidation_evidence_rows"], 12)
+        self.assertTrue(coverage["acceptance"]["stable_dependency_evidence_does_not_activate_replay"])
+        self.assertTrue(coverage["acceptance"]["emits_no_cache_apply_actions"])
+
     def test_tool_cache_nonstable_dependency_evidence_emits_blocked_review_rows(self) -> None:
         base = {
             "provider_family": "openai",

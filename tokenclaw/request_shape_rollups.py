@@ -10266,12 +10266,24 @@ def _tool_cache_review_candidate_from_evidence_row(row: dict[str, Any]) -> dict[
         dependency_decision=dependency_decision,
     )
     retired_no_repeat = _tool_cache_retired_no_repeat(row)
+    streaming_replay_blocked = bool(row.get("stream"))
     if retired_no_repeat:
         candidate_status = "blocked"
         candidate_decision = "no-op-retired-no-repeat"
         blocker_reason = "retire-staged-no-repeat"
         next_action = "keep-tool-cache-replay-retired-no-repeat"
         stageable_after_review = False
+    elif streaming_replay_blocked:
+        candidate_status = "blocked"
+        candidate_decision = "no-op-streaming-replay-not-supported"
+        blocker_reason = "streaming-replay-not-supported"
+        next_action = "stage-streaming-replay-buffer-fixture"
+        stageable_after_review = False
+        readiness_gate["raw_stage_gate_status"] = readiness_gate.get("gate_status")
+        readiness_gate["stage_allowed"] = False
+        readiness_gate["gate_status"] = "streaming-replay-not-supported"
+        readiness_gate["next_action"] = next_action
+        readiness_gate["reason"] = blocker_reason
     elif dependency_decision == "stable-dependency-evidence":
         proof_available = bool(replay_proof.get("proof_available"))
         candidate_status = "review-ready" if proof_available else "review-only-gated"
@@ -10471,6 +10483,13 @@ def _build_tool_cache_review_candidates(rows: list[dict[str, Any]], *, limit: in
                 row.get("candidate_decision") == "no-op-retired-no-repeat"
                 for row in candidates
                 if row.get("retired_no_repeat") is True
+            ),
+            "streaming_candidates_do_not_become_review_ready": all(
+                row.get("candidate_status") != "review-ready"
+                and row.get("candidate_decision") == "no-op-streaming-replay-not-supported"
+                and row.get("blocker_reason") == "streaming-replay-not-supported"
+                for row in candidates
+                if bool(row.get("stream"))
             ),
             "does_not_allow_savings_floor_without_replay_proof": all(
                 not bool(row.get("allows_savings_floor_without_replay_proof"))
@@ -10822,8 +10841,16 @@ def _build_tool_cache_managed_local_replay_previews(
                 and row["dependency_evidence_decision"].get("decision") == "stable-dependency-evidence"
                 and isinstance(row.get("replay_proof"), dict)
                 and bool(row["replay_proof"].get("proof_available"))
+                and not bool(row.get("stream"))
                 for row in previews
                 if row.get("preview_status") == "review-ready"
+            ),
+            "streaming_shapes_do_not_become_review_ready_previews": all(
+                row.get("preview_status") != "review-ready"
+                and row.get("preview_decision") == "keep-blocked"
+                and row.get("blocker_reason") == "streaming-replay-not-supported"
+                for row in previews
+                if bool(row.get("stream"))
             ),
             "managed_preview_agreement_is_review_only": all(
                 isinstance(row.get("managed_preview_agreement"), dict)
@@ -11127,12 +11154,27 @@ def build_request_shape_tool_cache_replay_evidence_report(
             "review_only_candidates_require_live_repeat_or_observed_hit_proof": bool(
                 review_only_candidates.get("acceptance", {}).get("requires_live_repeat_or_observed_hit_proof")
             ),
+            "streaming_candidates_do_not_become_review_ready": bool(
+                review_only_candidates.get("acceptance", {}).get(
+                    "streaming_candidates_do_not_become_review_ready"
+                )
+            ),
             "stable_without_live_repeat_or_observed_hit_is_noop": bool(
                 review_only_candidates.get("acceptance", {}).get("stable_without_live_repeat_or_observed_hit_is_noop")
             ),
             "stable_without_live_repeat_or_observed_hit_preview_is_noop": bool(
                 managed_local_replay_previews.get("acceptance", {}).get(
                     "stable_without_live_repeat_or_observed_hit_is_noop"
+                )
+            ),
+            "streaming_shapes_do_not_become_review_ready_previews": bool(
+                managed_local_replay_previews.get("acceptance", {}).get(
+                    "streaming_shapes_do_not_become_review_ready_previews"
+                )
+            ),
+            "review_ready_previews_require_stable_dependency_and_proof": bool(
+                managed_local_replay_previews.get("acceptance", {}).get(
+                    "review_ready_previews_require_stable_dependency_and_proof"
                 )
             ),
             "retired_no_repeat_emits_noop": bool(
