@@ -340,14 +340,6 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
 
 
 def _writable_experiment_config_path() -> Path:
-    env_path = os.getenv("TOKENCLAW_ROUTING_EXPERIMENTS")
-    if env_path:
-        return Path(env_path)
-    cwd_config = Path.cwd() / "config" / "routing_experiments.yaml"
-    if cwd_config.exists():
-        return cwd_config
-    if ROUTING_EXPERIMENT_POLICY_SOURCE == "local-manual" and ROUTING_EXPERIMENT_RULES_PATH:
-        return Path(ROUTING_EXPERIMENT_RULES_PATH)
     return tokenclaw_config_path("routing_experiments.yaml")
 
 
@@ -576,13 +568,42 @@ def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str
 
 
 def _load_experiment_policy() -> tuple[dict[str, Any], str, str]:
+    manual_layers: list[tuple[Path, dict[str, Any]]] = []
     for path in _manual_rule_candidates("routing_experiments.yaml", "TOKENCLAW_ROUTING_EXPERIMENTS"):
         if not path.exists():
             continue
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         if isinstance(data, dict):
-            return _apply_policy_yaml(_default_experiment_policy(), data), "local-manual", str(path)
+            manual_layers.append((path, data))
+    if manual_layers:
+        primary_path, primary_data = manual_layers[0]
+        policy = _apply_policy_yaml(_default_experiment_policy(), primary_data)
+        primary_uses_model_pairs_only = (
+            isinstance(primary_data.get("model_pairs"), list)
+            and primary_data.get("routing_candidates") is None
+            and primary_data.get("candidates") is None
+        )
+        if primary_uses_model_pairs_only:
+            return policy, "local-manual", str(primary_path)
+        existing_identities = {
+            _routing_candidate_identity(candidate)
+            for candidate in _clean_routing_candidates(
+                policy.get("routing_candidates") or [],
+                shape="routing_candidates",
+            )
+        }
+        for _, layer_data in manual_layers[1:]:
+            raw_candidates = layer_data.get("routing_candidates")
+            if raw_candidates is None:
+                raw_candidates = layer_data.get("candidates")
+            for candidate in _clean_routing_candidates(raw_candidates, shape="routing_candidates"):
+                identity = _routing_candidate_identity(candidate)
+                if identity in existing_identities:
+                    continue
+                policy.setdefault("routing_candidates", []).append(candidate)
+                existing_identities.add(identity)
+        return policy, "local-manual", str(primary_path)
 
     defaults_path = Path(__file__).parent / "routing_experiments.yaml"
     policy = _default_experiment_policy()

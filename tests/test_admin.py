@@ -6,6 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+import yaml
+
 
 HAS_RUNTIME_DEPS = importlib.util.find_spec("fastapi") is not None
 
@@ -22,7 +24,11 @@ class AdminRouterTests(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
         self.old_routing_experiments = os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS")
+        self.old_config_dir = os.environ.get("TOKENCLAW_CONFIG_DIR")
+        self.old_policy_config_dir = os.environ.get("TOKENCLAW_POLICY_CONFIG_DIR")
         os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+        os.environ["TOKENCLAW_CONFIG_DIR"] = str(Path(self.tmp.name) / ".tokenclaw")
+        os.environ.pop("TOKENCLAW_POLICY_CONFIG_DIR", None)
 
     def tearDown(self):
         if self.old_event_log is None:
@@ -33,6 +39,14 @@ class AdminRouterTests(unittest.TestCase):
             os.environ.pop("TOKENCLAW_ROUTING_EXPERIMENTS", None)
         else:
             os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = self.old_routing_experiments
+        if self.old_config_dir is None:
+            os.environ.pop("TOKENCLAW_CONFIG_DIR", None)
+        else:
+            os.environ["TOKENCLAW_CONFIG_DIR"] = self.old_config_dir
+        if self.old_policy_config_dir is None:
+            os.environ.pop("TOKENCLAW_POLICY_CONFIG_DIR", None)
+        else:
+            os.environ["TOKENCLAW_POLICY_CONFIG_DIR"] = self.old_policy_config_dir
         self.tmp.cleanup()
 
     def test_reload_route_is_loopback_only(self):
@@ -117,8 +131,10 @@ class AdminRouterTests(unittest.TestCase):
                     self.assertFalse(data["managed_server_calls_made"])
 
     def test_routing_candidate_append_route_writes_idempotently_for_loopback(self):
-        config_path = Path(self.tmp.name) / "routing_experiments.yaml"
-        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = str(config_path)
+        config_path = Path(self.tmp.name) / ".tokenclaw" / "routing_experiments.yaml"
+        transient_path = Path(self.tmp.name) / "run-routing-experiments.yaml"
+        transient_path.write_text("enabled: true\nrouting_candidates: []\n", encoding="utf-8")
+        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = str(transient_path)
         import tokenclaw.routing_experiments as routing_experiments
 
         importlib.reload(routing_experiments)
@@ -143,7 +159,10 @@ class AdminRouterTests(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["status"], "appended")
         self.assertTrue(data["wrote_active_policy_files"])
+        self.assertEqual(Path(data["target_file"]), config_path)
         self.assertTrue(config_path.exists())
+        transient_data = yaml.safe_load(transient_path.read_text(encoding="utf-8"))
+        self.assertEqual(transient_data["routing_candidates"], [])
 
         duplicate = local.post("/tokenclaw/admin/routing-experiments/candidates", json=payload)
         self.assertEqual(duplicate.status_code, 200)

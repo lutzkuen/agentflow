@@ -26,6 +26,8 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         "TOKENCLAW_ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD",
         "TOKENCLAW_RECOMMENDATION_ENABLED",
         "TOKENCLAW_RECOMMENDATION_SERVER_URL",
+        "TOKENCLAW_CONFIG_DIR",
+        "TOKENCLAW_POLICY_CONFIG_DIR",
         "HOME",
     )
 
@@ -194,8 +196,7 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         self.assertEqual(tool_light["max_text_chars"], 64000)
 
     def test_dashboard_candidate_append_is_idempotent_and_makes_coverage_visible(self):
-        config_path = Path(self.home.name) / "routing_experiments.yaml"
-        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = str(config_path)
+        config_path = Path(self.home.name) / ".tokenclaw" / "routing_experiments.yaml"
         importlib.reload(experiments)
 
         before = experiments.routing_candidate_coverage(
@@ -246,6 +247,66 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         importlib.reload(experiments)
         after = experiments.routing_candidate_coverage(
             requested_model="claude-opus-5-0",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            category="chat",
+            stream=False,
+            text_chars=12000,
+            input_tokens=3000,
+        )
+        self.assertEqual(after["status"], "covered")
+        self.assertEqual(after["selected_candidate_id"], result["candidate_id"])
+
+    def test_dashboard_candidate_append_uses_durable_config_when_env_points_to_overlay(self):
+        transient_path = Path(self.home.name) / "tokenclaw-run-routing-experiments.yaml"
+        transient_path.write_text(
+            """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 10.0
+routing_candidates: []
+""",
+            encoding="utf-8",
+        )
+        durable_path = Path(self.home.name) / ".tokenclaw" / "routing_experiments.yaml"
+        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = str(transient_path)
+        importlib.reload(experiments)
+
+        before = experiments.routing_candidate_coverage(
+            requested_model="claude-opus-5-1",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            category="chat",
+            stream=False,
+            text_chars=12000,
+            input_tokens=3000,
+        )
+        self.assertEqual(before["status"], "uncovered")
+
+        result = experiments.append_dashboard_routing_candidate({
+            "requested_model": "claude-opus-5-1",
+            "routed_model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "category": "chat",
+            "stream": False,
+            "max_text_chars": 32000,
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "appended")
+        self.assertEqual(Path(result["target_file"]), durable_path)
+        self.assertTrue(durable_path.exists())
+        durable_data = yaml.safe_load(durable_path.read_text(encoding="utf-8"))
+        self.assertIn(result["candidate_id"], {row["candidate_id"] for row in durable_data["routing_candidates"]})
+        transient_data = yaml.safe_load(transient_path.read_text(encoding="utf-8"))
+        self.assertEqual(transient_data["routing_candidates"], [])
+
+        importlib.reload(experiments)
+        after = experiments.routing_candidate_coverage(
+            requested_model="claude-opus-5-1",
             provider="anthropic",
             source_surface="anthropic_messages",
             category="chat",
