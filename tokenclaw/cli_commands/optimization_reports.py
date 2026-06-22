@@ -5389,6 +5389,13 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
         help="Maximum number of unsuppressed cohorts to stage in this run, default: 10. "
         "Remaining stageable cohorts are picked up on the next run once earlier ones are applied.",
     )
+    parser.add_argument(
+        "--context-plateau-stats-json",
+        help=(
+            "Optional JSON file containing dashboard stats with context_plateaus. "
+            "When supplied, stage from metadata-only context-plateau cohorts instead of scanning provider calls."
+        ),
+    )
     parser.add_argument("--cohort-provider-family", help="Only report cohorts matching this provider family.")
     parser.add_argument("--cohort-source-surface", help="Only report cohorts matching this source surface.")
     parser.add_argument("--cohort-endpoint", help="Only report cohorts matching this endpoint.")
@@ -5436,8 +5443,42 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
     from tokenclaw.request_shape_rollups import (
         apply_request_shape_crunch_canary_action,
         apply_request_shape_crunch_canary_actions,
+        build_context_plateau_crunch_rollup_report,
         build_request_shape_crunch_canary_stage_report,
     )
+
+    source_rollup_report = None
+    if args.context_plateau_stats_json:
+        stats_path = Path(args.context_plateau_stats_json)
+        try:
+            stats_payload = json.loads(stats_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            result = {
+                "schema": "tokenclaw.request_shape_repeated_context_crunch_canary_stage.v1",
+                "status": "invalid-context-plateau-stats-json",
+                "ok": False,
+                "dry_run": True,
+                "read_only": True,
+                "reason": "invalid-context-plateau-stats-json",
+                "next_action": "provide-valid-context-plateau-stats-json",
+                "errors": [{"path": "$.context_plateau_stats_json", "message": str(exc)}],
+                "privacy": {
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                    "raw_prompts_included": False,
+                    "request_ids_included": False,
+                    "session_ids_included": False,
+                },
+            }
+            if args.pretty:
+                stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+            else:
+                _write_json(stdout, result)
+            return 1
+        source_rollup_report = build_context_plateau_crunch_rollup_report(
+            stats_payload if isinstance(stats_payload, dict) else {},
+            limit=args.limit,
+        )
 
     store = _open_store_for_db(str(args.db))
     try:
@@ -5451,6 +5492,7 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
             rules_path=args.rules_path,
             max_new_canaries=args.max_new_canaries,
             cohort_filter=cohort_filter or None,
+            source_rollup_report=source_rollup_report,
         )
     finally:
         store.conn.close()

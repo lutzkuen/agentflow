@@ -5697,13 +5697,19 @@ def build_request_shape_crunch_canary_stage_report(
     rules_path: str | Path | None = None,
     max_new_canaries: int = DEFAULT_CRUNCH_CANARY_MAX_NEW_STAGE_ACTIONS,
     cohort_filter: dict[str, Any] | None = None,
+    source_rollup_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    rollup_report = build_request_shape_rollups_report(
-        store_obj,
-        limit=limit,
-        persist=persist_rollups,
-        run_id=run_id,
-    )
+    if isinstance(source_rollup_report, dict):
+        rollup_report = source_rollup_report
+        if run_id and not rollup_report.get("run_id"):
+            rollup_report = {**rollup_report, "run_id": run_id}
+    else:
+        rollup_report = build_request_shape_rollups_report(
+            store_obj,
+            limit=limit,
+            persist=persist_rollups,
+            run_id=run_id,
+        )
     existing_canary_rules = _load_request_shape_crunch_canary_rules(rules_path)
     has_cohort_filter = bool(_request_shape_crunch_canary_rule_conditions(cohort_filter))
     dry_run = build_request_shape_crunch_opportunity_dry_run(

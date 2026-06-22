@@ -20,6 +20,7 @@ from tokenclaw.request_shape_rollups import (
     build_request_shape_cache_replay_canary_stage_report,
     build_request_shape_cache_replay_evidence_report,
     build_request_shape_cache_replay_policy_decision_report,
+    build_context_plateau_crunch_rollup_report,
     build_request_shape_crunch_canary_impact_report,
     build_request_shape_crunch_canary_impact_rows_report,
     build_request_shape_crunch_activation_evidence_report,
@@ -5033,6 +5034,179 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(payload["stage_lifecycle_projection"]["projected_canary_holdout_count"], 1)
         self.assertTrue(payload["privacy"]["aggregate_only"])
         self.assertNotIn("raw prompt must not leak", stdout.getvalue())
+
+    def test_crunch_canary_stage_cli_accepts_context_plateau_stats_source(self) -> None:
+        stats_path = Path(self.tmpdir.name) / "context-plateaus.json"
+        stats_path.write_text(
+            json.dumps(
+                {
+                    "context_plateaus": [
+                        {
+                            "session_id": "raw-session-id-must-not-leak",
+                            "source_surface": "anthropic_messages",
+                            "app_family": "claude-code",
+                            "category": "tool-result",
+                            "workflow_phase": "tool-execution",
+                            "calls": 24,
+                            "plateau_pairs": 18,
+                            "median_text_chars": 96_000,
+                            "p90_text_chars": 118_000,
+                            "cost_usd": 0.72,
+                            "cache_read_savings_usd": 0.18,
+                            "crunch_saved_chars": 4_000,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        stdout = io.StringIO()
+        code = cli.request_shape_crunch_canary_stage_cli(
+            [
+                "--db",
+                self.db_path,
+                "--context-plateau-stats-json",
+                str(stats_path),
+                "--rollout-fraction",
+                "0.10",
+                "--holdout-fraction",
+                "0.20",
+                "--run-id",
+                "plateau-stage-cli",
+            ],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "tokenclaw.request_shape_repeated_context_crunch_canary_stage.v1")
+        self.assertEqual(payload["status"], "staged")
+        self.assertEqual(payload["source_report"]["schema"], "tokenclaw.context_plateau_crunch_rollups.v1")
+        self.assertEqual(payload["source_report"]["window"]["source"], "context_plateaus")
+        self.assertEqual(payload["staged_canary_count"], 1)
+        self.assertTrue(payload["acceptance"]["stages_one_repeated_context_crunch_canary"])
+        self.assertTrue(payload["acceptance"]["has_projected_lifecycle_split"])
+        self.assertTrue(payload["acceptance"]["has_holdout_metadata"])
+        self.assertEqual(payload["top_stage_action"]["source_evidence_schema"], "tokenclaw.context_plateau_crunch_rollup_row.v1")
+        self.assertEqual(payload["top_stage_action"]["conditions"]["source_surface"], "anthropic_messages")
+        self.assertEqual(payload["top_stage_action"]["conditions"]["category"], "tool-result")
+        self.assertEqual(payload["top_stage_action"]["target_local_policy_section"], "crunch.rules")
+        self.assertEqual(payload["top_stage_action"]["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertFalse(payload["privacy"]["provider_calls_made"])
+        self.assertFalse(payload["privacy"]["managed_server_calls_made"])
+        self.assertNotIn("raw-session-id-must-not-leak", stdout.getvalue())
+        self.assertNotIn(str(stats_path), stdout.getvalue())
+
+    def test_context_plateau_crunch_canary_apply_and_impact_have_coverage_and_suppression(self) -> None:
+        source_report = build_context_plateau_crunch_rollup_report(
+            {
+                "context_plateaus": [
+                    {
+                        "session_id": "raw-session-id-must-not-leak",
+                        "source_surface": "anthropic_messages",
+                        "app_family": "claude-code",
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "calls": 24,
+                        "plateau_pairs": 18,
+                        "median_text_chars": 96_000,
+                        "p90_text_chars": 118_000,
+                        "cost_usd": 0.72,
+                        "crunch_saved_chars": 4_000,
+                    }
+                ],
+            }
+        )
+        self.assertIsNotNone(source_report)
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+        stage = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            source_rollup_report=source_report,
+            rules_path=rules_path,
+            rollout_fraction=0.10,
+            holdout_fraction=0.20,
+            run_id="plateau-source-stage",
+        )
+        self.assertEqual(stage["status"], "staged")
+        self.assertEqual(stage["staged_canary_count"], 1)
+        self.assertTrue(stage["acceptance"]["has_projected_lifecycle_split"])
+        action = stage["top_stage_action"]
+
+        apply_result = apply_request_shape_crunch_canary_action(action, rules_path=rules_path)
+        self.assertTrue(apply_result["ok"])
+        self.assertTrue(apply_result["wrote_policy_files"])
+
+        restage = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            source_rollup_report=source_report,
+            rules_path=rules_path,
+            rollout_fraction=0.10,
+            holdout_fraction=0.20,
+            run_id="plateau-source-restage",
+        )
+        self.assertEqual(restage["status"], "already-staged")
+        self.assertEqual(restage["duplicate_suppression"]["suppressed_existing_cohort_count"], 1)
+        self.assertTrue(restage["duplicate_suppression"]["suppresses_new_stage_action"])
+
+        features = dict(action["conditions"])
+        selected: dict[str, dict[str, object]] = {}
+        for index in range(5000):
+            lifecycle = request_shape_crunch_canary_lifecycle(action, {**features, "cohort_sample_id": f"plateau-{index}"})
+            if lifecycle["status"] in {"applied", "holdout"}:
+                selected.setdefault(str(lifecycle["status"]), lifecycle)
+            if {"applied", "holdout"} <= set(selected):
+                break
+        self.assertIn("applied", selected)
+        self.assertIn("holdout", selected)
+
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming",
+            category="tool-result",
+            workflow_phase="tool-execution",
+            text_chars=96_000,
+            cost=0.60,
+            baseline=0.72,
+            crunch_extra={
+                "changed": True,
+                "before_chars": 96_000,
+                "after_chars": 86_000,
+                "saved_chars": 10_000,
+                "tokens_saved_est": 2_500,
+                "request_shape_repeated_context_canary": selected["applied"],
+            },
+        )
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming",
+            category="tool-result",
+            workflow_phase="tool-execution",
+            text_chars=96_000,
+            cost=0.72,
+            baseline=0.72,
+            crunch_extra={"request_shape_repeated_context_canary": selected["holdout"]},
+        )
+
+        impact = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="plateau-impact")[
+            "crunch_canary_impact"
+        ]
+        self.assertEqual(impact["schema"], "tokenclaw.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(impact["summary"]["applied_count"], 1)
+        self.assertEqual(impact["summary"]["holdout_count"], 1)
+        self.assertEqual(impact["summary"]["safety_stop_count"], 0)
+        self.assertEqual(impact["summary"]["rollback_count"], 0)
+        self.assertGreater(impact["summary"]["saved_tokens"], 0)
+        self.assertGreater(impact["summary"]["saved_usd"], 0)
+        self.assertFalse(impact["privacy"]["provider_calls_made"])
+        self.assertFalse(impact["privacy"]["managed_server_calls_made"])
+        rendered = json.dumps({"stage": stage, "restage": restage, "impact": impact}, sort_keys=True)
+        self.assertNotIn("raw-session-id-must-not-leak", rendered)
+        self.assertNotIn(str(rules_path), rendered)
 
     def test_crunch_canary_stage_reports_activation_ready_rollup_selection_and_skips(self) -> None:
         for _ in range(3):
