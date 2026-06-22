@@ -6,15 +6,18 @@ import sys
 import time
 from typing import Any, Awaitable, Callable
 
-from fastapi import APIRouter, FastAPI
-from fastapi.responses import HTMLResponse, RedirectResponse
+import httpx
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from tokenclaw import stats as stats_views
+from tokenclaw.policy_events import log_policy_event
 from tokenclaw.store import utc_now
 
 
 LimiterStatus = Callable[[], list[dict[str, Any]]]
 StoreSource = Any | Callable[[], Any]
+DashboardAdminForwarder = Callable[[str, dict[str, Any], dict[str, str]], Awaitable[tuple[int, dict[str, Any]]]]
 
 
 def _store(store_source: StoreSource) -> Any:
@@ -45,6 +48,89 @@ def _stats_timing_log_threshold_ms() -> float:
         return 250.0
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _dashboard_writes_enabled() -> bool:
+    return _env_bool("TOKENCLAW_DASHBOARD_ALLOW_WRITES", True)
+
+
+def _dashboard_admin_base_url() -> str:
+    raw = os.getenv("TOKENCLAW_DASHBOARD_ADMIN_BASE_URL") or os.getenv("TOKENCLAW_ADMIN_BASE_URL") or "http://127.0.0.1:4000"
+    return raw.rstrip("/")
+
+
+async def _default_dashboard_admin_forwarder(
+    path: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+) -> tuple[int, dict[str, Any]]:
+    url = f"{_dashboard_admin_base_url()}{path}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(url, json=payload, headers=headers)
+    try:
+        data = response.json()
+    except Exception:
+        data = {
+            "ok": False,
+            "error": {
+                "type": "invalid_admin_response",
+                "message": "dashboard admin forwarder received a non-JSON response",
+            },
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        }
+    if not isinstance(data, dict):
+        data = {
+            "ok": False,
+            "error": {
+                "type": "invalid_admin_response",
+                "message": "dashboard admin forwarder received a non-object response",
+            },
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        }
+    return response.status_code, data
+
+
+async def _dashboard_json_object_request(request: Request, *, schema: str) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return None, JSONResponse(
+            {
+                "schema": schema,
+                "ok": False,
+                "error": {
+                    "type": "invalid_json",
+                    "message": str(exc),
+                },
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+            },
+            status_code=400,
+        )
+    if not isinstance(body, dict):
+        return None, JSONResponse(
+            {
+                "schema": schema,
+                "ok": False,
+                "error": {
+                    "type": "invalid_payload",
+                    "message": "expected a JSON object",
+                },
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+            },
+            status_code=400,
+        )
+    return body, None
+
+
 def create_dashboard_router(
     *,
     store_obj: StoreSource,
@@ -55,8 +141,10 @@ def create_dashboard_router(
     dashboard_host: str | None = None,
     dashboard_read_only: bool = True,
     full_stats_ttl_s: float | None = None,
+    admin_forwarder: DashboardAdminForwarder | None = None,
 ) -> APIRouter:
     router = APIRouter()
+    forward_admin = admin_forwarder or _default_dashboard_admin_forwarder
     stats_ttl_s = _full_stats_ttl_s() if full_stats_ttl_s is None else max(0.0, float(full_stats_ttl_s))
     full_stats_cache: dict[str, Any] | None = None
     full_stats_cache_at = 0.0
@@ -620,6 +708,116 @@ def create_dashboard_router(
             dashboard_read_only=dashboard_read_only,
         )
 
+    @router.post("/tokenclaw/dashboard/admin/routing-experiments/candidates", response_model=None)
+    async def dashboard_append_routing_experiment_candidate(request: Request) -> Any:
+        client_host = request.client.host if request.client else None
+        if not _dashboard_writes_enabled():
+            log_policy_event(
+                "routing-candidate-append-forward",
+                ok=False,
+                details={
+                    "source": "dashboard_lan_forwarder",
+                    "client_host": client_host,
+                    "status": "disabled",
+                    "error_type": "dashboard_writes_disabled",
+                    "wrote_active_policy_files": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+            )
+            return JSONResponse(
+                {
+                    "schema": "tokenclaw.dashboard_routing_candidate_append_forward.v1",
+                    "ok": False,
+                    "error": {
+                        "type": "dashboard_writes_disabled",
+                        "message": "dashboard routing config writes are disabled",
+                    },
+                    "wrote_active_policy_files": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+                status_code=403,
+            )
+
+        body, error_response = await _dashboard_json_object_request(
+            request,
+            schema="tokenclaw.dashboard_routing_candidate_append_forward.v1",
+        )
+        if error_response is not None:
+            log_policy_event(
+                "routing-candidate-append-forward",
+                ok=False,
+                details={
+                    "source": "dashboard_lan_forwarder",
+                    "client_host": client_host,
+                    "status": "invalid-request",
+                    "error_type": "invalid_json",
+                    "wrote_active_policy_files": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+            )
+            return error_response
+        assert body is not None
+
+        headers = {
+            "x-tokenclaw-admin-source": "dashboard_lan_forwarder",
+        }
+        if client_host:
+            headers["x-tokenclaw-forwarded-client-host"] = client_host
+
+        path = "/tokenclaw/admin/routing-experiments/candidates"
+        try:
+            status_code, result = await forward_admin(path, body, headers)
+        except Exception as exc:
+            log_policy_event(
+                "routing-candidate-append-forward",
+                ok=False,
+                details={
+                    "source": "dashboard_lan_forwarder",
+                    "client_host": client_host,
+                    "status": "forward-error",
+                    "error_type": exc.__class__.__name__,
+                    "wrote_active_policy_files": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+            )
+            return JSONResponse(
+                {
+                    "schema": "tokenclaw.dashboard_routing_candidate_append_forward.v1",
+                    "ok": False,
+                    "error": {
+                        "type": "admin_forward_failed",
+                        "message": "dashboard could not reach the local proxy admin endpoint",
+                    },
+                    "wrote_active_policy_files": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+                status_code=502,
+            )
+
+        ok = 200 <= int(status_code) < 300 and bool(result.get("ok"))
+        log_policy_event(
+            "routing-candidate-append-forward",
+            ok=ok,
+            details={
+                "source": "dashboard_lan_forwarder",
+                "client_host": client_host,
+                "forward_target": "loopback_proxy_admin",
+                "forward_path": path,
+                "status": result.get("status"),
+                "candidate_id": result.get("candidate_id"),
+                "wrote_active_policy_files": bool(result.get("wrote_active_policy_files")),
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            },
+        )
+        return JSONResponse(result, status_code=int(status_code))
+
     @router.get("/tokenclaw/stats/weekly")
     async def stats_weekly() -> dict[str, Any]:
         return await stats_views.stats_weekly(_store(store_obj))
@@ -649,6 +847,7 @@ def create_dashboard_app(
     proxy_host: str | None = None,
     dashboard_host: str | None = None,
     full_stats_ttl_s: float | None = None,
+    admin_forwarder: DashboardAdminForwarder | None = None,
 ) -> FastAPI:
     app = FastAPI(title="AgentFlow Dashboard", version="0.1.0")
 
@@ -676,6 +875,7 @@ def create_dashboard_app(
             dashboard_host=dashboard_host,
             dashboard_read_only=True,
             full_stats_ttl_s=full_stats_ttl_s,
+            admin_forwarder=admin_forwarder,
         )
     )
     return app

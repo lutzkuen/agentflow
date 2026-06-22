@@ -24253,7 +24253,7 @@ function activityFlags(unit){
 function adminControlUrl(path){
   const configured=window.TOKENCLAW_ADMIN_BASE_URL||localStorage.getItem('tokenclawAdminBaseUrl')||'';
   if(configured)return configured.replace(/\\/$/,'')+path;
-  if(window.location.port==='4002')return 'http://127.0.0.1:4000'+path;
+  if(path==='/tokenclaw/admin/routing-experiments/candidates')return '/tokenclaw/dashboard/admin/routing-experiments/candidates';
   return path;
 }
 function routingCandidateAction(unit){

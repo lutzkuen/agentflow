@@ -627,6 +627,139 @@ class DashboardImportTests(unittest.TestCase):
             tmp.close()
             event_tmp.cleanup()
 
+    def test_dashboard_routes_routing_candidate_writes_through_loopback_forwarder(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        event_tmp = tempfile.TemporaryDirectory()
+        old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        old_allow_writes = os.environ.get("TOKENCLAW_DASHBOARD_ALLOW_WRITES")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        os.environ["TOKENCLAW_DASHBOARD_ALLOW_WRITES"] = "1"
+        store = Store(tmp.name)
+        calls = []
+
+        async def fake_forwarder(path, payload, headers):
+            calls.append((path, payload, headers))
+            return 200, {
+                "schema": "tokenclaw.routing_candidate_append.v1",
+                "ok": True,
+                "status": "appended",
+                "candidate_id": "dashboard-routing-candidate:test",
+                "target_file": "routing_experiments.yaml",
+                "wrote_active_policy_files": True,
+                "reloaded_modules": ["tokenclaw.router"],
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+            }
+
+        try:
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={
+                    "min_request_interval_ms": 0,
+                    "max_tier_backoff_wait_s": 30,
+                    "max_concurrent_per_tier": 2,
+                },
+                admin_forwarder=fake_forwarder,
+            )
+            client = TestClient(app, client=("192.168.178.25", 50000))
+            payload = {
+                "requested_model": "claude-opus-5-0",
+                "routed_model": "claude-sonnet-4-6",
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "chat",
+                "stream": False,
+                "max_text_chars": 32000,
+            }
+            response = client.post("/tokenclaw/dashboard/admin/routing-experiments/candidates", json=payload)
+
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["status"], "appended")
+            self.assertEqual(len(calls), 1)
+            path, forwarded_payload, headers = calls[0]
+            self.assertEqual(path, "/tokenclaw/admin/routing-experiments/candidates")
+            self.assertEqual(forwarded_payload, payload)
+            self.assertEqual(headers["x-tokenclaw-admin-source"], "dashboard_lan_forwarder")
+            self.assertEqual(headers["x-tokenclaw-forwarded-client-host"], "192.168.178.25")
+
+            from tokenclaw.policy_events import recent_policy_events
+
+            events = recent_policy_events(limit=1)["events"]
+            self.assertEqual(events[0]["action"], "routing-candidate-append-forward")
+            self.assertEqual(events[0]["details"]["source"], "dashboard_lan_forwarder")
+            self.assertEqual(events[0]["details"]["client_host"], "192.168.178.25")
+            self.assertEqual(events[0]["details"]["forward_target"], "loopback_proxy_admin")
+            self.assertFalse(events[0]["details"]["provider_calls_made"])
+            self.assertFalse(events[0]["details"]["managed_server_calls_made"])
+        finally:
+            if old_event_log is None:
+                os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
+            else:
+                os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = old_event_log
+            if old_allow_writes is None:
+                os.environ.pop("TOKENCLAW_DASHBOARD_ALLOW_WRITES", None)
+            else:
+                os.environ["TOKENCLAW_DASHBOARD_ALLOW_WRITES"] = old_allow_writes
+            store.conn.close()
+            tmp.close()
+            event_tmp.cleanup()
+
+    def test_dashboard_routing_candidate_forwarder_can_be_disabled(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        event_tmp = tempfile.TemporaryDirectory()
+        old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        old_allow_writes = os.environ.get("TOKENCLAW_DASHBOARD_ALLOW_WRITES")
+        os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        os.environ["TOKENCLAW_DASHBOARD_ALLOW_WRITES"] = "0"
+        store = Store(tmp.name)
+        calls = []
+
+        async def fake_forwarder(path, payload, headers):
+            calls.append((path, payload, headers))
+            return 200, {"ok": True}
+
+        try:
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={
+                    "min_request_interval_ms": 0,
+                    "max_tier_backoff_wait_s": 30,
+                    "max_concurrent_per_tier": 2,
+                },
+                admin_forwarder=fake_forwarder,
+            )
+            client = TestClient(app, client=("192.168.178.25", 50000))
+            response = client.post(
+                "/tokenclaw/dashboard/admin/routing-experiments/candidates",
+                json={"requested_model": "claude-opus-5-0", "routed_model": "claude-sonnet-4-6"},
+            )
+
+            self.assertEqual(response.status_code, 403)
+            self.assertFalse(response.json()["ok"])
+            self.assertEqual(response.json()["error"]["type"], "dashboard_writes_disabled")
+            self.assertEqual(calls, [])
+        finally:
+            if old_event_log is None:
+                os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
+            else:
+                os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = old_event_log
+            if old_allow_writes is None:
+                os.environ.pop("TOKENCLAW_DASHBOARD_ALLOW_WRITES", None)
+            else:
+                os.environ["TOKENCLAW_DASHBOARD_ALLOW_WRITES"] = old_allow_writes
+            store.conn.close()
+            tmp.close()
+            event_tmp.cleanup()
+
     def test_promotion_blocker_next_actions_dashboard_endpoint_uses_local_review_fixture(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         work_tmp = tempfile.TemporaryDirectory()

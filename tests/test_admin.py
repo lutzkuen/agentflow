@@ -171,6 +171,46 @@ class AdminRouterTests(unittest.TestCase):
         self.assertEqual(duplicate_data["status"], "already-present")
         self.assertFalse(duplicate_data["wrote_active_policy_files"])
 
+    def test_routing_candidate_append_records_dashboard_forwarded_origin_for_loopback(self):
+        transient_path = Path(self.tmp.name) / "run-routing-experiments.yaml"
+        transient_path.write_text("enabled: true\nrouting_candidates: []\n", encoding="utf-8")
+        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = str(transient_path)
+        import tokenclaw.routing_experiments as routing_experiments
+
+        importlib.reload(routing_experiments)
+        app = FastAPI()
+        app.include_router(create_admin_router())
+
+        local = TestClient(app, client=("127.0.0.1", 50000))
+        response = local.post(
+            "/tokenclaw/admin/routing-experiments/candidates",
+            json={
+                "requested_model": "claude-opus-5-0",
+                "routed_model": "claude-sonnet-4-6",
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "tool-heavy",
+                "stream": False,
+                "max_text_chars": 64000,
+            },
+            headers={
+                "x-tokenclaw-admin-source": "dashboard_lan_forwarder",
+                "x-tokenclaw-forwarded-client-host": "192.168.178.25",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        from tokenclaw.policy_events import recent_policy_events
+
+        event = recent_policy_events(limit=1)["events"][0]
+        self.assertEqual(event["action"], "routing-candidate-append")
+        self.assertEqual(event["details"]["source"], "dashboard_lan_forwarder")
+        self.assertEqual(event["details"]["client_host"], "127.0.0.1")
+        self.assertEqual(event["details"]["forwarded_client_host"], "192.168.178.25")
+        self.assertFalse(event["details"]["provider_calls_made"])
+        self.assertFalse(event["details"]["managed_server_calls_made"])
+
     def test_policy_draft_stage_route_returns_structured_diff_for_loopback(self):
         app = FastAPI()
         app.include_router(create_admin_router())

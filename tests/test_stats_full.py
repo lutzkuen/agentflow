@@ -9614,7 +9614,8 @@ request_shape_repeated_context_canaries:
         self.assertIn("Add to routing config", html)
         self.assertIn("routingCandidateAction(unit)", html)
         self.assertIn("adminControlUrl('/tokenclaw/admin/routing-experiments/candidates')", html)
-        self.assertIn("http://127.0.0.1:4000", html)
+        self.assertIn("'/tokenclaw/dashboard/admin/routing-experiments/candidates'", html)
+        self.assertNotIn("http://127.0.0.1:4000", html)
 
     def test_recent_activity_flags_uncovered_routing_candidate_rows(self):
         server.store.log_call(

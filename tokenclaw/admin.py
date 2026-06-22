@@ -74,6 +74,24 @@ def _loopback_cors_headers(request: Request) -> dict[str, str]:
     }
 
 
+def _admin_event_source(request: Request) -> str:
+    source = request.headers.get("x-tokenclaw-admin-source")
+    if source == "dashboard_lan_forwarder" and request_is_loopback(request):
+        return source
+    return "admin_api"
+
+
+def _admin_event_details(request: Request) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "source": _admin_event_source(request),
+        "client_host": request.client.host if request.client else None,
+    }
+    forwarded_host = request.headers.get("x-tokenclaw-forwarded-client-host")
+    if forwarded_host and request_is_loopback(request):
+        details["forwarded_client_host"] = forwarded_host
+    return details
+
+
 async def _json_object_request(request: Request, *, schema: str) -> tuple[dict[str, Any] | None, JSONResponse | None]:
     try:
         body = await request.json()
@@ -188,8 +206,7 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
             "routing-candidate-append",
             ok=bool(result.get("ok")),
             details={
-                "source": "admin_api",
-                "client_host": request.client.host if request.client else None,
+                **_admin_event_details(request),
                 "status": result.get("status"),
                 "candidate_id": result.get("candidate_id"),
                 "target_file": result.get("target_file"),
