@@ -69,6 +69,15 @@ jobs:
           fi
           "$venv_python" -m pip install --upgrade pip
           "$venv_python" -m pip install dist/*.whl
+          "$venv_python" - <<'PY'
+          import importlib.metadata as md
+
+          requires = md.requires("tokenclaw") or []
+          forbidden = ("psycopg", "zstandard", "websockets")
+          for name in forbidden:
+              if any(req.lower().startswith(name) for req in requires):
+                  raise SystemExit(f"base wheel unexpectedly requires optional dependency: {name}")
+          PY
           echo "VENV_PY=$venv_python" >> "$GITHUB_ENV"
           echo "$venv_bin" >> "$GITHUB_PATH"
 

@@ -2245,7 +2245,7 @@ class PostgresStore(SQLiteStore):
         except ImportError as exc:
             raise RuntimeError(
                 "TOKENCLAW_DATABASE_URL requires the psycopg pool extra. "
-                "Install with: python -m pip install 'psycopg[binary,pool]>=3.2'"
+                "Install with: python -m pip install 'tokenclaw[managed]'"
             ) from exc
         self.path = database_url
         self.database_url = database_url

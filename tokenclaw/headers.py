@@ -97,7 +97,10 @@ async def read_json_object_body(
                 if zstd is None:
                     if passthrough_unsupported_encoding:
                         return None
-                    raise ClientJsonRequestError("Unsupported content encoding.")
+                    raise ClientJsonRequestError(
+                        "Unsupported zstd content encoding. "
+                        "Install with: python -m pip install 'tokenclaw[compression]'"
+                    )
                 body = zstd.ZstdDecompressor().decompress(body)
             elif encoding == "gzip":
                 body = gzip.decompress(body)

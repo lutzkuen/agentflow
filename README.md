@@ -17,6 +17,17 @@ The target packaged install is:
 pip install tokenclaw
 ```
 
+The default install is intentionally focused on the local proxy, dashboard,
+local SQLite telemetry, and file-backed YAML rules. Advanced dependencies stay
+behind optional extras:
+
+```bash
+pip install 'tokenclaw[managed]'          # Postgres-backed managed/workbench storage
+pip install 'tokenclaw[compression]'      # zstd request-body decoding
+pip install 'tokenclaw[openai-realtime]'  # OpenAI realtime WebSocket proxy bridge
+pip install 'tokenclaw[all]'              # all optional runtime extras
+```
+
 Until the public package name is migrated, install from this repository:
 
 ```bash
@@ -514,7 +525,7 @@ pattern_rules:
 
 ## Advanced policy and diagnostics
 
-The README keeps the happy path short. Advanced local policy review/apply/rollback, managed recommendation bridge, replayability reports, routing experiments, and promotion diagnostics are available as CLI entry points installed by `pip install -e .`.
+The README keeps the happy path short. Advanced local policy review/apply/rollback, managed recommendation bridge, replayability reports, routing experiments, and promotion diagnostics are available as CLI entry points installed by `pip install -e .`. Commands that need optional managed storage, zstd decoding, or OpenAI realtime bridging will print the matching extra install hint instead of making those dependencies part of the first-run install.
 
 List them with:
 

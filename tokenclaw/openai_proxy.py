@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
 
 import httpx
-import websockets
 from fastapi import Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -88,6 +87,18 @@ from tokenclaw.upstream_url import join_openai_upstream_url, openai_websocket_ur
 
 
 SESSION_COST_ALERT_USD = float(os.getenv("TOKENCLAW_SESSION_COST_ALERT_USD", "5.0"))
+OPENAI_REALTIME_EXTRA_HINT = "python -m pip install 'tokenclaw[openai-realtime]'"
+
+
+def _import_websockets() -> Any:
+    try:
+        import websockets
+    except ImportError as exc:
+        raise RuntimeError(
+            "OpenAI realtime WebSocket proxy requires the optional openai-realtime extra. "
+            f"Install with: {OPENAI_REALTIME_EXTRA_HINT}"
+        ) from exc
+    return websockets
 
 
 async def _queue_optimization_coordinator_lifecycle_feedback(
@@ -589,6 +600,13 @@ async def openai_responses_websocket(context: ProviderContext, websocket: WebSoc
     await websocket.accept()
     if context.provider != "openai":
         await websocket.close(code=1008, reason="provider mismatch")
+        return
+
+    try:
+        websockets = _import_websockets()
+    except RuntimeError as exc:
+        logging.warning("tokenclaw openai realtime dependency missing: %s", exc)
+        await websocket.close(code=1011, reason=str(exc)[:120])
         return
 
     headers = build_websocket_headers(context, websocket)
