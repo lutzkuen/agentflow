@@ -13,6 +13,7 @@ from tokenclaw.recommendations import (
     policy_decision_min_confidence,
     policy_decisions_enabled,
 )
+from tokenclaw.routing_experiments import routing_pathway_policy_decision
 from tokenclaw.store import stable_json
 
 
@@ -244,7 +245,29 @@ async def fetch_openai_recommendation_decision(
         })
         return decision
 
-    target_model, target_error = _safe_openai_target(_managed_target_model(fetched))
+    original_target = _managed_target_model(fetched)
+    client_policy = routing_pathway_policy_decision(
+        provider="openai",
+        requested_model=current_model,
+        current_model=current_model,
+        target_model=original_target if isinstance(original_target, str) else None,
+        source_surface=str(recommendation_unit.get("source_surface") or ""),
+        category=str(recommendation_unit.get("category") or ""),
+        workflow_phase=str(recommendation_unit.get("workflow_phase") or ""),
+        pathway_id=str(fetched.get("policy_id") or fetched.get("decision_id") or ""),
+    )
+    decision["client_routing_policy"] = client_policy
+    if not client_policy.get("allowed", True):
+        decision.update({
+            "status": "skipped",
+            "apply_reason": "client-routing-blocklist",
+            "would_change_model": isinstance(original_target, str) and original_target != current_model,
+            "would_route_model": original_target if isinstance(original_target, str) else None,
+            "lifecycle_event": "fallback",
+        })
+        return decision
+    policy_target = client_policy.get("target_model")
+    target_model, target_error = _safe_openai_target(policy_target if isinstance(policy_target, str) else original_target)
     decision["projection"] = _projection(
         current_model=current_model,
         target_model=target_model,

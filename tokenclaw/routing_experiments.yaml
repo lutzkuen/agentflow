@@ -29,6 +29,31 @@ source_surfaces:
   - codex_turn
 streaming_shadow_source_surfaces:
   - anthropic_messages
+
+# Thin-client routing policy. Managed servers discover and mint new pathways;
+# the local client keeps only guardrails, explicit preferences, and a small
+# deterministic fallback so it remains useful with no server configured.
+blocklist: []
+preferred_pathways: []
+fallback_routes:
+  - requested_model: claude-opus-4-8
+    routed_model: claude-sonnet-4-6
+  - requested_model: claude-opus-4-5
+    routed_model: claude-sonnet-4-6
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
+  - requested_model: gpt-5.5
+    routed_model: gpt-5.4
+  - requested_model: gpt-5.4
+    routed_model: gpt-5.3
+  - requested_model: gpt-5.3-codex
+    routed_model: gpt-5-codex
+  - requested_model: gpt-5-codex
+    routed_model: gpt-5-mini
+  - requested_model: gpt-5.3
+    routed_model: gpt-5-mini
+  - requested_model: gpt-5-mini
+    routed_model: gpt-5-nano
 model_pairs:
   - requested_model: claude-sonnet-4-6
     routed_model: claude-haiku-4-5-20251001

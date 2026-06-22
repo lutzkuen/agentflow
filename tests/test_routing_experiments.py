@@ -196,6 +196,214 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         self.assertEqual(tool_light["shadow_model"], "claude-sonnet-4-6")
         self.assertEqual(tool_light["max_text_chars"], 64000)
 
+    def test_thin_config_uses_preferred_pathway_without_legacy_candidate_matrix(self):
+        config_dir = Path(self.home.name) / "config"
+        config_dir.mkdir()
+        (config_dir / "routing_experiments.yaml").write_text(
+            """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 1.0
+providers: [openai]
+source_surfaces: [openai_responses]
+preferred_pathways:
+  - requested_model: gpt-5.5
+    routed_model: gpt-5-mini
+    provider: openai
+    source_surface: openai_responses
+    category: chat
+fallback_routes:
+  gpt-5.5: gpt-5.4
+""",
+            encoding="utf-8",
+        )
+        importlib.reload(experiments)
+
+        self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["model_pairs"], [])
+        self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["routing_candidates"], [])
+        meta = experiments.routing_experiment_decision(
+            {"model": "gpt-5.5"},
+            {
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.5",
+                "category": "chat",
+                "text_chars": 1000,
+            },
+            stream=False,
+            provider="openai",
+            source_surface="openai_responses",
+            random_value=lambda: 0.0,
+        )
+
+        self.assertTrue(meta["sampled"])
+        self.assertEqual(meta["shadow_model"], "gpt-5-mini")
+        self.assertEqual(meta["candidate_policy_shape"], "preferred_pathways")
+        self.assertEqual(meta["selected_candidate"]["candidate_source"], "client-preferred-pathway")
+
+    def test_thin_config_synthesizes_fallback_candidate_for_unenumerated_model(self):
+        config_dir = Path(self.home.name) / "config"
+        config_dir.mkdir()
+        (config_dir / "routing_experiments.yaml").write_text(
+            """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 1.0
+providers: [anthropic]
+source_surfaces: [anthropic_messages]
+streaming_shadow_source_surfaces: [anthropic_messages]
+fallback_routes:
+  claude-opus-5-0: claude-sonnet-4-6
+""",
+            encoding="utf-8",
+        )
+        importlib.reload(experiments)
+
+        meta = experiments.routing_experiment_decision(
+            {"model": "claude-opus-5-0", "stream": True},
+            {
+                "requested_model": "claude-opus-5-0",
+                "routed_model": "claude-opus-5-0",
+                "category": "chat",
+                "text_chars": 12000,
+            },
+            stream=True,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            random_value=lambda: 0.0,
+        )
+
+        self.assertTrue(meta["sampled"])
+        self.assertEqual(meta["reason"], "streaming-shadow-sampled")
+        self.assertEqual(meta["shadow_model"], "claude-sonnet-4-6")
+        self.assertEqual(meta["candidate_policy_shape"], "fallback_routes")
+        self.assertEqual(meta["selected_candidate"]["candidate_source"], "deterministic-fallback")
+
+    def test_thin_config_blocklist_blocks_fallback_candidate(self):
+        config_dir = Path(self.home.name) / "config"
+        config_dir.mkdir()
+        (config_dir / "routing_experiments.yaml").write_text(
+            """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 1.0
+providers: [anthropic]
+source_surfaces: [anthropic_messages]
+blocklist:
+  - routed_model: claude-sonnet-4-6
+fallback_routes:
+  claude-opus-5-0: claude-sonnet-4-6
+""",
+            encoding="utf-8",
+        )
+        importlib.reload(experiments)
+
+        meta = experiments.routing_experiment_decision(
+            {"model": "claude-opus-5-0"},
+            {
+                "requested_model": "claude-opus-5-0",
+                "routed_model": "claude-opus-5-0",
+                "category": "chat",
+                "text_chars": 1000,
+            },
+            stream=False,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            random_value=lambda: 0.0,
+        )
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "model-pair-blocked")
+        self.assertEqual(meta["blocklist_match"]["routed_model"], "claude-sonnet-4-6")
+
+    def test_managed_route_policy_prefers_client_pathway_and_blocks_disallowed_target(self):
+        config_dir = Path(self.home.name) / "config"
+        config_dir.mkdir()
+        (config_dir / "routing_experiments.yaml").write_text(
+            """
+enabled: true
+preferred_pathways:
+  - requested_model: gpt-5.5
+    routed_model: gpt-5-mini
+    provider: openai
+    source_surface: openai_responses
+blocklist:
+  - requested_model: gpt-5.5
+    routed_model: gpt-5-nano
+""",
+            encoding="utf-8",
+        )
+        importlib.reload(experiments)
+
+        override = experiments.routing_pathway_policy_decision(
+            provider="openai",
+            requested_model="gpt-5.5",
+            current_model="gpt-5.5",
+            target_model="gpt-5.4",
+            source_surface="openai_responses",
+        )
+        blocked = experiments.routing_pathway_policy_decision(
+            provider="openai",
+            requested_model="gpt-5.5",
+            current_model="gpt-5.5",
+            target_model="gpt-5-nano",
+            source_surface="openai_responses",
+        )
+
+        self.assertEqual(override["decision"], "preferred-override")
+        self.assertEqual(override["target_model"], "gpt-5-mini")
+        self.assertTrue(override["allowed"])
+
+        (config_dir / "routing_experiments.yaml").write_text(
+            """
+enabled: true
+blocklist:
+  - requested_model: gpt-5.5
+    routed_model: gpt-5-nano
+""",
+            encoding="utf-8",
+        )
+        importlib.reload(experiments)
+        blocked = experiments.routing_pathway_policy_decision(
+            provider="openai",
+            requested_model="gpt-5.5",
+            current_model="gpt-5.5",
+            target_model="gpt-5-nano",
+            source_surface="openai_responses",
+        )
+        self.assertEqual(blocked["decision"], "blocked")
+        self.assertFalse(blocked["allowed"])
+
+    def test_distills_legacy_candidate_config_to_thin_policy(self):
+        thin = experiments.distill_thin_routing_policy({
+            "enabled": True,
+            "mode": "shadow_candidate_pass_through",
+            "model_pairs": [
+                {"requested_model": "claude-opus-5-0", "routed_model": "claude-sonnet-4-6"},
+            ],
+            "routing_candidates": [
+                {
+                    "candidate_id": "preferred-chat",
+                    "requested_model": "gpt-5.5",
+                    "routed_model": "gpt-5-mini",
+                    "provider": "openai",
+                    "source_surface": "openai_responses",
+                }
+            ],
+            "blocklist": ["gpt-5-nano"],
+        })
+
+        self.assertNotIn("model_pairs", thin)
+        self.assertNotIn("routing_candidates", thin)
+        preferred_pairs = {
+            (item["requested_model"], item["routed_model"])
+            for item in thin["preferred_pathways"]
+        }
+        self.assertIn(("gpt-5.5", "gpt-5-mini"), preferred_pairs)
+        self.assertEqual(thin["blocklist"], [{"model": "gpt-5-nano"}])
+
     def test_dashboard_candidate_append_is_idempotent_and_makes_coverage_visible(self):
         config_path = Path(self.home.name) / ".tokenclaw" / "routing_experiments.yaml"
         importlib.reload(experiments)
@@ -959,12 +1167,16 @@ eligibility_overrides:
             random_value=lambda: 0.0,
         )
 
-        self.assertFalse(generic["sampled"])
-        self.assertEqual(generic["reason"], "model-pair-not-enabled")
+        self.assertTrue(generic["sampled"])
+        self.assertEqual(generic["reason"], "sampled-shadow-candidate-pass-through")
+        self.assertEqual(generic["shadow_model"], "gpt-5.4")
+        self.assertEqual(generic["candidate_policy_shape"], "fallback_routes")
+        self.assertEqual(generic["selected_candidate"]["candidate_source"], "deterministic-fallback")
         self.assertEqual(generic["eligible_candidate_count"], 0)
         self.assertEqual(generic["candidate_selector_basis"]["app_family"], "generic_openai")
-        self.assertFalse(codex_wrong_phase["sampled"])
-        self.assertEqual(codex_wrong_phase["reason"], "model-pair-not-enabled")
+        self.assertTrue(codex_wrong_phase["sampled"])
+        self.assertEqual(codex_wrong_phase["shadow_model"], "gpt-5.4")
+        self.assertEqual(codex_wrong_phase["candidate_policy_shape"], "fallback_routes")
         self.assertEqual(codex_wrong_phase["eligible_candidate_count"], 0)
 
     def test_config_policy_samples_routed_down_non_streaming_call(self):

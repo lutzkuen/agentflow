@@ -24,6 +24,7 @@ from tokenclaw.pricing import codex_app_model, codex_app_processing_mode, estima
 from tokenclaw.prompt_features import PROMPT_DIFFICULTY_FEATURE_SCHEMA
 from tokenclaw.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
 from tokenclaw.store import stable_json, utc_now
+from tokenclaw.routing_experiments import routing_pathway_policy_decision
 from tokenclaw.terminal_features import TERMINAL_LOG_FEATURE_SCHEMA
 
 
@@ -1521,6 +1522,32 @@ def apply_policy_decision_routing_to_body(
     meta["local_policy_decision_mode"] = meta.get("recommended_mode") or "observe"
     meta["min_confidence"] = policy_decision_min_confidence()
     meta["canary_fraction"] = policy_decision_canary_fraction()
+    client_policy = routing_pathway_policy_decision(
+        provider=provider,
+        requested_model=str(routing_meta.get("requested_model") or current_model),
+        current_model=current_model,
+        target_model=target_model,
+        source_surface=str(meta.get("source_surface") or routing_meta.get("source_surface") or ""),
+        category=str(routing_meta.get("category") or ""),
+        workflow_phase=str(routing_meta.get("workflow_phase") or ""),
+        stream=bool(routing_meta.get("stream")),
+        pathway_id=str(meta.get("policy_id") or meta.get("decision_id") or ""),
+    )
+    meta["client_routing_policy"] = client_policy
+    if not client_policy.get("allowed", True):
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "client-routing-blocklist",
+            "fallback": "local-policy",
+            "would_route_model": target_model or None,
+            "local_action_taken": "noop",
+        })
+        return meta
+    policy_target = client_policy.get("target_model")
+    if isinstance(policy_target, str) and policy_target:
+        target_model = policy_target
+        meta["target_model_after_client_policy"] = target_model
 
     if not _provider_compatible(provider, target_model):
         meta.update({

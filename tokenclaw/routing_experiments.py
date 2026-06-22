@@ -101,6 +101,7 @@ def _default_experiment_policy() -> dict[str, Any]:
         "mode": "shadow_candidate_pass_through",
         "enabled": True,
         "kill_switch": False,
+        "thin_client_routing": True,
         "sample_rate": 0.10,
         "daily_budget_usd": 10.0,
         "min_text_chars": 0,
@@ -108,6 +109,19 @@ def _default_experiment_policy() -> dict[str, Any]:
         "providers": ["anthropic", "openai"],
         "source_surfaces": ["anthropic_messages", "openai_responses", "openai_chat", "codex_turn"],
         "streaming_shadow_source_surfaces": ["anthropic_messages"],
+        "blocklist": [],
+        "preferred_pathways": [],
+        "fallback_routes": [
+            {"requested_model": "claude-opus-4-8", "routed_model": "claude-sonnet-4-6"},
+            {"requested_model": "claude-opus-4-5", "routed_model": "claude-sonnet-4-6"},
+            {"requested_model": "claude-sonnet-4-6", "routed_model": "claude-haiku-4-5-20251001"},
+            {"requested_model": "gpt-5.5", "routed_model": "gpt-5.4"},
+            {"requested_model": "gpt-5.4", "routed_model": "gpt-5.3"},
+            {"requested_model": "gpt-5.3-codex", "routed_model": "gpt-5-codex"},
+            {"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"},
+            {"requested_model": "gpt-5.3", "routed_model": "gpt-5-mini"},
+            {"requested_model": "gpt-5-mini", "routed_model": "gpt-5-nano"},
+        ],
         "model_pairs": [
             {"requested_model": "claude-sonnet-4-6", "routed_model": "claude-haiku-4-5-20251001"},
             {"requested_model": "claude-opus-4-8", "routed_model": "claude-sonnet-4-6"},
@@ -431,6 +445,102 @@ def _clean_routing_candidates(raw_candidates: Any, *, shape: str) -> list[dict[s
     return candidates
 
 
+def _clean_fallback_routes(raw_routes: Any) -> list[dict[str, Any]]:
+    if isinstance(raw_routes, dict):
+        raw_list = [
+            {"requested_model": requested, "routed_model": routed}
+            for requested, routed in raw_routes.items()
+        ]
+    else:
+        raw_list = raw_routes
+    return _clean_routing_candidates(raw_list, shape="fallback_routes")
+
+
+def _clean_blocklist(raw_blocklist: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_blocklist, list):
+        return []
+    blocked: list[dict[str, Any]] = []
+    for raw in raw_blocklist:
+        if isinstance(raw, str):
+            model = raw.strip()
+            if model:
+                blocked.append({"model": model})
+            continue
+        if not isinstance(raw, dict):
+            continue
+        item: dict[str, Any] = {}
+        for source, target in (
+            ("model", "model"),
+            ("requested_model", "requested_model"),
+            ("requested", "requested_model"),
+            ("routed_model", "routed_model"),
+            ("target_model", "routed_model"),
+            ("route_to", "routed_model"),
+            ("provider", "provider"),
+            ("source_surface", "source_surface"),
+            ("app_family", "app_family"),
+            ("category", "category"),
+            ("workflow_phase", "workflow_phase"),
+            ("pathway_id", "pathway_id"),
+        ):
+            value = raw.get(source)
+            if value not in (None, ""):
+                item[target] = str(value).strip()
+        if item:
+            blocked.append(item)
+    return blocked
+
+
+def distill_thin_routing_policy(data: dict[str, Any]) -> dict[str, Any]:
+    """Build the thin routing policy form from a legacy experiment policy."""
+
+    base = _default_experiment_policy()
+    policy = _apply_policy_yaml(base, data if isinstance(data, dict) else {})
+    preferred: dict[tuple[str, str], dict[str, Any]] = {}
+    for candidate in (policy.get("preferred_pathways") or []):
+        if not isinstance(candidate, dict):
+            continue
+        key = (str(candidate.get("requested_model") or ""), str(candidate.get("routed_model") or ""))
+        if key[0] and key[1]:
+            preferred[key] = dict(candidate)
+    for candidate in (policy.get("routing_candidates") or policy.get("model_pairs") or []):
+        if not isinstance(candidate, dict):
+            continue
+        key = (str(candidate.get("requested_model") or ""), str(candidate.get("routed_model") or ""))
+        if key[0] and key[1]:
+            preferred.setdefault(key, dict(candidate))
+
+    return {
+        "profile_id": str(policy.get("profile_id") or "thin-routing-policy-v1"),
+        "mode": str(policy.get("mode") or "shadow_candidate_pass_through"),
+        "enabled": bool(policy.get("enabled", True)),
+        "kill_switch": bool(policy.get("kill_switch", False)),
+        "sample_rate": float(policy.get("sample_rate") or 0.0),
+        "daily_budget_usd": float(policy.get("daily_budget_usd") or 0.0),
+        "min_text_chars": int(policy.get("min_text_chars") or 0),
+        "max_text_chars": int(policy.get("max_text_chars") or 0),
+        "providers": list(policy.get("providers") or []),
+        "source_surfaces": list(policy.get("source_surfaces") or []),
+        "streaming_shadow_source_surfaces": list(policy.get("streaming_shadow_source_surfaces") or []),
+        "blocklist": list(policy.get("blocklist") or []),
+        "preferred_pathways": list(preferred.values()),
+        "fallback_routes": [
+            {
+                "requested_model": item.get("requested_model"),
+                "routed_model": item.get("routed_model"),
+                **({"provider": item["provider"]} if item.get("provider") else {}),
+                **({"source_surface": item["source_surface"]} if item.get("source_surface") else {}),
+            }
+            for item in (policy.get("fallback_routes") or [])
+            if isinstance(item, dict)
+        ],
+        "eligibility_overrides": list(policy.get("eligibility_overrides") or []),
+        "similarity_threshold": float(policy.get("similarity_threshold") or 0.0),
+        "min_samples_for_confidence": int(policy.get("min_samples_for_confidence") or 1),
+        "store_response_bodies": bool(policy.get("store_response_bodies", False)),
+    }
+
+
 def _routing_candidate_identity(candidate: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(candidate.get(key) for key in (
         "requested_model",
@@ -495,6 +605,267 @@ def _suggest_adjacent_routed_model(requested: str) -> str:
     return requested
 
 
+def _fallback_route_for_requested(requested: str) -> str | None:
+    for route in ROUTING_EXPERIMENT_POLICY.get("fallback_routes") or []:
+        if not isinstance(route, dict):
+            continue
+        if str(route.get("requested_model") or "") != requested:
+            continue
+        routed = str(route.get("routed_model") or "").strip()
+        if routed and routed != requested:
+            return routed
+    suggested = _suggest_adjacent_routed_model(requested)
+    return suggested if suggested and suggested != requested else None
+
+
+def _blocklist_matches(
+    item: dict[str, Any],
+    *,
+    requested: str,
+    routed: str,
+    provider: str = "",
+    source_surface: str = "",
+    app_family: str = "",
+    category: str = "",
+    workflow_phase: str = "",
+    pathway_id: str = "",
+) -> bool:
+    model = str(item.get("model") or "").strip()
+    if model and model not in {requested, routed}:
+        return False
+    exact_fields = {
+        "requested_model": requested,
+        "routed_model": routed,
+        "provider": provider,
+        "source_surface": source_surface,
+        "app_family": app_family,
+        "category": category,
+        "workflow_phase": workflow_phase,
+        "pathway_id": pathway_id,
+    }
+    for key, actual in exact_fields.items():
+        expected = str(item.get(key) or "").strip()
+        if expected and expected != str(actual):
+            return False
+    return bool(model or any(str(item.get(key) or "").strip() for key in exact_fields))
+
+
+def _blocked_pathway(
+    *,
+    requested: str,
+    routed: str,
+    provider: str = "",
+    source_surface: str = "",
+    app_family: str = "",
+    category: str = "",
+    workflow_phase: str = "",
+    pathway_id: str = "",
+) -> dict[str, Any] | None:
+    for item in ROUTING_EXPERIMENT_POLICY.get("blocklist") or []:
+        if not isinstance(item, dict):
+            continue
+        if _blocklist_matches(
+            item,
+            requested=requested,
+            routed=routed,
+            provider=provider,
+            source_surface=source_surface,
+            app_family=app_family,
+            category=category,
+            workflow_phase=workflow_phase,
+            pathway_id=pathway_id,
+        ):
+            return dict(item)
+    return None
+
+
+def _preferred_pathway_for_requested(
+    requested: str,
+    *,
+    provider: str = "",
+    source_surface: str = "",
+    category: str = "",
+    workflow_phase: str = "",
+    stream: bool = False,
+    text_chars: int = 0,
+    input_tokens: int = 0,
+) -> dict[str, Any] | None:
+    app_family = _app_family(provider, source_surface, requested)
+    for candidate in ROUTING_EXPERIMENT_POLICY.get("preferred_pathways") or []:
+        if not isinstance(candidate, dict):
+            continue
+        if _candidate_matches(
+            candidate,
+            requested=requested,
+            provider=provider,
+            source_surface=source_surface,
+            app_family=app_family,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=stream,
+            text_chars=text_chars,
+            input_tokens=input_tokens,
+        ):
+            routed = str(candidate.get("routed_model") or "").strip()
+            if routed and not _blocked_pathway(
+                requested=requested,
+                routed=routed,
+                provider=provider,
+                source_surface=source_surface,
+                app_family=app_family,
+                category=category,
+                workflow_phase=workflow_phase,
+                pathway_id=str(candidate.get("candidate_id") or ""),
+            ):
+                return dict(candidate)
+    return None
+
+
+def _thin_candidate_for_requested(
+    requested: str,
+    *,
+    provider: str,
+    source_surface: str,
+    category: str,
+    workflow_phase: str,
+    stream: bool,
+    text_chars: int,
+    input_tokens: int,
+    target_model: str | None = None,
+    candidate_source: str = "deterministic-fallback",
+) -> dict[str, Any] | None:
+    if not bool(ROUTING_EXPERIMENT_POLICY.get("thin_client_routing")):
+        return None
+    app_family = _app_family(provider, source_surface, requested)
+    preferred = _preferred_pathway_for_requested(
+        requested,
+        provider=provider,
+        source_surface=source_surface,
+        category=category,
+        workflow_phase=workflow_phase,
+        stream=stream,
+        text_chars=text_chars,
+        input_tokens=input_tokens,
+    )
+    if preferred is not None:
+        preferred["policy_shape"] = "preferred_pathways"
+        preferred["candidate_source"] = preferred.get("candidate_source") or "client-preferred-pathway"
+        return preferred
+
+    if candidate_source == "deterministic-fallback" and str(category or "").startswith("tool"):
+        return None
+
+    routed = str(target_model or "").strip() or _fallback_route_for_requested(requested)
+    if not routed or routed == requested:
+        return None
+    if _blocked_pathway(
+        requested=requested,
+        routed=routed,
+        provider=provider,
+        source_surface=source_surface,
+        app_family=app_family,
+        category=category,
+        workflow_phase=workflow_phase,
+    ):
+        return None
+    material = {
+        "requested_model": requested,
+        "routed_model": routed,
+        "provider": provider,
+        "source_surface": source_surface,
+        "category": category,
+        "workflow_phase": workflow_phase,
+        "stream": bool(stream),
+        "candidate_source": candidate_source,
+    }
+    digest = hashlib.sha256(stable_json(material).encode("utf-8")).hexdigest()[:12]
+    return {
+        "candidate_id": f"thin-{candidate_source}:{digest}",
+        "requested_model": requested,
+        "routed_model": routed,
+        "provider": provider,
+        "source_surface": source_surface,
+        "app_family": app_family,
+        "category": category,
+        "workflow_phase": workflow_phase,
+        "stream": bool(stream),
+        "policy_shape": "fallback_routes" if candidate_source == "deterministic-fallback" else candidate_source,
+        "candidate_source": candidate_source,
+    }
+
+
+def routing_pathway_policy_decision(
+    *,
+    provider: str,
+    requested_model: str,
+    current_model: str,
+    target_model: str | None,
+    source_surface: str = "",
+    category: str = "",
+    workflow_phase: str = "",
+    stream: bool = False,
+    pathway_id: str = "",
+) -> dict[str, Any]:
+    refresh_experiment_policy_if_changed()
+    requested = str(requested_model or current_model or "").strip()
+    current = str(current_model or requested).strip()
+    target = str(target_model or "").strip()
+    app_family = _app_family(provider, source_surface, requested)
+    preferred = _preferred_pathway_for_requested(
+        requested,
+        provider=provider,
+        source_surface=source_surface,
+        category=category,
+        workflow_phase=workflow_phase,
+        stream=stream,
+    )
+    preferred_target = str((preferred or {}).get("routed_model") or "").strip()
+    decision = "allow"
+    reason = "managed-recommendation-allowed"
+    route_source = "managed-recommended"
+    if preferred_target and preferred_target != target:
+        target = preferred_target
+        decision = "preferred-override"
+        reason = "client-preferred-pathway"
+        route_source = "client-preferred-pathway"
+    blocked = _blocked_pathway(
+        requested=requested,
+        routed=target,
+        provider=provider,
+        source_surface=source_surface,
+        app_family=app_family,
+        category=category,
+        workflow_phase=workflow_phase,
+        pathway_id=pathway_id,
+    )
+    if blocked is not None:
+        decision = "blocked"
+        reason = "client-routing-blocklist"
+        route_source = "client-blocklist"
+    return {
+        "schema": "tokenclaw.routing_pathway_policy_decision.v1",
+        "decision": decision,
+        "allowed": decision != "blocked",
+        "reason": reason,
+        "route_source": route_source,
+        "requested_model": requested,
+        "current_model": current,
+        "original_target_model": str(target_model or "").strip() or None,
+        "target_model": target or None,
+        "preferred_pathway": _candidate_public_metadata(preferred) if preferred is not None else None,
+        "blocklist_match": blocked,
+        "policy_source": ROUTING_EXPERIMENT_POLICY_SOURCE,
+        "rule_path": ROUTING_EXPERIMENT_RULES_PATH,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+        },
+    }
+
+
 def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
     if data.get("profile_id") not in (None, ""):
         policy["profile_id"] = str(data["profile_id"])
@@ -504,6 +875,10 @@ def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str
             policy["mode"] = mode
     policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
     policy["kill_switch"] = _as_bool(data.get("kill_switch"), policy["kill_switch"])
+    policy["thin_client_routing"] = _as_bool(
+        data.get("thin_client_routing"),
+        bool(policy.get("thin_client_routing", True)),
+    )
     if data.get("sample_rate") is not None:
         policy["sample_rate"] = max(0.0, min(1.0, float(data["sample_rate"])))
     if data.get("daily_budget_usd") is not None:
@@ -531,6 +906,21 @@ def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str
         routing_candidates = data.get("candidates")
     if isinstance(routing_candidates, list):
         policy["routing_candidates"] = _clean_routing_candidates(routing_candidates, shape="routing_candidates")
+    if isinstance(data.get("preferred_pathways"), list):
+        policy["preferred_pathways"] = _clean_routing_candidates(data["preferred_pathways"], shape="preferred_pathways")
+    if data.get("fallback_routes") is not None:
+        policy["fallback_routes"] = _clean_fallback_routes(data.get("fallback_routes"))
+    if isinstance(data.get("blocklist"), list):
+        policy["blocklist"] = _clean_blocklist(data.get("blocklist"))
+    if (
+        any(key in data for key in ("blocklist", "preferred_pathways", "fallback_routes"))
+        and "model_pairs" not in data
+        and "routing_candidates" not in data
+        and "candidates" not in data
+    ):
+        policy["thin_client_routing"] = True
+        policy["model_pairs"] = []
+        policy["routing_candidates"] = []
     categories = data.get("categories")
     if isinstance(categories, list):
         policy["categories"] = [str(c) for c in categories if c is not None]
@@ -586,7 +976,17 @@ def _load_experiment_policy() -> tuple[dict[str, Any], str, str]:
             and primary_data.get("routing_candidates") is None
             and primary_data.get("candidates") is None
         )
+        primary_uses_thin_only = (
+            any(key in primary_data for key in ("blocklist", "preferred_pathways", "fallback_routes"))
+            and primary_data.get("model_pairs") is None
+            and primary_data.get("routing_candidates") is None
+            and primary_data.get("candidates") is None
+        )
         if primary_uses_model_pairs_only:
+            policy["thin_client_routing"] = False
+            return policy, "local-manual", str(primary_path)
+        if primary_uses_thin_only:
+            policy["thin_client_routing"] = True
             return policy, "local-manual", str(primary_path)
         existing_identities = {
             _routing_candidate_identity(candidate)
@@ -1551,7 +1951,52 @@ def routing_experiment_decision(
             meta["candidate_selector"] = selection["candidate_selector"]
             meta["candidate_selector_basis"] = selection["candidate_selector_basis"]
             meta["candidate_policy_shape"] = selection["candidate_policy_shape"]
+            if selected_candidate is None:
+                selected_candidate = _thin_candidate_for_requested(
+                    requested,
+                    provider=provider,
+                    source_surface=source_surface,
+                    category=category,
+                    workflow_phase=workflow_phase,
+                    stream=stream,
+                    text_chars=text_chars,
+                    input_tokens=input_tokens,
+                )
+                candidate = str((selected_candidate or {}).get("routed_model") or "").strip() or None
+                if selected_candidate is not None:
+                    meta["candidate_selector"] = "thin-client-fallback"
+                    meta["candidate_policy_shape"] = selected_candidate.get("policy_shape")
+            blocked = _blocked_pathway(
+                requested=requested,
+                routed=str(candidate or ""),
+                provider=provider,
+                source_surface=source_surface,
+                app_family=_app_family(provider, source_surface, requested),
+                category=category,
+                workflow_phase=workflow_phase,
+                pathway_id=str((selected_candidate or {}).get("candidate_id") or ""),
+            )
+            if blocked is not None:
+                meta["reason"] = "model-pair-blocked"
+                meta["blocklist_match"] = blocked
+                return meta
         if not candidate:
+            fallback_block_target = _fallback_route_for_requested(requested)
+            if fallback_block_target:
+                blocked = _blocked_pathway(
+                    requested=requested,
+                    routed=fallback_block_target,
+                    provider=provider,
+                    source_surface=source_surface,
+                    app_family=_app_family(provider, source_surface, requested),
+                    category=category,
+                    workflow_phase=workflow_phase,
+                )
+                if blocked is not None:
+                    meta["reason"] = "model-pair-blocked"
+                    meta["blocklist_match"] = blocked
+                    meta["blocked_routed_model"] = fallback_block_target
+                    return meta
             meta["reason"] = "model-pair-not-enabled"
             return meta
         if selected_candidate is not None:
@@ -1582,6 +2027,19 @@ def routing_experiment_decision(
             text_chars=text_chars,
             input_tokens=input_tokens,
         )
+        if applied_candidate is None:
+            applied_candidate = _thin_candidate_for_requested(
+                requested,
+                provider=provider,
+                source_surface=source_surface,
+                category=category,
+                workflow_phase=workflow_phase,
+                stream=stream,
+                text_chars=text_chars,
+                input_tokens=input_tokens,
+                target_model=routed,
+                candidate_source="applied-or-managed-route",
+            )
         if applied_candidate is None:
             meta["reason"] = "model-pair-not-enabled"
             return meta
