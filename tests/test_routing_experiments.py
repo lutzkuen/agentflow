@@ -108,6 +108,90 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         self.assertEqual(meta["primary_model"], "claude-sonnet-4-6")
         self.assertEqual(meta["shadow_model"], "claude-haiku-4-5-20251001")
 
+    def test_default_policy_collects_current_anthropic_opus_shadow_evidence(self):
+        pairs = {
+            (pair["requested_model"], pair["routed_model"])
+            for pair in experiments.ROUTING_EXPERIMENT_POLICY["model_pairs"]
+        }
+        self.assertIn(("claude-opus-4-8", "claude-sonnet-4-6"), pairs)
+
+        candidates = {
+            candidate["candidate_id"]: candidate
+            for candidate in experiments.ROUTING_EXPERIMENT_POLICY["routing_candidates"]
+        }
+        expected_ids = {
+            "anthropic-opus48-to-sonnet46-chat",
+            "anthropic-opus48-to-sonnet46-tool-result-stream",
+            "anthropic-opus48-to-sonnet46-tool-light",
+        }
+        self.assertTrue(expected_ids.issubset(candidates))
+        for candidate_id in expected_ids:
+            self.assertEqual(candidates[candidate_id]["requested_model"], "claude-opus-4-8")
+            self.assertEqual(candidates[candidate_id]["routed_model"], "claude-sonnet-4-6")
+            self.assertEqual(candidates[candidate_id]["provider"], "anthropic")
+            self.assertEqual(candidates[candidate_id]["source_surface"], "anthropic_messages")
+
+        chat = experiments.routing_experiment_decision(
+            {"model": "claude-opus-4-8"},
+            {
+                "requested_model": "claude-opus-4-8",
+                "routed_model": "claude-opus-4-8",
+                "category": "chat",
+                "text_chars": 12000,
+            },
+            stream=False,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            random_value=lambda: 0.0,
+        )
+        streaming_tool_result = experiments.routing_experiment_decision(
+            {"model": "claude-opus-4-8", "stream": True},
+            {
+                "requested_model": "claude-opus-4-8",
+                "routed_model": "claude-opus-4-8",
+                "category": "tool-result",
+                "text_chars": 90000,
+            },
+            stream=True,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            random_value=lambda: 0.0,
+        )
+        tool_light = experiments.routing_experiment_decision(
+            {"model": "claude-opus-4-8"},
+            {
+                "requested_model": "claude-opus-4-8",
+                "routed_model": "claude-opus-4-8",
+                "category": "tool-light",
+                "text_chars": 40000,
+            },
+            stream=False,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            random_value=lambda: 0.0,
+        )
+
+        self.assertTrue(chat["sampled"])
+        self.assertEqual(chat["reason"], "sampled-shadow-candidate-pass-through")
+        self.assertEqual(chat["candidate_id"], "anthropic-opus48-to-sonnet46-chat")
+        self.assertEqual(chat["primary_model"], "claude-opus-4-8")
+        self.assertEqual(chat["shadow_model"], "claude-sonnet-4-6")
+        self.assertEqual(chat["max_text_chars"], 32000)
+
+        self.assertTrue(streaming_tool_result["sampled"])
+        self.assertEqual(streaming_tool_result["reason"], "streaming-shadow-sampled")
+        self.assertEqual(
+            streaming_tool_result["candidate_id"],
+            "anthropic-opus48-to-sonnet46-tool-result-stream",
+        )
+        self.assertEqual(streaming_tool_result["shadow_model"], "claude-sonnet-4-6")
+        self.assertEqual(streaming_tool_result["max_text_chars"], 128000)
+
+        self.assertTrue(tool_light["sampled"])
+        self.assertEqual(tool_light["candidate_id"], "anthropic-opus48-to-sonnet46-tool-light")
+        self.assertEqual(tool_light["shadow_model"], "claude-sonnet-4-6")
+        self.assertEqual(tool_light["max_text_chars"], 64000)
+
     def test_streaming_shadow_gate_skips_non_anthropic_surfaces(self):
         meta = experiments.routing_experiment_decision(
             {"model": "gpt-5.4", "stream": True},

@@ -6,6 +6,10 @@
 # candidates, not active user-visible routing rules.
 #
 # Response bodies are not stored unless store_response_bodies is explicitly enabled.
+# When Anthropic requested model IDs advance, add adjacent Opus shadow
+# candidates here and extend the default-policy coverage test in
+# tests/test_routing_experiments.py so new traffic cannot silently collect
+# zero route-down evidence.
 
 profile_id: first-safe-openai-codex-claude-shadow-pass-through-v1
 mode: shadow_candidate_pass_through
@@ -28,6 +32,8 @@ streaming_shadow_source_surfaces:
 model_pairs:
   - requested_model: claude-sonnet-4-6
     routed_model: claude-haiku-4-5-20251001
+  - requested_model: claude-opus-4-8
+    routed_model: claude-sonnet-4-6
   - requested_model: claude-opus-4-5
     routed_model: claude-sonnet-4-6
   # Legacy fallback pairs for older parsers. Newer AgentFlow uses
@@ -75,6 +81,35 @@ routing_candidates:
     app_family: claude_code
     category: chat
     max_text_chars: 8000
+  - candidate_id: anthropic-opus48-to-sonnet46-chat
+    label: Anthropic Opus 4.8 to Sonnet 4.6 chat evidence
+    requested_model: claude-opus-4-8
+    routed_model: claude-sonnet-4-6
+    provider: anthropic
+    source_surface: anthropic_messages
+    app_family: claude_code
+    category: chat
+    max_text_chars: 32000
+  - candidate_id: anthropic-opus48-to-sonnet46-tool-result-stream
+    label: Anthropic Opus 4.8 to Sonnet 4.6 streaming tool-result evidence
+    requested_model: claude-opus-4-8
+    routed_model: claude-sonnet-4-6
+    provider: anthropic
+    source_surface: anthropic_messages
+    app_family: claude_code
+    category: tool-result
+    stream: true
+    max_text_chars: 128000
+    sample_rate: 0.10
+  - candidate_id: anthropic-opus48-to-sonnet46-tool-light
+    label: Anthropic Opus 4.8 to Sonnet 4.6 tool-light evidence
+    requested_model: claude-opus-4-8
+    routed_model: claude-sonnet-4-6
+    provider: anthropic
+    source_surface: anthropic_messages
+    app_family: claude_code
+    category: tool-light
+    max_text_chars: 64000
 
   # Codex app / Codex-like traffic: prefer Codex-specialized adjacent candidates.
   - candidate_id: codex-gpt55-to-gpt53-codex-summary
@@ -188,6 +223,25 @@ categories:
   - tool-result
   - tool-heavy
   - codex-turn
+eligibility_overrides:
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: chat
+    max_text_chars: 32000
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: tool-light
+    max_text_chars: 64000
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: tool-result
+    stream: true
+    max_text_chars: 128000
+    sample_rate: 0.10
+    daily_budget_usd: 10.0
 similarity_threshold: 0.86
 min_samples_for_confidence: 20
 store_response_bodies: false

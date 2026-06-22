@@ -2,6 +2,9 @@ profile_id: first-safe-openai-codex-claude-shadow-pass-through-v1
 mode: shadow_candidate_pass_through
 enabled: true
 kill_switch: false
+# Keep current Anthropic requested model IDs represented here and in
+# tokenclaw/routing_experiments.yaml; tests/test_routing_experiments.py guards
+# that new Opus traffic has default shadow evidence candidates.
 sample_rate: 0.10
 daily_budget_usd: 10.0
 min_text_chars: 0
@@ -66,8 +69,8 @@ routing_candidates:
     app_family: claude_code
     category: chat
     max_text_chars: 8000
-  - candidate_id: anthropic-opus48-to-sonnet46-tool-result
-    label: Anthropic Opus 4.8 to Sonnet 4.6 tool-result evidence
+  - candidate_id: anthropic-opus48-to-sonnet46-tool-result-stream
+    label: Anthropic Opus 4.8 to Sonnet 4.6 streaming tool-result evidence
     requested_model: claude-opus-4-8
     routed_model: claude-sonnet-4-6
     provider: anthropic
@@ -77,8 +80,8 @@ routing_candidates:
     stream: true
     max_text_chars: 128000
     sample_rate: 0.10
-  - candidate_id: anthropic-opus48-to-sonnet46-summary
-    label: Anthropic Opus 4.8 to Sonnet 4.6 summary evidence
+  - candidate_id: anthropic-opus48-to-sonnet46-chat
+    label: Anthropic Opus 4.8 to Sonnet 4.6 chat evidence
     requested_model: claude-opus-4-8
     routed_model: claude-sonnet-4-6
     provider: anthropic
@@ -245,6 +248,16 @@ eligibility_overrides:
     provider: anthropic
     stream: true
     max_text_chars: 32000
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: chat
+    max_text_chars: 32000
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: tool-light
+    max_text_chars: 64000
   - scope: category
     provider: anthropic
     source_surface: anthropic_messages
