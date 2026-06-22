@@ -403,7 +403,7 @@ def _clean_routing_candidate(raw: dict[str, Any], index: int, *, shape: str) -> 
         "routed_model": routed,
         "policy_shape": shape,
     }
-    for key in ("provider", "source_surface", "app_family", "category", "workflow_phase"):
+    for key in ("provider", "source_surface", "app_family", "category", "workflow_phase", "candidate_source"):
         if raw.get(key) not in (None, ""):
             candidate[key] = str(raw[key])
     if raw.get("stream") is not None:
@@ -998,7 +998,7 @@ def _candidate_public_metadata(candidate: dict[str, Any] | None) -> dict[str, An
         "policy_shape": candidate.get("policy_shape"),
         "sample_weight": candidate.get("sample_weight", 1.0),
     }
-    for key in ("provider", "source_surface", "app_family", "category", "workflow_phase", "stream", "sample_rate"):
+    for key in ("provider", "source_surface", "app_family", "category", "workflow_phase", "candidate_source", "stream", "sample_rate"):
         if key in candidate:
             public[key] = candidate[key]
     return public
@@ -1175,6 +1175,7 @@ def append_dashboard_routing_candidate(payload: dict[str, Any]) -> dict[str, Any
             "app_family",
             "category",
             "workflow_phase",
+            "candidate_source",
             "stream",
             "min_text_chars",
             "max_text_chars",
@@ -1186,6 +1187,7 @@ def append_dashboard_routing_candidate(payload: dict[str, Any]) -> dict[str, Any
         if payload.get(key) not in (None, "")
     }
     raw_candidate.setdefault("candidate_id", payload.get("candidate_id") or _candidate_id_for_dashboard(raw_candidate))
+    raw_candidate.setdefault("candidate_source", "dashboard-recent-call")
     raw_candidate.setdefault("sample_rate", 0.05)
     candidate = _clean_routing_candidate(raw_candidate, 0, shape="routing_candidates")
     if candidate is None:
@@ -2464,6 +2466,506 @@ def _count_rows(mapping: dict[str, int], *, key_name: str = "reason") -> list[di
     ]
 
 
+def _is_dashboard_routing_candidate(candidate: dict[str, Any]) -> bool:
+    candidate_id = str(candidate.get("candidate_id") or "")
+    source = str(candidate.get("candidate_source") or candidate.get("source") or "").replace("_", "-")
+    return candidate_id.startswith("dashboard-") or source in {
+        "dashboard-recent-call",
+        "dashboard-added",
+        "dashboard",
+    }
+
+
+def _routing_candidate_fingerprint(candidate: dict[str, Any]) -> str:
+    material = {
+        key: candidate.get(key)
+        for key in (
+            "candidate_id",
+            "requested_model",
+            "routed_model",
+            "provider",
+            "source_surface",
+            "app_family",
+            "category",
+            "workflow_phase",
+            "stream",
+            "min_text_chars",
+            "max_text_chars",
+            "min_input_tokens",
+            "max_input_tokens",
+            "candidate_source",
+        )
+        if candidate.get(key) not in (None, "")
+    }
+    digest = hashlib.sha256(stable_json(material).encode("utf-8")).hexdigest()[:16]
+    return f"routing-candidate:{digest}"
+
+
+def _public_counterfactual_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "fingerprint": _routing_candidate_fingerprint(candidate),
+        "candidate_source": _public_label(candidate.get("candidate_source"), fallback="dashboard-recent-call"),
+        "provider": _public_label(candidate.get("provider"), fallback="unknown"),
+        "source_surface": _public_label(candidate.get("source_surface"), fallback="unknown"),
+        "app_family": _public_label(candidate.get("app_family"), fallback="unknown"),
+        "requested_model": _public_label(candidate.get("requested_model"), fallback=""),
+        "routed_model": _public_label(candidate.get("routed_model"), fallback=""),
+        "category": _public_label(candidate.get("category"), fallback="unknown"),
+        "workflow_phase": _public_label(candidate.get("workflow_phase"), fallback="unknown"),
+        "stream": bool(candidate.get("stream")) if candidate.get("stream") is not None else None,
+        "text_chars_bucket": _text_chars_bucket(candidate.get("max_text_chars") or 0),
+    }
+
+
+def _nested_dicts(*values: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for value in values:
+        if isinstance(value, dict):
+            result.append(value)
+            for nested in value.values():
+                if isinstance(nested, dict):
+                    result.append(nested)
+    return result
+
+
+def _routing_lifecycle_status(
+    *,
+    candidate: dict[str, Any],
+    row: dict[str, Any],
+    routing: dict[str, Any],
+    experiment: dict[str, Any],
+) -> str:
+    labels: list[str] = []
+    for source in _nested_dicts(
+        routing,
+        experiment,
+        routing.get("routing_experiment"),
+        routing.get("openai_canary"),
+        routing.get("anthropic_canary"),
+        routing.get("canary"),
+        routing.get("managed_recommendation"),
+    ):
+        for key in (
+            "lifecycle_event",
+            "lifecycle_status",
+            "canary_cohort",
+            "cohort",
+            "status",
+            "reason",
+            "fallback_reason",
+            "outcome_bucket",
+            "routing_outcome_label",
+        ):
+            value = source.get(key)
+            if value not in (None, ""):
+                labels.append(str(value).lower().replace("_", "-"))
+    label_text = " ".join(labels)
+    if "safety-stop" in label_text or "safety-stopped" in label_text:
+        return "safety_stopped"
+    if "rollback" in label_text:
+        return "rollback"
+    if "holdout" in label_text:
+        return "canary_holdout"
+    if "canary-applied" in label_text or "selected-canary" in label_text:
+        return "canary_applied"
+    if experiment.get("shadow_only") or experiment.get("counterfactual"):
+        return "canary_holdout"
+    routed = str(row.get("routed_model") or "")
+    if routed and routed == str(candidate.get("routed_model") or ""):
+        return "canary_applied"
+    requested = str(row.get("requested_model") or "")
+    if routed and requested and routed == requested:
+        return "canary_holdout"
+    return "unknown"
+
+
+def _routing_row_matches_candidate(
+    candidate: dict[str, Any],
+    row: dict[str, Any],
+    *,
+    routing: dict[str, Any],
+    experiment: dict[str, Any],
+) -> bool:
+    candidate_id = str(candidate.get("candidate_id") or "")
+    selected_candidate = experiment.get("selected_candidate")
+    selected_candidate_id = selected_candidate.get("candidate_id") if isinstance(selected_candidate, dict) else ""
+    observed_candidate_id = str(
+        experiment.get("candidate_id")
+        or selected_candidate_id
+        or ""
+    )
+    if candidate_id and observed_candidate_id == candidate_id:
+        return True
+    requested = str(row.get("requested_model") or experiment.get("requested_model") or "").strip()
+    provider = str(row.get("provider") or experiment.get("provider") or candidate.get("provider") or "unknown")
+    source_surface = str(
+        row.get("source_surface")
+        or experiment.get("source_surface")
+        or candidate.get("source_surface")
+        or "unknown"
+    )
+    category = str(row.get("category") or experiment.get("category") or routing.get("category") or "unknown")
+    workflow_phase = _workflow_phase_from_payloads(experiment, routing)
+    stream = bool(row.get("stream"))
+    text_chars = _as_non_negative_int(
+        experiment.get("text_chars")
+        or routing.get("text_chars")
+        or row.get("text_chars")
+        or 0
+    ) or 0
+    input_tokens = _as_non_negative_int(
+        row.get("actual_input_tokens")
+        or row.get("input_tokens_est")
+        or experiment.get("input_tokens_est")
+        or routing.get("input_tokens_est")
+        or 0
+    ) or 0
+    return _candidate_matches(
+        candidate,
+        requested=requested,
+        provider=provider,
+        source_surface=source_surface,
+        app_family=_app_family(provider, source_surface, requested),
+        category=category,
+        workflow_phase=workflow_phase,
+        stream=stream,
+        text_chars=text_chars,
+        input_tokens=input_tokens,
+    )
+
+
+def _new_lifecycle_bucket(candidate: dict[str, Any]) -> dict[str, Any]:
+    public = _public_counterfactual_candidate(candidate)
+    return {
+        "schema": "tokenclaw.routing_experiment_lifecycle_outcome.v1",
+        **public,
+        "status": "no-local-traffic",
+        "matched_count": 0,
+        "observed_count": 0,
+        "applied_count": 0,
+        "holdout_count": 0,
+        "safety_stop_count": 0,
+        "rollback_count": 0,
+        "skipped_count": 0,
+        "unknown_count": 0,
+        "error_count": 0,
+        "retry_count": 0,
+        "fallback_count": 0,
+        "projected_saved_usd": 0.0,
+        "observed_saved_usd": 0.0,
+        "projected_savings_per_1000_calls_usd": 0.0,
+        "observed_savings_per_1000_calls_usd": 0.0,
+        "latest_observed_at": None,
+        "freshness": {
+            "schema": "tokenclaw.routing_experiment_lifecycle_freshness.v1",
+            "latest_observed_age_hours": None,
+            "max_age_hours": ROUTING_PROMOTION_FRESHNESS_MAX_AGE_HOURS,
+            "stale": True,
+            "reason": "no-local-traffic",
+        },
+        "cohort_counts": {
+            "canary_applied": 0,
+            "canary_holdout": 0,
+            "safety_stopped": 0,
+            "rollback": 0,
+            "skipped": 0,
+            "unknown": 0,
+        },
+        "coverage": {
+            "schema": "tokenclaw.routing_experiment_lifecycle_coverage.v1",
+            "matched_count": 0,
+            "applied_count": 0,
+            "holdout_count": 0,
+            "has_applied_coverage": False,
+            "has_holdout_coverage": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "regression_deltas": {
+            "schema": "tokenclaw.routing_experiment_lifecycle_regression_deltas.v1",
+            "error_rate_delta": 0.0,
+            "retry_rate_delta": 0.0,
+            "fallback_rate_delta": 0.0,
+            "applied_error_rate": 0.0,
+            "holdout_error_rate": 0.0,
+            "applied_retry_rate": 0.0,
+            "holdout_retry_rate": 0.0,
+            "applied_fallback_rate": 0.0,
+            "holdout_fallback_rate": 0.0,
+        },
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "raw_response_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+            "managed_server_calls_made": False,
+            "provider_calls_made": False,
+            "policy_files_written": False,
+        },
+        "_applied_errors": 0,
+        "_holdout_errors": 0,
+        "_applied_retries": 0,
+        "_holdout_retries": 0,
+        "_applied_fallbacks": 0,
+        "_holdout_fallbacks": 0,
+    }
+
+
+def build_routing_experiment_lifecycle_outcomes(
+    store_obj: Any,
+    *,
+    limit: int = 50,
+    since: str | None = None,
+    window_hours: float | None = 168.0,
+) -> dict[str, Any]:
+    """Summarize local lifecycle evidence for dashboard-added routing candidates."""
+    dashboard_candidates = [
+        dict(candidate)
+        for candidate in _all_routing_candidates()
+        if isinstance(candidate, dict) and _is_dashboard_routing_candidate(candidate)
+    ]
+    capped = max(1, min(int(limit or 1), 1000))
+    buckets = {
+        _routing_candidate_fingerprint(candidate): _new_lifecycle_bucket(candidate)
+        for candidate in dashboard_candidates
+    }
+    cutoff = _since_cutoff_iso(since=since, window_hours=window_hours)
+    params: list[Any] = []
+    where = ""
+    if cutoff:
+        where = "where created_at >= ?"
+        params.append(cutoff)
+    try:
+        rows = store_obj.conn.execute(
+            f"""
+            select id, created_at,
+                   coalesce(provider, 'anthropic') as provider,
+                   coalesce(source_surface, 'anthropic_messages') as source_surface,
+                   coalesce(stream, 0) as stream,
+                   requested_model,
+                   routed_model,
+                   coalesce(category, 'unknown') as category,
+                   status_code,
+                   latency_ms,
+                   input_tokens_est,
+                   actual_input_tokens,
+                   cost_est_usd,
+                   cost_baseline_usd,
+                   retry_count,
+                   routing_outcome_label,
+                   error,
+                   routing_json
+            from calls
+            {where}
+            order by created_at desc
+            limit 50000
+            """,
+            tuple(params),
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    for raw_row in rows:
+        row = dict(raw_row)
+        routing = _parse_jsonish(row.get("routing_json"))
+        experiment = routing.get("routing_experiment") if isinstance(routing.get("routing_experiment"), dict) else {}
+        if row.get("routing_outcome_label") not in (None, ""):
+            routing["routing_outcome_label"] = row.get("routing_outcome_label")
+        for candidate in dashboard_candidates:
+            if not _routing_row_matches_candidate(candidate, row, routing=routing, experiment=experiment):
+                continue
+            bucket = buckets[_routing_candidate_fingerprint(candidate)]
+            lifecycle = _routing_lifecycle_status(candidate=candidate, row=row, routing=routing, experiment=experiment)
+            bucket["matched_count"] += 1
+            bucket["observed_count"] += 1
+            bucket["status"] = "observed"
+            if lifecycle == "canary_applied":
+                bucket["applied_count"] += 1
+                bucket["cohort_counts"]["canary_applied"] += 1
+            elif lifecycle == "canary_holdout":
+                bucket["holdout_count"] += 1
+                bucket["cohort_counts"]["canary_holdout"] += 1
+            elif lifecycle == "safety_stopped":
+                bucket["safety_stop_count"] += 1
+                bucket["cohort_counts"]["safety_stopped"] += 1
+            elif lifecycle == "rollback":
+                bucket["rollback_count"] += 1
+                bucket["cohort_counts"]["rollback"] += 1
+            elif lifecycle == "skipped":
+                bucket["skipped_count"] += 1
+                bucket["cohort_counts"]["skipped"] += 1
+            else:
+                bucket["unknown_count"] += 1
+                bucket["cohort_counts"]["unknown"] += 1
+            status_code = _as_non_negative_int(row.get("status_code"))
+            retry_count = _as_non_negative_int(row.get("retry_count")) or 0
+            has_error = bool(row.get("error")) or (status_code is not None and status_code >= 400)
+            has_fallback = bool(routing.get("fallback_reason") or experiment.get("fallback_reason"))
+            if has_error:
+                bucket["error_count"] += 1
+            if retry_count:
+                bucket["retry_count"] += retry_count
+            if has_fallback:
+                bucket["fallback_count"] += 1
+            if lifecycle == "canary_applied":
+                bucket["_applied_errors"] += 1 if has_error else 0
+                bucket["_applied_retries"] += retry_count
+                bucket["_applied_fallbacks"] += 1 if has_fallback else 0
+                baseline = float(row.get("cost_baseline_usd") or 0.0)
+                actual = float(row.get("cost_est_usd") or 0.0)
+                if baseline > actual:
+                    bucket["observed_saved_usd"] += baseline - actual
+            elif lifecycle == "canary_holdout":
+                bucket["_holdout_errors"] += 1 if has_error else 0
+                bucket["_holdout_retries"] += retry_count
+                bucket["_holdout_fallbacks"] += 1 if has_fallback else 0
+            if bucket["latest_observed_at"] is None or str(row.get("created_at")) > str(bucket["latest_observed_at"]):
+                bucket["latest_observed_at"] = row.get("created_at")
+
+    try:
+        experiment_rows = store_obj.conn.execute(
+            f"""
+            select created_at,
+                   coalesce(provider, 'anthropic') as provider,
+                   coalesce(source_surface, 'anthropic_messages') as source_surface,
+                   coalesce(stream, 0) as stream,
+                   requested_model,
+                   routed_model,
+                   coalesce(category, 'unknown') as category,
+                   primary_cost_est_usd,
+                   shadow_cost_est_usd,
+                   experiment_json,
+                   routing_json
+            from routing_experiments
+            {where}
+            order by created_at desc
+            limit 50000
+            """,
+            tuple(params),
+        ).fetchall()
+    except Exception:
+        experiment_rows = []
+    for raw_row in experiment_rows:
+        row = dict(raw_row)
+        experiment = _parse_jsonish(row.get("experiment_json"))
+        routing = _parse_jsonish(row.get("routing_json"))
+        for candidate in dashboard_candidates:
+            if not _routing_row_matches_candidate(candidate, row, routing=routing, experiment=experiment):
+                continue
+            bucket = buckets[_routing_candidate_fingerprint(candidate)]
+            primary = float(row.get("primary_cost_est_usd") or 0.0)
+            shadow = float(row.get("shadow_cost_est_usd") or 0.0)
+            if primary > shadow:
+                bucket["projected_saved_usd"] += primary - shadow
+            if bucket["latest_observed_at"] is None or str(row.get("created_at")) > str(bucket["latest_observed_at"]):
+                bucket["latest_observed_at"] = row.get("created_at")
+
+    outcomes: list[dict[str, Any]] = []
+    for bucket in buckets.values():
+        matched = int(bucket["matched_count"])
+        applied = int(bucket["applied_count"])
+        holdout = int(bucket["holdout_count"])
+        projected = round(float(bucket["projected_saved_usd"]), 6)
+        observed = round(float(bucket["observed_saved_usd"]), 6)
+        bucket["projected_saved_usd"] = projected
+        bucket["observed_saved_usd"] = observed
+        bucket["projected_savings_per_1000_calls_usd"] = round((projected / matched) * 1000, 6) if matched else 0.0
+        bucket["observed_savings_per_1000_calls_usd"] = round((observed / applied) * 1000, 6) if applied else 0.0
+        bucket["coverage"] = {
+            **bucket["coverage"],
+            "matched_count": matched,
+            "applied_count": applied,
+            "holdout_count": holdout,
+            "has_applied_coverage": applied > 0,
+            "has_holdout_coverage": holdout > 0,
+        }
+        applied_error_rate = bucket["_applied_errors"] / applied if applied else 0.0
+        holdout_error_rate = bucket["_holdout_errors"] / holdout if holdout else 0.0
+        applied_retry_rate = bucket["_applied_retries"] / applied if applied else 0.0
+        holdout_retry_rate = bucket["_holdout_retries"] / holdout if holdout else 0.0
+        applied_fallback_rate = bucket["_applied_fallbacks"] / applied if applied else 0.0
+        holdout_fallback_rate = bucket["_holdout_fallbacks"] / holdout if holdout else 0.0
+        bucket["regression_deltas"] = {
+            **bucket["regression_deltas"],
+            "error_rate_delta": round(applied_error_rate - holdout_error_rate, 6),
+            "retry_rate_delta": round(applied_retry_rate - holdout_retry_rate, 6),
+            "fallback_rate_delta": round(applied_fallback_rate - holdout_fallback_rate, 6),
+            "applied_error_rate": round(applied_error_rate, 6),
+            "holdout_error_rate": round(holdout_error_rate, 6),
+            "applied_retry_rate": round(applied_retry_rate, 6),
+            "holdout_retry_rate": round(holdout_retry_rate, 6),
+            "applied_fallback_rate": round(applied_fallback_rate, 6),
+            "holdout_fallback_rate": round(holdout_fallback_rate, 6),
+        }
+        age = _age_hours(bucket.get("latest_observed_at"))
+        stale = age is None or age > ROUTING_PROMOTION_FRESHNESS_MAX_AGE_HOURS
+        bucket["freshness"] = {
+            **bucket["freshness"],
+            "latest_observed_age_hours": round(age, 3) if age is not None else None,
+            "stale": bool(stale),
+            "reason": "stale-lifecycle-evidence" if stale and age is not None else "fresh" if not stale else "no-local-traffic",
+        }
+        if applied > 0 and holdout > 0 and not bucket["safety_stop_count"] and not bucket["rollback_count"]:
+            bucket["status"] = "coverage-ready"
+        elif matched > 0:
+            bucket["status"] = "insufficient-lifecycle-coverage"
+        for key in list(bucket):
+            if key.startswith("_"):
+                bucket.pop(key, None)
+        outcomes.append(bucket)
+    outcomes.sort(
+        key=lambda item: (
+            int(item.get("applied_count") or 0) + int(item.get("holdout_count") or 0),
+            str(item.get("latest_observed_at") or ""),
+        ),
+        reverse=True,
+    )
+    outcomes = outcomes[:capped]
+    status_counts: dict[str, int] = {}
+    for outcome in outcomes:
+        _increment_count(status_counts, outcome.get("status"), fallback="unknown")
+    return {
+        "schema": "tokenclaw.routing_experiment_lifecycle_outcomes.v1",
+        "generated_at": utc_now(),
+        "status": "tracked" if dashboard_candidates else "no-dashboard-routing-candidates",
+        "candidate_source": "dashboard-recent-call",
+        "dashboard_candidate_count": len(dashboard_candidates),
+        "outcome_count": len(outcomes),
+        "summary": {
+            "matched_count": sum(int(item.get("matched_count") or 0) for item in outcomes),
+            "applied_count": sum(int(item.get("applied_count") or 0) for item in outcomes),
+            "holdout_count": sum(int(item.get("holdout_count") or 0) for item in outcomes),
+            "safety_stop_count": sum(int(item.get("safety_stop_count") or 0) for item in outcomes),
+            "rollback_count": sum(int(item.get("rollback_count") or 0) for item in outcomes),
+            "observed_saved_usd": round(sum(float(item.get("observed_saved_usd") or 0.0) for item in outcomes), 6),
+            "projected_saved_usd": round(sum(float(item.get("projected_saved_usd") or 0.0) for item in outcomes), 6),
+            "status_counts": _count_rows(status_counts, key_name="status"),
+        },
+        "outcomes": outcomes,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "raw_response_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+            "managed_server_calls_made": False,
+            "provider_calls_made": False,
+            "policy_files_written": False,
+        },
+    }
+
+
 def _since_cutoff_iso(*, since: str | None = None, window_hours: float | None = 24.0) -> str | None:
     if since:
         parsed = _parse_utc(since)
@@ -3563,6 +4065,12 @@ def build_routing_experiment_report(
         limit=limit,
     )
     readiness_scoreboard = _build_routing_candidate_readiness_scoreboard(candidates)
+    lifecycle_outcomes = build_routing_experiment_lifecycle_outcomes(
+        store_obj,
+        limit=limit,
+        since=since,
+        window_hours=window_hours if window_hours is not None else 168.0,
+    )
     return {
         "schema": "tokenclaw.routing_experiment_report.v1",
         "generated_at": utc_now(),
@@ -3628,6 +4136,9 @@ def build_routing_experiment_report(
             "routing_readiness_ready_count": readiness_scoreboard.get("summary", {}).get("ready_count", 0),
             "routing_readiness_insufficient_evidence_count": readiness_scoreboard.get("summary", {}).get("insufficient_evidence_count", 0),
             "routing_readiness_regressing_count": readiness_scoreboard.get("summary", {}).get("regressing_count", 0),
+            "routing_lifecycle_outcome_count": lifecycle_outcomes.get("outcome_count", 0),
+            "routing_lifecycle_applied_count": lifecycle_outcomes.get("summary", {}).get("applied_count", 0),
+            "routing_lifecycle_holdout_count": lifecycle_outcomes.get("summary", {}).get("holdout_count", 0),
         },
         "decision_reasons": decision_reasons,
         "decision_surfaces": decision_surfaces,
@@ -3635,6 +4146,7 @@ def build_routing_experiment_report(
         "claude_shadow_yield": claude_shadow_yield,
         "post_fix_shadow_yield": post_fix_shadow_yield,
         "readiness_scoreboard": readiness_scoreboard,
+        "lifecycle_outcomes": lifecycle_outcomes,
         "candidates": candidates,
         "privacy": {
             "metadata_only": True,

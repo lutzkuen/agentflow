@@ -2303,6 +2303,185 @@ similarity_threshold: 0.86
         self.assertEqual(full["routing_experiment_report"]["candidates"][0]["promotion_verdict"], "promote")
         self.assertEqual(full["summary"]["routing_experiment_promotion_ready_candidates"], 1)
 
+    def test_dashboard_added_candidate_lifecycle_outcomes_are_metadata_only(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            candidate_id = "dashboard-anthropic-claude-opus-5-0-to-claude-sonnet-4-6-chat-fixture"
+            (config / "routing_experiments.yaml").write_text(
+                f"""
+enabled: true
+mode: applied_routed_down
+sample_rate: 1.0
+daily_budget_usd: 10.0
+providers:
+  - anthropic
+source_surfaces:
+  - anthropic_messages
+categories:
+  - chat
+routing_candidates:
+  - candidate_id: {candidate_id}
+    candidate_source: dashboard-recent-call
+    requested_model: claude-opus-5-0
+    routed_model: claude-sonnet-4-6
+    provider: anthropic
+    source_surface: anthropic_messages
+    app_family: claude_code
+    category: chat
+    stream: false
+    max_text_chars: 32000
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
+            try:
+                base_experiment = {
+                    "schema": "tokenclaw.routing_experiment_decision.v1",
+                    "candidate_id": candidate_id,
+                    "candidate_source": "dashboard-recent-call",
+                    "provider": "anthropic",
+                    "source_surface": "anthropic_messages",
+                    "requested_model": "claude-opus-5-0",
+                    "routed_model": "claude-sonnet-4-6",
+                    "category": "chat",
+                    "status": "selected",
+                    "sampled": True,
+                    "mode": "applied_routed_down",
+                    "privacy": {
+                        "metadata_only": True,
+                        "raw_prompts_included": False,
+                        "provider_bodies_included": False,
+                        "request_ids_included": False,
+                        "session_ids_included": False,
+                    },
+                }
+                applied_routing = {
+                    "routing_experiment": {
+                        **base_experiment,
+                        "canary_cohort": "canary_applied",
+                        "reason": "selected-canary",
+                    }
+                }
+                holdout_routing = {
+                    "routing_experiment": {
+                        **base_experiment,
+                        "canary_cohort": "canary_holdout",
+                        "reason": "selected-holdout",
+                    }
+                }
+                store.log_call(
+                    id="local-applied-call-id-not-in-output",
+                    created_at="2026-06-22T08:00:00+00:00",
+                    path="/v1/messages",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-opus-5-0",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=900,
+                    input_tokens_est=2400,
+                    actual_input_tokens=2400,
+                    output_tokens_est=200,
+                    actual_output_tokens=200,
+                    cost_baseline_usd=0.09,
+                    cost_est_usd=0.03,
+                    category="chat",
+                    retry_count=0,
+                    routing_json=stable_json(applied_routing),
+                    error=None,
+                )
+                store.log_call(
+                    id="local-holdout-call-id-not-in-output",
+                    created_at="2026-06-22T08:05:00+00:00",
+                    path="/v1/messages",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-opus-5-0",
+                    routed_model="claude-opus-5-0",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1100,
+                    input_tokens_est=2500,
+                    actual_input_tokens=2500,
+                    output_tokens_est=210,
+                    actual_output_tokens=210,
+                    cost_baseline_usd=0.095,
+                    cost_est_usd=0.095,
+                    category="chat",
+                    retry_count=0,
+                    routing_json=stable_json(holdout_routing),
+                    error=None,
+                )
+                store.log_routing_experiment(
+                    id="shadow-row-not-in-output",
+                    call_id="shadow-call-not-in-output",
+                    created_at="2026-06-22T08:10:00+00:00",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    stream=0,
+                    requested_model="claude-opus-5-0",
+                    routed_model="claude-sonnet-4-6",
+                    primary_model="claude-opus-5-0",
+                    shadow_model="claude-sonnet-4-6",
+                    category="chat",
+                    routing_reason="sampled-routed-down-call",
+                    input_tokens_est=2400,
+                    primary_status_code=200,
+                    shadow_status_code=200,
+                    primary_latency_ms=1100,
+                    shadow_latency_ms=900,
+                    primary_output_chars=10,
+                    shadow_output_chars=10,
+                    primary_output_sha256="primary",
+                    shadow_output_sha256="shadow",
+                    output_similarity=0.99,
+                    passed_threshold=1,
+                    primary_cost_est_usd=0.09,
+                    shadow_cost_est_usd=0.03,
+                    routing_json=stable_json(applied_routing),
+                    experiment_json=stable_json(base_experiment),
+                )
+                lifecycle = manual.build_routing_experiment_lifecycle_outcomes(store, limit=10, window_hours=0)
+                report = manual.build_routing_experiment_report(store, limit=10, window_hours=0)
+            finally:
+                store.conn.close()
+
+        self.assertEqual(lifecycle["schema"], "tokenclaw.routing_experiment_lifecycle_outcomes.v1")
+        self.assertEqual(lifecycle["summary"]["applied_count"], 1)
+        self.assertEqual(lifecycle["summary"]["holdout_count"], 1)
+        self.assertEqual(lifecycle["summary"]["matched_count"], 2)
+        self.assertEqual(lifecycle["summary"]["observed_saved_usd"], 0.06)
+        outcome = lifecycle["outcomes"][0]
+        self.assertEqual(outcome["status"], "coverage-ready")
+        self.assertTrue(outcome["fingerprint"].startswith("routing-candidate:"))
+        self.assertEqual(outcome["candidate_source"], "dashboard-recent-call")
+        self.assertEqual(outcome["applied_count"], 1)
+        self.assertEqual(outcome["holdout_count"], 1)
+        self.assertEqual(outcome["safety_stop_count"], 0)
+        self.assertEqual(outcome["rollback_count"], 0)
+        self.assertEqual(outcome["observed_savings_per_1000_calls_usd"], 60.0)
+        self.assertEqual(outcome["projected_savings_per_1000_calls_usd"], 30.0)
+        self.assertEqual(outcome["regression_deltas"]["error_rate_delta"], 0.0)
+        self.assertEqual(outcome["regression_deltas"]["retry_rate_delta"], 0.0)
+        self.assertTrue(outcome["coverage"]["has_applied_coverage"])
+        self.assertTrue(outcome["coverage"]["has_holdout_coverage"])
+        self.assertTrue(outcome["privacy"]["metadata_only"])
+        self.assertFalse(outcome["privacy"]["individual_candidate_ids_included"])
+        self.assertFalse(outcome["privacy"]["request_ids_included"])
+        rendered = stable_json(lifecycle)
+        self.assertNotIn(candidate_id, rendered)
+        self.assertNotIn("local-applied-call-id-not-in-output", rendered)
+        self.assertIn("lifecycle_outcomes", report)
+        self.assertEqual(report["summary"]["routing_lifecycle_applied_count"], 1)
+        self.assertEqual(report["summary"]["routing_lifecycle_holdout_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
