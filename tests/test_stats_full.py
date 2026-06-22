@@ -143,6 +143,128 @@ request_shape_repeated_context_canaries:
         self.assertNotIn("raw-policy-secret-should-not-leak", rendered)
         self.assertNotIn("raw-cohort-secret-should-not-leak", rendered)
 
+    def test_stats_full_exposes_closed_loop_activation_readiness_without_private_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_path = os.path.join(tmp, "latest.plan.json")
+            plan = {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "local_activation_next_action_queue": {
+                    "schema": "tokenclaw.local_activation_next_action_queue.v1",
+                    "status": "ranked",
+                    "entries": [
+                        {
+                            "rank": 1,
+                            "lever": "cache",
+                            "local_action_family": "cache",
+                            "current_status": "blocked",
+                            "state": "blocked",
+                            "next_action": "rollback-cache-replay-rule",
+                            "blocking_reason": "stale-cache-replay-evidence",
+                            "blocker_codes": ["evidence-older-than-max-age"],
+                            "freshness_state": "stale-rollback-required",
+                            "rank_basis": {"evidence_age_hours": 80.25},
+                            "sample_count": 36,
+                            "projected_savings_usd": 0.075373,
+                            "rollback_required": True,
+                            "target_local_policy_section": "cache.pattern_rules",
+                            "target_local_rule_file": "cache_rules.yaml",
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                            "raw_prompt": "raw-closed-loop-stats-secret",
+                            "request_id": "req-closed-loop-stats-secret",
+                            "session_id": "session-closed-loop-stats-secret",
+                            "cache_key": "cache-key-closed-loop-stats-secret",
+                            "file_path": "/tmp/private-closed-loop-stats/cache_rules.yaml",
+                        },
+                        {
+                            "rank": 2,
+                            "lever": "crunch",
+                            "local_action_family": "crunch",
+                            "current_status": "ready",
+                            "state": "review",
+                            "next_action": "stage-request-shape-crunch-canary",
+                            "sample_count": 18,
+                            "projected_savings_usd": 0.031,
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        },
+                        {
+                            "rank": 3,
+                            "lever": "routing",
+                            "local_action_family": "routing",
+                            "current_status": "active",
+                            "state": "observed",
+                            "next_action": "observe-routing-canary-outcomes",
+                            "sample_count": 12,
+                            "applied_count": 8,
+                            "holdout_count": 4,
+                            "realized_savings_usd": 0.006,
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        },
+                    ],
+                    "successor_decisions": [
+                        {
+                            "local_action_family": "crunch",
+                            "decision": "review",
+                            "recommended_next_action": "stage-request-shape-crunch-canary",
+                            "issue_worthy_status": "review",
+                            "preview_agreement_status": "agreed",
+                            "preview_verified": True,
+                            "preview_verification_status": "preview-verified",
+                            "policy_write_candidate": True,
+                            "managed_preview_required": False,
+                            "source_fingerprint": "activation:crunch-preview-agreed-secret",
+                            "successor_action_fingerprint": "successor:crunch-preview-agreed-secret",
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            }
+            with open(plan_path, "w", encoding="utf-8") as handle:
+                json.dump(plan, handle)
+
+            with patch.dict(os.environ, {"TOKENCLAW_EVIDENCE_TO_ACTIVATION_PLAN_JSON": plan_path}, clear=False):
+                result = asyncio.run(stats_views.stats_full(server.store))
+                lightweight = asyncio.run(stats_views.stats(server.store, self.tmp.name))
+
+        readiness = result["closed_loop_activation"]
+        self.assertEqual(lightweight["closed_loop_activation"]["schema"], "tokenclaw.closed_loop_activation_readiness.v1")
+        self.assertGreaterEqual(
+            {
+                row["family"]: {item["state"]: item["count"] for item in row["state_counts"]}
+                for row in lightweight["closed_loop_activation"]["families"]
+            }["cache"]["rollback_required"],
+            1,
+        )
+        self.assertEqual(readiness["schema"], "tokenclaw.closed_loop_activation_readiness.v1")
+        self.assertEqual(readiness["status"], "tracked")
+        families = {row["family"]: row for row in readiness["families"]}
+        cache_states = {row["state"]: row["count"] for row in families["cache"]["state_counts"]}
+        crunch_states = {row["state"]: row["count"] for row in families["crunch"]["state_counts"]}
+        routing_states = {row["state"]: row["count"] for row in families["routing"]["state_counts"]}
+
+        self.assertGreaterEqual(cache_states["rollback_required"], 1)
+        self.assertGreaterEqual(cache_states["preview_missing"], 1)
+        self.assertEqual(families["cache"]["top_next_action"], "rollback-cache-replay-rule")
+        self.assertEqual(families["cache"]["top_blocker"], "evidence-older-than-max-age")
+        self.assertAlmostEqual(families["cache"]["top_stale_evidence_age_hours"], 80.25)
+        self.assertGreaterEqual(crunch_states["preview_agreed"], 1)
+        self.assertGreaterEqual(crunch_states["draft_ready"], 1)
+        self.assertGreaterEqual(routing_states["realized_savings"], 1)
+        self.assertTrue(readiness["privacy"]["metadata_only"])
+        self.assertTrue(readiness["privacy"]["aggregate_only"])
+
+        rendered = json.dumps(readiness, sort_keys=True)
+        for forbidden in (
+            "raw-closed-loop-stats-secret",
+            "req-closed-loop-stats-secret",
+            "session-closed-loop-stats-secret",
+            "cache-key-closed-loop-stats-secret",
+            "/tmp/private-closed-loop-stats",
+            "activation:crunch-preview-agreed-secret",
+            "successor:crunch-preview-agreed-secret",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_lightweight_stats_routing_rows_include_openai_canary_lifecycle_counts(self):
         observed_at = datetime.now(timezone.utc).isoformat()
 

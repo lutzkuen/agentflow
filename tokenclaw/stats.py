@@ -17657,6 +17657,8 @@ def _accounting_rollup(units: list[dict[str, Any]]) -> dict[str, Any]:
 async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
     conn = store_obj.conn
     today_start = _utc_today_start_iso()
+    activation_burndown = await stats_local_activation_next_action_queue(limit=5, store_obj=store_obj)
+    closed_loop_activation = _closed_loop_activation_readiness(activation_burndown)
 
     def scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
         row = conn.execute(sql, params).fetchone()
@@ -17852,6 +17854,7 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
             "errors": int(total_summary["errors"] or 0),
             "today_errors": int(today_summary["errors"] or 0),
             "avg_latency_ms": round(float(total_summary["avg_latency_ms"] or 0), 2),
+            "closed_loop_activation": closed_loop_activation.get("summary", {}),
         },
         "executive_summary": {
             "accounting_today": {
@@ -17901,6 +17904,7 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
             },
         },
         "db": default_db,
+        "closed_loop_activation": closed_loop_activation,
         "routing": [dict(r) for r in routed],
         "recent": [dict(r) for r in recent],
     }
@@ -18928,6 +18932,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     sqlite_maintenance = await stats_sqlite_maintenance(store_obj)
     active_crunch_rule_coverage = _active_crunch_rule_coverage()
     activation_burndown = await stats_local_activation_next_action_queue(limit=5, store_obj=store_obj)
+    closed_loop_activation = _closed_loop_activation_readiness(activation_burndown)
     activation_successor_queue_health = build_activation_successor_queue_health(limit=5)
     savings_loop_bottlenecks = build_savings_loop_bottlenecks_report(
         store_obj,
@@ -19754,6 +19759,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "routing_experiment_promotion_reason_counts": routing_experiment_report_summary["promotion_reason_counts"],
             "routing_experiment_promotion_ready_candidates": routing_experiment_report_summary["promotion_ready_candidates"],
             "activation_burndown": activation_burndown.get("summary", {}),
+            "closed_loop_activation": closed_loop_activation.get("summary", {}),
             "activation_successor_burndown": (activation_burndown.get("successor_burndown") or {}).get("summary", {}),
             "activation_preview_agreement_burndown": (
                 activation_burndown.get("activation_preview_agreement_burndown") or {}
@@ -19764,6 +19770,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         },
         "savings_loop_bottlenecks": savings_loop_bottlenecks,
         "activation_burndown": activation_burndown,
+        "closed_loop_activation": closed_loop_activation,
         "activation_successor_queue_health": activation_successor_queue_health,
         "managed_preview_coverage": activation_burndown.get("managed_preview_coverage"),
         "recent": recent,
@@ -21653,6 +21660,259 @@ def _activation_successor_burndown(entries: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+CLOSED_LOOP_ACTIVATION_FAMILIES = ("cache", "crunch", "routing")
+
+CLOSED_LOOP_ACTIVATION_STATES = (
+    "preview_missing",
+    "preview_agreed",
+    "draft_ready",
+    "applied_waiting_observation",
+    "realized_savings",
+    "retired_no_repeat",
+    "rollback_required",
+    "safety_stopped",
+    "keep_blocked",
+)
+
+
+def _closed_loop_activation_family(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if "cache" in text:
+        return "cache"
+    if "crunch" in text:
+        return "crunch"
+    if "routing" in text or "route" in text:
+        return "routing"
+    return text if text in CLOSED_LOOP_ACTIVATION_FAMILIES else None
+
+
+def _closed_loop_activation_text(row: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in (
+        "state",
+        "current_status",
+        "issue_worthy_status",
+        "next_action",
+        "unblock_reason",
+        "blocking_reason",
+        "freshness_state",
+        "duplicate_suppression_status",
+        "evidence_schema",
+        "promotion_readiness",
+        "promotion_decision",
+        "decision",
+    ):
+        parts.append(str(row.get(key) or ""))
+    parts.extend(str(code or "") for code in row.get("blocker_codes") or [])
+    coverage = row.get("managed_preview_coverage") if isinstance(row.get("managed_preview_coverage"), dict) else {}
+    for key in ("status", "preview_data_status", "top_omitted_or_blocker_reason"):
+        parts.append(str(coverage.get(key) or ""))
+    return " ".join(parts).lower()
+
+
+def _closed_loop_activation_entry_states(row: dict[str, Any]) -> set[str]:
+    text = _closed_loop_activation_text(row)
+    states: set[str] = set()
+    realized = _as_float(row.get("realized_savings_usd") or row.get("actual_saved_cost_usd") or row.get("observed_saved_usd"))
+    applied = _as_int(row.get("applied_count"))
+    safety_stops = _as_int(row.get("safety_stop_count"))
+    rollbacks = _as_int(row.get("rollback_count"))
+    preview_status = str(
+        row.get("preview_verification_status")
+        or (row.get("managed_preview_coverage") or {}).get("preview_data_status")
+        or (row.get("managed_preview_coverage") or {}).get("status")
+        or ""
+    ).lower()
+
+    if "no-data" in preview_status or "missing" in preview_status or "not-previewed" in preview_status:
+        states.add("preview_missing")
+    if row.get("preview_verified") or "preview-verified" in preview_status or "agreed" in text:
+        states.add("preview_agreed")
+    if (
+        row.get("policy_write_candidate")
+        or row.get("required_local_executor")
+        or row.get("local_policy_patch")
+        or "draft" in text
+        or "stage" in text
+    ):
+        states.add("draft_ready")
+    if safety_stops > 0 or "safety" in text and "stop" in text:
+        states.add("safety_stopped")
+    if rollbacks > 0 or row.get("rollback_required") or "rollback" in text:
+        states.add("rollback_required")
+    if "retire" in text or "retired" in text or "no-repeat" in text or "superseded" in text:
+        states.add("retired_no_repeat")
+    if realized > 0:
+        states.add("realized_savings")
+    if applied > 0 and realized <= 0 and not states.intersection({"rollback_required", "safety_stopped", "retired_no_repeat"}):
+        states.add("applied_waiting_observation")
+    if "keep-blocked" in text or "blocked" in text:
+        states.add("keep_blocked")
+    if not states:
+        states.add("preview_missing")
+    return states
+
+
+def _closed_loop_entry_stale_age_hours(row: dict[str, Any]) -> float | None:
+    rank_basis = row.get("rank_basis") if isinstance(row.get("rank_basis"), dict) else {}
+    for value in (
+        rank_basis.get("evidence_age_hours"),
+        row.get("evidence_age_hours"),
+        (row.get("managed_preview_coverage") or {}).get("latest_preview_age_hours")
+        if isinstance(row.get("managed_preview_coverage"), dict)
+        else None,
+    ):
+        if value is not None:
+            return round(_as_float(value), 3)
+    return None
+
+
+def _closed_loop_activation_readiness(activation_burndown: dict[str, Any]) -> dict[str, Any]:
+    family_rows: dict[str, dict[str, Any]] = {}
+    for family in CLOSED_LOOP_ACTIVATION_FAMILIES:
+        family_rows[family] = {
+            "family": family,
+            "row_count": 0,
+            "state_counts": {state: 0 for state in CLOSED_LOOP_ACTIVATION_STATES},
+            "top_next_action": None,
+            "top_blocker": None,
+            "top_state": None,
+            "top_stale_evidence_age_hours": None,
+            "projected_savings_usd": 0.0,
+            "realized_savings_usd": 0.0,
+            "sample_count": 0,
+            "applied_count": 0,
+            "holdout_count": 0,
+            "safety_stop_count": 0,
+            "rollback_count": 0,
+            "privacy": _local_activation_queue_privacy(),
+        }
+
+    entries = [row for row in activation_burndown.get("entries") or [] if isinstance(row, dict)]
+    top_candidates: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        family = _closed_loop_activation_family(entry.get("local_action_family") or entry.get("lever"))
+        if family not in family_rows:
+            continue
+        row = family_rows[family]
+        states = _closed_loop_activation_entry_states(entry)
+        row["row_count"] += 1
+        for state in states:
+            if state in row["state_counts"]:
+                row["state_counts"][state] += 1
+        row["projected_savings_usd"] += _as_float(entry.get("projected_savings_usd"))
+        row["realized_savings_usd"] += _as_float(entry.get("realized_savings_usd"))
+        row["sample_count"] += _as_int(entry.get("sample_count"))
+        row["applied_count"] += _as_int(entry.get("applied_count"))
+        row["holdout_count"] += _as_int(entry.get("holdout_count"))
+        row["safety_stop_count"] += _as_int(entry.get("safety_stop_count"))
+        row["rollback_count"] += _as_int(entry.get("rollback_count"))
+        current_top = top_candidates.get(family)
+        sort_key = (_as_int(entry.get("rank")) or 9999, -_as_float(entry.get("projected_savings_usd")))
+        current_sort = (
+            (_as_int(current_top.get("rank")) or 9999, -_as_float(current_top.get("projected_savings_usd")))
+            if current_top
+            else (999999, 0.0)
+        )
+        if sort_key < current_sort:
+            top_candidates[family] = entry
+
+    preview_burndown = activation_burndown.get("activation_preview_agreement_burndown")
+    preview_families = preview_burndown.get("families") if isinstance(preview_burndown, dict) else []
+    for preview in preview_families or []:
+        if not isinstance(preview, dict):
+            continue
+        family = _closed_loop_activation_family(preview.get("local_action_family"))
+        if family not in family_rows:
+            continue
+        row = family_rows[family]
+        row["state_counts"]["preview_agreed"] += _as_int(preview.get("agreed_count"))
+        row["state_counts"]["preview_missing"] += _as_int(preview.get("missing_count")) + _as_int(preview.get("not_previewed_count"))
+        row["state_counts"]["draft_ready"] += _as_int(preview.get("dry_run_drafted_count"))
+        if row["top_next_action"] is None and preview.get("top_next_action"):
+            row["top_next_action"] = public_label(preview.get("top_next_action"), "none")
+        if row["top_blocker"] is None and preview.get("top_reason_code"):
+            row["top_blocker"] = public_label(preview.get("top_reason_code"), "none")
+
+    for family, entry in top_candidates.items():
+        row = family_rows[family]
+        row["top_next_action"] = public_label(entry.get("next_action") or "inspect-local-evidence", "inspect-local-evidence")
+        row["top_blocker"] = _activation_top_blocker(entry)
+        ranked_states = [
+            state
+            for state in CLOSED_LOOP_ACTIVATION_STATES
+            if row["state_counts"].get(state)
+        ]
+        row["top_state"] = ranked_states[0] if ranked_states else "preview_missing"
+        row["top_stale_evidence_age_hours"] = _closed_loop_entry_stale_age_hours(entry)
+
+    public_families: list[dict[str, Any]] = []
+    total_state_counts: Counter[str] = Counter()
+    for family in CLOSED_LOOP_ACTIVATION_FAMILIES:
+        row = family_rows[family]
+        state_counts = {state: _as_int(row["state_counts"].get(state)) for state in CLOSED_LOOP_ACTIVATION_STATES}
+        total_state_counts.update(state_counts)
+        row_count = _as_int(row.get("row_count"))
+        status = "tracked" if row_count or any(state_counts.values()) else "missing"
+        public_families.append(
+            {
+                "family": family,
+                "status": status,
+                "row_count": row_count,
+                "state_counts": [{"state": state, "count": count} for state, count in state_counts.items()],
+                "top_state": row.get("top_state") or ("preview_missing" if status == "tracked" else "missing"),
+                "top_next_action": row.get("top_next_action") or "none",
+                "top_blocker": row.get("top_blocker") or "none",
+                "top_stale_evidence_age_hours": row.get("top_stale_evidence_age_hours"),
+                "projected_savings_usd": round(_as_float(row.get("projected_savings_usd")), 8),
+                "realized_savings_usd": round(_as_float(row.get("realized_savings_usd")), 8),
+                "sample_count": _as_int(row.get("sample_count")),
+                "applied_count": _as_int(row.get("applied_count")),
+                "holdout_count": _as_int(row.get("holdout_count")),
+                "safety_stop_count": _as_int(row.get("safety_stop_count")),
+                "rollback_count": _as_int(row.get("rollback_count")),
+                "privacy": row["privacy"],
+            }
+        )
+
+    tracked = [row for row in public_families if row["status"] == "tracked"]
+    top = sorted(
+        tracked,
+        key=lambda row: (
+            -_as_float(row.get("projected_savings_usd")),
+            -_as_float(row.get("realized_savings_usd")),
+            -_as_int(row.get("sample_count")),
+            str(row.get("family") or ""),
+        ),
+    )
+    return {
+        "schema": "tokenclaw.closed_loop_activation_readiness.v1",
+        "generated_at": utc_now(),
+        "status": "tracked" if tracked else "missing",
+        "summary": {
+            "family_count": len(public_families),
+            "tracked_family_count": len(tracked),
+            "row_count": sum(_as_int(row.get("row_count")) for row in public_families),
+            "state_counts": [{"state": state, "count": int(total_state_counts.get(state, 0))} for state in CLOSED_LOOP_ACTIVATION_STATES],
+            "top_family": top[0]["family"] if top else None,
+            "top_state": top[0]["top_state"] if top else None,
+            "top_next_action": top[0]["top_next_action"] if top else None,
+            "top_blocker": top[0]["top_blocker"] if top else None,
+            "top_projected_savings_usd": round(_as_float(top[0].get("projected_savings_usd")) if top else 0.0, 8),
+            "top_realized_savings_usd": round(_as_float(top[0].get("realized_savings_usd")) if top else 0.0, 8),
+            "top_stale_evidence_age_hours": top[0].get("top_stale_evidence_age_hours") if top else None,
+            "total_projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in public_families), 8),
+            "total_realized_savings_usd": round(sum(_as_float(row.get("realized_savings_usd")) for row in public_families), 8),
+        },
+        "families": public_families,
+        "privacy": _local_activation_queue_privacy(
+            activation_burndown.get("privacy") if isinstance(activation_burndown.get("privacy"), dict) else {}
+        ),
+    }
+
+
 def _activation_successor_health_empty(
     *,
     status: str,
@@ -22933,6 +23193,17 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Signal</th><th data-sort-type="text">Status</th><th data-sort-type="text">Why stalled</th><th data-sort-type="text">Operator action</th><th data-sort-type="text">Command</th><th data-sort-type="number">Rows</th><th data-sort-type="number">Age</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="savings-loop-bottlenecks-tbody"></tbody>
+  </table>
+  </div>
+</div>
+<div class="section">
+  <h2>Closed-loop activation readiness</h2>
+  <div class="table-wrap">
+  <table class="activity-table" data-table-id="closed-loop-activation" data-filter-label="Filter closed-loop activation readiness">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="text">Status</th><th data-sort-type="text">States</th><th data-sort-type="text">Top action</th><th data-sort-type="text">Top blocker</th><th data-sort-type="number">Stale age</th><th data-sort-type="money">Projected</th><th data-sort-type="money">Realized</th><th data-sort-type="number">Coverage</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="closed-loop-activation-tbody"></tbody>
   </table>
   </div>
 </div>
@@ -24955,6 +25226,10 @@ async function refresh(){
     document.getElementById('c-activation-bottleneck').textContent='on demand';
     document.getElementById('c-activation-action').textContent='activation queue is not polled by the shell';
     document.getElementById('c-activation-savings').textContent='use Activation next actions';
+    renderSavingsLoopBottlenecks(d);
+    renderActivationBurndown(d);
+    renderActivationBottleneckCard(d);
+    renderClosedLoopActivation(d);
 
     document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
   }catch(e){
@@ -27113,6 +27388,57 @@ function savingsLoopStatusBadge(status){
   if(status==='blocked'||status==='stalled')return'err';
   if(status==='unavailable')return'miss';
   return'provider';
+}
+function closedLoopStateBadge(state){
+  if(['preview_agreed','draft_ready','realized_savings'].includes(state))return'hit';
+  if(['rollback_required','safety_stopped'].includes(state))return'err';
+  if(['preview_missing','applied_waiting_observation','retired_no_repeat','keep_blocked'].includes(state))return'routed';
+  if(state==='missing')return'miss';
+  return'provider';
+}
+function renderClosedLoopActivation(d){
+  const target=document.getElementById('closed-loop-activation-tbody');
+  if(!target)return;
+  const report=d.closed_loop_activation||{};
+  const summary=report.summary||{};
+  const rows=report.families||[];
+  const topFamily=summary.top_family||'no bottleneck';
+  const topState=summary.top_state||'missing';
+  const topAction=summary.top_next_action||'none';
+  const topBlocker=summary.top_blocker||'none';
+  const topAge=summary.top_stale_evidence_age_hours;
+  document.getElementById('c-activation-bottleneck').textContent=topFamily;
+  document.getElementById('c-activation-action').textContent=report.status==='tracked'
+    ? `${topState} · ${topAction}`
+    : (report.status||'missing');
+  document.getElementById('c-activation-savings').textContent=report.status==='tracked'
+    ? `projected ${fmt(summary.top_projected_savings_usd||0,6)} · realized ${fmt(summary.top_realized_savings_usd||0,6)} · ${topBlocker}${topAge==null?'':' · stale '+topAge+'h'}`
+    : 'closed-loop state unavailable';
+  target.innerHTML=rows.map(row=>{
+    const states=(row.state_counts||[])
+      .filter(item=>(item.count||0)>0)
+      .map(item=>`<span class="badge ${closedLoopStateBadge(item.state)}">${esc(item.state)} ${(item.count||0).toLocaleString()}</span>`)
+      .join(' ')||'<span class="badge miss">none</span>';
+    const coverage=[
+      `samples ${(row.sample_count||0).toLocaleString()}`,
+      `applied ${(row.applied_count||0).toLocaleString()}`,
+      `holdout ${(row.holdout_count||0).toLocaleString()}`,
+      `safety ${(row.safety_stop_count||0).toLocaleString()}`,
+      `rollback ${(row.rollback_count||0).toLocaleString()}`
+    ].join(' · ');
+    return `<tr>
+      <td><span class="badge provider">${esc(row.family||'unknown')}</span></td>
+      <td><span class="badge ${evidenceActivationStatusBadge(row.status)}">${esc(row.status||'unknown')}</span><div class="sub">${esc(row.top_state||'')}</div></td>
+      <td class="flags">${states}</td>
+      <td class="model">${esc(row.top_next_action||'none')}</td>
+      <td class="flags"><span class="badge miss">${esc(row.top_blocker||'none')}</span></td>
+      <td class="tokens">${row.top_stale_evidence_age_hours==null?'—':Number(row.top_stale_evidence_age_hours).toLocaleString()+'h'}</td>
+      <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+      <td class="savings">${fmt(row.realized_savings_usd||0,6)}</td>
+      <td class="tokens">${esc(coverage)}</td>
+      <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||report.privacy||{})}</td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="10" style="color:#8b949e">No closed-loop activation readiness available</td></tr>';
 }
 function renderSavingsLoopBottlenecks(d){
   const report=d.savings_loop_bottlenecks||{};
