@@ -3978,6 +3978,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                     "next_action": "refresh-managed-activation-preview",
                     "blocker_codes": ["evidence-older-than-max-age"],
                     "sample_count": 36,
+                    "holdout_count": 12 if source.endswith("promote") else 0,
+                    "canary_fraction": 0.1,
+                    "holdout_fraction": 0.1,
                     "projected_savings_usd": 0.075373,
                     "target_local_rule_file": "cache_rules.yaml",
                     "target_local_policy_section": "cache.pattern_rules",
@@ -4021,6 +4024,17 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_apply_action_count": 0,
                 "cache_entries_written": 0,
                 "emits_cache_apply_action": False,
+                "shape": {
+                    "provider_family": "openai",
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "category": "chat",
+                    "workflow_phase": "chat",
+                    "has_tools": source.endswith("unsafe-tools"),
+                    "stream": False,
+                    "text_bucket": "2k_8k_chars",
+                    "token_bucket": "500_2k_tokens",
+                },
                 "reason_codes": [score],
                 "privacy": {"metadata_only": True, "aggregate_only": True},
                 "raw_prompt": "raw scored cache preview prompt must not leak",
@@ -4108,6 +4122,63 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(decisions["activation:cache-promote"]["issue_worthy_status"], "ready")
         self.assertEqual(decisions["activation:cache-retire"]["issue_worthy_status"], "suppressed")
         self.assertEqual(decisions["activation:cache-unsafe-tools"]["decision"], "keep-blocked")
+
+        file_draft_report = queue["cache_replay_file_action_drafts"]
+        self.assertEqual(file_draft_report["schema"], "tokenclaw.cache_replay_file_action_drafts.v1")
+        self.assertEqual(file_draft_report["summary"]["draft_count"], 5)
+        self.assertEqual(file_draft_report["summary"]["policy_patch_draft_count"], 2)
+        self.assertEqual(file_draft_report["summary"]["no_write_action_count"], 2)
+        self.assertEqual(file_draft_report["summary"]["blocked_action_count"], 1)
+        self.assertEqual(file_draft_report["summary"]["cache_apply_action_count"], 0)
+        self.assertEqual(file_draft_report["summary"]["cache_entries_written"], 0)
+        self.assertEqual(file_draft_report["summary"]["provider_calls_made"], 0)
+        self.assertEqual(file_draft_report["summary"]["managed_server_calls_made"], 0)
+        self.assertFalse(file_draft_report["summary"]["policy_files_written"])
+        self.assertEqual(file_draft_report["summary"]["unsafe_cache_apply_action_count"], 0)
+        self.assertTrue(file_draft_report["privacy"]["metadata_only"])
+        self.assertTrue(file_draft_report["privacy"]["aggregate_only"])
+        self.assertFalse(file_draft_report["privacy"]["raw_prompts_included"])
+        self.assertFalse(file_draft_report["privacy"]["provider_bodies_included"])
+        self.assertFalse(file_draft_report["privacy"]["request_ids_included"])
+        self.assertFalse(file_draft_report["privacy"]["session_ids_included"])
+        self.assertFalse(file_draft_report["privacy"]["cache_keys_included"])
+        self.assertFalse(file_draft_report["privacy"]["individual_candidate_ids_included"])
+
+        file_drafts = {row["source_fingerprint"]: row for row in file_draft_report["drafts"]}
+        promote_draft = file_drafts["activation:cache-promote"]
+        self.assertEqual(promote_draft["status"], "drafted")
+        self.assertEqual(promote_draft["draft_action"], "stage-exact-cache-replay-canary")
+        self.assertEqual(promote_draft["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(promote_draft["target_local_policy_section"], "cache.pattern_rules")
+        promote_patch = promote_draft["proposed_policy_patch"]
+        self.assertEqual(promote_patch["operation"], "stage_exact_cache_replay_canary")
+        self.assertEqual(promote_patch["pattern_rules"][0]["mode"], "canary")
+        self.assertEqual(promote_patch["pattern_rules"][0]["replay_type"], "exact")
+        self.assertFalse(promote_draft["emits_cache_apply_action"])
+        self.assertEqual(promote_draft["cache_entries_written"], 0)
+        self.assertFalse(promote_draft["policy_files_written"])
+
+        rollback_draft = file_drafts["activation:cache-rollback"]
+        self.assertEqual(rollback_draft["status"], "drafted")
+        self.assertEqual(rollback_draft["draft_action"], "rollback-cache-replay-rule")
+        rollback_patch = rollback_draft["proposed_policy_patch"]
+        self.assertEqual(rollback_patch["operation"], "disable_cache_replay_rule")
+        self.assertEqual(rollback_patch["pattern_rules"][0]["id"], "[REDACTED_ID]")
+        self.assertFalse(rollback_patch["pattern_rules"][0]["enabled"])
+        self.assertEqual(rollback_patch["pattern_rules"][0]["disabled_reason"], "stale-cache-replay-evidence")
+        self.assertTrue(rollback_patch["target_rule_selector"]["rule_id_redacted"])
+
+        warmup_draft = file_drafts["activation:cache-warmup"]
+        self.assertEqual(warmup_draft["status"], "no-write")
+        self.assertEqual(warmup_draft["no_write_next_action"], "keep-cache-replay-canary-staged")
+        retire_draft = file_drafts["activation:cache-retire"]
+        self.assertEqual(retire_draft["status"], "no-write")
+        self.assertEqual(retire_draft["no_write_next_action"], "retire-cache-replay-canary-no-repeat")
+        unsafe_draft = file_drafts["activation:cache-unsafe-tools"]
+        self.assertEqual(unsafe_draft["status"], "blocked")
+        self.assertEqual(unsafe_draft["draft_action"], "keep-cache-replay-blocked")
+        self.assertFalse(unsafe_draft["emits_cache_apply_action"])
+        self.assertEqual(unsafe_draft["cache_entries_written"], 0)
 
         rendered = json.dumps(queue, sort_keys=True)
         self.assertNotIn("raw scored cache preview prompt must not leak", rendered)

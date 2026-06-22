@@ -21,6 +21,8 @@ LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_SCHEMA = "tokenclaw.local_activation_next_act
 LOCAL_ACTIVATION_NEXT_ACTION_QUEUE_ENTRY_SCHEMA = "tokenclaw.local_activation_next_action_queue_entry.v1"
 LOCAL_ACTIVATION_SUCCESSOR_ACTION_SCHEMA = "tokenclaw.local_activation_successor_action.v1"
 LOCAL_ACTIVATION_SUCCESSOR_DECISION_SCHEMA = "tokenclaw.local_activation_successor_decision.v1"
+CACHE_REPLAY_FILE_ACTION_DRAFTS_SCHEMA = "tokenclaw.cache_replay_file_action_drafts.v1"
+CACHE_REPLAY_FILE_ACTION_DRAFT_SCHEMA = "tokenclaw.cache_replay_file_action_draft.v1"
 PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA = "tokenclaw.preview_verified_activation_successor_gate.v1"
 MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "tokenclaw.managed_activation_preview_health_gate.v1"
 ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA = "tokenclaw.activation_feedback_evidence_freshness_gate.v1"
@@ -7493,6 +7495,8 @@ def _managed_preview_successor_gate(
         gate["cache_apply_action_count"] = 0
         gate["cache_entries_written"] = 0
         gate["emits_cache_apply_action"] = False
+        if isinstance(outcome.get("shape"), dict):
+            gate["shape"] = sanitize_value(outcome.get("shape"))
     return gate
 
 
@@ -8081,6 +8085,306 @@ def build_local_activation_successor_decisions(queue: dict[str, Any]) -> list[di
         seen_sources.add(source)
         rows.append(row)
     return rows
+
+
+def _cache_replay_file_action_privacy() -> dict[str, Any]:
+    privacy = _successor_action_privacy()
+    privacy.update(
+        {
+            "local_only": True,
+            "review_only": True,
+            "read_only": True,
+            "content_free": True,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "policy_files_written": False,
+            "cache_entries_written": False,
+            "cache_apply_action_count": 0,
+            "emits_cache_apply_action": False,
+        }
+    )
+    return privacy
+
+
+def _cache_replay_shape(action: dict[str, Any]) -> dict[str, Any]:
+    shape = action.get("shape") if isinstance(action.get("shape"), dict) else {}
+    gate = action.get("managed_preview_gate") if isinstance(action.get("managed_preview_gate"), dict) else {}
+    if not shape and isinstance(gate.get("shape"), dict):
+        shape = gate["shape"]
+    return sanitize_value(shape) if isinstance(shape, dict) else {}
+
+
+def _cache_replay_shape_is_supported(action: dict[str, Any]) -> bool:
+    shape = _cache_replay_shape(action)
+    has_tools = bool(shape.get("has_tools")) or bool(action.get("has_tools"))
+    stream = bool(shape.get("stream")) or bool(action.get("stream"))
+    tool_replay_enabled = action.get("tool_cache_replay_enabled")
+    streaming_replay_enabled = action.get("streaming_replay_enabled")
+    blockers = {str(item) for item in action.get("blocker_codes") or []}
+    if has_tools or stream:
+        return False
+    if tool_replay_enabled is False or streaming_replay_enabled is False:
+        if "tools-present" in blockers or "streaming-replay-not-supported" in blockers:
+            return False
+    return True
+
+
+def _cache_replay_has_holdout_coverage(action: dict[str, Any]) -> bool:
+    return _to_int(action.get("holdout_count")) > 0 or _to_int(action.get("holdout_coverage_count")) > 0
+
+
+def _cache_replay_draft_fingerprint(action: dict[str, Any], draft_action: str) -> str:
+    material = {
+        "schema": CACHE_REPLAY_FILE_ACTION_DRAFT_SCHEMA,
+        "source_fingerprint": sanitize_value(action.get("source_fingerprint")),
+        "successor_action_fingerprint": sanitize_value(action.get("fingerprint")),
+        "draft_action": draft_action,
+        "target_local_rule_file": sanitize_value(action.get("target_local_rule_file") or "cache_rules.yaml"),
+        "target_local_policy_section": sanitize_value(action.get("target_local_policy_section") or "cache.pattern_rules"),
+    }
+    return public_id(json.dumps(material, sort_keys=True), prefix="cache-replay-action-draft") or "cache-replay-action-draft:unknown"
+
+
+def _cache_replay_evidence_summary(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "tokenclaw.cache_replay_file_action_evidence_summary.v1",
+        "source_fingerprint": sanitize_value(action.get("source_fingerprint")),
+        "successor_action_fingerprint": sanitize_value(action.get("fingerprint")),
+        "source_evidence_schema": sanitize_value(action.get("evidence_schema")),
+        "cache_reobserve_decision": sanitize_value(action.get("cache_reobserve_decision")),
+        "promotion_readiness": sanitize_value(action.get("promotion_readiness")),
+        "preview_verified": bool(action.get("preview_verified")),
+        "sample_count": _to_int(action.get("sample_count")),
+        "holdout_count": _to_int(action.get("holdout_count")),
+        "projected_savings_usd": round(_to_float(action.get("projected_savings_usd")), 8),
+        "target_shape": _cache_replay_shape(action),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _cache_replay_file_action_draft(action: dict[str, Any]) -> dict[str, Any] | None:
+    if str(action.get("local_action_family") or "") != "cache":
+        return None
+    decision = str(
+        action.get("cache_reobserve_decision")
+        or action.get("promotion_readiness")
+        or action.get("successor_status")
+        or ""
+    ).strip()
+    if decision not in {
+        "promote-ready",
+        "rollback-required",
+        "keep-staged-warmup",
+        "retire-staged-no-repeat",
+        "keep-blocked",
+    }:
+        return None
+
+    target_file = sanitize_value(action.get("target_local_rule_file") or "cache_rules.yaml")
+    target_section = sanitize_value(action.get("target_local_policy_section") or "cache.pattern_rules")
+    evidence_summary = _cache_replay_evidence_summary(action)
+    base = {
+        "schema": CACHE_REPLAY_FILE_ACTION_DRAFT_SCHEMA,
+        "source": "local-activation-successor",
+        "source_fingerprint": sanitize_value(action.get("source_fingerprint")),
+        "successor_action_fingerprint": sanitize_value(action.get("fingerprint")),
+        "local_action_family": "cache",
+        "target_local_rule_file": target_file,
+        "target_local_policy_section": target_section,
+        "review_required": True,
+        "preview_verified": bool(action.get("preview_verified")),
+        "cache_reobserve_decision": sanitize_value(decision),
+        "recommended_next_action": sanitize_value(action.get("recommended_next_action")),
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
+        "emits_cache_apply_action": False,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _cache_replay_file_action_privacy(),
+        "evidence_summary": evidence_summary,
+    }
+
+    if decision == "rollback-required":
+        draft_action = "rollback-cache-replay-rule"
+        rule_ref = public_id(
+            action.get("rollback_action_type") or action.get("source_fingerprint"),
+            prefix="cache-replay-rule",
+            fallback="cache-replay-rule:unknown",
+        )
+        disabled_reason = sanitize_value(action.get("disabled_reason") or "stale-cache-replay-evidence")
+        base.update(
+            {
+                "status": "drafted",
+                "draft_action": draft_action,
+                "draft_id": _cache_replay_draft_fingerprint(action, draft_action),
+                "proposed_policy_patch": {
+                    "schema": "tokenclaw.cache_replay_file_policy_patch.v1",
+                    "operation": "disable_cache_replay_rule",
+                    "patch_type": "rollback_openai_exact_cache_replay_policy",
+                    "target_rule_selector": {
+                        "rule_id": SENSITIVE_ID,
+                        "rule_ref": rule_ref,
+                        "rule_id_redacted": True,
+                        "policy_section": target_section,
+                    },
+                    "pattern_rules": [
+                        {
+                            "id": SENSITIVE_ID,
+                            "enabled": False,
+                            "disabled_reason": disabled_reason,
+                        }
+                    ],
+                    "review_required": True,
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+                "rollback_metadata": {
+                    "schema": "tokenclaw.cache_replay_file_action_rollback_metadata.v1",
+                    "rollback_action_type": sanitize_value(
+                        action.get("rollback_action_type") or "disable_openai_exact_cache_replay_policy"
+                    ),
+                    "disabled_reason": disabled_reason,
+                    "rule_id_redacted": True,
+                    "target_local_rule_file": target_file,
+                    "target_local_policy_section": target_section,
+                    "policy_files_written": False,
+                },
+            }
+        )
+    elif decision == "promote-ready":
+        draft_action = "stage-exact-cache-replay-canary"
+        supported = _cache_replay_shape_is_supported(action)
+        has_holdout = _cache_replay_has_holdout_coverage(action)
+        if supported and has_holdout:
+            base.update(
+                {
+                    "status": "drafted",
+                    "draft_action": draft_action,
+                    "draft_id": _cache_replay_draft_fingerprint(action, draft_action),
+                    "proposed_policy_patch": {
+                        "schema": "tokenclaw.cache_replay_file_policy_patch.v1",
+                        "operation": "stage_exact_cache_replay_canary",
+                        "patch_type": "stage_openai_exact_cache_replay_canary",
+                        "pattern_rules": [
+                            {
+                                "id": _cache_replay_draft_fingerprint(action, "exact-cache-replay-rule"),
+                                "enabled": True,
+                                "mode": "canary",
+                                "replay_type": "exact",
+                                "canary_fraction_lte": round(_to_float(action.get("canary_fraction"), 0.1), 4),
+                                "holdout_fraction_gte": round(_to_float(action.get("holdout_fraction"), 0.1), 4),
+                                "shape": _cache_replay_shape(action),
+                            }
+                        ],
+                        "review_required": True,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                        "managed_server_calls_made": False,
+                    },
+                }
+            )
+        else:
+            base.update(
+                {
+                    "status": "blocked",
+                    "draft_action": "keep-cache-replay-blocked",
+                    "draft_id": _cache_replay_draft_fingerprint(action, "keep-cache-replay-blocked"),
+                    "blocked_reason": "unsupported-replay-shape" if not supported else "missing-holdout-coverage",
+                    "no_write_next_action": "keep-cache-replay-blocked",
+                }
+            )
+    elif decision == "keep-staged-warmup":
+        base.update(
+            {
+                "status": "no-write",
+                "draft_action": "keep-cache-replay-canary-staged",
+                "draft_id": _cache_replay_draft_fingerprint(action, "keep-cache-replay-canary-staged"),
+                "no_write_next_action": "keep-cache-replay-canary-staged",
+                "reason_codes": ["warmup-evidence-still-needed"],
+            }
+        )
+    elif decision == "retire-staged-no-repeat":
+        base.update(
+            {
+                "status": "no-write",
+                "draft_action": "retire-cache-replay-canary-no-repeat",
+                "draft_id": _cache_replay_draft_fingerprint(action, "retire-cache-replay-canary-no-repeat"),
+                "no_write_next_action": "retire-cache-replay-canary-no-repeat",
+                "reason_codes": ["no-repeat-observed"],
+            }
+        )
+    else:
+        base.update(
+            {
+                "status": "blocked",
+                "draft_action": "keep-cache-replay-blocked",
+                "draft_id": _cache_replay_draft_fingerprint(action, "keep-cache-replay-blocked"),
+                "blocked_reason": "cache-replay-preview-keep-blocked",
+                "no_write_next_action": "keep-cache-replay-blocked",
+            }
+        )
+    return sanitize_value(
+        {
+            key: value
+            for key, value in base.items()
+            if value not in (None, "", [], 0)
+            or key in {
+                "cache_apply_action_count",
+                "cache_entries_written",
+                "emits_cache_apply_action",
+                "policy_files_written",
+                "provider_calls_made",
+                "managed_server_calls_made",
+            }
+        }
+    )
+
+
+def build_cache_replay_file_action_drafts(successor_actions: list[dict[str, Any]]) -> dict[str, Any]:
+    drafts: list[dict[str, Any]] = []
+    for action in successor_actions:
+        if not isinstance(action, dict):
+            continue
+        draft = _cache_replay_file_action_draft(action)
+        if draft is not None:
+            drafts.append(draft)
+    status_counts: Counter[str] = Counter(str(item.get("status") or "unknown") for item in drafts)
+    draft_action_counts: Counter[str] = Counter(str(item.get("draft_action") or "unknown") for item in drafts)
+    def draft_supported(item: dict[str, Any]) -> bool:
+        evidence = item.get("evidence_summary") if isinstance(item.get("evidence_summary"), dict) else {}
+        shape = evidence.get("target_shape") if isinstance(evidence.get("target_shape"), dict) else {}
+        return not bool(shape.get("has_tools")) and not bool(shape.get("stream"))
+
+    unsafe_apply_count = sum(
+        1
+        for item in drafts
+        if not draft_supported(item)
+        and bool(item.get("emits_cache_apply_action"))
+    )
+    return {
+        "schema": CACHE_REPLAY_FILE_ACTION_DRAFTS_SCHEMA,
+        "status": "drafted" if drafts else "no-cache-replay-successors",
+        "review_only": True,
+        "summary": {
+            "draft_count": len(drafts),
+            "policy_patch_draft_count": sum(1 for item in drafts if isinstance(item.get("proposed_policy_patch"), dict)),
+            "no_write_action_count": sum(1 for item in drafts if item.get("status") == "no-write"),
+            "blocked_action_count": sum(1 for item in drafts if item.get("status") == "blocked"),
+            "cache_apply_action_count": sum(_to_int(item.get("cache_apply_action_count")) for item in drafts),
+            "cache_entries_written": sum(_to_int(item.get("cache_entries_written")) for item in drafts),
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "policy_files_written": False,
+            "unsafe_cache_apply_action_count": unsafe_apply_count,
+            "status_counts": [{"value": key, "count": count} for key, count in sorted(status_counts.items())],
+            "draft_action_counts": [{"value": key, "count": count} for key, count in sorted(draft_action_counts.items())],
+        },
+        "drafts": drafts[:20],
+        "privacy": _cache_replay_file_action_privacy(),
+    }
 
 
 def _activation_successor_issue_labels(action: dict[str, Any], status_label: str) -> list[str]:
@@ -9463,6 +9767,12 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             blocker_counts[str(code)] += 1
     successor_actions = build_local_activation_successor_actions({"entries": entries})
     successor_decisions = build_local_activation_successor_decisions({"successor_actions": successor_actions})
+    cache_replay_file_action_drafts = build_cache_replay_file_action_drafts(successor_actions)
+    cache_replay_file_action_summary = (
+        cache_replay_file_action_drafts.get("summary")
+        if isinstance(cache_replay_file_action_drafts.get("summary"), dict)
+        else {}
+    )
     preview_successor_summary = _preview_successor_summary(successor_actions)
     preview_gates = [
         entry.get("managed_preview_gate")
@@ -9491,6 +9801,13 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             "non_duplicate_successor_action_count": len({str(action.get("fingerprint")) for action in successor_actions if action.get("fingerprint")}),
             "successor_decision_count": len(successor_decisions),
             "non_duplicate_successor_decision_count": len({str(row.get("source_fingerprint")) for row in successor_decisions if row.get("source_fingerprint")}),
+            "cache_replay_file_action_draft_count": _to_int(cache_replay_file_action_summary.get("draft_count")),
+            "cache_replay_file_policy_patch_draft_count": _to_int(cache_replay_file_action_summary.get("policy_patch_draft_count")),
+            "cache_replay_file_no_write_action_count": _to_int(cache_replay_file_action_summary.get("no_write_action_count")),
+            "cache_replay_file_blocked_action_count": _to_int(cache_replay_file_action_summary.get("blocked_action_count")),
+            "cache_replay_file_cache_apply_action_count": _to_int(cache_replay_file_action_summary.get("cache_apply_action_count")),
+            "cache_replay_file_cache_entries_written": _to_int(cache_replay_file_action_summary.get("cache_entries_written")),
+            "cache_replay_file_unsafe_cache_apply_action_count": _to_int(cache_replay_file_action_summary.get("unsafe_cache_apply_action_count")),
             "preview_verified_successor_count": preview_verified_count,
             "preview_required_successor_count": preview_required_count,
             "preview_blocked_successor_count": preview_blocked_count,
@@ -9534,6 +9851,7 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
         "entries": entries[:20],
         "successor_actions": successor_actions[:20],
         "successor_decisions": successor_decisions[:20],
+        "cache_replay_file_action_drafts": cache_replay_file_action_drafts,
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
