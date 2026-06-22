@@ -65,6 +65,8 @@ CRUNCH_POST_MAX_ROLLOUT_DECISION_SCHEMA = "tokenclaw.request_shape_crunch_post_m
 FOLLOW_UP_CANDIDATES_SCHEMA = "tokenclaw.request_shape_follow_up_candidates.v1"
 FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "tokenclaw.request_shape_blocker_cohort.v1"
 SOURCE_TRAFFIC_ACQUISITION_SCHEMA = "tokenclaw.source_traffic_acquisition_action.v1"
+ROUTING_DOWNGRADE_DRILL_SCHEMA = "tokenclaw.request_shape_routing_downgrade_drills.v1"
+ROUTING_DOWNGRADE_DRILL_ROW_SCHEMA = "tokenclaw.request_shape_routing_downgrade_drill.v1"
 DEPENDENCY_EVIDENCE_CLASSES = (
     "missing-dependency-evidence",
     "stable-dependency-evidence",
@@ -114,6 +116,11 @@ DEFAULT_CACHE_REPLAY_MIN_STAGE_ROWS = 10
 DEFAULT_CACHE_REPLAY_MIN_STAGE_PROJECTED_HITS = 5
 DEFAULT_CACHE_REPLAY_MIN_STAGE_SAVINGS_USD = 0.01
 DEFAULT_ROLLUP_SNAPSHOT_MAX_AGE_HOURS = 72.0
+DEFAULT_ROUTING_DOWNGRADE_DRILL_CANARY_FRACTION = 0.10
+DEFAULT_ROUTING_DOWNGRADE_DRILL_HOLDOUT_FRACTION = 0.10
+DEFAULT_ROUTING_DOWNGRADE_DRILL_MIN_SAMPLES = 5
+DEFAULT_ROUTING_DOWNGRADE_DRILL_MAX_ERROR_RATE = 0.05
+DEFAULT_ROUTING_DOWNGRADE_DRILL_MAX_RETRY_RATE = 0.25
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -11856,6 +11863,363 @@ def _shape_follow_up_privacy() -> dict[str, Any]:
     return privacy
 
 
+def _routing_downgrade_privacy() -> dict[str, Any]:
+    privacy = _shape_follow_up_privacy()
+    privacy.update(
+        {
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_response_bodies_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "policy_files_written": False,
+        }
+    )
+    return privacy
+
+
+def _routing_downgrade_target(
+    *,
+    provider: str,
+    requested_model_family: str,
+) -> tuple[str | None, str | None, str]:
+    provider = public_label(provider, "unknown")
+    requested = public_label(requested_model_family, "unknown")
+    if provider == "anthropic":
+        if "opus" in requested:
+            return "claude-sonnet-4.5", "claude-sonnet", "opus-to-sonnet-downgrade-drill"
+        if "sonnet" in requested:
+            return "claude-haiku-4.5", "claude-haiku", "sonnet-to-haiku-downgrade-drill"
+        return None, None, "no-cheaper-anthropic-routing-target"
+    if provider == "openai":
+        if requested in {"gpt-5", "gpt-5.3", "gpt-5.3-codex", "gpt-5.2", "gpt-5.2-codex", "gpt-5-codex"}:
+            return "gpt-5-mini", "gpt-5-mini", "gpt5-to-mini-downgrade-drill"
+        if requested in {"gpt-5.5", "gpt-5.4"}:
+            return "gpt-5.4-mini", "gpt-5.4-mini", "gpt5-large-to-mini-downgrade-drill"
+        if requested == "gpt-4.1":
+            return "gpt-4.1-mini", "gpt-4.1-mini", "gpt41-to-mini-downgrade-drill"
+        if requested == "gpt-4o":
+            return "gpt-4o-mini", "gpt-4o-mini", "gpt4o-to-mini-downgrade-drill"
+        return None, None, "no-cheaper-openai-routing-target"
+    return None, None, "unknown-provider-routing-target"
+
+
+def _routing_token_cost_usd(tokens: int, *, provider: str, model: str, field: str) -> float:
+    if tokens <= 0:
+        return 0.0
+    basis = pricing_basis(model, provider)
+    price = _as_float(basis.get(field))
+    if price <= 0:
+        return 0.0
+    return (tokens / 1_000_000.0) * price
+
+
+def _routing_downgrade_projection(
+    row: dict[str, Any],
+    *,
+    provider: str,
+    requested_model: str,
+    target_model: str,
+    sample_count: int,
+) -> dict[str, Any]:
+    input_tokens = _as_int(row.get("successful_input_tokens") or row.get("input_tokens"))
+    output_tokens = _as_int(row.get("output_tokens"))
+    requested_cost = _routing_token_cost_usd(
+        input_tokens,
+        provider=provider,
+        model=requested_model,
+        field="input_usd_per_million",
+    ) + _routing_token_cost_usd(
+        output_tokens,
+        provider=provider,
+        model=requested_model,
+        field="output_usd_per_million",
+    )
+    target_cost = _routing_token_cost_usd(
+        input_tokens,
+        provider=provider,
+        model=target_model,
+        field="input_usd_per_million",
+    ) + _routing_token_cost_usd(
+        output_tokens,
+        provider=provider,
+        model=target_model,
+        field="output_usd_per_million",
+    )
+    projected = max(0.0, requested_cost - target_cost)
+    per_call = projected / float(sample_count) if sample_count > 0 else 0.0
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "requested_model_cost_usd": round(requested_cost, 8),
+        "target_model_cost_usd": round(target_cost, 8),
+        "projected_savings_usd": round(projected, 8),
+        "projected_savings_per_1000_calls_usd": round(per_call * 1000.0, 8),
+    }
+
+
+def _routing_drill_fingerprint(material: dict[str, Any]) -> str:
+    digest = hashlib.sha256(stable_json(material).encode("utf-8")).hexdigest()[:16]
+    return f"routing-drill:{digest}"
+
+
+def _routing_drill_stale(row: dict[str, Any]) -> bool:
+    if bool(row.get("stale") or row.get("snapshot_stale")):
+        return True
+    freshness_state = public_label(row.get("freshness_state") or row.get("freshness_status"), "fresh")
+    if freshness_state in {"stale", "snapshot-stale", "rollup-stale"}:
+        return True
+    freshness = row.get("snapshot_freshness") if isinstance(row.get("snapshot_freshness"), dict) else {}
+    return bool(freshness.get("stale"))
+
+
+def _routing_drill_blockers(
+    row: dict[str, Any],
+    *,
+    target_model: str | None,
+    target_reason: str,
+    projection: dict[str, Any],
+    min_samples: int,
+    max_error_rate: float,
+    max_retry_rate: float,
+) -> list[str]:
+    blockers: set[str] = set()
+    sample_count = _as_int(row.get("row_count") or row.get("sample_count"))
+    error_rate = _as_int(row.get("error_count")) / float(sample_count) if sample_count > 0 else 0.0
+    retry_rate = _as_int(row.get("retry_count")) / float(sample_count) if sample_count > 0 else 0.0
+    category = public_label(row.get("category"), "unknown")
+    phase = public_label(row.get("workflow_phase"), "unknown")
+    existing_blockers = {public_label(item, "unknown") for item in row.get("blocker_codes") or []}
+    if not target_model:
+        blockers.add(target_reason)
+    if _routing_drill_stale(row):
+        blockers.add("stale-request-shape-rollup")
+    if sample_count < min_samples:
+        blockers.add("too-small-routing-drill-sample")
+    if _as_float(projection.get("projected_savings_per_1000_calls_usd")) <= 0:
+        blockers.add("non-positive-routing-savings-projection")
+    if "thinking-routing-guard" in existing_blockers or category == "thinking" or phase == "thinking":
+        blockers.add("thinking-routing-guard")
+    if category in {"code-gen", "coding", "planning"} or phase in {"planning", "code-generation"}:
+        blockers.add("high-downgrade-risk-shape")
+    if error_rate > max_error_rate:
+        blockers.add("elevated-error-rate")
+    if retry_rate > max_retry_rate:
+        blockers.add("elevated-retry-rate")
+    if public_label(row.get("routing_status"), "unknown") != "routed":
+        blockers.add("missing-quality-evidence")
+    priority = {
+        "stale-request-shape-rollup": 0,
+        "thinking-routing-guard": 1,
+        "high-downgrade-risk-shape": 2,
+        "elevated-error-rate": 3,
+        "elevated-retry-rate": 4,
+        "too-small-routing-drill-sample": 5,
+        "non-positive-routing-savings-projection": 6,
+        "no-cheaper-anthropic-routing-target": 7,
+        "no-cheaper-openai-routing-target": 7,
+        "unknown-provider-routing-target": 7,
+        "missing-quality-evidence": 20,
+    }
+    return sorted(blockers, key=lambda code: (priority.get(code, 10), code))
+
+
+def build_request_shape_routing_downgrade_drill_report(
+    rollups: list[dict[str, Any]],
+    *,
+    limit: int = 25,
+    canary_fraction: float = DEFAULT_ROUTING_DOWNGRADE_DRILL_CANARY_FRACTION,
+    holdout_fraction: float = DEFAULT_ROUTING_DOWNGRADE_DRILL_HOLDOUT_FRACTION,
+    min_samples: int = DEFAULT_ROUTING_DOWNGRADE_DRILL_MIN_SAMPLES,
+    max_error_rate: float = DEFAULT_ROUTING_DOWNGRADE_DRILL_MAX_ERROR_RATE,
+    max_retry_rate: float = DEFAULT_ROUTING_DOWNGRADE_DRILL_MAX_RETRY_RATE,
+) -> dict[str, Any]:
+    capped_limit = max(1, min(_as_int(limit) or 25, 1000))
+    rows: list[dict[str, Any]] = []
+    blocker_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    target_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    total_samples = 0
+    total_projected = 0.0
+
+    for row in rollups:
+        if not isinstance(row, dict):
+            continue
+        classes = {public_label(item, "unknown") for item in row.get("candidate_work_classes") or []}
+        families = {public_label(item, "unknown") for item in row.get("candidate_families") or []}
+        routing_status = public_label(row.get("routing_status"), "unknown")
+        if "routing" not in classes and "routing_candidate" not in families and routing_status not in {"passthrough", "routed"}:
+            continue
+
+        provider = public_label(row.get("provider_family"), "unknown")
+        requested_family = public_label(row.get("requested_model_family"), "unknown")
+        target_model, target_family, target_reason = _routing_downgrade_target(
+            provider=provider,
+            requested_model_family=requested_family,
+        )
+        sample_count = _as_int(row.get("row_count") or row.get("sample_count"))
+        projection = _routing_downgrade_projection(
+            row,
+            provider=provider,
+            requested_model=requested_family,
+            target_model=target_model or requested_family,
+            sample_count=sample_count,
+        )
+        blockers = _routing_drill_blockers(
+            row,
+            target_model=target_model,
+            target_reason=target_reason,
+            projection=projection,
+            min_samples=min_samples,
+            max_error_rate=max_error_rate,
+            max_retry_rate=max_retry_rate,
+        )
+        hard_blockers = {
+            "stale-request-shape-rollup",
+            "too-small-routing-drill-sample",
+            "non-positive-routing-savings-projection",
+            "thinking-routing-guard",
+            "high-downgrade-risk-shape",
+            "elevated-error-rate",
+            "elevated-retry-rate",
+            "no-cheaper-anthropic-routing-target",
+            "no-cheaper-openai-routing-target",
+            "unknown-provider-routing-target",
+        }
+        status = "blocked" if hard_blockers.intersection(blockers) else "review-ready"
+        next_action = (
+            "review-routing-downgrade-canary"
+            if status == "review-ready"
+            else "keep-routing-downgrade-drill-blocked"
+        )
+        fingerprint_material = {
+            "schema": ROUTING_DOWNGRADE_DRILL_ROW_SCHEMA,
+            "provider_family": provider,
+            "source_surface": public_label(row.get("source_surface"), "unknown"),
+            "endpoint": public_label(row.get("endpoint"), "unknown"),
+            "requested_model_family": requested_family,
+            "target_model_family": target_family,
+            "category": public_label(row.get("category"), "unknown"),
+            "workflow_phase": public_label(row.get("workflow_phase"), "unknown"),
+            "stream": bool(row.get("stream")),
+            "has_tools": bool(row.get("has_tools")),
+            "text_bucket": public_label(row.get("text_bucket"), "unknown"),
+            "token_bucket": public_label(row.get("token_bucket"), "unknown"),
+        }
+        canary_sample_count = int(math.ceil(sample_count * canary_fraction)) if status == "review-ready" else 0
+        holdout_sample_count = int(math.ceil(sample_count * holdout_fraction)) if status == "review-ready" else 0
+        drill = {
+            "schema": ROUTING_DOWNGRADE_DRILL_ROW_SCHEMA,
+            "fingerprint": _routing_drill_fingerprint(fingerprint_material),
+            "source_evidence_schema": row.get("source_schema") or row.get("schema") or ROLLUP_ROW_SCHEMA,
+            **fingerprint_material,
+            "candidate_id_included": False,
+            "requested_model_family": requested_family,
+            "candidate_target_model": target_model,
+            "target_model_family": target_family,
+            "target_reason": target_reason,
+            "routing_status": routing_status,
+            "sample_count": sample_count,
+            "row_count": sample_count,
+            "error_count": _as_int(row.get("error_count")),
+            "retry_count": _as_int(row.get("retry_count")),
+            "error_rate": round(_as_int(row.get("error_count")) / float(sample_count), 6) if sample_count else 0.0,
+            "retry_rate": round(_as_int(row.get("retry_count")) / float(sample_count), 6) if sample_count else 0.0,
+            "input_tokens": projection["input_tokens"],
+            "output_tokens": projection["output_tokens"],
+            "projected_savings_usd": projection["projected_savings_usd"],
+            "projected_savings_per_1000_calls_usd": projection["projected_savings_per_1000_calls_usd"],
+            "recommended_canary_fraction": round(canary_fraction, 4) if status == "review-ready" else 0.0,
+            "recommended_holdout_fraction": round(holdout_fraction, 4) if status == "review-ready" else 0.0,
+            "recommended_canary_sample_count": canary_sample_count,
+            "recommended_holdout_sample_count": holdout_sample_count,
+            "top_blocker_code": blockers[0] if blockers else None,
+            "blocker_codes": blockers,
+            "status": status,
+            "readiness_state": status,
+            "recommended_next_action": next_action,
+            "local_action_family": "routing",
+            "review_only": True,
+            "emits_routing_apply_action": False,
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "aggregate_only": True,
+            "privacy": _routing_downgrade_privacy(),
+        }
+        rows.append(drill)
+        total_samples += sample_count
+        if status == "review-ready":
+            total_projected += _as_float(drill.get("projected_savings_usd"))
+        _increment(status_counts, status, sample_count)
+        _increment(target_counts, target_family or target_reason, sample_count)
+        _increment(source_counts, drill.get("source_surface"), sample_count)
+        for blocker in blockers:
+            _increment(blocker_counts, blocker, sample_count)
+
+    rows.sort(
+        key=lambda item: (
+            item.get("status") == "review-ready",
+            _as_float(item.get("projected_savings_per_1000_calls_usd")),
+            _as_int(item.get("sample_count")),
+            str(item.get("fingerprint")),
+        ),
+        reverse=True,
+    )
+    for rank, row in enumerate(rows[:capped_limit], start=1):
+        row["rank"] = rank
+
+    ranked = rows[:capped_limit]
+    top = ranked[0] if ranked else None
+    blocker_breakdown = _breakdown(blocker_counts)
+    return {
+        "schema": ROUTING_DOWNGRADE_DRILL_SCHEMA,
+        "status": "ranked" if ranked else "no-routing-downgrade-drill-candidates",
+        "summary": {
+            "rows_considered": len([row for row in rollups if isinstance(row, dict)]),
+            "candidate_count": len(ranked),
+            "review_ready_count": sum(1 for row in ranked if row.get("status") == "review-ready"),
+            "blocked_count": sum(1 for row in ranked if row.get("status") == "blocked"),
+            "sample_count": total_samples,
+            "top_fingerprint": top.get("fingerprint") if top else None,
+            "top_next_action": top.get("recommended_next_action") if top else None,
+            "top_blocker_code": top.get("top_blocker_code") if top else None,
+            "top_projected_savings_per_1000_calls_usd": (
+                top.get("projected_savings_per_1000_calls_usd") if top else 0.0
+            ),
+            "total_projected_savings_usd": round(total_projected, 8),
+            "minimum_sample_count": min_samples,
+            "default_canary_fraction": round(canary_fraction, 4),
+            "default_holdout_fraction": round(holdout_fraction, 4),
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "policy_files_written": False,
+        },
+        "status_breakdown": _breakdown(status_counts),
+        "target_breakdown": _breakdown(target_counts),
+        "source_surface_breakdown": _breakdown(source_counts),
+        "blocker_breakdown": blocker_breakdown,
+        "top_candidate": top,
+        "candidates": ranked,
+        "acceptance": {
+            "has_stable_fingerprints": all(str(row.get("fingerprint", "")).startswith("routing-drill:") for row in ranked),
+            "has_sample_counts": all(_as_int(row.get("sample_count")) >= 0 for row in ranked),
+            "has_projected_savings_per_1000_calls": all(
+                "projected_savings_per_1000_calls_usd" in row for row in ranked
+            ),
+            "has_canary_and_holdout_sizing": all(
+                "recommended_canary_fraction" in row and "recommended_holdout_fraction" in row for row in ranked
+            ),
+            "emits_no_routing_apply_actions": all(not bool(row.get("emits_routing_apply_action")) for row in ranked),
+            "policy_files_written": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _routing_downgrade_privacy(),
+    }
+
+
 def _source_traffic_acquisition_attempt(
     *,
     rows_considered: int,
@@ -12659,6 +13023,8 @@ def _rollup_snapshot_from_report(report: dict[str, Any]) -> dict[str, Any]:
     follow_up_summary = follow_up.get("summary") if isinstance(follow_up.get("summary"), dict) else {}
     replay = report.get("cache_replayability_dry_run") if isinstance(report.get("cache_replayability_dry_run"), dict) else {}
     replay_summary = replay.get("summary") if isinstance(replay.get("summary"), dict) else {}
+    routing_drills = report.get("routing_downgrade_drills") if isinstance(report.get("routing_downgrade_drills"), dict) else {}
+    routing_drill_summary = routing_drills.get("summary") if isinstance(routing_drills.get("summary"), dict) else {}
     crunch = report.get("crunch_opportunity_dry_run") if isinstance(report.get("crunch_opportunity_dry_run"), dict) else {}
     crunch_summary = crunch.get("summary") if isinstance(crunch.get("summary"), dict) else {}
     generated_at = str(report.get("generated_at") or utc_now())
@@ -12702,10 +13068,21 @@ def _rollup_snapshot_from_report(report: dict[str, Any]) -> dict[str, Any]:
             "cache_replayability_skipped_cohort_count": _as_int(replay_summary.get("skipped_cohort_count")),
             "cache_replayability_projected_hits": _as_int(replay_summary.get("projected_hits")),
             "cache_replayability_projected_savings_usd": round(_as_float(replay_summary.get("projected_savings_usd")), 8),
+            "routing_downgrade_drill_candidate_count": _as_int(routing_drill_summary.get("candidate_count")),
+            "routing_downgrade_drill_review_ready_count": _as_int(routing_drill_summary.get("review_ready_count")),
+            "routing_downgrade_drill_top_projected_savings_per_1000_calls_usd": round(
+                _as_float(routing_drill_summary.get("top_projected_savings_per_1000_calls_usd")),
+                8,
+            ),
+            "routing_downgrade_drill_total_projected_savings_usd": round(
+                _as_float(routing_drill_summary.get("total_projected_savings_usd")),
+                8,
+            ),
             "projected_crunch_tokens_saved": _as_int(crunch_summary.get("projected_saved_tokens")),
             "projected_crunch_savings_usd": round(_as_float(crunch_summary.get("projected_savings_usd")), 8),
             "total_projected_savings_usd": round(
                 _as_float(replay_summary.get("projected_savings_usd"))
+                + _as_float(routing_drill_summary.get("total_projected_savings_usd"))
                 + _as_float(crunch_summary.get("projected_savings_usd")),
                 8,
             ),
@@ -12773,6 +13150,7 @@ def latest_request_shape_rollup_snapshot_report(
         return None
     rollups = _snapshot_rollup_rows(snapshot)
     follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10) if rollups else None
+    routing_downgrade_drills = build_request_shape_routing_downgrade_drill_report(rollups, limit=25) if rollups else None
     crunch_opportunity_dry_run = build_request_shape_crunch_opportunity_dry_run(rollups, limit=25) if rollups else None
     follow_up_summary = {
         key: summary.get(key)
@@ -12821,6 +13199,12 @@ def latest_request_shape_rollup_snapshot_report(
             "snapshot_rehydrated_crunch_candidate_count": _as_int(
                 (crunch_opportunity_dry_run or {}).get("summary", {}).get("candidate_count")
             ),
+            "routing_downgrade_drill_candidate_count": _as_int(
+                (routing_downgrade_drills or {}).get("summary", {}).get("candidate_count")
+            ),
+            "routing_downgrade_drill_review_ready_count": _as_int(
+                (routing_downgrade_drills or {}).get("summary", {}).get("review_ready_count")
+            ),
         },
         "candidate_family_breakdown": summary.get("candidate_family_breakdown")
         if isinstance(summary.get("candidate_family_breakdown"), list)
@@ -12844,6 +13228,23 @@ def latest_request_shape_rollup_snapshot_report(
         "crunch_opportunity_dry_run": crunch_opportunity_dry_run
         if isinstance(crunch_opportunity_dry_run, dict) and not freshness["stale"]
         else None,
+        "routing_downgrade_drills": routing_downgrade_drills
+        if isinstance(routing_downgrade_drills, dict) and not freshness["stale"]
+        else {
+            "schema": ROUTING_DOWNGRADE_DRILL_SCHEMA,
+            "status": "snapshot-stale" if freshness["stale"] else "no-routing-downgrade-drill-candidates",
+            "summary": {
+                "candidate_count": 0,
+                "review_ready_count": 0,
+                "blocked_count": 0,
+                "top_blocker_code": "snapshot-stale" if freshness["stale"] else None,
+                "provider_calls_made": 0,
+                "managed_server_calls_made": 0,
+                "policy_files_written": False,
+            },
+            "candidates": [],
+            "privacy": _routing_downgrade_privacy(),
+        },
         "rollups": rollups if not freshness["stale"] else [],
         "privacy": snapshot.get("privacy") if isinstance(snapshot.get("privacy"), dict) else _shape_follow_up_privacy(),
     }
@@ -13090,6 +13491,7 @@ def build_request_shape_rollups_report(
     )
     source = "recent-local-metadata-window-backfill" if metadata_window_backfilled else "recent-local-call-metadata"
     follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10, source=source)
+    routing_downgrade_drills = build_request_shape_routing_downgrade_drill_report(rollups, limit=25)
     remaining_crunch_measurements = build_request_shape_crunch_remaining_measurement_report(
         follow_up_candidates=follow_up_candidates,
         crunch_opportunity=crunch_opportunity_dry_run,
@@ -13141,6 +13543,11 @@ def build_request_shape_rollups_report(
             "follow_up_candidate_count": follow_up_candidates["summary"]["ranked_candidate_count"],
             "top_next_action": follow_up_candidates["summary"]["top_next_action"],
             "top_local_action_family": follow_up_candidates["summary"]["top_local_action_family"],
+            "routing_downgrade_drill_candidate_count": routing_downgrade_drills["summary"]["candidate_count"],
+            "routing_downgrade_drill_review_ready_count": routing_downgrade_drills["summary"]["review_ready_count"],
+            "routing_downgrade_drill_top_projected_savings_per_1000_calls_usd": routing_downgrade_drills["summary"][
+                "top_projected_savings_per_1000_calls_usd"
+            ],
             "remaining_crunch_measurement_count": remaining_crunch_measurements["summary"]["remaining_measurement_required_count"],
         },
         "provider_breakdown": _breakdown(provider_counts),
@@ -13148,6 +13555,7 @@ def build_request_shape_rollups_report(
         "blocker_code_breakdown": _breakdown(blocker_counts),
         "source_traffic_acquisition": follow_up_candidates["source_traffic_acquisition"],
         "follow_up_candidates": follow_up_candidates,
+        "routing_downgrade_drills": routing_downgrade_drills,
         "cache_replayability_dry_run": cache_replayability_dry_run,
         "cache_replay_blocker_classification": cache_replay_blocker_classification,
         "crunch_opportunity_dry_run": crunch_opportunity_dry_run,

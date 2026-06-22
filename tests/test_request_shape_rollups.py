@@ -30,6 +30,7 @@ from tokenclaw.request_shape_rollups import (
     build_request_shape_crunch_policy_decision_report,
     build_request_shape_crunch_canary_stage_report,
     build_request_shape_follow_up_candidates,
+    build_request_shape_routing_downgrade_drill_report,
     build_request_shape_rollups_report,
     build_request_shape_tool_cache_replay_evidence_report,
     latest_request_shape_rollup_snapshot_report,
@@ -182,6 +183,132 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(follow_up["source_traffic_acquisition"]["attempted"])
         self.assertEqual(follow_up["summary"]["top_next_action"], "emit-request-shape-rollups")
         self.assertEqual(follow_up["missing_measurements"], ["no-source-traffic-for-request-shape-rollups"])
+
+    def test_routing_downgrade_drills_rank_review_only_candidates_with_stable_fingerprints(self) -> None:
+        rollups = [
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "source_schema": "tokenclaw.request_shape_rollups.v1",
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "requested_model_family": "gpt-5",
+                "routed_model_family": "gpt-5",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "stream": False,
+                "has_tools": False,
+                "text_bucket": "8k_32k_chars",
+                "token_bucket": "500_2k_tokens",
+                "cache_status": "miss",
+                "routing_status": "passthrough",
+                "candidate_families": ["routing_candidate"],
+                "candidate_work_classes": ["routing"],
+                "blocker_codes": [],
+                "row_count": 20,
+                "sample_count": 20,
+                "error_count": 0,
+                "retry_count": 0,
+                "input_tokens": 20_000,
+                "successful_input_tokens": 20_000,
+                "output_tokens": 2_000,
+            }
+        ]
+
+        report = build_request_shape_routing_downgrade_drill_report(rollups)
+        repeated = build_request_shape_routing_downgrade_drill_report(rollups)
+
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_routing_downgrade_drills.v1")
+        self.assertEqual(report["status"], "ranked")
+        self.assertEqual(report["summary"]["candidate_count"], 1)
+        self.assertEqual(report["summary"]["review_ready_count"], 1)
+        self.assertEqual(report["summary"]["blocked_count"], 0)
+        self.assertFalse(report["summary"]["policy_files_written"])
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["fingerprint"], repeated["candidates"][0]["fingerprint"])
+        self.assertTrue(candidate["fingerprint"].startswith("routing-drill:"))
+        self.assertEqual(candidate["status"], "review-ready")
+        self.assertEqual(candidate["sample_count"], 20)
+        self.assertEqual(candidate["candidate_target_model"], "gpt-5-mini")
+        self.assertGreater(candidate["projected_savings_per_1000_calls_usd"], 0)
+        self.assertEqual(candidate["recommended_canary_fraction"], 0.1)
+        self.assertEqual(candidate["recommended_holdout_fraction"], 0.1)
+        self.assertEqual(candidate["recommended_canary_sample_count"], 2)
+        self.assertEqual(candidate["recommended_holdout_sample_count"], 2)
+        self.assertIn("missing-quality-evidence", candidate["blocker_codes"])
+        self.assertFalse(candidate["emits_routing_apply_action"])
+        self.assertFalse(candidate["policy_files_written"])
+        self.assertTrue(candidate["review_only"])
+        self.assertTrue(candidate["privacy"]["metadata_only"])
+        self.assertTrue(candidate["privacy"]["aggregate_only"])
+        self.assertFalse(candidate["privacy"]["raw_prompts_included"])
+        self.assertFalse(candidate["privacy"]["provider_calls_made"])
+        self.assertFalse(candidate["privacy"]["managed_server_calls_made"])
+        self.assertTrue(report["acceptance"]["has_stable_fingerprints"])
+        self.assertTrue(report["acceptance"]["has_projected_savings_per_1000_calls"])
+        self.assertTrue(report["acceptance"]["has_canary_and_holdout_sizing"])
+        self.assertTrue(report["acceptance"]["emits_no_routing_apply_actions"])
+
+    def test_routing_downgrade_drills_block_stale_too_small_and_unsafe_shapes(self) -> None:
+        base = {
+            "schema": "tokenclaw.request_shape_rollup_row.v1",
+            "source_schema": "tokenclaw.request_shape_rollups.v1",
+            "provider_family": "anthropic",
+            "source_surface": "anthropic_messages",
+            "endpoint": "messages",
+            "requested_model_family": "claude-sonnet",
+            "routed_model_family": "claude-sonnet",
+            "workflow_phase": "tool-execution",
+            "stream": True,
+            "has_tools": False,
+            "text_bucket": "8k_32k_chars",
+            "token_bucket": "500_2k_tokens",
+            "cache_status": "skipped",
+            "routing_status": "passthrough",
+            "candidate_families": ["routing_candidate"],
+            "candidate_work_classes": ["routing"],
+            "error_count": 0,
+            "retry_count": 0,
+            "input_tokens": 20_000,
+            "successful_input_tokens": 20_000,
+            "output_tokens": 2_000,
+        }
+        rollups = [
+            {**base, "category": "chat", "row_count": 20, "sample_count": 20, "freshness_state": "stale"},
+            {**base, "category": "chat", "row_count": 1, "sample_count": 1},
+            {
+                **base,
+                "category": "thinking",
+                "workflow_phase": "thinking",
+                "row_count": 20,
+                "sample_count": 20,
+                "blocker_codes": ["thinking-routing-guard"],
+            },
+        ]
+
+        report = build_request_shape_routing_downgrade_drill_report(rollups)
+
+        self.assertEqual(report["status"], "ranked")
+        self.assertEqual(report["summary"]["candidate_count"], 3)
+        self.assertEqual(report["summary"]["review_ready_count"], 0)
+        self.assertEqual(report["summary"]["blocked_count"], 3)
+        blockers = {row["top_blocker_code"] for row in report["candidates"]}
+        self.assertIn("stale-request-shape-rollup", blockers)
+        self.assertIn("too-small-routing-drill-sample", blockers)
+        self.assertIn("thinking-routing-guard", blockers)
+        breakdown = {row["value"]: row["count"] for row in report["blocker_breakdown"]}
+        self.assertGreater(breakdown["stale-request-shape-rollup"], 0)
+        self.assertGreater(breakdown["too-small-routing-drill-sample"], 0)
+        self.assertGreater(breakdown["thinking-routing-guard"], 0)
+        for candidate in report["candidates"]:
+            self.assertEqual(candidate["status"], "blocked")
+            self.assertEqual(candidate["recommended_canary_fraction"], 0.0)
+            self.assertEqual(candidate["recommended_holdout_fraction"], 0.0)
+            self.assertEqual(candidate["recommended_canary_sample_count"], 0)
+            self.assertEqual(candidate["recommended_holdout_sample_count"], 0)
+            self.assertFalse(candidate["emits_routing_apply_action"])
+            self.assertFalse(candidate["policy_files_written"])
+            self.assertTrue(candidate["privacy"]["metadata_only"])
 
     def _cache_replay_hit_recovery_smoke(self) -> dict[str, object]:
         return {
@@ -804,6 +931,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["summary"]["rollup_count"], 2)
         self.assertEqual(report["summary"]["collapsed_rows"], 2)
         self.assertEqual(report["summary"]["follow_up_candidate_count"], 2)
+        self.assertIn("routing_downgrade_drills", report)
+        self.assertEqual(report["routing_downgrade_drills"]["schema"], "tokenclaw.request_shape_routing_downgrade_drills.v1")
+        self.assertIn("routing_downgrade_drill_candidate_count", report["summary"])
         self.assertEqual(report["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
         self.assertTrue(report["snapshot_persisted"])
         self.assertEqual(report["snapshot_persisted_count"], 1)
@@ -828,6 +958,11 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(latest_snapshot_report["rollup_snapshot"]["summary"]["rollup_count"], 2)
         self.assertEqual(latest_snapshot_report["summary"]["snapshot_rehydrated_rollup_count"], 2)
         self.assertEqual(latest_snapshot_report["follow_up_candidates"]["status"], "candidates-ranked")
+        self.assertIn("routing_downgrade_drills", latest_snapshot_report)
+        self.assertEqual(
+            latest_snapshot_report["routing_downgrade_drills"]["schema"],
+            "tokenclaw.request_shape_routing_downgrade_drills.v1",
+        )
         self.assertEqual(latest_snapshot_report["crunch_opportunity_dry_run"]["status"], "ranked")
         self.assertGreater(
             latest_snapshot_report["crunch_opportunity_dry_run"]["summary"]["projected_saved_tokens"],
