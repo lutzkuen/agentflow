@@ -28,6 +28,9 @@ ONBOARDING_TARGETS = ("openai", "claude", "codex", "claude-vscode", "claude-desk
 UNSUPPORTED_ONBOARDING_TARGETS = ("copilot",)
 RUN_TARGETS = ("openai", "claude")
 DEFAULT_STATS_URL = "http://127.0.0.1:4002/tokenclaw/stats"
+ROUTING_EXPERIMENTS_ENV = "TOKENCLAW_ROUTING_EXPERIMENTS"
+ROUTING_EXPERIMENTS_STRICT_ENV = "TOKENCLAW_ROUTING_EXPERIMENTS_STRICT"
+DEFAULT_CLAUDE_PROD_PORT = 4000
 
 
 def _local_url_with_path(base_url: str, path: str) -> str:
@@ -57,6 +60,39 @@ def _calls_count(db_path: Path) -> int | None:
     except sqlite3.Error:
         return None
     return int(row[0] or 0) if row else None
+
+
+def _proxy_arg_value(proxy_args: Sequence[str], flag: str) -> str | None:
+    try:
+        index = list(proxy_args).index(flag)
+    except ValueError:
+        return None
+    if index + 1 >= len(proxy_args):
+        return None
+    return str(proxy_args[index + 1])
+
+
+def _configured_proxy_port(proxy_args: Sequence[str]) -> int | None:
+    raw = _proxy_arg_value(proxy_args, "--port")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _prod_routing_experiments_path(
+    *,
+    target: str,
+    proxy_args: Sequence[str],
+    config_dir: str | Path,
+) -> Path | None:
+    if target != "claude":
+        return None
+    if _configured_proxy_port(proxy_args) != DEFAULT_CLAUDE_PROD_PORT:
+        return None
+    return Path(config_dir).expanduser() / "routing_experiments.yaml"
 
 
 def _claude_desktop_routing_verification(result: dict[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
@@ -677,9 +713,36 @@ def _onboarding_cli(
         if args.dry_run:
             stdout.write(activation.shell_command_for_profile(profile, redact=True) + "\n")
             return 0
+        durable_routing_experiments = _prod_routing_experiments_path(
+            target=args.target,
+            proxy_args=proxy_args,
+            config_dir=args.config_dir,
+        )
+        old_routing_experiments = os.environ.get(ROUTING_EXPERIMENTS_ENV)
+        old_routing_experiments_strict = os.environ.get(ROUTING_EXPERIMENTS_STRICT_ENV)
+        if durable_routing_experiments is not None:
+            os.environ[ROUTING_EXPERIMENTS_ENV] = str(durable_routing_experiments)
+            os.environ[ROUTING_EXPERIMENTS_STRICT_ENV] = "1"
+        launched_path = os.environ.get(ROUTING_EXPERIMENTS_ENV)
+        if launched_path:
+            stderr.write(
+                f"{brand} run launch: target={args.target} port={_configured_proxy_port(proxy_args)} "
+                f"routing_experiments={launched_path}\n"
+            )
         from tokenclaw import server
 
-        server.main(proxy_args)
+        try:
+            server.main(proxy_args)
+        finally:
+            if durable_routing_experiments is not None:
+                if old_routing_experiments is None:
+                    os.environ.pop(ROUTING_EXPERIMENTS_ENV, None)
+                else:
+                    os.environ[ROUTING_EXPERIMENTS_ENV] = old_routing_experiments
+                if old_routing_experiments_strict is None:
+                    os.environ.pop(ROUTING_EXPERIMENTS_STRICT_ENV, None)
+                else:
+                    os.environ[ROUTING_EXPERIMENTS_STRICT_ENV] = old_routing_experiments_strict
         return 0
 
     if args.command == "doctor":

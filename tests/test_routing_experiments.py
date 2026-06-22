@@ -20,6 +20,7 @@ import tokenclaw.routing_experiments as experiments
 class RoutingExperimentPolicyTest(unittest.TestCase):
     ENV_KEYS = (
         "TOKENCLAW_ROUTING_EXPERIMENTS",
+        "TOKENCLAW_ROUTING_EXPERIMENTS_STRICT",
         "TOKENCLAW_ROUTING_EXPERIMENTS_ENABLED",
         "TOKENCLAW_ROUTING_EXPERIMENT_SAMPLE_RATE",
         "TOKENCLAW_ROUTING_EXPERIMENT_DAILY_BUDGET_USD",
@@ -316,6 +317,69 @@ routing_candidates: []
         )
         self.assertEqual(after["status"], "covered")
         self.assertEqual(after["selected_candidate_id"], result["candidate_id"])
+
+    def test_strict_env_routing_experiments_path_does_not_fall_through_to_worktree_config(self):
+        worktree_config = Path(self.home.name) / "config"
+        worktree_config.mkdir()
+        (worktree_config / "routing_experiments.yaml").write_text(
+            """
+enabled: true
+routing_candidates:
+  - candidate_id: worktree-opus59-to-sonnet46
+    requested_model: claude-opus-5-9
+    routed_model: claude-sonnet-4-6
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: chat
+    max_text_chars: 32000
+""",
+            encoding="utf-8",
+        )
+        strict_path = Path(self.home.name) / ".tokenclaw" / "routing_experiments.yaml"
+        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = str(strict_path)
+        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS_STRICT"] = "1"
+        importlib.reload(experiments)
+
+        before = experiments.routing_candidate_coverage(
+            requested_model="claude-opus-5-9",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            category="chat",
+            stream=False,
+            text_chars=12000,
+            input_tokens=3000,
+        )
+        self.assertEqual(before["status"], "uncovered")
+
+        strict_path.parent.mkdir(parents=True, exist_ok=True)
+        strict_path.write_text(
+            """
+enabled: true
+routing_candidates:
+  - candidate_id: durable-opus59-to-sonnet46
+    requested_model: claude-opus-5-9
+    routed_model: claude-sonnet-4-6
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: chat
+    max_text_chars: 32000
+""",
+            encoding="utf-8",
+        )
+        importlib.reload(experiments)
+
+        after = experiments.routing_candidate_coverage(
+            requested_model="claude-opus-5-9",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            category="chat",
+            stream=False,
+            text_chars=12000,
+            input_tokens=3000,
+        )
+        self.assertEqual(after["status"], "covered")
+        self.assertEqual(after["selected_candidate_id"], "durable-opus59-to-sonnet46")
+        self.assertEqual(experiments.ROUTING_EXPERIMENT_RULES_PATH, str(strict_path))
 
     def test_streaming_shadow_gate_skips_non_anthropic_surfaces(self):
         meta = experiments.routing_experiment_decision(

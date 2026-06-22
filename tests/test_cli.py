@@ -1591,7 +1591,11 @@ class AgentflowActivationCliTests(unittest.TestCase):
             )
 
             with patch("tokenclaw.server.main") as server_main:
-                code = cli.tokenclaw_cli(["run", "claude", "--config-dir", tmp], stdout=io.StringIO())
+                code = cli.tokenclaw_cli(
+                    ["run", "claude", "--config-dir", tmp],
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
 
             self.assertEqual(code, 0)
             server_main.assert_called_once_with([
@@ -1604,6 +1608,77 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 "--anthropic-upstream",
                 upstream,
             ])
+
+    def test_tokenclaw_run_claude_prod_uses_durable_routing_experiments_path(self):
+        upstream = "https://anthropic.example"
+        captured_env: dict[str, str | None] = {}
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "tokenclaw"
+            transient_path = Path(tmp) / "run-routing-experiments.yaml"
+            cli.tokenclaw_cli(
+                ["activate", "claude", "--config-dir", str(config_dir), "--claude-base-url", upstream],
+                stdout=io.StringIO(),
+            )
+            stderr = io.StringIO()
+
+            def capture_server_main(_proxy_args):
+                captured_env["routing_experiments"] = os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS")
+                captured_env["routing_experiments_strict"] = os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS_STRICT")
+
+            with patch.dict(os.environ, {"TOKENCLAW_ROUTING_EXPERIMENTS": str(transient_path)}, clear=False):
+                with patch("tokenclaw.server.main", side_effect=capture_server_main) as server_main:
+                    code = cli.tokenclaw_cli(
+                        ["run", "claude", "--config-dir", str(config_dir)],
+                        stdout=io.StringIO(),
+                        stderr=stderr,
+                    )
+                self.assertEqual(os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS"), str(transient_path))
+                self.assertIsNone(os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS_STRICT"))
+
+            durable_path = config_dir / "routing_experiments.yaml"
+            self.assertEqual(code, 0)
+            server_main.assert_called_once()
+            self.assertEqual(captured_env["routing_experiments"], str(durable_path))
+            self.assertEqual(captured_env["routing_experiments_strict"], "1")
+            self.assertIn(f"routing_experiments={durable_path}", stderr.getvalue())
+            self.assertIn("target=claude port=4000", stderr.getvalue())
+
+    def test_tokenclaw_run_claude_dev_port_preserves_transient_routing_experiments_path(self):
+        upstream = "https://anthropic.example"
+        captured_env: dict[str, str | None] = {}
+        captured_args: dict[str, list[str]] = {}
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "tokenclaw"
+            transient_path = Path(tmp) / "run-routing-experiments.yaml"
+            cli.tokenclaw_cli(
+                ["activate", "claude", "--config-dir", str(config_dir), "--claude-base-url", upstream],
+                stdout=io.StringIO(),
+            )
+            stderr = io.StringIO()
+
+            def capture_server_main(proxy_args):
+                captured_env["routing_experiments"] = os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS")
+                captured_env["routing_experiments_strict"] = os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS_STRICT")
+                captured_args["proxy_args"] = list(proxy_args)
+
+            with patch.dict(
+                os.environ,
+                {"TOKENCLAW_PORT": "4001", "TOKENCLAW_ROUTING_EXPERIMENTS": str(transient_path)},
+                clear=False,
+            ):
+                with patch("tokenclaw.server.main", side_effect=capture_server_main):
+                    code = cli.tokenclaw_cli(
+                        ["run", "claude", "--config-dir", str(config_dir)],
+                        stdout=io.StringIO(),
+                        stderr=stderr,
+                    )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(captured_env["routing_experiments"], str(transient_path))
+            self.assertIsNone(captured_env["routing_experiments_strict"])
+            self.assertEqual(captured_args["proxy_args"][captured_args["proxy_args"].index("--port") + 1], "4001")
+            self.assertIn(f"routing_experiments={transient_path}", stderr.getvalue())
+            self.assertIn("target=claude port=4001", stderr.getvalue())
 
     def test_activate_codex_writes_user_config_and_default_openai_dependency(self):
         with TemporaryDirectory() as tmp:

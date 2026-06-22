@@ -334,6 +334,8 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     candidates: list[Path] = []
     if env_path:
         candidates.append(Path(env_path))
+        if os.getenv(f"{env_name}_STRICT", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            return candidates
     candidates.append(Path.cwd() / "config" / filename)
     candidates.append(tokenclaw_config_path(filename))
     return candidates
