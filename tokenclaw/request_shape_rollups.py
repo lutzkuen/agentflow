@@ -68,6 +68,7 @@ FOLLOW_UP_CANDIDATES_SCHEMA = "tokenclaw.request_shape_follow_up_candidates.v1"
 FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "tokenclaw.request_shape_blocker_cohort.v1"
 LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA = "tokenclaw.request_shape_local_activation_candidate_queue.v1"
 LOCAL_ACTIVATION_CANDIDATE_QUEUE_ENTRY_SCHEMA = "tokenclaw.request_shape_local_activation_candidate_queue_entry.v1"
+ROLLUP_SOURCE_DECLARATION_SCHEMA = "tokenclaw.request_shape_rollup_source_declaration.v1"
 SOURCE_TRAFFIC_ACQUISITION_SCHEMA = "tokenclaw.source_traffic_acquisition_action.v1"
 DASHBOARD_ROUTING_CANDIDATE_ROLLUP_SOURCE_SCHEMA = "tokenclaw.dashboard_routing_candidate_rollups.v1"
 ROUTING_DOWNGRADE_DRILL_SCHEMA = "tokenclaw.request_shape_routing_downgrade_drills.v1"
@@ -3328,6 +3329,68 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
         "request_fingerprints_included": False,
     }
     return group
+
+
+def _rollup_source_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "provider_bodies_included": False,
+        "raw_responses_included": False,
+        "tool_payloads_included": False,
+        "file_paths_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "cache_keys_included": False,
+        "individual_candidate_ids_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "policy_files_written": False,
+    }
+
+
+def _request_shape_rollup_source_declaration(
+    *,
+    source: str,
+    status: str,
+    rows_considered: int,
+    rollups: list[dict[str, Any]],
+    acquisition_reason: str | None = None,
+) -> dict[str, Any]:
+    source_surface_counts: dict[str, int] = {}
+    provider_counts: dict[str, int] = {}
+    endpoint_counts: dict[str, int] = {}
+    for row in rollups:
+        if not isinstance(row, dict):
+            continue
+        row_count = _as_int(row.get("row_count") or row.get("sample_count") or row.get("count"))
+        _increment(source_surface_counts, row.get("source_surface"), row_count)
+        _increment(provider_counts, row.get("provider_family"), row_count)
+        _increment(endpoint_counts, row.get("endpoint"), row_count)
+    return {
+        "schema": ROLLUP_SOURCE_DECLARATION_SCHEMA,
+        "source": public_label(source, "unknown"),
+        "status": public_label(status, "unknown"),
+        "reason": public_label(acquisition_reason, None),
+        "rows_considered": max(0, _as_int(rows_considered)),
+        "rollup_count": len([row for row in rollups if isinstance(row, dict)]),
+        "source_surface_breakdown": _breakdown(source_surface_counts),
+        "provider_breakdown": _breakdown(provider_counts),
+        "endpoint_breakdown": _breakdown(endpoint_counts),
+        "from_local_metadata": source in {
+            "recent-local-call-metadata",
+            "recent-local-metadata-window-backfill",
+            "dashboard-routing-candidates",
+        },
+        "read_only": True,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "policy_files_written": False,
+        "privacy": _rollup_source_privacy(),
+    }
 
 
 def _replayability_privacy() -> dict[str, Any]:
@@ -14261,6 +14324,8 @@ def _rollup_snapshot_from_report(report: dict[str, Any]) -> dict[str, Any]:
         "summary": {
             "rows_considered": _as_int(summary.get("rows_considered")),
             "rollup_count": _as_int(summary.get("rollup_count")),
+            "rollup_source_count": _as_int(summary.get("rollup_source_count")),
+            "top_rollup_source": summary.get("top_rollup_source"),
             "ranked_candidate_count": _as_int(follow_up_summary.get("ranked_candidate_count")),
             "top_next_action": follow_up_summary.get("top_next_action") or summary.get("top_next_action"),
             "top_local_action_family": follow_up_summary.get("top_local_action_family") or summary.get("top_local_action_family"),
@@ -14310,6 +14375,9 @@ def _rollup_snapshot_from_report(report: dict[str, Any]) -> dict[str, Any]:
             ),
             "no_source_traffic_reason": None,
         },
+        "rollup_source_declarations": report.get("rollup_source_declarations")
+        if isinstance(report.get("rollup_source_declarations"), list)
+        else [],
         "rollups": _snapshot_safe_rollup_rows(report),
         "privacy": {
             "metadata_only": True,
@@ -14406,6 +14474,8 @@ def latest_request_shape_rollup_snapshot_report(
         "summary": {
             "rows_considered": _as_int(summary.get("rows_considered")),
             "rollup_count": _as_int(summary.get("rollup_count")),
+            "rollup_source_count": _as_int(summary.get("rollup_source_count")),
+            "top_rollup_source": summary.get("top_rollup_source"),
             "collapsed_rows": 0,
             "metadata_window_backfilled": False,
             "body_rows_read": 0,
@@ -14433,6 +14503,9 @@ def latest_request_shape_rollup_snapshot_report(
         else [],
         "blocker_code_breakdown": summary.get("blocker_code_breakdown")
         if isinstance(summary.get("blocker_code_breakdown"), list)
+        else [],
+        "rollup_source_declarations": snapshot.get("rollup_source_declarations")
+        if isinstance(snapshot.get("rollup_source_declarations"), list)
         else [],
         "follow_up_candidates": follow_up_candidates
         if isinstance(follow_up_candidates, dict) and not freshness["stale"]
@@ -14767,6 +14840,21 @@ def build_request_shape_rollups_report(
         if dashboard_candidate_backfilled
         else len(rows)
     )
+    source_declarations = [
+        _request_shape_rollup_source_declaration(
+            source=source,
+            status=follow_up_candidates["source_traffic_acquisition_status"],
+            rows_considered=rows_considered,
+            rollups=rollups,
+            acquisition_reason=follow_up_candidates["summary"].get("no_source_traffic_reason"),
+        )
+    ]
+    follow_up_candidates = dict(follow_up_candidates)
+    follow_up_candidates["rollup_source_declarations"] = source_declarations
+    if isinstance(follow_up_candidates.get("summary"), dict):
+        follow_up_candidates["summary"] = dict(follow_up_candidates["summary"])
+        follow_up_candidates["summary"]["rollup_source_count"] = len(source_declarations)
+        follow_up_candidates["summary"]["top_rollup_source"] = source_declarations[0]["source"] if source_declarations else None
     report = {
         "schema": SCHEMA,
         "generated_at": generated_at,
@@ -14783,6 +14871,8 @@ def build_request_shape_rollups_report(
             "rows_considered": rows_considered,
             "rollup_count": len(rollups),
             "collapsed_rows": max(0, rows_considered - len(rollups)),
+            "rollup_source_count": len(source_declarations),
+            "top_rollup_source": source_declarations[0]["source"] if source_declarations else None,
             "metadata_window_backfilled": metadata_window_backfilled,
             "metadata_window_backfill_rows": len(rows) if metadata_window_backfilled else 0,
             "dashboard_candidate_backfilled": dashboard_candidate_backfilled,
@@ -14806,6 +14896,7 @@ def build_request_shape_rollups_report(
         "provider_breakdown": _breakdown(provider_counts),
         "candidate_family_breakdown": _breakdown(candidate_family_counts),
         "blocker_code_breakdown": _breakdown(blocker_counts),
+        "rollup_source_declarations": source_declarations,
         "source_traffic_acquisition": follow_up_candidates["source_traffic_acquisition"],
         "follow_up_candidates": follow_up_candidates,
         "routing_downgrade_drills": routing_downgrade_drills,

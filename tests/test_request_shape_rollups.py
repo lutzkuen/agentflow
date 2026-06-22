@@ -296,11 +296,92 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertNotIn(raw_prompt, rendered)
         self.assertNotIn(raw_path, rendered)
 
+    def test_rollups_declare_recent_local_call_metadata_source_without_raw_leaks(self) -> None:
+        raw_request_id = "raw-provider-request-id-must-not-leak"
+        raw_session_id = "raw-provider-session-id-must-not-leak"
+        raw_prompt = "raw provider prompt must not leak"
+        for index in range(2):
+            self.store.log_call(
+                id=f"{raw_request_id}-{index}",
+                created_at=f"2026-06-21T02:00:0{index}+00:00",
+                path="/v1/responses",
+                provider="openai",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5",
+                routed_model="gpt-5",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1200,
+                input_tokens_est=10_500,
+                output_tokens_est=250,
+                actual_input_tokens=10_500,
+                actual_output_tokens=250,
+                cost_est_usd=0.031,
+                cost_baseline_usd=0.031,
+                retry_count=0,
+                session_id=raw_session_id,
+                category="tool-result",
+                routing_json=stable_json(
+                    {
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "has_tools": True,
+                        "text_chars": 42_000,
+                        "reason": "passthrough",
+                    }
+                ),
+                crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                request_json=stable_json({"prompt": raw_prompt, "request_id": raw_request_id}),
+                response_json=stable_json({"output": "raw response must not leak"}),
+            )
+
+        report = build_request_shape_rollups_report(self.store, limit=10, persist=False, run_id="provider-source")
+        follow_up = report["follow_up_candidates"]
+
+        self.assertEqual(report["window"]["source"], "recent-local-call-metadata")
+        self.assertEqual(report["summary"]["rows_considered"], 2)
+        self.assertEqual(report["summary"]["rollup_source_count"], 1)
+        self.assertEqual(report["summary"]["top_rollup_source"], "recent-local-call-metadata")
+        self.assertGreaterEqual(report["summary"]["rollup_count"], 1)
+        self.assertEqual(follow_up["source_traffic_acquisition_status"], "completed")
+        self.assertGreaterEqual(follow_up["summary"]["ranked_candidate_count"], 1)
+        declarations = report["rollup_source_declarations"]
+        self.assertEqual(len(declarations), 1)
+        source = declarations[0]
+        self.assertEqual(source["schema"], "tokenclaw.request_shape_rollup_source_declaration.v1")
+        self.assertEqual(source["source"], "recent-local-call-metadata")
+        self.assertEqual(source["status"], "completed")
+        self.assertEqual(source["rows_considered"], 2)
+        self.assertEqual(source["rollup_count"], report["summary"]["rollup_count"])
+        self.assertTrue(source["from_local_metadata"])
+        self.assertTrue(source["privacy"]["metadata_only"])
+        self.assertTrue(source["privacy"]["aggregate_only"])
+        self.assertFalse(source["privacy"]["raw_prompts_included"])
+        self.assertFalse(source["privacy"]["request_ids_included"])
+        self.assertFalse(source["privacy"]["session_ids_included"])
+        self.assertEqual(follow_up["rollup_source_declarations"], declarations)
+        snapshot = report["rollup_snapshot"]
+        self.assertEqual(snapshot["summary"]["top_rollup_source"], "recent-local-call-metadata")
+        self.assertEqual(snapshot["rollup_source_declarations"], declarations)
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn(raw_request_id, rendered)
+        self.assertNotIn(raw_session_id, rendered)
+        self.assertNotIn(raw_prompt, rendered)
+        self.assertNotIn("raw response must not leak", rendered)
+
     def test_rollups_preserve_no_source_traffic_when_calls_and_metadata_windows_empty(self) -> None:
         report = build_request_shape_rollups_report(self.store, limit=10, persist=False, run_id="empty-backfill")
 
         self.assertEqual(report["summary"]["rows_considered"], 0)
         self.assertEqual(report["summary"]["rollup_count"], 0)
+        self.assertEqual(report["summary"]["rollup_source_count"], 1)
+        self.assertEqual(report["summary"]["top_rollup_source"], "recent-local-call-metadata")
+        self.assertEqual(report["rollup_source_declarations"][0]["status"], "no-source-traffic")
         self.assertFalse(report["summary"]["metadata_window_backfilled"])
         self.assertTrue(report["summary"]["source_traffic_acquisition_attempted"])
         self.assertEqual(report["source_traffic_acquisition"]["status"], "no-source-traffic")
