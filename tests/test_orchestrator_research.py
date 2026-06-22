@@ -2702,6 +2702,27 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(fresh["post_rollback_observation"]["observation_window_elapsed"])
         self.assertFalse(fresh["post_rollback_observation"]["no_reobserve_traffic"])
 
+        file_draft_report = queue["cache_replay_file_action_drafts"]
+        self.assertEqual(file_draft_report["summary"]["draft_count"], 4)
+        self.assertEqual(file_draft_report["summary"]["no_write_action_count"], 3)
+        self.assertEqual(file_draft_report["summary"]["blocked_action_count"], 1)
+        file_drafts = {row["source_fingerprint"]: row for row in file_draft_report["drafts"]}
+        reobserve_draft = file_drafts["activation:fresh-reobserve"]
+        self.assertEqual(reobserve_draft["status"], "no-write")
+        self.assertEqual(reobserve_draft["draft_action"], "reobserve-cache-replay-after-rollback")
+        self.assertTrue(reobserve_draft["decision_id"].startswith("cache-replay-file-decision:"))
+        self.assertIn("cache-replay-rollback-applied", reobserve_draft["reason_codes"])
+        self.assertEqual(reobserve_draft["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(reobserve_draft["projected_savings_usd"], 0.075373)
+        self.assertEqual(reobserve_draft["observed_savings_usd"], 0.0)
+        blocked_draft = file_drafts["activation:stale-rollback-not-applied"]
+        self.assertEqual(blocked_draft["status"], "blocked")
+        self.assertEqual(blocked_draft["blocked_reason"], "cache-replay-rollback-not-applied")
+        self.assertEqual(blocked_draft["no_write_next_action"], "apply-cache-replay-rollback-before-reobserve")
+        self.assertFalse(reobserve_draft["emits_cache_apply_action"])
+        self.assertEqual(reobserve_draft["cache_entries_written"], 0)
+        self.assertFalse(reobserve_draft["policy_files_written"])
+
         for row in [*actions.values(), *decisions.values()]:
             self.assertTrue(row["privacy"]["metadata_only"])
             self.assertTrue(row["privacy"]["aggregate_only"])
@@ -4218,6 +4239,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_apply_action_count": 0,
                 "cache_entries_written": 0,
                 "emits_cache_apply_action": False,
+                "projected_saved_tokens": 456,
+                "projected_savings_usd": 0.075373,
+                "observed_saved_tokens": 123,
+                "observed_saved_usd": 0.0123,
                 "shape": {
                     "provider_family": "openai",
                     "source_surface": "openai_responses",
@@ -4342,8 +4367,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         promote_draft = file_drafts["activation:cache-promote"]
         self.assertEqual(promote_draft["status"], "drafted")
         self.assertEqual(promote_draft["draft_action"], "stage-exact-cache-replay-canary")
+        self.assertTrue(promote_draft["decision_id"].startswith("cache-replay-file-decision:"))
+        self.assertIn("promote-ready", promote_draft["reason_codes"])
         self.assertEqual(promote_draft["target_local_rule_file"], "cache_rules.yaml")
         self.assertEqual(promote_draft["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(promote_draft["projected_savings_usd"], 0.075373)
+        self.assertEqual(promote_draft["observed_savings_usd"], 0.0123)
+        self.assertEqual(promote_draft["evidence_summary"]["projected_saved_tokens"], 456)
+        self.assertEqual(promote_draft["evidence_summary"]["observed_saved_tokens"], 123)
         promote_patch = promote_draft["proposed_policy_patch"]
         self.assertEqual(promote_patch["operation"], "stage_exact_cache_replay_canary")
         self.assertEqual(promote_patch["pattern_rules"][0]["mode"], "canary")
@@ -4355,6 +4386,10 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         rollback_draft = file_drafts["activation:cache-rollback"]
         self.assertEqual(rollback_draft["status"], "drafted")
         self.assertEqual(rollback_draft["draft_action"], "rollback-cache-replay-rule")
+        self.assertTrue(rollback_draft["decision_id"].startswith("cache-replay-file-decision:"))
+        self.assertIn("rollback-required", rollback_draft["reason_codes"])
+        self.assertEqual(rollback_draft["projected_savings_usd"], 0.075373)
+        self.assertEqual(rollback_draft["observed_savings_usd"], 0.0123)
         rollback_patch = rollback_draft["proposed_policy_patch"]
         self.assertEqual(rollback_patch["operation"], "disable_cache_replay_rule")
         self.assertEqual(rollback_patch["pattern_rules"][0]["id"], "[REDACTED_ID]")

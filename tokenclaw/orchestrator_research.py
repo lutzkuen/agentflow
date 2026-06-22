@@ -7770,18 +7770,20 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             action["successor_decision_fingerprint"] = sanitize_value(preview_gate.get("successor_decision_fingerprint"))
             if preview_gate.get("crunch_preview_confidence") is not None:
                 action["crunch_preview_confidence"] = round(_to_float(preview_gate.get("crunch_preview_confidence")), 8)
-            if preview_gate.get("projected_saved_tokens") is not None:
-                action["projected_saved_tokens"] = _to_int(preview_gate.get("projected_saved_tokens"))
-            if preview_gate.get("projected_saved_usd") is not None:
-                action["projected_saved_usd"] = round(_to_float(preview_gate.get("projected_saved_usd")), 8)
-            if preview_gate.get("projected_savings_usd") is not None:
-                action["projected_savings_usd"] = round(_to_float(preview_gate.get("projected_savings_usd")), 8)
-            if preview_gate.get("observed_saved_tokens") is not None:
-                action["observed_saved_tokens"] = _to_int(preview_gate.get("observed_saved_tokens"))
-            if preview_gate.get("observed_saved_usd") is not None:
-                action["observed_saved_usd"] = round(_to_float(preview_gate.get("observed_saved_usd")), 8)
             if preview_gate.get("observed_crunch_ratio") is not None:
                 action["observed_crunch_ratio"] = round(_to_float(preview_gate.get("observed_crunch_ratio")), 8)
+        if isinstance(preview_gate.get("reason_codes"), list):
+            action["reason_codes"] = sanitize_value(preview_gate.get("reason_codes") or [])
+        if preview_gate.get("projected_saved_tokens") is not None:
+            action["projected_saved_tokens"] = _to_int(preview_gate.get("projected_saved_tokens"))
+        if preview_gate.get("projected_saved_usd") is not None:
+            action["projected_saved_usd"] = round(_to_float(preview_gate.get("projected_saved_usd")), 8)
+        if preview_gate.get("projected_savings_usd") is not None:
+            action["projected_savings_usd"] = round(_to_float(preview_gate.get("projected_savings_usd")), 8)
+        if preview_gate.get("observed_saved_tokens") is not None:
+            action["observed_saved_tokens"] = _to_int(preview_gate.get("observed_saved_tokens"))
+        if preview_gate.get("observed_saved_usd") is not None:
+            action["observed_saved_usd"] = round(_to_float(preview_gate.get("observed_saved_usd")), 8)
         if preview_gate.get("managed_rank") is not None:
             action["managed_rank"] = _to_int(preview_gate.get("managed_rank"))
             action["managed_priority_source"] = (
@@ -7963,6 +7965,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "next_action_breakdown",
         "needed_resolution",
         "quality_risk_reason_codes",
+        "reason_codes",
     ):
         if isinstance(entry.get(key), list):
             action[key] = sanitize_value(entry.get(key))
@@ -8232,6 +8235,48 @@ def _cache_replay_draft_fingerprint(action: dict[str, Any], draft_action: str) -
     return public_id(json.dumps(material, sort_keys=True), prefix="cache-replay-action-draft") or "cache-replay-action-draft:unknown"
 
 
+def _cache_replay_file_action_decision_id(action: dict[str, Any], decision: str) -> str:
+    material = {
+        "schema": CACHE_REPLAY_FILE_ACTION_DRAFT_SCHEMA,
+        "source_fingerprint": sanitize_value(action.get("source_fingerprint")),
+        "successor_action_fingerprint": sanitize_value(action.get("fingerprint")),
+        "cache_reobserve_decision": sanitize_value(decision),
+        "target_local_rule_file": sanitize_value(action.get("target_local_rule_file") or "cache_rules.yaml"),
+        "target_local_policy_section": sanitize_value(action.get("target_local_policy_section") or "cache.pattern_rules"),
+    }
+    return public_id(json.dumps(material, sort_keys=True), prefix="cache-replay-file-decision") or "cache-replay-file-decision:unknown"
+
+
+def _cache_replay_file_reason_codes(action: dict[str, Any], decision: str) -> list[str]:
+    codes: list[str] = []
+    for key in ("reason_codes", "blocker_codes", "quality_risk_reason_codes"):
+        value = action.get(key)
+        if isinstance(value, list):
+            codes.extend(str(item) for item in value if str(item or "").strip())
+    for key in (
+        "cache_reobserve_decision",
+        "promotion_readiness",
+        "promotion_decision",
+        "promotion_recommendation",
+        "disabled_reason",
+        "unblock_reason",
+    ):
+        value = str(action.get(key) or "").strip()
+        if value:
+            codes.append(value)
+    if decision:
+        codes.append(decision)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for code in codes:
+        clean = sanitize_value(code)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        unique.append(clean)
+    return unique
+
+
 def _cache_replay_evidence_summary(action: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": "tokenclaw.cache_replay_file_action_evidence_summary.v1",
@@ -8243,7 +8288,15 @@ def _cache_replay_evidence_summary(action: dict[str, Any]) -> dict[str, Any]:
         "preview_verified": bool(action.get("preview_verified")),
         "sample_count": _to_int(action.get("sample_count")),
         "holdout_count": _to_int(action.get("holdout_count")),
+        "projected_hits": _to_int(action.get("projected_hits")),
+        "observed_hits": _to_int(action.get("observed_hits") or action.get("actual_hits")),
+        "projected_saved_tokens": _to_int(action.get("projected_saved_tokens")),
+        "observed_saved_tokens": _to_int(action.get("observed_saved_tokens")),
         "projected_savings_usd": round(_to_float(action.get("projected_savings_usd")), 8),
+        "observed_savings_usd": round(
+            _to_float(action.get("observed_savings_usd") or action.get("observed_saved_usd") or action.get("realized_savings_usd")),
+            8,
+        ),
         "target_shape": _cache_replay_shape(action),
         "metadata_only": True,
         "aggregate_only": True,
@@ -8253,17 +8306,23 @@ def _cache_replay_evidence_summary(action: dict[str, Any]) -> dict[str, Any]:
 def _cache_replay_file_action_draft(action: dict[str, Any]) -> dict[str, Any] | None:
     if str(action.get("local_action_family") or "") != "cache":
         return None
-    decision = str(
-        action.get("cache_reobserve_decision")
-        or action.get("promotion_readiness")
-        or action.get("successor_status")
-        or ""
-    ).strip()
+    decision = str(action.get("cache_reobserve_decision") or action.get("post_rollback_successor_decision") or "").strip()
+    if not decision:
+        successor_status = str(action.get("successor_status") or "").strip()
+        promotion_readiness = str(action.get("promotion_readiness") or "").strip()
+        decision = (
+            promotion_readiness
+            if successor_status in {"", "blocked", "keep-blocked", "review", "review-only"} and promotion_readiness
+            else successor_status or promotion_readiness
+        )
     if decision not in {
         "promote-ready",
         "rollback-required",
+        "reobserve-after-rollback",
         "keep-staged-warmup",
         "retire-staged-no-repeat",
+        "retired-stale-no-traffic",
+        "keep-blocked-narrow",
         "keep-blocked",
     }:
         return None
@@ -8271,6 +8330,7 @@ def _cache_replay_file_action_draft(action: dict[str, Any]) -> dict[str, Any] | 
     target_file = sanitize_value(action.get("target_local_rule_file") or "cache_rules.yaml")
     target_section = sanitize_value(action.get("target_local_policy_section") or "cache.pattern_rules")
     evidence_summary = _cache_replay_evidence_summary(action)
+    reason_codes = _cache_replay_file_reason_codes(action, decision)
     base = {
         "schema": CACHE_REPLAY_FILE_ACTION_DRAFT_SCHEMA,
         "source": "local-activation-successor",
@@ -8282,7 +8342,11 @@ def _cache_replay_file_action_draft(action: dict[str, Any]) -> dict[str, Any] | 
         "review_required": True,
         "preview_verified": bool(action.get("preview_verified")),
         "cache_reobserve_decision": sanitize_value(decision),
+        "decision_id": _cache_replay_file_action_decision_id(action, decision),
         "recommended_next_action": sanitize_value(action.get("recommended_next_action")),
+        "reason_codes": reason_codes,
+        "projected_savings_usd": evidence_summary["projected_savings_usd"],
+        "observed_savings_usd": evidence_summary["observed_savings_usd"],
         "cache_apply_action_count": 0,
         "cache_entries_written": 0,
         "emits_cache_apply_action": False,
@@ -8393,6 +8457,16 @@ def _cache_replay_file_action_draft(action: dict[str, Any]) -> dict[str, Any] | 
                 "reason_codes": ["warmup-evidence-still-needed"],
             }
         )
+    elif decision == "reobserve-after-rollback":
+        base.update(
+            {
+                "status": "no-write",
+                "draft_action": "reobserve-cache-replay-after-rollback",
+                "draft_id": _cache_replay_draft_fingerprint(action, "reobserve-cache-replay-after-rollback"),
+                "no_write_next_action": "reobserve-cache-replay-after-rollback",
+                "reason_codes": reason_codes or ["cache-replay-rollback-applied"],
+            }
+        )
     elif decision == "retire-staged-no-repeat":
         base.update(
             {
@@ -8403,14 +8477,28 @@ def _cache_replay_file_action_draft(action: dict[str, Any]) -> dict[str, Any] | 
                 "reason_codes": ["no-repeat-observed"],
             }
         )
+    elif decision == "retired-stale-no-traffic":
+        base.update(
+            {
+                "status": "no-write",
+                "draft_action": "retire-stale-cache-replay-successor-no-traffic",
+                "draft_id": _cache_replay_draft_fingerprint(action, "retire-stale-cache-replay-successor-no-traffic"),
+                "no_write_next_action": "retire-stale-cache-replay-successor-no-traffic",
+                "reason_codes": reason_codes or ["post-rollback-observation-window-elapsed-no-traffic"],
+            }
+        )
     else:
         base.update(
             {
                 "status": "blocked",
                 "draft_action": "keep-cache-replay-blocked",
                 "draft_id": _cache_replay_draft_fingerprint(action, "keep-cache-replay-blocked"),
-                "blocked_reason": "cache-replay-preview-keep-blocked",
-                "no_write_next_action": "keep-cache-replay-blocked",
+                "blocked_reason": "cache-replay-rollback-not-applied"
+                if decision == "keep-blocked-narrow"
+                else "cache-replay-preview-keep-blocked",
+                "no_write_next_action": "apply-cache-replay-rollback-before-reobserve"
+                if decision == "keep-blocked-narrow"
+                else "keep-cache-replay-blocked",
             }
         )
     return sanitize_value(
@@ -8425,6 +8513,8 @@ def _cache_replay_file_action_draft(action: dict[str, Any]) -> dict[str, Any] | 
                 "policy_files_written",
                 "provider_calls_made",
                 "managed_server_calls_made",
+                "projected_savings_usd",
+                "observed_savings_usd",
             }
         }
     )
