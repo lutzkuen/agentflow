@@ -3602,24 +3602,50 @@ class RequestShapeRollupTests(unittest.TestCase):
             recorded["schema"],
             "tokenclaw.request_shape_cache_replay_reobserve_recorded_evidence.v1",
         )
+        self.assertEqual(reobserve["freshness_status"], "stale")
+        self.assertEqual(recorded["freshness_status"], "stale")
         self.assertEqual(recorded["max_age_hours"], 72.0)
         self.assertEqual(recorded["applied_count"], 0)
         self.assertEqual(recorded["holdout_count"], 0)
         self.assertEqual(recorded["observed_hits"], 0)
+        self.assertEqual(recorded["exact_hit_count"], 0)
+        self.assertEqual(recorded["miss_count"], 0)
+        self.assertEqual(recorded["observed_savings_usd"], 0.0)
+        self.assertEqual(recorded["retry_count"], 0)
         self.assertEqual(recorded["error_count"], 0)
         self.assertEqual(recorded["fallback_count"], 0)
         self.assertEqual(recorded["invalidation_skipped_count"], 0)
+        self.assertEqual(recorded["blocker_breakdown"], [])
         self.assertTrue(recorded["rollback_required"])
         self.assertFalse(recorded["retirement_required"])
         self.assertIn("canary_fraction", recorded)
         self.assertIn("holdout_fraction", recorded)
         self.assertTrue(recorded["metadata_only"])
         self.assertTrue(recorded["aggregate_only"])
+        durable_decision = reobserve["durable_decision"]
+        self.assertEqual(
+            durable_decision["schema"],
+            "tokenclaw.request_shape_cache_replay_reobserve_durable_decision.v1",
+        )
+        self.assertEqual(durable_decision["decision"], "rollback-required")
+        self.assertEqual(durable_decision["freshness_status"], "stale")
+        self.assertEqual(durable_decision["successor_resolution"], "rollback-required")
+        self.assertEqual(durable_decision["observed_coverage"]["applied_count"], 0)
+        self.assertEqual(durable_decision["observed_coverage"]["holdout_count"], 0)
+        self.assertEqual(durable_decision["observed_coverage"]["exact_hit_count"], 0)
+        self.assertEqual(durable_decision["observed_coverage"]["warmup_miss_count"], 0)
+        self.assertEqual(durable_decision["observed_coverage"]["non_warmup_miss_count"], 0)
+        self.assertEqual(durable_decision["observed_coverage"]["invalidation_skipped_count"], 0)
+        self.assertEqual(durable_decision["cache_apply_action_count"], 0)
+        self.assertEqual(durable_decision["cache_entries_written"], 0)
         self.assertEqual(
             evidence["summary"]["reobserve_window_successor_resolution"],
             "rollback-required",
         )
+        self.assertEqual(evidence["summary"]["reobserve_window_freshness_status"], "stale")
         self.assertTrue(evidence["acceptance"]["reports_reobserve_recorded_evidence"])
+        self.assertTrue(evidence["acceptance"]["reports_reobserve_freshness_status"])
+        self.assertTrue(evidence["acceptance"]["reports_durable_reobserve_decision"])
         self.assertTrue(evidence["acceptance"]["resolves_stale_successor_beyond_evidence_age"])
         self.assertEqual(reobserve["traffic_floor"]["minimum_observed_rows"], 10)
         self.assertEqual(reobserve["traffic_floor"]["minimum_applied_count"], 1)
@@ -4930,15 +4956,38 @@ class RequestShapeRollupTests(unittest.TestCase):
             "tokenclaw.request_shape_cache_replay_reobserve_recorded_evidence.v1",
         )
         self.assertEqual(recorded["age_hours"], 96.0)
+        self.assertEqual(reobserve["freshness_status"], "stale")
+        self.assertEqual(recorded["freshness_status"], "stale")
+        self.assertEqual(recorded["observed_savings_usd"], 0.03)
+        self.assertEqual(recorded["exact_hit_count"], 1)
+        self.assertEqual(recorded["miss_count"], 0)
+        self.assertEqual(recorded["retry_count"], 0)
+        self.assertEqual(recorded["blocker_breakdown"], [])
         self.assertTrue(recorded["rollback_required"])
         self.assertFalse(recorded["retirement_required"])
         self.assertTrue(recorded["metadata_only"])
         self.assertTrue(recorded["aggregate_only"])
+        durable_decision = reobserve["durable_decision"]
+        self.assertEqual(
+            durable_decision["schema"],
+            "tokenclaw.request_shape_cache_replay_reobserve_durable_decision.v1",
+        )
+        self.assertEqual(durable_decision["decision"], "reobserve-after-rollback")
+        self.assertEqual(durable_decision["freshness_status"], "stale")
+        self.assertEqual(durable_decision["successor_resolution"], "rollback-required")
+        self.assertEqual(durable_decision["observed_coverage"]["applied_count"], 1)
+        self.assertEqual(durable_decision["observed_coverage"]["holdout_count"], 1)
+        self.assertEqual(durable_decision["observed_coverage"]["exact_hit_count"], 1)
+        self.assertEqual(durable_decision["observed_coverage"]["observed_savings_usd"], 0.03)
+        self.assertEqual(durable_decision["cache_apply_action_count"], 0)
+        self.assertEqual(durable_decision["cache_entries_written"], 0)
         self.assertEqual(
             decision["summary"]["post_rollback_observation_successor_resolution"],
             "rollback-required",
         )
         self.assertTrue(decision["acceptance"]["reports_reobserve_recorded_evidence"])
+        self.assertTrue(decision["acceptance"]["reports_reobserve_freshness_status"])
+        self.assertTrue(decision["acceptance"]["reports_durable_reobserve_decision"])
         self.assertTrue(decision["acceptance"]["resolves_stale_successor_beyond_evidence_age"])
         self.assertEqual(reobserve["next_state"], "reobserve-window-open")
         self.assertEqual(reobserve["next_action"], "apply-cache-replay-rollback-before-reobserve")
@@ -4960,6 +5009,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(reobserve["file_paths_included"])
         self.assertEqual(decision["post_rollback_observation"], reobserve)
         self.assertEqual(decision["summary"]["post_rollback_observation_state"], "rollback-required")
+        self.assertEqual(decision["summary"]["post_rollback_observation_freshness_status"], "stale")
         self.assertEqual(decision["summary"]["post_rollback_observation_next_state"], "reobserve-window-open")
         self.assertEqual(decision["summary"]["cache_apply_action_count"], 0)
         self.assertFalse(decision["summary"]["cache_entries_written"])

@@ -8227,9 +8227,11 @@ def _cache_replay_bounded_reobserve_window(
     observed_hits: int,
     projected_hits: int,
     projected_savings_usd: float,
+    observed_savings_usd: float,
     warmup_analysis: dict[str, Any],
     max_age_hours: float,
     lifecycle_counts: dict[str, Any] | None = None,
+    blocker_breakdown: list[dict[str, Any]] | None = None,
     age_hours: float | None = None,
 ) -> dict[str, Any]:
     top_canary = staged_canaries[0] if staged_canaries else {}
@@ -8294,29 +8296,72 @@ def _cache_replay_bounded_reobserve_window(
         observed_hits=observed_hits,
         warmup_analysis=warmup_analysis,
     )
+    freshness_status = "stale" if stale else ("fresh" if observed_rows > 0 else "no-fresh-evidence")
+    safe_blocker_breakdown = [
+        {"value": public_label(item.get("value"), "unknown"), "count": _as_int(item.get("count"))}
+        for item in (blocker_breakdown or [])
+        if isinstance(item, dict) and public_label(item.get("value"), "unknown") != "unknown"
+    ]
     recorded_evidence = {
         "schema": "tokenclaw.request_shape_cache_replay_reobserve_recorded_evidence.v1",
+        "freshness_status": freshness_status,
         "age_hours": age_hours,
         "max_age_hours": float(max_age_hours),
         "canary_fraction": round(_as_float(top_canary.get("canary_fraction")), 6),
         "holdout_fraction": round(_as_float(top_canary.get("holdout_fraction")), 6),
         "projected_hits": projected_hits,
         "projected_savings_usd": round(projected_savings_usd, 6),
+        "observed_savings_usd": round(observed_savings_usd, 6),
         "applied_count": applied_count,
         "holdout_count": holdout_count,
         "observed_hits": observed_hits,
+        "exact_hit_count": observed_hits,
+        "miss_count": _as_int(lifecycle_counts.get("miss_count")),
         "warmup_miss_count": _as_int(warmup_analysis.get("warmup_miss_count")),
         "non_warmup_miss_count": _as_int(warmup_analysis.get("non_warmup_miss_count")),
         "repeat_window_status": public_label(repeat_window.get("reason") or warmup_analysis.get("status"), "unknown"),
         "repeat_window_elapsed": bool(repeat_window.get("elapsed")),
         "later_exact_repeat_expected": bool(repeat_window.get("later_exact_repeat_expected")),
         "later_exact_repeat_absent": bool(repeat_window.get("later_exact_repeat_absent")),
+        "retry_count": _as_int(lifecycle_counts.get("retry_count")),
         "error_count": _as_int(lifecycle_counts.get("error_count")),
         "fallback_count": _as_int(lifecycle_counts.get("fallback_count")),
         "invalidation_skipped_count": _as_int(lifecycle_counts.get("invalidation_skipped_count")),
         "unsupported_shape_count": _as_int(lifecycle_counts.get("unsupported_shape_count")),
+        "blocker_breakdown": safe_blocker_breakdown,
         "retirement_required": decision == "retire-staged-no-repeat",
         "rollback_required": decision == "rollback-required",
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    durable_decision = {
+        "schema": "tokenclaw.request_shape_cache_replay_reobserve_durable_decision.v1",
+        "decision": decision,
+        "status": window_status,
+        "freshness_status": freshness_status,
+        "successor_resolution": successor_resolution,
+        "next_action": next_action,
+        "observed_coverage": {
+            "observed_row_count": observed_rows,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "exact_hit_count": observed_hits,
+            "miss_count": _as_int(lifecycle_counts.get("miss_count")),
+            "warmup_miss_count": _as_int(warmup_analysis.get("warmup_miss_count")),
+            "non_warmup_miss_count": _as_int(warmup_analysis.get("non_warmup_miss_count")),
+            "invalidation_skipped_count": _as_int(lifecycle_counts.get("invalidation_skipped_count")),
+            "fallback_count": _as_int(lifecycle_counts.get("fallback_count")),
+            "error_count": _as_int(lifecycle_counts.get("error_count")),
+            "retry_count": _as_int(lifecycle_counts.get("retry_count")),
+            "observed_savings_usd": round(observed_savings_usd, 6),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "blocker_breakdown": safe_blocker_breakdown,
+        "emits_cache_apply_action": False,
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
+        "policy_files_written": False,
         "metadata_only": True,
         "aggregate_only": True,
     }
@@ -8324,7 +8369,9 @@ def _cache_replay_bounded_reobserve_window(
         "schema": "tokenclaw.request_shape_cache_replay_bounded_reobserve_window.v1",
         "status": window_status,
         "decision": decision,
+        "freshness_status": freshness_status,
         "successor_resolution": successor_resolution,
+        "durable_decision": durable_decision,
         "next_action": next_action,
         "reason": stale_reason if stale else reason,
         "blocker_codes": blocker_codes,
@@ -8645,9 +8692,11 @@ def build_request_shape_cache_replay_evidence_report(
         observed_hits=observed_hits,
         projected_hits=projected_hits,
         projected_savings_usd=projected_savings,
+        observed_savings_usd=observed_savings,
         warmup_analysis=warmup_analysis,
         max_age_hours=max_age_hours,
         lifecycle_counts=lifecycle_counts,
+        blocker_breakdown=_breakdown(blocker_counts),
         age_hours=age_hours,
     )
     return {
@@ -8702,6 +8751,7 @@ def build_request_shape_cache_replay_evidence_report(
             "stale_zero_traffic_rule_count": len(stale_zero_traffic_rules),
             "reobserve_window_status": reobserve_window["status"],
             "reobserve_window_decision": reobserve_window["decision"],
+            "reobserve_window_freshness_status": reobserve_window["freshness_status"],
             "reobserve_window_successor_resolution": reobserve_window["successor_resolution"],
             "reobserve_window_next_action": reobserve_window["next_action"],
         },
@@ -8735,6 +8785,8 @@ def build_request_shape_cache_replay_evidence_report(
             "reports_bounded_reobserve_window": isinstance(reobserve_window, dict),
             "reports_reobserve_traffic_floor": isinstance(reobserve_window.get("traffic_floor"), dict),
             "reports_reobserve_recorded_evidence": isinstance(reobserve_window.get("recorded_evidence"), dict),
+            "reports_reobserve_freshness_status": reobserve_window.get("freshness_status") in {"fresh", "stale", "no-fresh-evidence"},
+            "reports_durable_reobserve_decision": isinstance(reobserve_window.get("durable_decision"), dict),
             "resolves_stale_successor_beyond_evidence_age": (
                 (not stale)
                 or reobserve_window["successor_resolution"]
@@ -9326,6 +9378,11 @@ def _cache_replay_policy_post_rollback_reobserve_window(
     holdout_count = metrics["holdout_count"]
     observed_hits = metrics["observed_hits"]
     repeat_window = warmup_analysis.get("repeat_window") if isinstance(warmup_analysis.get("repeat_window"), dict) else {}
+    blocker_breakdown = (
+        evidence.get("blocker_breakdown")
+        if isinstance(evidence, dict) and isinstance(evidence.get("blocker_breakdown"), list)
+        else []
+    )
     traffic_floor = {
         "schema": "tokenclaw.request_shape_cache_replay_reobserve_traffic_floor.v1",
         "minimum_observed_rows": DEFAULT_CACHE_REPLAY_MIN_STAGE_ROWS,
@@ -9391,29 +9448,72 @@ def _cache_replay_policy_post_rollback_reobserve_window(
         successor_resolution = "keep-staged-warmup"
     else:
         successor_resolution = "reobserve-window-open"
+    freshness_status = "stale" if metrics["stale_evidence"] else ("fresh" if observed_rows > 0 else "no-fresh-evidence")
+    safe_blocker_breakdown = [
+        {"value": public_label(item.get("value"), "unknown"), "count": _as_int(item.get("count"))}
+        for item in blocker_breakdown
+        if isinstance(item, dict) and public_label(item.get("value"), "unknown") != "unknown"
+    ]
     recorded_evidence = {
         "schema": "tokenclaw.request_shape_cache_replay_reobserve_recorded_evidence.v1",
+        "freshness_status": freshness_status,
         "age_hours": stale.get("age_hours") if stale.get("age_hours") is not None else metrics.get("evidence_age_hours"),
         "max_age_hours": max_age_hours,
         "canary_fraction": round(_as_float(top.get("canary_fraction")), 6),
         "holdout_fraction": round(_as_float(top.get("holdout_fraction")), 6),
         "projected_hits": metrics["projected_hits"],
         "projected_savings_usd": metrics["projected_savings_usd"],
+        "observed_savings_usd": metrics["observed_savings_usd"],
         "applied_count": applied_count,
         "holdout_count": holdout_count,
         "observed_hits": observed_hits,
+        "exact_hit_count": metrics["exact_hit_count"],
+        "miss_count": metrics["miss_count"],
         "warmup_miss_count": metrics["warmup_miss_count"],
         "non_warmup_miss_count": metrics["non_warmup_miss_count"],
         "repeat_window_status": public_label(repeat_window.get("reason") or warmup_analysis.get("status"), "unknown"),
         "repeat_window_elapsed": bool(repeat_window.get("elapsed")),
         "later_exact_repeat_expected": bool(repeat_window.get("later_exact_repeat_expected")),
         "later_exact_repeat_absent": bool(repeat_window.get("later_exact_repeat_absent")),
+        "retry_count": metrics["retry_count"],
         "error_count": metrics["error_count"],
         "fallback_count": metrics["fallback_count"],
         "invalidation_skipped_count": metrics["invalidation_skipped_count"],
         "unsupported_shape_count": metrics["unsupported_shape_count"],
+        "blocker_breakdown": safe_blocker_breakdown,
         "retirement_required": successor_resolution == "retire-staged-no-repeat",
         "rollback_required": decision == "rollback",
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+    durable_decision = {
+        "schema": "tokenclaw.request_shape_cache_replay_reobserve_durable_decision.v1",
+        "decision": "reobserve-after-rollback" if decision == "rollback" else state,
+        "status": status,
+        "freshness_status": freshness_status,
+        "successor_resolution": successor_resolution,
+        "next_action": next_action,
+        "observed_coverage": {
+            "observed_row_count": observed_rows,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "exact_hit_count": metrics["exact_hit_count"],
+            "miss_count": metrics["miss_count"],
+            "warmup_miss_count": metrics["warmup_miss_count"],
+            "non_warmup_miss_count": metrics["non_warmup_miss_count"],
+            "invalidation_skipped_count": metrics["invalidation_skipped_count"],
+            "fallback_count": metrics["fallback_count"],
+            "error_count": metrics["error_count"],
+            "retry_count": metrics["retry_count"],
+            "observed_savings_usd": metrics["observed_savings_usd"],
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "blocker_breakdown": safe_blocker_breakdown,
+        "emits_cache_apply_action": False,
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
+        "policy_files_written": False,
         "metadata_only": True,
         "aggregate_only": True,
     }
@@ -9422,7 +9522,9 @@ def _cache_replay_policy_post_rollback_reobserve_window(
         "status": status,
         "decision": "reobserve-after-rollback" if decision == "rollback" else state,
         "state": state,
+        "freshness_status": freshness_status,
         "successor_resolution": successor_resolution,
+        "durable_decision": durable_decision,
         "recorded_evidence": recorded_evidence,
         "next_state": next_state,
         "next_action": next_action,
@@ -9807,6 +9909,7 @@ def build_request_shape_cache_replay_policy_decision_report(
             "stale_evidence": metrics["stale_evidence"],
             "post_rollback_observation_status": post_rollback_observation["status"],
             "post_rollback_observation_state": post_rollback_observation["state"],
+            "post_rollback_observation_freshness_status": post_rollback_observation["freshness_status"],
             "post_rollback_observation_successor_resolution": post_rollback_observation["successor_resolution"],
             "post_rollback_observation_next_state": post_rollback_observation["next_state"],
             "post_rollback_observation_next_action": post_rollback_observation["next_action"],
@@ -9868,6 +9971,8 @@ def build_request_shape_cache_replay_policy_decision_report(
             "reports_reobserve_traffic_floor": isinstance(post_rollback_observation.get("traffic_floor"), dict),
             "reports_reobserve_expiry_metadata": isinstance(post_rollback_observation.get("expiry"), dict),
             "reports_reobserve_recorded_evidence": isinstance(post_rollback_observation.get("recorded_evidence"), dict),
+            "reports_reobserve_freshness_status": post_rollback_observation.get("freshness_status") in {"fresh", "stale", "no-fresh-evidence"},
+            "reports_durable_reobserve_decision": isinstance(post_rollback_observation.get("durable_decision"), dict),
             "resolves_stale_successor_beyond_evidence_age": (
                 (not metrics["stale_evidence"])
                 or post_rollback_observation["successor_resolution"]
