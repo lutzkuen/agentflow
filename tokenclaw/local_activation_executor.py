@@ -20,6 +20,8 @@ HANDOFF_SCHEMA = "tokenclaw.local_activation_managed_handoff.v1"
 HANDOFF_ROW_SCHEMA = "tokenclaw.local_activation_managed_handoff_row.v1"
 HANDOFF_PRIVACY_SCHEMA = "tokenclaw.local_activation_managed_handoff_privacy.v1"
 PREVIEW_REQUEST_SCHEMA = "tokenclaw.managed_activation_preview_request.v1"
+PREVIEW_REFRESH_BATCH_SCHEMA = "tokenclaw.managed_activation_preview_refresh_batch.v1"
+PREVIEW_REFRESH_ROW_SCHEMA = "tokenclaw.managed_activation_preview_refresh_row.v1"
 PREVIEW_RESULT_SCHEMA = "tokenclaw.managed_activation_preview_result.v1"
 PREVIEW_DECISION_SCHEMA = "tokenclaw.managed_activation_preview_decision.v1"
 PREVIEW_RANKED_NEXT_ACTION_SCHEMA = "tokenclaw.managed_activation_preview_ranked_next_action.v1"
@@ -387,6 +389,10 @@ def _executor_entry(row: dict[str, Any]) -> dict[str, Any]:
         "managed_priority_rank",
         "managed_priority_source",
         "managed_rank_fallback_reason",
+        "rank_basis",
+        "freshness_state",
+        "freshness_multiplier",
+        "freshness_adjusted_savings_per_1000_calls_usd",
         "durable_action_ledger_entry",
         "keep_blocked_reason",
         "next_state",
@@ -430,6 +436,10 @@ def _executor_entry(row: dict[str, Any]) -> dict[str, Any]:
         "managed_rank",
         "managed_priority_rank",
         "durable_action_ledger_entry",
+        "rank_basis",
+        "freshness_state",
+        "freshness_multiplier",
+        "freshness_adjusted_savings_per_1000_calls_usd",
     }
     return {key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in preserved}
 
@@ -822,6 +832,13 @@ def _handoff_row(entry: dict[str, Any]) -> dict[str, Any]:
         "duplicate_suppression_status": sanitize_value(entry.get("duplicate_suppression_status")),
         "duplicate_suppression_reason": sanitize_value(entry.get("duplicate_suppression_reason")),
         "durable_action_ledger_entry": bool(entry.get("durable_action_ledger_entry")),
+        "rank_basis": sanitize_value(entry.get("rank_basis")) if isinstance(entry.get("rank_basis"), dict) else None,
+        "freshness_state": sanitize_value(entry.get("freshness_state")),
+        "freshness_multiplier": round(_as_float(entry.get("freshness_multiplier")), 8),
+        "freshness_adjusted_savings_per_1000_calls_usd": round(
+            _as_float(entry.get("freshness_adjusted_savings_per_1000_calls_usd")),
+            8,
+        ),
         "keep_blocked_reason": sanitize_value(entry.get("keep_blocked_reason")),
         "next_state": sanitize_value(entry.get("next_state")),
         "next_state_reason": sanitize_value(entry.get("next_state_reason")),
@@ -849,6 +866,9 @@ def _handoff_row(entry: dict[str, Any]) -> dict[str, Any]:
         "managed_rank",
         "managed_priority_rank",
         "durable_action_ledger_entry",
+        "rank_basis",
+        "freshness_multiplier",
+        "freshness_adjusted_savings_per_1000_calls_usd",
         "provider_forwarding",
         "server_content_processing",
         "managed_enforced",
@@ -1016,6 +1036,208 @@ def _top_preview_rows(rows: list[dict[str, Any]], *, top_successor_count: int) -
         "preview_refresh_skipped_resolved_keep_blocked_count": skipped_resolved,
         "preview_refresh_selected_handoff_refs": sorted(ref for ref in selected_refs if ref),
     }
+
+
+def _preview_refresh_status(row: dict[str, Any], *, managed_preview_configured: bool) -> tuple[str, str]:
+    if managed_preview_configured:
+        return "preview-refresh-ready", "managed-preview-url-configured"
+    if bool(row.get("managed_preview_required")):
+        return "preview-unavailable", "managed-preview-url-not-configured"
+    return "preview-disabled", "managed-preview-optional"
+
+
+def _preview_refresh_ref(row: dict[str, Any], status: str) -> str:
+    material = {
+        "handoff": row.get("handoff_ref"),
+        "activation": row.get("source_activation_ref"),
+        "successor": row.get("source_successor_ref"),
+        "family": row.get("local_action_family"),
+        "next_action": row.get("executor_next_action"),
+        "status": status,
+    }
+    return public_id(json.dumps(material, sort_keys=True), prefix="preview-refresh") or "preview-refresh:unknown"
+
+
+def _row_coverage(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("coverage")
+    return value if isinstance(value, dict) else {}
+
+
+def _row_savings(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("savings")
+    return value if isinstance(value, dict) else {}
+
+
+def _preview_refresh_rank_basis(row: dict[str, Any]) -> dict[str, Any]:
+    rank_basis = row.get("rank_basis")
+    if isinstance(rank_basis, dict):
+        return sanitize_value(rank_basis)
+    coverage = _row_coverage(row)
+    savings = _row_savings(row)
+    return {
+        "schema": "tokenclaw.managed_activation_preview_refresh_rank_basis.v1",
+        "metadata_only": True,
+        "aggregate_only": True,
+        "rank": _as_int(row.get("rank")),
+        "source_queue_rank": _as_int(row.get("source_queue_rank")),
+        "source_ledger_rank": _as_int(row.get("source_ledger_rank")),
+        "sample_count": _as_int(coverage.get("sample_count")),
+        "projected_savings_usd": round(_as_float(savings.get("projected_savings_usd")), 8),
+        "freshness_state": sanitize_value(row.get("freshness_state") or "unknown"),
+    }
+
+
+def _preview_refresh_row(row: dict[str, Any], *, managed_preview_configured: bool) -> dict[str, Any]:
+    status, reason = _preview_refresh_status(row, managed_preview_configured=managed_preview_configured)
+    savings = _row_savings(row)
+    rank_basis = _preview_refresh_rank_basis(row)
+    refresh_row = {
+        "schema": PREVIEW_REFRESH_ROW_SCHEMA,
+        "refresh_ref": _preview_refresh_ref(row, status),
+        "handoff_ref": sanitize_value(row.get("handoff_ref")),
+        "source_activation_ref": sanitize_value(row.get("source_activation_ref")),
+        "source_successor_ref": sanitize_value(row.get("source_successor_ref")),
+        "source_executor_ref": sanitize_value(row.get("source_executor_ref")),
+        "rank": _as_int(row.get("rank")),
+        "source_queue_rank": _as_int(row.get("source_queue_rank")),
+        "source_ledger_rank": _as_int(row.get("source_ledger_rank")),
+        "local_action_family": sanitize_value(row.get("local_action_family") or "unknown"),
+        "recommended_next_action": sanitize_value(row.get("executor_next_action") or "inspect-local-evidence"),
+        "executor_action_class": sanitize_value(row.get("executor_action_class") or "review-only"),
+        "successor_status": sanitize_value(row.get("successor_status") or "review"),
+        "current_status": sanitize_value(row.get("current_status") or "unknown"),
+        "current_state": sanitize_value(row.get("current_state") or "unknown"),
+        "blocker_codes": sanitize_value(row.get("blocker_codes") or []),
+        "freshness_state": sanitize_value(row.get("freshness_state") or rank_basis.get("freshness_state") or "unknown"),
+        "rank_basis": sanitize_value(rank_basis),
+        "projected_saved_tokens": _as_int(savings.get("projected_saved_tokens")),
+        "projected_savings_usd": round(_as_float(savings.get("projected_savings_usd")), 8),
+        "realized_savings_usd": round(_as_float(savings.get("realized_savings_usd")), 8),
+        "preview_requirement": "required" if bool(row.get("managed_preview_required")) else "optional",
+        "managed_preview_required": bool(row.get("managed_preview_required")),
+        "preview_verified": bool(row.get("preview_verified")),
+        "preview_verification_status": sanitize_value(row.get("preview_verification_status")),
+        "preview_verification_decision": sanitize_value(row.get("preview_verification_decision")),
+        "refresh_status": status,
+        "refresh_reason": reason,
+        "managed_preview_configured": managed_preview_configured,
+        "review_only": True,
+        "feature_only": True,
+        "locally_executed": True,
+        "provider_forwarding": False,
+        "server_content_processing": False,
+        "managed_enforced": False,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _handoff_privacy(),
+    }
+    if isinstance(row.get("managed_preview_gate"), dict):
+        refresh_row["managed_preview_gate"] = sanitize_value(row.get("managed_preview_gate"))
+    preserved = {
+        "rank",
+        "source_queue_rank",
+        "source_ledger_rank",
+        "projected_saved_tokens",
+        "projected_savings_usd",
+        "realized_savings_usd",
+        "managed_preview_required",
+        "preview_verified",
+        "managed_preview_configured",
+        "review_only",
+        "feature_only",
+        "locally_executed",
+        "provider_forwarding",
+        "server_content_processing",
+        "managed_enforced",
+        "policy_files_written",
+        "provider_calls_made",
+        "managed_server_calls_made",
+        "rank_basis",
+        "privacy",
+    }
+    return {key: value for key, value in refresh_row.items() if value not in (None, "", [], 0) or key in preserved}
+
+
+def build_managed_activation_preview_refresh_batch(
+    source: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    top_successor_count: int = 0,
+    managed_preview_url: str | None = None,
+) -> dict[str, Any]:
+    """Build a feature-only local batch of activation successors needing preview refresh."""
+    handoff = (
+        source
+        if source.get("schema") == HANDOFF_SCHEMA
+        else build_local_activation_executor_managed_handoff(source, now=now)
+    )
+    all_rows = [row for row in handoff.get("rows") or [] if isinstance(row, dict)]
+    rows, refresh_summary = _top_preview_rows(all_rows, top_successor_count=int(top_successor_count or 0))
+    managed_preview_configured = bool(str(managed_preview_url or "").strip())
+    refresh_rows = [
+        _preview_refresh_row(row, managed_preview_configured=managed_preview_configured)
+        for row in rows
+    ]
+    family_counts = Counter(str(row.get("local_action_family") or "unknown") for row in refresh_rows)
+    status_counts = Counter(str(row.get("refresh_status") or "unknown") for row in refresh_rows)
+    preview_required_rows = [row for row in refresh_rows if bool(row.get("managed_preview_required"))]
+    preview_required_family_counts = Counter(str(row.get("local_action_family") or "unknown") for row in preview_required_rows)
+    result = {
+        "schema": PREVIEW_REFRESH_BATCH_SCHEMA,
+        "compatible_schemas": ["agentflow.managed_activation_preview_refresh_batch.v1"],
+        "generated_at": handoff.get("generated_at")
+        or (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(),
+        "status": "ready" if refresh_rows else "empty",
+        "mode": "review-only",
+        "dry_run": True,
+        "managed_dependency": "optional",
+        "feature_only": True,
+        "locally_executed": True,
+        "provider_forwarding": False,
+        "server_content_processing": False,
+        "managed_enforced": False,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "managed_preview_configured": managed_preview_configured,
+        "source_handoff_schema": sanitize_value(handoff.get("schema")),
+        "source_handoff_status": sanitize_value(handoff.get("status")),
+        "rows": refresh_rows,
+        "summary": {
+            "refresh_row_count": len(refresh_rows),
+            "preview_required_row_count": len(preview_required_rows),
+            "preview_optional_row_count": max(0, len(refresh_rows) - len(preview_required_rows)),
+            "local_action_family_count": len(family_counts),
+            "local_action_family_counts": [
+                {"value": key, "count": count} for key, count in sorted(family_counts.items())
+            ],
+            "preview_required_local_action_family_counts": [
+                {"value": key, "count": count} for key, count in sorted(preview_required_family_counts.items())
+            ],
+            "refresh_status_counts": [
+                {"value": key, "count": count} for key, count in sorted(status_counts.items())
+            ],
+            "projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in refresh_rows), 8),
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            **refresh_summary,
+        },
+        "privacy": _handoff_privacy(),
+    }
+    result = sanitize_value(result)
+    violations = managed_egress_violations(result)
+    result["egress_guard"] = {
+        "schema": "tokenclaw.managed_egress_guard.v1",
+        "status": "passed" if not violations else "blocked",
+        "blocked": bool(violations),
+        "violation_count": len(violations),
+        "raw_values_logged": False,
+    }
+    if violations:
+        result["egress_guard"]["blocked_keys"] = sorted({item.get("key", "unknown") for item in violations})
+    return result
 
 
 def build_managed_activation_preview_request(

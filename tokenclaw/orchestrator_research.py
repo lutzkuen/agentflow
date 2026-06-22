@@ -10718,6 +10718,13 @@ def _activation_burndown_row_from_successor(action: dict[str, Any]) -> dict[str,
         "target_local_policy_section": sanitize_value(action.get("target_local_policy_section")),
         "duplicate_suppression_status": sanitize_value(action.get("duplicate_suppression_status")),
         "duplicate_suppression_reason": sanitize_value(action.get("duplicate_suppression_reason")),
+        "rank_basis": sanitize_value(action.get("rank_basis")) if isinstance(action.get("rank_basis"), dict) else None,
+        "freshness_state": sanitize_value(action.get("freshness_state")),
+        "freshness_multiplier": round(_to_float(action.get("freshness_multiplier")), 8),
+        "freshness_adjusted_savings_per_1000_calls_usd": round(
+            _to_float(action.get("freshness_adjusted_savings_per_1000_calls_usd")),
+            8,
+        ),
         "projected_savings_usd": round(_to_float(action.get("projected_savings_usd")), 8),
         "realized_savings_usd": round(_to_float(action.get("realized_savings_usd")), 8),
         "sample_count": _to_int(action.get("sample_count")),
@@ -10824,6 +10831,8 @@ def _activation_burndown_row_from_successor(action: dict[str, Any]) -> dict[str,
         "error_rate_delta",
         "retry_rate_delta",
         "fallback_rate_delta",
+        "freshness_multiplier",
+        "freshness_adjusted_savings_per_1000_calls_usd",
     }
     return {key: value for key, value in row.items() if value not in (None, "", [], 0) or key in preserved}
 

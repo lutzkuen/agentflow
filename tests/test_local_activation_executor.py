@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from tokenclaw import cli
 from tokenclaw.local_activation_executor import (
+    build_managed_activation_preview_refresh_batch,
     build_managed_activation_preview_request,
     build_managed_activation_preview_result,
     build_local_activation_executor_bundle,
@@ -879,6 +880,106 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertNotIn("activation-feedback-blocker-review-already-resolved", rendered)
         self.assertNotIn("activation:preview-verified", rendered)
         self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
+
+    def test_managed_activation_preview_refresh_batch_is_feature_only_from_successor_queue(self):
+        plan = json.loads(json.dumps(_preview_required_successor_queue_plan()))
+        plan["entries"][0]["rank_basis"] = {
+            "schema": "tokenclaw.local_activation_successor_rank_basis.v1",
+            "metadata_only": True,
+            "aggregate_only": True,
+            "rank_bucket": 1,
+            "freshness_state": "fresh",
+            "sample_count": 10,
+            "projected_savings_usd": 0.045,
+        }
+        plan["entries"][0]["freshness_state"] = "fresh"
+        plan["entries"][0]["freshness_multiplier"] = 0.9
+        plan["entries"][0]["freshness_adjusted_savings_per_1000_calls_usd"] = 1.25
+
+        result = build_managed_activation_preview_refresh_batch(plan, now=NOW)
+        repeat = build_managed_activation_preview_refresh_batch(plan, now=NOW)
+
+        self.assertEqual(result["schema"], "tokenclaw.managed_activation_preview_refresh_batch.v1")
+        self.assertIn("agentflow.managed_activation_preview_refresh_batch.v1", result["compatible_schemas"])
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["summary"]["refresh_row_count"], 3)
+        self.assertEqual(result["summary"]["preview_required_row_count"], 3)
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+        self.assertFalse(result["policy_files_written"])
+        self.assertTrue(result["feature_only"])
+        self.assertTrue(result["locally_executed"])
+        self.assertEqual(
+            [row["refresh_ref"] for row in result["rows"]],
+            [row["refresh_ref"] for row in repeat["rows"]],
+        )
+        family_counts = {item["value"]: item["count"] for item in result["summary"]["local_action_family_counts"]}
+        self.assertEqual(family_counts["routing"], 1)
+        self.assertEqual(family_counts["cache"], 1)
+        self.assertEqual(family_counts["activation-feedback"], 1)
+        status_counts = {item["value"]: item["count"] for item in result["summary"]["refresh_status_counts"]}
+        self.assertEqual(status_counts["preview-unavailable"], 3)
+        first = result["rows"][0]
+        routing = next(row for row in result["rows"] if row["local_action_family"] == "routing")
+        self.assertTrue(first["refresh_ref"].startswith("preview-refresh:"))
+        self.assertTrue(first["source_activation_ref"].startswith("activation:"))
+        self.assertTrue(first["source_successor_ref"].startswith("successor:"))
+        self.assertEqual(first["recommended_next_action"], "refresh-managed-activation-preview")
+        self.assertEqual(first["preview_requirement"], "required")
+        self.assertEqual(first["refresh_reason"], "managed-preview-url-not-configured")
+        self.assertEqual(routing["freshness_state"], "fresh")
+        self.assertEqual(routing["rank_basis"]["freshness_state"], "fresh")
+        self.assertTrue(first["privacy"]["metadata_only"])
+        self.assertFalse(first["privacy"]["provider_calls_made"])
+        self.assertFalse(first["privacy"]["managed_server_calls_made"])
+        self.assertFalse(first["privacy"]["policy_files_written"])
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("req-preview-secret", rendered)
+        self.assertNotIn("session-preview-secret", rendered)
+        self.assertNotIn("cache-preview-secret", rendered)
+        self.assertNotIn("raw preview secret", rendered)
+
+    def test_managed_activation_preview_refresh_batch_marks_optional_rows_disabled_offline(self):
+        plan = json.loads(json.dumps(_preview_required_successor_queue_plan()))
+        optional = json.loads(json.dumps(plan["entries"][0]))
+        optional.update(
+            {
+                "rank": 4,
+                "fingerprint": "activation:preview-crunch-optional",
+                "lever": "crunch",
+                "local_action_family": "crunch",
+                "managed_preview_required": False,
+                "managed_preview_gate": {
+                    "schema": "tokenclaw.preview_verified_activation_successor_gate.v1",
+                    "required": False,
+                    "status": "missing-preview",
+                    "verified": False,
+                    "decision": "preview-optional",
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "privacy": {"metadata_only": True, "aggregate_only": True, "review_only": True},
+                },
+            }
+        )
+        plan["entries"].append(optional)
+
+        result = build_managed_activation_preview_refresh_batch(plan, now=NOW)
+
+        by_family = {row["local_action_family"]: row for row in result["rows"]}
+        self.assertEqual(by_family["crunch"]["preview_requirement"], "optional")
+        self.assertEqual(by_family["crunch"]["refresh_status"], "preview-disabled")
+        self.assertEqual(by_family["crunch"]["refresh_reason"], "managed-preview-optional")
+        status_counts = {item["value"]: item["count"] for item in result["summary"]["refresh_status_counts"]}
+        self.assertEqual(status_counts["preview-unavailable"], 3)
+        self.assertEqual(status_counts["preview-disabled"], 1)
+        self.assertEqual(result["summary"]["preview_optional_row_count"], 1)
+        self.assertFalse(result["summary"]["policy_files_written"])
+        self.assertFalse(result["summary"]["provider_calls_made"])
+        self.assertFalse(result["summary"]["managed_server_calls_made"])
         self.assertEqual(managed_egress_violations(result), [])
 
     def test_managed_activation_preview_result_summarizes_review_only_decisions(self):
