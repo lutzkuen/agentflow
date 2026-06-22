@@ -635,9 +635,44 @@ def _load_experiment_policy() -> tuple[dict[str, Any], str, str]:
     return policy, "local-default", str(defaults_path)
 
 
+def _experiment_policy_file_paths() -> list[Path]:
+    paths = _manual_rule_candidates("routing_experiments.yaml", "TOKENCLAW_ROUTING_EXPERIMENTS")
+    paths.append(Path(__file__).parent / "routing_experiments.yaml")
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _experiment_policy_file_snapshots() -> dict[str, dict[str, Any]]:
+    return {str(path): policy_file_snapshot(path) for path in _experiment_policy_file_paths()}
+
+
+def _experiment_policy_snapshot_key(snapshots: dict[str, dict[str, Any]]) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        sorted(
+            (
+                path,
+                bool(snapshot.get("exists")),
+                bool(snapshot.get("is_file")),
+                snapshot.get("size"),
+                snapshot.get("mtime_ns"),
+                snapshot.get("sha256"),
+            )
+            for path, snapshot in snapshots.items()
+        )
+    )
+
+
 ROUTING_EXPERIMENT_POLICY, ROUTING_EXPERIMENT_POLICY_SOURCE, ROUTING_EXPERIMENT_RULES_PATH = _load_experiment_policy()
 ROUTING_EXPERIMENT_RULES_LOADED_AT = utc_now()
 ROUTING_EXPERIMENT_RULES_LOADED_FILE = policy_file_snapshot(ROUTING_EXPERIMENT_RULES_PATH)
+ROUTING_EXPERIMENT_RULES_LOADED_FILES = _experiment_policy_file_snapshots()
 ROUTING_EXPERIMENT_ENABLED = bool(ROUTING_EXPERIMENT_POLICY["enabled"])
 ROUTING_EXPERIMENT_MODE = str(ROUTING_EXPERIMENT_POLICY.get("mode") or "applied_routed_down")
 ROUTING_EXPERIMENT_SAMPLE_RATE = float(ROUTING_EXPERIMENT_POLICY["sample_rate"])
@@ -652,6 +687,44 @@ ROUTING_PROMOTION_MIN_PASS_RATE = 0.90
 ROUTING_PROMOTION_MAX_SHADOW_ERROR_RATE = 0.05
 ROUTING_PROMOTION_MAX_PRIMARY_ERROR_RATE = 0.05
 ROUTING_PROMOTION_SCHEMA = "tokenclaw.routing_experiment_promotion_verdict.v1"
+
+
+def refresh_experiment_policy_if_changed(*, force: bool = False) -> bool:
+    global ROUTING_EXPERIMENT_POLICY
+    global ROUTING_EXPERIMENT_POLICY_SOURCE
+    global ROUTING_EXPERIMENT_RULES_PATH
+    global ROUTING_EXPERIMENT_RULES_LOADED_AT
+    global ROUTING_EXPERIMENT_RULES_LOADED_FILE
+    global ROUTING_EXPERIMENT_RULES_LOADED_FILES
+    global ROUTING_EXPERIMENT_ENABLED
+    global ROUTING_EXPERIMENT_MODE
+    global ROUTING_EXPERIMENT_SAMPLE_RATE
+    global ROUTING_EXPERIMENT_DAILY_BUDGET_USD
+    global ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD
+    global ROUTING_EXPERIMENT_MIN_SAMPLES
+    global ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES
+
+    current_snapshots = _experiment_policy_file_snapshots()
+    if not force and _experiment_policy_snapshot_key(current_snapshots) == _experiment_policy_snapshot_key(
+        ROUTING_EXPERIMENT_RULES_LOADED_FILES
+    ):
+        return False
+
+    policy, source, rules_path = _load_experiment_policy()
+    ROUTING_EXPERIMENT_POLICY = policy
+    ROUTING_EXPERIMENT_POLICY_SOURCE = source
+    ROUTING_EXPERIMENT_RULES_PATH = rules_path
+    ROUTING_EXPERIMENT_RULES_LOADED_AT = utc_now()
+    ROUTING_EXPERIMENT_RULES_LOADED_FILE = policy_file_snapshot(rules_path)
+    ROUTING_EXPERIMENT_RULES_LOADED_FILES = _experiment_policy_file_snapshots()
+    ROUTING_EXPERIMENT_ENABLED = bool(policy["enabled"])
+    ROUTING_EXPERIMENT_MODE = str(policy.get("mode") or "applied_routed_down")
+    ROUTING_EXPERIMENT_SAMPLE_RATE = float(policy["sample_rate"])
+    ROUTING_EXPERIMENT_DAILY_BUDGET_USD = float(policy["daily_budget_usd"])
+    ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD = float(policy["similarity_threshold"])
+    ROUTING_EXPERIMENT_MIN_SAMPLES = int(policy["min_samples_for_confidence"])
+    ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES = bool(policy["store_response_bodies"])
+    return True
 
 
 def _override_matches(
@@ -792,6 +865,7 @@ def _model_pair_allowed(requested: str, routed: str) -> bool:
 
 
 def _all_routing_candidates() -> list[dict[str, Any]]:
+    refresh_experiment_policy_if_changed()
     configured = [
         dict(item)
         for item in ROUTING_EXPERIMENT_POLICY.get("routing_candidates") or []

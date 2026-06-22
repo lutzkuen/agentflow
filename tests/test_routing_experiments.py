@@ -245,7 +245,6 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         data_after = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         self.assertEqual(len(data_after["routing_candidates"]), len(data["routing_candidates"]))
 
-        importlib.reload(experiments)
         after = experiments.routing_candidate_coverage(
             requested_model="claude-opus-5-0",
             provider="anthropic",
@@ -257,6 +256,89 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         )
         self.assertEqual(after["status"], "covered")
         self.assertEqual(after["selected_candidate_id"], result["candidate_id"])
+
+    def test_dashboard_candidate_append_refreshes_coverage_without_module_reload(self):
+        importlib.reload(experiments)
+
+        before = experiments.routing_candidate_coverage(
+            requested_model="claude-opus-5-2",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            category="chat",
+            stream=False,
+            text_chars=12000,
+            input_tokens=3000,
+        )
+        self.assertEqual(before["status"], "uncovered")
+
+        result = experiments.append_dashboard_routing_candidate({
+            "requested_model": "claude-opus-5-2",
+            "routed_model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "category": "chat",
+            "stream": False,
+            "max_text_chars": 32000,
+        })
+        self.assertEqual(result["status"], "appended")
+
+        after = experiments.routing_candidate_coverage(
+            requested_model="claude-opus-5-2",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            category="chat",
+            stream=False,
+            text_chars=12000,
+            input_tokens=3000,
+        )
+        self.assertEqual(after["status"], "covered")
+        self.assertEqual(after["selected_candidate_id"], result["candidate_id"])
+
+    def test_manual_durable_config_edit_refreshes_coverage_without_module_reload(self):
+        config_path = Path(self.home.name) / ".tokenclaw" / "routing_experiments.yaml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        importlib.reload(experiments)
+
+        before = experiments.routing_candidate_coverage(
+            requested_model="claude-opus-5-3",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            category="chat",
+            stream=False,
+            text_chars=12000,
+            input_tokens=3000,
+        )
+        self.assertEqual(before["status"], "uncovered")
+
+        config_path.write_text(
+            """
+enabled: true
+mode: shadow_candidate_pass_through
+routing_candidates:
+  - candidate_id: manual-opus53-to-sonnet46-chat
+    requested_model: claude-opus-5-3
+    routed_model: claude-sonnet-4-6
+    provider: anthropic
+    source_surface: anthropic_messages
+    app_family: claude_code
+    category: chat
+    max_text_chars: 32000
+""",
+            encoding="utf-8",
+        )
+
+        after = experiments.routing_candidate_coverage(
+            requested_model="claude-opus-5-3",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            category="chat",
+            stream=False,
+            text_chars=12000,
+            input_tokens=3000,
+        )
+        self.assertEqual(after["status"], "covered")
+        self.assertEqual(after["selected_candidate_id"], "manual-opus53-to-sonnet46-chat")
 
     def test_dashboard_candidate_append_uses_durable_config_when_env_points_to_overlay(self):
         transient_path = Path(self.home.name) / "tokenclaw-run-routing-experiments.yaml"
@@ -305,7 +387,6 @@ routing_candidates: []
         transient_data = yaml.safe_load(transient_path.read_text(encoding="utf-8"))
         self.assertEqual(transient_data["routing_candidates"], [])
 
-        importlib.reload(experiments)
         after = experiments.routing_candidate_coverage(
             requested_model="claude-opus-5-1",
             provider="anthropic",
