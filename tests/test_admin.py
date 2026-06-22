@@ -1,3 +1,4 @@
+import importlib
 import importlib.util
 import json
 import os
@@ -20,6 +21,7 @@ class AdminRouterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.old_event_log = os.environ.get("TOKENCLAW_POLICY_EVENTS_LOG")
+        self.old_routing_experiments = os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS")
         os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
 
     def tearDown(self):
@@ -27,6 +29,10 @@ class AdminRouterTests(unittest.TestCase):
             os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
         else:
             os.environ["TOKENCLAW_POLICY_EVENTS_LOG"] = self.old_event_log
+        if self.old_routing_experiments is None:
+            os.environ.pop("TOKENCLAW_ROUTING_EXPERIMENTS", None)
+        else:
+            os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = self.old_routing_experiments
         self.tmp.cleanup()
 
     def test_reload_route_is_loopback_only(self):
@@ -91,6 +97,7 @@ class AdminRouterTests(unittest.TestCase):
         remote = TestClient(app, client=("192.168.1.50", 50000))
         cases = [
             ("/tokenclaw/admin/reload-policies", {}),
+            ("/tokenclaw/admin/routing-experiments/candidates", {"requested_model": "claude-opus-5-0", "routed_model": "claude-sonnet-4-6"}),
             ("/tokenclaw/admin/policy-drafts/stage", {"section": "cache", "policy": {"semantic_cache": {"threshold": 0.91}}}),
             ("/tokenclaw/admin/policy-drafts/validate", {"draft": "draft-one"}),
             ("/tokenclaw/admin/policy-drafts/apply", {"draft": "draft-one"}),
@@ -108,6 +115,42 @@ class AdminRouterTests(unittest.TestCase):
                     self.assertFalse(data["wrote_active_policy_files"])
                     self.assertFalse(data["provider_calls_made"])
                     self.assertFalse(data["managed_server_calls_made"])
+
+    def test_routing_candidate_append_route_writes_idempotently_for_loopback(self):
+        config_path = Path(self.tmp.name) / "routing_experiments.yaml"
+        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = str(config_path)
+        import tokenclaw.routing_experiments as routing_experiments
+
+        importlib.reload(routing_experiments)
+        app = FastAPI()
+        app.include_router(create_admin_router())
+
+        local = TestClient(app, client=("127.0.0.1", 50000))
+        payload = {
+            "requested_model": "claude-opus-5-0",
+            "routed_model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "category": "chat",
+            "stream": False,
+            "max_text_chars": 32000,
+        }
+        response = local.post("/tokenclaw/admin/routing-experiments/candidates", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["status"], "appended")
+        self.assertTrue(data["wrote_active_policy_files"])
+        self.assertTrue(config_path.exists())
+
+        duplicate = local.post("/tokenclaw/admin/routing-experiments/candidates", json=payload)
+        self.assertEqual(duplicate.status_code, 200)
+        duplicate_data = duplicate.json()
+        self.assertTrue(duplicate_data["ok"])
+        self.assertEqual(duplicate_data["status"], "already-present")
+        self.assertFalse(duplicate_data["wrote_active_policy_files"])
 
     def test_policy_draft_stage_route_returns_structured_diff_for_loopback(self):
         app = FastAPI()

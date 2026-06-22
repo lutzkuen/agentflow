@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import json
 import os
+import yaml
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
@@ -191,6 +192,69 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         self.assertEqual(tool_light["candidate_id"], "anthropic-opus48-to-sonnet46-tool-light")
         self.assertEqual(tool_light["shadow_model"], "claude-sonnet-4-6")
         self.assertEqual(tool_light["max_text_chars"], 64000)
+
+    def test_dashboard_candidate_append_is_idempotent_and_makes_coverage_visible(self):
+        config_path = Path(self.home.name) / "routing_experiments.yaml"
+        os.environ["TOKENCLAW_ROUTING_EXPERIMENTS"] = str(config_path)
+        importlib.reload(experiments)
+
+        before = experiments.routing_candidate_coverage(
+            requested_model="claude-opus-5-0",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            category="chat",
+            stream=False,
+            text_chars=12000,
+            input_tokens=3000,
+        )
+        self.assertEqual(before["status"], "uncovered")
+        self.assertTrue(before["actionable"])
+        self.assertEqual(before["suggested_routed_model"], "claude-sonnet-4-6")
+
+        result = experiments.append_dashboard_routing_candidate({
+            "requested_model": "claude-opus-5-0",
+            "routed_model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "category": "chat",
+            "stream": False,
+            "max_text_chars": 32000,
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "appended")
+        self.assertTrue(result["wrote_active_policy_files"])
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        self.assertIn(result["candidate_id"], {row["candidate_id"] for row in data["routing_candidates"]})
+
+        duplicate = experiments.append_dashboard_routing_candidate({
+            "requested_model": "claude-opus-5-0",
+            "routed_model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "category": "chat",
+            "stream": False,
+            "max_text_chars": 32000,
+        })
+        self.assertEqual(duplicate["status"], "already-present")
+        self.assertFalse(duplicate["wrote_active_policy_files"])
+        data_after = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(data_after["routing_candidates"]), len(data["routing_candidates"]))
+
+        importlib.reload(experiments)
+        after = experiments.routing_candidate_coverage(
+            requested_model="claude-opus-5-0",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            category="chat",
+            stream=False,
+            text_chars=12000,
+            input_tokens=3000,
+        )
+        self.assertEqual(after["status"], "covered")
+        self.assertEqual(after["selected_candidate_id"], result["candidate_id"])
 
     def test_streaming_shadow_gate_skips_non_anthropic_surfaces(self):
         meta = experiments.routing_experiment_decision(

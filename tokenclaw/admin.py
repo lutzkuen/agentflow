@@ -64,6 +64,16 @@ def _forbidden_workbench_response(action: str, request: Request, message: str) -
     )
 
 
+def _loopback_cors_headers(request: Request) -> dict[str, str]:
+    origin = request.headers.get("origin") or "*"
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "content-type",
+        "Vary": "Origin",
+    }
+
+
 async def _json_object_request(request: Request, *, schema: str) -> tuple[dict[str, Any] | None, JSONResponse | None]:
     try:
         body = await request.json()
@@ -131,6 +141,70 @@ async def reload_policy_modules(after_reload: Callable[[], None] | None = None) 
 
 def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRouter:
     router = APIRouter()
+
+    @router.options("/tokenclaw/admin/routing-experiments/candidates", response_model=None)
+    async def append_routing_experiment_candidate_options(request: Request) -> Any:
+        if not request_is_loopback(request):
+            return _forbidden_workbench_response(
+                "routing-candidate-append-preflight",
+                request,
+                "routing candidate config writes are only available from loopback clients",
+            )
+        return JSONResponse(
+            {
+                "ok": True,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+            },
+            headers=_loopback_cors_headers(request),
+        )
+
+    @router.post("/tokenclaw/admin/routing-experiments/candidates", response_model=None)
+    async def append_routing_experiment_candidate(request: Request) -> Any:
+        if not request_is_loopback(request):
+            return _forbidden_workbench_response(
+                "routing-candidate-append",
+                request,
+                "routing candidate config writes are only available from loopback clients",
+            )
+
+        body, error_response = await _json_object_request(
+            request,
+            schema="tokenclaw.routing_candidate_append.v1",
+        )
+        if error_response is not None:
+            return error_response
+        assert body is not None
+
+        from tokenclaw.routing_experiments import append_dashboard_routing_candidate
+
+        result = append_dashboard_routing_candidate(body)
+        if result.get("ok") and result.get("wrote_active_policy_files"):
+            reload_result = await reload_policy_modules(after_reload=after_reload)
+            result["reloaded_modules"] = reload_result.get("reloaded_modules", [])
+        else:
+            result["reloaded_modules"] = False
+        log_policy_event(
+            "routing-candidate-append",
+            ok=bool(result.get("ok")),
+            details={
+                "source": "admin_api",
+                "client_host": request.client.host if request.client else None,
+                "status": result.get("status"),
+                "candidate_id": result.get("candidate_id"),
+                "target_file": result.get("target_file"),
+                "wrote_active_policy_files": bool(result.get("wrote_active_policy_files")),
+                "reloaded_modules": bool(result.get("reloaded_modules")),
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            },
+        )
+        return JSONResponse(
+            result,
+            status_code=200 if result.get("ok") else 400,
+            headers=_loopback_cors_headers(request),
+        )
 
     @router.post("/tokenclaw/admin/reload-policies", response_model=None)
     async def reload_policies(request: Request) -> Any:

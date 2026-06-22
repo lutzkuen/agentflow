@@ -16919,6 +16919,9 @@ def _provider_activity_unit(
         output_tokens = r.get("output_tokens_est")
     source_surface = str(r.get("source_surface") or _source_surface(provider, str(r.get("path") or "")))
     endpoint = str(r.get("endpoint") or str(r.get("path") or ""))
+    category = r.get("category") or routing.get("category")
+    workflow_phase = routing.get("workflow_phase")
+    text_chars = routing.get("text_chars")
     quality_signals = derive_provider_quality_signals(
         source_surface=source_surface,
         status_code=r.get("status_code"),
@@ -16933,6 +16936,37 @@ def _provider_activity_unit(
         cache_meta=cache,
         provider_adoption_windows=provider_adoption_windows,
     )
+    try:
+        from tokenclaw.routing_experiments import routing_candidate_coverage
+
+        routing_candidate = routing_candidate_coverage(
+            requested_model=requested_model,
+            provider=provider,
+            source_surface=source_surface,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=bool(r.get("stream")),
+            text_chars=text_chars or 0,
+            input_tokens=input_tokens or 0,
+        )
+    except Exception as exc:
+        routing_candidate = {
+            "schema": "tokenclaw.routing_candidate_coverage.v1",
+            "status": "coverage-error",
+            "covered": False,
+            "actionable": False,
+            "reason": exc.__class__.__name__,
+            "eligible_candidate_count": 0,
+            "eligible_candidate_ids": [],
+            "add_payload": None,
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+            },
+        }
     return {
         "feature_schema_version": "tokenclaw.optimization_unit_features.v1",
         "unit_id": f"provider_call:{r.get('id')}",
@@ -16953,8 +16987,9 @@ def _provider_activity_unit(
             "endpoint": endpoint,
             "source_surface": source_surface,
             "stream": bool(r.get("stream")),
-            "category": r.get("category") or routing.get("category"),
-            "text_chars": routing.get("text_chars"),
+            "category": category,
+            "workflow_phase": workflow_phase,
+            "text_chars": text_chars,
             "input_tokens": input_tokens,
             "input_tokens_est": r.get("input_tokens_est"),
             "actual_input_tokens": r.get("actual_input_tokens"),
@@ -16963,12 +16998,13 @@ def _provider_activity_unit(
         },
         "tool_features": {
             "has_tools": routing.get("has_tools"),
-            "category": r.get("category") or routing.get("category"),
+            "category": category,
             "thinking_history_stripped": routing.get("thinking_history_stripped"),
             "stripped_params": routing.get("stripped_params") or [],
         },
         "optimization_features": {
             "routing": routing,
+            "routing_candidate": routing_candidate,
             "crunch": crunch,
             "cache": cache,
             "policy_sources": sorted({
@@ -22350,6 +22386,12 @@ def dashboard_html() -> str:
   .badge.routed{background:#2d2208;color:#d29922}
   .badge.crunched{background:#1a1a3a;color:#79c0ff}
   .badge.provider{background:#20242b;color:#c9d1d9}
+  .routing-candidate-form{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;margin-left:4px}
+  .routing-candidate-form input{background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-family:inherit;font-size:11px;max-width:150px;padding:2px 5px}
+  .routing-candidate-form input:focus{border-color:#58a6ff;outline:none}
+  .routing-candidate-form button{background:#1f6feb;border:1px solid #388bfd;border-radius:4px;color:#fff;cursor:pointer;font-family:inherit;font-size:11px;padding:2px 6px}
+  .routing-candidate-form button:disabled{cursor:default;opacity:.65}
+  .routing-candidate-status{color:#8b949e;font-size:11px}
   .model{max-width:160px;overflow:hidden;text-overflow:ellipsis;color:#c9d1d9}
   .model.downgraded{color:#d29922}
   .cost{color:#3fb950;font-variant-numeric:tabular-nums}
@@ -23925,6 +23967,58 @@ function activityFlags(unit){
   if(category)flags.push(`<span class="badge provider">${esc(category)}</span>`);
   return flags.join(' ')||'<span class="badge miss">observed</span>';
 }
+function adminControlUrl(path){
+  const configured=window.TOKENCLAW_ADMIN_BASE_URL||localStorage.getItem('tokenclawAdminBaseUrl')||'';
+  if(configured)return configured.replace(/\\/$/,'')+path;
+  if(window.location.port==='4002')return 'http://127.0.0.1:4000'+path;
+  return path;
+}
+function routingCandidateAction(unit){
+  if(unit.granularity!=='provider_request')return'';
+  const candidate=((unit.optimization_features||{}).routing_candidate)||{};
+  if(candidate.covered)return'<span class="badge hit">routing candidate covered</span>';
+  if(!candidate.actionable||!candidate.add_payload)return'';
+  const payload=candidate.add_payload||{};
+  const hidden=['requested_model','provider','source_surface','app_family','category','workflow_phase','stream','max_text_chars']
+    .filter(key=>payload[key]!=null&&payload[key]!=='')
+    .map(key=>`<input type="hidden" name="${esc(key)}" value="${esc(payload[key])}">`).join('');
+  const suggested=payload.routed_model||candidate.suggested_routed_model||'';
+  return `<span class="routing-candidate-form" data-routing-candidate="1">
+    <span class="badge routed">No routing candidate — not collecting shadow evidence</span>
+    ${hidden}
+    <input name="routed_model" value="${esc(suggested)}" aria-label="Target routing model">
+    <button type="button" onclick="addRoutingCandidate(this.closest('[data-routing-candidate]'))">Add to routing config</button>
+    <span class="routing-candidate-status" data-routing-result></span>
+  </span>`;
+}
+async function addRoutingCandidate(container){
+  const result=container.querySelector('[data-routing-result]');
+  const button=container.querySelector('button');
+  const payload={};
+  container.querySelectorAll('input[name]').forEach(input=>{payload[input.name]=input.value;});
+  payload.stream=payload.stream==='true';
+  ['max_text_chars','min_text_chars','max_input_tokens','min_input_tokens'].forEach(key=>{
+    if(payload[key]!=null&&payload[key]!=='')payload[key]=Number(payload[key]);
+  });
+  button.disabled=true;
+  if(result)result.textContent='saving...';
+  try{
+    const r=await fetch(adminControlUrl('/tokenclaw/admin/routing-experiments/candidates'),{
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    const data=await r.json();
+    if(!r.ok||!data.ok)throw new Error((data.error&&data.error.message)||('HTTP '+r.status));
+    if(result)result.textContent=data.status==='already-present'?`covered: ${data.candidate_id}`:`added: ${data.candidate_id}`;
+    container.dataset.saved='1';
+    setTimeout(()=>refreshActivity(),500);
+  }catch(e){
+    if(result)result.textContent='blocked: '+e.message;
+    button.disabled=false;
+  }
+  return false;
+}
 function usageHints(row){
   const hints=row.remaining_saving_potential_hints||[];
   if(!hints.length)return'<span class="badge hit">no obvious signal</span>';
@@ -24502,7 +24596,7 @@ async function refreshActivity(){
         <td class="tokens">${esc(activityInput(unit))}</td>
         <td>${activityOutcome(unit)}</td>
         <td class="latency">${fmtMs(o.latency_ms)}</td>
-        <td class="flags">${activityFlags(unit)}</td>
+        <td class="flags">${activityFlags(unit)} ${routingCandidateAction(unit)}</td>
       </tr>`;
     }).join('')||'<tr><td colspan="10" style="color:#8b949e">No recent activity yet</td></tr>';
     applyAllDataTables();

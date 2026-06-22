@@ -9610,6 +9610,58 @@ request_shape_repeated_context_canaries:
         self.assertIn(">Activation next actions</button>", html)
         self.assertIn("id=\"evidence-activation-summary-tbody\"", html)
         self.assertIn("fetch('/tokenclaw/stats/evidence-to-activation-next-actions?limit=20')", html)
+        self.assertIn("No routing candidate — not collecting shadow evidence", html)
+        self.assertIn("Add to routing config", html)
+        self.assertIn("routingCandidateAction(unit)", html)
+        self.assertIn("adminControlUrl('/tokenclaw/admin/routing-experiments/candidates')", html)
+        self.assertIn("http://127.0.0.1:4000", html)
+
+    def test_recent_activity_flags_uncovered_routing_candidate_rows(self):
+        server.store.log_call(
+            id="call-uncovered-routing-candidate",
+            created_at=utc_now(),
+            path="/v1/messages",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            requested_model="claude-opus-9-9",
+            routed_model=None,
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=123,
+            input_tokens_est=3000,
+            output_tokens_est=100,
+            actual_input_tokens=3000,
+            actual_output_tokens=100,
+            cost_est_usd=0.01,
+            cost_baseline_usd=0.01,
+            category="chat",
+            routing_json=stable_json({
+                "requested_model": "claude-opus-9-9",
+                "routed_model": "claude-opus-9-9",
+                "category": "chat",
+                "workflow_phase": "planning",
+                "text_chars": 12000,
+            }),
+            cache_json=stable_json({"status": "miss"}),
+        )
+
+        activity = asyncio.run(stats_views.stats_activity(server.store, limit=1))
+        unit = activity["units"][0]
+        coverage = unit["optimization_features"]["routing_candidate"]
+
+        self.assertEqual(coverage["schema"], "tokenclaw.routing_candidate_coverage.v1")
+        self.assertEqual(coverage["status"], "uncovered")
+        self.assertFalse(coverage["covered"])
+        self.assertTrue(coverage["actionable"])
+        self.assertEqual(coverage["reason"], "no-routing-candidate")
+        self.assertEqual(coverage["add_payload"]["requested_model"], "claude-opus-9-9")
+        self.assertEqual(coverage["add_payload"]["routed_model"], "claude-sonnet-4-6")
+        self.assertEqual(coverage["add_payload"]["provider"], "anthropic")
+        self.assertEqual(coverage["add_payload"]["source_surface"], "anthropic_messages")
+        self.assertEqual(coverage["add_payload"]["category"], "chat")
+        self.assertFalse(coverage["privacy"]["provider_bodies_included"])
+        self.assertFalse(coverage["privacy"]["request_ids_included"])
 
     def test_dashboard_exposes_terminal_output_compaction_readiness_panel(self):
         html = stats_views.dashboard_html()

@@ -339,6 +339,18 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     return candidates
 
 
+def _writable_experiment_config_path() -> Path:
+    env_path = os.getenv("TOKENCLAW_ROUTING_EXPERIMENTS")
+    if env_path:
+        return Path(env_path)
+    cwd_config = Path.cwd() / "config" / "routing_experiments.yaml"
+    if cwd_config.exists():
+        return cwd_config
+    if ROUTING_EXPERIMENT_POLICY_SOURCE == "local-manual" and ROUTING_EXPERIMENT_RULES_PATH:
+        return Path(ROUTING_EXPERIMENT_RULES_PATH)
+    return tokenclaw_config_path("routing_experiments.yaml")
+
+
 def _override_scope(override: dict[str, Any]) -> str:
     requested = str(override.get("scope") or "").strip().replace("_", "-")
     if requested in {"global", "provider", "source-surface", "category"}:
@@ -423,6 +435,70 @@ def _clean_routing_candidates(raw_candidates: Any, *, shape: str) -> list[dict[s
         if candidate is not None:
             candidates.append(candidate)
     return candidates
+
+
+def _routing_candidate_identity(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(candidate.get(key) for key in (
+        "requested_model",
+        "routed_model",
+        "provider",
+        "source_surface",
+        "app_family",
+        "category",
+        "workflow_phase",
+        "stream",
+        "min_text_chars",
+        "max_text_chars",
+        "min_input_tokens",
+        "max_input_tokens",
+    ))
+
+
+def _candidate_id_for_dashboard(payload: dict[str, Any]) -> str:
+    material = stable_json({
+        key: payload.get(key)
+        for key in (
+            "requested_model",
+            "routed_model",
+            "provider",
+            "source_surface",
+            "app_family",
+            "category",
+            "workflow_phase",
+            "stream",
+        )
+        if payload.get(key) not in (None, "")
+    })
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+    provider = _public_label(payload.get("provider"), fallback="provider")
+    requested = _public_label(payload.get("requested_model"), fallback="requested")
+    routed = _public_label(payload.get("routed_model"), fallback="routed")
+    category = _public_label(payload.get("category"), fallback="shape")
+    return _safe_candidate_id(
+        f"dashboard-{provider}-{requested}-to-{routed}-{category}-{digest}",
+        fallback=f"dashboard-routing-candidate:{digest}",
+    )
+
+
+def _suggest_adjacent_routed_model(requested: str) -> str:
+    model_l = requested.lower()
+    if "opus" in model_l:
+        return "claude-sonnet-4-6"
+    if "sonnet" in model_l:
+        return "claude-haiku-4-5-20251001"
+    if "gpt-5.5" in model_l or "gpt-5-5" in model_l:
+        return "gpt-5.4"
+    if "gpt-5.4" in model_l or "gpt-5-4" in model_l:
+        return "gpt-5.3"
+    if "gpt-5.3-codex" in model_l or "gpt-5-3-codex" in model_l:
+        return "gpt-5-codex"
+    if "gpt-5-codex" in model_l:
+        return "gpt-5-mini"
+    if "gpt-5.3" in model_l or "gpt-5-3" in model_l:
+        return "gpt-5-mini"
+    if "gpt-5-mini" in model_l:
+        return "gpt-5-nano"
+    return requested
 
 
 def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
@@ -968,6 +1044,203 @@ def _route_down_candidate_selection(
         "candidate_selector": selector,
         "candidate_selector_basis": basis,
         "candidate_policy_shape": policy_shape,
+    }
+
+
+def routing_candidate_coverage(
+    *,
+    requested_model: Any,
+    provider: Any = "",
+    source_surface: Any = "",
+    category: Any = "",
+    workflow_phase: Any = "",
+    stream: Any = False,
+    text_chars: Any = 0,
+    input_tokens: Any = 0,
+) -> dict[str, Any]:
+    requested = str(requested_model or "").strip()
+    provider_label = str(provider or "").strip() or "unknown"
+    surface_label = str(source_surface or "").strip() or "unknown"
+    category_label = str(category or "").strip() or "unknown"
+    phase_label = str(workflow_phase or "").strip()
+    stream_bool = bool(stream)
+    text_count = _as_non_negative_int(text_chars) or 0
+    token_count = _as_non_negative_int(input_tokens) or 0
+    app_family = _app_family(provider_label, surface_label, requested)
+    if not requested:
+        return {
+            "schema": "tokenclaw.routing_candidate_coverage.v1",
+            "status": "missing-requested-model",
+            "covered": False,
+            "actionable": False,
+            "reason": "requested-model-missing",
+            "eligible_candidate_count": 0,
+            "eligible_candidate_ids": [],
+            "policy_source": ROUTING_EXPERIMENT_POLICY_SOURCE,
+            "rule_path": ROUTING_EXPERIMENT_RULES_PATH,
+            "add_payload": None,
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+            },
+        }
+
+    selection = _route_down_candidate_selection(
+        requested,
+        provider=provider_label,
+        source_surface=surface_label,
+        category=category_label,
+        workflow_phase=phase_label,
+        stream=stream_bool,
+        text_chars=text_count,
+        input_tokens=token_count,
+    )
+    selected = selection.get("selected")
+    suggested = str((selected or {}).get("routed_model") or "").strip()
+    if not suggested:
+        suggested = _legacy_route_down_candidate_for_requested(requested) or _suggest_adjacent_routed_model(requested)
+    covered = selected is not None
+    payload: dict[str, Any] = {
+        "requested_model": requested,
+        "routed_model": suggested,
+        "provider": provider_label,
+        "source_surface": surface_label,
+        "app_family": app_family,
+        "category": category_label,
+        "stream": stream_bool,
+    }
+    if phase_label:
+        payload["workflow_phase"] = phase_label
+    if text_count > 0:
+        payload["max_text_chars"] = max(8000, text_count)
+    return {
+        "schema": "tokenclaw.routing_candidate_coverage.v1",
+        "status": "covered" if covered else "uncovered",
+        "covered": covered,
+        "actionable": not covered,
+        "reason": "matched-routing-candidate" if covered else "no-routing-candidate",
+        "eligible_candidate_count": int(selection.get("eligible_candidate_count") or 0),
+        "eligible_candidate_ids": list(selection.get("eligible_candidate_ids") or []),
+        "selected_candidate_id": (selected or {}).get("candidate_id") if isinstance(selected, dict) else None,
+        "suggested_routed_model": suggested,
+        "policy_source": ROUTING_EXPERIMENT_POLICY_SOURCE,
+        "rule_path": ROUTING_EXPERIMENT_RULES_PATH,
+        "add_payload": payload,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+        },
+    }
+
+
+def append_dashboard_routing_candidate(payload: dict[str, Any]) -> dict[str, Any]:
+    requested = str(payload.get("requested_model") or "").strip()
+    routed = str(payload.get("routed_model") or "").strip()
+    if not requested or not routed:
+        return {
+            "schema": "tokenclaw.routing_candidate_append.v1",
+            "ok": False,
+            "status": "blocked",
+            "error": {"type": "invalid_payload", "message": "requested_model and routed_model are required"},
+            "wrote_active_policy_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        }
+    if requested == routed:
+        return {
+            "schema": "tokenclaw.routing_candidate_append.v1",
+            "ok": False,
+            "status": "blocked",
+            "error": {"type": "invalid_payload", "message": "routed_model must differ from requested_model"},
+            "wrote_active_policy_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        }
+
+    raw_candidate = {
+        key: payload.get(key)
+        for key in (
+            "requested_model",
+            "routed_model",
+            "provider",
+            "source_surface",
+            "app_family",
+            "category",
+            "workflow_phase",
+            "stream",
+            "min_text_chars",
+            "max_text_chars",
+            "min_input_tokens",
+            "max_input_tokens",
+            "sample_rate",
+            "sample_weight",
+        )
+        if payload.get(key) not in (None, "")
+    }
+    raw_candidate.setdefault("candidate_id", payload.get("candidate_id") or _candidate_id_for_dashboard(raw_candidate))
+    raw_candidate.setdefault("sample_rate", 0.05)
+    candidate = _clean_routing_candidate(raw_candidate, 0, shape="routing_candidates")
+    if candidate is None:
+        return {
+            "schema": "tokenclaw.routing_candidate_append.v1",
+            "ok": False,
+            "status": "blocked",
+            "error": {"type": "invalid_payload", "message": "candidate could not be normalized"},
+            "wrote_active_policy_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        }
+
+    path = _writable_experiment_config_path()
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            data = {}
+    else:
+        data = dict(ROUTING_EXPERIMENT_POLICY)
+        data["policy_source"] = "local-manual"
+    candidates = data.get("routing_candidates")
+    if not isinstance(candidates, list):
+        candidates = []
+    clean_existing = _clean_routing_candidates(candidates, shape="routing_candidates")
+    target_identity = _routing_candidate_identity(candidate)
+    for existing in clean_existing:
+        if _routing_candidate_identity(existing) == target_identity:
+            return {
+                "schema": "tokenclaw.routing_candidate_append.v1",
+                "ok": True,
+                "status": "already-present",
+                "candidate_id": existing.get("candidate_id"),
+                "candidate": _candidate_public_metadata(existing),
+                "target_file": str(path),
+                "wrote_active_policy_files": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+            }
+
+    data["routing_candidates"] = candidates + [candidate]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
+    return {
+        "schema": "tokenclaw.routing_candidate_append.v1",
+        "ok": True,
+        "status": "appended",
+        "candidate_id": candidate.get("candidate_id"),
+        "candidate": _candidate_public_metadata(candidate),
+        "target_file": str(path),
+        "wrote_active_policy_files": True,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
     }
 
 
