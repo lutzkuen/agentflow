@@ -7365,6 +7365,7 @@ def _managed_preview_successor_gate(
             and not preview_provider_call
             and not failed_closed
             and not disagreement
+            and local_gate.get("passed")
         )
     if crunch_preview_decision:
         verified = bool(
@@ -7375,22 +7376,35 @@ def _managed_preview_successor_gate(
             and not preview_provider_call
             and not failed_closed
             and not disagreement
+            and local_gate.get("passed")
         )
     action_status = _successor_action_status(entry)
     if request_shape_outcome_class:
-        status = _request_shape_rollup_preview_status(request_shape_outcome_class)
-        decision = _request_shape_rollup_preview_decision(request_shape_outcome_class)
-        next_action = _request_shape_rollup_next_action(request_shape_outcome_class, outcome, entry)
-        reason = f"request-shape-rollup-{request_shape_outcome_class}"
+        if request_shape_outcome_class == "review-ready" and not local_gate.get("passed"):
+            status = "local-executor-gate-not-passed"
+            decision = "keep-blocked"
+            next_action = "satisfy-local-executor-gate-before-managed-preview"
+            reason = "request-shape-rollup-local-executor-gate-not-passed"
+        else:
+            status = _request_shape_rollup_preview_status(request_shape_outcome_class)
+            decision = _request_shape_rollup_preview_decision(request_shape_outcome_class)
+            next_action = _request_shape_rollup_next_action(request_shape_outcome_class, outcome, entry)
+            reason = f"request-shape-rollup-{request_shape_outcome_class}"
         if request_shape_outcome_class == "no-data" and local_only_preview_optional:
             decision = "preview-optional"
             next_action = entry.get("next_action") or next_action
             reason = "managed-preview-optional"
     elif crunch_preview_decision:
-        status = _crunch_preview_status(crunch_preview_decision)
-        decision = _crunch_preview_successor_decision(crunch_preview_decision)
-        next_action = _crunch_preview_next_action(crunch_preview_decision, outcome, entry)
-        reason = f"crunch-preview-{crunch_preview_decision}"
+        if crunch_preview_decision in {"review-ready", "keep-staged"} and not local_gate.get("passed"):
+            status = "local-executor-gate-not-passed"
+            decision = "keep-blocked"
+            next_action = "satisfy-local-executor-gate-before-managed-preview"
+            reason = f"crunch-preview-{crunch_preview_decision}-local-executor-gate-not-passed"
+        else:
+            status = _crunch_preview_status(crunch_preview_decision)
+            decision = _crunch_preview_successor_decision(crunch_preview_decision)
+            next_action = _crunch_preview_next_action(crunch_preview_decision, outcome, entry)
+            reason = f"crunch-preview-{crunch_preview_decision}"
     elif verified:
         if cache_rollback_accepted:
             decision = "rollback-required"

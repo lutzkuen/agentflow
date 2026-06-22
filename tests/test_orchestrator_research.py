@@ -3580,6 +3580,199 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn('"policy_files_written": true', rendered.lower())
         self.assertNotIn('"provider_calls_made": true', rendered.lower())
 
+    def test_managed_rollup_scores_require_local_executor_gate_for_successor_promotion(self):
+        ledger = {
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 1,
+                    "fingerprint": "activation:rollup-gated",
+                    "lever": "request-shape-rollups",
+                    "local_action_family": "crunch",
+                    "evidence_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
+                    "state": "projected",
+                    "current_status": "projected",
+                    "issue_worthy_status": "ready",
+                    "next_action": "stage-repeated-context-crunch-canary",
+                    "blocker_codes": ["ranked_request_shape_rollup"],
+                    "sample_count": 24,
+                    "projected_saved_tokens": 12000,
+                    "projected_savings_usd": 0.036,
+                    "managed_preview_required": False,
+                    "target_local_policy_section": "crunch.rules",
+                    "target_local_rule_file": "crunch_rules.yaml",
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 2,
+                    "fingerprint": "activation:rollup-stageable",
+                    "lever": "request-shape-rollups",
+                    "local_action_family": "crunch",
+                    "evidence_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
+                    "state": "projected",
+                    "current_status": "projected",
+                    "issue_worthy_status": "ready",
+                    "next_action": "stage-repeated-context-crunch-canary",
+                    "blocker_codes": ["ranked_request_shape_rollup"],
+                    "sample_count": 36,
+                    "projected_saved_tokens": 18000,
+                    "projected_savings_usd": 0.054,
+                    "managed_preview_required": False,
+                    "stage_allowed": True,
+                    "target_local_policy_section": "crunch.rules",
+                    "target_local_rule_file": "crunch_rules.yaml",
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 3,
+                    "fingerprint": "activation:rollup-missing-optional",
+                    "lever": "request-shape-rollups",
+                    "local_action_family": "cohort-ranking",
+                    "evidence_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
+                    "state": "missing-evidence",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "emit-request-shape-rollups",
+                    "blocker_codes": ["no-source-traffic-for-request-shape-rollups"],
+                    "sample_count": 0,
+                    "managed_preview_required": False,
+                    "policy_files_written": False,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": 4,
+                    "fingerprint": "activation:rollup-missing-required",
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                    "state": "blocked",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "rollback-cache-replay-rule",
+                    "blocker_codes": ["evidence-older-than-max-age"],
+                    "sample_count": 36,
+                    "projected_savings_usd": 0.075373,
+                    "managed_preview_required": True,
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+        outcomes = [
+            {
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": f"managed-preview-outcome:{source}",
+                "source_fingerprint": source,
+                "preview_ref": f"preview:{source}",
+                "local_action_family": "crunch",
+                "evidence_schema": "tokenclaw.request_shape_follow_up_candidates.v1",
+                "classification": "review-only",
+                "managed_preview_classification": "accepted",
+                "decision": "accepted",
+                "next_action": "stage-repeated-context-crunch-canary",
+                "cohort_class": "review-ready",
+                "rollup_outcome_status": "review-ready",
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "managed_rank": rank,
+                "managed_recommended_next_action": "stage-repeated-context-crunch-canary",
+                "managed_expected_savings_path": "Managed rollup score selected a repeated-context crunch canary.",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+                "raw_prompt": "raw managed rollup score must not leak",
+            }
+            for source, rank in (
+                ("activation:rollup-gated", 1),
+                ("activation:rollup-stageable", 2),
+            )
+        ]
+
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": ledger,
+                "managed_activation_preview_outcomes": {
+                    "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
+                    "status": "tracked",
+                    "managed_dependency": "optional",
+                    "managed_server_calls_made": True,
+                    "summary": {
+                        "stored_preview_outcome_count": len(outcomes),
+                        "stale_count": 0,
+                        "missing_preview_decision_count": 0,
+                        "failed_closed_count": 0,
+                        "disagreement_count": 0,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                    },
+                    "outcomes": outcomes,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "managed_activation_preview_health": {
+                    "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
+                    "status": "ready",
+                    "accepted_batch_count": 1,
+                    "rejected_batch_count": 0,
+                    "submitted_row_count": len(outcomes),
+                    "previewed_row_count": len(outcomes),
+                    "omitted_row_count": 0,
+                    "rejected_row_count": 0,
+                    "privacy_rejection_count": 0,
+                    "latest_preview_age_hours": 1.0,
+                    "previewed_counts_by_local_action_family": {"crunch": len(outcomes)},
+                    "top_omission_reasons": [],
+                    "top_rejection_reasons": [],
+                },
+            }
+        )
+
+        actions = {row["source_fingerprint"]: row for row in queue["successor_actions"]}
+        decisions = {row["source_fingerprint"]: row for row in queue["successor_decisions"]}
+
+        gated = decisions["activation:rollup-gated"]
+        self.assertEqual(gated["preview_agreement_status"], "local-executor-gate-not-passed")
+        self.assertFalse(gated["preview_verified"])
+        self.assertEqual(gated["decision"], "keep-blocked")
+        self.assertEqual(gated["recommended_next_action"], "satisfy-local-executor-gate-before-managed-preview")
+        self.assertEqual(gated["managed_rank"], 1)
+
+        stageable = decisions["activation:rollup-stageable"]
+        self.assertEqual(stageable["preview_agreement_status"], "agreed")
+        self.assertTrue(stageable["preview_verified"])
+        self.assertEqual(stageable["decision"], "ready")
+        self.assertEqual(stageable["recommended_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(stageable["managed_rank"], 2)
+
+        optional = actions["activation:rollup-missing-optional"]
+        self.assertEqual(optional["successor_status"], "source-traffic-acquisition")
+        self.assertEqual(optional["preview_verification_decision"], "preview-optional")
+        self.assertEqual(optional["recommended_next_action"], "emit-request-shape-rollups")
+
+        required = decisions["activation:rollup-missing-required"]
+        self.assertEqual(required["decision"], "keep-blocked")
+        self.assertEqual(required["preview_agreement_status"], "missing-preview")
+        self.assertEqual(required["recommended_next_action"], "refresh-managed-activation-preview")
+
+        for row in [*actions.values(), *decisions.values()]:
+            self.assertFalse(row.get("policy_files_written", False))
+            self.assertFalse(row["privacy"].get("provider_calls_made", False))
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("raw managed rollup score must not leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertNotIn('"provider_calls_made": true', rendered.lower())
+
     def test_server_style_preview_outcomes_feed_successor_queue(self):
         rows = [
             (
