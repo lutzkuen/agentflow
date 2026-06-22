@@ -4219,6 +4219,21 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             any("Keep cohort-ranking activation successor blocked on no-source-traffic" in title for title in titles),
             "source-traffic acquisition successors should not create generic blocked placeholder issues",
         )
+        signal = placeholder_plan["evidence"]["stats_summary"]["request_shape_rollup_candidates"]
+        self.assertEqual(signal["schema"], "tokenclaw.request_shape_rollup_candidate_signal.v1")
+        self.assertEqual(signal["status"], "evidence-gap-ranked")
+        self.assertEqual(signal["summary"]["rollup_count"], 1)
+        self.assertEqual(signal["summary"]["ranked_candidate_count"], 1)
+        self.assertEqual(signal["summary"]["top_next_action"], "emit-request-shape-rollups")
+        self.assertEqual(
+            signal["summary"]["no_source_traffic_reason"],
+            "no-source-traffic-for-request-shape-rollups",
+        )
+        self.assertEqual(signal["top_candidate"]["blocker_codes"], ["no-source-traffic-for-request-shape-rollups"])
+        self.assertEqual(signal["top_candidate"]["source_fingerprint"], "activation:rollup-placeholder")
+        self.assertEqual(signal["missing_measurements"], [])
+        self.assertTrue(signal["privacy"]["metadata_only"])
+        self.assertFalse(signal["privacy"]["request_ids_included"])
 
     def test_preview_agreed_activation_outcomes_emit_successor_decisions(self):
         ledger = {

@@ -4995,11 +4995,11 @@ def _request_shape_successor_gap_rows(stats: dict[str, Any]) -> list[dict[str, A
         source_fingerprint = str(source.get("source_fingerprint") or source.get("fingerprint") or "").strip()
         if not source_fingerprint or source_fingerprint in seen:
             continue
-        if lever != "request-shape-rollups" and family != "cohort-ranking":
+        if lever != "request-shape-rollups" and family not in {"cohort-ranking", "source-traffic-acquisition"}:
             continue
         if next_action != "emit-request-shape-rollups":
             continue
-        if "ranked_request_shape_rollup" not in blockers:
+        if not blockers.intersection({"ranked_request_shape_rollup", "no-source-traffic-for-request-shape-rollups"}):
             continue
         seen.add(source_fingerprint)
         fingerprint = public_id(

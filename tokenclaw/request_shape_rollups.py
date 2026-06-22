@@ -64,6 +64,7 @@ CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA = "tokenclaw.request_shape_crunch_pol
 CRUNCH_POST_MAX_ROLLOUT_DECISION_SCHEMA = "tokenclaw.request_shape_crunch_post_max_rollout_decision.v1"
 FOLLOW_UP_CANDIDATES_SCHEMA = "tokenclaw.request_shape_follow_up_candidates.v1"
 FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "tokenclaw.request_shape_blocker_cohort.v1"
+SOURCE_TRAFFIC_ACQUISITION_SCHEMA = "tokenclaw.source_traffic_acquisition_action.v1"
 DEPENDENCY_EVIDENCE_CLASSES = (
     "missing-dependency-evidence",
     "stable-dependency-evidence",
@@ -11676,6 +11677,36 @@ def _shape_follow_up_privacy() -> dict[str, Any]:
     return privacy
 
 
+def _source_traffic_acquisition_attempt(
+    *,
+    rows_considered: int,
+    rollup_count: int,
+    source: str = "recent-local-call-metadata",
+) -> dict[str, Any]:
+    status = "completed" if rows_considered > 0 and rollup_count > 0 else "no-source-traffic"
+    return {
+        "schema": SOURCE_TRAFFIC_ACQUISITION_SCHEMA,
+        "status": status,
+        "action_type": "source-traffic-acquisition",
+        "source_schema": FOLLOW_UP_CANDIDATES_SCHEMA,
+        "recommended_next_action": "emit-request-shape-rollups",
+        "recommended_command": "tokenclaw-request-shape-rollups",
+        "recommended_module": "tokenclaw.request_shape_rollups",
+        "target_downstream_lever": "cohort-ranking",
+        "blocker_code": None if status == "completed" else "no-source-traffic-for-request-shape-rollups",
+        "attempted": True,
+        "rows_considered": rows_considered,
+        "rollup_count": rollup_count,
+        "source": public_label(source, "recent-local-call-metadata"),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _shape_follow_up_privacy(),
+    }
+
+
 def _estimated_cache_replay_savings(row: dict[str, Any], row_count: int) -> tuple[int, float]:
     projected_hits = max(0, row_count - 1)
     if projected_hits <= 0:
@@ -11949,6 +11980,7 @@ def build_request_shape_follow_up_candidates(
     rollups: list[dict[str, Any]],
     *,
     limit: int = 10,
+    source: str = "recent-local-call-metadata",
 ) -> dict[str, Any]:
     relevant_classes = {"repeated_context", "replayability", "routing", "crunch"}
     candidates = [
@@ -12000,17 +12032,28 @@ def build_request_shape_follow_up_candidates(
     )
     top = clean[0] if clean else None
     missing = [] if clean else [no_source_traffic_reason or "request_shape_follow_up_candidates"]
+    rows_considered = sum(_as_int(row.get("row_count") or row.get("count")) for row in rollups if isinstance(row, dict))
+    source_traffic_acquisition = _source_traffic_acquisition_attempt(
+        rows_considered=rows_considered,
+        rollup_count=len([row for row in rollups if isinstance(row, dict)]),
+        source=source,
+    )
     return {
         "schema": FOLLOW_UP_CANDIDATES_SCHEMA,
         "status": status,
+        "action_type": "source-traffic-acquisition",
+        "source_traffic_acquisition_status": source_traffic_acquisition["status"],
+        "source_traffic_acquisition": source_traffic_acquisition,
         "summary": {
-            "rows_considered": sum(_as_int(row.get("row_count") or row.get("count")) for row in rollups if isinstance(row, dict)),
+            "rows_considered": rows_considered,
             "rollup_count": len([row for row in rollups if isinstance(row, dict)]),
             "ranked_candidate_count": len(clean),
             "top_next_action": top.get("next_action") if top else "emit-request-shape-rollups" if no_source_traffic_reason else None,
             "top_local_action_family": top.get("local_action_family") if top else "cohort-ranking" if no_source_traffic_reason else None,
             "top_readiness_state": top.get("readiness_state") if top else "blocked" if no_source_traffic_reason else None,
             "no_source_traffic_reason": no_source_traffic_reason,
+            "source_traffic_acquisition_status": source_traffic_acquisition["status"],
+            "source_traffic_acquisition_attempted": True,
             "activation_ready_count": sum(1 for item in clean if item.get("readiness_state") == "activation-ready"),
             "class_breakdown": _breakdown(class_counts),
             "blocker_breakdown": _breakdown(blocker_counts),
@@ -12866,7 +12909,8 @@ def build_request_shape_rollups_report(
         crunch_policy_decision=crunch_policy_decision,
         crunch_canary_impact=crunch_canary_impact,
     )
-    follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10)
+    source = "recent-local-metadata-window-backfill" if metadata_window_backfilled else "recent-local-call-metadata"
+    follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10, source=source)
     remaining_crunch_measurements = build_request_shape_crunch_remaining_measurement_report(
         follow_up_candidates=follow_up_candidates,
         crunch_opportunity=crunch_opportunity_dry_run,
@@ -12901,7 +12945,7 @@ def build_request_shape_rollups_report(
         "window": {
             "start": window_start,
             "end": window_end,
-            "source": "recent-local-metadata-window-backfill" if metadata_window_backfilled else "recent-local-call-metadata",
+            "source": source,
         },
         "summary": {
             "rows_considered": len(rows),
@@ -12909,6 +12953,8 @@ def build_request_shape_rollups_report(
             "collapsed_rows": max(0, len(rows) - len(rollups)),
             "metadata_window_backfilled": metadata_window_backfilled,
             "metadata_window_backfill_rows": len(rows) if metadata_window_backfilled else 0,
+            "source_traffic_acquisition_status": follow_up_candidates["source_traffic_acquisition_status"],
+            "source_traffic_acquisition_attempted": True,
             "total_cost_est_usd": round(sum(_as_float(row.get("cost_est_usd")) for row in rollups), 6),
             "total_baseline_cost_usd": round(sum(_as_float(row.get("baseline_cost_usd")) for row in rollups), 6),
             "observed_savings_usd": round(sum(_as_float(row.get("observed_savings_usd")) for row in rollups), 6),
@@ -12921,6 +12967,7 @@ def build_request_shape_rollups_report(
         "provider_breakdown": _breakdown(provider_counts),
         "candidate_family_breakdown": _breakdown(candidate_family_counts),
         "blocker_code_breakdown": _breakdown(blocker_counts),
+        "source_traffic_acquisition": follow_up_candidates["source_traffic_acquisition"],
         "follow_up_candidates": follow_up_candidates,
         "cache_replayability_dry_run": cache_replayability_dry_run,
         "cache_replay_blocker_classification": cache_replay_blocker_classification,
