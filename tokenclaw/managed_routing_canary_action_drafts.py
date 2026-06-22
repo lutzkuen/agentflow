@@ -10,12 +10,19 @@ from tokenclaw.store import stable_json, utc_now
 
 SCHEMA = "tokenclaw.managed_routing_canary_action_drafts.v1"
 ACTION_SCHEMA = "tokenclaw.managed_routing_canary_action_draft.v1"
+PROMOTION_SCHEMA = "tokenclaw.managed_routing_canary_promotion_action.v1"
+ROLLBACK_SCHEMA = "tokenclaw.managed_routing_canary_rollback_action.v1"
 BLOCKED_SCHEMA = "tokenclaw.managed_routing_canary_blocked_action.v1"
 PRIVACY_SCHEMA = "tokenclaw.managed_routing_canary_action_drafts_privacy.v1"
 TARGET_LOCAL_RULE_FILE = "routing_canary_policy.yaml"
 TARGET_LOCAL_POLICY_SECTION = "routing.canaries"
+PROMOTION_TARGET_LOCAL_RULE_FILE = "routing_rules.yaml"
+PROMOTION_TARGET_LOCAL_POLICY_SECTION = "routing.rules"
 
 ACCEPTED_DECISIONS = {"canary", "widen"}
+PROMOTION_DECISIONS = {"promote", "promotion-ready", "graduate"}
+PROMOTION_STATUSES = {"ready", "promotion-ready", "promote"}
+ROLLBACK_STATUSES = {"stale", "regressed", "rollback"}
 BLOCKED_DECISIONS = {"hold", "rollback", "no-evidence"}
 STALE_REASON_CODES = {"routing-lifecycle-stale-evidence", "stale-routing-pathway-matrix"}
 MISSING_HOLDOUT_REASON_CODES = {
@@ -44,6 +51,15 @@ UNSAFE_REASON_CODES = {
     "safety-stop-observed",
     "error-observed",
     "fallback-observed",
+}
+REGRESSION_REASON_CODES = {
+    "error-rate-regression",
+    "retry-rate-regression",
+    "fallback-rate-regression",
+    "semantic-quality-regression-observed",
+    "routing-lifecycle-error-rate-regression",
+    "routing-lifecycle-retry-rate-regression",
+    "routing-lifecycle-fallback-rate-regression",
 }
 
 
@@ -175,7 +191,7 @@ def _decision_obj(row: dict[str, Any]) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     decision = str(value or row.get("decision") or "").strip().lower()
-    if decision in ACCEPTED_DECISIONS | BLOCKED_DECISIONS:
+    if decision in ACCEPTED_DECISIONS | PROMOTION_DECISIONS | BLOCKED_DECISIONS:
         return {
             "schema": "agentflow.routing_pathway_lifecycle_decision.v1",
             "decision": decision,
@@ -266,6 +282,16 @@ def _base_fields(row: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any
         "projected_savings_usd": _as_float(
             row.get("projected_savings_usd") or row.get("projected_saved_usd") or inputs.get("projected_savings_usd")
         ),
+        "routing_only_savings_usd": _as_float(
+            row.get("routing_only_savings_usd")
+            or row.get("observed_routing_savings_usd")
+            or row.get("routing_savings_usd")
+            or row.get("observed_savings_usd")
+            or row.get("observed_saved_usd")
+            or inputs.get("routing_only_savings_usd")
+            or inputs.get("observed_routing_savings_usd")
+            or inputs.get("observed_savings_usd")
+        ),
         "target_local_rule_file": TARGET_LOCAL_RULE_FILE,
         "target_local_policy_section": TARGET_LOCAL_POLICY_SECTION,
         "review_only": True,
@@ -303,6 +329,194 @@ def _rollback_metadata(reason_codes: list[str]) -> dict[str, Any]:
         "metadata_only": True,
         "aggregate_only": True,
     }
+
+
+def _stale_evidence(row: dict[str, Any], reason_codes: list[str]) -> bool:
+    stale = row.get("stale_evidence")
+    if isinstance(stale, dict) and stale.get("stale"):
+        return True
+    return bool(row.get("stale")) or bool(set(reason_codes) & STALE_REASON_CODES)
+
+
+def _positive_savings(row: dict[str, Any], decision: dict[str, Any]) -> bool:
+    inputs = _dict(decision.get("inputs"))
+    values = (
+        row.get("routing_only_savings_usd"),
+        row.get("observed_routing_savings_usd"),
+        row.get("routing_savings_usd"),
+        row.get("observed_savings_usd"),
+        row.get("observed_saved_usd"),
+        row.get("projected_savings_usd"),
+        row.get("projected_saved_usd"),
+        inputs.get("routing_only_savings_usd"),
+        inputs.get("observed_routing_savings_usd"),
+        inputs.get("observed_savings_usd"),
+        inputs.get("projected_savings_usd"),
+    )
+    return any(_as_float(value) > 0.0 for value in values)
+
+
+def _promotion_request(row: dict[str, Any], decision: dict[str, Any]) -> bool:
+    decision_name = _label(decision.get("decision"), fallback="")
+    status = _label(row.get("status"), fallback="")
+    next_action = _label(row.get("recommended_next_action") or decision.get("next_action"), fallback="")
+    return (
+        decision_name in PROMOTION_DECISIONS
+        or status in PROMOTION_STATUSES
+        or "promote" in next_action
+        or "graduate" in next_action
+    )
+
+
+def _promotion_blocker(row: dict[str, Any], decision: dict[str, Any], reason_codes: list[str]) -> str | None:
+    base = _base_fields(row, decision)
+    reasons = set(reason_codes)
+    if _stale_evidence(row, reason_codes):
+        return "stale-evidence"
+    if reasons & (UNSAFE_REASON_CODES | REGRESSION_REASON_CODES):
+        return "regression-signal"
+    if _as_int(base.get("safety_stop_count")) > 0:
+        return "safety-stop-observed"
+    if _as_int(base.get("rollback_count")) > 0:
+        return "rollback-observed"
+    if _as_int(base.get("error_count")) > 0:
+        return "error-observed"
+    if _as_int(base.get("fallback_count")) > 0:
+        return "fallback-observed"
+    if _as_int(base.get("retry_count")) > 0:
+        return "retry-observed"
+    if _as_int(base.get("applied_count")) <= 0:
+        return "missing-applied-coverage"
+    if _as_int(base.get("holdout_count")) <= 0:
+        return "missing-holdout-coverage"
+    if not _positive_savings(row, decision):
+        return "missing-positive-routing-savings"
+    return None
+
+
+def _rollback_required(row: dict[str, Any], decision: dict[str, Any], reason_codes: list[str]) -> bool:
+    status = _label(row.get("status"), fallback="")
+    blocker = _promotion_blocker(row, decision, reason_codes)
+    return status in ROLLBACK_STATUSES or blocker in {
+        "stale-evidence",
+        "regression-signal",
+        "safety-stop-observed",
+        "rollback-observed",
+        "error-observed",
+        "fallback-observed",
+        "retry-observed",
+    }
+
+
+def _promotion_patch(base: dict[str, Any], reason_codes: list[str]) -> dict[str, Any]:
+    conditions = {
+        "model_pattern": base["requested_model"],
+        "source_surface": base["source_surface"],
+        "category": base["category"],
+        "workflow_phase": base["workflow_phase"],
+    }
+    if base.get("text_bucket") not in (None, "unknown"):
+        conditions["text_bucket"] = base["text_bucket"]
+    if base.get("token_bucket") not in (None, "unknown"):
+        conditions["token_bucket"] = base["token_bucket"]
+    return {
+        "schema": "tokenclaw.managed_routing_canary_promotion_policy_patch.v1",
+        "patch_type": "promote_routing_canary_to_local_rule",
+        "target_local_rule_file": PROMOTION_TARGET_LOCAL_RULE_FILE,
+        "target_local_policy_section": PROMOTION_TARGET_LOCAL_POLICY_SECTION,
+        "source_canary_policy_file": TARGET_LOCAL_RULE_FILE,
+        "source_policy": "managed-recommended",
+        "candidate_fingerprint": base["candidate_fingerprint"],
+        "enabled": True,
+        "review_required": True,
+        "policy_files_written": False,
+        "proposed_rule": {
+            "id": public_id(
+                stable_json({
+                    "candidate": base["candidate_fingerprint"],
+                    "requested_model": base["requested_model"],
+                    "target_model": base["target_model"],
+                }),
+                prefix="managed-routing-promotion-rule",
+            ),
+            "enabled": True,
+            "policy_source": "managed-recommended",
+            "conditions": conditions,
+            "action": {
+                "route_to": base["target_model"],
+                "reason": "managed routing canary promoted after applied and holdout coverage",
+            },
+            "metadata": {
+                "promoted_from_canary": True,
+                "source_canary_policy_file": TARGET_LOCAL_RULE_FILE,
+                "reason_codes": _reason_codes(reason_codes, "applied-and-holdout-coverage-present"),
+                "applied_count": base["applied_count"],
+                "holdout_count": base["holdout_count"],
+                "observed_savings_usd": base["observed_savings_usd"],
+                "projected_savings_usd": base["projected_savings_usd"],
+                "routing_only_savings_usd": base["routing_only_savings_usd"],
+                "safety_gates": {
+                    "requires_applied_coverage": True,
+                    "requires_holdout_coverage": True,
+                    "requires_positive_routing_savings": True,
+                    "requires_zero_safety_stops": True,
+                    "requires_zero_rollbacks": True,
+                    "requires_zero_error_retry_fallback_regressions": True,
+                },
+                "privacy": _privacy(),
+            },
+        },
+    }
+
+
+def _promotion_action(row: dict[str, Any], decision: dict[str, Any], reason_codes: list[str]) -> dict[str, Any]:
+    base = _base_fields(row, decision)
+    action = {
+        **base,
+        "schema": PROMOTION_SCHEMA,
+        "status": "promotion-drafted",
+        "action_type": "promote-routing-canary-to-local-rule",
+        "reason": "routing-canary-promotion-ready",
+        "reason_codes": _reason_codes(reason_codes, "applied-and-holdout-coverage-present", "positive-routing-savings"),
+        "draft_fingerprint": _draft_ref(row, {**decision, "decision": "promote"}),
+        "active_policy_write": False,
+        "target_local_rule_file": PROMOTION_TARGET_LOCAL_RULE_FILE,
+        "target_local_policy_section": PROMOTION_TARGET_LOCAL_POLICY_SECTION,
+        "source_canary_policy_file": TARGET_LOCAL_RULE_FILE,
+        "routing_promotion_policy_patch": _promotion_patch(base, reason_codes),
+        "rollback_metadata": _rollback_metadata(reason_codes),
+    }
+    return {key: value for key, value in action.items() if value not in (None, "", [])}
+
+
+def _rollback_action(row: dict[str, Any], decision: dict[str, Any], reason_codes: list[str], reason: str) -> dict[str, Any]:
+    rollback = {
+        **_base_fields(row, decision),
+        "schema": ROLLBACK_SCHEMA,
+        "status": "rollback-drafted",
+        "reason": reason,
+        "reason_codes": _reason_codes(reason_codes, reason),
+        "action_type": "rollback-routing-canary-draft",
+        "draft_fingerprint": _draft_ref(row, {**decision, "decision": "rollback"}),
+        "active_policy_write": False,
+        "canary_fraction": 0.0,
+        "holdout_fraction": 0.0,
+        "routing_canary_policy_patch": {
+            "schema": "tokenclaw.managed_routing_canary_policy_patch_draft.v1",
+            "patch_type": "rollback_routing_canary",
+            "target_local_rule_file": TARGET_LOCAL_RULE_FILE,
+            "target_local_policy_section": TARGET_LOCAL_POLICY_SECTION,
+            "source_policy": "managed-recommended",
+            "candidate_fingerprint": _candidate_ref(row),
+            "enabled": False,
+            "canary_fraction": 0.0,
+            "holdout_fraction": 0.0,
+            "review_required": True,
+            "policy_files_written": False,
+        },
+        "rollback_metadata": _rollback_metadata(reason_codes),
+    }
+    return {key: value for key, value in rollback.items() if value not in (None, "", [])}
 
 
 def _action_draft(row: dict[str, Any], decision: dict[str, Any], reason_codes: list[str]) -> dict[str, Any]:
@@ -374,6 +588,16 @@ def _row_to_action(row: dict[str, Any]) -> dict[str, Any]:
         row.get("pathway_decision_reason_codes"),
     )
     decision_name = _label(decision.get("decision"), fallback="unknown")
+    if _promotion_request(row, decision):
+        blocker = _promotion_blocker(row, decision, reason_codes)
+        if blocker is None:
+            return _promotion_action(row, {**decision, "decision": "promote"}, reason_codes)
+        if _rollback_required(row, decision, reason_codes):
+            return _rollback_action(row, {**decision, "decision": "rollback"}, reason_codes, blocker)
+        return _blocked_action(row, decision or {"decision": "keep-blocked", "reason_codes": reason_codes}, _reason_codes(reason_codes, blocker))
+    if _rollback_required(row, decision, reason_codes):
+        blocker = _promotion_blocker(row, decision, reason_codes) or _narrow_reason(decision_name, reason_codes)
+        return _rollback_action(row, {**decision, "decision": "rollback"}, reason_codes, blocker)
     if decision_name in ACCEPTED_DECISIONS and not (set(reason_codes) & (STALE_REASON_CODES | UNSAFE_REASON_CODES | LOW_SAVINGS_REASON_CODES)):
         return _action_draft(row, decision, reason_codes)
     return _blocked_action(row, decision or {"decision": decision_name, "reason_codes": reason_codes}, reason_codes)
@@ -382,7 +606,9 @@ def _row_to_action(row: dict[str, Any]) -> dict[str, Any]:
 def build_managed_routing_canary_action_drafts(source: dict[str, Any]) -> dict[str, Any]:
     rows = _rows_from_source(source)
     actions = [_row_to_action(row) for row in rows]
-    drafted = [row for row in actions if row.get("status") == "drafted"]
+    drafted = [row for row in actions if row.get("status") in {"drafted", "promotion-drafted"}]
+    promotions = [row for row in actions if row.get("status") == "promotion-drafted"]
+    rollbacks = [row for row in actions if row.get("status") == "rollback-drafted"]
     blocked = [row for row in actions if row.get("status") == "blocked"]
     reason_counts = Counter(str(row.get("reason") or "unknown") for row in actions)
     decision_counts = Counter(str(row.get("decision") or "unknown") for row in actions)
@@ -390,7 +616,7 @@ def build_managed_routing_canary_action_drafts(source: dict[str, Any]) -> dict[s
     result = {
         "schema": SCHEMA,
         "generated_at": utc_now(),
-        "status": "drafted" if drafted else "blocked" if blocked else "empty",
+        "status": "drafted" if drafted or rollbacks else "blocked" if blocked else "empty",
         "source_schema": _label(source.get("schema")),
         "managed_dependency": "optional",
         "review_only": True,
@@ -406,6 +632,8 @@ def build_managed_routing_canary_action_drafts(source: dict[str, Any]) -> dict[s
             "scored_row_count": len(rows),
             "action_count": len(actions),
             "action_draft_count": len(drafted),
+            "promotion_patch_count": len(promotions),
+            "rollback_action_count": len(rollbacks),
             "blocked_action_count": len(blocked),
             "routing_apply_action_count": 0,
             "policy_files_written": False,
@@ -415,6 +643,8 @@ def build_managed_routing_canary_action_drafts(source: dict[str, Any]) -> dict[s
             "source_surface_counts": [{"value": key, "count": value} for key, value in sorted(source_counts.items())],
         },
         "actions": drafted,
+        "promotion_actions": promotions,
+        "rollback_actions": rollbacks,
         "blocked_actions": blocked,
         "privacy": _privacy(),
     }

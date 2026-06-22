@@ -124,7 +124,9 @@ class ManagedRoutingCanaryActionDraftTests(unittest.TestCase):
         self.assertEqual(result["status"], "drafted")
         self.assertEqual(result["summary"]["scored_row_count"], 3)
         self.assertEqual(result["summary"]["action_draft_count"], 1)
-        self.assertEqual(result["summary"]["blocked_action_count"], 2)
+        self.assertEqual(result["summary"]["promotion_patch_count"], 0)
+        self.assertEqual(result["summary"]["rollback_action_count"], 2)
+        self.assertEqual(result["summary"]["blocked_action_count"], 0)
         self.assertEqual(result["summary"]["routing_apply_action_count"], 0)
         self.assertFalse(result["policy_files_written"])
         self.assertFalse(result["provider_calls_made"])
@@ -148,9 +150,10 @@ class ManagedRoutingCanaryActionDraftTests(unittest.TestCase):
             "disable-routing-canary-draft",
         )
 
-        reasons = {row["reason"] for row in result["blocked_actions"]}
-        self.assertEqual(reasons, {"stale-managed-routing-score", "unsafe-managed-routing-score"})
-        self.assertTrue(all(row["routing_apply_action_count"] == 0 for row in result["blocked_actions"]))
+        reasons = {row["reason"] for row in result["rollback_actions"]}
+        self.assertEqual(reasons, {"stale-evidence", "regression-signal"})
+        self.assertTrue(all(row["routing_apply_action_count"] == 0 for row in result["rollback_actions"]))
+        self.assertTrue(all(row["status"] == "rollback-drafted" for row in result["rollback_actions"]))
 
         repeated = build_managed_routing_canary_action_drafts(self._source())
         self.assertEqual(draft["draft_fingerprint"], repeated["actions"][0]["draft_fingerprint"])
@@ -181,9 +184,134 @@ class ManagedRoutingCanaryActionDraftTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["summary"]["action_draft_count"], 1)
-        self.assertEqual(payload["summary"]["blocked_action_count"], 2)
+        self.assertEqual(payload["summary"]["rollback_action_count"], 2)
+        self.assertEqual(payload["summary"]["blocked_action_count"], 0)
         self.assertEqual(payload["summary"]["routing_apply_action_count"], 0)
         self.assertEqual(payload["egress_guard"]["status"], "passed")
+
+    def test_promotes_ready_lifecycle_rows_and_blocks_or_rolls_back_bad_evidence(self) -> None:
+        source = {
+            "schema": "tokenclaw.local_routing_pathway_outcome_feedback.v1",
+            "outcomes": [
+                {
+                    "schema": "tokenclaw.local_routing_pathway_outcome_feedback_row.v1",
+                    "status": "ready",
+                    "candidate_fingerprint": "routing-pathway-candidate:ready-fixture",
+                    "pathway_id": "generic-openai-summary",
+                    "source_surface": "openai_responses",
+                    "app_family": "generic_openai",
+                    "provider_family": "openai",
+                    "endpoint": "responses",
+                    "category": "summary",
+                    "workflow_phase": "summary",
+                    "requested_model": "gpt-5.5",
+                    "target_model": "gpt-5.4",
+                    "text_bucket": "lt_2k_chars",
+                    "token_bucket": "lt_1k_tokens",
+                    "applied_count": 8,
+                    "holdout_count": 4,
+                    "safety_stop_count": 0,
+                    "rollback_count": 0,
+                    "error_count": 0,
+                    "fallback_count": 0,
+                    "retry_count": 0,
+                    "observed_savings_usd": 0.21,
+                    "projected_savings_usd": 0.35,
+                    "reason_codes": ["applied-and-holdout-coverage-present"],
+                },
+                {
+                    "schema": "tokenclaw.local_routing_pathway_outcome_feedback_row.v1",
+                    "status": "ready",
+                    "candidate_fingerprint": "routing-pathway-candidate:missing-holdout",
+                    "source_surface": "openai_responses",
+                    "app_family": "generic_openai",
+                    "provider_family": "openai",
+                    "endpoint": "responses",
+                    "category": "summary",
+                    "workflow_phase": "summary",
+                    "requested_model": "gpt-5.5",
+                    "target_model": "gpt-5.4",
+                    "applied_count": 8,
+                    "holdout_count": 0,
+                    "observed_savings_usd": 0.21,
+                },
+                {
+                    "schema": "tokenclaw.local_routing_pathway_outcome_feedback_row.v1",
+                    "status": "stale",
+                    "candidate_fingerprint": "routing-pathway-candidate:stale-ready",
+                    "source_surface": "openai_responses",
+                    "app_family": "generic_openai",
+                    "provider_family": "openai",
+                    "endpoint": "responses",
+                    "category": "summary",
+                    "workflow_phase": "summary",
+                    "requested_model": "gpt-5.5",
+                    "target_model": "gpt-5.4",
+                    "applied_count": 8,
+                    "holdout_count": 4,
+                    "observed_savings_usd": 0.21,
+                    "reason_codes": ["routing-lifecycle-stale-evidence"],
+                },
+                {
+                    "schema": "tokenclaw.local_routing_pathway_outcome_feedback_row.v1",
+                    "status": "regressed",
+                    "candidate_fingerprint": "routing-pathway-candidate:regressed-ready",
+                    "source_surface": "openai_responses",
+                    "app_family": "generic_openai",
+                    "provider_family": "openai",
+                    "endpoint": "responses",
+                    "category": "summary",
+                    "workflow_phase": "summary",
+                    "requested_model": "gpt-5.5",
+                    "target_model": "gpt-5.4",
+                    "applied_count": 8,
+                    "holdout_count": 4,
+                    "observed_savings_usd": 0.21,
+                    "reason_codes": ["semantic-quality-regression-observed"],
+                },
+            ],
+        }
+
+        result = build_managed_routing_canary_action_drafts(source)
+
+        self.assertEqual(result["summary"]["promotion_patch_count"], 1)
+        self.assertEqual(result["summary"]["rollback_action_count"], 2)
+        self.assertEqual(result["summary"]["blocked_action_count"], 1)
+        self.assertEqual(result["summary"]["routing_apply_action_count"], 0)
+        self.assertFalse(result["policy_files_written"])
+
+        promotion = result["promotion_actions"][0]
+        self.assertEqual(promotion["schema"], "tokenclaw.managed_routing_canary_promotion_action.v1")
+        self.assertEqual(promotion["status"], "promotion-drafted")
+        self.assertEqual(promotion["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(promotion["target_local_policy_section"], "routing.rules")
+        patch = promotion["routing_promotion_policy_patch"]
+        self.assertEqual(patch["patch_type"], "promote_routing_canary_to_local_rule")
+        self.assertEqual(patch["source_canary_policy_file"], "routing_canary_policy.yaml")
+        self.assertTrue(patch["proposed_rule"]["enabled"])
+        self.assertEqual(patch["proposed_rule"]["action"]["route_to"], "gpt-5.4")
+        self.assertEqual(patch["proposed_rule"]["metadata"]["applied_count"], 8)
+        self.assertEqual(patch["proposed_rule"]["metadata"]["holdout_count"], 4)
+
+        blocked = result["blocked_actions"][0]
+        self.assertEqual(blocked["reason"], "missing-holdout-coverage")
+        self.assertEqual(blocked["routing_apply_action_count"], 0)
+
+        rollback_reasons = {row["reason"] for row in result["rollback_actions"]}
+        self.assertEqual(rollback_reasons, {"stale-evidence", "regression-signal"})
+        self.assertTrue(all(row["routing_apply_action_count"] == 0 for row in result["rollback_actions"]))
+
+        rendered = json.dumps(result, sort_keys=True)
+        for forbidden in (
+            '"raw_prompt"',
+            '"provider_body"',
+            '"request_id"',
+            '"session_id"',
+            '"cache_key"',
+            '"file_path"',
+            '"policy_file_contents"',
+        ):
+            self.assertNotIn(forbidden, rendered)
 
 
 if __name__ == "__main__":
