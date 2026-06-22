@@ -4626,6 +4626,206 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn('"policy_files_written": true', rendered.lower())
         self.assertNotIn('"emits_routing_apply_action": true', rendered.lower())
 
+    def test_preview_agreed_crunch_and_routing_successors_emit_review_only_canary_drafts(self):
+        def entry(source, family, *, gate, next_action, duplicate=False):
+            target_file = "crunch_rules.yaml" if family == "crunch" else "routing_rules.yaml"
+            target_section = "crunch.rules" if family == "crunch" else "routing.rules"
+            row = {
+                "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                "rank": len(entries) + 1,
+                "fingerprint": source,
+                "lever": family,
+                "local_action_family": family,
+                "evidence_schema": f"tokenclaw.{family}.preview_fixture.v1",
+                "state": "ranked-evidence",
+                "current_status": "ready" if gate.get("verified") else "blocked",
+                "issue_worthy_status": "ready" if gate.get("verified") else "blocked",
+                "next_action": next_action,
+                "expected_savings_path": f"Stage a preview-agreed {family} canary and measure local outcome coverage.",
+                "sample_count": 80,
+                "applied_count": 24,
+                "holdout_count": 18,
+                "rollback_count": 0,
+                "safety_stop_count": 0,
+                "canary_fraction": 0.2,
+                "holdout_fraction": 0.15,
+                "projected_saved_tokens": 32000,
+                "projected_savings_usd": 0.42,
+                "savings_per_1000_calls_usd": 3.5,
+                "target_local_rule_file": target_file,
+                "target_local_policy_section": target_section,
+                "managed_preview_gate": gate,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+                "request_id": f"req-{source}-must-not-leak",
+                "raw_prompt": "raw preview-agreed canary fixture must not leak",
+            }
+            if duplicate:
+                row["duplicate_suppression"] = {
+                    "schema": "tokenclaw.local_activation_successor_duplicate_suppression.v1",
+                    "reason": "duplicate-successor-fingerprint",
+                    "suppresses_duplicate_successor_issue": True,
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                }
+            return row
+
+        def gate(*, verified, status, decision, family, reason_codes=None):
+            return {
+                "schema": "tokenclaw.preview_verified_activation_successor_gate.v1",
+                "verified": verified,
+                "status": status,
+                "decision": decision,
+                "required": True,
+                "next_action": "rank-repeated-context-crunch-dry-run"
+                if family == "crunch"
+                else "stage-routing-downgrade-canary",
+                "crunch_preview_decision": "review-ready" if family == "crunch" and verified else None,
+                "reason_codes": reason_codes or [],
+                "quality_risk_reason_codes": reason_codes or [],
+                "projected_saved_tokens": 32000,
+                "projected_saved_usd": 0.42,
+                "projected_savings_usd": 0.42,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            }
+
+        entries = []
+        entries.extend(
+            [
+                entry(
+                    "activation:agreed-crunch",
+                    "crunch",
+                    gate=gate(
+                        verified=True,
+                        status="preview-verified",
+                        decision="review-only",
+                        family="crunch",
+                    ),
+                    next_action="rank-repeated-context-crunch-dry-run",
+                ),
+                entry(
+                    "activation:agreed-routing",
+                    "routing",
+                    gate=gate(
+                        verified=True,
+                        status="preview-verified",
+                        decision="ready",
+                        family="routing",
+                    ),
+                    next_action="stage-routing-downgrade-canary",
+                ),
+                entry(
+                    "activation:stale-crunch",
+                    "crunch",
+                    gate=gate(
+                        verified=False,
+                        status="stale-preview",
+                        decision="review-stale-preview",
+                        family="crunch",
+                    ),
+                    next_action="refresh-managed-activation-preview",
+                ),
+                entry(
+                    "activation:unsafe-crunch",
+                    "crunch",
+                    gate=gate(
+                        verified=False,
+                        status="crunch-preview-quality-risk",
+                        decision="keep-blocked",
+                        family="crunch",
+                        reason_codes=["semantic-quality-regression"],
+                    ),
+                    next_action="keep-repeated-context-crunch-blocked",
+                ),
+                entry(
+                    "activation:missing-routing",
+                    "routing",
+                    gate=gate(
+                        verified=False,
+                        status="no-data-preview-health",
+                        decision="keep-blocked",
+                        family="routing",
+                    ),
+                    next_action="refresh-managed-activation-preview",
+                ),
+                entry(
+                    "activation:duplicate-routing",
+                    "routing",
+                    gate=gate(
+                        verified=True,
+                        status="preview-verified",
+                        decision="ready",
+                        family="routing",
+                    ),
+                    next_action="stage-routing-downgrade-canary",
+                    duplicate=True,
+                ),
+            ]
+        )
+        queue = build_local_activation_next_action_queue(
+            {
+                "evidence_to_activation_next_action_ledger": {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
+                    "status": "tracked",
+                    "entries": entries,
+                }
+            }
+        )
+
+        report = queue["preview_agreed_canary_drafts"]
+        self.assertEqual(report["schema"], "tokenclaw.preview_agreed_repeated_context_canary_drafts.v1")
+        self.assertTrue(report["review_only"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["policy_file_contents_included"])
+        self.assertEqual(queue["summary"]["preview_agreed_canary_draft_count"], 2)
+        self.assertEqual(queue["summary"]["preview_agreed_canary_policy_patch_draft_count"], 2)
+        self.assertEqual(queue["summary"]["preview_agreed_canary_blocked_successor_count"], 4)
+        self.assertEqual(queue["summary"]["preview_agreed_crunch_canary_draft_count"], 1)
+        self.assertEqual(queue["summary"]["preview_agreed_routing_canary_draft_count"], 1)
+
+        drafts = {row["source_fingerprint"]: row for row in report["drafts"]}
+        crunch = drafts["activation:agreed-crunch"]
+        routing = drafts["activation:agreed-routing"]
+        for draft in (crunch, routing):
+            self.assertEqual(draft["status"], "drafted")
+            self.assertEqual(draft["rollout_fraction"], 0.2)
+            self.assertEqual(draft["canary_fraction"], 0.2)
+            self.assertEqual(draft["holdout_fraction"], 0.15)
+            self.assertTrue(draft["source_fingerprint"].startswith("activation:"))
+            self.assertTrue(draft["successor_action_fingerprint"].startswith("successor:"))
+            self.assertIn("Stage a preview-agreed", draft["expected_savings_path"])
+            self.assertTrue(draft["safety_gates"]["stage_allowed"])
+            self.assertTrue(draft["safety_gates"]["has_applied_coverage"])
+            self.assertTrue(draft["safety_gates"]["has_holdout_coverage"])
+            self.assertTrue(draft["safety_gates"]["zero_safety_stops"])
+            self.assertTrue(draft["safety_gates"]["zero_rollbacks"])
+            self.assertFalse(draft["policy_files_written"])
+            self.assertFalse(draft["provider_calls_made"])
+            self.assertFalse(draft["managed_server_calls_made"])
+            self.assertFalse(draft["proposed_policy_patch"]["policy_files_written"])
+
+        self.assertEqual(crunch["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(crunch["target_local_policy_section"], "crunch.rules")
+        self.assertIn("crunch_rules", crunch["proposed_policy_patch"])
+        self.assertEqual(routing["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(routing["target_local_policy_section"], "routing.rules")
+        self.assertIn("routing_rules", routing["proposed_policy_patch"])
+
+        blockers = {row["source_fingerprint"]: row for row in report["blockers"]}
+        self.assertEqual(blockers["activation:stale-crunch"]["blocked_reason"], "stale-preview")
+        self.assertEqual(blockers["activation:unsafe-crunch"]["blocked_reason"], "crunch-preview-quality-risk")
+        self.assertEqual(blockers["activation:missing-routing"]["blocked_reason"], "no-data-preview-health")
+        self.assertEqual(blockers["activation:duplicate-routing"]["blocked_reason"], "duplicate-successor-fingerprint")
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("raw preview-agreed canary fixture must not leak", rendered)
+        self.assertNotIn("req-activation:agreed-crunch-must-not-leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+
     def test_stored_no_data_preview_outcomes_keep_successor_blocked(self):
         ledger = {
             "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",

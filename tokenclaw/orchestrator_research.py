@@ -25,6 +25,8 @@ CACHE_REPLAY_FILE_ACTION_DRAFTS_SCHEMA = "tokenclaw.cache_replay_file_action_dra
 CACHE_REPLAY_FILE_ACTION_DRAFT_SCHEMA = "tokenclaw.cache_replay_file_action_draft.v1"
 ROUTING_CANARY_FILE_ACTION_DRAFTS_SCHEMA = "tokenclaw.routing_canary_file_action_drafts.v1"
 ROUTING_CANARY_FILE_ACTION_DRAFT_SCHEMA = "tokenclaw.routing_canary_file_action_draft.v1"
+PREVIEW_AGREED_CANARY_DRAFTS_SCHEMA = "tokenclaw.preview_agreed_repeated_context_canary_drafts.v1"
+PREVIEW_AGREED_CANARY_DRAFT_SCHEMA = "tokenclaw.preview_agreed_repeated_context_canary_draft.v1"
 PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA = "tokenclaw.preview_verified_activation_successor_gate.v1"
 MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "tokenclaw.managed_activation_preview_health_gate.v1"
 ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA = "tokenclaw.activation_feedback_evidence_freshness_gate.v1"
@@ -8800,6 +8802,366 @@ def build_routing_canary_file_action_drafts(successor_actions: list[dict[str, An
     }
 
 
+def _preview_agreed_canary_privacy() -> dict[str, Any]:
+    privacy = _successor_action_privacy()
+    privacy.update(
+        {
+            "review_only": True,
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "policy_file_contents_included": False,
+        }
+    )
+    return privacy
+
+
+def _preview_agreed_canary_family(action: dict[str, Any], decision: dict[str, Any]) -> str:
+    family = str(
+        action.get("local_action_family")
+        or decision.get("local_action_family")
+        or action.get("lever")
+        or ""
+    ).strip()
+    if family in {"routing", "crunch"}:
+        return family
+    next_action = str(
+        decision.get("recommended_next_action")
+        or action.get("recommended_next_action")
+        or ""
+    ).strip()
+    if "routing" in next_action:
+        return "routing"
+    if "crunch" in next_action:
+        return "crunch"
+    return ""
+
+
+def _preview_agreed_canary_target_file(family: str, action: dict[str, Any], decision: dict[str, Any]) -> str:
+    fallback = "crunch_rules.yaml" if family == "crunch" else "routing_rules.yaml"
+    return sanitize_value(
+        action.get("target_local_rule_file")
+        or decision.get("target_local_rule_file")
+        or fallback
+    )
+
+
+def _preview_agreed_canary_target_section(family: str, action: dict[str, Any], decision: dict[str, Any]) -> str:
+    fallback = "crunch.rules" if family == "crunch" else "routing.rules"
+    return sanitize_value(
+        action.get("target_local_policy_section")
+        or decision.get("target_local_policy_section")
+        or fallback
+    )
+
+
+def _preview_agreed_canary_fraction(action: dict[str, Any], key: str) -> float:
+    value = action.get(key)
+    if value is None:
+        value = action.get(f"recommended_{key}")
+    if value is None:
+        value = 0.1
+    return round(_to_float(value), 4)
+
+
+def _preview_agreed_canary_stage_blocker(action: dict[str, Any], decision: dict[str, Any]) -> str:
+    duplicate_status = str(action.get("duplicate_suppression_status") or "").strip()
+    if duplicate_status == "suppressed":
+        return sanitize_value(action.get("duplicate_suppression_reason") or "duplicate-successor-fingerprint")
+    if action.get("lifecycle_progressed_from_next_action") or action.get("lifecycle_progressed_from_evidence_schema"):
+        return "successor-already-progressed"
+    if not bool(decision.get("preview_verified") or action.get("preview_verified")):
+        return sanitize_value(
+            decision.get("preview_agreement_status")
+            or action.get("preview_verification_status")
+            or "missing-preview"
+        )
+    preview_status = str(decision.get("preview_agreement_status") or "").strip()
+    if preview_status != "agreed":
+        return sanitize_value(preview_status or "preview-not-agreed")
+    decision_text = str(decision.get("decision") or action.get("successor_status") or "").strip()
+    if decision_text in {
+        "keep-blocked",
+        "review-stale-preview",
+        "rollback-required",
+        "keep-current-rule",
+        "suppress-duplicate",
+    }:
+        return sanitize_value(decision_text)
+    reason_codes = [
+        str(item)
+        for item in (
+            decision.get("quality_risk_reason_codes")
+            or action.get("quality_risk_reason_codes")
+            or action.get("reason_codes")
+            or []
+        )
+        if str(item or "").strip()
+    ]
+    unsafe_codes = {
+        "semantic-quality-regression",
+        "quality-risk",
+        "unsafe",
+        "unsafe-successor",
+        "stale-preview",
+        "stale-evidence",
+    }
+    for code in reason_codes:
+        if code in unsafe_codes or code.startswith("unsafe") or "quality-risk" in code or "stale" in code:
+            return sanitize_value(code)
+    return ""
+
+
+def _preview_agreed_canary_safety_gates(
+    family: str,
+    action: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    applied_count = _to_int(action.get("applied_count") or decision.get("applied_count"))
+    holdout_count = _to_int(action.get("holdout_count") or decision.get("holdout_count"))
+    safety_stop_count = _to_int(action.get("safety_stop_count") or decision.get("safety_stop_count"))
+    rollback_count = _to_int(action.get("rollback_count") or decision.get("rollback_count"))
+    freshness_state = sanitize_value(action.get("freshness_state") or decision.get("freshness_state") or "preview-agreed")
+    preview_status = str(decision.get("preview_agreement_status") or "").strip()
+    coverage_available = any(key in action or key in decision for key in ("applied_count", "holdout_count"))
+    freshness_passed = freshness_state not in {"stale", "stale-preview", "stale-evidence", "stale-rollback-required"}
+    return {
+        "schema": "tokenclaw.preview_agreed_canary_safety_gates.v1",
+        "local_action_family": family,
+        "preview_verified": bool(decision.get("preview_verified") or action.get("preview_verified")),
+        "preview_agreement_status": sanitize_value(preview_status or "not-previewed"),
+        "freshness_state": freshness_state,
+        "freshness_check_passed": bool(freshness_passed),
+        "coverage_available": bool(coverage_available),
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "has_applied_coverage": bool(applied_count > 0) if coverage_available else False,
+        "has_holdout_coverage": bool(holdout_count > 0) if coverage_available else False,
+        "coverage_check_passed": bool(applied_count > 0 and holdout_count > 0) if coverage_available else True,
+        "safety_stop_count": safety_stop_count,
+        "rollback_count": rollback_count,
+        "zero_safety_stops": safety_stop_count == 0,
+        "zero_rollbacks": rollback_count == 0,
+        "stage_allowed": bool(
+            preview_status == "agreed"
+            and freshness_passed
+            and safety_stop_count == 0
+            and rollback_count == 0
+            and (not coverage_available or (applied_count > 0 and holdout_count > 0))
+        ),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _preview_agreed_canary_draft_id(
+    family: str,
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    draft_action: str,
+) -> str:
+    material = {
+        "schema": PREVIEW_AGREED_CANARY_DRAFT_SCHEMA,
+        "family": family,
+        "source_fingerprint": sanitize_value(decision.get("source_fingerprint") or action.get("source_fingerprint")),
+        "successor_action_fingerprint": sanitize_value(
+            decision.get("successor_action_fingerprint") or action.get("fingerprint")
+        ),
+        "draft_action": draft_action,
+        "target_local_rule_file": _preview_agreed_canary_target_file(family, action, decision),
+    }
+    return public_id(json.dumps(material, sort_keys=True), prefix="preview-agreed-canary-draft") or "preview-agreed-canary-draft:unknown"
+
+
+def _preview_agreed_canary_blocker(
+    family: str,
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    return sanitize_value(
+        {
+            "schema": PREVIEW_AGREED_CANARY_DRAFT_SCHEMA,
+            "status": "blocked",
+            "source": "local-activation-successor",
+            "local_action_family": family,
+            "source_fingerprint": sanitize_value(decision.get("source_fingerprint") or action.get("source_fingerprint")),
+            "successor_action_fingerprint": sanitize_value(
+                decision.get("successor_action_fingerprint") or action.get("fingerprint")
+            ),
+            "preview_verified": bool(decision.get("preview_verified") or action.get("preview_verified")),
+            "preview_agreement_status": sanitize_value(decision.get("preview_agreement_status") or "not-previewed"),
+            "blocked_reason": sanitize_value(reason or "preview-not-agreed"),
+            "narrower_next_action": sanitize_value(
+                decision.get("recommended_next_action")
+                or action.get("recommended_next_action")
+                or "refresh-managed-activation-preview"
+            ),
+            "target_local_rule_file": _preview_agreed_canary_target_file(family, action, decision),
+            "target_local_policy_section": _preview_agreed_canary_target_section(family, action, decision),
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "privacy": _preview_agreed_canary_privacy(),
+        }
+    )
+
+
+def _preview_agreed_canary_draft(
+    family: str,
+    action: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    draft_action = f"stage-preview-agreed-{family}-canary"
+    canary_fraction = _preview_agreed_canary_fraction(action, "canary_fraction")
+    holdout_fraction = _preview_agreed_canary_fraction(action, "holdout_fraction")
+    target_file = _preview_agreed_canary_target_file(family, action, decision)
+    target_section = _preview_agreed_canary_target_section(family, action, decision)
+    safety_gates = _preview_agreed_canary_safety_gates(family, action, decision)
+    source_fingerprint = sanitize_value(decision.get("source_fingerprint") or action.get("source_fingerprint"))
+    successor_action_fingerprint = sanitize_value(
+        decision.get("successor_action_fingerprint") or action.get("fingerprint")
+    )
+    patch_key = "crunch_rules" if family == "crunch" else "routing_rules"
+    return sanitize_value(
+        {
+            "schema": PREVIEW_AGREED_CANARY_DRAFT_SCHEMA,
+            "status": "drafted",
+            "source": "local-activation-successor",
+            "draft_action": draft_action,
+            "draft_id": _preview_agreed_canary_draft_id(family, action, decision, draft_action),
+            "local_action_family": family,
+            "source_fingerprint": source_fingerprint,
+            "successor_action_fingerprint": successor_action_fingerprint,
+            "successor_decision_fingerprint": sanitize_value(decision.get("fingerprint")),
+            "expected_savings_path": sanitize_value(
+                action.get("expected_savings_path")
+                or action.get("managed_expected_savings_path")
+                or "Stage preview-agreed repeated-context canary and measure local outcomes."
+            ),
+            "target_local_rule_file": target_file,
+            "target_local_policy_section": target_section,
+            "canary_fraction": canary_fraction,
+            "rollout_fraction": canary_fraction,
+            "holdout_fraction": holdout_fraction,
+            "sample_count": _to_int(action.get("sample_count")),
+            "projected_savings_usd": round(
+                _to_float(action.get("projected_savings_usd") or action.get("projected_saved_usd")),
+                8,
+            ),
+            "projected_saved_tokens": _to_int(action.get("projected_saved_tokens")),
+            "safety_gates": safety_gates,
+            "proposed_policy_patch": {
+                "schema": "tokenclaw.preview_agreed_canary_policy_patch.v1",
+                "operation": draft_action,
+                "patch_type": f"stage_preview_agreed_{family}_canary",
+                patch_key: [
+                    {
+                        "id": _preview_agreed_canary_draft_id(family, action, decision, f"{family}-rule"),
+                        "enabled": False,
+                        "mode": "canary",
+                        "review_only": True,
+                        "canary_fraction": canary_fraction,
+                        "rollout_fraction": canary_fraction,
+                        "holdout_fraction": holdout_fraction,
+                        "source_fingerprint": source_fingerprint,
+                        "successor_action_fingerprint": successor_action_fingerprint,
+                        "safety_gates": safety_gates,
+                    }
+                ],
+                "review_required": True,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+            },
+            "review_only": True,
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "privacy": _preview_agreed_canary_privacy(),
+        }
+    )
+
+
+def build_preview_agreed_canary_drafts(
+    successor_actions: list[dict[str, Any]],
+    successor_decisions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    decisions = successor_decisions if isinstance(successor_decisions, list) else build_local_activation_successor_decisions(
+        {"successor_actions": successor_actions}
+    )
+    action_by_fingerprint = {
+        str(action.get("fingerprint")): action
+        for action in successor_actions
+        if isinstance(action, dict) and str(action.get("fingerprint") or "").strip()
+    }
+    action_by_source = {
+        str(action.get("source_fingerprint")): action
+        for action in successor_actions
+        if isinstance(action, dict) and str(action.get("source_fingerprint") or "").strip()
+    }
+    drafts: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        source = str(decision.get("source_fingerprint") or "").strip()
+        if not source or source in seen_sources:
+            continue
+        seen_sources.add(source)
+        action = action_by_fingerprint.get(str(decision.get("successor_action_fingerprint") or "")) or action_by_source.get(source)
+        if not isinstance(action, dict):
+            continue
+        family = _preview_agreed_canary_family(action, decision)
+        if family not in {"routing", "crunch"}:
+            continue
+        blocker = _preview_agreed_canary_stage_blocker(action, decision)
+        if blocker:
+            blockers.append(_preview_agreed_canary_blocker(family, action, decision, blocker))
+            continue
+        draft = _preview_agreed_canary_draft(family, action, decision)
+        gates = draft.get("safety_gates") if isinstance(draft.get("safety_gates"), dict) else {}
+        if not gates.get("stage_allowed"):
+            blockers.append(
+                _preview_agreed_canary_blocker(
+                    family,
+                    action,
+                    decision,
+                    "preview-agreed-canary-safety-gate-blocked",
+                )
+            )
+            continue
+        drafts.append(draft)
+    status_counts: Counter[str] = Counter(str(item.get("status") or "unknown") for item in [*drafts, *blockers])
+    family_counts: Counter[str] = Counter(str(item.get("local_action_family") or "unknown") for item in drafts)
+    blocker_counts: Counter[str] = Counter(str(item.get("blocked_reason") or "unknown") for item in blockers)
+    return {
+        "schema": PREVIEW_AGREED_CANARY_DRAFTS_SCHEMA,
+        "status": "drafted" if drafts else "blocked",
+        "review_only": True,
+        "summary": {
+            "draft_count": len(drafts),
+            "policy_patch_draft_count": sum(1 for item in drafts if isinstance(item.get("proposed_policy_patch"), dict)),
+            "blocked_successor_count": len(blockers),
+            "preview_agreed_successor_count": sum(1 for item in [*drafts, *blockers] if item.get("preview_agreement_status") == "agreed"),
+            "routing_draft_count": family_counts.get("routing", 0),
+            "crunch_draft_count": family_counts.get("crunch", 0),
+            "policy_files_written": False,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "status_counts": [{"value": key, "count": count} for key, count in sorted(status_counts.items())],
+            "blocker_reason_counts": [
+                {"value": key, "count": count}
+                for key, count in sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))
+            ],
+        },
+        "drafts": drafts[:20],
+        "blockers": blockers[:20],
+        "privacy": _preview_agreed_canary_privacy(),
+    }
+
+
 def _activation_successor_issue_labels(action: dict[str, Any], status_label: str) -> list[str]:
     priority = "priority:p1" if status_label == "status:ready" else "priority:p2"
     labels = _default_issue_labels(priority)
@@ -10652,6 +11014,7 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
     successor_decisions = build_local_activation_successor_decisions({"successor_actions": successor_actions})
     cache_replay_file_action_drafts = build_cache_replay_file_action_drafts(successor_actions)
     routing_canary_file_action_drafts = build_routing_canary_file_action_drafts(successor_actions)
+    preview_agreed_canary_drafts = build_preview_agreed_canary_drafts(successor_actions, successor_decisions)
     cache_replay_file_action_summary = (
         cache_replay_file_action_drafts.get("summary")
         if isinstance(cache_replay_file_action_drafts.get("summary"), dict)
@@ -10660,6 +11023,11 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
     routing_canary_file_action_summary = (
         routing_canary_file_action_drafts.get("summary")
         if isinstance(routing_canary_file_action_drafts.get("summary"), dict)
+        else {}
+    )
+    preview_agreed_canary_summary = (
+        preview_agreed_canary_drafts.get("summary")
+        if isinstance(preview_agreed_canary_drafts.get("summary"), dict)
         else {}
     )
     preview_successor_summary = _preview_successor_summary(successor_actions)
@@ -10702,6 +11070,11 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             "routing_canary_file_blocked_action_count": _to_int(routing_canary_file_action_summary.get("blocked_action_count")),
             "routing_canary_file_routing_apply_action_count": _to_int(routing_canary_file_action_summary.get("routing_apply_action_count")),
             "routing_canary_file_unsafe_routing_apply_action_count": _to_int(routing_canary_file_action_summary.get("unsafe_routing_apply_action_count")),
+            "preview_agreed_canary_draft_count": _to_int(preview_agreed_canary_summary.get("draft_count")),
+            "preview_agreed_canary_policy_patch_draft_count": _to_int(preview_agreed_canary_summary.get("policy_patch_draft_count")),
+            "preview_agreed_canary_blocked_successor_count": _to_int(preview_agreed_canary_summary.get("blocked_successor_count")),
+            "preview_agreed_routing_canary_draft_count": _to_int(preview_agreed_canary_summary.get("routing_draft_count")),
+            "preview_agreed_crunch_canary_draft_count": _to_int(preview_agreed_canary_summary.get("crunch_draft_count")),
             "preview_verified_successor_count": preview_verified_count,
             "preview_required_successor_count": preview_required_count,
             "preview_blocked_successor_count": preview_blocked_count,
@@ -10747,6 +11120,7 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
         "successor_decisions": successor_decisions[:20],
         "cache_replay_file_action_drafts": cache_replay_file_action_drafts,
         "routing_canary_file_action_drafts": routing_canary_file_action_drafts,
+        "preview_agreed_canary_drafts": preview_agreed_canary_drafts,
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -12943,9 +13317,18 @@ def build_evidence_to_activation_burndown(
                 "preview_agreement_by_local_action_family",
                 "preview_top_omitted_reasons",
                 "preview_top_no_op_reasons",
+                "preview_agreed_canary_draft_count",
+                "preview_agreed_canary_policy_patch_draft_count",
+                "preview_agreed_canary_blocked_successor_count",
+                "preview_agreed_routing_canary_draft_count",
+                "preview_agreed_crunch_canary_draft_count",
             ):
                 if key in queue_summary:
                     result["summary"][key] = sanitize_value(queue_summary.get(key))
+            if isinstance(next_action_queue.get("preview_agreed_canary_drafts"), dict):
+                result["preview_agreed_canary_drafts"] = sanitize_value(
+                    next_action_queue.get("preview_agreed_canary_drafts")
+                )
     return sanitize_value(result)
 
 
