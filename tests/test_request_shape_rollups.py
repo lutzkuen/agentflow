@@ -8147,6 +8147,106 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(ledger["entries"][0]["status"], "needs-more-samples")
         self.assertEqual(ledger["entries"][0]["recommendation"], "keep-staged")
 
+    def test_crunch_policy_decision_fixture_emits_four_promotion_outcomes(self) -> None:
+        def candidate(
+            policy_id: str,
+            recommendation: str,
+            *,
+            applied_count: int,
+            holdout_count: int,
+            saved_tokens: int = 0,
+            saved_usd: float = 0.0,
+            safety_stop_count: int = 0,
+            rollback_count: int = 0,
+            reason_codes: list[str] | None = None,
+        ) -> dict[str, object]:
+            return {
+                "schema": "tokenclaw.request_shape_crunch_canary_impact_candidate.v1",
+                "policy_id": policy_id,
+                "cohort_id": policy_id.replace("policy", "cohort"),
+                "policy_source": "local-manual",
+                "impact_recommendation": recommendation,
+                "applied_count": applied_count,
+                "holdout_count": holdout_count,
+                "saved_tokens": saved_tokens,
+                "saved_chars": saved_tokens * 4,
+                "saved_usd": saved_usd,
+                "projected_saved_tokens": max(saved_tokens, 1000),
+                "projected_saved_usd": max(saved_usd, 0.003),
+                "safety_stop_count": safety_stop_count,
+                "rollback_count": rollback_count,
+                "fallback_count": 0,
+                "error_rate_delta": 0.0,
+                "retry_rate_delta": 0.0,
+                "fallback_rate_delta": 0.0,
+                "reason_codes": reason_codes or [],
+                "coverage": {
+                    "schema": "tokenclaw.request_shape_crunch_canary_coverage.v1",
+                    "applied_count": applied_count,
+                    "holdout_count": holdout_count,
+                    "has_applied_coverage": applied_count > 0,
+                    "has_holdout_coverage": holdout_count > 0,
+                    "safety_stop_count": safety_stop_count,
+                    "rollback_count": rollback_count,
+                    "metadata_only": True,
+                    "aggregate_only": True,
+                },
+            }
+
+        report = build_request_shape_crunch_policy_decision_report(
+            {
+                "schema": "tokenclaw.request_shape_crunch_canary_impact.v1",
+                "status": "observed",
+                "summary": {
+                    "applied_count": 7,
+                    "holdout_count": 3,
+                    "saved_tokens": 3200,
+                    "provider_calls_made": 0,
+                    "managed_server_calls_made": 0,
+                    "policy_files_written": False,
+                },
+                "candidates": [
+                    candidate("policy-promote", "promotion-ready", applied_count=4, holdout_count=2, saved_tokens=3200, saved_usd=0.0096),
+                    candidate("policy-staged", "collect-more-evidence", applied_count=2, holdout_count=0, saved_tokens=900, saved_usd=0.0027, reason_codes=["missing-holdout-coverage"]),
+                    candidate("policy-rollback", "rollback", applied_count=1, holdout_count=1, safety_stop_count=1, rollback_count=1, reason_codes=["canary-safety-stopped"]),
+                    candidate("policy-blocked", "keep-blocked", applied_count=0, holdout_count=0, reason_codes=["no-applied-savings"]),
+                ],
+            }
+        )
+
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(report["promotion_decision"], "promote")
+        self.assertEqual(report["promotion_readiness"], "promotion-ready")
+        self.assertEqual(report["decision"], "widen")
+        self.assertFalse(report["summary"]["policy_files_written"])
+        self.assertEqual(report["summary"]["provider_calls_made"], 0)
+        self.assertEqual(report["summary"]["managed_server_calls_made"], 0)
+        decisions_by_policy = {item["policy_id"]: item for item in report["decisions"]}
+        self.assertEqual(decisions_by_policy["policy-promote"]["promotion_decision"], "promote")
+        self.assertEqual(decisions_by_policy["policy-staged"]["promotion_decision"], "keep-staged")
+        self.assertEqual(decisions_by_policy["policy-rollback"]["promotion_decision"], "rollback")
+        self.assertEqual(decisions_by_policy["policy-blocked"]["promotion_decision"], "keep-blocked")
+        self.assertEqual(decisions_by_policy["policy-promote"]["promotion_decision_options"], ["promote", "keep-staged", "rollback", "keep-blocked"])
+        self.assertTrue(decisions_by_policy["policy-promote"]["coverage"]["has_applied_coverage"])
+        self.assertTrue(decisions_by_policy["policy-promote"]["coverage"]["has_holdout_coverage"])
+        self.assertEqual(decisions_by_policy["policy-promote"]["observed_saved_tokens"], 3200)
+        self.assertEqual(decisions_by_policy["policy-rollback"]["metrics"]["safety_stop_count"], 1)
+        self.assertEqual(decisions_by_policy["policy-rollback"]["metrics"]["rollback_count"], 1)
+        duplicate_suppression = decisions_by_policy["policy-promote"]["duplicate_suppression"]
+        self.assertTrue(duplicate_suppression["suppresses_new_activation_issue"])
+        self.assertTrue(duplicate_suppression["suppresses_generic_crunch_activation_issue"])
+        self.assertEqual(duplicate_suppression["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertTrue(str(duplicate_suppression["fingerprint"]).startswith("activation:"))
+        self.assertTrue(report["summary"]["duplicate_activation_issue_suppressed"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["provider_bodies_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("raw prompt", rendered)
+
     def test_crunch_activation_evidence_joins_current_decision_and_active_rule(self) -> None:
         decision_id = "request-shape-crunch-policy-decision:9db327d1abdec766"
         with tempfile.TemporaryDirectory() as tmp:

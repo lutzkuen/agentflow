@@ -2703,6 +2703,24 @@ def _crunch_policy_decision_value(candidate: dict[str, Any] | None) -> str:
     return "blocked"
 
 
+def _crunch_policy_promotion_decision(decision: str) -> str:
+    return {
+        "widen": "promote",
+        "rollback": "rollback",
+        "keep-staged": "keep-staged",
+        "blocked": "keep-blocked",
+    }.get(decision, "keep-blocked")
+
+
+def _crunch_policy_promotion_readiness(decision: str) -> str:
+    return {
+        "widen": "promotion-ready",
+        "rollback": "rollback-required",
+        "keep-staged": "needs-more-evidence",
+        "blocked": "keep-blocked",
+    }.get(decision, "keep-blocked")
+
+
 def _crunch_policy_decision_reason(candidate: dict[str, Any] | None, decision: str) -> str:
     if not candidate:
         return "missing-applied-or-holdout-coverage"
@@ -2815,8 +2833,47 @@ def _crunch_policy_decision_patch(candidate: dict[str, Any] | None, decision: st
     }
 
 
+def _crunch_policy_decision_duplicate_suppression(
+    candidate: dict[str, Any] | None,
+    decision: str,
+    promotion_decision: str,
+) -> dict[str, Any]:
+    has_candidate = bool(candidate and (candidate.get("policy_id") or candidate.get("cohort_id")))
+    suppresses_activation = bool(has_candidate)
+    return {
+        "schema": "tokenclaw.request_shape_crunch_policy_decision_duplicate_suppression.v1",
+        "suppresses_new_activation_issue": suppresses_activation,
+        "suppresses_generic_crunch_activation_issue": suppresses_activation,
+        "suppresses_generic_crunch_promotion_issue": suppresses_activation,
+        "reason": "durable-repeated-context-crunch-policy-decision" if suppresses_activation else "missing-canary-candidate",
+        "decision": decision,
+        "promotion_decision": promotion_decision,
+        "matching_local_policy": "crunch_rules" if suppresses_activation else None,
+        "target_local_rule_file": "crunch_rules.yaml",
+        "target_local_policy_section": "crunch.rules",
+        "policy_id_included": False,
+        "cohort_id_included": False,
+        "fingerprint": (
+            "activation:"
+            + hashlib.sha256(
+                stable_json(
+                    {
+                        "schema": "tokenclaw.request_shape_crunch_policy_decision_duplicate_suppression.v1",
+                        "policy_id": candidate.get("policy_id") if candidate else None,
+                        "cohort_id": candidate.get("cohort_id") if candidate else None,
+                        "decision": decision,
+                        "promotion_decision": promotion_decision,
+                    }
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+        ),
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
 def _crunch_policy_decision_from_candidate(candidate: dict[str, Any] | None) -> dict[str, Any]:
     decision = _crunch_policy_decision_value(candidate)
+    promotion_decision = _crunch_policy_promotion_decision(decision)
     reason = _crunch_policy_decision_reason(candidate, decision)
     rollback_metadata = _crunch_policy_decision_rollback_metadata(candidate, decision)
     metrics = _crunch_policy_decision_metrics(candidate)
@@ -2830,10 +2887,13 @@ def _crunch_policy_decision_from_candidate(candidate: dict[str, Any] | None) -> 
     if candidate is None:
         candidate = {}
     decision_id = _crunch_policy_decision_id(candidate, decision)
+    duplicate_suppression = _crunch_policy_decision_duplicate_suppression(candidate, decision, promotion_decision)
     return {
         "schema": "tokenclaw.request_shape_crunch_policy_decision_entry.v1",
         "decision_id": decision_id,
         "decision": decision,
+        "promotion_decision": promotion_decision,
+        "promotion_readiness": _crunch_policy_promotion_readiness(decision),
         "graduation_decision": _crunch_policy_graduation_decision(decision, candidate.get("reason_codes") or [reason]),
         "status": "decided",
         "reason": reason,
@@ -2844,6 +2904,7 @@ def _crunch_policy_decision_from_candidate(candidate: dict[str, Any] | None) -> 
         "target_local_policy_section": "crunch.rules",
         "policy_source": public_label(candidate.get("policy_source") or "local-manual", "local-manual"),
         "decision_options": ["widen", "rollback", "keep-staged", "blocked"],
+        "promotion_decision_options": ["promote", "keep-staged", "rollback", "keep-blocked"],
         "policy_id": candidate.get("policy_id"),
         "cohort_id": candidate.get("cohort_id"),
         "promotion_allowed": promotion_allowed,
@@ -2865,6 +2926,7 @@ def _crunch_policy_decision_from_candidate(candidate: dict[str, Any] | None) -> 
         "safety_stop_state": "observed" if metrics["safety_stop_count"] > 0 else "none",
         "local_policy_patch": _crunch_policy_decision_patch(candidate, decision),
         "rollback_metadata": rollback_metadata,
+        "duplicate_suppression": duplicate_suppression,
         "source_candidate_schema": candidate.get("schema"),
         "source_impact_recommendation": candidate.get("impact_recommendation"),
         "source_recommended_next_action": candidate.get("recommended_next_action"),
@@ -2906,12 +2968,17 @@ def build_request_shape_crunch_policy_decision_report(impact_report: dict[str, A
         "read_only": True,
         "generated_at": utc_now(),
         "decision": top["decision"],
+        "promotion_decision": top["promotion_decision"],
+        "promotion_readiness": top["promotion_readiness"],
         "graduation_decision": top["graduation_decision"],
         "decision_id": top["decision_id"],
         "top_decision": top,
         "decisions": decision_entries,
+        "duplicate_suppression": top.get("duplicate_suppression"),
         "summary": {
             "decision": top["decision"],
+            "promotion_decision": top["promotion_decision"],
+            "promotion_readiness": top["promotion_readiness"],
             "graduation_decision": top["graduation_decision"],
             "decision_id": top["decision_id"],
             "decision_count": len(decision_entries),
@@ -2937,6 +3004,11 @@ def build_request_shape_crunch_policy_decision_report(impact_report: dict[str, A
             "target_local_rule_file": "crunch_rules.yaml",
             "target_local_policy_section": "crunch.rules",
             "coverage": top["coverage"],
+            "duplicate_activation_issue_suppressed": bool(
+                (top.get("duplicate_suppression") or {}).get("suppresses_new_activation_issue")
+            )
+            if isinstance(top.get("duplicate_suppression"), dict)
+            else False,
             "source_impact_status": impact_report.get("status") if isinstance(impact_report, dict) else None,
             "source_impact_recommendation": top.get("source_impact_recommendation"),
             "policy_files_written": False,
