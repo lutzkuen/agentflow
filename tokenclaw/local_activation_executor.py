@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 from typing import Any
 
 from tokenclaw.orchestrator_research import (
@@ -27,8 +28,10 @@ PREVIEW_DECISION_SCHEMA = "tokenclaw.managed_activation_preview_decision.v1"
 PREVIEW_RANKED_NEXT_ACTION_SCHEMA = "tokenclaw.managed_activation_preview_ranked_next_action.v1"
 BUNDLE_SCHEMA = "tokenclaw.local_activation_executor_bundle.v1"
 BUNDLE_OUTCOME_SCHEMA = "tokenclaw.local_activation_executor_bundle_outcome.v1"
+APPLY_SCHEMA = "tokenclaw.local_activation_executor_apply.v1"
+APPLY_OUTCOME_SCHEMA = "tokenclaw.local_activation_executor_apply_outcome.v1"
 
-SAFE_SELECTABLE_CLASSES = {"draft-local-policy", "review-only", "retire"}
+SAFE_SELECTABLE_CLASSES = {"draft-local-policy", "review-only", "retire", "apply-cache-rollback"}
 SUPPORTED_PREVIEW_LOCAL_ACTION_FAMILIES = ["routing", "crunch", "cache", "activation-feedback"]
 PREVIEW_REQUIRED_LOCAL_ACTION_FAMILIES = {"routing", "cache", "activation-feedback"}
 
@@ -109,6 +112,59 @@ def _input_to_burndown(source: dict[str, Any], *, now: datetime | None) -> dict[
     return build_activation_burndown_report(source, now=now)
 
 
+def _source_rows_by_fingerprint(source: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if isinstance(source.get("entries"), list):
+        rows.extend(item for item in source.get("entries") or [] if isinstance(item, dict))
+    evidence = source.get("evidence") if isinstance(source.get("evidence"), dict) else {}
+    stats = evidence.get("stats_summary") if isinstance(evidence.get("stats_summary"), dict) else {}
+    for key in ("local_activation_next_action_queue", "evidence_to_activation_next_action_ledger"):
+        nested = stats.get(key) if isinstance(stats.get(key), dict) else {}
+        if isinstance(nested.get("entries"), list):
+            rows.extend(item for item in nested.get("entries") or [] if isinstance(item, dict))
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        fingerprint = str(row.get("fingerprint") or row.get("source_fingerprint") or "").strip()
+        if fingerprint:
+            result[fingerprint] = row
+    return result
+
+
+def _merge_executor_source_fields(rows: list[dict[str, Any]], source: dict[str, Any]) -> list[dict[str, Any]]:
+    original_rows = _source_rows_by_fingerprint(source)
+    if not original_rows:
+        return rows
+    preserved_keys = (
+        "local_policy_patch",
+        "rollback_metadata",
+        "managed_preview_gate",
+        "managed_preview_required",
+        "preview_verified",
+        "preview_verification_status",
+        "preview_verification_decision",
+        "promotion_readiness",
+        "rollback_required",
+        "recommended_next_action",
+        "local_executor_gate_passed",
+    )
+    merged: list[dict[str, Any]] = []
+    for row in rows:
+        candidate_keys = [
+            str(row.get("fingerprint") or "").strip(),
+            str(row.get("source_fingerprint") or "").strip(),
+        ]
+        original = next((original_rows[key] for key in candidate_keys if key and key in original_rows), {})
+        if not original:
+            merged.append(row)
+            continue
+        next_row = dict(row)
+        for key in preserved_keys:
+            if key in original and key not in next_row:
+                next_row[key] = original[key]
+        merged.append(next_row)
+    return merged
+
+
 def _has_any(row: dict[str, Any], *needles: str) -> bool:
     text = " ".join(
         [
@@ -135,6 +191,71 @@ def _nested_dict(row: dict[str, Any], *keys: str) -> dict[str, Any]:
 
 def _managed_preview_gate(row: dict[str, Any]) -> dict[str, Any]:
     return _nested_dict(row, "managed_preview_gate")
+
+
+def _local_executor_gate_passed(row: dict[str, Any], gate: dict[str, Any]) -> bool:
+    local_gate = gate.get("local_executor_gate") if isinstance(gate.get("local_executor_gate"), dict) else {}
+    if local_gate.get("passed") is not None:
+        return bool(local_gate.get("passed"))
+    if row.get("local_executor_gate_passed") is not None:
+        return bool(row.get("local_executor_gate_passed"))
+    return False
+
+
+def _cache_rollback_patch(row: dict[str, Any]) -> dict[str, Any]:
+    patch = row.get("local_policy_patch") if isinstance(row.get("local_policy_patch"), dict) else {}
+    if patch:
+        return patch
+    rollback = row.get("rollback_metadata") if isinstance(row.get("rollback_metadata"), dict) else {}
+    disable_patch = rollback.get("disable_patch") if isinstance(rollback.get("disable_patch"), dict) else {}
+    rules = [rule for rule in disable_patch.get("pattern_rules") or [] if isinstance(rule, dict)]
+    if not rules:
+        return {}
+    return {
+        "schema": "tokenclaw.request_shape_cache_replay_policy_decision_local_patch.v1",
+        "patch_type": "rollback_openai_exact_cache_replay_policy",
+        "target_local_rule_file": rollback.get("target_local_rule_file") or "cache_rules.yaml",
+        "source_canary_policy_file": rollback.get("source_canary_policy_file") or "cache_canary_policy.yaml",
+        "pattern_rules": rules,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "rules_path_included": False,
+    }
+
+
+def _is_preview_verified_cache_rollback(row: dict[str, Any]) -> bool:
+    family = str(row.get("local_action_family") or row.get("lever") or "").strip()
+    if family != "cache":
+        return False
+    if str(row.get("target_local_rule_file") or "").strip() != "cache_rules.yaml":
+        return False
+    if str(row.get("target_local_policy_section") or "").strip() != "cache.pattern_rules":
+        return False
+    patch = _cache_rollback_patch(row)
+    if not patch or not [rule for rule in patch.get("pattern_rules") or [] if isinstance(rule, dict)]:
+        return False
+    if str(patch.get("target_local_rule_file") or "cache_rules.yaml").strip() != "cache_rules.yaml":
+        return False
+
+    gate = _managed_preview_gate(row)
+    if not _local_executor_gate_passed(row, gate):
+        return False
+    verified = bool(row.get("preview_verified") or gate.get("verified"))
+    status = _preview_status(row, gate)
+    if status in {"preview-verified", "verified", "agreed"}:
+        verified = True
+    if not verified:
+        return False
+
+    preview_decision = _preview_decision_value(row, gate)
+    promotion_readiness = str(row.get("promotion_readiness") or "").strip()
+    rollback_required = bool(
+        row.get("rollback_required")
+        or promotion_readiness == "rollback-required"
+        or str(row.get("next_action") or row.get("recommended_next_action") or "").strip() == "rollback-cache-replay-rule"
+    )
+    preview_agrees = preview_decision in {"rollback", "keep-blocked", "accepted", "ready"}
+    return bool(rollback_required and preview_agrees)
 
 
 def _managed_preview_required(row: dict[str, Any]) -> bool:
@@ -193,6 +314,8 @@ def _executor_action_class(row: dict[str, Any]) -> str:
     status = str(row.get("successor_status") or "").strip()
     current_status = str(row.get("current_status") or "").strip()
     current_state = str(row.get("current_state") or "").strip()
+    if _is_preview_verified_cache_rollback(row):
+        return "apply-cache-rollback"
     if _is_full_rollout_crunch(row) or status == "keep-current-rule" or current_status == "full-rollout":
         gate_state = str(_full_rollout_gate(row).get("state") or "").strip()
         outcome_value = str(row.get("full_rollout_outcome") or _full_rollout_outcome(row).get("outcome") or "").strip()
@@ -400,9 +523,16 @@ def _executor_entry(row: dict[str, Any]) -> dict[str, Any]:
         "diagnostic_class",
         "diagnostic_reason",
         "review_status",
+        "promotion_readiness",
+        "rollback_required",
     ):
         if row.get(key) is not None:
             entry[key] = sanitize_value(row.get(key))
+    cache_patch = _cache_rollback_patch(row)
+    if cache_patch and str(entry.get("local_action_family") or "") == "cache":
+        entry["local_policy_patch"] = sanitize_value(cache_patch)
+    if isinstance(row.get("rollback_metadata"), dict) and str(entry.get("local_action_family") or "") == "cache":
+        entry["rollback_metadata"] = sanitize_value(row.get("rollback_metadata"))
     preserved = {
         "rank",
         "source_rank",
@@ -440,6 +570,7 @@ def _executor_entry(row: dict[str, Any]) -> dict[str, Any]:
         "freshness_state",
         "freshness_multiplier",
         "freshness_adjusted_savings_per_1000_calls_usd",
+        "rollback_required",
     }
     return {key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in preserved}
 
@@ -492,7 +623,11 @@ def build_local_activation_executor_plan(
     """Build a dry-run executor/review plan from local activation successor evidence."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     burndown = _input_to_burndown(source, now=now)
-    rows = _collapse_full_rollout_crunch_rows([row for row in burndown.get("rows") or [] if isinstance(row, dict)])
+    rows = _merge_executor_source_fields(
+        [row for row in burndown.get("rows") or [] if isinstance(row, dict)],
+        source,
+    )
+    rows = _collapse_full_rollout_crunch_rows(rows)
     entries = [_executor_entry(row) for row in rows]
     for rank, entry in enumerate(entries, start=1):
         entry["rank"] = rank
@@ -555,7 +690,7 @@ def _bundle_result_status(entry: dict[str, Any]) -> str:
     successor_status = str(entry.get("successor_status") or "").strip()
     current_state = str(entry.get("current_state") or "").strip()
     next_action = str(entry.get("executor_next_action") or "").strip()
-    if action_class == "rollback-required" or successor_status == "rollback-required":
+    if action_class in {"rollback-required", "apply-cache-rollback"} or successor_status == "rollback-required":
         return "rollback-required"
     if (
         action_class == "retire"
@@ -648,6 +783,10 @@ def _review_bundle_from_entry(entry: dict[str, Any], *, generated_at: str) -> di
         "managed_server_calls_made": False,
         "privacy": _privacy(),
     }
+    if isinstance(entry.get("local_policy_patch"), dict) and str(entry.get("local_action_family") or "") == "cache":
+        outcome_row["local_policy_patch"] = sanitize_value(entry.get("local_policy_patch"))
+    if isinstance(entry.get("rollback_metadata"), dict) and str(entry.get("local_action_family") or "") == "cache":
+        outcome_row["rollback_metadata"] = sanitize_value(entry.get("rollback_metadata"))
     result = {
         "schema": BUNDLE_SCHEMA,
         "generated_at": generated_at,
@@ -693,6 +832,10 @@ def _review_bundle_from_entry(entry: dict[str, Any], *, generated_at: str) -> di
         "managed_server_calls_made": False,
         "privacy": _privacy(),
     }
+    if isinstance(entry.get("local_policy_patch"), dict) and str(entry.get("local_action_family") or "") == "cache":
+        result["local_policy_patch"] = sanitize_value(entry.get("local_policy_patch"))
+    if isinstance(entry.get("rollback_metadata"), dict) and str(entry.get("local_action_family") or "") == "cache":
+        result["rollback_metadata"] = sanitize_value(entry.get("rollback_metadata"))
     result = sanitize_value(result)
     violations = managed_egress_violations(result)
     result["egress_guard"] = {
@@ -744,6 +887,206 @@ def build_local_activation_executor_bundle(
         }
         return sanitize_value(result)
     return _review_bundle_from_entry(entry, generated_at=now.isoformat())
+
+
+def _apply_privacy(*, policy_files_written: bool) -> dict[str, Any]:
+    privacy = _privacy()
+    privacy.update(
+        {
+            "schema": "tokenclaw.local_activation_executor_apply_privacy.v1",
+            "read_only": False,
+            "policy_files_written": bool(policy_files_written),
+            "policy_file_contents_included": False,
+            "file_paths_included": False,
+            "absolute_paths_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        }
+    )
+    return privacy
+
+
+def _bundle_cache_rollback_patch(bundle: dict[str, Any]) -> dict[str, Any]:
+    patch = bundle.get("local_policy_patch") if isinstance(bundle.get("local_policy_patch"), dict) else {}
+    if patch:
+        return patch
+    outcome = bundle.get("outcome") if isinstance(bundle.get("outcome"), dict) else {}
+    patch = outcome.get("local_policy_patch") if isinstance(outcome.get("local_policy_patch"), dict) else {}
+    if patch:
+        return patch
+    rollback = bundle.get("rollback_metadata") if isinstance(bundle.get("rollback_metadata"), dict) else {}
+    if not rollback:
+        rollback = outcome.get("rollback_metadata") if isinstance(outcome.get("rollback_metadata"), dict) else {}
+    disable_patch = rollback.get("disable_patch") if isinstance(rollback.get("disable_patch"), dict) else {}
+    rules = [rule for rule in disable_patch.get("pattern_rules") or [] if isinstance(rule, dict)]
+    if not rules:
+        return {}
+    return {
+        "schema": "tokenclaw.request_shape_cache_replay_policy_decision_local_patch.v1",
+        "patch_type": "rollback_openai_exact_cache_replay_policy",
+        "target_local_rule_file": rollback.get("target_local_rule_file") or "cache_rules.yaml",
+        "source_canary_policy_file": rollback.get("source_canary_policy_file") or "cache_canary_policy.yaml",
+        "pattern_rules": rules,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "rules_path_included": False,
+    }
+
+
+def _cache_rollback_bundle_allowed(bundle: dict[str, Any], patch: dict[str, Any]) -> tuple[bool, str]:
+    if str(bundle.get("local_action_family") or "").strip() != "cache":
+        return False, "not-cache-action"
+    if str(bundle.get("target_local_rule_file") or "").strip() != "cache_rules.yaml":
+        return False, "target-rule-file-not-cache-rules"
+    if str(bundle.get("target_local_policy_section") or "").strip() != "cache.pattern_rules":
+        return False, "target-policy-section-not-cache-pattern-rules"
+    if str(patch.get("target_local_rule_file") or "cache_rules.yaml").strip() != "cache_rules.yaml":
+        return False, "patch-target-rule-file-not-cache-rules"
+    if not [rule for rule in patch.get("pattern_rules") or [] if isinstance(rule, dict)]:
+        return False, "missing-pattern-rule-patch"
+
+    gate = bundle.get("local_gate") if isinstance(bundle.get("local_gate"), dict) else {}
+    if str(gate.get("executor_action_class") or bundle.get("executor_action_class") or "").strip() != "apply-cache-rollback":
+        return False, "executor-action-not-cache-rollback"
+    if bool(gate.get("provider_calls_made")) or bool(bundle.get("provider_calls_made")):
+        return False, "provider-call-not-allowed"
+    if bool(gate.get("managed_server_calls_made")) or bool(bundle.get("managed_server_calls_made")):
+        return False, "managed-server-call-not-allowed"
+    if not bool(gate.get("preview_verified") or bundle.get("preview_verified")):
+        return False, "preview-not-verified"
+    preview_decision = str(gate.get("preview_verification_decision") or bundle.get("preview_verification_decision") or "").strip()
+    if preview_decision not in {"rollback", "keep-blocked", "accepted", "ready"}:
+        return False, "preview-decision-does-not-agree"
+    if str(bundle.get("status") or "").strip() != "rollback-required":
+        return False, "bundle-not-rollback-required"
+    return True, "cache-rollback-preview-verified"
+
+
+def apply_local_activation_executor_bundle(
+    bundle: dict[str, Any],
+    *,
+    config_dir: str | Path,
+    now: datetime | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Apply a preview-verified local activation executor bundle.
+
+    This currently supports only cache rollback patches that disable existing
+    `cache_rules.yaml` pattern rules. It intentionally returns file names and
+    public rule references, not absolute paths or policy file contents.
+    """
+    from tokenclaw.openai_cache_replay_apply import (
+        _apply_cache_rules_disable_patch,
+        _read_policy_yaml,
+        _write_policy_file,
+    )
+
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    patch = _bundle_cache_rollback_patch(bundle)
+    allowed, reason = _cache_rollback_bundle_allowed(bundle, patch)
+    target_file = "cache_rules.yaml"
+    result_status = "blocked"
+    changed_rule_refs: list[str] = []
+    missing_rule_refs: list[str] = []
+    policy_files_written = False
+    rollback_count = 0
+
+    if allowed:
+        rules_path = Path(config_dir) / target_file
+        old_text = rules_path.read_text(encoding="utf-8") if rules_path.exists() else None
+        policy = _read_policy_yaml(rules_path)
+        updated_policy, changed_rules, missing_rules = _apply_cache_rules_disable_patch(policy, patch)
+        import yaml
+
+        new_text = yaml.safe_dump(updated_policy, sort_keys=False)
+        rules_changed = bool(changed_rules) and old_text != new_text
+        if rules_changed and not dry_run:
+            _write_policy_file(rules_path, new_text)
+            policy_files_written = True
+        rollback_count = 1 if rules_changed and not dry_run else 0
+        result_status = "applied" if policy_files_written else ("dry-run" if rules_changed else "no-op")
+        reason = "cache-rollback-applied" if policy_files_written else ("cache-rollback-dry-run" if rules_changed else "cache-rollback-no-op")
+        changed_rule_refs = [
+            public_id(str(item.get("id") or ""), prefix="cache-rule", fallback="cache-rule:unknown")
+            for item in changed_rules
+        ]
+        missing_rule_refs = [
+            public_id(str(item.get("id") or ""), prefix="cache-rule", fallback="cache-rule:unknown")
+            for item in missing_rules
+        ]
+
+    privacy = _apply_privacy(policy_files_written=policy_files_written)
+    outcome = {
+        "schema": APPLY_OUTCOME_SCHEMA,
+        "action_id": public_id(
+            json.dumps(
+                {
+                    "bundle": bundle.get("bundle_ref") or bundle.get("stable_fingerprint"),
+                    "source": bundle.get("source_successor_fingerprint") or bundle.get("source_fingerprint"),
+                    "target": target_file,
+                    "result": result_status,
+                },
+                sort_keys=True,
+            ),
+            prefix="activation-apply",
+            fallback="activation-apply:unknown",
+        ),
+        "source_bundle_ref": sanitize_value(bundle.get("bundle_ref") or bundle.get("stable_fingerprint")),
+        "source_executor_fingerprint": sanitize_value(bundle.get("source_executor_fingerprint")),
+        "source_successor_fingerprint": sanitize_value(bundle.get("source_successor_fingerprint")),
+        "source_fingerprint": sanitize_value(bundle.get("source_fingerprint")),
+        "result": result_status,
+        "reason": sanitize_value(reason),
+        "local_action_family": "cache",
+        "target_local_policy_section": "cache.pattern_rules",
+        "target_local_rule_file": target_file,
+        "rollback_count": rollback_count,
+        "changed_rule_count": len(changed_rule_refs),
+        "missing_rule_count": len(missing_rule_refs),
+        "changed_rule_refs": changed_rule_refs,
+        "missing_rule_refs": missing_rule_refs,
+        "policy_files_written": policy_files_written,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "cache_apply_action_count": 0,
+        "cache_entries_written": 0,
+        "privacy": privacy,
+    }
+    result = {
+        "schema": APPLY_SCHEMA,
+        "generated_at": now.isoformat(),
+        "status": result_status,
+        "dry_run": bool(dry_run),
+        "outcome": outcome,
+        "summary": {
+            "applied_count": 1 if result_status == "applied" else 0,
+            "rollback_count": rollback_count,
+            "changed_rule_count": len(changed_rule_refs),
+            "missing_rule_count": len(missing_rule_refs),
+            "target_local_rule_file": target_file,
+            "policy_files_written": policy_files_written,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "cache_apply_action_count": 0,
+            "cache_entries_written": 0,
+        },
+        "policy_files_written": policy_files_written,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": privacy,
+    }
+    result = sanitize_value(result)
+    violations = managed_egress_violations(result)
+    result["egress_guard"] = {
+        "schema": "tokenclaw.managed_egress_guard.v1",
+        "status": "passed" if not violations else "blocked",
+        "blocked": bool(violations),
+        "violation_count": len(violations),
+        "raw_values_logged": False,
+    }
+    if violations:
+        result["egress_guard"]["blocked_keys"] = sorted({item.get("key", "unknown") for item in violations})
+    return result
 
 
 def _public_ref(value: Any, *, prefix: str) -> str | None:

@@ -8,8 +8,11 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
+import yaml
+
 from tokenclaw import cli
 from tokenclaw.local_activation_executor import (
+    apply_local_activation_executor_bundle,
     build_managed_activation_preview_refresh_batch,
     build_managed_activation_preview_request,
     build_managed_activation_preview_result,
@@ -511,6 +514,102 @@ def _preview_required_successor_queue_plan():
     }
 
 
+def _preview_verified_cache_rollback_source():
+    rule_id = "local-openai-cache-replay-promoted:c4b2752b80016830"
+    patch = {
+        "schema": "tokenclaw.request_shape_cache_replay_policy_decision_local_patch.v1",
+        "patch_type": "rollback_openai_exact_cache_replay_policy",
+        "target_local_rule_file": "cache_rules.yaml",
+        "source_canary_policy_file": "cache_canary_policy.yaml",
+        "pattern_rules": [
+            {
+                "id": rule_id,
+                "enabled": False,
+                "disabled_reason": "stale-cache-replay-evidence",
+            }
+        ],
+        "metadata_only": True,
+        "aggregate_only": True,
+        "rules_path_included": False,
+    }
+    rollback_metadata = {
+        "schema": "tokenclaw.request_shape_cache_replay_policy_decision_rollback_metadata.v1",
+        "required_for_promotion": True,
+        "rollback_action_type": "disable_openai_exact_cache_replay_policy",
+        "target_local_rule_file": "cache_rules.yaml",
+        "source_canary_policy_file": "cache_canary_policy.yaml",
+        "rule_id": rule_id,
+        "rule_count": 1,
+        "reason": "stale-cache-replay-evidence",
+        "disable_patch": {"pattern_rules": patch["pattern_rules"]},
+        "metadata_only": True,
+        "aggregate_only": True,
+        "rules_path_included": False,
+    }
+    gate = {
+        "schema": "tokenclaw.preview_verified_activation_successor_gate.v1",
+        "required": True,
+        "status": "preview-verified",
+        "verified": True,
+        "decision": "keep-blocked",
+        "next_action": "rollback-cache-replay-rule",
+        "reason": "rollback-required",
+        "local_executor_gate": {
+            "schema": "tokenclaw.preview_verified_successor_local_executor_gate.v1",
+            "passed": True,
+            "policy_write_candidate": True,
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "reason": "local-executor-gate-passed",
+        },
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": {"metadata_only": True, "aggregate_only": True, "review_only": True},
+    }
+    return {
+        "schema": "tokenclaw.local_activation_next_action_queue.v1",
+        "status": "ranked",
+        "entries": [
+            {
+                "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
+                "rank": 1,
+                "ledger_rank": 2,
+                "fingerprint": "activation:cache-rollback",
+                "source_fingerprint": "activation:cache-rollback",
+                "lever": "cache",
+                "local_action_family": "cache",
+                "evidence_schema": "tokenclaw.request_shape_cache_replay_policy_decision.v1",
+                "current_status": "blocked",
+                "state": "blocked",
+                "successor_status": "keep-blocked",
+                "next_action": "rollback-cache-replay-rule",
+                "recommended_next_action": "rollback-cache-replay-rule",
+                "promotion_readiness": "rollback-required",
+                "rollback_required": True,
+                "blocker_codes": ["evidence-older-than-max-age"],
+                "sample_count": 36,
+                "projected_savings_usd": 0.075373,
+                "target_local_policy_section": "cache.pattern_rules",
+                "target_local_rule_file": "cache_rules.yaml",
+                "managed_preview_required": True,
+                "managed_preview_gate": gate,
+                "preview_verified": True,
+                "preview_verification_status": "preview-verified",
+                "preview_verification_decision": "keep-blocked",
+                "local_policy_patch": patch,
+                "rollback_metadata": rollback_metadata,
+                "cache_key": "raw-cache-key-must-not-leak",
+                "request_id": "req-cache-rollback-secret",
+                "raw_prompt": "raw prompt must not leak",
+                "file_path": "/tmp/private-cache-rules.yaml",
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            }
+        ],
+        "privacy": {"metadata_only": True, "aggregate_only": True},
+    }
+
+
 class LocalActivationExecutorTest(unittest.TestCase):
     def test_executor_plan_selects_one_safe_review_action(self):
         result = build_local_activation_executor_plan(_executor_fixture_plan(), now=NOW)
@@ -713,6 +812,83 @@ class LocalActivationExecutorTest(unittest.TestCase):
         self.assertNotIn("cache-review-secret", rendered)
         self.assertNotIn("/tmp/private-cache-review.py", rendered)
         self.assertNotIn("raw cache review prompt must not leak", rendered)
+
+    def test_preview_verified_cache_rollback_bundle_applies_cache_rules_patch(self):
+        source = _preview_verified_cache_rollback_source()
+        bundle = build_local_activation_executor_bundle(source, now=NOW, action_rank=1)
+
+        self.assertEqual(bundle["status"], "rollback-required")
+        self.assertEqual(bundle["executor_action_class"], "apply-cache-rollback")
+        self.assertEqual(bundle["local_gate"]["preview_verification_status"], "preview-verified")
+        self.assertTrue(bundle["local_gate"]["preview_verified"])
+        self.assertEqual(bundle["local_policy_patch"]["target_local_rule_file"], "cache_rules.yaml")
+        rendered_bundle = json.dumps(bundle, sort_keys=True)
+        self.assertNotIn("raw-cache-key-must-not-leak", rendered_bundle)
+        self.assertNotIn("req-cache-rollback-secret", rendered_bundle)
+        self.assertNotIn("raw prompt must not leak", rendered_bundle)
+        self.assertNotIn("/tmp/private-cache-rules.yaml", rendered_bundle)
+
+        with TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "cache_rules.yaml"
+            rules_path.write_text(
+                "\n".join(
+                    [
+                        "schema: tokenclaw.cache_rules.v1",
+                        "pattern_rules:",
+                        "  - id: local-openai-cache-replay-promoted:c4b2752b80016830",
+                        "    enabled: true",
+                        "    policy_source: local-manual",
+                        "    conditions:",
+                        "      provider_family: openai",
+                        "    action:",
+                        "      type: exact_cache_pattern",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = apply_local_activation_executor_bundle(
+                bundle,
+                config_dir=tmpdir,
+                now=NOW,
+            )
+            applied_policy = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["schema"], "tokenclaw.local_activation_executor_apply.v1")
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["summary"]["rollback_count"], 1)
+        self.assertTrue(result["summary"]["policy_files_written"])
+        self.assertFalse(result["summary"]["provider_calls_made"])
+        self.assertFalse(result["summary"]["managed_server_calls_made"])
+        self.assertEqual(result["outcome"]["rollback_count"], 1)
+        self.assertTrue(result["outcome"]["policy_files_written"])
+        self.assertFalse(result["outcome"]["provider_calls_made"])
+        self.assertFalse(result["outcome"]["managed_server_calls_made"])
+        self.assertEqual(result["outcome"]["target_local_rule_file"], "cache_rules.yaml")
+        self.assertFalse(applied_policy["pattern_rules"][0]["enabled"])
+        self.assertEqual(applied_policy["pattern_rules"][0]["disabled_reason"], "stale-cache-replay-evidence")
+        self.assertEqual(result["egress_guard"]["status"], "passed")
+        self.assertEqual(managed_egress_violations(result), [])
+
+        privacy = result["outcome"]["privacy"]
+        self.assertTrue(privacy["metadata_only"])
+        self.assertTrue(privacy["aggregate_only"])
+        self.assertFalse(privacy["raw_prompts_included"])
+        self.assertFalse(privacy["provider_bodies_included"])
+        self.assertFalse(privacy["request_ids_included"])
+        self.assertFalse(privacy["cache_keys_included"])
+        self.assertFalse(privacy["absolute_paths_included"])
+        self.assertFalse(privacy["policy_file_contents_included"])
+        self.assertFalse(privacy["provider_calls_made"])
+        self.assertFalse(privacy["managed_server_calls_made"])
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("raw-cache-key-must-not-leak", rendered)
+        self.assertNotIn("req-cache-rollback-secret", rendered)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("/tmp/private-cache-rules.yaml", rendered)
+        self.assertNotIn(str(rules_path), rendered)
 
     def test_local_activation_executor_bundle_records_blocked_rollback_and_retired_results(self):
         blocked = build_local_activation_executor_bundle(
