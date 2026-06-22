@@ -19520,6 +19520,9 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "routing_experiment_promotion_ready_candidates": routing_experiment_report_summary["promotion_ready_candidates"],
             "activation_burndown": activation_burndown.get("summary", {}),
             "activation_successor_burndown": (activation_burndown.get("successor_burndown") or {}).get("summary", {}),
+            "activation_preview_agreement_burndown": (
+                activation_burndown.get("activation_preview_agreement_burndown") or {}
+            ).get("summary", {}),
             "savings_loop_bottlenecks": savings_loop_bottlenecks.get("summary", {}),
             "activation_successor_queue_health": activation_successor_queue_health.get("summary", {}),
             "managed_preview_coverage": (activation_burndown.get("managed_preview_coverage") or {}).get("summary", {}),
@@ -21149,6 +21152,7 @@ def _empty_local_activation_queue_payload(
         },
         "entries": [],
         "successor_burndown": _activation_successor_burndown([]),
+        "activation_preview_agreement_burndown": _activation_preview_agreement_burndown({}),
         "managed_preview_coverage": managed_preview_coverage or _empty_managed_preview_coverage(
             status="disabled",
             status_reason="managed preview coverage was not requested",
@@ -21746,6 +21750,166 @@ def _public_preview_gated_successor_decision(decision: dict[str, Any]) -> dict[s
     return {key: value for key, value in public.items() if value not in (None, "", []) or key == "preview_verified"}
 
 
+PREVIEW_AGREEMENT_BUCKETS = (
+    "agreed",
+    "missing",
+    "stale",
+    "omitted",
+    "blocked",
+    "disagreed",
+    "not_previewed",
+)
+
+
+def _preview_agreement_bucket(row: dict[str, Any]) -> str:
+    status = str(row.get("preview_agreement_status") or "").strip().lower()
+    verification_status = str(row.get("preview_verification_status") or "").strip().lower()
+    decision = str(row.get("decision") or "").strip().lower()
+    if row.get("preview_verified") or status == "agreed":
+        return "agreed"
+    if row.get("preview_omitted_reason") or row.get("top_preview_omission_reason") or "omitted" in status:
+        return "omitted"
+    if "disagree" in status or "failed-closed" in status or "unsafe" in status or "disagree" in verification_status:
+        return "disagreed"
+    if "stale" in status or "stale" in verification_status:
+        return "stale"
+    if "missing" in status or "no-data" in status or "missing" in verification_status or "no-data" in verification_status:
+        return "missing"
+    if status in {"", "not-previewed"}:
+        return "not_previewed"
+    if "blocked" in status or "blocked" in decision or "keep-blocked" in decision:
+        return "blocked"
+    return "blocked"
+
+
+def _preview_agreement_reason(row: dict[str, Any]) -> str:
+    for key in (
+        "preview_omitted_reason",
+        "preview_no_op_reason",
+        "top_preview_omission_reason",
+        "preview_verification_status",
+        "preview_agreement_status",
+        "decision",
+    ):
+        text = str(row.get(key) or "").strip()
+        if text:
+            return public_label(text, "unknown")
+    return "unknown"
+
+
+def _summary_preview_agreement_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = summary.get("preview_agreement_by_local_action_family")
+    if not isinstance(rows, list):
+        return []
+    public_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        family = str(row.get("local_action_family") or "").strip()
+        if not family:
+            continue
+        public: dict[str, Any] = {
+            "local_action_family": public_label(family, "unknown"),
+            "top_reason_code": public_label(row.get("top_reason_code") or row.get("top_reason") or "none", "none"),
+            "top_next_action": public_label(row.get("top_next_action") or "none", "none"),
+            "top_source_ref": _activation_public_ref(row.get("source_fingerprint") or row.get("top_source_fingerprint"), prefix="activation-ref"),
+            "top_successor_action_ref": _activation_public_ref(
+                row.get("successor_action_fingerprint") or row.get("top_successor_action_fingerprint"),
+                prefix="successor-ref",
+            ),
+            "privacy": _local_activation_queue_privacy(row.get("privacy") if isinstance(row.get("privacy"), dict) else {}),
+        }
+        total = 0
+        for bucket in PREVIEW_AGREEMENT_BUCKETS:
+            count = _as_int(row.get(f"{bucket}_count"))
+            public[f"{bucket}_count"] = count
+            total += count
+        if not total:
+            total = sum(_as_int(row.get(key)) for key in ("stored_preview_outcome_count", "row_count", "count"))
+        public["total_count"] = total
+        public_rows.append(public)
+    return public_rows
+
+
+def _activation_preview_agreement_burndown(queue: dict[str, Any]) -> dict[str, Any]:
+    summary = queue.get("summary") if isinstance(queue.get("summary"), dict) else {}
+    summary_rows = _summary_preview_agreement_rows(summary)
+    raw_decisions: list[dict[str, Any]] = []
+    if isinstance(queue, dict) and queue:
+        try:
+            from tokenclaw.orchestrator_research import (
+                build_local_activation_successor_actions,
+                build_local_activation_successor_decisions,
+            )
+
+            actions = queue.get("successor_actions")
+            if not isinstance(actions, list):
+                actions = build_local_activation_successor_actions(queue)
+            decisions = queue.get("successor_decisions")
+            if not isinstance(decisions, list):
+                decisions = build_local_activation_successor_decisions({"successor_actions": actions})
+            raw_decisions = [row for row in decisions if isinstance(row, dict)]
+        except Exception:
+            raw_decisions = []
+    public_decisions = [_public_preview_gated_successor_decision(row) for row in raw_decisions]
+    if not public_decisions:
+        total_by_bucket = {
+            f"{bucket}_count": sum(_as_int(row.get(f"{bucket}_count")) for row in summary_rows)
+            for bucket in PREVIEW_AGREEMENT_BUCKETS
+        }
+        return {
+            "schema": "tokenclaw.dashboard_activation_preview_agreement_burndown.v1",
+            "status": "tracked" if summary_rows else "missing",
+            "summary": {
+                "local_action_family_count": len(summary_rows),
+                "successor_decision_count": 0,
+                "total_count": sum(_as_int(row.get("total_count")) for row in summary_rows),
+                **total_by_bucket,
+            },
+            "families": summary_rows,
+            "privacy": _local_activation_queue_privacy(queue.get("privacy") if isinstance(queue.get("privacy"), dict) else {}),
+        }
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in public_decisions:
+        family = public_label(row.get("local_action_family") or "unknown", "unknown")
+        grouped.setdefault(family, []).append(row)
+    family_rows: list[dict[str, Any]] = []
+    for family, rows in sorted(grouped.items()):
+        bucket_counts = Counter(_preview_agreement_bucket(row) for row in rows)
+        reason_counts = Counter(_preview_agreement_reason(row) for row in rows)
+        top = rows[0]
+        family_rows.append(
+            {
+                "local_action_family": family,
+                "total_count": len(rows),
+                **{f"{bucket}_count": int(bucket_counts.get(bucket, 0)) for bucket in PREVIEW_AGREEMENT_BUCKETS},
+                "top_preview_agreement_status": public_label(top.get("preview_agreement_status") or "not-previewed", "not-previewed"),
+                "top_reason_code": reason_counts.most_common(1)[0][0] if reason_counts else "unknown",
+                "top_next_action": public_label(top.get("recommended_next_action") or "inspect-local-evidence", "inspect-local-evidence"),
+                "top_source_ref": top.get("source_ref"),
+                "top_successor_action_ref": top.get("successor_action_ref"),
+                "privacy": _local_activation_queue_privacy(top.get("privacy") if isinstance(top.get("privacy"), dict) else {}),
+            }
+        )
+    total_counts = {
+        f"{bucket}_count": sum(_as_int(row.get(f"{bucket}_count")) for row in family_rows)
+        for bucket in PREVIEW_AGREEMENT_BUCKETS
+    }
+    return {
+        "schema": "tokenclaw.dashboard_activation_preview_agreement_burndown.v1",
+        "status": "tracked" if family_rows else "missing",
+        "summary": {
+            "local_action_family_count": len(family_rows),
+            "successor_decision_count": len(public_decisions),
+            "total_count": len(public_decisions),
+            **total_counts,
+        },
+        "families": family_rows,
+        "privacy": _local_activation_queue_privacy(queue.get("privacy") if isinstance(queue.get("privacy"), dict) else {}),
+    }
+
+
 def _proposal_status_label(labels: Any) -> str:
     if not isinstance(labels, list):
         return "status:unknown"
@@ -22057,6 +22221,7 @@ async def stats_local_activation_next_action_queue(limit: int = 20, store_obj: A
         "summary": summary,
         "entries": entries,
         "successor_burndown": _activation_successor_burndown(all_entries),
+        "activation_preview_agreement_burndown": _activation_preview_agreement_burndown(queue),
         "managed_preview_coverage": managed_preview_coverage,
         "privacy": _local_activation_queue_privacy(queue_privacy),
     }
@@ -22281,6 +22446,17 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Family</th><th data-sort-type="text">Status</th><th data-sort-type="number">Rows</th><th data-sort-type="text">Burndown</th><th data-sort-type="text">Top action</th><th data-sort-type="text">Top blocker</th><th data-sort-type="number">Coverage</th><th data-sort-type="money">Savings</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="activation-successor-burndown-tbody"></tbody>
+  </table>
+  </div>
+</div>
+<div class="section">
+  <h2>Activation preview agreement burndown</h2>
+  <div class="table-wrap">
+  <table class="activity-table" data-table-id="activation-preview-agreement-burndown" data-filter-label="Filter activation preview agreement burndown">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="number">Total</th><th data-sort-type="number">Agreed</th><th data-sort-type="number">Missing</th><th data-sort-type="number">Stale</th><th data-sort-type="number">Omitted</th><th data-sort-type="number">Blocked</th><th data-sort-type="number">Disagreed</th><th data-sort-type="text">Top reason</th><th data-sort-type="text">Refs</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="activation-preview-agreement-burndown-tbody"></tbody>
   </table>
   </div>
 </div>
@@ -26639,6 +26815,30 @@ function renderActivationSuccessorBurndown(burndown){
     </tr>`;
   }).join('')||'<tr><td colspan="9" style="color:#8b949e">No activation successor evidence burndown available</td></tr>';
 }
+function renderActivationPreviewAgreementBurndown(burndown){
+  const target=document.getElementById('activation-preview-agreement-burndown-tbody');
+  if(!target)return;
+  burndown=burndown||{};
+  const rows=burndown.families||[];
+  target.innerHTML=rows.map(row=>{
+    const refs=[row.top_source_ref,row.top_successor_action_ref].filter(Boolean).join(' · ')||'—';
+    const reason=row.top_reason_code||row.top_preview_agreement_status||'unknown';
+    const action=row.top_next_action||'inspect-local-evidence';
+    return `<tr>
+      <td><span class="badge provider">${esc(row.local_action_family||'unknown')}</span></td>
+      <td class="tokens">${(row.total_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.agreed_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.missing_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.stale_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.omitted_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.blocked_count||0).toLocaleString()}<div class="sub">not previewed ${(row.not_previewed_count||0).toLocaleString()}</div></td>
+      <td class="tokens">${(row.disagreed_count||0).toLocaleString()}</td>
+      <td class="flags"><span class="badge ${row.agreed_count?'hit':row.stale_count?'routed':'miss'}">${esc(reason)}</span><div class="sub">${esc(action)}</div></td>
+      <td class="model">${esc(refs)}</td>
+      <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||burndown.privacy||{})}</td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="11" style="color:#8b949e">No activation preview agreement burndown available</td></tr>';
+}
 async function refreshLocalActivationQueue(){
   try{
     const r=await fetch('/tokenclaw/stats/local-activation-next-action-queue?limit=20');
@@ -26647,6 +26847,7 @@ async function refreshLocalActivationQueue(){
     const source=d.source||{};
     const privacy=d.privacy||{};
     renderActivationSuccessorBurndown(d.successor_burndown||{});
+    renderActivationPreviewAgreementBurndown(d.activation_preview_agreement_burndown||{});
     const sourceBadges=[
       source.available?'<span class="badge hit">latest plan</span>':'<span class="badge miss">no plan</span>',
       source.configured?'<span class="badge provider">configured path</span>':'<span class="badge miss">default path</span>',

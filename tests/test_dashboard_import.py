@@ -3793,6 +3793,61 @@ class DashboardImportTests(unittest.TestCase):
                             "status_counts": [{"value": "full-rollout", "count": 1}, {"value": "applied", "count": 1}],
                             "unblock_reason_counts": [{"value": "repeated-context-crunch-full-rollout-active", "count": 1}],
                         },
+                        "successor_actions": [],
+                        "successor_decisions": [
+                            {
+                                "schema": "tokenclaw.local_activation_successor_decision.v1",
+                                "source_fingerprint": "activation:preview-secret-cache",
+                                "successor_action_fingerprint": "successor:preview-secret-cache-action",
+                                "local_action_family": "cache",
+                                "decision": "keep-blocked",
+                                "recommended_next_action": "refresh-managed-activation-preview",
+                                "issue_worthy_status": "blocked",
+                                "preview_agreement_status": "no-data-preview-health",
+                                "preview_verified": False,
+                                "preview_verification_status": "no-data-preview-health",
+                                "privacy": {"metadata_only": True, "aggregate_only": True},
+                            },
+                            {
+                                "schema": "tokenclaw.local_activation_successor_decision.v1",
+                                "source_fingerprint": "activation:preview-secret-routing",
+                                "successor_action_fingerprint": "successor:preview-secret-routing-action",
+                                "local_action_family": "routing",
+                                "decision": "ready",
+                                "recommended_next_action": "stage-routing-downgrade-canary",
+                                "issue_worthy_status": "ready",
+                                "preview_agreement_status": "agreed",
+                                "preview_verified": True,
+                                "preview_verification_status": "preview-agreed",
+                                "privacy": {"metadata_only": True, "aggregate_only": True},
+                            },
+                            {
+                                "schema": "tokenclaw.local_activation_successor_decision.v1",
+                                "source_fingerprint": "activation:preview-secret-crunch",
+                                "successor_action_fingerprint": "successor:preview-secret-crunch-action",
+                                "local_action_family": "crunch",
+                                "decision": "review-stale-preview",
+                                "recommended_next_action": "refresh-managed-activation-preview",
+                                "issue_worthy_status": "blocked",
+                                "preview_agreement_status": "stale-preview",
+                                "preview_verified": False,
+                                "preview_verification_status": "stale-preview",
+                                "privacy": {"metadata_only": True, "aggregate_only": True},
+                            },
+                            {
+                                "schema": "tokenclaw.local_activation_successor_decision.v1",
+                                "source_fingerprint": "activation:preview-secret-feedback",
+                                "successor_action_fingerprint": "successor:preview-secret-feedback-action",
+                                "local_action_family": "activation-feedback",
+                                "decision": "keep-blocked",
+                                "recommended_next_action": "record-live-service-deploy-failure-and-wait-for-shell-guard-health",
+                                "issue_worthy_status": "blocked",
+                                "preview_agreement_status": "preview-omitted",
+                                "preview_verified": False,
+                                "preview_omitted_reason": "managed-preview-health-no-data",
+                                "privacy": {"metadata_only": True, "aggregate_only": True},
+                            },
+                        ],
                         "entries": [
                             {
                                 "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
@@ -3974,12 +4029,36 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(burndown["privacy"]["session_ids_included"])
             self.assertFalse(burndown["privacy"]["cache_keys_included"])
             self.assertFalse(burndown["privacy"]["file_paths_included"])
+            preview_burndown = payload["activation_preview_agreement_burndown"]
+            self.assertEqual(preview_burndown["schema"], "tokenclaw.dashboard_activation_preview_agreement_burndown.v1")
+            self.assertEqual(preview_burndown["summary"]["successor_decision_count"], 4)
+            self.assertEqual(preview_burndown["summary"]["agreed_count"], 1)
+            self.assertEqual(preview_burndown["summary"]["missing_count"], 1)
+            self.assertEqual(preview_burndown["summary"]["stale_count"], 1)
+            self.assertEqual(preview_burndown["summary"]["omitted_count"], 1)
+            preview_by_family = {row["local_action_family"]: row for row in preview_burndown["families"]}
+            self.assertEqual(preview_by_family["cache"]["missing_count"], 1)
+            self.assertEqual(preview_by_family["cache"]["top_next_action"], "refresh-managed-activation-preview")
+            self.assertEqual(preview_by_family["routing"]["agreed_count"], 1)
+            self.assertEqual(preview_by_family["routing"]["top_reason_code"], "preview-agreed")
+            self.assertTrue(preview_by_family["routing"]["top_source_ref"].startswith("activation-ref:"))
+            self.assertTrue(preview_by_family["routing"]["top_successor_action_ref"].startswith("successor-ref:"))
+            self.assertEqual(preview_by_family["crunch"]["stale_count"], 1)
+            self.assertEqual(preview_by_family["activation-feedback"]["omitted_count"], 1)
+            self.assertFalse(preview_burndown["privacy"]["raw_prompts_included"])
+            self.assertFalse(preview_burndown["privacy"]["provider_bodies_included"])
+            self.assertFalse(preview_burndown["privacy"]["request_ids_included"])
+            self.assertFalse(preview_burndown["privacy"]["session_ids_included"])
+            self.assertFalse(preview_burndown["privacy"]["cache_keys_included"])
+            self.assertFalse(preview_burndown["privacy"]["individual_candidate_ids_included"])
             self.assertEqual(full_payload["activation_burndown"]["schema"], "tokenclaw.dashboard_local_activation_next_action_queue.v1")
             self.assertEqual(full_payload["activation_burndown"]["summary"]["queued_action_count"], 4)
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["lever"], "crunch")
             self.assertEqual(full_payload["activation_burndown"]["entries"][0]["target_local_rule_file"], "crunch_rules.yaml")
             self.assertEqual(full_payload["activation_burndown"]["successor_burndown"]["summary"]["tracked_family_count"], 3)
+            self.assertEqual(full_payload["activation_burndown"]["activation_preview_agreement_burndown"]["summary"]["successor_decision_count"], 4)
             self.assertEqual(full_payload["summary"]["activation_successor_burndown"]["tracked_family_count"], 3)
+            self.assertEqual(full_payload["summary"]["activation_preview_agreement_burndown"]["successor_decision_count"], 4)
             self.assertIn("activation_burndown", full_payload["summary"])
             coverage = payload["managed_preview_coverage"]
             self.assertEqual(coverage["schema"], "tokenclaw.dashboard_managed_activation_preview_coverage.v1")
@@ -4025,6 +4104,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("local-activation-queue-summary-tbody", dashboard.text)
             self.assertIn("local-activation-queue-entries-tbody", dashboard.text)
             self.assertIn("activation-successor-burndown-tbody", dashboard.text)
+            self.assertIn("activation-preview-agreement-burndown-tbody", dashboard.text)
             self.assertIn("activation-burndown-tbody", dashboard.text)
             self.assertIn("Managed preview", dashboard.text)
 
@@ -4041,6 +4121,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertNotIn("cache-queue-secret", rendered)
             self.assertNotIn("/tmp/secret-queue-project/file.py", rendered)
             self.assertNotIn("activation:queue-secret-fingerprint", rendered)
+            self.assertNotIn("activation:preview-secret-routing", rendered)
+            self.assertNotIn("successor:preview-secret-routing-action", rendered)
         finally:
             try:
                 plan_tmp.close()
