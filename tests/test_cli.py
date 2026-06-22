@@ -803,7 +803,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             bashrc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
             stdout = io.StringIO()
 
-            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+            with patch.dict(os.environ, {"HOME": str(home), "SHELL": "/bin/bash"}, clear=True):
                 code = cli.tokenclaw_cli(["activate", "claude-code", "--config-dir", str(config_dir)], stdout=stdout)
 
             self.assertEqual(code, 0)
@@ -816,6 +816,62 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertIn(f"Shell profile: {bashrc}", output)
             self.assertIn("Shell profile changed: true", output)
 
+    def test_activate_claude_vscode_uses_bash_profile_when_zshrc_also_exists(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            config_dir = home / ".tokenclaw"
+            home.mkdir()
+            zshrc = home / ".zshrc"
+            bashrc = home / ".bashrc"
+            zshrc.write_text("# stale zsh config\n", encoding="utf-8")
+            bashrc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {"HOME": str(home), "SHELL": "/bin/bash"}, clear=True):
+                code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            env_path = config_dir / "claude-vscode.env"
+            self.assertIn(f"source {env_path}\n", bashrc.read_text(encoding="utf-8"))
+            self.assertNotIn(str(env_path), zshrc.read_text(encoding="utf-8"))
+            config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["targets"]["claude-vscode"]["shell_profile_path"], str(bashrc))
+            self.assertIn(f"Shell profile: {bashrc}", stdout.getvalue())
+
+    def test_activate_claude_vscode_uses_zsh_profile_for_zsh_shell(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            config_dir = home / ".tokenclaw"
+            home.mkdir()
+            bashrc = home / ".bashrc"
+            zshrc = home / ".zshrc"
+            bashrc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+            zshrc.write_text("# zsh config\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"HOME": str(home), "SHELL": "/usr/bin/zsh"}, clear=True):
+                code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=io.StringIO())
+
+            self.assertEqual(code, 0)
+            env_path = config_dir / "claude-vscode.env"
+            self.assertIn(f"source {env_path}\n", zshrc.read_text(encoding="utf-8"))
+            self.assertNotIn(str(env_path), bashrc.read_text(encoding="utf-8"))
+
+    def test_activate_claude_vscode_falls_back_to_profile_for_unknown_shell(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            config_dir = home / ".tokenclaw"
+            home.mkdir()
+
+            with patch.dict(os.environ, {"HOME": str(home), "SHELL": "/usr/bin/fish"}, clear=True):
+                code = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=io.StringIO())
+
+            self.assertEqual(code, 0)
+            profile = home / ".profile"
+            env_path = config_dir / "claude-vscode.env"
+            self.assertIn(f"source {env_path}\n", profile.read_text(encoding="utf-8"))
+            config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["targets"]["claude-vscode"]["shell_profile_path"], str(profile))
+
     def test_activate_claude_vscode_shell_profile_is_idempotent(self):
         with TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -825,7 +881,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             env_path = config_dir / "claude-vscode.env"
             profile.write_text(f"source {env_path}\n", encoding="utf-8")
 
-            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+            with patch.dict(os.environ, {"HOME": str(home), "SHELL": "/bin/zsh"}, clear=True):
                 first = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=io.StringIO())
                 second_stdout = io.StringIO()
                 second = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=second_stdout)

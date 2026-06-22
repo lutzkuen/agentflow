@@ -34,7 +34,6 @@ CLAUDE_DESKTOP_USER_DESKTOP_PATH = Path(".local") / "share" / "applications" / "
 CLAUDE_DESKTOP_SYSTEM_DESKTOP_PATH = Path("/usr/share/applications/claude-desktop.desktop")
 CLAUDE_DESKTOP_SYSTEMD_ENV_PATH = Path(".config") / "environment.d" / "tokenclaw.conf"
 ACTIVATION_TARGETS = ("openai", "claude", "codex", "claude-vscode", "claude-desktop")
-SHELL_PROFILE_CANDIDATES = (".zshrc", ".bashrc", ".profile")
 
 
 class ActivationError(ValueError):
@@ -692,10 +691,11 @@ def claude_vscode_env_path(config_dir: str | Path | None = None) -> Path:
 
 def default_shell_profile_path() -> Path:
     home = safe_home_dir()
-    for name in SHELL_PROFILE_CANDIDATES:
-        path = home / name
-        if path.exists():
-            return path
+    shell_name = Path(os.getenv("SHELL") or "").name
+    if shell_name == "zsh":
+        return home / ".zshrc"
+    if shell_name == "bash":
+        return home / ".bashrc"
     return home / ".profile"
 
 
