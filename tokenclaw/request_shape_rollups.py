@@ -5566,9 +5566,145 @@ def _activation_candidate_queue_crunch_rollups(source: Any) -> tuple[list[dict[s
     }
 
 
+def _preview_gate_verified(row: dict[str, Any]) -> bool:
+    gate = row.get("managed_preview_gate") if isinstance(row.get("managed_preview_gate"), dict) else {}
+    status = public_label(row.get("preview_verification_status") or gate.get("status"), "")
+    decision = public_label(row.get("preview_verification_decision") or gate.get("decision"), "")
+    return bool(
+        row.get("preview_verified")
+        or gate.get("verified")
+        or status in {"preview-verified", "verified", "agreed"}
+        or decision in {"ready", "review-ready"}
+    )
+
+
+def _local_executor_gate_passed(row: dict[str, Any]) -> bool:
+    gate = row.get("managed_preview_gate") if isinstance(row.get("managed_preview_gate"), dict) else {}
+    local_gate = gate.get("local_executor_gate") if isinstance(gate.get("local_executor_gate"), dict) else {}
+    if local_gate.get("passed") is not None:
+        return bool(local_gate.get("passed"))
+    if row.get("local_executor_gate_passed") is not None:
+        return bool(row.get("local_executor_gate_passed"))
+    if row.get("policy_files_written") or row.get("provider_calls_made"):
+        return False
+    return bool(_preview_gate_verified(row))
+
+
+def _local_activation_successor_crunch_rollups(source: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not isinstance(source, dict):
+        return [], {
+            "source_schema": "tokenclaw.local_activation_next_action_queue.v1",
+            "source_queue_status": None,
+            "source_queue_entry_count": 0,
+            "source_queue_crunch_entry_count": 0,
+            "source_queue_preview_verified_crunch_entry_count": 0,
+        }
+
+    actions = source.get("successor_actions") if isinstance(source.get("successor_actions"), list) else []
+    if not actions:
+        actions = source.get("entries") if isinstance(source.get("entries"), list) else []
+    rows: list[dict[str, Any]] = []
+    verified_crunch_count = 0
+    for entry in actions:
+        if not isinstance(entry, dict):
+            continue
+        if public_label(entry.get("local_action_family") or entry.get("lever"), "unknown") != "crunch":
+            continue
+        if not _preview_gate_verified(entry) or not _local_executor_gate_passed(entry):
+            continue
+        if public_label(entry.get("target_local_policy_section"), "unknown") not in {"crunch.rules", "unknown"}:
+            continue
+        if public_label(entry.get("target_local_rule_file"), "crunch_rules.yaml") != "crunch_rules.yaml":
+            continue
+        if _as_int(entry.get("safety_stop_count")) > 0 or _as_int(entry.get("rollback_count")) > 0:
+            continue
+        verified_crunch_count += 1
+        sample_count = _as_int(entry.get("sample_count") or entry.get("row_count"))
+        projected_tokens = _as_int(entry.get("projected_saved_tokens") or entry.get("observed_saved_tokens"))
+        projected_chars = _as_int(entry.get("projected_saved_chars")) or projected_tokens * 4
+        estimated_input_tokens = (
+            _as_int(entry.get("successful_input_tokens"))
+            or _as_int(entry.get("input_tokens"))
+            or (
+                int(round(projected_tokens / REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE))
+                if projected_tokens > 0 and REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE > 0
+                else 0
+            )
+        )
+        blocker_codes = [
+            public_label(item, "unknown")
+            for item in entry.get("blocker_codes") or []
+            if public_label(item, "unknown") != "unknown"
+        ]
+        rows.append(
+            {
+                "schema": ROLLUP_ROW_SCHEMA,
+                "source_schema": "tokenclaw.local_activation_successor_action.v1",
+                "source_activation_fingerprint": public_label(
+                    entry.get("source_fingerprint") or entry.get("fingerprint"),
+                    "unknown",
+                ),
+                "source_activation_candidate_rank": _as_int(
+                    entry.get("source_queue_rank") or entry.get("rank") or entry.get("source_ledger_rank")
+                ),
+                "provider_family": public_label(entry.get("provider_family"), "unknown"),
+                "source_surface": public_label(entry.get("source_surface"), "unknown"),
+                "endpoint": public_label(entry.get("endpoint"), "unknown"),
+                "app_family": public_label(entry.get("app_family"), "unknown"),
+                "requested_model_family": public_label(entry.get("requested_model_family"), "unknown"),
+                "routed_model_family": public_label(entry.get("routed_model_family") or entry.get("target_model_family"), "unknown"),
+                "category": public_label(entry.get("category"), "unknown"),
+                "workflow_phase": public_label(entry.get("workflow_phase"), "unknown"),
+                "stream": bool(entry.get("stream")),
+                "has_tools": bool(entry.get("has_tools")),
+                "cache_status": public_label(entry.get("cache_status"), "unknown"),
+                "routing_status": public_label(entry.get("routing_status"), "unknown"),
+                "text_bucket": public_label(entry.get("text_bucket"), "unknown"),
+                "token_bucket": public_label(entry.get("token_bucket"), "unknown"),
+                "candidate_work_classes": ["crunch", "repeated_context"],
+                "candidate_families": ["crunch_candidate"],
+                "blocker_codes": blocker_codes,
+                "row_count": sample_count,
+                "sample_count": sample_count,
+                "successful_input_tokens": estimated_input_tokens,
+                "input_tokens": estimated_input_tokens,
+                "projected_crunch_tokens_saved": projected_tokens,
+                "projected_crunch_chars_saved": projected_chars,
+                "projected_crunch_savings_usd": round(
+                    _as_float(entry.get("projected_saved_usd") or entry.get("projected_savings_usd") or entry.get("observed_saved_usd")),
+                    8,
+                ),
+                "current_crunch_tokens_saved": 0,
+                "current_crunch_chars_saved": 0,
+                "current_crunch_savings_usd": 0.0,
+                "crunch_canary_lifecycle": entry.get("crunch_canary_lifecycle")
+                if isinstance(entry.get("crunch_canary_lifecycle"), dict)
+                else {},
+                "freshness_state": public_label(entry.get("freshness_state"), "fresh"),
+                "activation_candidate_readiness_state": "activation-ready",
+                "activation_candidate_next_action": public_label(
+                    entry.get("recommended_next_action") or entry.get("next_action"),
+                    "stage-repeated-context-crunch-canary",
+                ),
+                "preview_verified": True,
+                "preview_verification_status": public_label(entry.get("preview_verification_status"), "preview-verified"),
+                "privacy": _shape_follow_up_privacy(),
+            }
+        )
+    return rows, {
+        "source_schema": public_label(source.get("schema"), "tokenclaw.local_activation_next_action_queue.v1"),
+        "source_queue_status": public_label(source.get("status"), "unknown"),
+        "source_queue_entry_count": len(actions),
+        "source_queue_crunch_entry_count": len(rows),
+        "source_queue_preview_verified_crunch_entry_count": verified_crunch_count,
+    }
+
+
 def _crunch_dry_run_source_rows(source: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if isinstance(source, dict) and source.get("schema") == LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA:
         return _activation_candidate_queue_crunch_rollups(source)
+    if isinstance(source, dict) and source.get("schema") == "tokenclaw.local_activation_next_action_queue.v1":
+        return _local_activation_successor_crunch_rollups(source)
     if isinstance(source, list):
         return [row for row in source if isinstance(row, dict)], {
             "source_schema": ROLLUP_ROW_SCHEMA,
@@ -6418,7 +6554,9 @@ def build_request_shape_crunch_canary_stage_report(
     )
     dry_run_source: list[dict[str, Any]] | dict[str, Any]
     rollup_rows = [row for row in rollup_report.get("rollups") or [] if isinstance(row, dict)]
-    if isinstance(activation_queue, dict) and not rollup_rows:
+    if rollup_report.get("schema") == "tokenclaw.local_activation_next_action_queue.v1":
+        dry_run_source = rollup_report
+    elif isinstance(activation_queue, dict) and not rollup_rows:
         dry_run_source = activation_queue
     else:
         dry_run_source = rollup_rows

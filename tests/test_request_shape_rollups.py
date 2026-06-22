@@ -7351,6 +7351,157 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(dry_run["cohorts"][0]["reason"], "repeated-context-crunch-canary-applied-and-holdout")
         self.assertEqual(dry_run["recommended_actions"], [])
 
+    def test_preview_verified_crunch_successor_stages_file_backed_canary_with_outcomes(self) -> None:
+        queue = {
+            "schema": "tokenclaw.local_activation_next_action_queue.v1",
+            "status": "ranked",
+            "successor_actions": [
+                {
+                    "schema": "tokenclaw.local_activation_successor_action.v1",
+                    "rank": 1,
+                    "fingerprint": "successor:preview-crunch",
+                    "source_fingerprint": "activation:preview-crunch",
+                    "lever": "crunch",
+                    "local_action_family": "crunch",
+                    "successor_status": "ready",
+                    "current_status": "ready",
+                    "recommended_next_action": "rank-repeated-context-crunch-dry-run",
+                    "blocker_codes": ["repeated-context-crunch-opportunity"],
+                    "target_local_policy_section": "crunch.rules",
+                    "target_local_rule_file": "crunch_rules.yaml",
+                    "sample_count": 32,
+                    "projected_saved_tokens": 16_000,
+                    "projected_saved_usd": 0.16,
+                    "provider_family": "anthropic",
+                    "source_surface": "anthropic_messages",
+                    "endpoint": "messages",
+                    "app_family": "claude_code",
+                    "requested_model_family": "claude-sonnet",
+                    "routed_model_family": "claude-sonnet",
+                    "category": "tool-result",
+                    "workflow_phase": "tool-execution",
+                    "stream": True,
+                    "has_tools": True,
+                    "cache_status": "skipped",
+                    "routing_status": "passthrough",
+                    "text_bucket": "32k_128k_chars",
+                    "token_bucket": "8k_32k_tokens",
+                    "safety_stop_count": 0,
+                    "rollback_count": 0,
+                    "preview_verified": True,
+                    "preview_verification_status": "preview-verified",
+                    "preview_verification_decision": "ready",
+                    "managed_preview_gate": {
+                        "schema": "tokenclaw.preview_verified_activation_successor_gate.v1",
+                        "status": "preview-verified",
+                        "decision": "ready",
+                        "verified": True,
+                        "required": False,
+                        "policy_files_written": False,
+                        "provider_calls_made": False,
+                        "managed_server_calls_made": False,
+                        "local_executor_gate": {
+                            "schema": "tokenclaw.preview_verified_successor_local_executor_gate.v1",
+                            "passed": True,
+                            "policy_files_written": False,
+                            "provider_calls_made": False,
+                        },
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "request_ids_included": False,
+                        "session_ids_included": False,
+                    },
+                    "raw_prompt": "raw prompt must not leak",
+                    "request_id": "raw-request-id-must-not-leak",
+                    "session_id": "raw-session-id-must-not-leak",
+                }
+            ],
+        }
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+        stage = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            source_rollup_report=queue,
+            rules_path=rules_path,
+            rollout_fraction=0.20,
+            holdout_fraction=0.20,
+            run_id="preview-verified-crunch",
+        )
+
+        self.assertEqual(stage["status"], "staged")
+        self.assertEqual(stage["staged_canary_count"], 1)
+        self.assertTrue(stage["acceptance"]["stages_one_repeated_context_crunch_canary"])
+        self.assertTrue(stage["acceptance"]["has_file_backed_target"])
+        action = stage["top_stage_action"]
+        self.assertEqual(action["source_activation_fingerprint"], "activation:preview-crunch")
+        self.assertEqual(action["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertTrue(action["privacy"]["metadata_only"])
+        rendered = json.dumps(stage, sort_keys=True)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("raw-request-id-must-not-leak", rendered)
+        self.assertNotIn("raw-session-id-must-not-leak", rendered)
+
+        apply_result = apply_request_shape_crunch_canary_action(action, rules_path=rules_path)
+        self.assertTrue(apply_result["ok"])
+        self.assertTrue(apply_result["wrote_policy_files"])
+
+        selected: dict[str, dict[str, object]] = {}
+        features = dict(action["conditions"])
+        for index in range(5000):
+            lifecycle = request_shape_crunch_canary_lifecycle(
+                action,
+                {**features, "cohort_sample_id": f"preview-crunch-{index}"},
+            )
+            if lifecycle["status"] in {"applied", "holdout"}:
+                selected.setdefault(str(lifecycle["status"]), lifecycle)
+            if {"applied", "holdout"} <= set(selected):
+                break
+        self.assertTrue(selected)
+
+        for status, lifecycle in selected.items():
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming",
+                category="tool-result",
+                workflow_phase="tool-execution",
+                text_chars=96_000,
+                cost=0.08 if status == "applied" else 0.09,
+                baseline=0.09,
+                actual_input_tokens=24_000,
+                crunch_extra={
+                    "changed": status == "applied",
+                    "tokens_saved_est": 4_000 if status == "applied" else 0,
+                    "request_shape_repeated_context_canary": lifecycle,
+                },
+            )
+
+        outcome = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="preview-crunch-outcome")
+        dry_run = outcome["crunch_opportunity_dry_run"]
+        self.assertGreater(
+            dry_run["summary"]["canary_applied_rows"] + dry_run["summary"]["canary_holdout_rows"],
+            0,
+        )
+        self.assertEqual(dry_run["summary"]["canary_safety_stopped_rows"], 0)
+        self.assertEqual(dry_run["cohorts"][0]["crunch_canary_lifecycle"].get("rollback_count", 0), 0)
+        self.assertTrue(dry_run["privacy"]["metadata_only"])
+
+        restage = build_request_shape_crunch_canary_stage_report(
+            self.store,
+            source_rollup_report=queue,
+            rules_path=rules_path,
+            rollout_fraction=0.20,
+            holdout_fraction=0.20,
+            run_id="preview-verified-crunch-repeat",
+        )
+        self.assertEqual(restage["status"], "already-staged")
+        self.assertTrue(restage["duplicate_suppression"]["suppresses_new_stage_action"])
+        self.assertEqual(restage["duplicate_suppression"]["matching_local_policy"], "crunch_rules")
+
     def test_crunch_canary_impact_reports_positive_applied_against_holdout(self) -> None:
         for cost in (0.08, 0.07, 0.09):
             self._log_call(
