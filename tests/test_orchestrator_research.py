@@ -5752,6 +5752,158 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(plan["privacy"]["raw_prompts_included"])
         self.assertFalse(plan["privacy"]["provider_bodies_included"])
 
+    def test_preview_consumed_successors_suppress_closed_predecessor_proposals(self):
+        source = "activation:cachepreviewclosed"
+        action = {
+            "schema": "tokenclaw.local_activation_successor_action.v1",
+            "fingerprint": "successor:cachepreviewclosed",
+            "source_fingerprint": source,
+            "lever": "cache",
+            "local_action_family": "cache",
+            "successor_status": "keep-blocked",
+            "current_status": "blocked",
+            "state": "blocked",
+            "issue_worthy_status": "blocked",
+            "recommended_next_action": "collect-local-evidence-before-activation",
+            "unblock_reason": "local-evidence-required",
+            "blocker_codes": ["local-evidence-required"],
+            "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+            "managed_preview_gate": {
+                "schema": "tokenclaw.preview_verified_activation_successor_gate.v1",
+                "status": "preview-omitted",
+                "decision": "keep-blocked",
+                "verified": False,
+                "required": True,
+                "next_action": "collect-local-evidence-before-activation",
+                "omitted_reason": "local-evidence-required",
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": True,
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+                "absolute_paths_included": False,
+            },
+        }
+        decision = {
+            "schema": "tokenclaw.local_activation_successor_decision.v1",
+            "fingerprint": "successor-decision:cachepreviewclosed",
+            "source_fingerprint": source,
+            "successor_action_fingerprint": action["fingerprint"],
+            "decision": "keep-blocked",
+            "issue_worthy_status": "blocked",
+            "local_action_family": "cache",
+            "recommended_next_action": "collect-local-evidence-before-activation",
+            "preview_verified": False,
+            "preview_agreement_status": "preview-omitted",
+            "preview_outcome_status": "preview-omitted",
+            "preview_verification_status": "preview-omitted",
+            "preview_verification_decision": "keep-blocked",
+            "preview_omitted_reason": "local-evidence-required",
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": True,
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    837,
+                    "Consume refreshed activation preview outcomes into local successor decisions",
+                    ["backlog", "status:ready", "cache", "privacy"],
+                    state="CLOSED",
+                    closed="2026-06-22T14:00:00Z",
+                    body=(
+                        "Fingerprint: activation:cachepreviewclosed\n"
+                        "Top next action: refresh-managed-activation-preview\n"
+                    ),
+                )
+            ],
+            stats={
+                "calls": 0,
+                "evidence_to_activation_next_action_ledger": {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
+                    "status": "tracked",
+                    "entries": [
+                        {
+                            "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                            "fingerprint": source,
+                            "lever": "cache",
+                            "local_action_family": "cache",
+                            "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                            "current_status": "blocked",
+                            "state": "blocked",
+                            "issue_worthy_status": "blocked",
+                            "next_action": "collect-local-evidence-before-activation",
+                            "blocker_codes": ["local-evidence-required"],
+                            "issue_status": "closed-issue-seen",
+                            "prior_issue": {
+                                "number": 837,
+                                "repo": "lutzkuen/tokenclaw",
+                                "title": "Consume refreshed activation preview outcomes into local successor decisions",
+                                "url": "https://github.com/lutzkuen/tokenclaw/issues/837",
+                            },
+                            "raw_prompt": "raw consumed preview prompt must not leak",
+                            "request_id": "req-consumed-preview-secret",
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "local_activation_next_action_queue": {
+                    "schema": "tokenclaw.local_activation_next_action_queue.v1",
+                    "status": "ranked",
+                    "entries": [
+                        {
+                            "schema": "tokenclaw.local_activation_next_action_queue_entry.v1",
+                            "fingerprint": source,
+                            "lever": "cache",
+                            "local_action_family": "cache",
+                            "state": "blocked",
+                            "current_status": "blocked",
+                            "issue_worthy_status": "blocked",
+                            "next_action": "collect-local-evidence-before-activation",
+                            "blocker_codes": ["local-evidence-required"],
+                            "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        }
+                    ],
+                    "successor_actions": [action],
+                    "successor_decisions": [decision],
+                    "summary": {"successor_action_count": 1, "successor_decision_count": 1},
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertNotIn(
+            "Keep cache activation successor blocked on local-evidence-required",
+            " ".join(titles),
+        )
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["preview_consumed_successor_suppressed_count"], 1)
+        suppressed = suppression["suppressed"][0]
+        self.assertEqual(suppressed["reason"], "preview-consumed-successor-predecessor")
+        self.assertEqual(suppressed["preview_outcome_status"], "preview-omitted")
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw consumed preview prompt must not leak", rendered)
+        self.assertNotIn("req-consumed-preview-secret", rendered)
+        self.assertFalse(plan["privacy"]["raw_prompts_included"])
+
     def test_tool_cache_dependency_preview_blockers_emit_safe_invalidation_drill_issue(self):
         dependency_rows = [
             (

@@ -9390,6 +9390,13 @@ def _activation_successor_progress_suppression(
         progressed_from
         or (fingerprint_next_action and current_next_action and fingerprint_next_action != current_next_action)
     )
+    preview_outcome_status = str(decision.get("preview_outcome_status") or "").strip()
+    preview_agreement_status = str(decision.get("preview_agreement_status") or "").strip()
+    preview_consumed = bool(
+        preview_outcome_status
+        and preview_outcome_status not in {"preview-missing", "not-previewed"}
+        and preview_agreement_status not in {"", "not-previewed", "missing-preview", "no-data-preview-health"}
+    )
     blocked_or_terminal = bool(
         status_values & {
             "blocked",
@@ -9433,6 +9440,26 @@ def _activation_successor_progress_suppression(
             "successor_status": sanitize_value(decision_text),
             "privacy": _candidate_privacy(),
         }
+    if closed_predecessor_seen and preview_consumed and blocked_or_terminal and request_shape_successor:
+        return {
+            "title": "preview-consumed activation successor predecessor",
+            "repo": "lutzkuen/tokenclaw",
+            "fingerprint": sanitize_value(source_fingerprint),
+            "reason": "preview-consumed-successor-predecessor",
+            "suppression_kind": "preview-consumed-successor-predecessor",
+            "prior_issue": (
+                _prior_issue_reference(source_entry.get("prior_issue") or action.get("prior_issue"))
+                if isinstance(source_entry.get("prior_issue") or action.get("prior_issue"), dict)
+                else None
+            ),
+            "preview_outcome_status": sanitize_value(preview_outcome_status),
+            "preview_agreement_status": sanitize_value(preview_agreement_status),
+            "current_next_action": sanitize_value(current_next_action),
+            "local_action_family": sanitize_value(family),
+            "current_status": sanitize_value(action.get("current_status") or source_entry.get("current_status")),
+            "successor_status": sanitize_value(decision_text),
+            "privacy": _candidate_privacy(),
+        }
     return None
 
 
@@ -9461,6 +9488,9 @@ def _proposals_from_activation_successor_decisions_with_metadata(
         ),
         "resolved_pass_diagnostic_suppressed_count": sum(
             1 for row in clean_suppressed if row.get("suppression_kind") == "resolved-activation-feedback-diagnostic"
+        ),
+        "preview_consumed_successor_suppressed_count": sum(
+            1 for row in clean_suppressed if row.get("suppression_kind") == "preview-consumed-successor-predecessor"
         ),
         "suppressed": clean_suppressed[:20],
         "privacy": _candidate_privacy(),
@@ -16912,6 +16942,9 @@ def build_research_plan(
             )
             proposal_suppression["resolved_pass_diagnostic_suppressed_count"] = _to_int(
                 activation_successor_suppression.get("resolved_pass_diagnostic_suppressed_count")
+            )
+            proposal_suppression["preview_consumed_successor_suppressed_count"] = _to_int(
+                activation_successor_suppression.get("preview_consumed_successor_suppressed_count")
             )
         create_issues, golden_path_suppressed = _filter_golden_path_ready_proposals(create_issues)
         if golden_path_suppressed:
