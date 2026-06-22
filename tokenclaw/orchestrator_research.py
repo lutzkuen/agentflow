@@ -23,6 +23,8 @@ LOCAL_ACTIVATION_SUCCESSOR_ACTION_SCHEMA = "tokenclaw.local_activation_successor
 LOCAL_ACTIVATION_SUCCESSOR_DECISION_SCHEMA = "tokenclaw.local_activation_successor_decision.v1"
 CACHE_REPLAY_FILE_ACTION_DRAFTS_SCHEMA = "tokenclaw.cache_replay_file_action_drafts.v1"
 CACHE_REPLAY_FILE_ACTION_DRAFT_SCHEMA = "tokenclaw.cache_replay_file_action_draft.v1"
+ROUTING_CANARY_FILE_ACTION_DRAFTS_SCHEMA = "tokenclaw.routing_canary_file_action_drafts.v1"
+ROUTING_CANARY_FILE_ACTION_DRAFT_SCHEMA = "tokenclaw.routing_canary_file_action_draft.v1"
 PREVIEW_VERIFIED_SUCCESSOR_GATE_SCHEMA = "tokenclaw.preview_verified_activation_successor_gate.v1"
 MANAGED_PREVIEW_HEALTH_GATE_SCHEMA = "tokenclaw.managed_activation_preview_health_gate.v1"
 ACTIVATION_FEEDBACK_FRESHNESS_GATE_SCHEMA = "tokenclaw.activation_feedback_evidence_freshness_gate.v1"
@@ -7733,8 +7735,16 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "category",
         "workflow_phase",
         "provider_family",
+        "stream",
         "requested_model",
         "candidate_target_model",
+        "requested_model_family",
+        "target_model_family",
+        "routing_status",
+        "routing_downgrade_drill_status",
+        "routing_downgrade_drill_rank",
+        "source_evidence_schema",
+        "target_reason",
         "required_local_executor",
         "diagnostic_class",
         "diagnostic_reason",
@@ -7775,6 +7785,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             action[key] = sanitize_value(entry.get(key))
     for key in (
         "emits_cache_apply_action",
+        "emits_routing_apply_action",
         "policy_files_written",
         "tool_cache_replay_enabled",
         "streaming_replay_enabled",
@@ -7807,6 +7818,8 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "affected_rows",
         "cache_apply_action_count",
         "cache_entries_written",
+        "recommended_canary_sample_count",
+        "recommended_holdout_sample_count",
         "warmup_miss_count",
         "observed_hits",
         "exact_hit_count",
@@ -7846,6 +7859,8 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "recovery_plan",
         "activation_feedback_diagnostic_classification",
         "post_rollback_observation",
+        "safety_stop",
+        "routing_canary_review",
     ):
         if isinstance(entry.get(key), dict):
             action[key] = sanitize_value(entry.get(key))
@@ -7902,6 +7917,7 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             "tool_cache_replay_enabled",
             "streaming_replay_enabled",
             "emits_cache_apply_action",
+            "emits_routing_apply_action",
             "live_repeat_confirmed",
             "observed_hit_proof",
             "observed_hits",
@@ -7920,6 +7936,8 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             "observed_saved_usd",
             "observed_crunch_ratio",
             "managed_rank",
+            "recommended_canary_sample_count",
+            "recommended_holdout_sample_count",
         }
     }
 
@@ -8384,6 +8402,242 @@ def build_cache_replay_file_action_drafts(successor_actions: list[dict[str, Any]
         },
         "drafts": drafts[:20],
         "privacy": _cache_replay_file_action_privacy(),
+    }
+
+
+def _routing_canary_file_action_privacy() -> dict[str, Any]:
+    privacy = _successor_action_privacy()
+    privacy.update(
+        {
+            "local_only": True,
+            "review_only": True,
+            "read_only": True,
+            "content_free": True,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "policy_files_written": False,
+            "emits_routing_apply_action": False,
+        }
+    )
+    return privacy
+
+
+def _routing_drill_action_shape(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider_family": sanitize_value(action.get("provider_family")),
+        "source_surface": sanitize_value(action.get("source_surface")),
+        "endpoint": sanitize_value(action.get("endpoint")),
+        "category": sanitize_value(action.get("category")),
+        "workflow_phase": sanitize_value(action.get("workflow_phase")),
+        "stream": bool(action.get("stream")),
+        "has_tools": bool(action.get("has_tools")),
+    }
+
+
+def _is_routing_downgrade_successor(action: dict[str, Any]) -> bool:
+    if str(action.get("local_action_family") or "") != "routing":
+        return False
+    evidence_schema = str(action.get("evidence_schema") or action.get("source_evidence_schema") or "")
+    next_action = str(action.get("recommended_next_action") or action.get("next_action") or "")
+    return bool(
+        evidence_schema == "tokenclaw.request_shape_routing_downgrade_drills.v1"
+        or action.get("routing_downgrade_drill_status") is not None
+        or next_action in {"stage-routing-downgrade-canary", "keep-routing-downgrade-drill-blocked"}
+    )
+
+
+def _routing_canary_draft_fingerprint(action: dict[str, Any], draft_action: str) -> str:
+    material = {
+        "schema": ROUTING_CANARY_FILE_ACTION_DRAFT_SCHEMA,
+        "source_fingerprint": sanitize_value(action.get("source_fingerprint")),
+        "successor_action_fingerprint": sanitize_value(action.get("fingerprint")),
+        "draft_action": draft_action,
+        "target_local_rule_file": sanitize_value(action.get("target_local_rule_file") or "routing_rules.yaml"),
+        "target_local_policy_section": sanitize_value(action.get("target_local_policy_section") or "routing.rules"),
+    }
+    return public_id(json.dumps(material, sort_keys=True), prefix="routing-canary-action-draft") or "routing-canary-action-draft:unknown"
+
+
+def _routing_canary_evidence_summary(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "tokenclaw.routing_canary_file_action_evidence_summary.v1",
+        "source_fingerprint": sanitize_value(action.get("source_fingerprint")),
+        "successor_action_fingerprint": sanitize_value(action.get("fingerprint")),
+        "source_evidence_schema": sanitize_value(
+            action.get("source_evidence_schema")
+            or action.get("evidence_schema")
+            or "tokenclaw.request_shape_routing_downgrade_drills.v1"
+        ),
+        "routing_downgrade_drill_status": sanitize_value(action.get("routing_downgrade_drill_status")),
+        "rank": _to_int(action.get("routing_downgrade_drill_rank") or action.get("source_ledger_rank") or action.get("rank")),
+        "sample_count": _to_int(action.get("sample_count")),
+        "projected_savings_usd": round(_to_float(action.get("projected_savings_usd")), 8),
+        "projected_savings_per_1000_calls_usd": round(_to_float(action.get("savings_per_1000_calls_usd")), 8),
+        "canary_fraction": round(_to_float(action.get("canary_fraction")), 4),
+        "holdout_fraction": round(_to_float(action.get("holdout_fraction")), 4),
+        "recommended_canary_sample_count": _to_int(action.get("recommended_canary_sample_count")),
+        "recommended_holdout_sample_count": _to_int(action.get("recommended_holdout_sample_count")),
+        "requested_model": sanitize_value(action.get("requested_model") or action.get("requested_model_family")),
+        "candidate_target_model": sanitize_value(action.get("candidate_target_model") or action.get("target_model_family")),
+        "target_reason": sanitize_value(action.get("target_reason")),
+        "shape": _routing_drill_action_shape(action),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _routing_canary_file_action_draft(action: dict[str, Any]) -> dict[str, Any] | None:
+    if not _is_routing_downgrade_successor(action):
+        return None
+
+    status = str(action.get("routing_downgrade_drill_status") or action.get("current_status") or "").strip()
+    blocked = status == "blocked" or str(action.get("successor_status") or "") == "keep-blocked"
+    target_file = sanitize_value(action.get("target_local_rule_file") or "routing_rules.yaml")
+    target_section = sanitize_value(action.get("target_local_policy_section") or "routing.rules")
+    evidence_summary = _routing_canary_evidence_summary(action)
+    blocker_codes = [str(item) for item in action.get("blocker_codes") or [] if str(item or "").strip()]
+    canary_fraction = round(_to_float(action.get("canary_fraction")), 4)
+    holdout_fraction = round(_to_float(action.get("holdout_fraction")), 4)
+    base = {
+        "schema": ROUTING_CANARY_FILE_ACTION_DRAFT_SCHEMA,
+        "source": "local-activation-successor",
+        "source_fingerprint": sanitize_value(action.get("source_fingerprint")),
+        "successor_action_fingerprint": sanitize_value(action.get("fingerprint")),
+        "local_action_family": "routing",
+        "target_local_rule_file": target_file,
+        "target_local_policy_section": target_section,
+        "review_required": True,
+        "preview_verified": bool(action.get("preview_verified")),
+        "routing_downgrade_drill_status": sanitize_value(status or "review-ready"),
+        "recommended_next_action": sanitize_value(action.get("recommended_next_action")),
+        "canary_fraction": canary_fraction,
+        "holdout_fraction": holdout_fraction,
+        "projected_savings_per_1000_calls_usd": round(_to_float(action.get("savings_per_1000_calls_usd")), 8),
+        "projected_savings_usd": round(_to_float(action.get("projected_savings_usd")), 8),
+        "sample_count": _to_int(action.get("sample_count")),
+        "rank": _to_int(action.get("routing_downgrade_drill_rank") or action.get("source_ledger_rank") or action.get("rank")),
+        "blocker_codes": sanitize_value(blocker_codes),
+        "emits_routing_apply_action": False,
+        "policy_files_written": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _routing_canary_file_action_privacy(),
+        "evidence_summary": evidence_summary,
+        "safety_stop": sanitize_value(
+            action.get("safety_stop")
+            if isinstance(action.get("safety_stop"), dict)
+            else {
+                "schema": "tokenclaw.routing_canary_safety_stop_metadata.v1",
+                "enabled": True,
+                "reason_codes": ["rate_limited", "upstream_error", "routing-quality-regression", "operator-rollback"],
+                "safety_stop_count": _to_int(action.get("safety_stop_count")),
+                "rollback_count": _to_int(action.get("rollback_count")),
+            }
+        ),
+    }
+
+    if blocked:
+        draft_action = "keep-routing-downgrade-drill-blocked"
+        base.update(
+            {
+                "status": "blocked",
+                "draft_action": draft_action,
+                "draft_id": _routing_canary_draft_fingerprint(action, draft_action),
+                "blocked_reason": sanitize_value((blocker_codes or [action.get("unblock_reason") or "routing-downgrade-drill-blocked"])[0]),
+                "no_write_next_action": "keep-routing-downgrade-drill-blocked",
+            }
+        )
+    else:
+        draft_action = "stage-routing-downgrade-canary"
+        base.update(
+            {
+                "status": "drafted",
+                "draft_action": draft_action,
+                "draft_id": _routing_canary_draft_fingerprint(action, draft_action),
+                "proposed_policy_patch": {
+                    "schema": "tokenclaw.routing_canary_file_policy_patch.v1",
+                    "operation": "stage_routing_downgrade_canary",
+                    "patch_type": "stage_request_shape_routing_downgrade_canary",
+                    "routing_rules": [
+                        {
+                            "id": _routing_canary_draft_fingerprint(action, "routing-downgrade-rule"),
+                            "enabled": False,
+                            "mode": "canary",
+                            "review_only": True,
+                            "requested_model": sanitize_value(
+                                action.get("requested_model") or action.get("requested_model_family")
+                            ),
+                            "route_to": sanitize_value(
+                                action.get("candidate_target_model") or action.get("target_model_family")
+                            ),
+                            "canary_fraction": canary_fraction,
+                            "holdout_fraction": holdout_fraction,
+                            "shape": _routing_drill_action_shape(action),
+                            "safety_stop": base["safety_stop"],
+                            "source_evidence_schema": evidence_summary["source_evidence_schema"],
+                            "source_rank": evidence_summary["rank"],
+                            "projected_savings_per_1000_calls_usd": base[
+                                "projected_savings_per_1000_calls_usd"
+                            ],
+                        }
+                    ],
+                    "review_required": True,
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+            }
+        )
+    return sanitize_value(
+        {
+            key: value
+            for key, value in base.items()
+            if value not in (None, "", [], 0)
+            or key in {
+                "emits_routing_apply_action",
+                "policy_files_written",
+                "provider_calls_made",
+                "managed_server_calls_made",
+                "projected_savings_usd",
+                "projected_savings_per_1000_calls_usd",
+                "canary_fraction",
+                "holdout_fraction",
+                "sample_count",
+                "rank",
+            }
+        }
+    )
+
+
+def build_routing_canary_file_action_drafts(successor_actions: list[dict[str, Any]]) -> dict[str, Any]:
+    drafts: list[dict[str, Any]] = []
+    for action in successor_actions:
+        if not isinstance(action, dict):
+            continue
+        draft = _routing_canary_file_action_draft(action)
+        if draft is not None:
+            drafts.append(draft)
+    status_counts: Counter[str] = Counter(str(item.get("status") or "unknown") for item in drafts)
+    draft_action_counts: Counter[str] = Counter(str(item.get("draft_action") or "unknown") for item in drafts)
+    unsafe_apply_count = sum(1 for item in drafts if bool(item.get("emits_routing_apply_action")))
+    return {
+        "schema": ROUTING_CANARY_FILE_ACTION_DRAFTS_SCHEMA,
+        "status": "drafted" if drafts else "no-routing-downgrade-successors",
+        "review_only": True,
+        "summary": {
+            "draft_count": len(drafts),
+            "policy_patch_draft_count": sum(1 for item in drafts if isinstance(item.get("proposed_policy_patch"), dict)),
+            "blocked_action_count": sum(1 for item in drafts if item.get("status") == "blocked"),
+            "routing_apply_action_count": sum(1 for item in drafts if bool(item.get("emits_routing_apply_action"))),
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "policy_files_written": False,
+            "unsafe_routing_apply_action_count": unsafe_apply_count,
+            "status_counts": [{"value": key, "count": count} for key, count in sorted(status_counts.items())],
+            "draft_action_counts": [{"value": key, "count": count} for key, count in sorted(draft_action_counts.items())],
+        },
+        "drafts": drafts[:20],
+        "privacy": _routing_canary_file_action_privacy(),
     }
 
 
@@ -9529,11 +9783,22 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "workflow_phase",
         "provider_family",
         "has_tools",
+        "stream",
         "requested_model",
         "candidate_target_model",
+        "requested_model_family",
+        "target_model_family",
+        "routing_status",
+        "routing_downgrade_drill_status",
+        "routing_downgrade_drill_rank",
+        "source_evidence_schema",
+        "target_reason",
+        "emits_routing_apply_action",
         "required_local_executor",
         "canary_fraction",
         "holdout_fraction",
+        "recommended_canary_sample_count",
+        "recommended_holdout_sample_count",
         "executor_compatible",
         "tool_cache_replay_enabled",
         "streaming_replay_enabled",
@@ -9609,6 +9874,8 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "recovery_plan",
         "post_rollback_observation",
         "local_policy_patch",
+        "safety_stop",
+        "routing_canary_review",
     ):
         if isinstance(entry.get(review_key), dict):
             clean[review_key] = sanitize_value(entry.get(review_key))
@@ -9641,10 +9908,13 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
         "freshness_multiplier",
         "canary_fraction",
         "holdout_fraction",
+        "recommended_canary_sample_count",
+        "recommended_holdout_sample_count",
         "affected_rows",
         "cache_apply_action_count",
         "cache_entries_written",
         "emits_cache_apply_action",
+        "emits_routing_apply_action",
         "tool_cache_replay_enabled",
         "streaming_replay_enabled",
         "tools_present_replay_evidence",
@@ -9679,8 +9949,131 @@ def _local_activation_next_action_queue_entry(entry: dict[str, Any]) -> dict[str
     return {key: value for key, value in clean.items() if value not in (None, "", [], 0) or key in preserved_empty_keys}
 
 
+def _routing_downgrade_required_executor(candidate: dict[str, Any]) -> str:
+    provider = str(candidate.get("provider_family") or "").strip()
+    if provider == "anthropic":
+        return "anthropic-routing-rules"
+    if provider == "openai":
+        return "openai-routing-canary"
+    return "routing-rules"
+
+
+def _routing_downgrade_drill_activation_entries(stats_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    shape_signal = (
+        stats_summary.get("request_shape_rollup_candidates")
+        if isinstance(stats_summary.get("request_shape_rollup_candidates"), dict)
+        else {}
+    )
+    report = (
+        shape_signal.get("routing_downgrade_drills")
+        if isinstance(shape_signal.get("routing_downgrade_drills"), dict)
+        else {}
+    )
+    rows = [row for row in report.get("candidates") or [] if isinstance(row, dict)]
+    if not rows:
+        return []
+    entries: list[dict[str, Any]] = []
+    for row in rows[:20]:
+        status = str(row.get("status") or row.get("readiness_state") or "").strip()
+        review_ready = status == "review-ready"
+        blocker_codes = [str(item) for item in row.get("blocker_codes") or [] if str(item or "").strip()]
+        if not review_ready and not blocker_codes:
+            blocker = str(row.get("top_blocker_code") or "routing-downgrade-drill-blocked").strip()
+            blocker_codes = [blocker]
+        source_fingerprint = str(row.get("fingerprint") or "").strip()
+        material = {
+            "schema": "tokenclaw.routing_downgrade_drill_activation_entry.v1",
+            "source_fingerprint": source_fingerprint,
+            "rank": _to_int(row.get("rank")),
+            "recommended_next_action": row.get("recommended_next_action"),
+            "status": status,
+        }
+        entry_fingerprint = public_id(json.dumps(material, sort_keys=True), prefix="activation")
+        sample_count = _to_int(row.get("sample_count") or row.get("row_count"))
+        projected_savings = round(_to_float(row.get("projected_savings_usd")), 8)
+        savings_per_1000 = round(_to_float(row.get("projected_savings_per_1000_calls_usd")), 8)
+        entry = {
+            "schema": EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA,
+            "rank": _to_int(row.get("rank")),
+            "fingerprint": entry_fingerprint,
+            "source_fingerprint": sanitize_value(source_fingerprint),
+            "lever": "routing",
+            "local_action_family": "routing",
+            "state": "ranked-evidence" if review_ready else "blocked",
+            "current_status": "projected" if review_ready else "blocked",
+            "issue_worthy_status": "review" if review_ready else "blocked",
+            "next_action": "stage-routing-downgrade-canary" if review_ready else "keep-routing-downgrade-drill-blocked",
+            "evidence_schema": report.get("schema") or "tokenclaw.request_shape_routing_downgrade_drills.v1",
+            "source_evidence_schema": row.get("source_evidence_schema") or report.get("schema"),
+            "expected_savings_path": (
+                "Converts ranked request-shape routing drill evidence into a measured local routing canary "
+                "with holdout coverage before any routing policy is activated."
+            ),
+            "blocker_codes": sanitize_value(blocker_codes),
+            "sample_count": sample_count,
+            "projected_savings_usd": projected_savings,
+            "projected_saved_usd": projected_savings,
+            "savings_per_1000_calls_usd": savings_per_1000,
+            "provider_family": sanitize_value(row.get("provider_family")),
+            "source_surface": sanitize_value(row.get("source_surface")),
+            "endpoint": sanitize_value(row.get("endpoint")),
+            "category": sanitize_value(row.get("category")),
+            "workflow_phase": sanitize_value(row.get("workflow_phase")),
+            "stream": bool(row.get("stream")),
+            "has_tools": bool(row.get("has_tools")),
+            "requested_model": sanitize_value(row.get("requested_model_family")),
+            "requested_model_family": sanitize_value(row.get("requested_model_family")),
+            "candidate_target_model": sanitize_value(row.get("candidate_target_model")),
+            "target_model_family": sanitize_value(row.get("target_model_family")),
+            "target_reason": sanitize_value(row.get("target_reason")),
+            "routing_status": sanitize_value(row.get("routing_status")),
+            "routing_downgrade_drill_status": sanitize_value(status),
+            "routing_downgrade_drill_rank": _to_int(row.get("rank")),
+            "canary_fraction": round(_to_float(row.get("recommended_canary_fraction")), 4),
+            "holdout_fraction": round(_to_float(row.get("recommended_holdout_fraction")), 4),
+            "recommended_canary_sample_count": _to_int(row.get("recommended_canary_sample_count")),
+            "recommended_holdout_sample_count": _to_int(row.get("recommended_holdout_sample_count")),
+            "required_local_executor": _routing_downgrade_required_executor(row),
+            "target_local_rule_file": "routing_rules.yaml",
+            "target_local_policy_section": "routing.rules",
+            "emits_routing_apply_action": False,
+            "policy_files_written": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "safety_stop_count": _to_int(row.get("safety_stop_count")),
+            "rollback_count": _to_int(row.get("rollback_count")),
+            "safety_stop": {
+                "schema": "tokenclaw.routing_canary_safety_stop_metadata.v1",
+                "enabled": True,
+                "reason_codes": ["rate_limited", "upstream_error", "routing-quality-regression", "operator-rollback"],
+                "safety_stop_count": _to_int(row.get("safety_stop_count")),
+                "rollback_count": _to_int(row.get("rollback_count")),
+                "policy_files_written": False,
+            },
+            "routing_canary_review": {
+                "schema": "tokenclaw.routing_downgrade_canary_review.v1",
+                "source_drill_fingerprint": sanitize_value(source_fingerprint),
+                "status": "review-ready" if review_ready else "blocked",
+                "rank": _to_int(row.get("rank")),
+                "sample_count": sample_count,
+                "canary_fraction": round(_to_float(row.get("recommended_canary_fraction")), 4),
+                "holdout_fraction": round(_to_float(row.get("recommended_holdout_fraction")), 4),
+                "projected_savings_per_1000_calls_usd": savings_per_1000,
+                "blocker_codes": sanitize_value(blocker_codes),
+                "metadata_only": True,
+                "aggregate_only": True,
+                "emits_routing_apply_action": False,
+                "policy_files_written": False,
+            },
+            "privacy": _candidate_privacy(),
+        }
+        entries.append(entry)
+    return entries
+
+
 def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     """Rank local activation next actions by realized savings and unblock reason."""
+    routing_downgrade_entries = _routing_downgrade_drill_activation_entries(stats_summary)
     ledger = (
         stats_summary
         if isinstance(stats_summary.get("entries"), list)
@@ -9703,10 +10096,17 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
                 safety_stop_burndown=safety_stop_burndown,
             )
     if not isinstance(ledger, dict):
-        return None
+        if not routing_downgrade_entries:
+            return None
+        ledger = {
+            "schema": EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA,
+            "status": "tracked",
+            "entries": [],
+            "privacy": _candidate_privacy(),
+        }
     entries = [
         _local_activation_next_action_queue_entry(entry)
-        for entry in ledger.get("entries") or []
+        for entry in [*(ledger.get("entries") or []), *routing_downgrade_entries]
         if isinstance(entry, dict)
     ]
     if not entries:
@@ -9768,9 +10168,15 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
     successor_actions = build_local_activation_successor_actions({"entries": entries})
     successor_decisions = build_local_activation_successor_decisions({"successor_actions": successor_actions})
     cache_replay_file_action_drafts = build_cache_replay_file_action_drafts(successor_actions)
+    routing_canary_file_action_drafts = build_routing_canary_file_action_drafts(successor_actions)
     cache_replay_file_action_summary = (
         cache_replay_file_action_drafts.get("summary")
         if isinstance(cache_replay_file_action_drafts.get("summary"), dict)
+        else {}
+    )
+    routing_canary_file_action_summary = (
+        routing_canary_file_action_drafts.get("summary")
+        if isinstance(routing_canary_file_action_drafts.get("summary"), dict)
         else {}
     )
     preview_successor_summary = _preview_successor_summary(successor_actions)
@@ -9808,6 +10214,11 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
             "cache_replay_file_cache_apply_action_count": _to_int(cache_replay_file_action_summary.get("cache_apply_action_count")),
             "cache_replay_file_cache_entries_written": _to_int(cache_replay_file_action_summary.get("cache_entries_written")),
             "cache_replay_file_unsafe_cache_apply_action_count": _to_int(cache_replay_file_action_summary.get("unsafe_cache_apply_action_count")),
+            "routing_canary_file_action_draft_count": _to_int(routing_canary_file_action_summary.get("draft_count")),
+            "routing_canary_file_policy_patch_draft_count": _to_int(routing_canary_file_action_summary.get("policy_patch_draft_count")),
+            "routing_canary_file_blocked_action_count": _to_int(routing_canary_file_action_summary.get("blocked_action_count")),
+            "routing_canary_file_routing_apply_action_count": _to_int(routing_canary_file_action_summary.get("routing_apply_action_count")),
+            "routing_canary_file_unsafe_routing_apply_action_count": _to_int(routing_canary_file_action_summary.get("unsafe_routing_apply_action_count")),
             "preview_verified_successor_count": preview_verified_count,
             "preview_required_successor_count": preview_required_count,
             "preview_blocked_successor_count": preview_blocked_count,
@@ -9852,6 +10263,7 @@ def build_local_activation_next_action_queue(stats_summary: dict[str, Any]) -> d
         "successor_actions": successor_actions[:20],
         "successor_decisions": successor_decisions[:20],
         "cache_replay_file_action_drafts": cache_replay_file_action_drafts,
+        "routing_canary_file_action_drafts": routing_canary_file_action_drafts,
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,

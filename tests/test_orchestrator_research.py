@@ -4190,6 +4190,213 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn('"policy_files_written": true', rendered.lower())
         self.assertNotIn('"emits_cache_apply_action": true', rendered.lower())
 
+    def test_ranked_routing_downgrade_drills_emit_reviewable_file_canary_drafts(self):
+        routing_drills = {
+            "schema": "tokenclaw.request_shape_routing_downgrade_drills.v1",
+            "status": "ranked",
+            "summary": {
+                "candidate_count": 3,
+                "review_ready_count": 1,
+                "blocked_count": 2,
+                "default_canary_fraction": 0.1,
+                "default_holdout_fraction": 0.1,
+                "provider_calls_made": 0,
+                "managed_server_calls_made": 0,
+                "policy_files_written": False,
+            },
+            "candidates": [
+                {
+                    "schema": "tokenclaw.request_shape_routing_downgrade_drill.v1",
+                    "fingerprint": "routing-drill:safechat",
+                    "source_evidence_schema": "tokenclaw.request_shape_rollups.v1",
+                    "rank": 1,
+                    "provider_family": "openai",
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "requested_model_family": "gpt-5",
+                    "candidate_target_model": "gpt-5-mini",
+                    "target_model_family": "gpt-5-mini",
+                    "target_reason": "gpt5-to-mini-downgrade-drill",
+                    "routing_status": "passthrough",
+                    "category": "chat",
+                    "workflow_phase": "chat",
+                    "stream": False,
+                    "has_tools": False,
+                    "sample_count": 40,
+                    "row_count": 40,
+                    "projected_savings_usd": 0.2,
+                    "projected_savings_per_1000_calls_usd": 5.0,
+                    "recommended_canary_fraction": 0.1,
+                    "recommended_holdout_fraction": 0.1,
+                    "recommended_canary_sample_count": 4,
+                    "recommended_holdout_sample_count": 4,
+                    "blocker_codes": ["missing-quality-evidence"],
+                    "status": "review-ready",
+                    "readiness_state": "review-ready",
+                    "recommended_next_action": "review-routing-downgrade-canary",
+                    "review_only": True,
+                    "emits_routing_apply_action": False,
+                    "policy_files_written": False,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                    "request_id": "req-routing-drill-must-not-leak",
+                    "session_id": "session-routing-drill-must-not-leak",
+                    "individual_candidate_id": "candidate-routing-drill-must-not-leak",
+                },
+                {
+                    "schema": "tokenclaw.request_shape_routing_downgrade_drill.v1",
+                    "fingerprint": "routing-drill:toosmall",
+                    "source_evidence_schema": "tokenclaw.request_shape_rollups.v1",
+                    "rank": 2,
+                    "provider_family": "openai",
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "requested_model_family": "gpt-5",
+                    "candidate_target_model": "gpt-5-mini",
+                    "target_model_family": "gpt-5-mini",
+                    "category": "chat",
+                    "workflow_phase": "chat",
+                    "stream": False,
+                    "has_tools": False,
+                    "sample_count": 2,
+                    "row_count": 2,
+                    "projected_savings_usd": 0.01,
+                    "projected_savings_per_1000_calls_usd": 5.0,
+                    "recommended_canary_fraction": 0.0,
+                    "recommended_holdout_fraction": 0.0,
+                    "recommended_canary_sample_count": 0,
+                    "recommended_holdout_sample_count": 0,
+                    "top_blocker_code": "too-small-routing-drill-sample",
+                    "blocker_codes": ["too-small-routing-drill-sample"],
+                    "status": "blocked",
+                    "readiness_state": "blocked",
+                    "recommended_next_action": "keep-routing-downgrade-drill-blocked",
+                    "emits_routing_apply_action": False,
+                    "policy_files_written": False,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                {
+                    "schema": "tokenclaw.request_shape_routing_downgrade_drill.v1",
+                    "fingerprint": "routing-drill:thinking",
+                    "source_evidence_schema": "tokenclaw.request_shape_rollups.v1",
+                    "rank": 3,
+                    "provider_family": "anthropic",
+                    "source_surface": "anthropic_messages",
+                    "endpoint": "messages",
+                    "requested_model_family": "claude-sonnet",
+                    "candidate_target_model": "claude-haiku-4.5",
+                    "target_model_family": "claude-haiku",
+                    "category": "thinking",
+                    "workflow_phase": "thinking",
+                    "stream": True,
+                    "has_tools": False,
+                    "sample_count": 25,
+                    "row_count": 25,
+                    "projected_savings_usd": 0.1,
+                    "projected_savings_per_1000_calls_usd": 4.0,
+                    "recommended_canary_fraction": 0.0,
+                    "recommended_holdout_fraction": 0.0,
+                    "recommended_canary_sample_count": 0,
+                    "recommended_holdout_sample_count": 0,
+                    "top_blocker_code": "thinking-routing-guard",
+                    "blocker_codes": ["thinking-routing-guard"],
+                    "status": "blocked",
+                    "readiness_state": "blocked",
+                    "recommended_next_action": "keep-routing-downgrade-drill-blocked",
+                    "emits_routing_apply_action": False,
+                    "policy_files_written": False,
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+        source = {
+            "request_shape_rollup_candidates": {
+                "schema": "tokenclaw.request_shape_rollup_candidate_signal.v1",
+                "routing_downgrade_drills": routing_drills,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            }
+        }
+
+        queue = build_local_activation_next_action_queue(source)
+        repeated = build_local_activation_next_action_queue(source)
+
+        self.assertEqual(queue["summary"]["routing_canary_file_action_draft_count"], 3)
+        self.assertEqual(queue["summary"]["routing_canary_file_policy_patch_draft_count"], 1)
+        self.assertEqual(queue["summary"]["routing_canary_file_blocked_action_count"], 2)
+        self.assertEqual(queue["summary"]["routing_canary_file_routing_apply_action_count"], 0)
+        self.assertEqual(queue["summary"]["routing_canary_file_unsafe_routing_apply_action_count"], 0)
+        self.assertFalse(queue["privacy"]["policy_files_written"])
+
+        actions = {row["source_fingerprint"]: row for row in queue["successor_actions"]}
+        safe_action = next(
+            row
+            for row in queue["successor_actions"]
+            if row.get("routing_downgrade_drill_status") == "review-ready"
+            and row.get("candidate_target_model") == "gpt-5-mini"
+        )
+        safe_source = safe_action["source_fingerprint"]
+        self.assertEqual(safe_action["local_action_family"], "routing")
+        self.assertEqual(safe_action["routing_downgrade_drill_status"], "review-ready")
+        self.assertEqual(safe_action["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(safe_action["target_local_policy_section"], "routing.rules")
+        self.assertEqual(safe_action["canary_fraction"], 0.1)
+        self.assertEqual(safe_action["holdout_fraction"], 0.1)
+        self.assertEqual(safe_action["recommended_canary_sample_count"], 4)
+        self.assertEqual(safe_action["recommended_holdout_sample_count"], 4)
+        self.assertFalse(safe_action["emits_routing_apply_action"])
+        self.assertFalse(safe_action["policy_files_written"])
+        self.assertTrue(safe_action["privacy"]["metadata_only"])
+        self.assertFalse(safe_action["privacy"]["request_ids_included"])
+        self.assertFalse(safe_action["privacy"]["session_ids_included"])
+
+        draft_report = queue["routing_canary_file_action_drafts"]
+        self.assertEqual(draft_report["schema"], "tokenclaw.routing_canary_file_action_drafts.v1")
+        self.assertTrue(draft_report["privacy"]["metadata_only"])
+        self.assertFalse(draft_report["privacy"]["provider_bodies_included"])
+        self.assertFalse(draft_report["privacy"]["request_ids_included"])
+        self.assertFalse(draft_report["privacy"]["session_ids_included"])
+        self.assertFalse(draft_report["privacy"]["individual_candidate_ids_included"])
+        drafts = {row["source_fingerprint"]: row for row in draft_report["drafts"]}
+        repeated_drafts = {
+            row["source_fingerprint"]: row
+            for row in repeated["routing_canary_file_action_drafts"]["drafts"]
+        }
+        self.assertEqual(drafts[safe_source]["draft_id"], repeated_drafts[safe_source]["draft_id"])
+        safe_draft = drafts[safe_source]
+        self.assertEqual(safe_draft["status"], "drafted")
+        self.assertEqual(safe_draft["draft_action"], "stage-routing-downgrade-canary")
+        self.assertEqual(safe_draft["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(safe_draft["target_local_policy_section"], "routing.rules")
+        self.assertEqual(safe_draft["projected_savings_per_1000_calls_usd"], 5.0)
+        patch = safe_draft["proposed_policy_patch"]
+        self.assertEqual(patch["operation"], "stage_routing_downgrade_canary")
+        rule = patch["routing_rules"][0]
+        self.assertFalse(rule["enabled"])
+        self.assertEqual(rule["mode"], "canary")
+        self.assertTrue(rule["review_only"])
+        self.assertEqual(rule["route_to"], "gpt-5-mini")
+        self.assertEqual(rule["canary_fraction"], 0.1)
+        self.assertEqual(rule["holdout_fraction"], 0.1)
+        self.assertEqual(rule["source_evidence_schema"], "tokenclaw.request_shape_rollups.v1")
+        self.assertEqual(rule["source_rank"], 1)
+        self.assertIn("safety_stop", rule)
+
+        blocked_reasons = {row["blocked_reason"] for row in draft_report["drafts"] if row["status"] == "blocked"}
+        self.assertIn("too-small-routing-drill-sample", blocked_reasons)
+        self.assertIn("thinking-routing-guard", blocked_reasons)
+        for draft in draft_report["drafts"]:
+            self.assertFalse(draft["emits_routing_apply_action"])
+            self.assertFalse(draft["policy_files_written"])
+            self.assertFalse(draft["provider_calls_made"])
+            self.assertFalse(draft["managed_server_calls_made"])
+
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("req-routing-drill-must-not-leak", rendered)
+        self.assertNotIn("session-routing-drill-must-not-leak", rendered)
+        self.assertNotIn("candidate-routing-drill-must-not-leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertNotIn('"emits_routing_apply_action": true', rendered.lower())
+
     def test_stored_no_data_preview_outcomes_keep_successor_blocked(self):
         ledger = {
             "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
