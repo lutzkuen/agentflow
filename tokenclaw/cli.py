@@ -1721,6 +1721,51 @@ def managed_routing_pathway_outcomes_cli(
     return 0 if not bool((result.get("egress_guard") or {}).get("blocked")) else 1
 
 
+def managed_routing_canary_action_drafts_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Convert managed routing pathway outcome scores into review-only local routing canary action drafts"
+    )
+    parser.add_argument(
+        "--scores-json",
+        required=True,
+        help="Path to managed routing outcome scores, managed-history rollups, or scored pathway outcome JSON.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    from tokenclaw.managed_routing_canary_action_drafts import (
+        build_managed_routing_canary_action_drafts,
+    )
+    from tokenclaw.orchestrator_research import load_json_file, write_json
+
+    try:
+        source = load_json_file(args.scores_json)
+    except (OSError, ValueError, TypeError) as exc:
+        _write_json(stderr, {"ok": False, "error": {"type": exc.__class__.__name__, "message": str(exc)}})
+        return 1
+    if not isinstance(source, dict):
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "error": {"type": "invalid_scores_json", "message": "scores JSON must be an object"},
+            },
+        )
+        return 1
+
+    result = build_managed_routing_canary_action_drafts(source)
+    write_json(stdout, result, pretty=args.pretty)
+    return 0 if not bool((result.get("egress_guard") or {}).get("blocked")) else 1
+
+
 def proxy_main() -> None:
     # The provider proxy forwards real API credentials and request bodies upstream.
     # Keep installed CLI defaults localhost-only unless the user explicitly opts in
@@ -2207,6 +2252,10 @@ def managed_routing_pathway_candidates_main() -> None:
 
 def managed_routing_pathway_outcomes_main() -> None:
     raise SystemExit(managed_routing_pathway_outcomes_cli())
+
+
+def managed_routing_canary_action_drafts_main() -> None:
+    raise SystemExit(managed_routing_canary_action_drafts_cli())
 
 
 def post_promotion_priority_delta_review_main() -> None:

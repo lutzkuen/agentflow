@@ -149,6 +149,7 @@ tokenclaw-managed-activation-preview = "tokenclaw.cli:managed_activation_preview
 tokenclaw-managed-activation-preview-outcomes = "tokenclaw.cli:managed_activation_preview_outcomes_main"
 tokenclaw-managed-routing-pathway-candidates = "tokenclaw.cli:managed_routing_pathway_candidates_main"
 tokenclaw-managed-routing-pathway-outcomes = "tokenclaw.cli:managed_routing_pathway_outcomes_main"
+tokenclaw-managed-routing-canary-action-drafts = "tokenclaw.cli:managed_routing_canary_action_drafts_main"
 
 [tool.setuptools]
 packages = ["tokenclaw", "tokenclaw.cli_commands", "tokenclaw.optimization"]
