@@ -7,11 +7,13 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
 from tokenclaw import cache as cache_module
 from tokenclaw import cli
+from tokenclaw import routing_experiments
 from tokenclaw.request_shape_rollups import (
     apply_request_shape_cache_replay_canary_action,
     apply_request_shape_crunch_canary_action,
@@ -183,6 +185,81 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(follow_up["source_traffic_acquisition"]["attempted"])
         self.assertEqual(follow_up["summary"]["top_next_action"], "emit-request-shape-rollups")
         self.assertEqual(follow_up["missing_measurements"], ["no-source-traffic-for-request-shape-rollups"])
+
+    def test_rollups_backfill_from_dashboard_added_routing_candidates_without_call_rows(self) -> None:
+        raw_candidate_id = "raw-dashboard-candidate-id-must-not-leak"
+        policy = {
+            "routing_candidates": [
+                {
+                    "candidate_id": raw_candidate_id,
+                    "candidate_source": "dashboard-added",
+                    "requested_model": "gpt-5-codex",
+                    "routed_model": "gpt-5-mini",
+                    "provider": "openai",
+                    "source_surface": "codex_turn",
+                    "app_family": "codex",
+                    "category": "codex-turn",
+                    "workflow_phase": "summary",
+                    "stream": False,
+                    "max_text_chars": 8000,
+                    "sample_weight": 4,
+                },
+                {
+                    "candidate_id": "dashboard-claude-tool-result",
+                    "candidate_source": "dashboard-recent-call",
+                    "requested_model": "claude-opus-4-8",
+                    "routed_model": "claude-sonnet-4-6",
+                    "provider": "anthropic",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "category": "tool-result",
+                    "workflow_phase": "tool-execution",
+                    "stream": True,
+                    "max_text_chars": 128000,
+                },
+            ],
+            "model_pairs": [],
+        }
+        with patch.object(routing_experiments, "ROUTING_EXPERIMENT_POLICY", policy):
+            report = build_request_shape_rollups_report(self.store, limit=10, persist=False, run_id="dashboard-backfill")
+            repeated = build_request_shape_rollups_report(self.store, limit=10, persist=False, run_id="dashboard-backfill-2")
+
+        follow_up = report["follow_up_candidates"]
+        self.assertEqual(report["window"]["source"], "dashboard-routing-candidates")
+        self.assertTrue(report["summary"]["dashboard_candidate_backfilled"])
+        self.assertEqual(report["summary"]["dashboard_candidate_backfill_rows"], 5)
+        self.assertEqual(report["summary"]["rows_considered"], 5)
+        self.assertEqual(report["source_traffic_acquisition"]["source"], "dashboard-routing-candidates")
+        self.assertEqual(report["source_traffic_acquisition"]["status"], "completed")
+        self.assertEqual(follow_up["schema"], "tokenclaw.request_shape_follow_up_candidates.v1")
+        self.assertEqual(follow_up["status"], "candidates-ranked")
+        self.assertEqual(follow_up["source_traffic_acquisition_status"], "completed")
+        self.assertEqual(follow_up["missing_measurements"], [])
+        self.assertGreaterEqual(follow_up["summary"]["ranked_candidate_count"], 2)
+        top = follow_up["top_candidate"]
+        self.assertTrue(top["fingerprint"].startswith("request-shape-follow-up:"))
+        self.assertEqual(top["local_action_family"], "routing")
+        self.assertEqual(top["next_action"], "stage-routing-lifecycle-evidence")
+        self.assertEqual(top["readiness_state"], "needs-lifecycle-evidence")
+        self.assertIn("routing", top["candidate_work_classes"])
+        self.assertIn("routing_candidate", top["candidate_families"])
+        self.assertTrue(top["privacy"]["metadata_only"])
+        self.assertTrue(top["privacy"]["aggregate_only"])
+        self.assertFalse(top["privacy"]["provider_calls_made"])
+        self.assertFalse(top["privacy"]["managed_server_calls_made"])
+        self.assertFalse(top["privacy"]["individual_candidate_ids_included"])
+        self.assertEqual(
+            [item["fingerprint"] for item in follow_up["candidates"]],
+            [item["fingerprint"] for item in repeated["follow_up_candidates"]["candidates"]],
+        )
+        rendered = json.dumps(report, sort_keys=True)
+        rendered_follow_up = json.dumps(follow_up, sort_keys=True)
+        self.assertNotIn(raw_candidate_id, rendered)
+        self.assertNotIn('"candidate_id"', rendered_follow_up)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
 
     def test_routing_downgrade_drills_rank_review_only_candidates_with_stable_fingerprints(self) -> None:
         rollups = [

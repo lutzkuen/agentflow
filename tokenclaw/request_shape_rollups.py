@@ -65,6 +65,7 @@ CRUNCH_POST_MAX_ROLLOUT_DECISION_SCHEMA = "tokenclaw.request_shape_crunch_post_m
 FOLLOW_UP_CANDIDATES_SCHEMA = "tokenclaw.request_shape_follow_up_candidates.v1"
 FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "tokenclaw.request_shape_blocker_cohort.v1"
 SOURCE_TRAFFIC_ACQUISITION_SCHEMA = "tokenclaw.source_traffic_acquisition_action.v1"
+DASHBOARD_ROUTING_CANDIDATE_ROLLUP_SOURCE_SCHEMA = "tokenclaw.dashboard_routing_candidate_rollups.v1"
 ROUTING_DOWNGRADE_DRILL_SCHEMA = "tokenclaw.request_shape_routing_downgrade_drills.v1"
 ROUTING_DOWNGRADE_DRILL_ROW_SCHEMA = "tokenclaw.request_shape_routing_downgrade_drill.v1"
 DEPENDENCY_EVIDENCE_CLASSES = (
@@ -227,6 +228,19 @@ def _source_surface(row: dict[str, Any], provider: str, endpoint: str) -> str:
         return f"openai_{endpoint}"
     if provider == "anthropic":
         return "anthropic_messages"
+    return "unknown"
+
+
+def _app_family(provider: str, source_surface: str, requested_model: Any) -> str:
+    provider_l = str(provider or "").lower()
+    surface_l = str(source_surface or "").lower()
+    model_l = str(requested_model or "").lower()
+    if provider_l == "anthropic" or surface_l == "anthropic_messages":
+        return "claude_code"
+    if provider_l == "openai" and (surface_l == "codex_turn" or "codex" in model_l):
+        return "codex"
+    if provider_l == "openai":
+        return "generic_openai"
     return "unknown"
 
 
@@ -12519,6 +12533,11 @@ def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, A
     provider = public_label(row.get("provider_family"), "unknown")
     source_surface = public_label(row.get("source_surface"), "unknown")
     endpoint = public_label(row.get("endpoint"), "unknown")
+    app_family = public_label(
+        row.get("app_family")
+        or _app_family(provider, source_surface, row.get("requested_model_family")),
+        "unknown",
+    )
     row_count = _as_int(row.get("row_count") or row.get("count"))
     cost = _as_float(row.get("cost_est_usd"))
     observed_savings = _as_float(row.get("observed_savings_usd"))
@@ -12550,13 +12569,35 @@ def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, A
         - error_count * 5.0
         - retry_count * 0.5
     )
+    fingerprint_material = {
+        "schema": FOLLOW_UP_BLOCKER_COHORT_SCHEMA,
+        "provider_family": provider,
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+        "app_family": app_family,
+        "requested_model_family": public_label(row.get("requested_model_family"), "unknown"),
+        "routed_model_family": public_label(row.get("routed_model_family"), "unknown"),
+        "category": public_label(row.get("category"), "unknown"),
+        "workflow_phase": public_label(row.get("workflow_phase"), "unknown"),
+        "stream": bool(row.get("stream")),
+        "has_tools": bool(row.get("has_tools")),
+        "text_bucket": public_label(row.get("text_bucket"), "unknown"),
+        "token_bucket": public_label(row.get("token_bucket"), "unknown"),
+        "cache_status": public_label(row.get("cache_status"), "unknown"),
+        "routing_status": public_label(row.get("routing_status"), "unknown"),
+        "candidate_work_classes": classes,
+        "candidate_families": families,
+    }
+    digest = hashlib.sha256(stable_json(fingerprint_material).encode("utf-8")).hexdigest()[:16]
     return {
         "schema": FOLLOW_UP_BLOCKER_COHORT_SCHEMA,
+        "fingerprint": f"request-shape-follow-up:{digest}",
         "rank": rank,
         "provider_surface_bucket": "/".join(part for part in (provider, source_surface, endpoint) if part) or "mixed",
         "provider_family": provider,
         "source_surface": source_surface,
         "endpoint": endpoint,
+        "app_family": app_family,
         "requested_model_family": public_label(row.get("requested_model_family"), "unknown"),
         "routed_model_family": public_label(row.get("routed_model_family"), "unknown"),
         "category": public_label(row.get("category"), "unknown"),
@@ -12686,6 +12727,130 @@ def build_request_shape_follow_up_candidates(
         "missing_measurements": missing,
         "privacy": _shape_follow_up_privacy(),
     }
+
+
+def _dashboard_candidate_source_surface(candidate: dict[str, Any], provider: str) -> str:
+    source_surface = public_label(candidate.get("source_surface"), "")
+    if source_surface:
+        return source_surface
+    if provider == "anthropic":
+        return "anthropic_messages"
+    if provider == "openai":
+        return "openai_responses"
+    return "unknown"
+
+
+def _dashboard_candidate_endpoint(provider: str, source_surface: str) -> str:
+    if source_surface == "anthropic_messages":
+        return "messages"
+    if source_surface in {"openai_chat", "openai_chat_completions"}:
+        return "chat_completions"
+    if source_surface in {"openai_responses", "codex_turn"} or provider == "openai":
+        return "responses"
+    return "unknown"
+
+
+def _dashboard_candidate_representative_text_chars(candidate: dict[str, Any]) -> int:
+    minimum = _as_int(candidate.get("min_text_chars"))
+    maximum = _as_int(candidate.get("max_text_chars"))
+    if minimum > 0 and maximum > 0:
+        return max(1, (minimum + maximum) // 2)
+    if maximum > 0:
+        return max(1, maximum - 1)
+    if minimum > 0:
+        return minimum
+    return 0
+
+
+def _dashboard_candidate_sample_count(candidate: dict[str, Any]) -> int:
+    weighted = _as_float(candidate.get("sample_weight"))
+    if weighted > 0:
+        return max(1, int(math.ceil(weighted)))
+    return 1
+
+
+def _dashboard_routing_candidate_rollup_rows(*, limit: int) -> list[dict[str, Any]]:
+    try:
+        from tokenclaw import routing_experiments
+
+        all_candidates = getattr(routing_experiments, "_all_routing_candidates")()
+        is_dashboard_candidate = getattr(routing_experiments, "_is_dashboard_routing_candidate")
+    except Exception:
+        return []
+
+    groups: dict[str, dict[str, Any]] = {}
+    for candidate in all_candidates:
+        if not isinstance(candidate, dict) or not is_dashboard_candidate(candidate):
+            continue
+        provider = public_label(candidate.get("provider"), "unknown")
+        requested_model = public_label(candidate.get("requested_model"), "unknown")
+        routed_model = public_label(candidate.get("routed_model"), requested_model)
+        source_surface = _dashboard_candidate_source_surface(candidate, provider)
+        endpoint = _dashboard_candidate_endpoint(provider, source_surface)
+        app_family = public_label(
+            candidate.get("app_family") or _app_family(provider, source_surface, requested_model),
+            "unknown",
+        )
+        category = public_label(candidate.get("category"), "unknown")
+        workflow_phase = public_label(candidate.get("workflow_phase") or category, "unknown")
+        stream = bool(candidate.get("stream")) if candidate.get("stream") is not None else False
+        has_tools = category.startswith("tool")
+        text_chars = _dashboard_candidate_representative_text_chars(candidate)
+        input_tokens = _as_int(candidate.get("max_input_tokens") or candidate.get("min_input_tokens"))
+        if input_tokens <= 0 and text_chars > 0:
+            input_tokens = max(1, text_chars // 4)
+        sample_count = _dashboard_candidate_sample_count(candidate)
+        basis = {
+            "source_surface": source_surface,
+            "endpoint": endpoint,
+            "provider_family": provider,
+            "app_family": app_family,
+            "requested_model_family": _model_family(requested_model),
+            "routed_model_family": _model_family(routed_model, _model_family(requested_model)),
+            "category": category,
+            "workflow_phase": workflow_phase,
+            "stream": stream,
+            "has_tools": has_tools,
+            "text_bucket": _text_bucket(text_chars),
+            "token_bucket": _token_bucket(input_tokens),
+            "cache_status": "skipped" if stream or has_tools else "missing",
+            "routing_status": "passthrough",
+            "file_dependency_status": "missing",
+            "file_dependency_fingerprint_available": False,
+        }
+        rollup_key = hashlib.sha256(stable_json(basis).encode("utf-8")).hexdigest()[:24]
+        group = groups.setdefault(
+            rollup_key,
+            _new_group(basis, candidate_id=_candidate_id(basis), rollup_key=rollup_key),
+        )
+        group["source_schema"] = DASHBOARD_ROUTING_CANDIDATE_ROLLUP_SOURCE_SCHEMA
+        group["row_count"] += sample_count
+        group["input_tokens"] += input_tokens * sample_count
+        group["successful_input_tokens"] += input_tokens * sample_count
+        _increment(group["status_counts"], "dashboard-candidate-metadata", sample_count)
+        _increment(group["candidate_family_counts"], "routing_candidate", sample_count)
+        _increment(group["blocker_counts"], "dashboard-routing-candidate-needs-lifecycle-evidence", sample_count)
+        _increment(group["cache_reason_counts"], "dashboard-candidate-metadata", sample_count)
+        _increment(group["file_dependency_status_counts"], "missing", sample_count)
+        _increment(group["file_dependency_fingerprint_availability_counts"], "missing", sample_count)
+
+    rollups = [_finalize_group(group) for group in groups.values()]
+    for row in rollups:
+        row["source_schema"] = DASHBOARD_ROUTING_CANDIDATE_ROLLUP_SOURCE_SCHEMA
+        row["sample_count"] = _as_int(row.get("row_count"))
+        row["metadata"]["source"] = "dashboard-routing-candidates"
+        row["metadata"]["dashboard_routing_candidate_rollup"] = True
+        row["privacy"]["individual_candidate_ids_included"] = False
+    rollups.sort(
+        key=lambda item: (
+            _as_int(item.get("row_count")),
+            item.get("provider_family") or "",
+            item.get("source_surface") or "",
+            item.get("category") or "",
+        ),
+        reverse=True,
+    )
+    return rollups[: max(1, min(_as_int(limit, 1000), 10_000))]
 
 
 def _context_plateau_source_surface(row: dict[str, Any]) -> str:
@@ -12997,6 +13162,7 @@ def _snapshot_safe_rollup_row(row: dict[str, Any], *, source_schema: str | None 
         "provider_family": public_label(row.get("provider_family"), "unknown"),
         "source_surface": public_label(row.get("source_surface"), "unknown"),
         "endpoint": public_label(row.get("endpoint"), "unknown"),
+        "app_family": public_label(row.get("app_family"), "unknown"),
         "requested_model_family": public_label(row.get("requested_model_family"), "unknown"),
         "routed_model_family": public_label(row.get("routed_model_family"), "unknown"),
         "category": public_label(row.get("category"), "unknown"),
@@ -13354,9 +13520,14 @@ def build_request_shape_rollups_report(
         ).fetchall()
     ]
     metadata_window_backfilled = False
+    dashboard_candidate_backfilled = False
     if not rows:
         rows = _codex_metadata_window_rows(store_obj, limit=capped_limit)
         metadata_window_backfilled = bool(rows)
+    dashboard_candidate_rollups: list[dict[str, Any]] = []
+    if not rows:
+        dashboard_candidate_rollups = _dashboard_routing_candidate_rollup_rows(limit=capped_limit)
+        dashboard_candidate_backfilled = bool(dashboard_candidate_rollups)
 
     groups: dict[str, dict[str, Any]] = {}
     provider_counts: dict[str, int] = {}
@@ -13508,7 +13679,7 @@ def build_request_shape_rollups_report(
             policy_id = str(crunch_canary_lifecycle.get("policy_id") or "unknown")
             _increment(group["crunch_canary_policy_counts"], policy_id)
 
-    rollups = [_finalize_group(group) for group in groups.values()]
+    rollups = dashboard_candidate_rollups or [_finalize_group(group) for group in groups.values()]
     rollups.sort(
         key=lambda item: (
             _as_float(item.get("observed_savings_usd")),
@@ -13518,6 +13689,17 @@ def build_request_shape_rollups_report(
         ),
         reverse=True,
     )
+    if dashboard_candidate_backfilled:
+        provider_counts = {}
+        candidate_family_counts = {}
+        blocker_counts = {}
+        for row in rollups:
+            row_count = _as_int(row.get("row_count") or row.get("sample_count"))
+            _increment(provider_counts, row.get("provider_family"), row_count)
+            for family in row.get("candidate_families") or []:
+                _increment(candidate_family_counts, family, row_count)
+            for blocker in row.get("blocker_codes") or []:
+                _increment(blocker_counts, blocker, row_count)
     persistable = [
         _persistable_row(
             run_id=run_id,
@@ -13561,7 +13743,12 @@ def build_request_shape_rollups_report(
         crunch_policy_decision=crunch_policy_decision,
         crunch_canary_impact=crunch_canary_impact,
     )
-    source = "recent-local-metadata-window-backfill" if metadata_window_backfilled else "recent-local-call-metadata"
+    if dashboard_candidate_backfilled:
+        source = "dashboard-routing-candidates"
+    elif metadata_window_backfilled:
+        source = "recent-local-metadata-window-backfill"
+    else:
+        source = "recent-local-call-metadata"
     follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10, source=source)
     routing_downgrade_drills = build_request_shape_routing_downgrade_drill_report(rollups, limit=25)
     remaining_crunch_measurements = build_request_shape_crunch_remaining_measurement_report(
@@ -13588,6 +13775,11 @@ def build_request_shape_rollups_report(
         crunch_canary_impact["summary"]["repeated_context_blocked_count"] = repeated_context_impact_rows["summary"]["blocked_count"]
         crunch_canary_impact["summary"]["repeated_context_superseded_count"] = repeated_context_impact_rows["summary"]["superseded_count"]
 
+    rows_considered = (
+        sum(_as_int(row.get("row_count") or row.get("sample_count")) for row in rollups)
+        if dashboard_candidate_backfilled
+        else len(rows)
+    )
     report = {
         "schema": SCHEMA,
         "generated_at": generated_at,
@@ -13601,11 +13793,13 @@ def build_request_shape_rollups_report(
             "source": source,
         },
         "summary": {
-            "rows_considered": len(rows),
+            "rows_considered": rows_considered,
             "rollup_count": len(rollups),
-            "collapsed_rows": max(0, len(rows) - len(rollups)),
+            "collapsed_rows": max(0, rows_considered - len(rollups)),
             "metadata_window_backfilled": metadata_window_backfilled,
             "metadata_window_backfill_rows": len(rows) if metadata_window_backfilled else 0,
+            "dashboard_candidate_backfilled": dashboard_candidate_backfilled,
+            "dashboard_candidate_backfill_rows": rows_considered if dashboard_candidate_backfilled else 0,
             "source_traffic_acquisition_status": follow_up_candidates["source_traffic_acquisition_status"],
             "source_traffic_acquisition_attempted": True,
             "total_cost_est_usd": round(sum(_as_float(row.get("cost_est_usd")) for row in rollups), 6),
