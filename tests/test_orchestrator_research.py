@@ -3948,6 +3948,177 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw rollback guidance prompt must not leak", rendered)
         self.assertNotIn('"policy_files_written": true', rendered.lower())
 
+    def test_scored_cache_reobserve_previews_drive_local_successor_decisions(self):
+        score_rows = [
+            ("activation:cache-promote", "promote-ready", "promote-cache-replay-rule", "ready"),
+            ("activation:cache-warmup", "keep-staged-warmup", "keep-cache-replay-canary-staged", "keep-staged-warmup"),
+            (
+                "activation:cache-retire",
+                "retire-staged-no-repeat",
+                "retire-cache-replay-canary-no-repeat",
+                "retire-staged-no-repeat",
+            ),
+            ("activation:cache-rollback", "rollback-required", "rollback-cache-replay-rule", "rollback-required"),
+            ("activation:cache-unsafe-tools", "keep-blocked", "keep-cache-replay-blocked", "keep-blocked"),
+        ]
+        ledger = {
+            "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",
+            "status": "tracked",
+            "entries": [
+                {
+                    "schema": "tokenclaw.evidence_to_activation_next_action_ledger_entry.v1",
+                    "rank": index,
+                    "fingerprint": source,
+                    "lever": "cache",
+                    "local_action_family": "cache",
+                    "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                    "state": "blocked",
+                    "current_status": "blocked",
+                    "issue_worthy_status": "blocked",
+                    "next_action": "refresh-managed-activation-preview",
+                    "blocker_codes": ["evidence-older-than-max-age"],
+                    "sample_count": 36,
+                    "projected_savings_usd": 0.075373,
+                    "target_local_rule_file": "cache_rules.yaml",
+                    "target_local_policy_section": "cache.pattern_rules",
+                    "emits_cache_apply_action": False,
+                    "policy_files_written": False,
+                    "cache_apply_action_count": 0,
+                    "cache_entries_written": 0,
+                    "tool_cache_replay_enabled": False if source.endswith("unsafe-tools") else None,
+                    "streaming_replay_enabled": False if source.endswith("unsafe-tools") else None,
+                    "request_id": "req-cache-score-must-not-leak",
+                    "session_id": "session-cache-score-must-not-leak",
+                }
+                for index, (source, _score, _next, _decision) in enumerate(score_rows, start=1)
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+        outcomes = [
+            {
+                "schema": "tokenclaw.managed_activation_preview_outcome.v1",
+                "outcome_fingerprint": f"managed-preview-outcome:{source}",
+                "source_fingerprint": source,
+                "preview_ref": f"preview:{score}",
+                "local_action_family": "cache",
+                "evidence_schema": "tokenclaw.request_shape_cache_replay_evidence.v1",
+                "classification": "accepted",
+                "managed_preview_classification": "accepted",
+                "decision": "accepted",
+                "cache_reobserve_decision": score,
+                "promotion_readiness": score,
+                "promotion_decision": score,
+                "next_action": next_action,
+                "preview_age_hours": 1.0,
+                "stale_after_hours": 72.0,
+                "stale": False,
+                "missing_preview_decision": False,
+                "failed_closed": False,
+                "disagrees_with_local_evidence": False,
+                "policy_files_written": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": True,
+                "cache_apply_action_count": 0,
+                "cache_entries_written": 0,
+                "emits_cache_apply_action": False,
+                "reason_codes": [score],
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+                "raw_prompt": "raw scored cache preview prompt must not leak",
+                "request_id": "managed-request-must-not-leak",
+                "session_id": "managed-session-must-not-leak",
+                "cache_key": "raw-cache-key-must-not-leak",
+                "individual_candidate_id": "candidate-must-not-leak",
+            }
+            for source, score, next_action, _decision in score_rows
+        ]
+        source = {
+            "evidence_to_activation_next_action_ledger": ledger,
+            "managed_activation_preview_outcomes": {
+                "schema": "tokenclaw.managed_activation_preview_outcomes.v1",
+                "status": "tracked",
+                "managed_dependency": "optional",
+                "managed_server_calls_made": True,
+                "summary": {
+                    "stored_preview_outcome_count": len(outcomes),
+                    "stale_count": 0,
+                    "missing_preview_decision_count": 0,
+                    "failed_closed_count": 0,
+                    "disagreement_count": 0,
+                    "policy_files_written": False,
+                    "provider_calls_made": False,
+                },
+                "outcomes": outcomes,
+                "privacy": {"metadata_only": True, "aggregate_only": True},
+            },
+            "managed_activation_preview_health": {
+                "schema": "tokenclaw.local_activation_executor_handoff_preview_health.v1",
+                "status": "ready",
+                "accepted_batch_count": 1,
+                "rejected_batch_count": 0,
+                "submitted_row_count": len(outcomes),
+                "previewed_row_count": len(outcomes),
+                "omitted_row_count": 0,
+                "rejected_row_count": 0,
+                "privacy_rejection_count": 0,
+                "latest_preview_age_hours": 1.0,
+                "previewed_counts_by_local_action_family": {"cache": len(outcomes)},
+                "top_omission_reasons": [],
+                "top_rejection_reasons": [],
+            },
+        }
+        queue = build_local_activation_next_action_queue(source)
+        repeat_queue = build_local_activation_next_action_queue(source)
+
+        actions = {row["source_fingerprint"]: row for row in queue["successor_actions"]}
+        decisions = {row["source_fingerprint"]: row for row in queue["successor_decisions"]}
+        repeat_decisions = {row["source_fingerprint"]: row for row in repeat_queue["successor_decisions"]}
+        for source_fingerprint, score, next_action, decision_value in score_rows:
+            with self.subTest(score=score):
+                action = actions[source_fingerprint]
+                decision = decisions[source_fingerprint]
+                self.assertTrue(action["preview_verified"])
+                self.assertEqual(action["preview_verification_status"], "preview-verified")
+                self.assertEqual(action["cache_reobserve_decision"], score)
+                self.assertEqual(action["promotion_readiness"], score)
+                self.assertEqual(action["recommended_next_action"], next_action)
+                self.assertEqual(action["successor_status"], decision_value)
+                self.assertEqual(action["cache_apply_action_count"], 0)
+                self.assertEqual(action["cache_entries_written"], 0)
+                self.assertFalse(action["emits_cache_apply_action"])
+                self.assertFalse(action["policy_files_written"])
+                self.assertFalse(action["privacy"]["provider_calls_made"])
+                self.assertFalse(action["privacy"]["raw_prompts_included"])
+                self.assertFalse(action["privacy"]["provider_bodies_included"])
+                self.assertFalse(action["privacy"]["request_ids_included"])
+                self.assertFalse(action["privacy"]["session_ids_included"])
+                self.assertFalse(action["privacy"]["cache_keys_included"])
+                self.assertFalse(action["privacy"]["individual_candidate_ids_included"])
+
+                self.assertEqual(decision["decision"], decision_value)
+                self.assertEqual(decision["recommended_next_action"], next_action)
+                self.assertEqual(decision["cache_reobserve_decision"], score)
+                self.assertTrue(decision["preview_verified"])
+                self.assertEqual(decision["preview_agreement_status"], "agreed")
+                self.assertEqual(decision["cache_apply_action_count"], 0)
+                self.assertEqual(decision["cache_entries_written"], 0)
+                self.assertFalse(decision["emits_cache_apply_action"])
+                self.assertFalse(decision["policy_files_written"])
+                self.assertEqual(decision["fingerprint"], repeat_decisions[source_fingerprint]["fingerprint"])
+
+        self.assertEqual(decisions["activation:cache-promote"]["issue_worthy_status"], "ready")
+        self.assertEqual(decisions["activation:cache-retire"]["issue_worthy_status"], "suppressed")
+        self.assertEqual(decisions["activation:cache-unsafe-tools"]["decision"], "keep-blocked")
+
+        rendered = json.dumps(queue, sort_keys=True)
+        self.assertNotIn("raw scored cache preview prompt must not leak", rendered)
+        self.assertNotIn("req-cache-score-must-not-leak", rendered)
+        self.assertNotIn("managed-request-must-not-leak", rendered)
+        self.assertNotIn("managed-session-must-not-leak", rendered)
+        self.assertNotIn("raw-cache-key-must-not-leak", rendered)
+        self.assertNotIn("candidate-must-not-leak", rendered)
+        self.assertNotIn('"policy_files_written": true', rendered.lower())
+        self.assertNotIn('"emits_cache_apply_action": true', rendered.lower())
+
     def test_stored_no_data_preview_outcomes_keep_successor_blocked(self):
         ledger = {
             "schema": "tokenclaw.evidence_to_activation_next_action_ledger.v1",

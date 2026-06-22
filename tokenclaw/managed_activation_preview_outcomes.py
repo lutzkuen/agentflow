@@ -372,6 +372,30 @@ def _cache_rollback_guidance_from_decision(decision: dict[str, Any]) -> dict[str
     }
 
 
+def _cache_reobserve_score(decision: dict[str, Any]) -> str:
+    for key in (
+        "cache_reobserve_decision",
+        "cache_reobserve_status",
+        "promotion_readiness",
+        "promotion_decision",
+        "promotion_recommendation",
+        "decision",
+        "status",
+    ):
+        text = str(decision.get(key) or "").strip().lower().replace("_", "-")
+        if text in {"promote", "promotion-ready", "promote-ready", "widen"}:
+            return "promote-ready"
+        if text in {"keep-staged", "keep-staged-warmup"}:
+            return "keep-staged-warmup"
+        if text in {"retire", "retired-no-repeat", "retire-staged-no-repeat"}:
+            return "retire-staged-no-repeat"
+        if text in {"rollback", "rollback-required", "rollback-needed"}:
+            return "rollback-required"
+        if text in {"keep-blocked", "blocked"}:
+            return "keep-blocked"
+    return ""
+
+
 def _outcome_from_rows(
     *,
     request_row: dict[str, Any],
@@ -547,6 +571,18 @@ def _outcome_from_rows(
         "privacy": _privacy(managed_server_calls_made=managed_server_calls_made),
     }
     if outcome["local_action_family"] == "cache":
+        cache_reobserve_score = _cache_reobserve_score(decision)
+        if cache_reobserve_score:
+            outcome["cache_reobserve_decision"] = cache_reobserve_score
+            outcome["promotion_readiness"] = cache_reobserve_score
+            outcome["promotion_decision"] = sanitize_value(
+                decision.get("promotion_decision")
+                or decision.get("promotion_recommendation")
+                or cache_reobserve_score
+            )
+            outcome["cache_apply_action_count"] = 0
+            outcome["cache_entries_written"] = 0
+            outcome["emits_cache_apply_action"] = False
         rollback_guidance = _cache_rollback_guidance_from_decision(decision)
         if rollback_guidance is not None:
             outcome["cache_rollback_guidance"] = rollback_guidance

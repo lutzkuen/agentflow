@@ -7106,6 +7106,23 @@ def _cache_rollback_guidance_from_outcome(outcome: dict[str, Any]) -> dict[str, 
     if str(outcome.get("local_action_family") or "").strip() != "cache":
         return None
     guidance = outcome.get("cache_rollback_guidance") if isinstance(outcome.get("cache_rollback_guidance"), dict) else {}
+    explicit_guidance = bool(
+        guidance
+        or outcome.get("rollback_action_type")
+        or outcome.get("disabled_reason")
+        or outcome.get("target_local_rule_file")
+        or outcome.get("target_local_policy_section")
+    )
+    scored_reobserve_rollback = bool(
+        str(outcome.get("cache_reobserve_decision") or "").strip() == "rollback-required"
+        or (
+            str(outcome.get("promotion_readiness") or "").strip() == "rollback-required"
+            and not bool(outcome.get("rollback_required"))
+            and not explicit_guidance
+        )
+    )
+    if scored_reobserve_rollback and not explicit_guidance and not bool(outcome.get("rollback_required")):
+        return None
     rollback_required = bool(
         outcome.get("rollback_required")
         or guidance.get("rollback_required")
@@ -7151,6 +7168,48 @@ def _cache_rollback_guidance_from_outcome(outcome: dict[str, Any]) -> dict[str, 
         if value not in (None, "", [], 0)
         or key in {"cache_apply_action_count", "cache_entries_written", "emits_cache_apply_action"}
     }
+
+
+def _cache_reobserve_score_from_outcome(outcome: dict[str, Any]) -> str:
+    if str(outcome.get("local_action_family") or "").strip() != "cache":
+        return ""
+    for key in (
+        "cache_reobserve_decision",
+        "cache_reobserve_status",
+        "promotion_readiness",
+        "promotion_decision",
+        "promotion_recommendation",
+        "decision",
+        "decision_status",
+        "managed_preview_classification",
+    ):
+        text = str(outcome.get(key) or "").strip().lower().replace("_", "-")
+        if text in {"promote", "promotion-ready", "promote-ready", "widen"}:
+            return "promote-ready"
+        if text in {"keep-staged", "keep-staged-warmup"}:
+            return "keep-staged-warmup"
+        if text in {"retire", "retired-no-repeat", "retire-staged-no-repeat"}:
+            return "retire-staged-no-repeat"
+        if text in {"rollback", "rollback-required", "rollback-needed"}:
+            return "rollback-required"
+        if text in {"keep-blocked", "blocked"}:
+            return "keep-blocked"
+    return ""
+
+
+def _cache_reobserve_next_action(score: str, outcome: dict[str, Any], entry: dict[str, Any]) -> str:
+    explicit = str(outcome.get("next_action") or outcome.get("recommended_next_action") or "").strip()
+    if score == "promote-ready":
+        return sanitize_value(explicit or "promote-cache-replay-rule")
+    if score == "keep-staged-warmup":
+        return sanitize_value(explicit or "keep-cache-replay-canary-staged")
+    if score == "retire-staged-no-repeat":
+        return sanitize_value(explicit or "retire-cache-replay-canary-no-repeat")
+    if score == "rollback-required":
+        return sanitize_value(explicit or "rollback-cache-replay-rule")
+    if score == "keep-blocked":
+        return sanitize_value(explicit or "keep-cache-replay-blocked")
+    return sanitize_value(explicit or entry.get("next_action") or "review-cache-replay-preview")
 
 
 def _managed_preview_successor_gate(
@@ -7242,6 +7301,7 @@ def _managed_preview_successor_gate(
         or outcome.get("provider_calls_made")
     )
     cache_rollback_guidance = _cache_rollback_guidance_from_outcome(outcome)
+    cache_reobserve_score = _cache_reobserve_score_from_outcome(outcome)
     cache_rollback_status = (
         str(cache_rollback_guidance.get("status") or "")
         if isinstance(cache_rollback_guidance, dict)
@@ -7296,6 +7356,8 @@ def _managed_preview_successor_gate(
     elif verified:
         if cache_rollback_accepted:
             decision = "rollback-required"
+        elif cache_reobserve_score:
+            decision = "ready" if cache_reobserve_score == "promote-ready" else cache_reobserve_score
         elif action_status in {"keep-current-rule", "suppress-duplicate"}:
             decision = action_status
         elif local_gate["passed"] and str(entry.get("issue_worthy_status") or "") == "ready":
@@ -7307,10 +7369,18 @@ def _managed_preview_successor_gate(
         else:
             decision = "review-only"
         status = "preview-verified"
-        reason = "local-managed-cache-rollback-guidance" if cache_rollback_accepted else "local-managed-preview-agree"
+        reason = (
+            "local-managed-cache-rollback-guidance"
+            if cache_rollback_accepted
+            else f"cache-reobserve-preview-{cache_reobserve_score}"
+            if cache_reobserve_score
+            else "local-managed-preview-agree"
+        )
         next_action = (
             "rollback-cache-replay-rule"
             if cache_rollback_accepted
+            else _cache_reobserve_next_action(cache_reobserve_score, outcome, entry)
+            if cache_reobserve_score
             else outcome.get("next_action") or entry.get("next_action")
         )
     else:
@@ -7369,6 +7439,16 @@ def _managed_preview_successor_gate(
         "rollup_outcome_status": sanitize_value(outcome.get("rollup_outcome_status")),
         "request_shape_rollup_outcome_class": sanitize_value(request_shape_outcome_class),
         "crunch_preview_decision": sanitize_value(crunch_preview_decision),
+        "cache_reobserve_decision": sanitize_value(cache_reobserve_score),
+        "promotion_readiness": sanitize_value(
+            cache_reobserve_score or outcome.get("promotion_readiness")
+        ),
+        "promotion_decision": sanitize_value(
+            outcome.get("promotion_decision") or outcome.get("promotion_recommendation") or cache_reobserve_score
+        ),
+        "promotion_recommendation": sanitize_value(
+            outcome.get("promotion_recommendation") or outcome.get("promotion_decision") or cache_reobserve_score
+        ),
         "crunch_preview_confidence": sanitize_value(outcome.get("crunch_preview_confidence")),
         "quality_risk_reason_codes": sanitize_value(outcome.get("quality_risk_reason_codes") or []),
         "projected_saved_tokens": sanitize_value(outcome.get("projected_saved_tokens")),
@@ -7409,6 +7489,10 @@ def _managed_preview_successor_gate(
     if cache_rollback_guidance is not None:
         gate["cache_rollback_guidance"] = sanitize_value(cache_rollback_guidance)
         gate["cache_rollback_guidance_status"] = sanitize_value(cache_rollback_status)
+    if cache_reobserve_score:
+        gate["cache_apply_action_count"] = 0
+        gate["cache_entries_written"] = 0
+        gate["emits_cache_apply_action"] = False
     return gate
 
 
@@ -7535,6 +7619,38 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
             action["recommended_next_action"] = sanitize_value(
                 preview_gate.get("next_action") or action["recommended_next_action"]
             )
+        elif preview_gate.get("verified") and preview_gate.get("cache_reobserve_decision"):
+            cache_reobserve_decision = sanitize_value(preview_gate.get("cache_reobserve_decision"))
+            action["successor_status"] = sanitize_value(preview_gate.get("decision") or action["successor_status"])
+            action["recommended_next_action"] = sanitize_value(
+                preview_gate.get("next_action") or action["recommended_next_action"]
+            )
+            action["cache_reobserve_decision"] = cache_reobserve_decision
+            action["promotion_readiness"] = sanitize_value(preview_gate.get("promotion_readiness") or cache_reobserve_decision)
+            action["promotion_decision"] = sanitize_value(preview_gate.get("promotion_decision") or cache_reobserve_decision)
+            action["promotion_recommendation"] = sanitize_value(
+                preview_gate.get("promotion_recommendation") or cache_reobserve_decision
+            )
+            action["rollback_required"] = cache_reobserve_decision == "rollback-required"
+            rollback_guidance = (
+                preview_gate.get("cache_rollback_guidance")
+                if isinstance(preview_gate.get("cache_rollback_guidance"), dict)
+                else {}
+            )
+            if rollback_guidance:
+                action["rollback_action_type"] = sanitize_value(rollback_guidance.get("rollback_action_type"))
+                action["disabled_reason"] = sanitize_value(rollback_guidance.get("disabled_reason"))
+                action["target_local_rule_file"] = sanitize_value(
+                    rollback_guidance.get("target_local_rule_file") or action.get("target_local_rule_file")
+                )
+                action["target_local_policy_section"] = sanitize_value(
+                    rollback_guidance.get("target_local_policy_section") or action.get("target_local_policy_section")
+                )
+                action["cache_rollback_guidance"] = sanitize_value(rollback_guidance)
+            action["cache_apply_action_count"] = 0
+            action["cache_entries_written"] = 0
+            action["emits_cache_apply_action"] = False
+            action["policy_files_written"] = False
         elif preview_gate.get("verified") and preview_gate.get("decision") == "ready":
             action["successor_status"] = "ready"
             action["recommended_next_action"] = sanitize_value(preview_gate.get("next_action") or action["recommended_next_action"])
@@ -7625,7 +7741,9 @@ def _local_activation_successor_action(entry: dict[str, Any]) -> dict[str, Any]:
         "next_state",
         "next_state_reason",
         "promotion_readiness",
+        "promotion_decision",
         "promotion_recommendation",
+        "cache_reobserve_decision",
         "rollback_action_type",
         "disabled_reason",
         "request_shape_rollup_outcome_class",
@@ -7808,6 +7926,8 @@ def _successor_decision_issue_status(action: dict[str, Any]) -> str:
         return "ready"
     if decision == "rollback-required":
         return "blocked"
+    if decision == "keep-staged-warmup":
+        return "blocked"
     if decision == "reobserve-after-rollback":
         return "review"
     if decision == "keep-blocked-narrow":
@@ -7900,7 +8020,9 @@ def _local_activation_successor_decision(action: dict[str, Any]) -> dict[str, An
         "recommended_command": sanitize_value(action.get("recommended_command")),
         "recommended_module": sanitize_value(action.get("recommended_module")),
         "promotion_readiness": sanitize_value(action.get("promotion_readiness")),
+        "promotion_decision": sanitize_value(action.get("promotion_decision")),
         "promotion_recommendation": sanitize_value(action.get("promotion_recommendation")),
+        "cache_reobserve_decision": sanitize_value(action.get("cache_reobserve_decision")),
         "rollback_required": bool(action.get("rollback_required")),
         "rollback_action_type": sanitize_value(action.get("rollback_action_type")),
         "disabled_reason": sanitize_value(action.get("disabled_reason")),
