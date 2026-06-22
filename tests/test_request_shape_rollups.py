@@ -22,6 +22,7 @@ from tokenclaw.request_shape_rollups import (
     build_request_shape_cache_replay_canary_stage_report,
     build_request_shape_cache_replay_evidence_report,
     build_request_shape_cache_replay_policy_decision_report,
+    build_request_shape_cache_replay_successor_dry_run,
     build_context_plateau_crunch_rollup_report,
     build_request_shape_crunch_canary_impact_report,
     build_request_shape_crunch_canary_impact_rows_report,
@@ -5399,6 +5400,259 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(dry_run["cohorts"], [])
         self.assertTrue(dry_run["privacy"]["metadata_only"])
         self.assertTrue(dry_run["privacy"]["aggregate_only"])
+
+    def _cache_successor_queue_entry(self, fingerprint: str, **overrides: object) -> dict:
+        entry = {
+            "schema": "tokenclaw.request_shape_local_activation_candidate_queue_entry.v1",
+            "fingerprint": fingerprint,
+            "rank": 1,
+            "local_action_family": "cache",
+            "recommended_next_action": "stage-cache-replay-canary",
+            "readiness_state": "activation-ready",
+            "provider_family": "openai",
+            "source_surface": "openai_responses",
+            "endpoint": "responses",
+            "category": "chat",
+            "workflow_phase": "chat",
+            "stream": False,
+            "has_tools": False,
+            "cache_status": "miss",
+            "text_bucket": "8k_32k_chars",
+            "token_bucket": "8k_32k_tokens",
+            "sample_count": 12,
+            "projected_hits": 11,
+            "projected_savings_usd": 0.05,
+            "observed_savings_usd": 0.0,
+            "freshness_state": "fresh",
+            "blocker_codes": [],
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_cache_replay_successor_classifies_dependency_evidence_and_reobserves_stale(self) -> None:
+        raw_request_id = "raw-cache-successor-request-id-must-not-leak"
+        raw_session_id = "raw-cache-successor-session-id-must-not-leak"
+        raw_path = "/tmp/private/cache-successor.py"
+        queue = {
+            "schema": "tokenclaw.request_shape_local_activation_candidate_queue.v1",
+            "status": "ranked",
+            "entries": [
+                self._cache_successor_queue_entry(
+                    "act-unsafe",
+                    has_tools=True,
+                    blocker_codes=["unsafe-tool-calls-without-invalidation", "unsafe-dependency-evidence"],
+                    request_id=raw_request_id,
+                ),
+                self._cache_successor_queue_entry(
+                    "act-missing",
+                    has_tools=True,
+                    blocker_codes=["invalidation-evidence-missing"],
+                    session_id=raw_session_id,
+                ),
+                self._cache_successor_queue_entry(
+                    "act-stale-dependency",
+                    has_tools=True,
+                    blocker_codes=["stale-dependency-evidence"],
+                    file_path=raw_path,
+                ),
+                self._cache_successor_queue_entry(
+                    "act-stale-by-age",
+                    freshness_state="stale",
+                ),
+                self._cache_successor_queue_entry(
+                    "act-unknown",
+                    has_tools=True,
+                    blocker_codes=["dependency-evidence-unknown"],
+                ),
+                self._cache_successor_queue_entry(
+                    "act-stable-tool-no-proof",
+                    has_tools=True,
+                    blocker_codes=["safe-invalidation-evidence-present"],
+                ),
+                self._cache_successor_queue_entry(
+                    "act-stable-tool-proof",
+                    has_tools=True,
+                    blocker_codes=["safe-invalidation-evidence-present"],
+                    cache_status="hit",
+                ),
+                self._cache_successor_queue_entry(
+                    "act-stable-stream-no-proof",
+                    stream=True,
+                    blocker_codes=["safe-invalidation-evidence-present"],
+                ),
+                self._cache_successor_queue_entry(
+                    "act-stable-nontool-no-proof",
+                ),
+                self._cache_successor_queue_entry(
+                    "act-stable-nontool-proof",
+                    observed_savings_usd=0.03,
+                ),
+            ],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        report = build_request_shape_cache_replay_successor_dry_run(queue)
+
+        self.assertEqual(report["schema"], "tokenclaw.request_shape_cache_replay_successor_dry_run.v1")
+        self.assertEqual(report["source_schema"], "tokenclaw.request_shape_local_activation_candidate_queue.v1")
+        self.assertEqual(report["source_queue_status"], "ranked")
+        self.assertEqual(report["source_queue_entry_count"], 10)
+        self.assertEqual(report["source_queue_cache_entry_count"], 10)
+        self.assertEqual(report["status"], "reobserve-stale-cache-replay-successors")
+
+        by_fingerprint = {cohort["source_activation_fingerprint"]: cohort for cohort in report["cohorts"]}
+        self.assertEqual(
+            set(by_fingerprint),
+            {
+                "act-unsafe",
+                "act-missing",
+                "act-stale-dependency",
+                "act-stale-by-age",
+                "act-unknown",
+                "act-stable-tool-no-proof",
+                "act-stable-tool-proof",
+                "act-stable-stream-no-proof",
+                "act-stable-nontool-no-proof",
+                "act-stable-nontool-proof",
+            },
+        )
+
+        # Every cohort classifies into the five-value dependency-evidence vocabulary.
+        for cohort in report["cohorts"]:
+            self.assertIn(cohort["dependency_evidence_class"], {"stable", "stale", "unsafe", "unknown", "missing"})
+            self.assertFalse(cohort["cache_entries_written"])
+            self.assertFalse(cohort["policy_files_written"])
+            self.assertTrue(cohort["privacy"]["metadata_only"])
+            self.assertTrue(cohort["privacy"]["aggregate_only"])
+
+        # Stale evidence reobserves before any rollback.
+        for stale_fp in ("act-stale-dependency", "act-stale-by-age"):
+            cohort = by_fingerprint[stale_fp]
+            self.assertEqual(cohort["dependency_evidence_class"], "stale")
+            self.assertEqual(cohort["successor_decision"], "reobserve-before-rollback")
+            self.assertEqual(cohort["successor_next_action"], "reobserve-cache-replay-evidence")
+            self.assertFalse(cohort["emits_cache_apply_action"])
+
+        # Unsafe and missing evidence emit no cache apply action and no cache entries.
+        for blocked_fp, expected_class in (("act-unsafe", "unsafe"), ("act-missing", "missing")):
+            cohort = by_fingerprint[blocked_fp]
+            self.assertEqual(cohort["dependency_evidence_class"], expected_class)
+            self.assertFalse(cohort["emits_cache_apply_action"])
+            self.assertFalse(cohort["cache_entries_written"])
+            self.assertFalse(cohort["tool_cache_replay_enabled"])
+            self.assertFalse(cohort["streaming_replay_enabled"])
+
+        self.assertEqual(by_fingerprint["act-unknown"]["dependency_evidence_class"], "unknown")
+        self.assertEqual(
+            by_fingerprint["act-unknown"]["successor_next_action"],
+            "collect-cache-replay-dependency-evidence",
+        )
+
+        # Tool/streaming replay stays disabled unless stable evidence has repeat proof.
+        tool_no_proof = by_fingerprint["act-stable-tool-no-proof"]
+        self.assertEqual(tool_no_proof["dependency_evidence_class"], "stable")
+        self.assertFalse(tool_no_proof["tool_cache_replay_enabled"])
+        self.assertFalse(tool_no_proof["emits_cache_apply_action"])
+        self.assertEqual(tool_no_proof["successor_next_action"], "collect-cache-replay-repeat-proof")
+
+        stream_no_proof = by_fingerprint["act-stable-stream-no-proof"]
+        self.assertFalse(stream_no_proof["streaming_replay_enabled"])
+        self.assertFalse(stream_no_proof["emits_cache_apply_action"])
+
+        tool_proof = by_fingerprint["act-stable-tool-proof"]
+        self.assertTrue(tool_proof["repeat_proof"]["has_repeat_proof"])
+        self.assertTrue(tool_proof["tool_cache_replay_enabled"])
+        self.assertTrue(tool_proof["emits_cache_apply_action"])
+        self.assertEqual(tool_proof["successor_next_action"], "stage-cache-replay-canary")
+
+        # Non-tool exact replay applies only with repeat proof.
+        self.assertFalse(by_fingerprint["act-stable-nontool-no-proof"]["emits_cache_apply_action"])
+        self.assertTrue(by_fingerprint["act-stable-nontool-proof"]["emits_cache_apply_action"])
+
+        apply_fingerprints = {action["source_activation_fingerprint"] for action in report["cache_apply_actions"]}
+        self.assertEqual(apply_fingerprints, {"act-stable-tool-proof", "act-stable-nontool-proof"})
+
+        summary = report["summary"]
+        self.assertEqual(summary["reobserve_cohort_count"], 2)
+        self.assertEqual(summary["unsafe_cohort_count"], 1)
+        self.assertEqual(summary["missing_evidence_cohort_count"], 1)
+        self.assertEqual(summary["apply_action_cohort_count"], 2)
+        self.assertEqual(summary["cache_apply_actions_emitted"], 2)
+        self.assertEqual(summary["cache_entries_written"], 0)
+        self.assertFalse(summary["policy_files_written"])
+        self.assertEqual(
+            summary["supported_evidence_classes"],
+            ["stable", "stale", "unsafe", "unknown", "missing"],
+        )
+
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn(raw_request_id, rendered)
+        self.assertNotIn(raw_session_id, rendered)
+        self.assertNotIn(raw_path, rendered)
+
+    def test_cache_replay_successor_consumes_ranked_activation_candidate_queue(self) -> None:
+        rollups = [
+            {
+                "schema": "tokenclaw.request_shape_rollup_row.v1",
+                "provider_family": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "app_family": "generic_openai",
+                "requested_model_family": "gpt-5",
+                "routed_model_family": "gpt-5",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "stream": False,
+                "has_tools": False,
+                "text_bucket": "8k_32k_chars",
+                "token_bucket": "8k_32k_tokens",
+                "cache_status": "miss",
+                "routing_status": "passthrough",
+                "candidate_work_classes": ["replayability"],
+                "candidate_families": ["cache_replay"],
+                "blocker_codes": ["exact-cache-miss"],
+                "row_count": 40,
+                "sample_count": 40,
+                "cost_est_usd": 0.40,
+            }
+        ]
+        follow_up = build_request_shape_follow_up_candidates(rollups, limit=10)
+        queue = follow_up["activation_candidate_queue"]
+
+        report = build_request_shape_cache_replay_successor_dry_run(queue)
+        repeat = build_request_shape_cache_replay_successor_dry_run(queue)
+
+        self.assertEqual(report["source_queue_cache_entry_count"], 1)
+        self.assertEqual(len(report["cohorts"]), 1)
+        cohort = report["cohorts"][0]
+        self.assertEqual(cohort["source_evidence_schema"], "tokenclaw.request_shape_local_activation_candidate_queue_entry.v1")
+        self.assertEqual(cohort["source_activation_fingerprint"], queue["entries"][0]["fingerprint"])
+        self.assertEqual(cohort["replay_kind"], "non-tool-cache")
+        self.assertEqual(cohort["dependency_evidence_class"], "stable")
+        self.assertFalse(cohort["emits_cache_apply_action"])
+        self.assertEqual(cohort["fingerprint"], repeat["cohorts"][0]["fingerprint"])
+        self.assertTrue(cohort["fingerprint"].startswith("cache-replay-successor:"))
+        self.assertEqual(report["cache_apply_actions"], [])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertFalse(report["privacy"]["cache_entries_written"])
+
+    def test_cache_replay_successor_noops_for_empty_activation_candidate_queue(self) -> None:
+        empty_queue = {
+            "schema": "tokenclaw.request_shape_local_activation_candidate_queue.v1",
+            "status": "empty",
+            "entries": [],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        report = build_request_shape_cache_replay_successor_dry_run(empty_queue)
+
+        self.assertEqual(report["status"], "no-cache-replay-successor-candidates")
+        self.assertEqual(report["source_queue_status"], "empty")
+        self.assertEqual(report["source_queue_cache_entry_count"], 0)
+        self.assertEqual(report["cohorts"], [])
+        self.assertEqual(report["cache_apply_actions"], [])
+        self.assertIn("cache-family-activation-candidates", report["missing_measurements"])
+        self.assertTrue(report["privacy"]["metadata_only"])
 
     def test_crunch_opportunity_dry_run_noops_for_small_or_one_off_rollups(self) -> None:
         small_rollups = [

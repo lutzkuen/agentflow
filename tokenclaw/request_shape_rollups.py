@@ -46,6 +46,8 @@ REPLAY_CACHE_CANARY_APPLY_SCHEMA = "tokenclaw.request_shape_cache_replay_canary_
 REPLAY_CACHE_CANARY_EVIDENCE_SCHEMA = "tokenclaw.request_shape_cache_replay_evidence.v1"
 REPLAY_CACHE_POLICY_DECISION_SCHEMA = "tokenclaw.request_shape_cache_replay_policy_decision.v1"
 CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "tokenclaw.request_shape_crunch_opportunity_dry_run.v1"
+CACHE_REPLAY_SUCCESSOR_DRY_RUN_SCHEMA = "tokenclaw.request_shape_cache_replay_successor_dry_run.v1"
+CACHE_REPLAY_SUCCESSOR_COHORT_SCHEMA = "tokenclaw.request_shape_cache_replay_successor_cohort.v1"
 CRUNCH_CANARY_ACTION_SCHEMA = "tokenclaw.request_shape_crunch_canary_action.v1"
 CRUNCH_CANARY_STAGE_SCHEMA = "tokenclaw.request_shape_repeated_context_crunch_canary_stage.v1"
 CRUNCH_CANARY_APPLY_SCHEMA = "tokenclaw.request_shape_crunch_canary_apply.v1"
@@ -5921,6 +5923,464 @@ def build_request_shape_crunch_opportunity_dry_run(
         "no_op_reason": no_op_reason,
         "missing_measurements": missing,
         "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def _cache_replay_successor_privacy() -> dict[str, Any]:
+    privacy = _replayability_privacy()
+    privacy.update(
+        {
+            "policy_files_written": False,
+            "cache_entries_written": False,
+            "cache_apply_actions_emitted": False,
+        }
+    )
+    return privacy
+
+
+# Activation-queue blocker codes that name a tool-cache dependency invalidation state.
+_DEPENDENCY_BLOCKER_TO_FILE_STATUS = {
+    "safe-invalidation-evidence-present": "stable",
+    "stale-dependency-evidence": "invalidated",
+    "unsafe-dependency-evidence": "unsafe",
+    "unsafe-tool-calls-without-invalidation": "unsafe",
+    "invalidation-evidence-missing": "missing",
+    "dependency-evidence-unknown": "unknown",
+}
+
+
+def _cache_successor_file_dependency_status(blocker_set: set[str], *, has_tools: bool) -> str:
+    """Map an activation cohort's blocker codes to a file-dependency status.
+
+    Unsafe evidence dominates, then stale, then missing, then explicit unknown.
+    Non-tool exact replay has no file dependency to invalidate, so it reports
+    ``not-applicable`` and freshness alone drives staleness downstream.
+    """
+    ranked = ("unsafe", "invalidated", "missing", "stable", "unknown")
+    observed: set[str] = set()
+    for code in blocker_set:
+        status = _DEPENDENCY_BLOCKER_TO_FILE_STATUS.get(code)
+        if status:
+            observed.add(status)
+    for status in ranked:
+        if status in observed:
+            return status
+    if has_tools:
+        # A tool-cache cohort with no invalidation signal cannot be trusted.
+        return "missing"
+    return "not-applicable"
+
+
+def _cache_successor_evidence_class(
+    *,
+    decision: str,
+    has_tools: bool,
+    evidence_stale: bool,
+    evidence_unknown: bool,
+) -> str:
+    """Normalise to the five-value vocabulary the successor queue classifies on."""
+    mapping = {
+        "stable-dependency-evidence": "stable",
+        "stale-risk-blocker": "stale",
+        "unsafe-dependency-evidence": "unsafe",
+        "missing-dependency-evidence": "missing",
+        "unknown-dependency-evidence": "unknown",
+    }
+    if decision in mapping:
+        return mapping[decision]
+    # decision == "not-required": exact non-tool replay. Freshness is the only
+    # staleness signal, so age-out becomes stale and a present cohort is stable.
+    if evidence_stale:
+        return "stale"
+    if evidence_unknown:
+        return "unknown"
+    return "stable"
+
+
+def _cache_successor_repeat_proof(entry: dict[str, Any]) -> dict[str, Any]:
+    cache_status = public_label(entry.get("cache_status"), "unknown")
+    live_repeat_hits = (
+        _as_int(entry.get("observed_hit_count"))
+        or _as_int(entry.get("cache_hit_count"))
+        or _as_int(entry.get("observed_cache_hits"))
+    )
+    observed_savings = _as_float(entry.get("observed_savings_usd"))
+    live_repeat = cache_status == "hit" or live_repeat_hits > 0
+    observed_hit = live_repeat or observed_savings > 0.0
+    if live_repeat:
+        basis = "live-cache-repeat-observed"
+    elif observed_hit:
+        basis = "observed-replay-savings"
+    else:
+        basis = "no-live-repeat-or-observed-hit"
+    return {
+        "schema": "tokenclaw.request_shape_cache_replay_successor_repeat_proof.v1",
+        "live_repeat": live_repeat,
+        "observed_hit": observed_hit,
+        "has_repeat_proof": bool(live_repeat or observed_hit),
+        "live_repeat_hit_count": live_repeat_hits,
+        "observed_savings_usd": round(observed_savings, 6),
+        "basis": basis,
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
+
+
+def _cache_successor_decision(
+    *,
+    evidence_class: str,
+    has_tools: bool,
+    stream: bool,
+    evidence_stale: bool,
+    repeat_proof: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve one cache-family activation cohort to a successor action.
+
+    Unsafe and missing evidence never produce a cache apply action or cache
+    entry.  Stale evidence reobserves before any rollback.  Tool and streaming
+    replay stay disabled unless invalidation evidence is stable *and* a live
+    repeat or observed-hit proof exists.
+    """
+    has_proof = bool(repeat_proof.get("has_repeat_proof"))
+    tool_or_stream = bool(has_tools or stream)
+    base = {
+        "tool_cache_replay_enabled": False,
+        "streaming_replay_enabled": False,
+        "emits_cache_apply_action": False,
+        "cache_entries_written": False,
+    }
+    if evidence_class == "unsafe":
+        return {
+            **base,
+            "successor_decision": "hold-unsafe-no-apply",
+            "successor_next_action": "keep-cache-replay-blocked-unsafe-evidence",
+            "successor_reason": "unsafe-tool-calls-without-invalidation",
+            "blocker_codes": ["unsafe-dependency-evidence"],
+        }
+    if evidence_class == "missing":
+        return {
+            **base,
+            "successor_decision": "collect-invalidation-evidence",
+            "successor_next_action": "collect-tool-call-cache-invalidation-evidence",
+            "successor_reason": "invalidation-evidence-missing",
+            "blocker_codes": ["invalidation-evidence-missing"],
+        }
+    if evidence_class == "unknown":
+        return {
+            **base,
+            "successor_decision": "classify-dependency-evidence",
+            "successor_next_action": "collect-cache-replay-dependency-evidence",
+            "successor_reason": "dependency-evidence-unknown",
+            "blocker_codes": ["dependency-evidence-unknown"],
+        }
+    if evidence_class == "stale" or evidence_stale:
+        # Refresh stale evidence before deciding to roll back or widen.
+        return {
+            **base,
+            "successor_decision": "reobserve-before-rollback",
+            "successor_next_action": "reobserve-cache-replay-evidence",
+            "successor_reason": "stale-cache-replay-evidence-older-than-max-age",
+            "blocker_codes": ["stale-cache-replay-evidence-older-than-max-age"],
+        }
+    # evidence_class == "stable" and fresh.
+    if tool_or_stream:
+        if has_proof:
+            return {
+                "tool_cache_replay_enabled": bool(has_tools),
+                "streaming_replay_enabled": bool(stream),
+                "emits_cache_apply_action": True,
+                "cache_entries_written": False,
+                "successor_decision": "apply-stable-with-repeat-proof",
+                "successor_next_action": "stage-cache-replay-canary",
+                "successor_reason": "stable-invalidation-evidence-with-repeat-proof",
+                "blocker_codes": [],
+            }
+        return {
+            **base,
+            "successor_decision": "keep-tool-streaming-replay-disabled",
+            "successor_next_action": "collect-cache-replay-repeat-proof",
+            "successor_reason": "stable-evidence-without-live-repeat-or-observed-hit",
+            "blocker_codes": ["missing-cache-replay-repeat-proof"],
+        }
+    if has_proof:
+        return {
+            "tool_cache_replay_enabled": False,
+            "streaming_replay_enabled": False,
+            "emits_cache_apply_action": True,
+            "cache_entries_written": False,
+            "successor_decision": "apply-stable-with-repeat-proof",
+            "successor_next_action": "stage-cache-replay-canary",
+            "successor_reason": "stable-exact-replay-with-repeat-proof",
+            "blocker_codes": [],
+        }
+    return {
+        **base,
+        "successor_decision": "stage-canary-for-repeat-proof",
+        "successor_next_action": "stage-cache-replay-canary",
+        "successor_reason": "stable-exact-replay-pending-repeat-proof",
+        "blocker_codes": ["missing-cache-replay-repeat-proof"],
+    }
+
+
+def _activation_candidate_queue_cache_entries(source: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not isinstance(source, dict):
+        return [], {
+            "source_schema": LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA,
+            "source_queue_status": None,
+            "source_queue_entry_count": 0,
+            "source_queue_cache_entry_count": 0,
+        }
+    entries = source.get("entries") if isinstance(source.get("entries"), list) else []
+    cache_entries = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and public_label(entry.get("local_action_family"), "unknown") == "cache"
+    ]
+    return cache_entries, {
+        "source_schema": public_label(source.get("schema"), LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA),
+        "source_queue_status": public_label(source.get("status"), "unknown"),
+        "source_queue_entry_count": len(entries),
+        "source_queue_cache_entry_count": len(cache_entries),
+    }
+
+
+def _cache_successor_source_entries(source: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if isinstance(source, dict) and source.get("schema") == LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA:
+        return _activation_candidate_queue_cache_entries(source)
+    if isinstance(source, dict) and isinstance(source.get("entries"), list):
+        return _activation_candidate_queue_cache_entries(source)
+    if isinstance(source, list):
+        cache_entries = [
+            entry
+            for entry in source
+            if isinstance(entry, dict)
+            and public_label(entry.get("local_action_family"), "unknown") == "cache"
+        ]
+        return cache_entries, {
+            "source_schema": LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA,
+            "source_queue_status": None,
+            "source_queue_entry_count": len(source),
+            "source_queue_cache_entry_count": len(cache_entries),
+        }
+    return [], {
+        "source_schema": LOCAL_ACTIVATION_CANDIDATE_QUEUE_SCHEMA,
+        "source_queue_status": None,
+        "source_queue_entry_count": 0,
+        "source_queue_cache_entry_count": 0,
+    }
+
+
+def build_request_shape_cache_replay_successor_dry_run(
+    source: list[dict[str, Any]] | dict[str, Any],
+    *,
+    limit: int = 25,
+    max_age_hours: float = DEFAULT_ROLLUP_SNAPSHOT_MAX_AGE_HOURS,
+) -> dict[str, Any]:
+    """Consume cache-family activation candidates and resolve stale-evidence successors.
+
+    For every cache-family entry in the ranked local activation candidate queue
+    this classifies the tool/non-tool dependency evidence as ``stable``,
+    ``stale``, ``unsafe``, ``unknown`` or ``missing`` and emits exactly one
+    metadata-only successor: stale evidence reobserves before rollback, unsafe
+    and missing evidence emit no cache apply action and write no cache entry,
+    and tool or streaming replay stays disabled unless stable evidence is paired
+    with a live-repeat or observed-hit proof.
+    """
+    cache_entries, source_metadata = _cache_successor_source_entries(source)
+    cohorts: list[dict[str, Any]] = []
+    evidence_class_counts: dict[str, int] = {}
+    decision_counts: dict[str, int] = {}
+    freshness_counts: dict[str, int] = {}
+    next_action_counts: dict[str, int] = {}
+    apply_action_cohorts = 0
+    reobserve_cohorts = 0
+    unsafe_cohorts = 0
+    missing_cohorts = 0
+    tool_or_streaming_blocked = 0
+
+    for entry in cache_entries:
+        rank = _as_int(entry.get("rank"))
+        has_tools = bool(entry.get("has_tools"))
+        stream = bool(entry.get("stream"))
+        sample_count = _as_int(entry.get("sample_count") or entry.get("row_count"))
+        blocker_set = {
+            public_label(item, "unknown")
+            for item in entry.get("blocker_codes") or []
+            if public_label(item, "unknown") != "unknown"
+        }
+        freshness_state = public_label(entry.get("freshness_state"), "unknown")
+        evidence_stale = freshness_state in {"stale", "snapshot-stale", "rollup-stale"}
+        evidence_unknown_freshness = freshness_state == "unknown"
+        file_dependency_status = _cache_successor_file_dependency_status(blocker_set, has_tools=has_tools)
+        dependency_decision = _cache_dependency_evidence_decision(
+            file_dependency_status=file_dependency_status if file_dependency_status != "not-applicable" else "stable",
+            next_action=public_label(entry.get("recommended_next_action") or entry.get("next_action"), "inspect-local-evidence"),
+            requires_invalidation=has_tools,
+            has_tools=has_tools,
+        )
+        evidence_class = _cache_successor_evidence_class(
+            decision=str(dependency_decision.get("decision")),
+            has_tools=has_tools,
+            evidence_stale=evidence_stale,
+            evidence_unknown=evidence_unknown_freshness,
+        )
+        repeat_proof = _cache_successor_repeat_proof(entry)
+        decision = _cache_successor_decision(
+            evidence_class=evidence_class,
+            has_tools=has_tools,
+            stream=stream,
+            evidence_stale=evidence_stale,
+            repeat_proof=repeat_proof,
+        )
+        cohort_fingerprint = public_id(
+            stable_json(
+                {
+                    "schema": CACHE_REPLAY_SUCCESSOR_COHORT_SCHEMA,
+                    "source_activation_fingerprint": public_label(entry.get("fingerprint"), "unknown"),
+                    "evidence_class": evidence_class,
+                    "successor_next_action": decision["successor_next_action"],
+                }
+            ),
+            prefix="cache-replay-successor",
+        )
+        cohort = {
+            "schema": CACHE_REPLAY_SUCCESSOR_COHORT_SCHEMA,
+            "fingerprint": cohort_fingerprint,
+            "rank": rank,
+            "source_evidence_schema": LOCAL_ACTIVATION_CANDIDATE_QUEUE_ENTRY_SCHEMA,
+            "source_activation_fingerprint": public_label(entry.get("fingerprint"), "unknown"),
+            "source_activation_candidate_rank": rank,
+            "source_activation_candidate_next_action": public_label(
+                entry.get("recommended_next_action") or entry.get("next_action"), "unknown"
+            ),
+            "provider_family": public_label(entry.get("provider_family"), "unknown"),
+            "source_surface": public_label(entry.get("source_surface"), "unknown"),
+            "endpoint": public_label(entry.get("endpoint"), "unknown"),
+            "category": public_label(entry.get("category"), "unknown"),
+            "workflow_phase": public_label(entry.get("workflow_phase"), "unknown"),
+            "stream": stream,
+            "has_tools": has_tools,
+            "cache_status": public_label(entry.get("cache_status"), "unknown"),
+            "text_bucket": public_label(entry.get("text_bucket"), "unknown"),
+            "token_bucket": public_label(entry.get("token_bucket"), "unknown"),
+            "sample_count": sample_count,
+            "row_count": sample_count,
+            "projected_hits": _as_int(entry.get("projected_hits")),
+            "projected_savings_usd": round(_as_float(entry.get("projected_savings_usd")), 6),
+            "observed_savings_usd": round(_as_float(entry.get("observed_savings_usd")), 6),
+            "replay_kind": "tool-cache" if has_tools else "streaming-cache" if stream else "non-tool-cache",
+            "freshness_state": freshness_state,
+            "evidence_stale": evidence_stale,
+            "file_dependency_status": file_dependency_status,
+            "dependency_evidence_class": evidence_class,
+            "dependency_evidence_decision": dependency_decision,
+            "repeat_proof": repeat_proof,
+            "successor_decision": decision["successor_decision"],
+            "successor_next_action": decision["successor_next_action"],
+            "successor_reason": decision["successor_reason"],
+            "blocker_codes": decision["blocker_codes"],
+            "tool_cache_replay_enabled": decision["tool_cache_replay_enabled"],
+            "streaming_replay_enabled": decision["streaming_replay_enabled"],
+            "emits_cache_apply_action": decision["emits_cache_apply_action"],
+            "cache_entries_written": False,
+            "policy_files_written": False,
+            "max_age_hours": float(max_age_hours),
+            "metadata_only": True,
+            "aggregate_only": True,
+            "privacy": _cache_replay_successor_privacy(),
+        }
+        cohorts.append(cohort)
+
+        _increment(evidence_class_counts, evidence_class, sample_count)
+        _increment(decision_counts, decision["successor_decision"], sample_count)
+        _increment(freshness_counts, freshness_state, sample_count)
+        _increment(next_action_counts, decision["successor_next_action"], sample_count)
+        if decision["emits_cache_apply_action"]:
+            apply_action_cohorts += 1
+        if decision["successor_decision"] == "reobserve-before-rollback":
+            reobserve_cohorts += 1
+        if evidence_class == "unsafe":
+            unsafe_cohorts += 1
+        if evidence_class == "missing":
+            missing_cohorts += 1
+        if (has_tools or stream) and not decision["emits_cache_apply_action"]:
+            tool_or_streaming_blocked += 1
+
+    cohorts.sort(
+        key=lambda item: (
+            item.get("successor_decision") == "reobserve-before-rollback",
+            _as_float(item.get("projected_savings_usd")),
+            _as_int(item.get("sample_count")),
+        ),
+        reverse=True,
+    )
+    for index, cohort in enumerate(cohorts, start=1):
+        cohort["rank"] = index
+
+    capped = cohorts[: max(1, min(_as_int(limit) or 25, 1000))]
+    apply_actions = [
+        {
+            "schema": "tokenclaw.request_shape_cache_replay_successor_apply_action.v1",
+            "source_activation_fingerprint": cohort["source_activation_fingerprint"],
+            "successor_next_action": cohort["successor_next_action"],
+            "replay_kind": cohort["replay_kind"],
+            "tool_cache_replay_enabled": cohort["tool_cache_replay_enabled"],
+            "streaming_replay_enabled": cohort["streaming_replay_enabled"],
+            "cache_entries_written": False,
+            "policy_files_written": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
+        for cohort in capped
+        if cohort.get("emits_cache_apply_action")
+    ]
+    if not cache_entries:
+        status = "no-cache-replay-successor-candidates"
+    elif reobserve_cohorts:
+        status = "reobserve-stale-cache-replay-successors"
+    elif apply_actions:
+        status = "apply-ready-cache-replay-successors"
+    else:
+        status = "blocked-cache-replay-successors"
+    missing_measurements = [] if cache_entries else ["cache-family-activation-candidates"]
+    top = capped[0] if capped else None
+    return {
+        "schema": CACHE_REPLAY_SUCCESSOR_DRY_RUN_SCHEMA,
+        "status": status,
+        "source_schema": source_metadata["source_schema"],
+        "source_queue_status": source_metadata["source_queue_status"],
+        "source_queue_entry_count": source_metadata["source_queue_entry_count"],
+        "source_queue_cache_entry_count": source_metadata["source_queue_cache_entry_count"],
+        "summary": {
+            "cache_successor_cohort_count": len(cohorts),
+            "source_queue_status": source_metadata["source_queue_status"],
+            "source_queue_entry_count": source_metadata["source_queue_entry_count"],
+            "source_queue_cache_entry_count": source_metadata["source_queue_cache_entry_count"],
+            "reobserve_cohort_count": reobserve_cohorts,
+            "unsafe_cohort_count": unsafe_cohorts,
+            "missing_evidence_cohort_count": missing_cohorts,
+            "apply_action_cohort_count": apply_action_cohorts,
+            "tool_or_streaming_disabled_cohort_count": tool_or_streaming_blocked,
+            "top_successor_decision": top.get("successor_decision") if top else None,
+            "top_successor_next_action": top.get("successor_next_action") if top else None,
+            "top_dependency_evidence_class": top.get("dependency_evidence_class") if top else None,
+            "evidence_class_breakdown": _breakdown(evidence_class_counts),
+            "successor_decision_breakdown": _breakdown(decision_counts),
+            "freshness_breakdown": _breakdown(freshness_counts),
+            "next_action_breakdown": _breakdown(next_action_counts),
+            "supported_evidence_classes": ["stable", "stale", "unsafe", "unknown", "missing"],
+            "cache_apply_actions_emitted": len(apply_actions),
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+        },
+        "top_cohort": top,
+        "cohorts": capped,
+        "cache_apply_actions": apply_actions,
+        "missing_measurements": missing_measurements,
+        "privacy": _cache_replay_successor_privacy(),
     }
 
 
