@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from tokenclaw.env import env
+from tokenclaw.local_compaction_canary_ramp import apply_managed_thinking_compaction_treatment
 from tokenclaw.managed_mode import managed_product_mode
 from tokenclaw.optimization.managed_actions import (
     cache_profile_from_decision,
@@ -155,10 +156,12 @@ def _route_proposal(decision: dict[str, Any]) -> dict[str, Any]:
 
 def _traffic_treatment(decision: dict[str, Any]) -> str | None:
     routing = decision.get("routing") if isinstance(decision.get("routing"), dict) else {}
+    crunch = decision.get("crunch") if isinstance(decision.get("crunch"), dict) else {}
     for source in (
         decision.get("server_action_selection"),
         _route_proposal(decision),
         routing,
+        crunch,
         decision,
     ):
         if not isinstance(source, dict):
@@ -166,6 +169,8 @@ def _traffic_treatment(decision: dict[str, Any]) -> str | None:
         treatment = _normalized_treatment(source.get("traffic_treatment") or source.get("server_traffic_treatment"))
         if treatment:
             return treatment
+    if decision.get("route_to_present") is True:
+        return None
     mode = _normalized_treatment(decision.get("local_policy_decision_mode") or decision.get("recommended_mode") or decision.get("mode"))
     if mode in {"live", "canary", "shadow", "observe", "hold"}:
         return mode
@@ -267,6 +272,8 @@ class ActionExecutor:
     enabled: bool = field(default_factory=lambda: _env_enabled(ACTION_EXECUTOR_ENABLED_ENV, "1"))
     require_signature: bool = field(default_factory=lambda: _env_enabled(ACTION_EXECUTOR_REQUIRE_SIGNATURE_ENV, "0"))
     now: datetime | None = None
+    config_dir: str | None = None
+    crunch_rules_path: str | None = None
 
     def execute(
         self,
@@ -376,9 +383,20 @@ class ActionExecutor:
             return self._finish(result, "held", "action-executor-disabled")
         if enforce_product_mode and not product_mode.server_calls_enabled:
             return self._finish(result, "held", product_mode.reason)
+        for family in DEFAULT_ACTION_FAMILIES:
+            if family not in supported and self._family_present(decision, local_actions, family):
+                result[family] = _disabled_family(family)
+                profiles = result.get("effective_profiles")
+                if isinstance(profiles, dict):
+                    profiles.pop(family, None)
+        if any(result[family].get("status") == "vetoed" for family in DEFAULT_ACTION_FAMILIES):
+            return self._finish(result, "vetoed", "local-action-vetoed")
         if not application_enabled:
+            self._preview_managed_crunch_treatment(result, decision)
             return self._finish(result, "held", "local-application-disabled")
         if enforce_product_mode and not product_mode.local_application_enabled:
+            if product_mode.mode == "dry_run":
+                self._preview_managed_crunch_treatment(result, decision)
             return self._finish(result, "held", f"managed-mode-{product_mode.mode}")
         if traffic_treatment in VETO_TRAFFIC_TREATMENTS:
             return self._hold_server_treatment(
@@ -417,22 +435,6 @@ class ActionExecutor:
                 status="held",
                 reason=treatment_reason,
             )
-        if traffic_treatment == "canary" and route_selected is not True:
-            return self._hold_server_treatment(
-                result,
-                decision,
-                local_actions,
-                status="held",
-                reason="server-route-selection-missing",
-            )
-
-        for family in DEFAULT_ACTION_FAMILIES:
-            if family not in supported and self._family_present(decision, local_actions, family):
-                result[family] = _disabled_family(family)
-                profiles = result.get("effective_profiles")
-                if isinstance(profiles, dict):
-                    profiles.pop(family, None)
-
         applied_families: list[str] = []
         target_model = _target_model(decision, local_actions)
         if target_model:
@@ -483,10 +485,17 @@ class ActionExecutor:
             profile = result.get("effective_profiles", {}).get(family) if isinstance(result.get("effective_profiles"), dict) else None
             if isinstance(profile, dict):
                 if family in supported:
+                    policy_file_result = None
+                    if family == "crunch":
+                        policy_file_result = self._apply_managed_crunch_treatment(result, decision)
                     result[family].update({
                         "status": result[family].get("status") if result[family].get("status") == "configured" else "applied",
                         "applied": result[family].get("applied") is not False,
-                        "apply_reason": result[family].get("apply_reason") or "local-profile-selected",
+                        "apply_reason": (
+                            "managed-crunch-traffic-treatment-applied"
+                            if isinstance(policy_file_result, dict) and policy_file_result.get("status") == "applied"
+                            else result[family].get("apply_reason") or "local-profile-selected"
+                        ),
                     })
                     applied_families.append(family)
                 else:
@@ -504,6 +513,45 @@ class ActionExecutor:
             return True
         section = local_actions.get(family)
         return isinstance(section, dict) and section.get("status") not in {None, "not-present"}
+
+    def _apply_managed_crunch_treatment(self, result: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any] | None:
+        crunch = decision.get("crunch")
+        if not isinstance(crunch, dict) or not crunch.get("candidate_id"):
+            return None
+        treatment_result = apply_managed_thinking_compaction_treatment(
+            decision,
+            apply=True,
+            config_dir=self.config_dir,
+            rules_path=self.crunch_rules_path,
+            now=self.now.isoformat() if self.now else None,
+        )
+        result["crunch"].update({
+            "traffic_treatment_policy_file": treatment_result,
+            "server_traffic_treatment": treatment_result.get("server_traffic_treatment"),
+            "candidate_id": treatment_result.get("candidate_id"),
+        })
+        return treatment_result
+
+    def _preview_managed_crunch_treatment(self, result: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any] | None:
+        crunch = decision.get("crunch")
+        if not isinstance(crunch, dict) or not crunch.get("candidate_id"):
+            return None
+        treatment_result = apply_managed_thinking_compaction_treatment(
+            decision,
+            apply=False,
+            config_dir=self.config_dir,
+            rules_path=self.crunch_rules_path,
+            now=self.now.isoformat() if self.now else None,
+        )
+        result["crunch"].update({
+            "status": "dry-run" if treatment_result.get("changed") else result["crunch"].get("status", "held"),
+            "applied": False,
+            "apply_reason": "managed-crunch-traffic-treatment-dry-run",
+            "traffic_treatment_policy_file": treatment_result,
+            "server_traffic_treatment": treatment_result.get("server_traffic_treatment"),
+            "candidate_id": treatment_result.get("candidate_id"),
+        })
+        return treatment_result
 
     def _hold_server_treatment(
         self,

@@ -4,6 +4,7 @@ import copy
 import difflib
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from tokenclaw.store import utc_now
 
 SCHEMA = "tokenclaw.local_compaction_canary_ramp.v1"
 DECISION_SCHEMA = "tokenclaw.local_compaction_canary_ramp_decision.v1"
+MANAGED_TREATMENT_SCHEMA = "tokenclaw.managed_thinking_compaction_treatment_apply.v1"
 CRUNCH_RULES_FILE = "crunch_rules.yaml"
 THINKING_SECTION = "anthropic_thinking_history_compaction"
 THINKING_TARGET_CANDIDATE = "repeated-context-thinking-tool-result-gte-128k"
@@ -81,6 +83,15 @@ def _default_rules_path(config_dir: str | Path | None = None) -> Path:
     return Path.cwd() / "config" / CRUNCH_RULES_FILE
 
 
+def _managed_rules_path(config_dir: str | Path | None = None, rules_path: str | Path | None = None) -> Path:
+    if rules_path is not None:
+        return Path(rules_path).expanduser()
+    env_path = os.getenv("TOKENCLAW_CRUNCH_RULES")
+    if env_path:
+        return Path(env_path).expanduser()
+    return _default_rules_path(config_dir)
+
+
 def _package_rules_path() -> Path:
     return Path(__file__).parent / CRUNCH_RULES_FILE
 
@@ -116,6 +127,245 @@ def _write_atomic(path: Path, text: str) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
+
+
+def _normalized_treatment(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "apply": "live",
+        "applied": "live",
+        "enforced": "live",
+        "selected": "canary",
+        "canary_applied": "canary",
+        "dry_run": "observe",
+        "dry-run": "observe",
+        "observe_only": "observe",
+        "noop": "none",
+        "no_op": "none",
+        "rolled_back": "rollback",
+        "rollback_required": "rollback",
+    }
+    return aliases.get(text, text or "hold")
+
+
+def _source_crunch_section(decision: dict[str, Any]) -> dict[str, Any]:
+    section = decision.get("crunch")
+    return section if isinstance(section, dict) else {}
+
+
+def _managed_fraction(crunch: dict[str, Any], decision: dict[str, Any], key: str) -> float | None:
+    for source in (crunch, decision):
+        value = source.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            continue
+        try:
+            return _bounded_fraction(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _rule_holdout_fraction(rule: dict[str, Any] | None, section: dict[str, Any]) -> float:
+    for source in (rule, section):
+        canary = source.get("canary") if isinstance(source, dict) and isinstance(source.get("canary"), dict) else {}
+        if canary.get("holdout_fraction") is not None:
+            return _bounded_fraction(canary.get("holdout_fraction"), 0.10)
+    return 0.10
+
+
+def _managed_controller_meta(
+    *,
+    decision: dict[str, Any],
+    treatment: str,
+    current_fraction: float,
+    recommended_fraction: float,
+    holdout_fraction: float,
+    now: str,
+) -> dict[str, Any]:
+    crunch = _source_crunch_section(decision)
+    reason_codes = crunch.get("reason_codes") if isinstance(crunch.get("reason_codes"), list) else decision.get("reason_codes")
+    return {
+        "schema": "tokenclaw.managed_thinking_compaction_treatment_metadata.v1",
+        "updated_at": now,
+        "decision": treatment,
+        "reason_codes": [str(item) for item in reason_codes] if isinstance(reason_codes, list) else [],
+        "previous_fraction": current_fraction,
+        "recommended_fraction": recommended_fraction,
+        "recommended_holdout_fraction": holdout_fraction,
+        "policy_id": decision.get("policy_id") or crunch.get("policy_id"),
+        "decision_id": decision.get("decision_id"),
+        "candidate_id": crunch.get("candidate_id") or THINKING_TARGET_CANDIDATE,
+        "policy_source": "managed-recommended",
+        "server_traffic_treatment": treatment,
+        "local_only": True,
+        "metadata_only": True,
+        "raw_content_included": False,
+    }
+
+
+def _apply_managed_thinking_edit(
+    data: dict[str, Any],
+    *,
+    decision: dict[str, Any],
+    treatment: str,
+    recommended_fraction: float,
+    holdout_fraction: float,
+    now: str,
+) -> None:
+    rule, section = _current_thinking_rule(data)
+    if rule is None:
+        return
+    current_fraction = _current_fraction(section, rule=rule)
+    enabled = recommended_fraction > 0.0
+    section["enabled"] = enabled
+    section["policy_source"] = "managed-recommended"
+    section["managed_controller"] = _managed_controller_meta(
+        decision=decision,
+        treatment=treatment,
+        current_fraction=current_fraction,
+        recommended_fraction=recommended_fraction,
+        holdout_fraction=holdout_fraction,
+        now=now,
+    )
+    parent_canary = section.setdefault("canary", {})
+    if isinstance(parent_canary, dict):
+        parent_canary["enabled"] = True
+        parent_canary["canary_fraction"] = recommended_fraction
+        parent_canary["holdout_fraction"] = holdout_fraction
+        parent_canary.setdefault("canary_salt", "managed-thinking-compaction-treatment-v1")
+        parent_canary.setdefault("canary_unit", "thinking_block_local_fingerprint")
+    rule["enabled"] = enabled
+    rule["policy_source"] = "managed-recommended"
+    canary = rule.setdefault("canary", {})
+    if isinstance(canary, dict):
+        canary["enabled"] = True
+        canary["canary_fraction"] = recommended_fraction
+        canary["holdout_fraction"] = holdout_fraction
+        canary.setdefault("canary_salt", "managed-thinking-compaction-treatment-v1")
+        canary.setdefault("canary_unit", "thinking_block_local_fingerprint")
+    safety = rule.setdefault("safety_stop", {})
+    if isinstance(safety, dict) and treatment == "rollback":
+        safety["last_managed_rollback_reason"] = "server-rollback"
+        safety["last_managed_rollback_at"] = now
+        safety["last_ramp_stop_reason"] = "server-rollback"
+        safety["last_ramp_stop_at"] = now
+    rule["managed_controller"] = _managed_controller_meta(
+        decision=decision,
+        treatment=treatment,
+        current_fraction=current_fraction,
+        recommended_fraction=recommended_fraction,
+        holdout_fraction=holdout_fraction,
+        now=now,
+    )
+
+
+def apply_managed_thinking_compaction_treatment(
+    decision: dict[str, Any],
+    *,
+    apply: bool = False,
+    config_dir: str | Path | None = None,
+    rules_path: str | Path | None = None,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Apply a server-owned traffic treatment to the local thinking compaction rule."""
+    target_path = _managed_rules_path(config_dir=config_dir, rules_path=rules_path)
+    data, original_text, loaded_from = _load_yaml(target_path)
+    proposed = copy.deepcopy(data)
+    timestamp = now or utc_now()
+    crunch = _source_crunch_section(decision)
+    candidate_id = str(crunch.get("candidate_id") or decision.get("candidate_id") or "")
+    treatment = _normalized_treatment(
+        crunch.get("traffic_treatment")
+        or crunch.get("server_traffic_treatment")
+        or decision.get("traffic_treatment")
+        or decision.get("server_traffic_treatment")
+    )
+    rule, section = _current_thinking_rule(proposed)
+    current_fraction = _current_fraction(section, rule=rule) if rule is not None else 0.0
+    current_holdout = _rule_holdout_fraction(rule, section)
+
+    result = {
+        "schema": MANAGED_TREATMENT_SCHEMA,
+        "generated_at": timestamp,
+        "ok": True,
+        "apply": bool(apply),
+        "target_rule_file": CRUNCH_RULES_FILE,
+        "target_path": str(target_path),
+        "loaded_from": loaded_from,
+        "target_file_existed": original_text is not None,
+        "candidate_id": candidate_id or THINKING_TARGET_CANDIDATE,
+        "server_traffic_treatment": treatment,
+        "current_fraction": current_fraction,
+        "current_holdout_fraction": current_holdout,
+        "recommended_fraction": current_fraction,
+        "recommended_holdout_fraction": current_holdout,
+        "changed": False,
+        "status": "no-change",
+        "reason": "server-held",
+        "wrote_policy_files": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _privacy(),
+        "diff": "",
+    }
+    if candidate_id and candidate_id != THINKING_TARGET_CANDIDATE:
+        result.update({"ok": False, "status": "unsupported", "reason": "unsupported-crunch-candidate"})
+        return result
+    if rule is None:
+        result.update({"ok": False, "status": "unsupported", "reason": "target-rule-not-found"})
+        return result
+    if treatment in {"hold", "held", "observe", "none", "shadow", "holdout"}:
+        result["reason"] = f"server-{treatment}"
+        return result
+
+    holdout = current_holdout
+    if treatment in {"canary", "widen"}:
+        fraction = _managed_fraction(crunch, decision, "canary_fraction")
+        if fraction is None:
+            fraction = current_fraction
+        reason = "managed-crunch-canary-fraction"
+    elif treatment == "live":
+        fraction = _managed_fraction(crunch, decision, "canary_fraction")
+        if fraction is None:
+            fraction = 1.0
+        server_holdout = _managed_fraction(crunch, decision, "holdout_fraction")
+        holdout = 0.0 if server_holdout is None else server_holdout
+        reason = "managed-crunch-live-treatment"
+    elif treatment == "rollback":
+        fraction = 0.0
+        reason = "managed-crunch-rollback"
+    else:
+        result.update({"ok": False, "status": "unsupported", "reason": "unsupported-traffic-treatment"})
+        return result
+
+    if fraction + holdout > 1.0:
+        holdout = max(0.0, 1.0 - fraction)
+    result["recommended_fraction"] = fraction
+    result["recommended_holdout_fraction"] = holdout
+    result["reason"] = reason
+    _apply_managed_thinking_edit(
+        proposed,
+        decision=decision,
+        treatment=treatment,
+        recommended_fraction=fraction,
+        holdout_fraction=holdout,
+        now=timestamp,
+    )
+    proposed_text = _dump_yaml(proposed)
+    changed = proposed_text != (original_text or "")
+    result["changed"] = changed
+    result["diff"] = _diff(original_text, proposed_text, target_path) if changed else ""
+    if apply and changed:
+        _write_atomic(target_path, proposed_text)
+        result["status"] = "applied"
+        result["wrote_policy_files"] = True
+    elif changed:
+        result["status"] = "planned"
+    else:
+        result["status"] = "no-change"
+    return result
 
 
 def _rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[str, Any]]:

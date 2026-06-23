@@ -151,6 +151,16 @@ def _crunch_section(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         "policy_id": section.get("policy_id"),
         "candidate_id": section.get("candidate_id"),
     }
+    for key in (
+        "traffic_treatment",
+        "server_traffic_treatment",
+        "canary_fraction",
+        "holdout_fraction",
+        "canary_unit",
+        "canary_salt",
+    ):
+        if section.get(key) is not None:
+            result[key] = section[key]
     if profile not in SUPPORTED_CRUNCH_PROFILES:
         result.update({"status": "unsupported", "apply_reason": "unsupported-crunch-profile"})
         return result, None
@@ -160,6 +170,16 @@ def _crunch_section(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         "policy_id": section.get("policy_id"),
         "candidate_id": section.get("candidate_id"),
     }
+    for key in (
+        "traffic_treatment",
+        "server_traffic_treatment",
+        "canary_fraction",
+        "holdout_fraction",
+        "canary_unit",
+        "canary_salt",
+    ):
+        if section.get(key) is not None:
+            effective[key] = section[key]
     threshold = _as_int(section.get("threshold_chars"))
     if threshold is None:
         thresholds = section.get("thresholds")
@@ -381,6 +401,8 @@ def _unsupported_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "provider_capability_matrix_schema",
             "provider_capabilities",
             "capability_audit",
+            "provider_forwarding",
+            "server_content_processing",
             "omitted_actions",
             "raw_payload_included",
         }:

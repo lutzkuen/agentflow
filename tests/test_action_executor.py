@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
+
+import yaml
 
 from tokenclaw.action_executor import ActionExecutor
 from tokenclaw.managed_action_outcome_feedback import build_managed_action_feedback
@@ -41,6 +45,72 @@ class ActionExecutorTests(unittest.TestCase):
             else:
                 decision[key] = value
         return decision
+
+    def _crunch_decision(self, *, treatment: str = "widen", fraction: float = 0.25, **overrides):
+        decision = {
+            "enabled": True,
+            "status": "received",
+            "policy_id": "managed-crunch-policy",
+            "decision_id": "managed-crunch-decision-1",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "crunch": {
+                "status": "recommended",
+                "profile": "managed",
+                "candidate_id": "repeated-context-thinking-tool-result-gte-128k",
+                "traffic_treatment": treatment,
+                "canary_fraction": fraction,
+                "holdout_fraction": 0.33,
+            },
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+        }
+        for key, value in overrides.items():
+            if key == "crunch":
+                decision["crunch"].update(value)
+            else:
+                decision[key] = value
+        return decision
+
+    def _write_crunch_rules(self, config: Path, *, fraction: float = 0.05, holdout: float = 0.10) -> Path:
+        config.mkdir(parents=True, exist_ok=True)
+        path = config / "crunch_rules.yaml"
+        path.write_text(
+            f"""
+enabled: true
+anthropic_thinking_history_compaction:
+  enabled: true
+  policy_source: local-manual
+  canary:
+    enabled: true
+    canary_fraction: {fraction}
+    holdout_fraction: {holdout}
+  rules:
+    - id: local-repeated-context-thinking-tool-result-canary
+      enabled: true
+      policy_source: local-manual
+      candidate_id: repeated-context-thinking-tool-result-gte-128k
+      canary:
+        enabled: true
+        canary_fraction: {fraction}
+        holdout_fraction: {holdout}
+      safety_stop:
+        enabled: true
+""",
+            encoding="utf-8",
+        )
+        return path
+
+    def _execute_crunch(self, *, config: Path, decision: dict, env: dict[str, str] | None = None, **executor_kwargs):
+        body = {"model": "claude-sonnet-4-6", "messages": []}
+        with patch.dict(os.environ, env or self.managed_live_env, clear=False):
+            result = ActionExecutor(provider="anthropic", config_dir=str(config), **executor_kwargs).execute(
+                body=body,
+                routing_meta={"routed_model": "claude-sonnet-4-6", "source_surface": "anthropic_messages"},
+                decision=decision,
+                application_enabled=True,
+                source_surface="anthropic_messages",
+            )
+        return result
 
     def test_applies_only_provider_body_model_rewrite_for_routing(self):
         body = {"model": "gpt-5-codex", "input": "hello"}
@@ -330,6 +400,140 @@ class ActionExecutorTests(unittest.TestCase):
         self.assertEqual(result["status"], "held")
         self.assertEqual(result["apply_reason"], "action-executor-disabled")
         self.assertEqual(result["fallback"], "local-policy")
+
+    def test_managed_crunch_hold_treatment_leaves_thinking_compaction_rule_unchanged(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.05, holdout=0.10)
+            before = path.read_text(encoding="utf-8")
+            result = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision(treatment="hold", fraction=0.25),
+            )
+            after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(result["crunch"]["status"], "held")
+        self.assertEqual(before, after)
+        self.assertIn("crunch", result["outcome_feedback"]["held_families"])
+
+    def test_managed_crunch_widen_updates_canary_fraction_and_preserves_holdout(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.05, holdout=0.10)
+            result = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision(treatment="widen", fraction=0.25),
+            )
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        rule = data["anthropic_thinking_history_compaction"]["rules"][0]
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["crunch"]["status"], "applied")
+        self.assertEqual(result["crunch"]["traffic_treatment_policy_file"]["status"], "applied")
+        self.assertAlmostEqual(rule["canary"]["canary_fraction"], 0.25)
+        self.assertAlmostEqual(rule["canary"]["holdout_fraction"], 0.10)
+        self.assertEqual(rule["policy_source"], "managed-recommended")
+        self.assertEqual(rule["managed_controller"]["server_traffic_treatment"], "widen")
+        self.assertIn("crunch", result["outcome_feedback"]["applied_families"])
+
+    def test_managed_crunch_canary_updates_policy_file_without_route_membership(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.05, holdout=0.10)
+            result = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision(treatment="canary", fraction=0.15),
+            )
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        rule = data["anthropic_thinking_history_compaction"]["rules"][0]
+        self.assertEqual(result["status"], "applied")
+        self.assertAlmostEqual(rule["canary"]["canary_fraction"], 0.15)
+        self.assertEqual(rule["managed_controller"]["server_traffic_treatment"], "canary")
+
+    def test_managed_crunch_rollback_disables_candidate_and_sets_safety_stop(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.25, holdout=0.10)
+            result = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision(treatment="rollback", fraction=0.0),
+            )
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        section = data["anthropic_thinking_history_compaction"]
+        rule = section["rules"][0]
+        self.assertEqual(result["status"], "applied")
+        self.assertFalse(section["enabled"])
+        self.assertFalse(rule["enabled"])
+        self.assertAlmostEqual(rule["canary"]["canary_fraction"], 0.0)
+        self.assertEqual(rule["safety_stop"]["last_managed_rollback_reason"], "server-rollback")
+        self.assertEqual(rule["managed_controller"]["server_traffic_treatment"], "rollback")
+
+    def test_managed_crunch_dry_run_reports_exact_policy_file_diff_without_writing(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.05, holdout=0.10)
+            before = path.read_text(encoding="utf-8")
+            result = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision(treatment="widen", fraction=0.20),
+                env={"TOKENCLAW_MANAGED": "1", "TOKENCLAW_MANAGED_MODE": "dry_run"},
+            )
+            after = path.read_text(encoding="utf-8")
+
+        policy_file = result["crunch"]["traffic_treatment_policy_file"]
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(result["apply_reason"], "managed-mode-dry_run")
+        self.assertEqual(result["crunch"]["status"], "dry-run")
+        self.assertEqual(policy_file["status"], "planned")
+        self.assertIn("+    canary_fraction: 0.2", policy_file["diff"])
+        self.assertEqual(before, after)
+
+    def test_managed_crunch_family_opt_out_vetoes_with_feedback_and_no_file_write(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.05, holdout=0.10)
+            before = path.read_text(encoding="utf-8")
+            result = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision(treatment="widen", fraction=0.25),
+                env={**self.managed_live_env, "TOKENCLAW_MANAGED_CRUNCH": "0"},
+            )
+            after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["status"], "vetoed")
+        self.assertEqual(result["crunch"]["veto_reason"], "local-action-family-disabled")
+        self.assertIn("crunch", result["outcome_feedback"]["vetoed_families"])
+        self.assertEqual(before, after)
+
+    def test_managed_crunch_unsigned_and_expired_decisions_are_vetoed_without_file_write(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.05, holdout=0.10)
+            before = path.read_text(encoding="utf-8")
+            unsigned = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision(treatment="widen", fraction=0.25),
+                require_signature=True,
+            )
+            expired = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision(
+                    treatment="widen",
+                    fraction=0.25,
+                    expires_at="2026-01-01T00:00:00+00:00",
+                ),
+                now=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+            after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(unsigned["status"], "vetoed")
+        self.assertEqual(unsigned["apply_reason"], "unsigned-policy")
+        self.assertEqual(expired["status"], "vetoed")
+        self.assertEqual(expired["apply_reason"], "expired-policy")
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
