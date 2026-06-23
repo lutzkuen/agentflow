@@ -156,6 +156,24 @@ class DashboardImportTests(unittest.TestCase):
             )
         store.conn.commit()
 
+    def _assert_default_dashboard_two_tabs(self, rendered: str) -> None:
+        tab_labels = re.findall(r'<button class="tab-btn[^"]*"[^>]*>([^<]+)</button>', rendered)
+        self.assertEqual(tab_labels, ["Today", "Last 7 days"])
+        self.assertIn("TokenClaw", rendered)
+        self.assertIn("/tokenclaw/stats", rendered)
+        self.assertIn("/tokenclaw/stats/weekly", rendered)
+        for internal_text in (
+            "Policy workbench",
+            "Codex optimization readiness",
+            "OpenAI optimization readiness",
+            "Managed OpenAI activation",
+            "Promotion blocker",
+            "Activation next",
+            "Scaffold crunch",
+            "canary impact",
+        ):
+            self.assertNotIn(internal_text, rendered)
+
     def test_dashboard_import_does_not_import_provider_server(self):
         old_dashboard = sys.modules.pop("tokenclaw.dashboard", None)
         old_dashboard_app = sys.modules.pop("tokenclaw.dashboard_app", None)
@@ -495,113 +513,41 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("reload_required", policy_json["codex_app"]["file"])
             self.assertEqual(admin_reload.status_code, 404)
             self.assertEqual(dashboard.status_code, 200)
-            self.assertIn("AgentFlow", dashboard.text)
-            self.assertIn("Policies", dashboard.text)
-            self.assertIn("/tokenclaw/stats/policies", dashboard.text)
-            self.assertIn("/tokenclaw/stats/policy-workbench", dashboard.text)
-            self.assertIn("/tokenclaw/stats/policy-events", dashboard.text)
-            self.assertIn("Policy workbench readiness", dashboard.text)
-            self.assertIn("policy-workbench-tbody", dashboard.text)
-            self.assertIn("Policy workbench events", dashboard.text)
-            self.assertIn("policy-workbench-events-tbody", dashboard.text)
-            self.assertIn("routing-experiment-eligibility-tbody", dashboard.text)
-            self.assertIn("Policy reload summary", dashboard.text)
-            self.assertIn("policy-summary-tbody", dashboard.text)
-            self.assertIn("Codex rules", dashboard.text)
-            self.assertIn("/tokenclaw/stats/codex-readiness", dashboard.text)
-            self.assertIn("Codex optimization readiness", dashboard.text)
-            self.assertIn("codex-readiness-tbody", dashboard.text)
-            self.assertIn("Codex exact-cache canary impact", dashboard.text)
-            self.assertIn("codex-cache-readiness-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/codex-canary-impact", dashboard.text)
-            self.assertIn("Codex canary impact by rule", dashboard.text)
-            self.assertIn("codex-canary-impact-tbody", dashboard.text)
-            self.assertIn("Recent policy events", dashboard.text)
-            self.assertIn("Safety / privacy status", dashboard.text)
-            self.assertIn("/tokenclaw/stats/safety", dashboard.text)
-            self.assertIn("safety-warnings-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/rollout-actions/readiness", dashboard.text)
-            self.assertIn("Rollout-action readiness", dashboard.text)
-            self.assertIn("rollout-readiness-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/local-pattern-coverage", dashboard.text)
-            self.assertIn("Local pattern coverage", dashboard.text)
-            self.assertIn("local-pattern-coverage-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/phase-routing", dashboard.text)
-            self.assertIn("Phase-routing rollout health", dashboard.text)
-            self.assertIn("phase-routing-health-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/optimization-eval-queue", dashboard.text)
-            self.assertIn("Optimization eval and promotion candidates", dashboard.text)
-            self.assertIn("optimization-eval-candidates-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/optimization-coordinator", dashboard.text)
-            self.assertIn("Cross-family coordinator state", dashboard.text)
-            self.assertIn("optimization-coordinator-summary-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/optimization-promotion-funnel", dashboard.text)
-            self.assertIn("Optimization promotion canary impact", dashboard.text)
-            self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/promotion-blocker-next-actions", dashboard.text)
-            self.assertIn("/tokenclaw/stats/post-promotion-deltas", dashboard.text)
-            self.assertIn("/tokenclaw/stats/post-promotion-priority-handoff", dashboard.text)
-            self.assertIn("Promotion blocker next actions", dashboard.text)
-            self.assertIn("promotion-blocker-summary-tbody", dashboard.text)
-            self.assertIn("promotion-blocker-groups-tbody", dashboard.text)
-            self.assertIn("Post-promotion blocker deltas", dashboard.text)
-            self.assertIn("post-promotion-deltas-tbody", dashboard.text)
-            self.assertIn("Post-promotion priority handoff health", dashboard.text)
-            self.assertIn("post-promotion-priority-handoff-tbody", dashboard.text)
-            self.assertIn("post-promotion-priority-handoff-sources-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/claude-routing-promotion-funnel", dashboard.text)
-            self.assertIn("Claude routing promotion funnel", dashboard.text)
-            self.assertIn("claude-routing-funnel-candidates-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/openai-optimization-readiness", dashboard.text)
-            self.assertIn("/tokenclaw/stats/managed-openai-activation", dashboard.text)
-            self.assertIn("Managed OpenAI activation", dashboard.text)
-            self.assertIn("managed-openai-activation-tbody", dashboard.text)
-            self.assertIn("managed-openai-activation-families-tbody", dashboard.text)
-            self.assertIn("OpenAI optimization readiness", dashboard.text)
-            self.assertIn("openai-optimization-readiness-summary-tbody", dashboard.text)
-            self.assertIn("openai-optimization-readiness-families-tbody", dashboard.text)
-            self.assertIn("openai-optimization-readiness-conflicts-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/openai-canary-readiness", dashboard.text)
-            self.assertIn("OpenAI local canary readiness", dashboard.text)
-            self.assertIn("openai-canary-readiness-summary-tbody", dashboard.text)
-            self.assertIn("openai-canary-readiness-candidates-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/openai-old-context-summary", dashboard.text)
-            self.assertIn("OpenAI old-context summary readiness", dashboard.text)
-            self.assertIn("openai-old-context-summary-readiness-tbody", dashboard.text)
-            self.assertIn("OpenAI old-context summary endpoint impact", dashboard.text)
-            self.assertIn("openai-old-context-summary-groups-tbody", dashboard.text)
-            self.assertIn("OpenAI old-context summary quality gates", dashboard.text)
-            self.assertIn("openai-old-context-summary-quality-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/openai-cache-replay-readiness", dashboard.text)
-            self.assertIn("OpenAI cache replay readiness", dashboard.text)
-            self.assertIn("openai-cache-replay-readiness-tbody", dashboard.text)
-            self.assertIn("OpenAI cache replay impact gates", dashboard.text)
-            self.assertIn("openai-cache-replay-impact-gates-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/cache-replay-activation-health", dashboard.text)
-            self.assertIn("Cache replay activation health", dashboard.text)
-            self.assertIn("cache-replay-activation-health-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/repeated-scaffold-opportunity", dashboard.text)
-            self.assertIn("/tokenclaw/stats/repeated-scaffold-impact", dashboard.text)
-            self.assertIn("/tokenclaw/stats/repeated-scaffold-activation", dashboard.text)
-            self.assertIn("/tokenclaw/stats/scaffold-rollout-health", dashboard.text)
-            self.assertIn("Scaffold crunch", dashboard.text)
-            self.assertIn("Managed scaffold rollout", dashboard.text)
-            self.assertIn("scaffold-rollout-health-tbody", dashboard.text)
-            self.assertIn("Repeated-scaffold crunch readiness", dashboard.text)
-            self.assertIn("repeated-scaffold-readiness-tbody", dashboard.text)
-            self.assertIn("Repeated-scaffold policy-decision activation", dashboard.text)
-            self.assertIn("repeated-scaffold-activation-tbody", dashboard.text)
-            self.assertIn("Repeated-scaffold activation groups", dashboard.text)
-            self.assertIn("repeated-scaffold-activation-groups-tbody", dashboard.text)
-            self.assertIn("Repeated-scaffold opportunity candidates", dashboard.text)
-            self.assertIn("repeated-scaffold-opportunities-tbody", dashboard.text)
-            self.assertIn("No repeated-scaffold opportunity candidates yet", dashboard.text)
-            self.assertIn("Repeated-scaffold canary impact", dashboard.text)
-            self.assertIn("repeated-scaffold-impact-summary-tbody", dashboard.text)
-            self.assertIn("repeated-scaffold-feedback-queue-tbody", dashboard.text)
-            self.assertIn("Repeated-scaffold promotion gates", dashboard.text)
-            self.assertIn("repeated-scaffold-impact-candidates-tbody", dashboard.text)
-            self.assertIn("No repeated-scaffold canary impact metadata yet", dashboard.text)
+            self.assertIn("TokenClaw", dashboard.text)
+            self.assertIn("/tokenclaw/stats", dashboard.text)
+            self.assertIn("/tokenclaw/stats/weekly", dashboard.text)
+            tab_labels = re.findall(r'<button class="tab-btn[^"]*"[^>]*>([^<]+)</button>', dashboard.text)
+            self.assertEqual(tab_labels, ["Today", "Last 7 days"])
+            self.assertIn("today-calls", dashboard.text)
+            self.assertIn("recent-tbody", dashboard.text)
+            self.assertIn("week-spend", dashboard.text)
+            self.assertIn("weekly-tbody", dashboard.text)
+            for internal_text in (
+                "Policies",
+                "Policy workbench",
+                "Research",
+                "Safety / privacy status",
+                "Codex optimization readiness",
+                "OpenAI optimization readiness",
+                "Managed OpenAI activation",
+                "canary impact",
+                "Promotion blocker",
+                "Activation next",
+                "Scaffold crunch",
+            ):
+                self.assertNotIn(internal_text, dashboard.text)
+            for internal_endpoint in (
+                "/tokenclaw/stats/policies",
+                "/tokenclaw/stats/policy-workbench",
+                "/tokenclaw/stats/policy-events",
+                "/tokenclaw/stats/codex-readiness",
+                "/tokenclaw/stats/openai-optimization-readiness",
+                "/tokenclaw/stats/managed-openai-activation",
+                "/tokenclaw/stats/optimization-eval-queue",
+                "/tokenclaw/stats/optimization-coordinator",
+                "/tokenclaw/stats/phase-routing",
+            ):
+                self.assertNotIn(internal_endpoint, dashboard.text)
         finally:
             if old_event_log is None:
                 os.environ.pop("TOKENCLAW_POLICY_EVENTS_LOG", None)
@@ -888,9 +834,7 @@ class DashboardImportTests(unittest.TestCase):
                 self.assertNotIn(forbidden, rendered)
 
             self.assertEqual(dashboard.status_code, 200)
-            self.assertIn("Promotion blocker next actions", dashboard.text)
-            self.assertIn("promotion-blocker-summary-tbody", dashboard.text)
-            self.assertIn("promotion-blocker-commands-tbody", dashboard.text)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
         finally:
             if old_review_path is None:
                 os.environ.pop("TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH", None)
@@ -1051,9 +995,7 @@ class DashboardImportTests(unittest.TestCase):
                 self.assertNotIn(forbidden, rendered)
 
             self.assertEqual(dashboard.status_code, 200)
-            self.assertIn("Post-promotion priority handoff health", dashboard.text)
-            self.assertIn("post-promotion-priority-handoff-tbody", dashboard.text)
-            self.assertIn("post-promotion-priority-handoff-sources-tbody", dashboard.text)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
         finally:
             if old_priority_review is None:
                 os.environ.pop("TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH", None)
@@ -1240,8 +1182,7 @@ class DashboardImportTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, rendered)
         self.assertEqual(dashboard.status_code, 200)
-        self.assertIn("Post-promotion blocker deltas", dashboard.text)
-        self.assertIn("post-promotion-deltas-tbody", dashboard.text)
+        self._assert_default_dashboard_two_tabs(dashboard.text)
 
     def test_dashboard_inline_javascript_syntax_checks_with_node(self):
         node = shutil.which("node")
@@ -1251,7 +1192,9 @@ class DashboardImportTests(unittest.TestCase):
         html = stats_views.dashboard_html()
         scripts = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
         self.assertTrue(scripts)
-        self.assertIn("/tokenclaw/stats/full", scripts[-1])
+        self.assertIn("/tokenclaw/stats", scripts[-1])
+        self.assertIn("/tokenclaw/stats/weekly", scripts[-1])
+        self.assertNotIn("/tokenclaw/stats/full", scripts[-1])
 
         with tempfile.NamedTemporaryFile("w", suffix=".js") as script_file:
             script_file.write("\n".join(scripts))
@@ -1519,13 +1462,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(rollout["active_policy"]["rule_path_included"])
 
             self.assertEqual(dashboard.status_code, 200)
-            self.assertIn("Managed scaffold rollout", dashboard.text)
-            self.assertIn("scaffold-rollout-health-tbody", dashboard.text)
-            self.assertIn("Repeated-scaffold crunch readiness", dashboard.text)
-            self.assertIn("Repeated-scaffold policy-decision activation", dashboard.text)
-            self.assertIn("repeated-scaffold-activation-tbody", dashboard.text)
-            self.assertIn("repeated-scaffold-activation-groups-tbody", dashboard.text)
-            self.assertIn("repeated-scaffold-impact-candidates-tbody", dashboard.text)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
 
             rendered = (
                 json.dumps(opportunity, sort_keys=True)
@@ -1663,9 +1600,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn(payload["state"], {"disabled", "ready"})
             self.assertFalse(payload["policy"]["rule_file"]["rule_path_included"])
             self.assertFalse(payload["policy"]["rule_file"]["policy_file_contents_included"])
-            self.assertIn("Terminal-output compaction readiness", dashboard_response.text)
-            self.assertIn("terminal-compaction-summary-tbody", dashboard_response.text)
-            self.assertIn("fetch('/tokenclaw/stats/terminal-output-compaction?opportunity_limit=250&impact_limit=100')", dashboard_response.text)
+            self._assert_default_dashboard_two_tabs(dashboard_response.text)
             self.assertFalse(payload["privacy"]["raw_terminal_lines_included"])
             self.assertFalse(payload["privacy"]["raw_terminal_text_included"])
             self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
@@ -1924,9 +1859,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["managed_lifecycle_feedback_retryable_error"], 1)
             self.assertEqual(payload["summary"]["managed_lifecycle_feedback_dropped"], 1)
             self.assertFalse(payload["lifecycle_feedback"]["payload_json_included"])
-            self.assertIn("Terminal-output compaction activation", dashboard_response.text)
-            self.assertIn("terminal-compaction-activation-tbody", dashboard_response.text)
-            self.assertIn("fetch('/tokenclaw/stats/terminal-output-compaction-activation?opportunity_limit=250&impact_limit=100')", dashboard_response.text)
+            self._assert_default_dashboard_two_tabs(dashboard_response.text)
             self.assertFalse(payload["privacy"]["raw_terminal_lines_included"])
             self.assertFalse(payload["privacy"]["raw_terminal_text_included"])
             self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
@@ -2108,8 +2041,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["request_ids_included"])
             self.assertFalse(payload["privacy"]["cache_keys_included"])
             self.assertFalse(payload["privacy"]["payload_json_included"])
-            self.assertIn("Managed OpenAI activation", dashboard.text)
-            self.assertIn("managed-openai-activation-tbody", dashboard.text)
+            self.assertEqual(dashboard.status_code, 200)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + dashboard.text
             for forbidden in (
@@ -2622,7 +2555,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["raw_prompts_included"])
             self.assertFalse(payload["privacy"]["raw_provider_bodies_included"])
             self.assertFalse(payload["privacy"]["provider_calls_made"])
-            self.assertIn("optimization-eval-candidates-tbody", dashboard.text)
+            self.assertEqual(dashboard.status_code, 200)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + dashboard.text
             for forbidden in (
@@ -2937,10 +2871,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["canary_applied_count"], 1)
             self.assertEqual(payload["summary"]["canary_holdout_count"], 1)
             self.assertEqual(payload["summary"]["pending_lifecycle_feedback_count"], 1)
-            self.assertIn("Optimization promotion canary impact", dashboard.text)
-            self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
-            self.assertIn("Readiness", dashboard.text)
-            self.assertIn("Next command", dashboard.text)
+            self.assertEqual(dashboard.status_code, 200)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
             self.assertEqual(action_response.status_code, 200)
             action_payload = action_response.json()
             self.assertEqual(action_payload["schema"], "tokenclaw.optimization_promotion_actions_dashboard.v1")
@@ -2963,9 +2895,6 @@ class DashboardImportTests(unittest.TestCase):
             action_rendered = json.dumps(action_payload, sort_keys=True)
             self.assertNotIn('"target_candidate_id"', action_rendered)
             self.assertNotIn('"action_id"', action_rendered)
-            self.assertIn("Promotion-ready actions", dashboard.text)
-            self.assertIn("optimization-promotion-actions-tbody", dashboard.text)
-            self.assertIn("/tokenclaw/stats/optimization-promotion-actions?limit=50", dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + json.dumps(action_payload, sort_keys=True) + dashboard.text
             for forbidden in (
@@ -3184,10 +3113,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(yield_payload["privacy"]["raw_prompts_included"])
             self.assertFalse(yield_payload["privacy"]["request_ids_included"])
             self.assertEqual(dashboard.status_code, 200)
-            self.assertIn("Claude routing promotion funnel", dashboard.text)
-            self.assertIn("/tokenclaw/stats/claude-routing-promotion-funnel", dashboard.text)
-            self.assertIn("claude-routing-funnel-candidates-tbody", dashboard.text)
-            self.assertIn("post-fix-shadow-yield-tbody", dashboard.text)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + json.dumps(yield_payload, sort_keys=True) + dashboard.text
             for forbidden in (
@@ -3535,8 +3461,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertTrue(payload["safety_stop"]["active"])
             self.assertFalse(payload["privacy"]["raw_action_payloads_included"])
             self.assertFalse(payload["privacy"]["yaml_contents_included"])
-            self.assertIn("rollout-readiness-tbody", dashboard.text)
-            self.assertIn("rollout-action-counts-tbody", dashboard.text)
+            self.assertEqual(dashboard.status_code, 200)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
 
             rendered = json.dumps(payload) + dashboard.text
             self.assertNotIn("raw prompt must stay hidden", rendered)
@@ -3708,8 +3634,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(queue["due_samples"][0]["payload_included"])
             self.assertFalse(queue["privacy"]["payload_json_included"])
             self.assertFalse(payload["privacy"]["managed_feedback_payload_json_included"])
-            self.assertIn("safety-managed-feedback-tbody", dashboard.text)
-            self.assertIn("managed-feedback-queue-tbody", dashboard.text)
+            self.assertEqual(dashboard.status_code, 200)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
             rendered = json.dumps(payload) + dashboard.text
             self.assertNotIn("must not appear in dashboard", rendered)
             self.assertNotIn("provider body must stay local", rendered)
@@ -3862,8 +3788,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["request_ids_included"])
             self.assertFalse(payload["privacy"]["session_ids_included"])
             self.assertFalse(payload["privacy"]["cache_keys_included"])
-            self.assertIn("evidence-activation-summary-tbody", dashboard.text)
-            self.assertIn("evidence-activation-entries-tbody", dashboard.text)
+            self.assertEqual(dashboard.status_code, 200)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + dashboard.text
             self.assertNotIn(str(plan_path), rendered)
@@ -4276,12 +4202,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(full_payload["activation_burndown"]["privacy"]["request_ids_included"])
             self.assertFalse(full_payload["activation_burndown"]["privacy"]["session_ids_included"])
             self.assertFalse(full_payload["activation_burndown"]["privacy"]["cache_keys_included"])
-            self.assertIn("local-activation-queue-summary-tbody", dashboard.text)
-            self.assertIn("local-activation-queue-entries-tbody", dashboard.text)
-            self.assertIn("activation-successor-burndown-tbody", dashboard.text)
-            self.assertIn("activation-preview-agreement-burndown-tbody", dashboard.text)
-            self.assertIn("activation-burndown-tbody", dashboard.text)
-            self.assertIn("Managed preview", dashboard.text)
+            self.assertEqual(dashboard.status_code, 200)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
 
             rendered = (
                 json.dumps(payload, sort_keys=True)
@@ -4382,8 +4304,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(health["status"], "empty")
             self.assertEqual(health["summary"]["top_projected_savings_usd"], 0.0)
             self.assertIn(health["summary"]["top_next_action"], (None, ""))
-            self.assertIn("c-activation-bottleneck", dashboard.text)
-            self.assertIn("activation queue is not polled by the shell", dashboard.text)
+            self.assertEqual(dashboard.status_code, 200)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
             self.assertFalse(health["privacy"]["raw_prompts_included"])
             self.assertFalse(health["privacy"]["provider_bodies_included"])
             self.assertFalse(health["privacy"]["request_ids_included"])
@@ -4628,12 +4550,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(health["privacy"]["session_ids_included"])
             self.assertFalse(health["privacy"]["cache_keys_included"])
             self.assertIn("activation_successor_queue_health", full_payload["summary"])
-            self.assertIn("c-activation-bottleneck", dashboard.text)
-            self.assertIn("c-activation-action", dashboard.text)
-            self.assertIn("c-activation-savings", dashboard.text)
-            self.assertIn("preview-gated-activation-issue-summary-tbody", dashboard.text)
-            self.assertIn("preview-gated-activation-issue-decisions-tbody", dashboard.text)
-            self.assertIn("preview-gated-activation-issue-proposals-tbody", dashboard.text)
+            self.assertEqual(dashboard.status_code, 200)
+            self._assert_default_dashboard_two_tabs(dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + json.dumps(full_payload, sort_keys=True) + dashboard.text
             self.assertNotIn(str(plan_path), rendered)

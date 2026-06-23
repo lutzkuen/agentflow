@@ -28683,3 +28683,210 @@ resetDashboardPolling();
 </script>
 </body>
 </html>"""
+
+
+def dashboard_html() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TokenClaw Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1419;color:#d8dee9;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}
+  header{align-items:center;background:#151b22;border-bottom:1px solid #2c3642;display:flex;gap:12px;padding:16px 24px}
+  h1{color:#f3f6fa;font-size:18px;font-weight:650;letter-spacing:0;margin:0}
+  .sub{color:#93a1b1;font-size:12px}
+  #status{color:#93a1b1;font-size:12px;margin-left:auto}
+  .tabs{border-bottom:1px solid #2c3642;display:flex;gap:4px;padding:0 24px}
+  .tab-btn{background:transparent;border:0;border-bottom:2px solid transparent;color:#93a1b1;cursor:pointer;font:inherit;padding:12px 14px}
+  .tab-btn.active{border-bottom-color:#5aa7ff;color:#f3f6fa}
+  .tab-panel{display:none;padding:20px 24px 28px}
+  .tab-panel.active{display:block}
+  .cards{display:grid;gap:12px;grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:18px}
+  .card{background:#151b22;border:1px solid #2c3642;border-radius:8px;min-width:0;padding:14px}
+  .label{color:#93a1b1;font-size:11px;font-weight:650;text-transform:uppercase}
+  .value{color:#f3f6fa;font-size:23px;font-weight:700;margin-top:6px;overflow-wrap:anywhere}
+  .hint{color:#93a1b1;font-size:12px;line-height:1.4;margin-top:4px;overflow-wrap:anywhere}
+  .money{color:#6ad77f}
+  .warn{color:#ffbd5e}
+  .bad{color:#ff7b72}
+  .section{margin-top:18px}
+  h2{color:#93a1b1;font-size:12px;font-weight:650;letter-spacing:.04em;margin:0 0 10px;text-transform:uppercase}
+  .table-wrap{overflow-x:auto}
+  table{border-collapse:collapse;min-width:900px;width:100%}
+  th{border-bottom:1px solid #2c3642;color:#93a1b1;font-size:11px;font-weight:650;padding:8px 10px;text-align:left;text-transform:uppercase;white-space:nowrap}
+  td{border-bottom:1px solid #1d252e;padding:8px 10px;white-space:nowrap}
+  tr:hover td{background:#151b22}
+  .badge{border-radius:4px;display:inline-block;font-size:11px;font-weight:650;padding:2px 6px}
+  .badge.ok{background:#17351f;color:#6ad77f}
+  .badge.err{background:#391b1b;color:#ff7b72}
+  .badge.miss{background:#252c34;color:#b7c0cc}
+  .model{max-width:260px;overflow:hidden;text-overflow:ellipsis}
+  .muted{color:#93a1b1}
+  @media (max-width:900px){
+    header{padding:14px 16px}
+    .tabs{padding:0 16px}
+    .tab-panel{padding:16px}
+    .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+  }
+  @media (max-width:560px){
+    header{align-items:flex-start;flex-direction:column}
+    #status{margin-left:0}
+    .cards{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>TokenClaw</h1>
+  <span class="sub">local savings dashboard</span>
+  <span id="status">loading</span>
+</header>
+
+<nav class="tabs" aria-label="Dashboard views">
+  <button class="tab-btn active" type="button" data-tab-name="today" onclick="showTab('today')">Today</button>
+  <button class="tab-btn" type="button" data-tab-name="last7" onclick="showTab('last7')">Last 7 days</button>
+</nav>
+
+<main>
+  <section class="tab-panel active" id="tab-today">
+    <div class="cards">
+      <div class="card"><div class="label">Calls today</div><div class="value" id="today-calls">-</div><div class="hint" id="today-errors">- errors</div></div>
+      <div class="card"><div class="label">Spend today</div><div class="value money" id="today-spend">-</div><div class="hint" id="today-tokens">- tokens</div></div>
+      <div class="card"><div class="label">Saved today</div><div class="value money" id="today-savings">-</div><div class="hint" id="today-savings-detail">local routing, crunching, exact cache</div></div>
+      <div class="card"><div class="label">Health</div><div class="value" id="today-health">-</div><div class="hint" id="today-latency">- avg latency</div></div>
+    </div>
+    <div class="section">
+      <h2>Recent Calls</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Time</th><th>Provider</th><th>Category</th><th>Requested</th><th>Routed</th><th>Spend</th><th>Saved</th><th>Status</th><th>Latency</th>
+          </tr></thead>
+          <tbody id="recent-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-last7">
+    <div class="cards">
+      <div class="card"><div class="label">Units</div><div class="value" id="week-units">-</div><div class="hint" id="week-success">- successful</div></div>
+      <div class="card"><div class="label">Spend</div><div class="value money" id="week-spend">-</div><div class="hint" id="week-baseline">- baseline</div></div>
+      <div class="card"><div class="label">Savings</div><div class="value money" id="week-savings">-</div><div class="hint">local summary endpoint</div></div>
+      <div class="card"><div class="label">Tokens</div><div class="value" id="week-tokens">-</div><div class="hint" id="week-errors">- errors</div></div>
+    </div>
+    <div class="section">
+      <h2>Daily Breakdown</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Date</th><th>Units</th><th>Provider calls</th><th>Codex turns</th><th>Success</th><th>Errors</th><th>Tokens</th><th>Spend</th><th>Baseline</th><th>Savings</th>
+          </tr></thead>
+          <tbody id="weekly-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const statusEl=document.getElementById('status');
+function text(id,value){document.getElementById(id).textContent=value}
+function money(value){return '$'+Number(value||0).toFixed(4)}
+function num(value){return Number(value||0).toLocaleString()}
+function localTime(value){
+  if(!value)return '-';
+  const d=new Date(value);
+  return Number.isNaN(d.getTime())?'-':d.toLocaleString();
+}
+function statusBadge(code){
+  const n=Number(code||0);
+  if(n>=400)return `<span class="badge err">${n}</span>`;
+  if(n>=200)return `<span class="badge ok">${n}</span>`;
+  return '<span class="badge miss">-</span>';
+}
+function showTab(name){
+  document.querySelectorAll('.tab-btn').forEach(btn=>btn.classList.toggle('active',btn.dataset.tabName===name));
+  document.querySelectorAll('.tab-panel').forEach(panel=>panel.classList.toggle('active',panel.id==='tab-'+name));
+}
+async function getJson(url){
+  const response=await fetch(url,{cache:'no-store'});
+  if(!response.ok)throw new Error(`${url} returned ${response.status}`);
+  return response.json();
+}
+function renderToday(data){
+  const summary=data.summary||{};
+  const health=(data.executive_summary||{}).health||{};
+  const savings=(data.executive_summary||{}).savings||{};
+  const tokens=(data.executive_summary||{}).tokens_today||{};
+  text('today-calls',num(data.today_calls));
+  text('today-errors',`${num(summary.today_errors)} errors`);
+  text('today-spend',money(data.today_cost_usd));
+  text('today-tokens',`${num(tokens.total_tokens)} tokens`);
+  text('today-savings',money(savings.today_tokenclaw_generated_savings_usd||data.today_savings_usd));
+  const buckets=savings.today_tokenclaw_generated_buckets||{};
+  text('today-savings-detail',`routing ${money(buckets.routing_usd)} · crunch ${money(buckets.crunching_usd)} · cache ${money(buckets.exact_local_cache_usd)}`);
+  text('today-health',summary.today_errors?'Check errors':'OK');
+  document.getElementById('today-health').className='value '+(summary.today_errors?'warn':'money');
+  text('today-latency',`${num(health.avg_latency_ms||summary.avg_latency_ms)} ms avg latency`);
+  const rows=(data.recent||[]).map(row=>{
+    const routed=row.routed_model&&row.routed_model!==row.requested_model?row.routed_model:'-';
+    return `<tr>
+      <td class="muted">${localTime(row.created_at)}</td>
+      <td>${row.provider||'unknown'}</td>
+      <td>${row.category||'unknown'}</td>
+      <td class="model">${row.requested_model||'-'}</td>
+      <td class="model">${routed}</td>
+      <td class="money">${money(row.cost_est_usd)}</td>
+      <td class="money">${money(row.saved_usd)}</td>
+      <td>${statusBadge(row.status_code)}</td>
+      <td class="muted">${num(row.latency_ms)} ms</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('recent-tbody').innerHTML=rows||'<tr><td colspan="9" class="muted">No calls recorded yet.</td></tr>';
+}
+function renderWeekly(data){
+  const totals=data.totals||{};
+  text('week-units',num(totals.total_units));
+  text('week-success',`${num(totals.successful_calls)} successful`);
+  text('week-spend',money(totals.cost_est_usd));
+  text('week-baseline',`${money(totals.cost_baseline_usd)} baseline`);
+  text('week-savings',money(totals.savings_usd));
+  text('week-tokens',num(totals.total_tokens));
+  text('week-errors',`${num(totals.errors)} errors`);
+  const rows=(data.days||[]).map(row=>`<tr>
+    <td>${row.day}</td>
+    <td>${num(row.total_units)}</td>
+    <td>${num(row.provider_calls)}</td>
+    <td>${num(row.codex_turns)}</td>
+    <td>${num(row.successful_calls)}</td>
+    <td>${num(row.errors)}</td>
+    <td>${num(row.total_tokens)}</td>
+    <td class="money">${money(row.cost_est_usd)}</td>
+    <td>${money(row.cost_baseline_usd)}</td>
+    <td class="money">${money(row.savings_usd)}</td>
+  </tr>`).join('');
+  document.getElementById('weekly-tbody').innerHTML=rows||'<tr><td colspan="10" class="muted">No weekly activity recorded yet.</td></tr>';
+}
+async function refresh(){
+  try{
+    const [today,weekly]=await Promise.all([
+      getJson('/tokenclaw/stats'),
+      getJson('/tokenclaw/stats/weekly'),
+    ]);
+    renderToday(today);
+    renderWeekly(weekly);
+    statusEl.textContent='updated '+new Date().toLocaleTimeString();
+  }catch(error){
+    statusEl.textContent='error loading dashboard';
+    console.error(error);
+  }
+}
+refresh();
+setInterval(refresh,5000);
+</script>
+</body>
+</html>"""
