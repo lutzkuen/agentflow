@@ -570,6 +570,48 @@ def _update_codex_toml(raw: str, local_base_url: str) -> tuple[str, bool]:
     return "".join(updated), True
 
 
+def _remove_or_restore_codex_toml_base_url(
+    raw: str,
+    *,
+    expected_local_base_url: str,
+    restore_base_url: str | None = None,
+) -> tuple[str, bool, str]:
+    lines = raw.splitlines(keepends=True)
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    for index, line in enumerate(lines):
+        if _is_table_header(line):
+            break
+        match = _OPENAI_BASE_URL_RE.match(line)
+        if not match:
+            continue
+        configured = _decode_simple_toml_string(match.group(2))
+        if configured != expected_local_base_url:
+            return raw, False, "codex-openai-base-url-mismatch"
+        if restore_base_url:
+            replacement_value = _toml_string(restore_base_url)
+            updated_line = f"{match.group(1)}{replacement_value}{match.group(3) or ''}{match.group(4) or newline}"
+            updated = list(lines)
+            updated[index] = updated_line
+            return "".join(updated), updated_line != line, "restored"
+        updated = list(lines)
+        del updated[index]
+        return "".join(updated), True, "removed"
+    return raw, False, "codex-openai-base-url-missing"
+
+
+def _decode_simple_toml_string(raw_value: str) -> str:
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return value[1:-1]
+        return decoded if isinstance(decoded, str) else str(decoded)
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1]
+    return value
+
+
 def _next_backup_path(path: Path) -> Path:
     candidate = path.with_name(path.name + ".tokenclaw.bak")
     if not candidate.exists():
@@ -612,6 +654,30 @@ def _update_desktop_exec_value(value: str, local_base_url: str) -> tuple[str, bo
     return shlex.join(updated), True
 
 
+def _remove_desktop_exec_value(value: str, local_base_url: str) -> tuple[str, bool, str]:
+    tokens = _split_exec_value(value)
+    if not tokens:
+        raise ActivationError("Claude Desktop Exec line is empty")
+    updated: list[str] = []
+    removed = False
+    for token in tokens:
+        if token.startswith("ANTHROPIC_BASE_URL="):
+            if token.split("=", 1)[1] != local_base_url:
+                return value, False, "claude-desktop-base-url-mismatch"
+            removed = True
+            continue
+        updated.append(token)
+    if not removed:
+        return value, False, "claude-desktop-base-url-missing"
+    if updated and updated[0] == "env" and len(updated) > 1 and "=" not in updated[1]:
+        updated = updated[1:]
+    if updated == ["env"]:
+        updated = []
+    if not updated:
+        raise ActivationError("Claude Desktop Exec line would be empty after deactivation")
+    return shlex.join(updated), True, "removed"
+
+
 def update_claude_desktop_desktop_file(raw: str, local_base_url: str) -> tuple[str, bool]:
     newline = "\r\n" if "\r\n" in raw else "\n"
     lines = raw.splitlines(keepends=True)
@@ -628,6 +694,25 @@ def update_claude_desktop_desktop_file(raw: str, local_base_url: str) -> tuple[s
         updated = list(lines)
         updated[index] = f"Exec={updated_value}{line_ending or newline}"
         return "".join(updated), True
+    raise ActivationError("Claude Desktop .desktop file does not contain an Exec= line")
+
+
+def remove_claude_desktop_desktop_file_routing(raw: str, local_base_url: str) -> tuple[str, bool, str]:
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.splitlines(keepends=True)
+    if raw and not raw.endswith(("\n", "\r")):
+        lines.append("")
+    for index, line in enumerate(lines):
+        line_ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        body = line[:-len(line_ending)] if line_ending else line
+        if not body.startswith("Exec="):
+            continue
+        updated_value, changed, reason = _remove_desktop_exec_value(body[len("Exec="):], local_base_url)
+        if not changed:
+            return raw, False, reason
+        updated = list(lines)
+        updated[index] = f"Exec={updated_value}{line_ending or newline}"
+        return "".join(updated), True, reason
     raise ActivationError("Claude Desktop .desktop file does not contain an Exec= line")
 
 
@@ -664,6 +749,23 @@ def update_claude_desktop_systemd_env_file(raw: str, local_base_url: str) -> tup
 
     prefix = "" if not raw or raw.endswith(("\n", "\r")) else newline
     return raw + prefix + wanted + newline, True
+
+
+def remove_anthropic_base_url_env_line(raw: str, local_base_url: str) -> tuple[str, bool, str]:
+    lines = raw.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        line_ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        body = line[:-len(line_ending)] if line_ending else line
+        stripped = body.strip()
+        if not stripped or stripped.startswith("#") or not stripped.startswith("ANTHROPIC_BASE_URL="):
+            continue
+        current = stripped.split("=", 1)[1]
+        if current != local_base_url:
+            return raw, False, "anthropic-base-url-mismatch"
+        updated = list(lines)
+        del updated[index]
+        return "".join(updated), True, "removed"
+    return raw, False, "anthropic-base-url-missing"
 
 
 def claude_desktop_base_url_from_systemd_env_file(raw: str) -> str | None:
@@ -765,6 +867,202 @@ def _shell_profile_sources_env(profile_contents: str, env_path: Path) -> bool:
 
 def _shell_profile_append_block(env_path: Path) -> str:
     return f"# TokenClaw\n{_shell_profile_source_line(env_path)}\n"
+
+
+def remove_shell_profile_source(raw: str, env_path: Path) -> tuple[str, bool, str]:
+    wanted_path = _normalized_shell_source_path(str(env_path))
+    lines = raw.splitlines(keepends=True)
+    remove_indexes: set[int] = set()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            tokens = shlex.split(stripped)
+        except ValueError:
+            continue
+        if len(tokens) >= 2 and tokens[0] in {"source", "."} and _normalized_shell_source_path(tokens[1]) == wanted_path:
+            remove_indexes.add(index)
+            if index > 0 and lines[index - 1].strip() == "# TokenClaw":
+                remove_indexes.add(index - 1)
+    if not remove_indexes:
+        return raw, False, "shell-profile-source-missing"
+    updated = [line for index, line in enumerate(lines) if index not in remove_indexes]
+    return "".join(updated), True, "removed"
+
+
+def _remove_target_profile(config: dict[str, Any], target: str) -> tuple[dict[str, Any], bool]:
+    updated = dict(config)
+    targets = dict(updated.get("targets") or {})
+    existed = target in targets
+    if existed:
+        del targets[target]
+    updated["schema"] = SCHEMA
+    updated["targets"] = targets
+    updated["updated_at"] = utc_now()
+    return updated, existed
+
+
+def _backup_codex_base_url(profile: dict[str, Any]) -> str | None:
+    backup_value = profile.get("codex_config_backup_path")
+    if not isinstance(backup_value, str) or not backup_value:
+        return None
+    backup_path = Path(backup_value).expanduser()
+    try:
+        raw = backup_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in raw.splitlines(keepends=True):
+        if _is_table_header(line):
+            return None
+        match = _OPENAI_BASE_URL_RE.match(line)
+        if match:
+            return _decode_simple_toml_string(match.group(2))
+    return None
+
+
+def deactivate_target(
+    config: dict[str, Any],
+    target: str,
+    *,
+    config_dir: str | Path | None = None,
+    dry_run: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    target = "claude-vscode" if target == "claude-code" else target
+    if target not in ACTIVATION_TARGETS:
+        raise ActivationError(f"unknown activation target: {target}")
+    profile = (config.get("targets") or {}).get(target)
+    configured = isinstance(profile, dict) and bool(profile.get("configured"))
+    actions: list[dict[str, Any]] = []
+    updated_config = config
+    if not configured:
+        return (
+            updated_config,
+            {
+                "schema": "tokenclaw.deactivation_result.v1",
+                "ok": True,
+                "target": target,
+                "configured_before": False,
+                "changed": False,
+                "dry_run": bool(dry_run),
+                "config_path": str(activation_config_path(config_dir)),
+                "actions": actions,
+                "message": f"TokenClaw target was not active: {target}",
+            },
+        )
+
+    profile = dict(profile)
+    local_base_url = str(profile.get("local_base_url") or "")
+
+    if target == "codex":
+        path_value = profile.get("codex_config_path")
+        if isinstance(path_value, str) and path_value:
+            path = Path(path_value).expanduser()
+            if path.exists():
+                original = path.read_text(encoding="utf-8")
+                restored_base_url = _backup_codex_base_url(profile)
+                updated, changed, reason = _remove_or_restore_codex_toml_base_url(
+                    original,
+                    expected_local_base_url=local_base_url,
+                    restore_base_url=restored_base_url,
+                )
+                if changed and not dry_run:
+                    path.write_text(updated, encoding="utf-8")
+                actions.append(
+                    {
+                        "action": "restore-codex-config" if restored_base_url else "remove-codex-openai-base-url",
+                        "path": str(path),
+                        "changed": changed,
+                        "reason": reason,
+                    }
+                )
+            else:
+                actions.append({"action": "remove-codex-openai-base-url", "path": str(path), "changed": False, "reason": "file-missing"})
+
+    if target == "claude-vscode":
+        env_path_value = profile.get("env_file_path")
+        if isinstance(env_path_value, str) and env_path_value:
+            env_path = Path(env_path_value).expanduser()
+            if env_path.exists():
+                expected = _claude_vscode_env_contents(local_base_url)
+                current = env_path.read_text(encoding="utf-8")
+                changed = current == expected
+                reason = "removed" if changed else "env-file-not-tokenclaw-managed"
+                if changed and not dry_run:
+                    env_path.unlink()
+                actions.append({"action": "remove-claude-vscode-env-file", "path": str(env_path), "changed": changed, "reason": reason})
+            else:
+                actions.append({"action": "remove-claude-vscode-env-file", "path": str(env_path), "changed": False, "reason": "file-missing"})
+
+        shell_profile_value = profile.get("shell_profile_path")
+        if isinstance(shell_profile_value, str) and shell_profile_value and isinstance(env_path_value, str) and env_path_value:
+            shell_path = Path(shell_profile_value).expanduser()
+            if shell_path.exists():
+                original = shell_path.read_text(encoding="utf-8")
+                updated, changed, reason = remove_shell_profile_source(original, Path(env_path_value).expanduser())
+                if changed and not dry_run:
+                    shell_path.write_text(updated, encoding="utf-8")
+                actions.append({"action": "remove-shell-profile-source", "path": str(shell_path), "changed": changed, "reason": reason})
+            else:
+                actions.append({"action": "remove-shell-profile-source", "path": str(shell_path), "changed": False, "reason": "file-missing"})
+
+        systemd_path_value = profile.get("systemd_env_file_path")
+        if isinstance(systemd_path_value, str) and systemd_path_value:
+            systemd_path = Path(systemd_path_value).expanduser()
+            if systemd_path.exists():
+                original = systemd_path.read_text(encoding="utf-8")
+                updated, changed, reason = remove_anthropic_base_url_env_line(original, local_base_url)
+                if changed and not dry_run:
+                    systemd_path.write_text(updated, encoding="utf-8")
+                actions.append({"action": "remove-systemd-env", "path": str(systemd_path), "changed": changed, "reason": reason})
+            else:
+                actions.append({"action": "remove-systemd-env", "path": str(systemd_path), "changed": False, "reason": "file-missing"})
+
+    if target == "claude-desktop":
+        desktop_path_value = profile.get("desktop_file_path")
+        if isinstance(desktop_path_value, str) and desktop_path_value:
+            desktop_path = Path(desktop_path_value).expanduser()
+            if desktop_path.exists():
+                original = desktop_path.read_text(encoding="utf-8")
+                updated, changed, reason = remove_claude_desktop_desktop_file_routing(original, local_base_url)
+                if changed and not dry_run:
+                    backup_path = _next_backup_path(desktop_path)
+                    shutil.copy2(desktop_path, backup_path)
+                    desktop_path.write_text(updated, encoding="utf-8")
+                actions.append({"action": "remove-claude-desktop-exec-env", "path": str(desktop_path), "changed": changed, "reason": reason})
+            else:
+                actions.append({"action": "remove-claude-desktop-exec-env", "path": str(desktop_path), "changed": False, "reason": "file-missing"})
+        env_path_value = profile.get("env_file_path")
+        if isinstance(env_path_value, str) and env_path_value:
+            env_path = Path(env_path_value).expanduser()
+            if env_path.exists():
+                original = env_path.read_text(encoding="utf-8")
+                updated, changed, reason = remove_anthropic_base_url_env_line(original, local_base_url)
+                if changed and not dry_run:
+                    env_path.write_text(updated, encoding="utf-8")
+                actions.append({"action": "remove-systemd-env", "path": str(env_path), "changed": changed, "reason": reason})
+            else:
+                actions.append({"action": "remove-systemd-env", "path": str(env_path), "changed": False, "reason": "file-missing"})
+
+    updated_config, profile_removed = _remove_target_profile(config, target)
+    if not dry_run:
+        write_activation_config(updated_config, config_dir)
+    changed = bool(profile_removed or any(bool(action.get("changed")) for action in actions))
+    return (
+        updated_config,
+        {
+            "schema": "tokenclaw.deactivation_result.v1",
+            "ok": True,
+            "target": target,
+            "configured_before": True,
+            "changed": changed,
+            "profile_removed": profile_removed,
+            "dry_run": bool(dry_run),
+            "config_path": str(activation_config_path(config_dir)),
+            "actions": actions,
+            "message": f"Deactivated TokenClaw target: {target}",
+        },
+    )
 
 
 def activate_claude_vscode(
@@ -969,6 +1267,13 @@ def activate_codex(
                 backup_path = _next_backup_path(path)
                 shutil.copy2(path, backup_path)
             path.write_text(updated_toml, encoding="utf-8")
+            if backup_path is not None:
+                codex_profile["codex_config_backup_path"] = str(backup_path)
+                updated_config = apply_activation_profile(
+                    apply_activation_profile(config, openai_profile, config_dir=config_dir),
+                    codex_profile,
+                    config_dir=config_dir,
+                )
         config_path = write_activation_config(updated_config, config_dir)
 
     return {

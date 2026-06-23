@@ -54,7 +54,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 0)
         output = stdout.getvalue()
-        for expected in ("activate", "stats", "doctor", "run", "version"):
+        for expected in ("activate", "deactivate", "stats", "doctor", "run", "version"):
             self.assertIn(expected, output)
         for target in ("openai", "claude", "codex", "claude-vscode", "claude-desktop"):
             self.assertIn(target, output)
@@ -65,6 +65,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
     def test_public_tokenclaw_subcommand_help_works(self):
         commands = [
             ("activate", "--help"),
+            ("deactivate", "--help"),
             ("stats", "--help"),
             ("doctor", "--help"),
             ("run", "--help"),
@@ -397,6 +398,22 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertIn("Local base URL for clients: http://127.0.0.1:4003/v1", stdout_one.getvalue())
             self.assertIn("Upstream provider base URL: https://api.openai.com", stdout_one.getvalue())
             self.assertIn("Run configured proxy: tokenclaw run openai", stdout_one.getvalue())
+
+    def test_deactivate_openai_removes_profile_idempotently(self):
+        with TemporaryDirectory() as tmp:
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            stdout_one = io.StringIO()
+            stdout_two = io.StringIO()
+
+            first = cli.tokenclaw_cli(["deactivate", "openai", "--config-dir", tmp], stdout=stdout_one)
+            second = cli.tokenclaw_cli(["deactivate", "openai", "--config-dir", tmp], stdout=stdout_two)
+
+            self.assertEqual(first, 0)
+            self.assertEqual(second, 0)
+            config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["targets"], {})
+            self.assertIn("Deactivated TokenClaw target: openai", stdout_one.getvalue())
+            self.assertIn("TokenClaw target was not active: openai", stdout_two.getvalue())
 
     def test_activate_openai_custom_upstream_preserves_local_base_url(self):
         upstream = "https://example-resource.openai.azure.com/openai/deployments/my-deployment?api-version=2024-10-21"
@@ -1054,6 +1071,32 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertIn("TokenClaw target is not configured: claude", stderr.getvalue())
             self.assertIn("tokenclaw activate claude", stderr.getvalue())
 
+    def test_deactivate_claude_vscode_removes_managed_env_and_profile_hooks(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            config_dir = home / ".tokenclaw"
+            home.mkdir()
+            bashrc = home / ".bashrc"
+            bashrc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"HOME": str(home), "SHELL": "/bin/bash"}, clear=True):
+                cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=io.StringIO())
+                stdout = io.StringIO()
+                code = cli.tokenclaw_cli(["deactivate", "claude-code", "--config-dir", str(config_dir)], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            env_path = config_dir / "claude-vscode.env"
+            systemd_env = home / ".config" / "environment.d" / "tokenclaw.conf"
+            self.assertFalse(env_path.exists())
+            self.assertEqual(bashrc.read_text(encoding="utf-8"), "export PATH=/usr/bin\n")
+            self.assertEqual(systemd_env.read_text(encoding="utf-8"), "")
+            config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(config["targets"].keys()), ["claude"])
+            output = stdout.getvalue()
+            self.assertIn("remove-claude-vscode-env-file: changed=true", output)
+            self.assertIn("remove-shell-profile-source: changed=true", output)
+            self.assertIn("Open a new shell", output)
+
     def test_activate_claude_desktop_patches_exec_line_and_writes_backup(self):
         with TemporaryDirectory() as tmp:
             config_dir = Path(tmp) / "tokenclaw"
@@ -1178,6 +1221,46 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 env_file.read_text(encoding="utf-8"),
                 "OTHER_KEY=kept\nANTHROPIC_BASE_URL=http://127.0.0.1:4999\n",
             )
+
+    def test_deactivate_claude_desktop_removes_managed_exec_env_only(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "tokenclaw"
+            desktop_file = Path(tmp) / "claude-desktop.desktop"
+            desktop_file.write_text(
+                "[Desktop Entry]\nName=Claude\nExec=env FOO=bar /opt/claude %U\n",
+                encoding="utf-8",
+            )
+            env_file = Path(tmp) / ".config" / "environment.d" / "tokenclaw.conf"
+            env_file.parent.mkdir(parents=True)
+            env_file.write_text("OTHER_KEY=kept\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"HOME": tmp}, clear=False), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.get",
+                side_effect=httpx.ConnectError("offline"),
+            ):
+                cli.tokenclaw_cli(
+                    [
+                        "activate",
+                        "claude-desktop",
+                        "--config-dir",
+                        str(config_dir),
+                        "--desktop-file",
+                        str(desktop_file),
+                    ],
+                    stdout=io.StringIO(),
+                )
+                stdout = io.StringIO()
+                code = cli.tokenclaw_cli(["deactivate", "claude-desktop", "--config-dir", str(config_dir)], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                desktop_file.read_text(encoding="utf-8"),
+                "[Desktop Entry]\nName=Claude\nExec=env FOO=bar /opt/claude %U\n",
+            )
+            self.assertEqual(env_file.read_text(encoding="utf-8"), "OTHER_KEY=kept\n")
+            config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(config["targets"].keys()), ["claude"])
+            self.assertIn("remove-claude-desktop-exec-env: changed=true", stdout.getvalue())
 
     def test_activate_claude_desktop_dry_run_does_not_write_files(self):
         with TemporaryDirectory() as tmp:
@@ -1904,6 +1987,41 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertTrue(backup.exists())
             self.assertEqual(backup.read_text(encoding="utf-8"), original)
             self.assertIn("openai_base_url", codex_config.read_text(encoding="utf-8"))
+
+    def test_deactivate_codex_restores_prior_root_openai_base_url(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "tokenclaw"
+            codex_config = Path(tmp) / "config.toml"
+            original = '# keep\nmodel = "gpt-5-codex"\nopenai_base_url = "https://api.openai.com/v1" # route\n[projects]\ntrusted = true\n'
+            codex_config.write_text(original, encoding="utf-8")
+
+            cli.tokenclaw_cli(
+                ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
+                stdout=io.StringIO(),
+            )
+            stdout = io.StringIO()
+            code = cli.tokenclaw_cli(["deactivate", "codex", "--config-dir", str(config_dir)], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(codex_config.read_text(encoding="utf-8"), original)
+            config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(config["targets"].keys()), ["openai"])
+            self.assertIn("restore-codex-config: changed=true", stdout.getvalue())
+
+    def test_deactivate_all_removes_app_and_provider_profiles(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "tokenclaw"
+            codex_config = Path(tmp) / "config.toml"
+            cli.tokenclaw_cli(
+                ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
+                stdout=io.StringIO(),
+            )
+
+            code = cli.tokenclaw_cli(["deactivate", "--config-dir", str(config_dir)], stdout=io.StringIO())
+
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))["targets"], {})
+            self.assertEqual(codex_config.read_text(encoding="utf-8"), "")
 
     def test_activate_codex_does_not_write_or_print_api_keys(self):
         with TemporaryDirectory() as tmp:

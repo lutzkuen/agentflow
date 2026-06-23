@@ -275,6 +275,31 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any], *, brand: str
     stdout.write("API keys are not stored or printed by activation.\n")
 
 
+def _write_deactivation_summary(stdout: Any, result: dict[str, Any], *, brand: str = "TokenClaw") -> None:
+    prefix = "Dry run: would deactivate" if result.get("dry_run") else "Deactivated"
+    if result.get("target"):
+        if result.get("configured_before"):
+            stdout.write(f"{prefix} {brand} target: {result['target']}\n")
+        else:
+            stdout.write(f"{brand} target was not active: {result['target']}\n")
+    for action in result.get("actions") or []:
+        action_name = str(action.get("action") or "cleanup")
+        path = str(action.get("path") or "")
+        changed = str(bool(action.get("changed"))).lower()
+        reason = str(action.get("reason") or "")
+        stdout.write(f"{action_name}: changed={changed}")
+        if path:
+            stdout.write(f", path={path}")
+        if reason:
+            stdout.write(f", reason={reason}")
+        stdout.write("\n")
+    stdout.write(f"Config file: {result['config_path']}\n")
+    if result.get("target") in {"claude-vscode", "claude-desktop"} and result.get("changed"):
+        stdout.write("Open a new shell, relaunch the app, or log out and back in for inherited environment changes to clear.\n")
+    if not result.get("configured_before"):
+        stdout.write(f"No {brand}-managed activation profile needed removal.\n")
+
+
 def _write_activation_config_error(stderr: Any, exc: Exception, *, command: str) -> None:
     stderr.write(str(exc) + "\n")
     if command == "activate":
@@ -441,6 +466,19 @@ def _onboarding_cli(
         default=argparse.SUPPRESS,
         help=argparse.SUPPRESS,
     )
+
+    deactivate_parser = subparsers.add_parser(
+        "deactivate",
+        parents=[config_parent],
+        help=f"Remove {brand}-managed activation profiles and local client routing hooks.",
+    )
+    deactivate_parser.add_argument(
+        "target",
+        nargs="?",
+        choices=(*ONBOARDING_TARGETS, "claude-code"),
+        help="Optional onboarding target label; defaults to all configured targets.",
+    )
+    deactivate_parser.add_argument("--dry-run", action="store_true", help="Show intended cleanup without writing files.")
 
     run_parser = subparsers.add_parser(
         "run",
@@ -700,6 +738,30 @@ def _onboarding_cli(
             dry_run=bool(args.dry_run),
         )
         _write_activation_summary(stdout, result, brand=brand)
+        return 0
+
+    if args.command == "deactivate":
+        try:
+            config = activation.load_activation_config(args.config_dir)
+        except activation.ActivationConfigError as exc:
+            _write_activation_config_error(stderr, exc, command="deactivate")
+            return 2
+        targets = [args.target] if args.target else ["claude-vscode", "claude-desktop", "codex", "openai", "claude"]
+        current_config = config
+        results = []
+        for target in targets:
+            try:
+                current_config, result = activation.deactivate_target(
+                    current_config,
+                    target,
+                    config_dir=args.config_dir,
+                    dry_run=bool(args.dry_run),
+                )
+            except activation.ActivationError as exc:
+                stderr.write(str(exc) + "\n")
+                return 2
+            results.append(result)
+            _write_deactivation_summary(stdout, result, brand=brand)
         return 0
 
     if args.command == "run":

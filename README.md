@@ -47,6 +47,7 @@ tokenclaw activate claude
 tokenclaw activate codex
 tokenclaw activate claude-vscode
 tokenclaw activate claude-desktop
+tokenclaw deactivate
 tokenclaw stats
 tokenclaw doctor
 ```
@@ -54,6 +55,14 @@ tokenclaw doctor
 Activation writes local routing/config files only. It does not store or print API keys.
 Keep provider credentials in your shell, OS secret manager, or the client that already
 uses them.
+
+Undo TokenClaw-managed activation profiles and local client routing hooks with:
+
+```bash
+tokenclaw deactivate
+tokenclaw deactivate codex
+tokenclaw deactivate claude-vscode
+```
 
 Start the configured proxies in separate terminals:
 
