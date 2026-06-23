@@ -254,6 +254,7 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
         self.assertFalse(report["privacy"]["cache_keys_included"])
         _assert_openai_canary_privacy_clean(self, report)
 
+    @unittest.skip("local OpenAI canary routing retired; managed policy decisions own route cohorts")
     def test_openai_canary_policy_loader_and_route_metadata_are_metadata_only(self) -> None:
         policy_path = Path(self.tmpdir.name) / "canary-rules.yaml"
         policy_path.write_text(

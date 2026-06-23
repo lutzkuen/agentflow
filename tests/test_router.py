@@ -83,6 +83,11 @@ def _log_memory_call(
 
 
 class RouterTest(unittest.TestCase):
+    def setUp(self):
+        for name in ("TOKENCLAW_ROUTING_RULES", "TOKENCLAW_DATABASE_URL", "TOKENCLAW_DB"):
+            os.environ.pop(name, None)
+        importlib.reload(router_module)
+
     def _reload_with_routing_yaml(self, tmp: str, yaml_text: str, extra_env: dict[str, str] | None = None):
         rules_path = Path(tmp) / "routing_rules.yaml"
         rules_path.write_text(yaml_text, encoding="utf-8")
@@ -517,31 +522,18 @@ rules:
         finally:
             importlib.reload(router_module)
 
-    def test_openai_file_canary_applies_without_env_flag(self):
+    def test_openai_canary_policy_file_is_ignored_by_runtime_router(self):
         with TemporaryDirectory() as tmp:
             rules_path = Path(tmp) / "routing_rules.yaml"
             rules_path.write_text(
                 """
 openai_canary:
   enabled: true
-  policy_id: test-openai-canary
+  policy_id: retired-local-openai-canary
   model_pattern: gpt-5
   target_model: gpt-5.4-mini
-  eligible_categories:
-    - chat
-    - short-completion
-  excluded_categories: []
-  allow_tools: false
-  allow_stream: false
-  min_text_chars: 0
-  max_text_chars: 8000
-  min_input_tokens_est: 0
-  max_input_tokens_est: 2000
   canary_fraction: 1.0
   holdout_fraction: 0.0
-  salt: test-openai-routing-canary
-  safety_stop:
-    enabled: false
 rules: []
 """,
                 encoding="utf-8",
@@ -551,318 +543,49 @@ rules: []
                     manual_router = importlib.reload(router_module)
 
                     routed, meta = manual_router.route_openai_model({
-                        "model": "gpt-5.4",
-                        "input": "summarize the recent result",
+                        "model": "gpt-5",
+                        "input": "Summarize the outcome without tools.",
+                    })
+
+                    self.assertEqual(routed, "gpt-5")
+                    self.assertFalse(meta["enabled"])
+                    self.assertEqual(meta["policy_source"], "local-manual")
+                    self.assertEqual(meta["routing_source"], "local-rules")
+                    self.assertNotIn("openai_canary", meta)
+                    self.assertFalse(manual_router.ROUTING_OPENAI_CANARY["enabled"])
+                    self.assertEqual(manual_router.ROUTING_OPENAI_CANARY["router_runtime_status"], "retired")
+            finally:
+                importlib.reload(router_module)
+
+    def test_openai_explicit_local_rule_still_routes(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+rules:
+  - conditions:
+      provider: openai
+      model_pattern: gpt-5.5
+      category: short-completion
+    action:
+      route_to: gpt-5.4
+      reason: explicit OpenAI chat route
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}, clear=False):
+                    manual_router = importlib.reload(router_module)
+
+                    routed, meta = manual_router.route_openai_model({
+                        "model": "gpt-5.5",
+                        "input": "Summarize the result.",
                     })
 
                     self.assertEqual(routed, "gpt-5.4")
                     self.assertTrue(meta["enabled"])
-                    self.assertEqual(meta["provider"], "openai")
-                    self.assertEqual(meta["policy_source"], "local-manual")
-                    self.assertEqual(meta["openai_canary"]["status"], "applied")
-                    self.assertEqual(meta["openai_canary"]["cohort"], "canary_applied")
-                    self.assertEqual(meta["openai_canary"]["shadow_model"], "gpt-5.4-mini")
-                    self.assertEqual(meta["openai_canary"]["actual_forwarded_model"], "gpt-5.4")
-                    self.assertTrue(meta["openai_canary"]["shadow_only"])
-            finally:
-                importlib.reload(router_module)
-
-    def test_openai_file_canary_holdout_is_deterministic(self):
-        with TemporaryDirectory() as tmp:
-            rules_path = Path(tmp) / "routing_rules.yaml"
-            rules_path.write_text(
-                """
-openai_canary:
-  enabled: true
-  policy_id: test-openai-holdout
-  model_pattern: gpt-5
-  target_model: gpt-5.4-mini
-  eligible_categories:
-    - chat
-    - short-completion
-  excluded_categories: []
-  canary_fraction: 0.0
-  holdout_fraction: 1.0
-  salt: test-openai-routing-holdout
-  safety_stop:
-    enabled: false
-rules: []
-""",
-                encoding="utf-8",
-            )
-            try:
-                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}, clear=False):
-                    manual_router = importlib.reload(router_module)
-
-                    routed_1, meta_1 = manual_router.route_openai_model({
-                        "model": "gpt-5.4",
-                        "input": "summarize the recent result",
-                    })
-                    routed_2, meta_2 = manual_router.route_openai_model({
-                        "model": "gpt-5.4",
-                        "input": "summarize the recent result",
-                    })
-
-                    self.assertEqual(routed_1, "gpt-5.4")
-                    self.assertEqual(routed_2, "gpt-5.4")
-                    self.assertEqual(meta_1["openai_canary"], meta_2["openai_canary"])
-                    self.assertEqual(meta_1["openai_canary"]["status"], "holdout")
-                    self.assertEqual(meta_1["openai_canary"]["cohort"], "canary_holdout")
-            finally:
-                importlib.reload(router_module)
-
-    def test_openai_file_canary_not_selected_keeps_requested_model(self):
-        with TemporaryDirectory() as tmp:
-            rules_path = Path(tmp) / "routing_rules.yaml"
-            rules_path.write_text(
-                """
-openai_canary:
-  enabled: true
-  policy_id: test-openai-not-selected
-  model_pattern: gpt-5
-  target_model: gpt-5.4-mini
-  eligible_categories:
-    - chat
-    - short-completion
-  excluded_categories: []
-  canary_fraction: 0.0
-  holdout_fraction: 0.0
-  salt: test-openai-routing-not-selected
-  safety_stop:
-    enabled: false
-rules: []
-""",
-                encoding="utf-8",
-            )
-            try:
-                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}, clear=False):
-                    manual_router = importlib.reload(router_module)
-
-                    routed, meta = manual_router.route_openai_model({
-                        "model": "gpt-5.4",
-                        "input": "summarize the recent result",
-                    })
-
-                    self.assertEqual(routed, "gpt-5.4")
-                    self.assertEqual(meta["openai_canary"]["status"], "not_selected")
-                    self.assertEqual(meta["openai_canary"]["cohort"], "skipped")
-            finally:
-                importlib.reload(router_module)
-
-    def test_openai_canary_list_selects_one_of_multiple_eligible_candidates(self):
-        with TemporaryDirectory() as tmp:
-            rules_path = Path(tmp) / "routing_rules.yaml"
-            rules_path.write_text(
-                """
-openai_canaries:
-  - enabled: true
-    policy_id: test-openai-gpt55-to-gpt54
-    requested_model: gpt-5.5
-    target_model: gpt-5.4
-    eligible_categories: [chat, short-completion]
-    excluded_categories: []
-    canary_fraction: 1.0
-    holdout_fraction: 0.0
-    safety_stop:
-      enabled: false
-  - enabled: true
-    policy_id: test-openai-gpt55-to-gpt53
-    requested_model: gpt-5.5
-    target_model: gpt-5.3
-    eligible_categories: [chat, short-completion]
-    excluded_categories: []
-    canary_fraction: 1.0
-    holdout_fraction: 0.0
-    safety_stop:
-      enabled: false
-rules: []
-""",
-                encoding="utf-8",
-            )
-            try:
-                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}, clear=False):
-                    manual_router = importlib.reload(router_module)
-
-                    routed_1, meta_1 = manual_router.route_openai_model({
-                        "model": "gpt-5.5",
-                        "input": "Summarize the outcome without tools.",
-                    })
-                    routed_2, meta_2 = manual_router.route_openai_model({
-                        "model": "gpt-5.5",
-                        "input": "Summarize the outcome without tools.",
-                    })
-
-                    self.assertEqual(routed_1, "gpt-5.5")
-                    self.assertEqual(routed_2, "gpt-5.5")
-                    canary = meta_1["openai_canary"]
-                    self.assertEqual(canary["status"], "applied")
-                    self.assertEqual(canary["eligible_canary_count"], 2)
-                    self.assertEqual(canary["runnable_canary_count"], 2)
-                    self.assertEqual(canary["candidate_policy_count"], 2)
-                    self.assertEqual(canary["selected_canary_policy_id"], canary["policy_id"])
-                    self.assertEqual(canary["canary_selection_basis"], "metadata-policy-selection")
-                    self.assertIn(canary["target_model"], {"gpt-5.4", "gpt-5.3"})
-                    self.assertEqual(meta_2["openai_canary"]["selected_canary_policy_id"], canary["selected_canary_policy_id"])
-                    serialized = stable_json(canary)
-                    self.assertNotIn("SECRET", serialized)
-                    self.assertNotIn("messages", serialized)
-                    self.assertNotIn("prompt", serialized)
-            finally:
-                importlib.reload(router_module)
-
-    def test_openai_canary_list_separates_codex_and_generic_candidates(self):
-        with TemporaryDirectory() as tmp:
-            rules_path = Path(tmp) / "routing_rules.yaml"
-            rules_path.write_text(
-                """
-openai_canaries:
-  - enabled: true
-    policy_id: codex-gpt55-to-gpt53-codex
-    requested_model: gpt-5.5
-    target_model: gpt-5.3-codex
-    app_family: codex
-    eligible_categories: [tool-light]
-    excluded_categories: []
-    allow_tools: true
-    canary_fraction: 1.0
-    holdout_fraction: 0.0
-    safety_stop:
-      enabled: false
-  - enabled: true
-    policy_id: generic-gpt55-to-gpt54
-    requested_model: gpt-5.5
-    target_model: gpt-5.4
-    app_family: generic_openai
-    eligible_categories: [tool-light]
-    excluded_categories: []
-    allow_tools: true
-    canary_fraction: 1.0
-    holdout_fraction: 0.0
-    safety_stop:
-      enabled: false
-rules: []
-""",
-                encoding="utf-8",
-            )
-            try:
-                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}, clear=False):
-                    manual_router = importlib.reload(router_module)
-
-                    _, codex_meta = manual_router.route_openai_model({
-                        "model": "gpt-5.5",
-                        "_tokenclaw_app_family": "codex",
-                        "input": "Inspect tool output.",
-                        "tools": [{"type": "function", "name": "read_file"}],
-                    })
-                    _, generic_meta = manual_router.route_openai_model({
-                        "model": "gpt-5.5",
-                        "_tokenclaw_app_family": "generic_openai",
-                        "input": "Inspect tool output.",
-                        "tools": [{"type": "function", "name": "read_file"}],
-                    })
-
-                    self.assertEqual(codex_meta["openai_canary"]["policy_id"], "codex-gpt55-to-gpt53-codex")
-                    self.assertEqual(codex_meta["openai_canary"]["target_model"], "gpt-5.3-codex")
-                    self.assertEqual(codex_meta["openai_canary"]["eligible_canary_count"], 1)
-                    self.assertEqual(generic_meta["openai_canary"]["policy_id"], "generic-gpt55-to-gpt54")
-                    self.assertEqual(generic_meta["openai_canary"]["target_model"], "gpt-5.4")
-                    self.assertEqual(generic_meta["openai_canary"]["eligible_canary_count"], 1)
-            finally:
-                importlib.reload(router_module)
-
-    def test_openai_canary_safety_stop_is_per_policy_in_candidate_list(self):
-        with TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "calls.sqlite3"
-            store = Store(str(db_path))
-            try:
-                store.log_call(
-                    id="openai-canary-stopped-1",
-                    created_at=utc_now(),
-                    path="/v1/responses",
-                    requested_model="gpt-5.5",
-                    routed_model="gpt-5.5",
-                    stream=0,
-                    cache_hit=0,
-                    status_code=500,
-                    latency_ms=1000,
-                    input_tokens_est=100,
-                    output_tokens_est=10,
-                    actual_input_tokens=100,
-                    actual_output_tokens=10,
-                    cost_est_usd=0.01,
-                    cost_baseline_usd=0.02,
-                    routing_json=stable_json({
-                        "openai_canary": {
-                            "policy_id": "stopped-policy",
-                            "status": "applied",
-                            "cohort": "canary_applied",
-                        }
-                    }),
-                    provider="openai",
-                    category="chat",
-                    retry_count=0,
-                )
-            finally:
-                store.conn.close()
-
-            rules_path = Path(tmp) / "routing_rules.yaml"
-            rules_path.write_text(
-                """
-openai_canaries:
-  - enabled: true
-    policy_id: stopped-policy
-    requested_model: gpt-5.5
-    target_model: gpt-5.4
-    eligible_categories: [chat, short-completion]
-    excluded_categories: []
-    canary_fraction: 1.0
-    holdout_fraction: 0.0
-    safety_stop:
-      enabled: true
-      min_samples: 1
-      max_error_rate: 0.0
-      max_retry_rate: 1.0
-      max_fallback_rate: 1.0
-  - enabled: true
-    policy_id: healthy-policy
-    requested_model: gpt-5.5
-    target_model: gpt-5.3
-    eligible_categories: [chat, short-completion]
-    excluded_categories: []
-    canary_fraction: 1.0
-    holdout_fraction: 0.0
-    safety_stop:
-      enabled: false
-rules: []
-""",
-                encoding="utf-8",
-            )
-            try:
-                with patch.dict(
-                    os.environ,
-                    {
-                        "TOKENCLAW_ROUTING_RULES": str(rules_path),
-                        "TOKENCLAW_DATABASE_URL": f"sqlite:///{db_path}",
-                    },
-                    clear=False,
-                ):
-                    manual_router = importlib.reload(router_module)
-
-                    routed, meta = manual_router.route_openai_model({
-                        "model": "gpt-5.5",
-                        "input": "Summarize the safe candidate state.",
-                    })
-
-                    canary = meta["openai_canary"]
-                    self.assertEqual(routed, "gpt-5.5")
-                    self.assertEqual(canary["status"], "applied")
-                    self.assertEqual(canary["policy_id"], "healthy-policy")
-                    self.assertEqual(canary["selected_canary_policy_id"], "healthy-policy")
-                    self.assertEqual(canary["eligible_canary_count"], 2)
-                    self.assertEqual(canary["runnable_canary_count"], 1)
-                    stopped = [item for item in canary["canary_candidates"] if item["policy_id"] == "stopped-policy"][0]
-                    self.assertEqual(stopped["status"], "safety_stopped")
-                    self.assertTrue(stopped["safety_stop_tripped"])
+                    self.assertEqual(meta["routing_source"], "explicit-local-rule")
+                    self.assertEqual(meta["reason"], "explicit OpenAI chat route")
             finally:
                 importlib.reload(router_module)
 
@@ -980,6 +703,43 @@ rules: []
         self.assertFalse(meta["enabled"])
         self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
 
+    def test_phase_canary_policy_file_is_ignored_by_runtime_router(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: true
+  policy_id: retired-local-phase-canary
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+rules: []
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertFalse(meta["enabled"])
+                    self.assertEqual(meta["routing_source"], "local-rules")
+                    self.assertNotIn("phase_canary", meta)
+                    self.assertFalse(manual_router.ROUTING_PHASE_CANARY["enabled"])
+                    self.assertEqual(manual_router.ROUTING_PHASE_CANARY["router_runtime_status"], "retired")
+            finally:
+                importlib.reload(router_module)
+
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_applies_seeded_eligible_tool_execution(self):
         with TemporaryDirectory() as tmp:
             try:
@@ -1024,6 +784,7 @@ rules: []
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_holdout_keeps_requested_model(self):
         with TemporaryDirectory() as tmp:
             try:
@@ -1061,6 +822,7 @@ rules: []
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_disabled_default_keeps_existing_rules(self):
         with TemporaryDirectory() as tmp:
             try:
@@ -1099,6 +861,7 @@ rules:
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_rejects_non_anthropic_source_surface(self):
         with TemporaryDirectory() as tmp:
             try:
@@ -1137,6 +900,7 @@ rules: []
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_rejects_non_anthropic_provider(self):
         with TemporaryDirectory() as tmp:
             try:
@@ -1175,6 +939,7 @@ rules: []
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_enforces_stream_scope(self):
         with TemporaryDirectory() as tmp:
             try:
@@ -1220,6 +985,7 @@ rules: []
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_thinking_history_stays_gated(self):
         with TemporaryDirectory() as tmp:
             try:
@@ -1270,6 +1036,7 @@ rules: []
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_safety_stops_tool_result_with_thinking_history(self):
         with TemporaryDirectory() as tmp:
             try:
@@ -1321,6 +1088,7 @@ rules: []
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_session_cohort_uses_hashed_session_only(self):
         with TemporaryDirectory() as tmp:
             try:
@@ -1400,6 +1168,7 @@ rules: []
         self.assertEqual(routing_meta["phase_canary"]["fallback_from_model"], HAIKU_DEFAULT)
         self.assertEqual(routing_meta["phase_canary"]["actual_forwarded_model"], SONNET_DEFAULT)
 
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_ineligible_planning_passes_through_before_broad_tool_rule(self):
         with TemporaryDirectory() as tmp:
             try:
@@ -1439,6 +1208,7 @@ rules:
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local phase canary routing retired; managed policy decisions own cohorts")
     def test_phase_canary_safety_stop_prevents_downgrade_after_errors(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "tokenclaw.sqlite3")
@@ -1540,6 +1310,45 @@ rules:
             finally:
                 importlib.reload(router_module)
 
+    def test_session_memory_condition_is_retired_and_fails_closed(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      category: tool-result
+      session_memory:
+        enabled: true
+        min_call_count: 3
+    action:
+      route_to: haiku
+      reason: retired session memory route
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body, session_id="secret-session-router")
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertFalse(meta["enabled"])
+                    self.assertEqual(meta["routing_backing"]["reason"], "no-matching-manual-hard-rule")
+                    self.assertNotIn("session_phase_memory", meta)
+            finally:
+                importlib.reload(router_module)
+
+    @unittest.skip("local DB-backed session routing gates retired; managed policy decisions own session gates")
     def test_session_memory_rule_routes_stable_tool_execution_window(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "tokenclaw.sqlite3")
@@ -1600,6 +1409,7 @@ rules:
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local DB-backed session routing gates retired; managed policy decisions own session gates")
     def test_session_memory_rule_buckets_adversarial_metadata_before_route_meta(self):
         forbidden = (
             "SECRET_ROUTER_MEMORY_PROMPT",
@@ -1667,6 +1477,7 @@ rules:
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local DB-backed session routing gates retired; managed policy decisions own session gates")
     def test_session_memory_rule_blocks_missing_memory(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "tokenclaw.sqlite3")
@@ -1710,6 +1521,7 @@ rules:
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local DB-backed session routing gates retired; managed policy decisions own session gates")
     def test_session_memory_rule_blocks_recent_errors_retries_and_fallbacks(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "tokenclaw.sqlite3")
@@ -1763,6 +1575,7 @@ rules:
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local DB-backed session routing gates retired; managed policy decisions own session gates")
     def test_session_memory_rule_blocks_thinking_and_planning_windows(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "tokenclaw.sqlite3")
@@ -1815,6 +1628,7 @@ rules:
             finally:
                 importlib.reload(router_module)
 
+    @unittest.skip("local DB-backed session routing gates retired; managed policy decisions own session gates")
     def test_session_memory_rule_routes_stable_summary_when_per_call_rule_agrees(self):
         with TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "tokenclaw.sqlite3")

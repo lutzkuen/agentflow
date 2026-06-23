@@ -980,7 +980,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual(experiment["primary_model"], "claude-sonnet-4-6")
         self.assertEqual(experiment["user_visible_model"], "claude-sonnet-4-6")
         self.assertEqual(experiment["shadow_model"], "claude-haiku-4-5-20251001")
-        self.assertEqual(experiment["local_route_candidate_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(experiment["local_route_candidate_model"], "claude-sonnet-4-6")
         [experiment_row] = server.store.conn.execute(
             "select provider, source_surface, requested_model, routed_model, primary_model, shadow_model, experiment_json "
             "from routing_experiments"

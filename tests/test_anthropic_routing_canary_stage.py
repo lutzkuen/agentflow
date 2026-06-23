@@ -261,6 +261,7 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertEqual(omitted_by_reason["missing-routed-model"]["target_model"], "claude-haiku-4-5-20251001")
         _assert_privacy_clean(self, result)
 
+    @unittest.skip("local Anthropic phase canary live routing retired; managed server owns route treatment")
     def test_applies_routing_rule_required_rollup_to_live_local_phase_canary(self) -> None:
         report = _pass_through_report()
         bucket = report["buckets"][0]

@@ -117,6 +117,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
             routed_model_family="haiku" if "haiku" in str(routed_model) else "sonnet",
         )
 
+    @unittest.skip("local Anthropic phase canary routing retired; managed policy decisions own cohorts")
     def test_route_model_activates_anthropic_tool_result_canary_with_holdout_lifecycle(self) -> None:
         policy = router._default_phase_canary_policy()
         policy.update({
