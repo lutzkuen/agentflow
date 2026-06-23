@@ -72,10 +72,14 @@ jobs:
           "$venv_python" - <<'PY'
           import importlib.metadata as md
 
+          # Requires-Dist entries gated behind an optional extra carry a
+          # `; extra == "..."` marker; only unmarked entries are installed with
+          # the base wheel, so the forbidden check must ignore the extras.
           requires = md.requires("tokenclaw") or []
+          base_requires = [req for req in requires if "extra" not in req.partition(";")[2]]
           forbidden = ("psycopg", "zstandard", "websockets")
           for name in forbidden:
-              if any(req.lower().startswith(name) for req in requires):
+              if any(req.lower().startswith(name) for req in base_requires):
                   raise SystemExit(f"base wheel unexpectedly requires optional dependency: {name}")
           PY
           echo "VENV_PY=$venv_python" >> "$GITHUB_ENV"
