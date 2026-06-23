@@ -4587,10 +4587,11 @@ def _latest_assistant_message_index(messages: list[Any]) -> int | None:
     return None
 
 
-def _dedupe_thinking_blocks(messages: list[Any]) -> int:
+def _dedupe_thinking_blocks(messages: list[Any], *, cache_boundary: dict[str, Any] | None = None) -> int:
     if not THINKING_DEDUP_ENABLED:
         return 0
 
+    cache_boundary = cache_boundary if isinstance(cache_boundary, dict) else {}
     latest_assistant_idx = _latest_assistant_message_index(messages)
     seen_newer: list[tuple[frozenset, int]] = []
     removed = 0
@@ -4612,10 +4613,17 @@ def _dedupe_thinking_blocks(messages: list[Any]) -> int:
                 thinking = block["thinking"]
                 if len(thinking) >= THINKING_DEDUP_MIN_CHARS:
                     shingles = _shingles(thinking)
+                    cache_prefix_protected = not _anthropic_target_below_cache_prefix(
+                        {"message_index": msg_idx, "block_index": block_idx},
+                        cache_boundary,
+                    )
                     must_preserve = (
+                        cache_prefix_protected
+                        or (
                         THINKING_DEDUP_SKIP_LATEST_ASSISTANT
                         and latest_assistant_idx is not None
                         and msg_idx == latest_assistant_idx
+                        )
                     )
                     if not must_preserve and len(content) > 1:
                         for prev_shingles, _prev_idx in seen_newer:
@@ -5623,6 +5631,9 @@ def _anthropic_thinking_compaction_base_meta(status: str, reason: str, *, policy
         "raw_session_ids_included": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
+        "cache_prefix_preserved": True,
+        "cached_chars_protected": 0,
+        "compacted_chars_below_breakpoint": 0,
     }
 
 
@@ -5694,6 +5705,86 @@ def _anthropic_thinking_tool_ids(body: dict[str, Any]) -> tuple[set[str], set[st
         tool_uses.update(_thinking_tool_use_ids(content))
         tool_results.update(_thinking_tool_result_ids(content))
     return tool_uses, tool_results
+
+
+def _anthropic_cache_prefix_boundary(body: dict[str, Any]) -> dict[str, Any]:
+    """Return numeric-only metadata for the last Anthropic cache_control breakpoint."""
+    boundary: dict[str, Any] = {
+        "present": False,
+        "message_index": None,
+        "block_index": None,
+        "cached_chars_protected": 0,
+    }
+
+    def block_chars(value: Any) -> int:
+        try:
+            return len(stable_json(value))
+        except Exception:
+            return 0
+
+    system = body.get("system")
+    if isinstance(system, list):
+        for block in system:
+            boundary["cached_chars_protected"] += block_chars(block)
+            if isinstance(block, dict) and block.get("cache_control"):
+                boundary.update({"present": True, "message_index": -1, "block_index": None})
+    elif isinstance(system, str):
+        boundary["cached_chars_protected"] += len(system)
+
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return boundary
+    for msg_idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            boundary["cached_chars_protected"] += block_chars(content)
+            continue
+        for block_idx, block in enumerate(content):
+            boundary["cached_chars_protected"] += block_chars(block)
+            if isinstance(block, dict) and block.get("cache_control"):
+                boundary.update({"present": True, "message_index": msg_idx, "block_index": block_idx})
+    if boundary["present"]:
+        protected = 0
+        if isinstance(system, list):
+            protected += sum(block_chars(block) for block in system)
+        elif isinstance(system, str):
+            protected += len(system)
+        protected_msg_idx = boundary.get("message_index")
+        protected_block_idx = boundary.get("block_index")
+        if isinstance(protected_msg_idx, int) and protected_msg_idx >= 0:
+            for msg_idx, msg in enumerate(messages[: protected_msg_idx + 1]):
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    protected += block_chars(content)
+                    continue
+                limit = len(content) if msg_idx < protected_msg_idx else int(protected_block_idx or 0) + 1
+                protected += sum(block_chars(block) for block in content[:limit])
+        boundary["cached_chars_protected"] = protected
+    else:
+        boundary["cached_chars_protected"] = 0
+    return boundary
+
+
+def _anthropic_target_below_cache_prefix(target: dict[str, Any], boundary: dict[str, Any]) -> bool:
+    if not boundary.get("present"):
+        return True
+    boundary_msg_idx = boundary.get("message_index")
+    boundary_block_idx = boundary.get("block_index")
+    if boundary_msg_idx is None:
+        return True
+    target_msg_idx = _safe_int(target.get("message_index"), -1)
+    target_block_idx = _safe_int(target.get("block_index"), -1)
+    if int(boundary_msg_idx) < 0:
+        return True
+    if target_msg_idx > int(boundary_msg_idx):
+        return True
+    if target_msg_idx < int(boundary_msg_idx):
+        return False
+    return target_block_idx > _safe_int(boundary_block_idx, -1)
 
 
 def _anthropic_thinking_compaction_targets(body: dict[str, Any], *, policy: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -5986,6 +6077,11 @@ def _apply_anthropic_thinking_history_compaction_canary(
         meta["reason"] = "active-top-level-thinking-request"
         return body, meta
 
+    cache_boundary = _anthropic_cache_prefix_boundary(body)
+    meta.update({
+        "cache_prefix_breakpoint_present": bool(cache_boundary.get("present")),
+        "cached_chars_protected": int(cache_boundary.get("cached_chars_protected") or 0),
+    })
     initial_features = _anthropic_thinking_compaction_features(body, category=category, before_chars=before_chars)
     evaluated_rules: list[dict[str, Any]] = []
     selected_policy: dict[str, Any] | None = None
@@ -6015,12 +6111,29 @@ def _apply_anthropic_thinking_history_compaction_canary(
             evaluated_rules.append(rule_eval)
             continue
         targets, blockers = _anthropic_thinking_compaction_targets(body, policy=policy)
+        protected_target_count = 0
+        if targets:
+            unprotected_targets = []
+            for target in targets:
+                if _anthropic_target_below_cache_prefix(target, cache_boundary):
+                    unprotected_targets.append(target)
+                else:
+                    protected_target_count += 1
+            targets = unprotected_targets
         if not targets:
+            if protected_target_count:
+                blockers = sorted({*blockers, "cache-prefix-protected"})
             rule_eval["reasons"].extend(blockers or ["no-eligible-thinking-history-blocks"])
+            if protected_target_count:
+                rule_eval["protected_target_count"] = protected_target_count
             evaluated_rules.append(rule_eval)
             target_blockers.extend(blockers)
             continue
-        rule_eval.update({"status": "matched", "target_count": len(targets)})
+        rule_eval.update({
+            "status": "matched",
+            "target_count": len(targets),
+            "protected_target_count": protected_target_count,
+        })
         evaluated_rules.append(rule_eval)
         selected_policy = policy
         selected_targets = targets
@@ -6038,6 +6151,8 @@ def _apply_anthropic_thinking_history_compaction_canary(
             "reason": first_reason or (target_blockers[0] if target_blockers else "no-eligible-thinking-history-blocks"),
             "category": category,
             "blockers": sorted(set(target_blockers)),
+            "cache_prefix_breakpoint_present": bool(cache_boundary.get("present")),
+            "cached_chars_protected": int(cache_boundary.get("cached_chars_protected") or 0),
         })
         return body, meta
 
@@ -6055,6 +6170,8 @@ def _apply_anthropic_thinking_history_compaction_canary(
             "reason_codes": ["policy-validation-error", *validation_errors],
             "evaluated_rules": evaluated_rules,
             "configured_rule_count": len(_anthropic_thinking_candidate_policies(base_policy)),
+            "cache_prefix_breakpoint_present": bool(cache_boundary.get("present")),
+            "cached_chars_protected": int(cache_boundary.get("cached_chars_protected") or 0),
             "lifecycle_feedback": {
                 "schema": "tokenclaw.anthropic_thinking_history_compaction_lifecycle_feedback.v1",
                 "status": "policy_validation_error",
@@ -6066,6 +6183,7 @@ def _apply_anthropic_thinking_history_compaction_canary(
         })
         return body, meta
     candidate_id = _anthropic_thinking_compaction_candidate_id(policy, selected_targets)
+    compacted_chars_below_breakpoint = sum(_safe_int(target.get("chars")) for target in selected_targets)
     planned_body = copy.deepcopy(body)
     messages = planned_body.get("messages")
     if not isinstance(messages, list):
@@ -6125,6 +6243,10 @@ def _apply_anthropic_thinking_history_compaction_canary(
         "planned_saved_tokens": planned_saved_tokens,
         "after_chars": before_chars,
         "tokens_saved_est": 0,
+        "cache_prefix_breakpoint_present": bool(cache_boundary.get("present")),
+        "cache_prefix_preserved": True,
+        "cached_chars_protected": int(cache_boundary.get("cached_chars_protected") or 0),
+        "compacted_chars_below_breakpoint": compacted_chars_below_breakpoint,
         "target_summaries": target_summaries,
         "evaluated_rules": evaluated_rules,
         "configured_rule_count": len(_anthropic_thinking_candidate_policies(base_policy)),
@@ -6182,6 +6304,9 @@ def _apply_anthropic_thinking_history_compaction_canary(
         "saved_chars": planned_saved,
         "tokens_saved_est": planned_saved_tokens,
         "compaction_cost_usd": 0.0,
+        "cache_prefix_preserved": True,
+        "cached_chars_protected": int(cache_boundary.get("cached_chars_protected") or 0),
+        "compacted_chars_below_breakpoint": compacted_chars_below_breakpoint,
     })
     meta["lifecycle_feedback"].update({"status": "applied", "cohort": str(canary.get("cohort") or "canary_applied")})
     return planned_body, meta
@@ -7248,7 +7373,10 @@ def crunch_body(
         if isinstance(msg, dict) and "content" in msg:
             msg["content"] = process_content(msg["content"], allow_shorten=allow_shorten)
     if _crunch_rule_allowed("thinking_deduplication"):
-        thinking_near_replacements = _dedupe_thinking_blocks(messages)
+        thinking_near_replacements = _dedupe_thinking_blocks(
+            messages,
+            cache_boundary=_anthropic_cache_prefix_boundary(new_body),
+        )
     else:
         skip_rule("thinking_deduplication", "rule-not-allowed")
     terminal_log_meta = _terminal_log_aggregate_meta(terminal_log_metas)

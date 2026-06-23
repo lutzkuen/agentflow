@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib
 import json
 import os
@@ -52,6 +53,19 @@ def _tool_result_body(*thinking_texts: str, top_level_thinking: bool = False, re
     return body
 
 
+def _cacheable_prefix(body: dict) -> list[dict]:
+    prefix: list[dict] = []
+    for msg in body.get("messages", []):
+        if not isinstance(msg, dict):
+            continue
+        copied = copy.deepcopy(msg)
+        prefix.append(copied)
+        content = copied.get("content")
+        if isinstance(content, list) and any(isinstance(block, dict) and block.get("cache_control") for block in content):
+            return prefix
+    return []
+
+
 def _write_rules(
     config: Path,
     *,
@@ -59,12 +73,14 @@ def _write_rules(
     holdout: float,
     min_samples: int = 5,
     max_error_rate: float = 0.1,
+    thinking_dedup_enabled: bool = False,
 ) -> None:
+    thinking_dedup_yaml = "true" if thinking_dedup_enabled else "false"
     (config / "crunch_rules.yaml").write_text(
         f"""
 enabled: true
 thinking_deduplication:
-  enabled: false
+  enabled: {thinking_dedup_yaml}
 anthropic_thinking_history_compaction:
   enabled: true
   rule_id: local-anthropic-thinking-history-compaction-canary
@@ -209,7 +225,7 @@ class AnthropicThinkingCompactionCanaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             config = tmp_path / "config"
             config.mkdir()
-            _write_rules(config, fraction=1.0, holdout=0.0)
+            _write_rules(config, fraction=1.0, holdout=0.0, thinking_dedup_enabled=True)
             os.chdir(tmp_path)
             manual = importlib.reload(crunch_module)
             duplicate = _thinking("apply")
@@ -234,6 +250,53 @@ class AnthropicThinkingCompactionCanaryTests(unittest.TestCase):
         self.assertNotIn("thinking-canary-test", rendered)
         self.assertFalse(compaction["canary"]["salt_included"])
         self.assertNotIn("salt", compaction["canary"])
+
+    def test_cache_control_prefix_blocks_are_preserved_while_suffix_compacts(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            _write_rules(config, fraction=1.0, holdout=0.0, thinking_dedup_enabled=True)
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            duplicate = _thinking("cache-prefix")
+            body = _tool_result_body(duplicate, duplicate, duplicate)
+            body["messages"][0]["content"][1]["cache_control"] = {"type": "ephemeral"}
+            protected_message = copy.deepcopy(body["messages"][0])
+
+            crunched, meta = manual.crunch_body(body, provider="anthropic", source_surface="anthropic_messages", endpoint="messages")
+
+        compaction = meta["anthropic_thinking_history_compaction"]
+        self.assertEqual(compaction["status"], "applied")
+        self.assertTrue(compaction["cache_prefix_preserved"])
+        self.assertTrue(compaction["cache_prefix_breakpoint_present"])
+        self.assertGreater(compaction["cached_chars_protected"], 0)
+        self.assertGreater(compaction["compacted_chars_below_breakpoint"], 0)
+        self.assertEqual(compaction["target_count"], 1)
+        matched = [item for item in compaction["evaluated_rules"] if item.get("status") == "matched"]
+        self.assertEqual(matched[0]["protected_target_count"], 1)
+        self.assertEqual(crunched["messages"][0], protected_message)
+        self.assertEqual(crunched["messages"][2]["content"], [{"type": "text", "text": "assistant fallback 1"}])
+        self.assertEqual(crunched["messages"][4]["content"][0]["type"], "thinking")
+
+    def test_compacted_turn_keeps_cacheable_prefix_stable_for_next_turn(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            _write_rules(config, fraction=1.0, holdout=0.0)
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            duplicate = _thinking("stable-prefix")
+            body = _tool_result_body(duplicate, duplicate, duplicate)
+            body["messages"][0]["content"][1]["cache_control"] = {"type": "ephemeral"}
+
+            crunched, meta = manual.crunch_body(body, provider="anthropic", source_surface="anthropic_messages", endpoint="messages")
+            next_turn = copy.deepcopy(crunched)
+            next_turn["messages"].append({"role": "user", "content": "continue again"})
+
+        self.assertEqual(meta["anthropic_thinking_history_compaction"]["status"], "applied")
+        self.assertEqual(_cacheable_prefix(crunched), _cacheable_prefix(next_turn))
 
     def test_holdout_assignment_is_deterministic_and_forwards_unchanged(self) -> None:
         with TemporaryDirectory() as tmp:
