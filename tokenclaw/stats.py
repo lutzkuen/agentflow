@@ -97,6 +97,173 @@ def _json_obj_has_value(raw: Any) -> bool:
     return bool(value) if isinstance(value, dict) else True
 
 
+def _safe_public_bool_env_configured(name: str) -> bool:
+    value = os.getenv(name)
+    return value is not None and bool(str(value).strip())
+
+
+def _managed_feed_state() -> dict[str, Any]:
+    from tokenclaw.recommendations import (
+        managed_auth_configured,
+        policy_decisions_enabled,
+        recommendation_server_configured,
+        recommendation_server_url,
+    )
+
+    mode = managed_mode_public_meta()
+    server_configured = recommendation_server_configured()
+    raw_url_state = _url_host_state(recommendation_server_url() if server_configured else None)
+    url_host_state = {
+        "configured": bool(raw_url_state.get("configured")),
+        "scheme": raw_url_state.get("scheme"),
+        "host_loopback": raw_url_state.get("host_loopback"),
+        "host_included": False,
+        "redacted_url_included": False,
+        "raw_url_included": False,
+    }
+    policy_decision_configured = (
+        _safe_public_bool_env_configured("TOKENCLAW_POLICY_DECISIONS_ENABLED")
+        or _safe_public_bool_env_configured("TOKENCLAW_POLICY_DECISION_ENABLED")
+        or bool(mode.get("configured"))
+    )
+    return {
+        "schema": "tokenclaw.managed_feed_state.v1",
+        "mode": mode.get("mode"),
+        "configured": bool(mode.get("configured")),
+        "managed_enabled": bool(mode.get("managed_enabled")),
+        "local_rules_only": bool(mode.get("local_rules_only")),
+        "server_calls_enabled": bool(mode.get("server_calls_enabled")),
+        "local_application_enabled": bool(mode.get("local_application_enabled")),
+        "families": dict(mode.get("families") or {}),
+        "reason": mode.get("reason"),
+        "server": {
+            "configured": bool(server_configured),
+            "auth_configured": bool(managed_auth_configured()),
+            "url_host_state": url_host_state,
+        },
+        "policy_decisions": {
+            "configured": bool(policy_decision_configured),
+            "enabled": bool(policy_decisions_enabled()),
+        },
+        "privacy": {
+            "metadata_only": True,
+            "server_url_included": False,
+            "api_key_value_included": False,
+            "raw_values_included": False,
+        },
+    }
+
+
+_MANAGED_SUCCESS_STATUSES = {"received", "applied", "dry-run", "accepted", "success"}
+
+
+def _managed_decision_source(routing: dict[str, Any], managed: dict[str, Any]) -> str:
+    managed_source = str(managed.get("policy_source") or "").strip()
+    status = str(managed.get("status") or "").strip()
+    if managed_source == "managed-enforced" or bool(managed.get("managed_enforced")):
+        return "managed-enforced"
+    if managed_source == "managed-recommended" or bool(managed.get("applied")) or status in _MANAGED_SUCCESS_STATUSES:
+        return "managed-recommended"
+    routing_source = str(routing.get("policy_source") or "").strip()
+    if routing_source == "local-manual":
+        return "local-manual"
+    return "off/pass-through"
+
+
+def _managed_attempt_status(managed: dict[str, Any]) -> str:
+    status = str(managed.get("status") or "").strip()
+    reason = str(managed.get("reason") or "").strip()
+    if status in _MANAGED_SUCCESS_STATUSES or bool(managed.get("applied")):
+        return "succeeded"
+    if status.startswith("skipped") or status in {"out-of-scope", "disabled", ""} or reason in {
+        "disabled",
+        "policy-decision-metadata-missing",
+        "source-surface-not-canonical",
+        "server-url-not-configured",
+    }:
+        return "skipped"
+    if status in {"error", "invalid"} or "error" in status:
+        return "failed"
+    if bool(managed.get("enabled")) or bool(managed.get("policy_decision_enabled")):
+        return "attempted"
+    return "skipped"
+
+
+def _managed_feed_decision_summary(
+    conn: Any,
+    *,
+    since: str | None,
+    day_field: bool = False,
+) -> dict[str, Any]:
+    where = "where created_at >= ?" if since else ""
+    params: tuple[Any, ...] = (since,) if since else ()
+    select_day = "date(created_at) as day," if day_field else ""
+    rows = conn.execute(
+        f"""
+        select {select_day}
+               requested_model,
+               routed_model,
+               routing_json,
+               managed_routing_json
+        from calls
+        {where}
+        """,
+        params,
+    ).fetchall()
+
+    backing_counts = {
+        "local-manual": 0,
+        "managed-recommended": 0,
+        "managed-enforced": 0,
+        "off/pass-through": 0,
+    }
+    attempts = {
+        "attempted": 0,
+        "succeeded": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    by_day: dict[str, dict[str, Any]] = {}
+
+    def empty_day() -> dict[str, Any]:
+        return {
+            "backing_counts": dict(backing_counts.fromkeys(backing_counts, 0)),
+            "policy_decision_calls": dict(attempts.fromkeys(attempts, 0)),
+        }
+
+    for row in rows:
+        raw_routing = row["routing_json"] if hasattr(row, "keys") else row[2 if day_field else 2]
+        raw_managed = row["managed_routing_json"] if hasattr(row, "keys") else row[3 if day_field else 3]
+        routing = _json_obj(raw_routing)
+        managed = _json_obj(raw_managed) or _json_obj(routing.get("managed_recommendation"))
+        source = _managed_decision_source(routing, managed)
+        backing_counts[source] = backing_counts.get(source, 0) + 1
+        attempt = _managed_attempt_status(managed)
+        attempts[attempt] = attempts.get(attempt, 0) + 1
+        if attempt == "succeeded":
+            attempts["attempted"] += 1
+        elif attempt == "failed":
+            attempts["attempted"] += 1
+        if day_field:
+            day = str(row["day"] if hasattr(row, "keys") else row[0] or "")
+            bucket = by_day.setdefault(day, empty_day())
+            bucket["backing_counts"][source] = bucket["backing_counts"].get(source, 0) + 1
+            bucket["policy_decision_calls"][attempt] = bucket["policy_decision_calls"].get(attempt, 0) + 1
+            if attempt in {"succeeded", "failed", "attempted"}:
+                if attempt != "attempted":
+                    bucket["policy_decision_calls"]["attempted"] = bucket["policy_decision_calls"].get("attempted", 0) + 1
+
+    return {
+        "schema": "tokenclaw.managed_feed_decision_summary.v1",
+        "window_start": since,
+        "total_calls": len(rows),
+        "policy_decision_calls": attempts,
+        "backing_counts": backing_counts,
+        "by_day": by_day,
+        "privacy": _metadata_only_privacy(),
+    }
+
+
 def _metadata_only_privacy() -> dict[str, bool]:
     return {
         "metadata_only": True,
@@ -17830,6 +17997,8 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
     today_start = _utc_today_start_iso()
     activation_burndown = await stats_local_activation_next_action_queue(limit=5, store_obj=store_obj)
     closed_loop_activation = _closed_loop_activation_readiness(activation_burndown)
+    managed_feed_state = _managed_feed_state()
+    managed_feed_today = _managed_feed_decision_summary(conn, since=today_start)
 
     def scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
         row = conn.execute(sql, params).fetchone()
@@ -18135,6 +18304,20 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
         },
         "db": default_db,
         "closed_loop_activation": closed_loop_activation,
+        "managed_feed": {
+            "schema": "tokenclaw.managed_feed_dashboard_summary.v1",
+            "state": managed_feed_state,
+            "today": {
+                "schema": "tokenclaw.managed_feed_window_summary.v1",
+                "window": "today",
+                "window_start": today_start,
+                "total_calls": managed_feed_today["total_calls"],
+                "policy_decision_calls": managed_feed_today["policy_decision_calls"],
+                "backing_counts": managed_feed_today["backing_counts"],
+                "privacy": _metadata_only_privacy(),
+            },
+            "privacy": _metadata_only_privacy(),
+        },
         "routing": [dict(r) for r in routed],
         "recent": [dict(r) for r in recent],
     }
@@ -20063,6 +20246,8 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
     day_keys = _utc_day_window(7)
     first_day = day_keys[0]
     first_day_start = f"{first_day}T00:00:00+00:00"
+    managed_feed_state = _managed_feed_state()
+    managed_feed_week = _managed_feed_decision_summary(conn, since=first_day_start, day_field=True)
 
     def new_day(day: str) -> dict[str, Any]:
         return {
@@ -20242,6 +20427,23 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
     days = []
     for day in day_keys:
         row = days_by_key[day]
+        managed_day = managed_feed_week["by_day"].get(day, {})
+        row["managed_feed"] = {
+            "schema": "tokenclaw.managed_feed_window_summary.v1",
+            "window": "day",
+            "window_start": f"{day}T00:00:00+00:00",
+            "total_calls": row["provider_calls"],
+            "policy_decision_calls": managed_day.get("policy_decision_calls")
+            or {"attempted": 0, "succeeded": 0, "skipped": 0, "failed": 0},
+            "backing_counts": managed_day.get("backing_counts")
+            or {
+                "local-manual": 0,
+                "managed-recommended": 0,
+                "managed-enforced": 0,
+                "off/pass-through": 0,
+            },
+            "privacy": _metadata_only_privacy(),
+        }
         row["total_tokens"] = row["provider_tokens"] + row["codex_tokens_est"]
         if row["_latency_count"]:
             row["avg_latency_ms"] = round(row["_latency_sum"] / row["_latency_count"])
@@ -20275,12 +20477,27 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
         "total_tokens": sum(r["total_tokens"] for r in days),
         "codex_cost_est_usd": round(sum(r["codex_cost_est_usd"] or 0 for r in days), 6),
         "cost_basis": "provider-reported + codex-estimated-from-chars",
+        "managed_feed": {
+            "schema": "tokenclaw.managed_feed_window_summary.v1",
+            "window": "last_7_days",
+            "window_start": first_day_start,
+            "total_calls": managed_feed_week["total_calls"],
+            "policy_decision_calls": managed_feed_week["policy_decision_calls"],
+            "backing_counts": managed_feed_week["backing_counts"],
+            "privacy": _metadata_only_privacy(),
+        },
     }
     return {
         "generated_at": generated_at,
         "schema": "tokenclaw.weekly_activity.v1",
         "source_surfaces": ["anthropic_messages", "openai_responses", "openai_chat", CODEX_APP_SOURCE_SURFACE],
         "cost_basis": "provider-reported + codex-estimated-from-chars",
+        "managed_feed": {
+            "schema": "tokenclaw.managed_feed_dashboard_summary.v1",
+            "state": managed_feed_state,
+            "last_7_days": totals["managed_feed"],
+            "privacy": _metadata_only_privacy(),
+        },
         "days": days,
         "totals": totals,
     }
@@ -28858,6 +29075,18 @@ def dashboard_html() -> str:
       <div class="card"><div class="label">Spend today</div><div class="value money" id="today-spend">-</div><div class="hint" id="today-tokens">- tokens</div></div>
       <div class="card"><div class="label">Saved today</div><div class="value money" id="today-savings">-</div><div class="hint" id="today-savings-detail">local routing, crunching, exact cache</div></div>
       <div class="card"><div class="label">Health</div><div class="value" id="today-health">-</div><div class="hint" id="today-latency">- avg latency</div></div>
+      <div class="card"><div class="label">Managed feed</div><div class="value" id="today-managed-state">-</div><div class="hint" id="today-managed-detail">-</div></div>
+    </div>
+    <div class="section">
+      <h2>Managed Backing</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Window</th><th>Mode</th><th>Server</th><th>Auth</th><th>Attempted</th><th>Succeeded</th><th>Skipped</th><th>Manual</th><th>Managed</th><th>Off / pass-through</th>
+          </tr></thead>
+          <tbody id="today-managed-tbody"></tbody>
+        </table>
+      </div>
     </div>
     <div class="section">
       <h2>Recent Calls</h2>
@@ -28878,6 +29107,18 @@ def dashboard_html() -> str:
       <div class="card"><div class="label">Spend</div><div class="value money" id="week-spend">-</div><div class="hint" id="week-baseline">- baseline</div></div>
       <div class="card"><div class="label">Savings</div><div class="value money" id="week-savings">-</div><div class="hint">local summary endpoint</div></div>
       <div class="card"><div class="label">Tokens</div><div class="value" id="week-tokens">-</div><div class="hint" id="week-errors">- errors</div></div>
+      <div class="card"><div class="label">Managed feed</div><div class="value" id="week-managed-state">-</div><div class="hint" id="week-managed-detail">-</div></div>
+    </div>
+    <div class="section">
+      <h2>Managed Backing</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Window</th><th>Mode</th><th>Server</th><th>Auth</th><th>Attempted</th><th>Succeeded</th><th>Skipped</th><th>Manual</th><th>Managed</th><th>Off / pass-through</th>
+          </tr></thead>
+          <tbody id="week-managed-tbody"></tbody>
+        </table>
+      </div>
     </div>
     <div class="section">
       <h2>Daily Breakdown</h2>
@@ -28909,6 +29150,34 @@ function statusBadge(code){
   if(n>=200)return `<span class="badge ok">${n}</span>`;
   return '<span class="badge miss">-</span>';
 }
+function managedSummaryRow(label,state,summary){
+  state=state||{};
+  summary=summary||{};
+  const calls=summary.policy_decision_calls||{};
+  const backing=summary.backing_counts||{};
+  const managed=Number(backing['managed-recommended']||0)+Number(backing['managed-enforced']||0);
+  const server=(state.server||{}).configured?'configured':'off';
+  const auth=(state.server||{}).auth_configured?'configured':'not configured';
+  return `<tr>
+    <td>${label}</td>
+    <td>${state.mode||'local_only'}</td>
+    <td>${server}</td>
+    <td>${auth}</td>
+    <td>${num(calls.attempted)}</td>
+    <td>${num(calls.succeeded)}</td>
+    <td>${num(calls.skipped)}</td>
+    <td>${num(backing['local-manual'])}</td>
+    <td>${num(managed)}</td>
+    <td>${num(backing['off/pass-through'])}</td>
+  </tr>`;
+}
+function managedCompactText(summary){
+  summary=summary||{};
+  const calls=summary.policy_decision_calls||{};
+  const backing=summary.backing_counts||{};
+  const managed=Number(backing['managed-recommended']||0)+Number(backing['managed-enforced']||0);
+  return `${num(calls.succeeded)} succeeded · ${num(calls.skipped)} skipped · ${num(managed)} managed-backed`;
+}
 function showTab(name){
   document.querySelectorAll('.tab-btn').forEach(btn=>btn.classList.toggle('active',btn.dataset.tabName===name));
   document.querySelectorAll('.tab-panel').forEach(panel=>panel.classList.toggle('active',panel.id==='tab-'+name));
@@ -28934,6 +29203,13 @@ function renderToday(data){
   text('today-health',summary.today_errors?'Check errors':'OK');
   document.getElementById('today-health').className='value '+(summary.today_errors?'warn':'money');
   text('today-latency',`${num(health.avg_latency_ms||summary.avg_latency_ms)} ms avg latency`);
+  const managed=data.managed_feed||{};
+  const managedState=managed.state||{};
+  const managedToday=managed.today||{};
+  text('today-managed-state',managedState.mode||'local_only');
+  text('today-managed-detail',managedCompactText(managedToday));
+  document.getElementById('today-managed-state').className='value '+(managedState.server_calls_enabled?'money':'muted');
+  document.getElementById('today-managed-tbody').innerHTML=managedSummaryRow('Today',managedState,managedToday);
   const rows=(data.recent||[]).map(row=>{
     const routed=row.routed_model&&row.routed_model!==row.requested_model?row.routed_model:'-';
     return `<tr>
@@ -28959,6 +29235,13 @@ function renderWeekly(data){
   text('week-savings',money(totals.savings_usd));
   text('week-tokens',num(totals.total_tokens));
   text('week-errors',`${num(totals.errors)} errors`);
+  const managed=data.managed_feed||{};
+  const managedState=managed.state||{};
+  const managedWeek=managed.last_7_days||totals.managed_feed||{};
+  text('week-managed-state',managedState.mode||'local_only');
+  text('week-managed-detail',managedCompactText(managedWeek));
+  document.getElementById('week-managed-state').className='value '+(managedState.server_calls_enabled?'money':'muted');
+  document.getElementById('week-managed-tbody').innerHTML=managedSummaryRow('Last 7 days',managedState,managedWeek);
   const rows=(data.days||[]).map(row=>`<tr>
     <td>${row.day}</td>
     <td>${num(row.total_units)}</td>

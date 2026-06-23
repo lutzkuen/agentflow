@@ -8,6 +8,7 @@ import time
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import patch
 
 HAS_RUNTIME_DEPS = all(
@@ -1260,6 +1261,111 @@ request_shape_repeated_context_canaries:
         self.assertEqual({row["value"]: row["count"] for row in result["policy_ids"]}, {"managed-route-24h": 1})
         self.assertTrue(result["recent"][0]["applied"])
 
+    def test_lightweight_and_weekly_stats_expose_compact_managed_feed_summary(self):
+        now = datetime.now(timezone.utc)
+
+        def log_call(call_id: str, created_at: datetime, *, routing: dict[str, Any], managed: dict[str, Any] | None = None) -> None:
+            server.store.log_call(
+                id=call_id,
+                created_at=created_at.isoformat(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-haiku-4-5-20251001"
+                if routing.get("policy_source") == "local-manual" or (managed or {}).get("applied")
+                else "claude-sonnet-4-6",
+                stream=0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=10,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.003,
+                crunch_json=stable_json({"changed": False, "policy_source": "local-default"}),
+                routing_json=stable_json(routing),
+                managed_routing_json=stable_json(managed) if managed is not None else None,
+                cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+                session_id="managed-feed-secret-session",
+                category="chat",
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+            )
+
+        with patch.dict(
+            os.environ,
+            {
+                "TOKENCLAW_MANAGED": "1",
+                "TOKENCLAW_MANAGED_MODE": "observe_only",
+                "TOKENCLAW_RECOMMENDATION_SERVER_URL": "https://managed.example.test",
+                "TOKENCLAW_MANAGED_API_KEY": "secret-value-must-not-render",
+            },
+            clear=False,
+        ):
+            log_call(
+                "managed-feed-recommended",
+                now,
+                routing={"reason": "managed route"},
+                managed={
+                    "schema": "tokenclaw.managed_policy_decision_evaluation.v1",
+                    "enabled": True,
+                    "status": "received",
+                    "policy_source": "managed-recommended",
+                    "applied": True,
+                },
+            )
+            log_call(
+                "managed-feed-local-manual",
+                now,
+                routing={"policy_source": "local-manual", "reason": "manual rule"},
+            )
+            log_call(
+                "managed-feed-off",
+                now,
+                routing={"policy_source": "local-default", "reason": "pass-through"},
+            )
+            log_call(
+                "managed-feed-enforced-yesterday",
+                now - timedelta(days=1),
+                routing={"reason": "managed enforced"},
+                managed={
+                    "schema": "tokenclaw.managed_policy_decision_evaluation.v1",
+                    "enabled": True,
+                    "status": "received",
+                    "policy_source": "managed-enforced",
+                    "applied": True,
+                    "managed_enforced": True,
+                },
+            )
+
+            today = asyncio.run(stats_views.stats(server.store, self.tmp.name))
+            weekly = asyncio.run(stats_views.stats_weekly(server.store))
+
+        managed_today = today["managed_feed"]
+        self.assertEqual(managed_today["schema"], "tokenclaw.managed_feed_dashboard_summary.v1")
+        self.assertEqual(managed_today["state"]["mode"], "observe_only")
+        self.assertTrue(managed_today["state"]["server"]["configured"])
+        self.assertTrue(managed_today["state"]["server"]["auth_configured"])
+        self.assertFalse(managed_today["state"]["server"]["url_host_state"]["raw_url_included"])
+        today_counts = managed_today["today"]["backing_counts"]
+        self.assertEqual(today_counts["managed-recommended"], 1)
+        self.assertEqual(today_counts["local-manual"], 1)
+        self.assertEqual(today_counts["off/pass-through"], 1)
+        self.assertEqual(managed_today["today"]["policy_decision_calls"]["succeeded"], 1)
+        self.assertGreaterEqual(managed_today["today"]["policy_decision_calls"]["skipped"], 2)
+
+        weekly_counts = weekly["managed_feed"]["last_7_days"]["backing_counts"]
+        self.assertEqual(weekly_counts["managed-recommended"], 1)
+        self.assertEqual(weekly_counts["managed-enforced"], 1)
+        self.assertEqual(weekly_counts["local-manual"], 1)
+        self.assertEqual(weekly_counts["off/pass-through"], 1)
+        rendered = json.dumps(weekly, sort_keys=True)
+        self.assertNotIn("secret-value-must-not-render", rendered)
+        self.assertNotIn("managed-feed-secret-session", rendered)
+        self.assertNotIn("https://managed.example.test", rendered)
+
     def test_managed_recommendation_dashboard_endpoint_and_panel_render_without_server(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
@@ -1323,11 +1429,12 @@ request_shape_repeated_context_canaries:
 
             html = client.get("/tokenclaw/dashboard")
             self.assertEqual(html.status_code, 200)
-            self.assertIn("Managed recommendation status", html.text)
-            self.assertIn("Managed recommendation health", html.text)
-            self.assertIn("/tokenclaw/stats/managed-recommendations", html.text)
-            self.assertIn("managed-summary-tbody", html.text)
-            self.assertIn("managed-health-tbody", html.text)
+            self.assertIn("Managed feed", html.text)
+            self.assertIn("Managed Backing", html.text)
+            self.assertIn("today-managed-tbody", html.text)
+            self.assertIn("week-managed-tbody", html.text)
+            self.assertNotIn("/tokenclaw/stats/managed-recommendations", html.text)
+            self.assertNotIn("Managed recommendation health", html.text)
 
     def test_openai_scoreboard_answers_go_no_go_from_metadata_and_suppresses_claude_no_traffic(self):
         def log_openai_call(created_at, *, routing, status_code=200, latency_ms=100, retry_count=0, cache=None, crunch=None, actual=0.02, baseline=0.02):
