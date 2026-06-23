@@ -38,10 +38,30 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Then use the public onboarding command:
+Then start the local savings stack from one terminal:
 
 ```bash
 tokenclaw --help
+tokenclaw start
+```
+
+`tokenclaw start` creates default local OpenAI-compatible and Anthropic-compatible
+activation profiles when they are missing, starts the local provider proxies when
+their ports are available, and starts the read-only dashboard:
+
+```text
+OpenAI-compatible proxy: http://127.0.0.1:4003/v1
+Anthropic-compatible proxy: http://127.0.0.1:4000
+Dashboard: http://127.0.0.1:4002/tokenclaw/dashboard
+```
+
+Provider credentials stay in your existing shell, OS secret manager, or client
+configuration. TokenClaw does not store or print API keys.
+
+Use the public onboarding commands when you want to wire specific clients to those
+local URLs:
+
+```bash
 tokenclaw activate openai
 tokenclaw activate claude
 tokenclaw activate codex

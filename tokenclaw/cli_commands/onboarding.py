@@ -6,7 +6,9 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 import sys
+import time
 from typing import Any, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -27,7 +29,11 @@ from tokenclaw.upstream_url import redact_url as _redact_url
 ONBOARDING_TARGETS = ("openai", "claude", "codex", "claude-vscode", "claude-desktop")
 UNSUPPORTED_ONBOARDING_TARGETS = ("copilot",)
 RUN_TARGETS = ("openai", "claude")
+DOCTOR_TARGETS = (*ONBOARDING_TARGETS, "start")
 DEFAULT_STATS_URL = "http://127.0.0.1:4002/tokenclaw/stats"
+DEFAULT_DASHBOARD_URL = "http://127.0.0.1:4002/tokenclaw/dashboard"
+DEFAULT_DASHBOARD_HOST = "0.0.0.0"
+DEFAULT_DASHBOARD_PORT = 4002
 ROUTING_EXPERIMENTS_ENV = "TOKENCLAW_ROUTING_EXPERIMENTS"
 ROUTING_EXPERIMENTS_STRICT_ENV = "TOKENCLAW_ROUTING_EXPERIMENTS_STRICT"
 DEFAULT_CLAUDE_PROD_PORT = 4000
@@ -93,6 +99,335 @@ def _prod_routing_experiments_path(
     if _configured_proxy_port(proxy_args) != DEFAULT_CLAUDE_PROD_PORT:
         return None
     return Path(config_dir).expanduser() / "routing_experiments.yaml"
+
+
+def _start_selected_provider_targets(args: Any) -> list[str]:
+    if bool(getattr(args, "dashboard_only", False)):
+        return []
+    selected = []
+    if bool(getattr(args, "openai", False)):
+        selected.append("openai")
+    if bool(getattr(args, "claude", False)):
+        selected.append("claude")
+    return selected or list(RUN_TARGETS)
+
+
+def _ensure_start_activation_config(
+    config: dict[str, Any],
+    *,
+    config_dir: str | Path,
+    targets: Sequence[str],
+    dry_run: bool,
+) -> tuple[dict[str, Any], list[str], str]:
+    from tokenclaw import activation
+
+    updated = json.loads(json.dumps(config))
+    configured_targets: list[str] = []
+    changed = False
+    for target in targets:
+        profiles = updated.setdefault("targets", {})
+        existing = profiles.get(target) if isinstance(profiles.get(target), dict) else None
+        if existing and existing.get("configured"):
+            continue
+        profiles[target] = activation.activation_profile(target)
+        configured_targets.append(target)
+        changed = True
+    config_path = str(activation.activation_config_path(config_dir))
+    if changed and not dry_run:
+        config_path = str(activation.write_activation_config(updated, config_dir))
+    return updated, configured_targets, config_path
+
+
+def _health_probe(url: str, *, timeout: float) -> tuple[bool, dict[str, Any] | None, str | None]:
+    if not _is_loopback_url(url):
+        return False, None, "non-loopback-url"
+    try:
+        response = httpx.get(url, timeout=timeout)
+    except Exception as exc:
+        return False, None, type(exc).__name__
+    if response.status_code < 200 or response.status_code >= 300:
+        return False, {"status_code": response.status_code}, "health-non-2xx"
+    try:
+        payload = response.json()
+    except ValueError:
+        return False, {"status_code": response.status_code}, "health-invalid-json"
+    return True, payload if isinstance(payload, dict) else {}, None
+
+
+def _provider_start_command(proxy_args: Sequence[str]) -> list[str]:
+    return [sys.executable, "-m", "tokenclaw.server", *list(proxy_args)]
+
+
+def _dashboard_start_command() -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "tokenclaw.dashboard",
+        "--host",
+        DEFAULT_DASHBOARD_HOST,
+        "--port",
+        str(DEFAULT_DASHBOARD_PORT),
+    ]
+
+
+def _redacted_command(command: Sequence[str]) -> str:
+    return " ".join(shlex_quote(part) for part in command)
+
+
+def shlex_quote(value: object) -> str:
+    import shlex
+
+    return shlex.quote(str(value))
+
+
+def _launch_start_service(
+    *,
+    name: str,
+    command: Sequence[str],
+    health_url: str | None,
+    timeout: float,
+    dry_run: bool,
+) -> tuple[dict[str, Any], subprocess.Popen[Any] | None]:
+    result: dict[str, Any] = {
+        "name": name,
+        "command": _redacted_command(command),
+        "status": "not-started",
+        "started": False,
+        "already_running": False,
+    }
+    if health_url:
+        result["health_url"] = health_url
+        healthy, payload, reason = _health_probe(health_url, timeout=timeout)
+        if healthy and (not payload or bool(payload.get("ok", True))):
+            result["status"] = "already running"
+            result["already_running"] = True
+            result["health"] = payload or {}
+            return result, None
+        if reason:
+            result["preflight_reason"] = reason
+
+    if dry_run:
+        result["status"] = "would start"
+        return result, None
+
+    try:
+        process = subprocess.Popen(list(command))
+    except OSError as exc:
+        result["status"] = "failed to start"
+        result["error"] = type(exc).__name__
+        return result, None
+
+    time.sleep(0.2)
+    returncode = process.poll()
+    result["pid"] = process.pid
+    if returncode is not None:
+        result["status"] = "exited"
+        result["returncode"] = returncode
+        return result, None
+    result["status"] = "started"
+    result["started"] = True
+    return result, process
+
+
+def _wait_for_start_processes(processes: Sequence[subprocess.Popen[Any]]) -> int:
+    active = list(processes)
+    if not active:
+        return 0
+    exit_code = 0
+    try:
+        while active:
+            for process in list(active):
+                returncode = process.poll()
+                if returncode is not None:
+                    active.remove(process)
+                    if returncode and exit_code == 0:
+                        exit_code = int(returncode)
+            if active:
+                time.sleep(0.5)
+    except KeyboardInterrupt:
+        for process in active:
+            if process.poll() is None:
+                process.terminate()
+        for process in active:
+            try:
+                process.wait(timeout=5)
+            except Exception:
+                pass
+        return 130
+    return exit_code
+
+
+def _write_start_summary(stdout: Any, result: dict[str, Any]) -> None:
+    services = result.get("services") if isinstance(result.get("services"), dict) else {}
+    openai = services.get("openai") if isinstance(services.get("openai"), dict) else {}
+    claude = services.get("claude") if isinstance(services.get("claude"), dict) else {}
+    dashboard = services.get("dashboard") if isinstance(services.get("dashboard"), dict) else {}
+
+    if openai.get("local_base_url"):
+        stdout.write(f"OpenAI-compatible proxy: {openai['local_base_url']}\n")
+    if claude.get("local_base_url"):
+        stdout.write(f"Anthropic-compatible proxy: {claude['local_base_url']}\n")
+    if dashboard.get("url"):
+        stdout.write(f"Dashboard: {dashboard['url']}\n")
+    stdout.write("\nSavings active:\n")
+    stdout.write("- local crunching: on\n")
+    stdout.write("- local cache: on\n")
+    stdout.write("- managed recommendations: off unless configured\n")
+    stdout.write("\n")
+    for name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        status = service.get("status") or "unknown"
+        stdout.write(f"{name}: {status}\n")
+        if service.get("reason"):
+            stdout.write(f"  reason: {service['reason']}\n")
+    if result.get("dry_run"):
+        stdout.write("Dry run only; no services were started.\n")
+    elif result.get("started_process_count", 0):
+        stdout.write("Press Ctrl-C to stop services started by this command.\n")
+    stdout.flush()
+
+
+def _start_result(
+    *,
+    config: dict[str, Any],
+    config_dir: str | Path,
+    targets: Sequence[str],
+    start_dashboard: bool,
+    timeout: float,
+    dry_run: bool,
+) -> tuple[dict[str, Any], list[subprocess.Popen[Any]]]:
+    from tokenclaw import activation
+
+    result: dict[str, Any] = {
+        "schema": "tokenclaw.start.v1",
+        "ok": True,
+        "dry_run": dry_run,
+        "config_path": str(activation.activation_config_path(config_dir)),
+        "services": {},
+        "auto_configured_targets": [],
+        "started_process_count": 0,
+        "privacy": {
+            "secrets_printed": False,
+            "provider_credentials_stored": False,
+            "managed_server_required": False,
+        },
+    }
+    processes: list[subprocess.Popen[Any]] = []
+    updated, configured_targets, config_path = _ensure_start_activation_config(
+        config,
+        config_dir=config_dir,
+        targets=targets,
+        dry_run=dry_run,
+    )
+    result["config_path"] = config_path
+    result["auto_configured_targets"] = configured_targets
+
+    for target in targets:
+        profile = (updated.get("targets") or {}).get(target) if isinstance(updated.get("targets"), dict) else None
+        if not isinstance(profile, dict) or not profile.get("configured"):
+            result["services"][target] = {
+                "name": target,
+                "status": "disabled",
+                "reason": "activation-profile-missing",
+            }
+            continue
+        try:
+            proxy_args = activation.proxy_args_for_target(updated, target)
+        except Exception as exc:
+            result["services"][target] = {
+                "name": target,
+                "status": "disabled",
+                "reason": type(exc).__name__,
+            }
+            continue
+        service, process = _launch_start_service(
+            name=target,
+            command=_provider_start_command(proxy_args),
+            health_url=str(profile.get("health_url") or ""),
+            timeout=timeout,
+            dry_run=dry_run,
+        )
+        service["local_base_url"] = profile.get("local_base_url")
+        service["provider"] = profile.get("provider")
+        result["services"][target] = service
+        if process is not None:
+            processes.append(process)
+
+    if start_dashboard:
+        service, process = _launch_start_service(
+            name="dashboard",
+            command=_dashboard_start_command(),
+            health_url=DEFAULT_STATS_URL,
+            timeout=timeout,
+            dry_run=dry_run,
+        )
+        service["url"] = DEFAULT_DASHBOARD_URL
+        result["services"]["dashboard"] = service
+        if process is not None:
+            processes.append(process)
+    else:
+        result["services"]["dashboard"] = {
+            "name": "dashboard",
+            "status": "disabled",
+            "reason": "no-dashboard",
+            "url": DEFAULT_DASHBOARD_URL,
+        }
+
+    result["started_process_count"] = len(processes)
+    failed = [
+        name
+        for name, service in result["services"].items()
+        if isinstance(service, dict) and service.get("status") in {"failed to start", "exited"}
+    ]
+    result["ok"] = not failed
+    if failed:
+        result["failed_services"] = failed
+    return result, processes
+
+
+def _doctor_dashboard_status(*, timeout: float) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "name": "dashboard",
+        "ok": False,
+        "status": "configured but not running",
+        "url": DEFAULT_DASHBOARD_URL,
+        "stats_url": DEFAULT_STATS_URL,
+        "reasons": [],
+    }
+    healthy, payload, reason = _health_probe(DEFAULT_STATS_URL, timeout=timeout)
+    if not healthy:
+        if reason:
+            result["reasons"].append(reason)
+        return result
+    result["ok"] = True
+    result["status"] = "healthy"
+    result["stats"] = {
+        "ok": bool(payload.get("ok", True)) if isinstance(payload, dict) else True,
+        "db": payload.get("db") if isinstance(payload, dict) else None,
+    }
+    return result
+
+
+def _start_doctor_result(
+    config: dict[str, Any],
+    *,
+    config_dir: str | Path | None,
+    timeout: float,
+) -> dict[str, Any]:
+    services: dict[str, dict[str, Any]] = {}
+    for name in RUN_TARGETS:
+        base = _target_activation_base(config, config_dir=config_dir, target=name)
+        profile = _profile_for_target(config, name)
+        services[name] = _doctor_provider_target(base, profile, timeout=timeout)
+    services["dashboard"] = _doctor_dashboard_status(timeout=timeout)
+    return {
+        "schema": "tokenclaw.start_doctor.v1",
+        "ok": all(bool(service.get("ok")) for service in services.values()),
+        "status": "healthy" if all(bool(service.get("ok")) for service in services.values()) else "issue",
+        "services": services,
+        "dashboard_url": DEFAULT_DASHBOARD_URL,
+    }
 
 
 def _claude_desktop_routing_verification(result: dict[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
@@ -350,6 +685,18 @@ def _onboarding_cli(
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    start_parser = subparsers.add_parser(
+        "start",
+        parents=[config_parent],
+        help=f"Start the local {brand} savings stack from one terminal.",
+    )
+    start_parser.add_argument("--openai", action="store_true", help="Start only the OpenAI-compatible proxy plus dashboard.")
+    start_parser.add_argument("--claude", action="store_true", help="Start only the Anthropic-compatible proxy plus dashboard.")
+    start_parser.add_argument("--dashboard-only", action="store_true", help="Start only the read-only dashboard.")
+    start_parser.add_argument("--no-dashboard", action="store_true", help="Start provider proxies without the dashboard.")
+    start_parser.add_argument("--dry-run", action="store_true", help="Print what would start without launching services.")
+    start_parser.add_argument("--timeout", type=float, default=1.0, help="Loopback health probe timeout in seconds.")
+
     activate_parser = subparsers.add_parser(
         "activate",
         parents=[config_parent],
@@ -498,7 +845,7 @@ def _onboarding_cli(
         parents=[config_parent],
         help=f"Check a configured {brand} target without exposing secrets.",
     )
-    doctor_parser.add_argument("target", nargs="?", choices=ONBOARDING_TARGETS)
+    doctor_parser.add_argument("target", nargs="?", choices=DOCTOR_TARGETS)
     doctor_parser.add_argument("--timeout", type=float, default=5.0, help="Health request timeout in seconds.")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
@@ -657,6 +1004,33 @@ def _onboarding_cli(
     args = parser.parse_args(argv)
     if not hasattr(args, "config_dir") or args.config_dir is None:
         args.config_dir = default_config_dir()
+
+    if args.command == "start":
+        if args.dashboard_only and args.no_dashboard:
+            stderr.write("--dashboard-only and --no-dashboard cannot be combined.\n")
+            return 2
+        if args.dashboard_only and (args.openai or args.claude):
+            stderr.write("--dashboard-only cannot be combined with --openai or --claude.\n")
+            return 2
+        try:
+            config = activation.load_activation_config(args.config_dir)
+        except activation.ActivationConfigError as exc:
+            _write_activation_config_error(stderr, exc, command="start")
+            return 2
+        targets = _start_selected_provider_targets(args)
+        result, processes = _start_result(
+            config=config,
+            config_dir=args.config_dir,
+            targets=targets,
+            start_dashboard=not bool(args.no_dashboard),
+            timeout=float(args.timeout),
+            dry_run=bool(args.dry_run),
+        )
+        _write_start_summary(stdout, result)
+        if args.dry_run:
+            return 0 if result.get("ok") else 1
+        wait_code = _wait_for_start_processes(processes)
+        return wait_code if wait_code else (0 if result.get("ok") else 1)
 
     if args.command == "activate":
         if args.target in UNSUPPORTED_ONBOARDING_TARGETS:
@@ -1040,6 +1414,8 @@ def _activation_config_error_result(
 
 
 def _selected_activation_targets(target: str | None) -> list[str]:
+    if target == "start":
+        return []
     return [target] if target else list(ONBOARDING_TARGETS)
 
 
@@ -1127,6 +1503,18 @@ def _activation_doctor_result(
     timeout: float,
 ) -> dict[str, Any]:
     from tokenclaw import activation
+
+    if target == "start":
+        start = _start_doctor_result(config, config_dir=config_dir, timeout=timeout)
+        return {
+            "schema": "tokenclaw.activation_doctor.v1",
+            "ok": bool(start.get("ok")),
+            "target": target,
+            "config_path": str(activation.activation_config_path(config_dir)),
+            "targets": {},
+            "start": start,
+            "activation_successor_queue_health": _activation_successor_queue_health(),
+        }
 
     targets: dict[str, dict[str, Any]] = {}
     for name in _selected_activation_targets(target):
@@ -1515,6 +1903,23 @@ def _write_activation_stats_summary(stdout: Any, result: dict[str, Any]) -> None
 
 
 def _write_activation_doctor_summary(stdout: Any, result: dict[str, Any]) -> None:
+    if result.get("target") == "start":
+        start = result.get("start") if isinstance(result.get("start"), dict) else {}
+        stdout.write(f"start: {start.get('status') or 'unknown'}\n")
+        services = start.get("services") if isinstance(start.get("services"), dict) else {}
+        for name in ("openai", "claude", "dashboard"):
+            service = services.get(name) if isinstance(services.get(name), dict) else {}
+            status = service.get("status") or "unknown"
+            stdout.write(f"{name}: {status}\n")
+            if service.get("local_base_url"):
+                stdout.write(f"  base url: {service['local_base_url']}\n")
+            if service.get("url"):
+                stdout.write(f"  url: {service['url']}\n")
+            reasons = service.get("reasons") if isinstance(service.get("reasons"), list) else []
+            if reasons:
+                stdout.write("  reasons: " + ", ".join(str(reason) for reason in reasons) + "\n")
+        return
+
     targets = result.get("targets") if isinstance(result.get("targets"), dict) else {}
     for name in _selected_activation_targets(result.get("target")):
         target = targets.get(name) if isinstance(targets.get(name), dict) else {}

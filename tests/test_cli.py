@@ -45,6 +45,19 @@ class ManagedFeedbackFlushClient:
         return httpx.Response(self.status_code, text=self.text)
 
 
+class DummyStartProcess:
+    pid = 12345
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+
 class AgentflowActivationCliTests(unittest.TestCase):
     def test_public_tokenclaw_help_lists_onboarding_commands_and_targets(self):
         stdout = io.StringIO()
@@ -54,7 +67,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 0)
         output = stdout.getvalue()
-        for expected in ("activate", "deactivate", "stats", "doctor", "run", "version"):
+        for expected in ("start", "activate", "deactivate", "stats", "doctor", "run", "version"):
             self.assertIn(expected, output)
         for target in ("openai", "claude", "codex", "claude-vscode", "claude-desktop"):
             self.assertIn(target, output)
@@ -198,6 +211,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "unsupported: GitHub Copilot is not a base-url target",
             "pip install tokenclaw",
             "tokenclaw --help",
+            "tokenclaw start",
             "tokenclaw internal --list",
         ):
             self.assertIn(expected, readme)
@@ -207,6 +221,93 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertNotIn("tokenclaw-dashboard --host", readme)
         self.assertNotIn("agentflow", readme)
         self.assertNotIn("sk-", readme)
+
+    def test_tokenclaw_start_dry_run_prints_default_urls_without_writing_config(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+
+            with patch("tokenclaw.cli_commands.onboarding.httpx.get", side_effect=httpx.ConnectError("offline")), patch(
+                "tokenclaw.cli_commands.onboarding.subprocess.Popen"
+            ) as popen:
+                code = cli.tokenclaw_cli(["start", "--config-dir", tmp, "--dry-run"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        popen.assert_not_called()
+        output = stdout.getvalue()
+        self.assertIn("OpenAI-compatible proxy: http://127.0.0.1:4003/v1", output)
+        self.assertIn("Anthropic-compatible proxy: http://127.0.0.1:4000", output)
+        self.assertIn("Dashboard: http://127.0.0.1:4002/tokenclaw/dashboard", output)
+        self.assertIn("- local crunching: on", output)
+        self.assertIn("- local cache: on", output)
+        self.assertIn("- managed recommendations: off unless configured", output)
+        self.assertIn("Dry run only; no services were started.", output)
+        self.assertFalse((Path(tmp) / "activation.json").exists())
+
+    def test_tokenclaw_start_launches_default_stack_and_writes_profiles(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            launched = []
+
+            def fake_popen(command):
+                launched.append(command)
+                return DummyStartProcess()
+
+            with patch("tokenclaw.cli_commands.onboarding.httpx.get", side_effect=httpx.ConnectError("offline")), patch(
+                "tokenclaw.cli_commands.onboarding.subprocess.Popen",
+                side_effect=fake_popen,
+            ), patch("tokenclaw.cli_commands.onboarding._wait_for_start_processes", return_value=0):
+                code = cli.tokenclaw_cli(["start", "--config-dir", tmp], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(len(launched), 3)
+            joined = "\n".join(" ".join(command) for command in launched)
+            self.assertIn("-m tokenclaw.server --provider openai", joined)
+            self.assertIn("-m tokenclaw.server --provider anthropic", joined)
+            self.assertIn("-m tokenclaw.dashboard", joined)
+            config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(config["targets"].keys()), ["claude", "openai"])
+            self.assertIn("Press Ctrl-C to stop services started by this command.", stdout.getvalue())
+
+    def test_tokenclaw_start_flags_select_provider_or_dashboard_only(self):
+        with TemporaryDirectory() as tmp:
+            openai_stdout = io.StringIO()
+            dashboard_stdout = io.StringIO()
+
+            with patch("tokenclaw.cli_commands.onboarding.httpx.get", side_effect=httpx.ConnectError("offline")):
+                openai_code = cli.tokenclaw_cli(["start", "--config-dir", tmp, "--openai", "--no-dashboard", "--dry-run"], stdout=openai_stdout)
+                dashboard_code = cli.tokenclaw_cli(["start", "--config-dir", tmp, "--dashboard-only", "--dry-run"], stdout=dashboard_stdout)
+
+        self.assertEqual(openai_code, 0)
+        self.assertIn("OpenAI-compatible proxy: http://127.0.0.1:4003/v1", openai_stdout.getvalue())
+        self.assertNotIn("Anthropic-compatible proxy:", openai_stdout.getvalue())
+        self.assertIn("dashboard: disabled", openai_stdout.getvalue())
+        self.assertEqual(dashboard_code, 0)
+        self.assertNotIn("OpenAI-compatible proxy:", dashboard_stdout.getvalue())
+        self.assertNotIn("Anthropic-compatible proxy:", dashboard_stdout.getvalue())
+        self.assertIn("Dashboard: http://127.0.0.1:4002/tokenclaw/dashboard", dashboard_stdout.getvalue())
+
+    def test_tokenclaw_doctor_start_reports_provider_and_dashboard_state(self):
+        with TemporaryDirectory() as tmp:
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            cli.tokenclaw_cli(["activate", "claude", "--config-dir", tmp], stdout=io.StringIO())
+            stdout = io.StringIO()
+            responses = [
+                httpx.Response(200, json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"}),
+                httpx.Response(200, json={"ok": True, "provider": "anthropic", "upstream": "https://api.anthropic.com"}),
+                httpx.Response(200, json={"ok": True, "db": "/tmp/tokenclaw.sqlite3"}),
+            ]
+
+            with patch("tokenclaw.cli_commands.onboarding.httpx.get", side_effect=responses):
+                code = cli.tokenclaw_cli(["doctor", "start", "--config-dir", tmp, "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["schema"], "tokenclaw.activation_doctor.v1")
+        self.assertTrue(result["start"]["ok"])
+        self.assertEqual(result["start"]["services"]["openai"]["status"], "healthy")
+        self.assertEqual(result["start"]["services"]["claude"]["status"], "healthy")
+        self.assertEqual(result["start"]["services"]["dashboard"]["status"], "healthy")
+        self.assertEqual(result["start"]["dashboard_url"], "http://127.0.0.1:4002/tokenclaw/dashboard")
 
     def test_readme_onboarding_commands_smoke_without_credentials(self):
         with TemporaryDirectory() as tmp:
