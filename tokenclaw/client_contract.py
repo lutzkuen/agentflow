@@ -37,6 +37,8 @@ _PROTO_ROOT_KEYS = {
     "raw_payload_included",
     "raw_body_storage",
     "privacy_summary",
+    "client_contract",
+    "local_client_version",
 }
 
 _PROTO_SECTION_KEYS = {

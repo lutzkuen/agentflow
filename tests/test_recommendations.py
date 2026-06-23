@@ -134,6 +134,81 @@ class RecommendationTest(unittest.TestCase):
         ):
             self.assertNotIn(secret, text)
 
+    def _active_policy_contract_meta(
+        self,
+        *,
+        provider="anthropic",
+        source_surface="anthropic_messages",
+        app_family="claude_code",
+        paths=None,
+    ):
+        if paths is None:
+            paths = [
+                "source_surface",
+                "feature_schema_version",
+                "granularity",
+                "app_family",
+                "requested_model",
+                "candidate_target_model",
+                "input_features.api_endpoint",
+                "input_features.thin_request_facts",
+                "input_features.category",
+                "input_features.text_bucket",
+                "input_features.input_token_bucket",
+                "input_features.text_chars",
+                "input_features.input_tokens_est",
+                "input_features.prompt_difficulty_features",
+                "input_features.terminal_log_features",
+                "input_features.requested_local_actions",
+                "input_features.use_routing_predictor",
+                "tool_features.has_tools",
+                "tool_features.tool_count",
+                "tool_features.tool_context_present",
+                "grouping_identifiers.session_id_hash",
+                "request_facts.schema",
+                "request_facts.provider_family",
+                "request_facts.endpoint",
+                "request_facts.requested_model",
+                "request_facts.stream",
+                "request_facts.text_chars",
+                "request_facts.input_tokens_est",
+                "request_facts.text_bucket",
+                "request_facts.input_token_bucket",
+                "request_facts.has_tools",
+                "request_facts.tool_count",
+                "request_facts.grouping_identifiers.session_id_hash",
+                "client_contract.contract_id",
+                "client_contract.measurement_path_count",
+                "local_client_version",
+            ]
+        contract = {
+            "schema": "tokenclaw.client_contract.v1",
+            "contract_id": "policy-contract",
+            "expires_at": "2999-01-01T00:00:00+00:00",
+            "provider": provider,
+            "source_surface": source_surface,
+            "app_family": app_family,
+            "measurement_plan": {"preflight": paths, "outcome": []},
+            "allowed_action_families": ["routing", "crunch", "cache"],
+            "privacy": {"metadata_only": True},
+        }
+        return {
+            "status": "received",
+            "reason": "fetched",
+            "cache_status": "stored",
+            "active": True,
+            "contract_id": contract["contract_id"],
+            "contract": contract,
+        }
+
+    def _active_policy_contract_patch(self, **kwargs):
+        contract_meta = self._active_policy_contract_meta(**kwargs)
+
+        async def fake_contract(_payload):
+            return contract_meta
+
+        return patch.object(recommendations, "_client_contract_for_payload", fake_contract)
+
     def test_disabled_path_skips_server_and_falls_back_to_local_policy(self):
         unit = {"requested_model": "claude-sonnet-4-6"}
 
@@ -198,6 +273,45 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["product_mode"]["mode"], "local_only")
         self.assertIsNone(FakeAsyncClient.last_url)
 
+    def test_policy_decision_requires_active_client_contract_before_policy_post(self):
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+
+        async def inactive_contract(_payload):
+            return {
+                "schema": "tokenclaw.client_contract_meta.v1",
+                "enabled": True,
+                "active": False,
+                "status": "error",
+                "reason": "unreachable",
+                "fallback": "local-policy",
+            }
+
+        with patch.object(recommendations, "_client_contract_for_payload", inactive_contract):
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_policy_decision({
+                    "source_surface": "anthropic_messages",
+                    "granularity": "provider_request",
+                    "app_family": "claude_code",
+                    "requested_model": "claude-sonnet-4-6",
+                    "input_features": {"text_chars": 1200, "raw_prompt": "do not send"},
+                    "tool_features": {"has_tools": False},
+                    "provider_body": {"messages": ["do not send"]},
+                    "replayability_level": "features_only",
+                }))
+
+        self.assertIsNone(FakeAsyncClient.last_url)
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "server-unavailable")
+        self.assertEqual(meta["fallback"], "local-policy")
+        self.assertFalse(meta["applied"])
+        self.assertEqual(meta["client_contract"]["status"], "error")
+        self.assertFalse(meta["client_contract"]["active"])
+        self.assertEqual(meta["managed_measurement"]["status"], "skipped")
+        self.assertEqual(meta["managed_measurement"]["reason"], "server-unavailable")
+        self.assertNotIn("do not send", str(meta))
+
     def test_policy_decision_fetch_can_use_request_facts_instead_of_rich_unit(self):
         os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
@@ -240,16 +354,19 @@ class RecommendationTest(unittest.TestCase):
             },
         }
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
-            meta = asyncio.run(recommendations.fetch_policy_decision(rich_unit, request_facts=envelope))
+        with self._active_policy_contract_patch():
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_policy_decision(rich_unit, request_facts=envelope))
 
         sent = FakeAsyncClient.last_json
         self.assertEqual(meta["status"], "received")
         self.assertEqual(sent["schema"], recommendations.POLICY_DECISION_PREFLIGHT_SCHEMA)
         self.assertEqual(sent["feature_schema_version"], recommendations.REQUEST_FACTS_SCHEMA)
+        self.assertEqual(sent["client_contract"]["contract_id"], "policy-contract")
+        self.assertTrue(sent["client_contract"]["contract_hash"].startswith("sha256:"))
         self.assertEqual(sent["source_surface"], "anthropic_messages")
         self.assertEqual(sent["app_family"], "claude_code")
-        self.assertIsNone(sent["candidate_target_model"])
+        self.assertIsNone(sent.get("candidate_target_model"))
         self.assertEqual(sent["request_facts"]["schema"], recommendations.REQUEST_FACTS_SCHEMA)
         self.assertTrue(sent["input_features"]["thin_request_facts"])
         self.assertEqual(sent["input_features"]["api_endpoint"], "messages")
@@ -784,14 +901,17 @@ class RecommendationTest(unittest.TestCase):
             "replayability_level": "features_only",
         }
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
-            meta = asyncio.run(recommendations.fetch_policy_decision(unit))
+        with self._active_policy_contract_patch():
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_policy_decision(unit))
 
         self.assertEqual(FakeAsyncClient.last_url, "http://127.0.0.1:4100/v1/policy-decision")
         self.assertNotIn("authorization", FakeAsyncClient.last_headers)
         sent = FakeAsyncClient.last_json
         self.assertEqual(sent["schema"], "tokenclaw.policy_decision_preflight.v1")
         self.assertEqual(sent["replayability_level"], "features_only")
+        self.assertEqual(sent["client_contract"]["contract_id"], "policy-contract")
+        self.assertTrue(sent["client_contract"]["contract_hash"].startswith("sha256:"))
         self.assertEqual(sent["input_features"]["api_endpoint"], "v1_messages")
         self.assertNotIn("path", sent["input_features"])
         self.assertNotIn("privacy_summary", sent)
@@ -855,8 +975,13 @@ class RecommendationTest(unittest.TestCase):
         )
         self.assertIn("old_context", unit["input_features"])
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
-            meta = asyncio.run(recommendations.fetch_policy_decision(unit))
+        with self._active_policy_contract_patch(
+            provider="openai",
+            source_surface="openai_responses",
+            app_family="generic_openai",
+        ):
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_policy_decision(unit))
 
         sent = FakeAsyncClient.last_json
         self.assertEqual(meta["status"], "received")
@@ -875,32 +1000,34 @@ class RecommendationTest(unittest.TestCase):
         os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = httpx.TimeoutException("too slow")
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
-            timeout_meta = asyncio.run(recommendations.fetch_policy_decision({
-                "source_surface": "anthropic_messages",
-                "granularity": "provider_request",
-                "app_family": "claude_code",
-                "requested_model": "claude-sonnet-4-6",
-                "input_features": {},
-                "tool_features": {},
-                "replayability_level": "features_only",
-            }))
+        with self._active_policy_contract_patch():
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                timeout_meta = asyncio.run(recommendations.fetch_policy_decision({
+                    "source_surface": "anthropic_messages",
+                    "granularity": "provider_request",
+                    "app_family": "claude_code",
+                    "requested_model": "claude-sonnet-4-6",
+                    "input_features": {},
+                    "tool_features": {},
+                    "replayability_level": "features_only",
+                }))
 
         FakeAsyncClient.error = None
         FakeAsyncClient.response = FakeResponse(body={
             "schema": "tokenclaw.unexpected.v1",
             "routing": {"status": "recommended", "target_model": "claude-haiku-4-5-20251001"},
         })
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
-            schema_meta = asyncio.run(recommendations.fetch_policy_decision({
-                "source_surface": "anthropic_messages",
-                "granularity": "provider_request",
-                "app_family": "claude_code",
-                "requested_model": "claude-sonnet-4-6",
-                "input_features": {},
-                "tool_features": {},
-                "replayability_level": "features_only",
-            }))
+        with self._active_policy_contract_patch():
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                schema_meta = asyncio.run(recommendations.fetch_policy_decision({
+                    "source_surface": "anthropic_messages",
+                    "granularity": "provider_request",
+                    "app_family": "claude_code",
+                    "requested_model": "claude-sonnet-4-6",
+                    "input_features": {},
+                    "tool_features": {},
+                    "replayability_level": "features_only",
+                }))
 
         self.assertEqual(timeout_meta["status"], "error")
         self.assertEqual(timeout_meta["reason"], "timeout")
@@ -914,16 +1041,17 @@ class RecommendationTest(unittest.TestCase):
         os.environ["TOKENCLAW_RECOMMENDATIONS_ENABLED"] = "1"
         os.environ["TOKENCLAW_POLICY_DECISIONS_ENABLED"] = "1"
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
-            meta = asyncio.run(recommendations.fetch_policy_decision({
-                "source_surface": "anthropic_messages",
-                "granularity": "provider_request",
-                "app_family": "claude_code",
-                "requested_model": "claude-sonnet-4-6",
-                "input_features": {},
-                "tool_features": {},
-                "replayability_level": "features_only",
-            }))
+        with self._active_policy_contract_patch():
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_policy_decision({
+                    "source_surface": "anthropic_messages",
+                    "granularity": "provider_request",
+                    "app_family": "claude_code",
+                    "requested_model": "claude-sonnet-4-6",
+                    "input_features": {},
+                    "tool_features": {},
+                    "replayability_level": "features_only",
+                }))
 
         self.assertEqual(meta["status"], "skipped")
         self.assertEqual(meta["reason"], "server-url-not-configured")
@@ -953,16 +1081,17 @@ class RecommendationTest(unittest.TestCase):
             },
         })
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
-            meta = asyncio.run(recommendations.fetch_policy_decision({
-                "source_surface": "anthropic_messages",
-                "granularity": "provider_request",
-                "app_family": "claude_code",
-                "requested_model": "claude-sonnet-4-6",
-                "input_features": {},
-                "tool_features": {},
-                "replayability_level": "features_only",
-            }))
+        with self._active_policy_contract_patch():
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_policy_decision({
+                    "source_surface": "anthropic_messages",
+                    "granularity": "provider_request",
+                    "app_family": "claude_code",
+                    "requested_model": "claude-sonnet-4-6",
+                    "input_features": {},
+                    "tool_features": {},
+                    "replayability_level": "features_only",
+                }))
 
         body = {"model": "claude-sonnet-4-6"}
         routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "local route"}
@@ -1052,17 +1181,18 @@ class RecommendationTest(unittest.TestCase):
             },
         })
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
-            meta = asyncio.run(recommendations.fetch_policy_decision({
-                "source_surface": "anthropic_messages",
-                "granularity": "provider_request",
-                "app_family": "claude_code",
-                "requested_model": "claude-sonnet-4-6",
-                "candidate_target_model": "claude-haiku-4-5-20251001",
-                "input_features": {"category": "tool-result"},
-                "tool_features": {"has_tools": True},
-                "replayability_level": "features_only",
-            }))
+        with self._active_policy_contract_patch():
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_policy_decision({
+                    "source_surface": "anthropic_messages",
+                    "granularity": "provider_request",
+                    "app_family": "claude_code",
+                    "requested_model": "claude-sonnet-4-6",
+                    "candidate_target_model": "claude-haiku-4-5-20251001",
+                    "input_features": {"category": "tool-result"},
+                    "tool_features": {"has_tools": True},
+                    "replayability_level": "features_only",
+                }))
 
         body = {"model": "claude-sonnet-4-6"}
         routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "local route"}

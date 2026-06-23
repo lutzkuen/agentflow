@@ -1234,6 +1234,64 @@ def _policy_decision_preflight_payload(unit: dict[str, Any]) -> dict[str, Any]:
     return _sanitize_features(payload)
 
 
+def _client_contract_preflight_meta(contract_meta: dict[str, Any] | None) -> dict[str, Any]:
+    contract = contract_meta.get("contract") if isinstance(contract_meta, dict) else None
+    if not isinstance(contract, dict):
+        contract = {}
+    measurement_plan = contract.get("measurement_plan") if isinstance(contract.get("measurement_plan"), dict) else {}
+    preflight_paths = measurement_plan.get("preflight") if isinstance(measurement_plan.get("preflight"), list) else []
+    contract_hash = "sha256:" + hashlib.sha256(stable_json({
+        "schema": contract.get("schema"),
+        "contract_id": contract.get("contract_id"),
+        "expires_at": contract.get("expires_at"),
+        "measurement_plan": measurement_plan,
+        "allowed_action_families": contract.get("allowed_action_families"),
+    }).encode("utf-8")).hexdigest() if contract else None
+    meta = {
+        "schema": "tokenclaw.policy_decision_client_contract_ref.v1",
+        "contract_id": contract.get("contract_id") or (contract_meta or {}).get("contract_id"),
+        "contract_hash": contract_hash,
+        "contract_status": (contract_meta or {}).get("status"),
+        "contract_reason": (contract_meta or {}).get("reason"),
+        "contract_cache_status": (contract_meta or {}).get("cache_status"),
+        "expires_at": contract.get("expires_at") or (contract_meta or {}).get("expires_at"),
+        "measurement_plan_id": measurement_plan.get("plan_id") or measurement_plan.get("id"),
+        "measurement_plan_version": measurement_plan.get("version"),
+        "measurement_path_count": len(preflight_paths),
+        "allowed_action_families": contract.get("allowed_action_families") or [],
+        "metadata_only": True,
+        "raw_payload_included": False,
+    }
+    return _sanitize_features({key: value for key, value in meta.items() if value is not None})
+
+
+def _attach_client_contract_to_preflight(
+    payload: dict[str, Any],
+    contract_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    enriched = dict(payload)
+    enriched["client_contract"] = _client_contract_preflight_meta(contract_meta)
+    enriched["local_client_version"] = TOKENCLAW_VERSION
+    return _sanitize_features(enriched)
+
+
+def _policy_decision_contract_skip_reason(contract_meta: dict[str, Any] | None) -> str | None:
+    if isinstance(contract_meta, dict) and contract_meta.get("active") is True:
+        return None
+    if not isinstance(contract_meta, dict):
+        return "missing-client-contract"
+    schema_error = str(contract_meta.get("schema_error") or "")
+    if schema_error == "expired":
+        return "expired-contract"
+    status = str(contract_meta.get("status") or "")
+    reason = str(contract_meta.get("reason") or "")
+    if status == "error" or reason in {"timeout", "unreachable", "server-error", "fetch-error"}:
+        return "server-unavailable"
+    if status == "invalid":
+        return "invalid-client-contract"
+    return reason or "no-active-client-contract"
+
+
 def _request_facts_from_envelope(envelope: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(envelope, dict):
         return None
@@ -1444,7 +1502,24 @@ async def fetch_policy_decision(unit: dict[str, Any], *, request_facts: dict[str
             else _policy_decision_preflight_payload(unit)
         )
         contract_meta = await _client_contract_for_payload(payload)
+        payload = _attach_client_contract_to_preflight(payload, contract_meta)
         measurement = execute_preflight_measurement_plan(payload, contract_meta)
+        contract_skip_reason = _policy_decision_contract_skip_reason(contract_meta)
+        if contract_skip_reason is not None:
+            _, contract_diagnostics = filter_payload_by_client_contract(
+                payload,
+                contract_meta,
+                stage="preflight",
+            )
+            meta["client_contract"] = contract_diagnostics
+            meta["managed_measurement"] = measurement
+            meta.update({
+                "status": "skipped",
+                "reason": contract_skip_reason,
+                "fallback": "local-policy",
+                "applied": False,
+            })
+            return meta
         payload, contract_diagnostics = filter_payload_by_client_contract(
             payload,
             contract_meta,
