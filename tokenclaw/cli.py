@@ -138,6 +138,7 @@ from tokenclaw.cli_commands.optimization_reports import (
     codex_terminal_transcript_opportunity_cli,
     anthropic_thinking_compaction_opportunity_cli,
     anthropic_thinking_compaction_impact_cli,
+    local_compaction_canary_ramp_cli,
     anthropic_thinking_compaction_dry_run_cli,
     codex_terminal_transcript_dry_run_cli,
     codex_terminal_transcript_impact_cli,

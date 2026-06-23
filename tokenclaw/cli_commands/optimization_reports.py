@@ -3338,6 +3338,65 @@ def anthropic_thinking_compaction_impact_cli(argv: Sequence[str] | None = None, 
     return 0
 
 
+def local_compaction_canary_ramp_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Auto-ramp local thinking-compaction and old-context-summary canaries from realized local deltas"
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("TOKENCLAW_DATABASE_URL") or os.getenv("TOKENCLAW_DB", str(Path.home() / ".tokenclaw" / "tokenclaw.sqlite3")),
+        help="TokenClaw database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=str(Path.cwd() / "config"),
+        help="Directory containing crunch_rules.yaml, default: ./config",
+    )
+    parser.add_argument("--rules-path", default=None, help="Explicit crunch_rules.yaml path.")
+    parser.add_argument("--apply", action="store_true", help="Write the planned local YAML changes.")
+    parser.add_argument("--limit", type=int, default=500, help="Recent provider calls to inspect, default: 500, max: 10000")
+    parser.add_argument("--since", default=None, help="Optional inclusive UTC timestamp lower bound.")
+    parser.add_argument("--initial-fraction", type=float, default=0.05, help="Initial non-zero canary fraction.")
+    parser.add_argument("--ramp-step", type=float, default=0.05, help="Fraction increment for each positive cycle.")
+    parser.add_argument("--max-fraction", type=float, default=0.50, help="Maximum canary fraction.")
+    parser.add_argument("--holdout-fraction", type=float, default=0.10, help="Thinking-compaction holdout fraction.")
+    parser.add_argument("--min-applied-samples", type=int, default=2, help="Minimum applied samples before widening.")
+    parser.add_argument("--min-holdout-samples", type=int, default=1, help="Minimum holdout samples before widening.")
+    parser.add_argument("--similarity-floor", type=float, default=0.98, help="Minimum accepted output-similarity score when reported.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from tokenclaw.local_compaction_canary_ramp import build_local_compaction_canary_ramp
+    from tokenclaw.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_local_compaction_canary_ramp(
+            store,
+            config_dir=args.config_dir,
+            rules_path=args.rules_path,
+            apply=args.apply,
+            limit=args.limit,
+            since=args.since,
+            initial_fraction=args.initial_fraction,
+            ramp_step=args.ramp_step,
+            max_fraction=args.max_fraction,
+            holdout_fraction=args.holdout_fraction,
+            min_applied_samples=args.min_applied_samples,
+            min_holdout_samples=args.min_holdout_samples,
+            similarity_floor=args.similarity_floor,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def anthropic_thinking_compaction_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Dry-run Anthropic thinking-history compaction plans from local request metadata")
     parser.add_argument(
