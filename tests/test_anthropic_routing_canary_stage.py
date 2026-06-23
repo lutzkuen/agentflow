@@ -205,12 +205,12 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["schema"], "tokenclaw.anthropic_routing_canary_stage.v1")
         self.assertEqual(result["summary"]["candidate_count"], 3)
-        self.assertEqual(result["summary"]["eligible_candidate_count"], 1)
+        self.assertEqual(result["summary"]["eligible_candidate_count"], 2)
         self.assertEqual(result["summary"]["staged_count"], 1)
-        self.assertEqual(result["summary"]["omitted_count"], 2)
+        self.assertEqual(result["summary"]["omitted_count"], 1)
         self.assertEqual(result["summary"]["projected_canary_applied_count"], 56)
         self.assertEqual(result["summary"]["projected_canary_holdout_count"], 111)
-        self.assertEqual(result["summary"]["projected_safety_stopped_count"], 32)
+        self.assertEqual(result["summary"]["projected_safety_stopped_count"], 0)
         self.assertTrue(result["summary"]["acceptance_met"])
 
         acceptance = result["acceptance"]
@@ -247,16 +247,33 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertEqual(lifecycle["estimated_savings_per_1000_calls_usd"], 4.5)
 
         omitted_by_reason = {item["reason"]: item for item in result["omitted"]}
-        thinking_omission = next(
-            item
-            for item in result["omitted"]
-            if isinstance(item.get("projected_lifecycle_evidence"), dict)
-            and "thinking-routing-guard" in item["projected_lifecycle_evidence"].get("blocker_codes", [])
-        )
-        self.assertEqual(thinking_omission["status"], "safety_stopped")
-        self.assertIn("thinking-routing-guard", thinking_omission["projected_lifecycle_evidence"]["blocker_codes"])
         self.assertEqual(omitted_by_reason["missing-routed-model"]["status"], "omitted")
         self.assertEqual(omitted_by_reason["missing-routed-model"]["target_model"], "claude-haiku-4-5-20251001")
+        _assert_privacy_clean(self, result)
+
+    def test_current_thinking_no_op_remains_guarded_with_specific_blocker(self) -> None:
+        report = _pass_through_report()
+        bucket = dict(report["buckets"][0])
+        bucket.update(
+            {
+                "sample_count": 12,
+                "actionability": "needs-lifecycle-evidence",
+                "no_op_reason": "current thinking request is unsafe to downgrade to Haiku",
+            }
+        )
+        report["buckets"] = [bucket]
+
+        result = build_anthropic_routing_canary_stage_report(report, min_samples=5)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["eligible_candidate_count"], 0)
+        self.assertEqual(result["summary"]["omitted_count"], 1)
+        self.assertEqual(result["summary"]["projected_safety_stopped_count"], 12)
+        omitted = result["omitted"][0]
+        self.assertEqual(omitted["reason"], "top-level-thinking-blocked")
+        self.assertEqual(omitted["status"], "safety_stopped")
+        self.assertIn("top-level-thinking-blocked", omitted["projected_lifecycle_evidence"]["blocker_codes"])
+        self.assertNotIn("thinking-routing-guard", omitted["projected_lifecycle_evidence"]["blocker_codes"])
         _assert_privacy_clean(self, result)
 
     def test_blocks_current_lifecycle_evidence_without_promotion_or_stage(self) -> None:

@@ -594,7 +594,7 @@ def _streaming_exact_replay_supported(
         return False
     reason = str(cache.get("reason") or "").lower()
     routing_reason = str(routing.get("reason") or "").lower()
-    if "thinking" in reason or "thinking" in routing_reason:
+    if "thinking" in reason or _routing_thinking_blockers(routing, routing_reason):
         return False
     unsupported_reasons = {
         "streaming-cache-disabled",
@@ -604,6 +604,42 @@ def _streaming_exact_replay_supported(
         "streaming-not-allowed",
     }
     return reason not in unsupported_reasons
+
+
+def _routing_thinking_blockers(routing: dict[str, Any], routing_reason: str) -> list[str]:
+    blockers: set[str] = set()
+    phase_canary = routing.get("phase_canary") if isinstance(routing.get("phase_canary"), dict) else {}
+    safety_stop = phase_canary.get("safety_stop") if isinstance(phase_canary.get("safety_stop"), dict) else {}
+    for code in _public_label_list(safety_stop.get("reason_codes")):
+        if code in {"top-level-thinking-blocked", "thinking-history-blocked", "thinking-routing-guard"}:
+            blockers.add(code)
+
+    gate = routing.get("thinking_gate") if isinstance(routing.get("thinking_gate"), dict) else {}
+    if bool(gate.get("top_level_thinking")):
+        blockers.add("top-level-thinking-blocked")
+    if bool(gate.get("assistant_thinking_history")):
+        blockers.add("thinking-history-blocked")
+
+    reason = str(routing_reason or "").strip().lower().replace(" ", "-")
+    if "thinking" not in reason:
+        return sorted(blockers)
+    evidence_only = (
+        "thinking-tool-safety-evidence" in reason
+        or "thinking/tool-safety-evidence" in reason
+        or "thinking-safety-evidence" in reason
+        or "thinking-lifecycle-evidence" in reason
+    )
+    if blockers or evidence_only:
+        return sorted(blockers)
+    if "top-level-thinking" in reason or "current-thinking" in reason:
+        blockers.add("top-level-thinking-blocked")
+    elif "thinking-request" in reason:
+        blockers.add("thinking-routing-guard")
+    elif "assistant-thinking-history" in reason or "thinking-history" in reason:
+        blockers.add("thinking-history-blocked")
+    elif "thinking-safety-gate" in reason or "thinking-blocked" in reason or "adaptive-thinking" in reason:
+        blockers.add("thinking-routing-guard")
+    return sorted(blockers)
 
 
 def _blocker_codes(
@@ -650,8 +686,7 @@ def _blocker_codes(
         blockers.add("cache-skipped")
     if cache_status == "hit":
         blockers.add("already-cache-hit")
-    if "thinking" in routing_reason:
-        blockers.add("thinking-routing-guard")
+    blockers.update(_routing_thinking_blockers(routing, routing_reason))
     if "rate" in routing_reason or status_bucket in {"4xx", "5xx"} and _as_int(row.get("retry_count")) > 0:
         blockers.add("rate-or-error-pressure")
     if routing_status == "passthrough" and not blockers:
@@ -13137,7 +13172,14 @@ def _routing_drill_blockers(
         blockers.add("too-small-routing-drill-sample")
     if _as_float(projection.get("projected_savings_per_1000_calls_usd")) <= 0:
         blockers.add("non-positive-routing-savings-projection")
-    if "thinking-routing-guard" in existing_blockers or category == "thinking" or phase == "thinking":
+    thinking_blockers = existing_blockers & {
+        "top-level-thinking-blocked",
+        "thinking-history-blocked",
+        "thinking-routing-guard",
+    }
+    if thinking_blockers:
+        blockers.update(thinking_blockers)
+    elif category == "thinking" or phase == "thinking":
         blockers.add("thinking-routing-guard")
     if category in {"code-gen", "coding", "planning"} or phase in {"planning", "code-generation"}:
         blockers.add("high-downgrade-risk-shape")
@@ -13149,6 +13191,8 @@ def _routing_drill_blockers(
         blockers.add("missing-quality-evidence")
     priority = {
         "stale-request-shape-rollup": 0,
+        "top-level-thinking-blocked": 1,
+        "thinking-history-blocked": 1,
         "thinking-routing-guard": 1,
         "high-downgrade-risk-shape": 2,
         "elevated-error-rate": 3,
@@ -13218,6 +13262,8 @@ def build_request_shape_routing_downgrade_drill_report(
             "stale-request-shape-rollup",
             "too-small-routing-drill-sample",
             "non-positive-routing-savings-projection",
+            "top-level-thinking-blocked",
+            "thinking-history-blocked",
             "thinking-routing-guard",
             "high-downgrade-risk-shape",
             "elevated-error-rate",

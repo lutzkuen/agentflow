@@ -186,7 +186,7 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
     if isinstance(lifecycle, dict):
         lifecycle_blockers = _lifecycle_blockers(lifecycle)
         blockers.extend(lifecycle_blockers)
-    if actionability and actionability != "actionable":
+    if actionability and actionability not in {"actionable", "needs-lifecycle-evidence", "review-ready"}:
         blockers.append(actionability)
     if provider != "anthropic":
         blockers.append("unsupported-provider")
@@ -198,9 +198,10 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
         blockers.append("not-sonnet-to-haiku")
     if bucket.get("no_op_reason"):
         reason = _string(bucket.get("no_op_reason")).lower().replace(" ", "-")
-        if "thinking" in reason:
-            blockers.append("thinking-routing-guard")
-        elif "stream" in reason:
+        thinking_blocker = _unsafe_thinking_no_op_blocker(reason)
+        if thinking_blocker:
+            blockers.append(thinking_blocker)
+        elif _unsupported_streaming_no_op(reason):
             blockers.append("unsupported-streaming-shape")
         elif "routed-model" in reason and "missing" in reason:
             blockers.append("missing-routed-model")
@@ -238,6 +239,45 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
     if isinstance(lifecycle, dict):
         candidate["anthropic_canary_lifecycle_evidence"] = lifecycle
     return candidate
+
+
+def _unsafe_thinking_no_op_blocker(reason: str) -> str | None:
+    reason = _string(reason).lower().replace(" ", "-")
+    if not reason or "thinking" not in reason:
+        return None
+    evidence_only = (
+        "thinking-tool-safety-evidence" in reason
+        or "thinking/tool-safety-evidence" in reason
+        or "thinking-safety-evidence" in reason
+        or "thinking-lifecycle-evidence" in reason
+    )
+    if evidence_only and not any(token in reason for token in ("blocked", "unsupported", "request", "history", "top-level")):
+        return None
+    if "top-level-thinking" in reason or "current-thinking" in reason:
+        return "top-level-thinking-blocked"
+    if "assistant-thinking-history" in reason or "thinking-history" in reason:
+        return "thinking-history-blocked"
+    if "thinking-safety-gate" in reason or "thinking-blocked" in reason or "adaptive-thinking" in reason:
+        return "thinking-routing-guard"
+    return None
+
+
+def _unsupported_streaming_no_op(reason: str) -> bool:
+    reason = _string(reason).lower().replace(" ", "-")
+    if "stream" not in reason:
+        return False
+    return any(
+        token in reason
+        for token in (
+            "unsupported",
+            "not-supported",
+            "disabled",
+            "not-enabled",
+            "not-allowed",
+            "unsafe",
+            "shape",
+        )
+    )
 
 
 def _candidate_list_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:

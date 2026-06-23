@@ -1400,6 +1400,77 @@ class RequestShapeRollupTests(unittest.TestCase):
         blocker_values = {item["value"] for item in dry_run["blocker_breakdown"]}
         self.assertNotIn("streaming-replay-not-supported", blocker_values)
 
+    def test_rollups_do_not_guard_evidence_only_thinking_or_streaming_mentions(self) -> None:
+        for _ in range(2):
+            self._log_call(
+                provider="anthropic",
+                path="/v1/messages",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+                category="chat",
+                workflow_phase="chat",
+                stream=1,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="streaming-exact-miss",
+                routing_reason="needs phase or thinking/tool safety evidence before downgrade",
+                routing_extra={
+                    "thinking_gate": {
+                        "status": "allowed",
+                        "top_level_thinking": False,
+                        "assistant_thinking_history": False,
+                    }
+                },
+                text_chars=2_400,
+                cost=0.01,
+                baseline=0.02,
+            )
+
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="safe-thinking-word")
+        [rollup] = report["rollups"]
+
+        self.assertIn("routing_candidate", rollup["candidate_families"])
+        self.assertNotIn("thinking-routing-guard", rollup["blocker_codes"])
+        self.assertNotIn("top-level-thinking-blocked", rollup["blocker_codes"])
+        self.assertNotIn("thinking-history-blocked", rollup["blocker_codes"])
+        self.assertNotIn("unsupported-streaming-shape", rollup["blocker_codes"])
+        self.assertIn("exact-cache-miss", rollup["blocker_codes"])
+
+    def test_rollups_keep_current_thinking_shape_guarded_with_specific_reason(self) -> None:
+        self._log_call(
+            provider="anthropic",
+            path="/v1/messages",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+            category="thinking",
+            workflow_phase="thinking",
+            stream=1,
+            has_tools=False,
+            cache_status="skipped",
+            cache_reason="streaming-thinking-disabled",
+            routing_reason="keep requested model for thinking request",
+            routing_extra={
+                "thinking_gate": {
+                    "status": "blocked",
+                    "reason": "current-thinking-request",
+                    "top_level_thinking": True,
+                    "assistant_thinking_history": False,
+                }
+            },
+            text_chars=16_000,
+            cost=0.02,
+            baseline=0.03,
+        )
+
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="unsafe-thinking")
+        [rollup] = report["rollups"]
+
+        self.assertIn("top-level-thinking-blocked", rollup["blocker_codes"])
+        self.assertNotIn("thinking-routing-guard", rollup["blocker_codes"])
+        drill = report["routing_downgrade_drills"]["candidates"][0]
+        self.assertEqual(drill["status"], "blocked")
+        self.assertIn("top-level-thinking-blocked", drill["blocker_codes"])
+
     def test_repeated_shapes_collapse_and_persist_without_raw_fields(self) -> None:
         for cost in (0.02, 0.03, 0.04):
             self._log_call(cost=cost, baseline=cost + 0.01)
