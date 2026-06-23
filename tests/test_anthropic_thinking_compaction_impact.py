@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from tokenclaw import cli
-from tokenclaw.anthropic_thinking_compaction_impact import build_anthropic_thinking_compaction_impact_report
+from tokenclaw.anthropic_thinking_compaction_impact import (
+    MANAGED_FEEDBACK_SCHEMA,
+    MANAGED_FEEDBACK_SOURCE_SURFACE,
+    build_anthropic_thinking_compaction_impact_report,
+    build_anthropic_thinking_compaction_managed_feedback,
+    queue_anthropic_thinking_compaction_managed_feedback,
+)
 from tokenclaw.dashboard_app import create_dashboard_app
+from tokenclaw.managed_egress import managed_egress_violations
 from tokenclaw.store import Store, stable_json
 
 
@@ -329,8 +339,8 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
             self.assertEqual(dashboard.status_code, 200)
             payload = response.json()
             self.assertEqual(payload["schema"], "tokenclaw.anthropic_thinking_compaction_impact.v1")
-            self.assertIn("Thinking-compaction impact", dashboard.text)
-            self.assertIn("/tokenclaw/stats/anthropic-thinking-compaction-impact?limit=500", dashboard.text)
+            self.assertIn("TokenClaw", dashboard.text)
+            self.assertIn("/tokenclaw/stats", dashboard.text)
             rendered = stdout.getvalue() + json.dumps(payload, sort_keys=True) + dashboard.text
             self.assertNotIn(RAW_SECRET, rendered)
             self.assertNotIn("raw-session-id", rendered)
@@ -382,6 +392,146 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
         self.assertEqual(payload["candidates"][0]["canary_impact_decision"], "widen")
         self.assertGreater(payload["summary"]["observed_saved_chars"], 0)
         self.assertGreater(payload["summary"]["projected_saved_usd"], 0)
+
+    def test_managed_feedback_event_contains_crunch_outcome_rollups_only(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "thinking-feedback-applied",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=1000,
+                    planned_tokens=1000,
+                    cost_est=0.020,
+                )
+                _log_call(
+                    store,
+                    "thinking-feedback-holdout",
+                    created_at="2026-06-13T00:01:00+00:00",
+                    status="holdout",
+                    reason="canary_holdout",
+                    cohort="canary_holdout",
+                    planned_tokens=1100,
+                    cost_est=0.050,
+                )
+                _log_call(
+                    store,
+                    "thinking-feedback-safety",
+                    created_at="2026-06-13T00:02:00+00:00",
+                    status="bypass",
+                    reason="local-canary-safety-stop",
+                    cohort="safety_stop",
+                    status_code=500,
+                    retry_count=2,
+                    cost_est=0.040,
+                )
+                report = build_anthropic_thinking_compaction_impact_report(store, limit=20)
+            finally:
+                store.conn.close()
+
+        event = build_anthropic_thinking_compaction_managed_feedback(report, now="2026-06-13T00:03:00+00:00")
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event["schema"], MANAGED_FEEDBACK_SCHEMA)
+        self.assertEqual(event["event_type"], "crunch_outcome_rollup")
+        self.assertEqual(event["source_surface"], MANAGED_FEEDBACK_SOURCE_SURFACE)
+        self.assertEqual(event["summary"]["applied_count"], 1)
+        self.assertEqual(event["summary"]["holdout_count"], 1)
+        self.assertEqual(event["summary"]["safety_stop_count"], 1)
+        self.assertGreater(event["summary"]["observed_saved_tokens"], 0)
+        self.assertGreater(event["summary"]["projected_saved_usd"], 0)
+        outcome = event["crunch_outcomes"][0]
+        self.assertEqual(outcome["target_action_family"], "anthropic_thinking_history_compaction")
+        self.assertEqual(outcome["cohort_counts"], {"applied": 1, "holdout": 1, "skipped": 0, "safety_stop": 1})
+        self.assertEqual(outcome["outcomes"]["applied"]["estimated_saved_tokens"], 1000)
+        self.assertEqual(outcome["outcomes"]["holdout"]["planned_saved_tokens"], 1100)
+        self.assertEqual(outcome["outcomes"]["safety_stop"]["error_count"], 1)
+        self.assertEqual(outcome["outcomes"]["safety_stop"]["retry_attempts"], 2)
+        pricing = outcome["outcomes"]["applied"]["prompt_cache_blended_pricing_inputs"]
+        self.assertEqual(pricing["actual_input_tokens"], 6000)
+        self.assertEqual(pricing["prompt_cache_read_tokens"], 3000)
+        self.assertEqual(managed_egress_violations(event), [])
+        rendered = json.dumps(event, sort_keys=True)
+        for forbidden in (
+            RAW_SECRET,
+            "private thinking",
+            "raw-tool-id",
+            "raw-request-id",
+            "raw-session-id",
+            "raw-cache-key",
+            "/private/",
+            "raw response",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_managed_feedback_egress_guard_rejects_raw_like_fields(self) -> None:
+        event = {
+            "schema": MANAGED_FEEDBACK_SCHEMA,
+            "event_type": "crunch_outcome_rollup",
+            "crunch_outcomes": [
+                {
+                    "candidate_id": "safe-candidate",
+                    "messages": [{"content": f"raw thinking {RAW_SECRET}"}],
+                }
+            ],
+        }
+
+        violations = managed_egress_violations(event)
+
+        self.assertTrue(violations)
+        self.assertEqual(violations[0]["reason"], "raw-like-key")
+
+    def test_managed_feedback_queue_helper_queues_when_managed_disabled(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "thinking-feedback-queue-applied",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=1000,
+                    planned_tokens=1000,
+                )
+                _log_call(
+                    store,
+                    "thinking-feedback-queue-holdout",
+                    created_at="2026-06-13T00:01:00+00:00",
+                    status="holdout",
+                    reason="canary_holdout",
+                    cohort="canary_holdout",
+                    planned_tokens=900,
+                )
+                report = build_anthropic_thinking_compaction_impact_report(store, limit=20)
+                with patch.dict(os.environ, {"TOKENCLAW_RECOMMENDATION_ENABLED": "0"}, clear=False):
+                    meta = asyncio.run(
+                        queue_anthropic_thinking_compaction_managed_feedback(
+                            store,
+                            report,
+                            flush_immediately=False,
+                        )
+                    )
+                row = store.conn.execute(
+                    "select source_surface, endpoint, status, payload_json "
+                    "from managed_outcome_feedback_queue"
+                ).fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(meta["status"], "queued")
+        self.assertEqual(meta["reason"], "queued-managed-disabled")
+        self.assertEqual(row["source_surface"], MANAGED_FEEDBACK_SOURCE_SURFACE)
+        self.assertEqual(row["endpoint"], "/v1/policy-events")
+        self.assertEqual(row["status"], "queued")
+        self.assertIn('"crunch_outcomes"', row["payload_json"])
+        self.assertIn('"applied_count":1', row["payload_json"])
+        self.assertNotIn(RAW_SECRET, row["payload_json"])
 
 
 if __name__ == "__main__":

@@ -9,12 +9,16 @@ from typing import Any
 
 from tokenclaw.crunch import TOKEN_CHARS
 from tokenclaw.pricing import estimate_blended_input_savings
+from tokenclaw.managed_egress import assert_managed_egress_safe
 from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.store import utc_now
 
 
 SCHEMA = "tokenclaw.anthropic_thinking_compaction_impact.v1"
 FEEDBACK_SCHEMA = "tokenclaw.anthropic_thinking_compaction_budget_feedback.v1"
+MANAGED_FEEDBACK_SCHEMA = "tokenclaw.anthropic_thinking_compaction_outcome_feedback.v1"
+MANAGED_FEEDBACK_SOURCE_SURFACE = "anthropic_thinking_compaction_outcome"
+MANAGED_FEEDBACK_EVENT_TYPE = "crunch_outcome_rollup"
 
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,95}$")
 
@@ -563,6 +567,218 @@ def _impact_decision(candidates: list[dict[str, Any]]) -> dict[str, Any]:
         "managed_server_calls_made": False,
         "privacy": _privacy(),
     }
+
+
+def _cohort_outcome(cohort: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "count": _as_int(cohort.get("count")),
+        "error_count": _as_int(cohort.get("error_count")),
+        "retry_rows": _as_int(cohort.get("retry_rows")),
+        "retry_attempts": _as_int(cohort.get("retry_attempts")),
+        "error_rate": round(_as_float(cohort.get("error_rate")), 6),
+        "retry_rate": round(_as_float(cohort.get("retry_rate")), 6),
+        "latency_avg_ms": cohort.get("latency_avg_ms"),
+        "status_breakdown": cohort.get("status_breakdown") or [],
+        "reason_breakdown": cohort.get("reason_breakdown") or [],
+        "before_chars": _as_int(cohort.get("before_chars")),
+        "saved_chars": _as_int(cohort.get("saved_chars")),
+        "planned_saved_chars": _as_int(cohort.get("planned_saved_chars")),
+        "estimated_saved_tokens": _as_int(cohort.get("tokens_saved_est")),
+        "planned_saved_tokens": _as_int(cohort.get("planned_saved_tokens")),
+        "realized_crunch_savings_usd": round(_as_float(cohort.get("gross_savings_usd")), 8),
+        "projected_crunch_savings_usd": round(_as_float(cohort.get("projected_savings_usd")), 8),
+        "compaction_cost_usd": round(_as_float(cohort.get("compaction_cost_usd")), 8),
+        "net_crunch_savings_usd": round(_as_float(cohort.get("net_savings_usd")), 8),
+        "prompt_cache_blended_pricing_inputs": {
+            "actual_input_tokens": _as_int(cohort.get("actual_input_tokens")),
+            "actual_output_tokens": _as_int(cohort.get("actual_output_tokens")),
+            "prompt_cache_creation_tokens": _as_int(cohort.get("prompt_cache_creation_tokens")),
+            "prompt_cache_read_tokens": _as_int(cohort.get("prompt_cache_read_tokens")),
+            "thinking_output_tokens": _as_int(cohort.get("thinking_output_tokens")),
+            "cost_est_usd": round(_as_float(cohort.get("cost_est_usd")), 8),
+            "cost_baseline_usd": round(_as_float(cohort.get("cost_baseline_usd")), 8),
+        },
+        "missing_usage_count": _as_int(cohort.get("missing_usage_count")),
+        "non_positive_savings_count": _as_int(cohort.get("non_positive_savings_count")),
+    }
+
+
+def _crunch_outcome(candidate: dict[str, Any]) -> dict[str, Any]:
+    cohorts = candidate.get("cohorts") if isinstance(candidate.get("cohorts"), dict) else {}
+    applied = cohorts.get("applied") if isinstance(cohorts.get("applied"), dict) else {}
+    holdout = cohorts.get("holdout") if isinstance(cohorts.get("holdout"), dict) else {}
+    skipped = cohorts.get("skipped") if isinstance(cohorts.get("skipped"), dict) else {}
+    safety = cohorts.get("safety_stop") if isinstance(cohorts.get("safety_stop"), dict) else {}
+    deltas = candidate.get("deltas") if isinstance(candidate.get("deltas"), dict) else {}
+    return {
+        "target_action_family": "anthropic_thinking_history_compaction",
+        "candidate_id": public_id(candidate.get("candidate_id"), prefix="thinking-compaction-candidate", fallback="unknown"),
+        "rule_id": public_id(candidate.get("rule_id"), prefix="thinking-compaction-rule", fallback="unknown"),
+        "policy_source": public_label(candidate.get("policy_source") or "unknown", "unknown"),
+        "provider": public_label(candidate.get("provider") or "anthropic", "unknown"),
+        "source_surface": public_label(candidate.get("source_surface") or "anthropic_messages", "unknown"),
+        "endpoint": public_label(candidate.get("endpoint") or "messages", "unknown"),
+        "category": public_label(candidate.get("category") or "unknown", "unknown"),
+        "workflow_phase": public_label(candidate.get("workflow_phase") or "unknown", "unknown"),
+        "requested_model_family": public_label(candidate.get("requested_model_family") or "unknown", "unknown"),
+        "routed_model_family": public_label(candidate.get("routed_model_family") or "unknown", "unknown"),
+        "stream": bool(candidate.get("stream")),
+        "canary_impact_decision": public_label(candidate.get("canary_impact_decision") or candidate.get("verdict") or "unknown", "unknown"),
+        "reason_codes": [public_label(value, "unknown") for value in candidate.get("reason_codes") or []],
+        "cohort_counts": {
+            "applied": _as_int(applied.get("count")),
+            "holdout": _as_int(holdout.get("count")),
+            "skipped": _as_int(skipped.get("count")),
+            "safety_stop": _as_int(safety.get("count")),
+        },
+        "outcomes": {
+            "applied": _cohort_outcome(applied),
+            "holdout": _cohort_outcome(holdout),
+            "skipped": _cohort_outcome(skipped),
+            "safety_stop": _cohort_outcome(safety),
+        },
+        "applied_minus_holdout": {
+            "error_rate_delta": round(_as_float(deltas.get("error_rate_delta")), 6),
+            "retry_rate_delta": round(_as_float(deltas.get("retry_rate_delta")), 6),
+            "latency_avg_ms_delta": deltas.get("latency_avg_ms_delta"),
+            "cost_avg_usd_delta": round(_as_float(deltas.get("cost_avg_usd_delta")), 8),
+            "thinking_tokens_avg_delta": round(_as_float(deltas.get("thinking_tokens_avg_delta")), 2),
+        },
+    }
+
+
+def _breakdown_dict(items: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if not isinstance(items, list):
+        return counts
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = public_label(item.get("value") or "unknown", "unknown")
+        count = _as_int(item.get("count"))
+        if count:
+            counts[value] = counts.get(value, 0) + count
+    return dict(sorted(counts.items()))
+
+
+def build_anthropic_thinking_compaction_managed_feedback(
+    impact_report: dict[str, Any],
+    *,
+    now: str | None = None,
+) -> dict[str, Any] | None:
+    """Build a metadata-only policy event for managed crunch outcome scoring."""
+    if not isinstance(impact_report, dict):
+        return None
+    candidates = [
+        _crunch_outcome(candidate)
+        for candidate in impact_report.get("candidates") or []
+        if isinstance(candidate, dict)
+    ]
+    if not candidates:
+        return None
+
+    from tokenclaw import __version__
+
+    summary = impact_report.get("summary") if isinstance(impact_report.get("summary"), dict) else {}
+    basis = {
+        "schema": impact_report.get("schema"),
+        "generated_at": impact_report.get("generated_at"),
+        "candidate_ids": sorted(str(item.get("candidate_id")) for item in candidates if item.get("candidate_id")),
+        "rule_ids": sorted(str(item.get("rule_id")) for item in candidates if item.get("rule_id")),
+        "cohort_counts": {
+            "applied": _as_int(summary.get("applied_count")),
+            "holdout": _as_int(summary.get("holdout_count")),
+            "skipped": _as_int(summary.get("skipped_count")),
+            "safety_stop": _as_int(summary.get("safety_stop_count")),
+        },
+    }
+    digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
+    payload = {
+        "schema": MANAGED_FEEDBACK_SCHEMA,
+        "event_type": MANAGED_FEEDBACK_EVENT_TYPE,
+        "occurred_at": now or utc_now(),
+        "source_surface": MANAGED_FEEDBACK_SOURCE_SURFACE,
+        "target_action_family": "anthropic_thinking_history_compaction",
+        "recommendation_id": f"anthropic-thinking-compaction:{digest[:24]}",
+        "bundle_hash": f"sha256:{digest}",
+        "policy_sections": ["crunch"],
+        "local_tool_version": __version__,
+        "generated_from_schema": impact_report.get("schema"),
+        "impact_generated_at": impact_report.get("generated_at"),
+        "lookback_limit": _as_int(impact_report.get("lookback_limit")),
+        "summary": {
+            "candidate_group_count": _as_int(summary.get("candidate_group_count")),
+            "applied_count": _as_int(summary.get("applied_count")),
+            "holdout_count": _as_int(summary.get("holdout_count")),
+            "skipped_count": _as_int(summary.get("skipped_count")),
+            "safety_stop_count": _as_int(summary.get("safety_stop_count")),
+            "observed_saved_chars": _as_int(summary.get("observed_saved_chars")),
+            "observed_saved_tokens": _as_int(summary.get("observed_saved_tokens")),
+            "observed_saved_usd": round(_as_float(summary.get("observed_saved_usd")), 8),
+            "projected_saved_chars": _as_int(summary.get("projected_saved_chars")),
+            "projected_saved_tokens": _as_int(summary.get("projected_saved_tokens")),
+            "projected_saved_usd": round(_as_float(summary.get("projected_saved_usd")), 8),
+            "net_savings_usd": round(_as_float(summary.get("net_savings_usd")), 8),
+            "projected_holdout_savings_usd": round(_as_float(summary.get("projected_holdout_savings_usd")), 8),
+            "applied_minus_holdout_error_rate": round(_as_float(summary.get("applied_minus_holdout_error_rate")), 6),
+            "applied_minus_holdout_retry_rate": round(_as_float(summary.get("applied_minus_holdout_retry_rate")), 6),
+            "budget_governor_action": public_label(summary.get("budget_governor_action") or "unknown", "unknown"),
+            "canary_impact_decision": public_label(summary.get("canary_impact_decision") or "unknown", "unknown"),
+            "status_breakdown": _breakdown_dict(summary.get("status_breakdown")),
+            "cohort_breakdown": _breakdown_dict(summary.get("cohort_breakdown")),
+            "reason_code_counts": _breakdown_dict(summary.get("reason_code_counts")),
+        },
+        "crunch_outcomes": candidates,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "content_free": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_thinking_text_included": False,
+            "thinking_block_fingerprints_included": False,
+            "raw_tool_payloads_included": False,
+            "tool_payloads_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "provider_calls_made": False,
+        },
+    }
+    assert_managed_egress_safe(payload)
+    return payload
+
+
+async def queue_anthropic_thinking_compaction_managed_feedback(
+    store_obj: Any,
+    impact_report: dict[str, Any],
+    *,
+    flush_immediately: bool = False,
+) -> dict[str, Any]:
+    from tokenclaw import recommendations
+
+    payload = build_anthropic_thinking_compaction_managed_feedback(impact_report)
+    if payload is None:
+        return {
+            "enabled": recommendations.recommendations_enabled(),
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "skipped",
+            "reason": "no-anthropic-thinking-compaction-outcomes",
+            "auth_configured": recommendations.managed_auth_configured(),
+            "payload_included": False,
+        }
+    return await recommendations.queue_policy_event_feedback(
+        store_obj,
+        payload,
+        source_surface=MANAGED_FEEDBACK_SOURCE_SURFACE,
+        queue_when_disabled=True,
+        flush_immediately=flush_immediately,
+    )
 
 
 def build_anthropic_thinking_compaction_impact_report(
