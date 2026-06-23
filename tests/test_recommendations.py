@@ -334,6 +334,9 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["status"], "received")
         self.assertEqual(meta["client_contract"]["status"], "active")
         self.assertTrue(meta["client_contract"]["filtered"])
+        self.assertEqual(meta["managed_measurement"]["status"], "measured")
+        self.assertIn("input_features.text_bucket", meta["managed_measurement"]["included_field_names"])
+        self.assertIn("tool_features.has_tools", meta["managed_measurement"]["included_field_names"])
         self.assertEqual(sent["source_surface"], "openai_responses")
         self.assertEqual(
             sent["input_features"],

@@ -29,6 +29,7 @@ from tokenclaw.managed_egress import (
     assert_managed_egress_safe,
     managed_egress_blocked_meta,
 )
+from tokenclaw.managed_measurements import execute_preflight_measurement_plan
 from tokenclaw.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
 from tokenclaw.prompt_features import PROMPT_DIFFICULTY_FEATURE_SCHEMA
 from tokenclaw.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
@@ -1443,12 +1444,14 @@ async def fetch_policy_decision(unit: dict[str, Any], *, request_facts: dict[str
             else _policy_decision_preflight_payload(unit)
         )
         contract_meta = await _client_contract_for_payload(payload)
+        measurement = execute_preflight_measurement_plan(payload, contract_meta)
         payload, contract_diagnostics = filter_payload_by_client_contract(
             payload,
             contract_meta,
             stage="preflight",
         )
         meta["client_contract"] = contract_diagnostics
+        meta["managed_measurement"] = measurement
         assert_managed_egress_safe(payload)
     except ManagedEgressBlocked as exc:
         meta.update(managed_egress_blocked_meta(endpoint=POLICY_DECISION_PATH, violations=exc.violations))
@@ -1644,12 +1647,14 @@ async def fetch_recommendation(unit: dict[str, Any]) -> dict[str, Any]:
     meta = _base_meta()
     try:
         contract_meta = await _client_contract_for_payload(unit)
+        measurement = execute_preflight_measurement_plan(unit, contract_meta)
         payload, contract_diagnostics = filter_payload_by_client_contract(
             unit,
             contract_meta,
             stage="preflight",
         )
         meta["client_contract"] = contract_diagnostics
+        meta["managed_measurement"] = measurement
         assert_managed_egress_safe(payload)
     except ManagedEgressBlocked as exc:
         meta.update(managed_egress_blocked_meta(endpoint=RECOMMENDATION_PATH, violations=exc.violations))

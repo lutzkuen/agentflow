@@ -45,6 +45,7 @@ LOCAL_RUNTIME_DECISION_KEYS = {
     "local_model_at_application",
     "local_model_before_recommendation",
     "loopback_unauthenticated_allowed",
+    "managed_measurement",
     "min_confidence",
     "mode",
     "policy_decision_enabled",

@@ -8,6 +8,7 @@ from tokenclaw.cache import cache_decision_meta
 from tokenclaw.client_contract import filter_payload_by_client_contract
 from tokenclaw.crunch import crunch_body, estimate_tokens_from_text
 from tokenclaw.managed_egress import assert_managed_egress_safe
+from tokenclaw.managed_measurements import execute_measurement_plan
 from tokenclaw.optimization.managed_actions import (
     cache_profile_from_decision,
     crunch_profile_from_decision,
@@ -64,6 +65,7 @@ class OpenAIMeasurementStage:
     summary: dict[str, Any]
     pattern_features: dict[str, Any]
     contract_diagnostics: dict[str, Any]
+    measurement_facts: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,11 @@ def collect_openai_measurements(
     stage: str = "preflight",
 ) -> OpenAIMeasurementStage:
     """Apply the managed client contract to feature-only measurements for one pipeline stage."""
+    measurement_facts = execute_measurement_plan(
+        unit,
+        contract_meta,
+        stage=stage,
+    )
     measured_unit, contract_diagnostics = filter_payload_by_client_contract(
         unit,
         contract_meta,
@@ -166,6 +173,7 @@ def collect_openai_measurements(
         summary=summary,
         pattern_features=pattern_features,
         contract_diagnostics=contract_diagnostics,
+        measurement_facts=measurement_facts,
     )
 
 
@@ -310,8 +318,10 @@ def execute_openai_local_policy(
     routing_meta["openai_feature_unit"] = preflight_measurement.summary
     routing_meta["openai_preflight_unit"] = preflight_measurement.summary
     routing_meta["openai_preflight_measurement"] = preflight_measurement.contract_diagnostics
+    routing_meta["openai_preflight_measurement_facts"] = preflight_measurement.measurement_facts
     routing_meta["openai_local_feature_unit"] = local_measurement.summary
     routing_meta["openai_local_measurement"] = local_measurement.contract_diagnostics
+    routing_meta["openai_local_measurement_facts"] = local_measurement.measurement_facts
     routing_meta.update(openai_call_store_fields(
         path,
         resolved_requested_model,
