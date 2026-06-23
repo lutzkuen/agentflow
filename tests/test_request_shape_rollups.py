@@ -1369,6 +1369,37 @@ class RequestShapeRollupTests(unittest.TestCase):
         )
         return call_id
 
+    def test_anthropic_no_tool_streaming_shape_is_replay_ready(self) -> None:
+        for _ in range(2):
+            self._log_call(
+                provider="anthropic",
+                path="/v1/messages",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+                category="chat",
+                workflow_phase="chat",
+                stream=1,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="streaming-exact-miss",
+                text_chars=2_400,
+                cost=0.01,
+                baseline=0.01,
+            )
+
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="streaming-safe-subset")
+        [rollup] = report["rollups"]
+
+        self.assertNotIn("unsupported-streaming-shape", rollup["blocker_codes"])
+        self.assertIn("exact-cache-miss", rollup["blocker_codes"])
+        dry_run = report["cache_replayability_dry_run"]
+        ready = next(row for row in dry_run["cohorts"] if row["endpoint"] == "messages")
+        self.assertEqual(ready["readiness"], "replay-ready")
+        self.assertEqual(ready["reason"], "replay-ready-exact-non-tool-shape")
+        self.assertEqual(ready["projected_hits"], 1)
+        blocker_values = {item["value"] for item in dry_run["blocker_breakdown"]}
+        self.assertNotIn("streaming-replay-not-supported", blocker_values)
+
     def test_repeated_shapes_collapse_and_persist_without_raw_fields(self) -> None:
         for cost in (0.02, 0.03, 0.04):
             self._log_call(cost=cost, baseline=cost + 0.01)

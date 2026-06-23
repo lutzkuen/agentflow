@@ -1852,6 +1852,28 @@ def streaming_cache_lookup_meta(
         local_replayability_level="local-exact-response" if CACHE_ENABLED else "features_only",
         store_obj=store_obj,
     )
+    unsafe_streaming_reasons = {
+        "cacheability-bucket-mismatch",
+        "static_information_hint-mismatch",
+        "time_sensitive_hint-mismatch",
+        "user_specific_hint-mismatch",
+        "exact_cache_candidate_hint-mismatch",
+    }
+    selected_unsafe_skip = next(
+        (
+            skip
+            for skip in reversed(pattern_skip_reasons)
+            if str(skip.get("reason") or "") in unsafe_streaming_reasons
+        ),
+        None,
+    )
+    default_streaming_exact = bool(
+        CACHE_ENABLED
+        and base_exact_enabled
+        and not has_tool_blocks
+        and not has_thinking_blocks
+        and selected_unsafe_skip is None
+    )
     if pattern_rule and CACHE_ENABLED and base_exact_enabled:
         exact_enabled = True
     selected_skip = _select_cache_replay_canary_skip(pattern_skip_reasons)
@@ -1870,6 +1892,13 @@ def streaming_cache_lookup_meta(
     elif has_thinking_blocks and CACHE_ENABLED:
         status = "skipped"
         reason = "streaming-thinking-disabled"
+    elif selected_unsafe_skip is not None:
+        status = "skipped"
+        reason = str(selected_unsafe_skip.get("reason") or "streaming-pattern-rule-skipped")
+    elif default_streaming_exact:
+        exact_enabled = True
+        status = "miss"
+        reason = "streaming-exact-miss"
     elif pattern_skip_reasons:
         status = "skipped"
         selected_reason = str(pattern_skip_reasons[-1].get("reason") or "streaming-pattern-rule-skipped")

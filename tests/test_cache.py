@@ -1678,13 +1678,13 @@ file_watch:
             },
         }])[0]
 
-    def test_streaming_cache_lookup_requires_explicit_static_pattern_rule(self):
+    def test_streaming_cache_lookup_allows_default_no_tool_exact_replay(self):
         can_cache, meta = cache_module.streaming_cache_lookup_meta(has_tool_blocks=False)
 
-        self.assertFalse(can_cache)
-        self.assertEqual(meta["status"], "skipped")
-        self.assertEqual(meta["reason"], "streaming-pattern-rule-required")
-        self.assertFalse(meta["exact_enabled"])
+        self.assertTrue(can_cache)
+        self.assertEqual(meta["status"], "miss")
+        self.assertEqual(meta["reason"], "streaming-exact-miss")
+        self.assertTrue(meta["exact_enabled"])
         self.assertFalse(meta["semantic_enabled"])
 
         can_tool_cache, tool_meta = cache_module.streaming_cache_lookup_meta(has_tool_blocks=True)

@@ -566,6 +566,46 @@ def _workflow_phase(row: dict[str, Any], routing: dict[str, Any]) -> str:
     return public_label(row.get("category"), "unknown")
 
 
+def _endpoint_label_from_row(row: dict[str, Any]) -> str:
+    endpoint = str(row.get("endpoint") or row.get("path") or "").strip().lower()
+    if endpoint.startswith("/v1/"):
+        endpoint = endpoint.removeprefix("/v1/")
+    return endpoint.strip("/").replace("/", "_") or "unknown"
+
+
+def _is_anthropic_messages_row(row: dict[str, Any]) -> bool:
+    provider = str(row.get("provider_family") or row.get("provider") or "").strip().lower()
+    source_surface = str(row.get("source_surface") or "").strip().lower()
+    return _endpoint_label_from_row(row) == "messages" and (
+        provider == "anthropic" or source_surface == "anthropic_messages"
+    )
+
+
+def _streaming_exact_replay_supported(
+    *,
+    row: dict[str, Any],
+    cache: dict[str, Any],
+    routing: dict[str, Any],
+    has_tools: bool,
+) -> bool:
+    if has_tools:
+        return False
+    if not _is_anthropic_messages_row(row):
+        return False
+    reason = str(cache.get("reason") or "").lower()
+    routing_reason = str(routing.get("reason") or "").lower()
+    if "thinking" in reason or "thinking" in routing_reason:
+        return False
+    unsupported_reasons = {
+        "streaming-cache-disabled",
+        "streaming-pattern-rule-required",
+        "streaming-thinking-disabled",
+        "streaming-tools-disabled",
+        "streaming-not-allowed",
+    }
+    return reason not in unsupported_reasons
+
+
 def _blocker_codes(
     *,
     row: dict[str, Any],
@@ -581,7 +621,12 @@ def _blocker_codes(
     reason = str(cache.get("reason") or "").lower()
     routing_reason = str(routing.get("reason") or "").lower()
     status_bucket = _status_bucket(row.get("status_code"))
-    if stream:
+    if stream and not _streaming_exact_replay_supported(
+        row=row,
+        cache=cache,
+        routing=routing,
+        has_tools=has_tools,
+    ):
         blockers.add("unsupported-streaming-shape")
     if has_tools and ("tools-disabled" in reason or "tool" in reason and "disabled" in reason):
         blockers.add("tool-call-cache-disabled")
@@ -10080,7 +10125,7 @@ def build_request_shape_cache_replay_policy_decision_report(
 
 def _shape_replayability_decision(row: dict[str, Any]) -> dict[str, Any]:
     row_count = _as_int(row.get("row_count") or row.get("count"))
-    endpoint = str(row.get("endpoint") or "unknown")
+    endpoint = _endpoint_label_from_row(row)
     cache_status = str(row.get("cache_status") or "unknown")
     stream = bool(row.get("stream"))
     has_tools = bool(row.get("has_tools"))
@@ -10093,7 +10138,7 @@ def _shape_replayability_decision(row: dict[str, Any]) -> dict[str, Any]:
         blockers.add("already-cache-hit")
     if row_count < 2:
         blockers.add("insufficient-repeat-evidence")
-    if stream:
+    if stream and not (not has_tools and _is_anthropic_messages_row(row)):
         blockers.add("streaming-replay-not-supported")
     if has_tools:
         blockers.add("tools-present")

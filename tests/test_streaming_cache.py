@@ -889,7 +889,7 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertEqual(candidate["compared_samples"], 0)
         self.assertIn("shadow-unsupported-shape-observed", candidate["promotion_reason_codes"])
 
-    def test_streamed_non_tool_response_is_not_cached_without_explicit_rule(self):
+    def test_streamed_non_tool_response_replays_without_explicit_rule(self):
         request_body = {
             "model": "claude-sonnet-4-6",
             "max_tokens": 32,
@@ -906,21 +906,27 @@ class StreamingCacheTest(unittest.TestCase):
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
-        self.assertEqual(first.headers["x-tokenclaw-cache"], "skip-streaming")
-        self.assertEqual(second.headers["x-tokenclaw-cache"], "skip-streaming")
+        self.assertEqual(first.headers["x-tokenclaw-cache"], "miss")
+        self.assertEqual(second.headers["x-tokenclaw-cache"], "hit")
         self.assertEqual(first_body, b"".join(STREAM_FRAMES))
         self.assertEqual(second_body, first_body)
-        self.assertEqual(FakeAsyncClient.calls, 2)
+        self.assertEqual(FakeAsyncClient.calls, 1)
 
         rows = server.store.conn.execute(
             "select stream, cache_hit, cache_json from calls order by created_at"
         ).fetchall()
         self.assertEqual([row["stream"] for row in rows], [1, 1])
-        self.assertEqual([row["cache_hit"] for row in rows], [0, 0])
+        self.assertEqual([row["cache_hit"] for row in rows], [0, 1])
         first_cache = json.loads(rows[0]["cache_json"])
         second_cache = json.loads(rows[1]["cache_json"])
-        self.assertEqual(first_cache["reason"], "streaming-pattern-rule-required")
-        self.assertEqual(second_cache["reason"], "streaming-pattern-rule-required")
+        self.assertEqual(first_cache["reason"], "streaming-exact-miss")
+        self.assertEqual(first_cache["stream_cache_store"]["status"], "stored")
+        self.assertGreaterEqual(first_cache["stream_cache_store"]["entry_count"], 1)
+        self.assertEqual(second_cache["reason"], "streaming-exact-match")
+        self.assertEqual(second_cache["hit_type"], "streaming-exact")
+        self.assertEqual(second_cache["stream_replay"]["media_type"], "text/event-stream")
+        self.assertEqual(second_cache["stream_replay"]["frame_count"], len(STREAM_FRAMES))
+        self.assertTrue(second_cache["stream_replay"]["complete"])
 
     def test_streamed_static_response_replays_only_with_explicit_canary_rule(self):
         request_body = {
