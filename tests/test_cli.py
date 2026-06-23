@@ -11861,6 +11861,59 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["flush"]["retryable_error"], 1)
 
+    def test_managed_feedback_background_drainer_recovers_stale_sending_row(self):
+        from tokenclaw import server
+        from tokenclaw.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            store = Store(db_path)
+            try:
+                self._enqueue_feedback(store, status="sending", attempts=1)
+                store.conn.execute(
+                    """
+                    update managed_outcome_feedback_queue
+                    set updated_at = ?, next_attempt_at = ?
+                    where id = ?
+                    """,
+                    (
+                        "2026-06-08T10:00:00+00:00",
+                        "2026-06-08T10:00:00+00:00",
+                        "queue-sending-1",
+                    ),
+                )
+                store.conn.commit()
+
+                with patch.dict(
+                    os.environ,
+                    {
+                        "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                        "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                        "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS": "3",
+                    },
+                    clear=False,
+                ):
+                    with patch.object(server, "store", store):
+                        with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                            results = asyncio.run(
+                                server._drain_managed_outcome_feedback_once(
+                                    limit=10,
+                                    stale_after_seconds=1,
+                                )
+                            )
+                row = store.get_managed_outcome_feedback("queue-sending-1")
+            finally:
+                store.conn.close()
+
+        self.assertEqual(results[0]["status"], "sent")
+        self.assertEqual(row["status"], "sent")
+        self.assertEqual(row["attempts"], 2)
+        self.assertIsNone(row["last_error"])
+        self.assertEqual(
+            ManagedFeedbackFlushClient.calls[0]["url"],
+            "http://managed.test/v1/optimization-units/77/outcome",
+        )
+
     def test_managed_feedback_flush_posts_post_promotion_action_outcome_rollups(self):
         from tokenclaw.store import Store
 

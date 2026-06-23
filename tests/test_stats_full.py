@@ -39,6 +39,36 @@ class StatsFullTest(unittest.TestCase):
         server._tier_backoff_until.clear()
         server._tier_backoff_until.update(self.old_tier_backoff_until)
 
+    def test_managed_feedback_queue_health_reports_stale_sending_rows(self):
+        server.store.enqueue_managed_outcome_feedback(
+            id="managed-feedback-stale-sending",
+            created_at="2026-06-08T10:00:00+00:00",
+            updated_at="2026-06-08T10:00:00+00:00",
+            source_surface="codex_turn",
+            endpoint="/v1/optimization-units/77/outcome",
+            optimization_unit_id=77,
+            payload_json=stable_json({"status": "success"}),
+            status="sending",
+            attempts=1,
+            next_attempt_at="2026-06-08T10:00:00+00:00",
+        )
+
+        health = stats_views._managed_feedback_queue_health(server.store, sample_limit=5)
+        safety = asyncio.run(
+            stats_views.stats_safety(
+                store_obj=server.store,
+                default_db=self.tmp.name,
+                proxy_host="127.0.0.1",
+                dashboard_host="127.0.0.1",
+            )
+        )
+
+        self.assertEqual(health["summary"]["sending"], 1)
+        self.assertEqual(health["summary"]["stale_sending"], 1)
+        self.assertEqual(health["stale_sending_samples"][0]["status"], "sending")
+        warning_codes = {item["code"] for item in safety["warnings"]}
+        self.assertIn("managed-feedback-stale-sending", warning_codes)
+
     def _keys_in(self, value):
         keys = set()
         if isinstance(value, dict):

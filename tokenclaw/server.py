@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import httpx
@@ -181,6 +182,7 @@ _tier_backoff_until = _limiter.backoff_until
 store = Store(DEFAULT_DB)
 app = FastAPI(title=f"AgentFlow {PROVIDER.title()} Proxy", version="0.1.0")
 _routing_outcome_label_task: asyncio.Task[Any] | None = None
+_managed_feedback_drainer_task: asyncio.Task[Any] | None = None
 
 
 def _provider_context() -> ProviderContext:
@@ -241,6 +243,52 @@ async def _periodic_routing_outcome_label_finalizer(interval_seconds: int) -> No
         await _finalize_routing_outcome_labels_once()
 
 
+async def _drain_managed_outcome_feedback_once(*, limit: int, stale_after_seconds: int) -> list[dict[str, Any]]:
+    from tokenclaw import recommendations
+
+    if not recommendations.recommendations_enabled():
+        return []
+    if hasattr(store, "recover_stale_managed_outcome_feedback_sends"):
+        stale_before = (
+            datetime.now(timezone.utc) - timedelta(seconds=max(1, int(stale_after_seconds)))
+        ).isoformat()
+        recovered = await asyncio.to_thread(
+            store.recover_stale_managed_outcome_feedback_sends,
+            stale_before=stale_before,
+        )
+        if recovered:
+            print(f"tokenclaw_managed_feedback_recovered_stale_sending count={recovered}", file=sys.stderr)
+    results = await recommendations.flush_queued_outcome_feedback(store, limit=max(1, int(limit)))
+    if results:
+        counts: dict[str, int] = {}
+        for item in results:
+            status = str(item.get("status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+        print(
+            "tokenclaw_managed_feedback_drain "
+            + " ".join(f"{key.replace('-', '_')}={value}" for key, value in sorted(counts.items())),
+            file=sys.stderr,
+        )
+    return results
+
+
+async def _periodic_managed_outcome_feedback_drainer(
+    *,
+    interval_seconds: int,
+    limit: int,
+    stale_after_seconds: int,
+) -> None:
+    while True:
+        try:
+            await _drain_managed_outcome_feedback_once(
+                limit=limit,
+                stale_after_seconds=stale_after_seconds,
+            )
+        except Exception as exc:
+            print(f"tokenclaw_managed_feedback_drain_error: {exc}", file=sys.stderr)
+        await asyncio.sleep(max(1, int(interval_seconds)))
+
+
 app.include_router(
     create_dashboard_router(
         store_obj=lambda: store,
@@ -255,7 +303,7 @@ app.include_router(create_admin_router(after_reload=_refresh_policy_module_bindi
 
 @app.on_event("startup")
 async def _log_startup_session_spending_summary() -> None:
-    global _routing_outcome_label_task
+    global _routing_outcome_label_task, _managed_feedback_drainer_task
     _log_recent_session_spending_summary("startup")
     await _finalize_routing_outcome_labels_once()
     try:
@@ -265,6 +313,17 @@ async def _log_startup_session_spending_summary() -> None:
     if label_interval > 0 and _routing_outcome_label_task is None:
         _routing_outcome_label_task = asyncio.create_task(
             _periodic_routing_outcome_label_finalizer(label_interval)
+        )
+    feedback_interval = env_int("TOKENCLAW_MANAGED_FEEDBACK_DRAIN_INTERVAL_SECONDS", 60)
+    feedback_limit = env_int("TOKENCLAW_MANAGED_FEEDBACK_DRAIN_BATCH_LIMIT", 100)
+    feedback_stale_after = env_int("TOKENCLAW_MANAGED_FEEDBACK_STALE_SENDING_SECONDS", 600)
+    if feedback_interval > 0 and _managed_feedback_drainer_task is None:
+        _managed_feedback_drainer_task = asyncio.create_task(
+            _periodic_managed_outcome_feedback_drainer(
+                interval_seconds=feedback_interval,
+                limit=max(1, min(feedback_limit, 100)),
+                stale_after_seconds=max(1, feedback_stale_after),
+            )
         )
     if env("TOKENCLAW_SQLITE_MAINTENANCE_ON_STARTUP", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
@@ -292,10 +351,13 @@ async def _log_startup_session_spending_summary() -> None:
 
 @app.on_event("shutdown")
 async def _log_shutdown_session_spending_summary() -> None:
-    global _routing_outcome_label_task
+    global _routing_outcome_label_task, _managed_feedback_drainer_task
     if _routing_outcome_label_task is not None:
         _routing_outcome_label_task.cancel()
         _routing_outcome_label_task = None
+    if _managed_feedback_drainer_task is not None:
+        _managed_feedback_drainer_task.cancel()
+        _managed_feedback_drainer_task = None
     _log_recent_session_spending_summary("shutdown")
 
 

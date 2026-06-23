@@ -929,7 +929,9 @@ def _managed_feedback_queue_health(
     status_counts: dict[str, int] = {}
     source_counts: dict[str, int] = {}
     due_rows: list[dict[str, Any]] = []
+    stale_sending_rows: list[dict[str, Any]] = []
     sent_rows: list[dict[str, Any]] = []
+    stale_sending_cutoff = now - timedelta(minutes=10)
     for row in rows:
         status = str(row.get("status") or "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
@@ -939,11 +941,17 @@ def _managed_feedback_queue_health(
             due_at = _parse_utc_datetime(row.get("next_attempt_at"))
             if due_at is not None and due_at <= now:
                 due_rows.append(row)
+        if status == "sending":
+            updated_at = _parse_utc_datetime(row.get("updated_at"))
+            if updated_at is not None and updated_at <= stale_sending_cutoff:
+                stale_sending_rows.append(row)
         if status == "sent":
             sent_rows.append(row)
 
     due_rows.sort(key=lambda row: _parse_utc_datetime(row.get("next_attempt_at")) or now)
+    stale_sending_rows.sort(key=lambda row: _parse_utc_datetime(row.get("updated_at")) or now)
     oldest_due = due_rows[0] if due_rows else None
+    oldest_stale_sending = stale_sending_rows[0] if stale_sending_rows else None
     sent_rows.sort(
         key=lambda row: _parse_utc_datetime(row.get("sent_at") or row.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
@@ -958,7 +966,11 @@ def _managed_feedback_queue_health(
         "sent": status_counts.get("sent", 0),
         "dropped_after_limit": status_counts.get("dropped-after-limit", 0),
         "error": status_counts.get("error", 0),
+        "stale_sending": len(stale_sending_rows),
         "oldest_due_age_seconds": _seconds_since_iso(oldest_due.get("next_attempt_at"), now) if oldest_due else None,
+        "oldest_stale_sending_age_seconds": _seconds_since_iso(
+            oldest_stale_sending.get("updated_at"), now
+        ) if oldest_stale_sending else None,
         "oldest_pending_age_seconds": _seconds_since_iso(
             min(
                 (row for row in rows if row.get("status") in {"queued", "retryable-error"}),
@@ -974,12 +986,21 @@ def _managed_feedback_queue_health(
         "status_breakdown": _breakdown_from_counts(status_counts),
         "source_surface_breakdown": _breakdown_from_counts(source_counts),
         "oldest_due": _public_managed_feedback_row(oldest_due, now=now),
+        "oldest_stale_sending": _public_managed_feedback_row(oldest_stale_sending, now=now),
         "last_successful_flush": _public_managed_feedback_row(last_successful, now=now),
         "due_samples": [
             item
             for item in (
                 _public_managed_feedback_row(row, now=now)
                 for row in due_rows[: max(0, int(sample_limit or 0))]
+            )
+            if item is not None
+        ],
+        "stale_sending_samples": [
+            item
+            for item in (
+                _public_managed_feedback_row(row, now=now)
+                for row in stale_sending_rows[: max(0, int(sample_limit or 0))]
             )
             if item is not None
         ],
@@ -1073,6 +1094,12 @@ async def stats_safety(
             "managed-feedback-retryable-errors",
             "medium",
             "Managed outcome feedback has rows waiting after retryable delivery errors.",
+        )
+    if _as_int(feedback_summary.get("stale_sending")) > 0:
+        warn(
+            "managed-feedback-stale-sending",
+            "medium",
+            "Managed outcome feedback has stale in-flight rows that should be recovered for retry.",
         )
     if _as_int(feedback_summary.get("dropped_after_limit")) > 0:
         warn(

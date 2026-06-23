@@ -509,8 +509,9 @@ class CompatRow(dict[str, Any]):
 
 
 class PostgresResult:
-    def __init__(self, rows: list[CompatRow]):
+    def __init__(self, rows: list[CompatRow], *, rowcount: int = -1):
         self._rows = rows
+        self.rowcount = rowcount
 
     def fetchone(self) -> CompatRow | None:
         return self._rows[0] if self._rows else None
@@ -533,7 +534,7 @@ class SQLiteConnection:
                 rows = [CompatRow(zip(names, row)) for row in cur.fetchall()]
             else:
                 self._conn.commit()
-            return PostgresResult(rows)
+            return PostgresResult(rows, rowcount=cur.rowcount)
 
     def commit(self) -> None:
         with self._lock:
@@ -559,7 +560,7 @@ class PostgresConnection:
                     rows = [CompatRow(zip(names, row)) for row in cur.fetchall()]
                 else:
                     conn.commit()
-                return PostgresResult(rows)
+                return PostgresResult(rows, rowcount=cur.rowcount)
 
     def commit(self) -> None:
         return None
@@ -1857,14 +1858,19 @@ class SQLiteStore:
             if not row:
                 return None
             attempts = int(row["attempts"] or 0) + 1
-            self.conn.execute(
+            cur = self.conn.execute(
                 """
                 update managed_outcome_feedback_queue
                 set status = ?, attempts = ?, updated_at = ?
                 where id = ?
+                  and status in ('queued', 'retryable-error')
+                  and next_attempt_at <= ?
                 """,
-                ("sending", attempts, now, queue_id),
+                ("sending", attempts, now, queue_id, now),
             )
+            if not cur.rowcount:
+                self.conn.commit()
+                return None
             self.conn.commit()
             claimed = dict(row)
             claimed["attempts"] = attempts
@@ -1904,20 +1910,45 @@ class SQLiteStore:
             claimed: list[dict[str, Any]] = []
             for row in rows:
                 attempts = int(row["attempts"] or 0) + 1
-                self.conn.execute(
+                cur = self.conn.execute(
                     """
                     update managed_outcome_feedback_queue
                     set status = ?, attempts = ?, updated_at = ?
                     where id = ?
+                      and status in ('queued', 'retryable-error')
+                      and next_attempt_at <= ?
                     """,
-                    ("sending", attempts, now, row["id"]),
+                    ("sending", attempts, now, row["id"], now),
                 )
+                if not cur.rowcount:
+                    continue
                 item = dict(row)
                 item["attempts"] = attempts
                 item["status"] = "sending"
                 claimed.append(item)
             self.conn.commit()
             return claimed
+
+    def recover_stale_managed_outcome_feedback_sends(
+        self,
+        *,
+        stale_before: str,
+        now: str | None = None,
+        error: str = "stale sending claim recovered for retry",
+    ) -> int:
+        now = now or utc_now()
+        with self._lock:
+            cur = self.conn.execute(
+                """
+                update managed_outcome_feedback_queue
+                set status = ?, updated_at = ?, last_error = ?, next_attempt_at = ?
+                where status = ?
+                  and updated_at <= ?
+                """,
+                ("retryable-error", now, error, now, "sending", stale_before),
+            )
+            self.conn.commit()
+            return int(cur.rowcount or 0)
 
     def due_managed_outcome_feedback(
         self,
