@@ -17973,32 +17973,88 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
         order by c desc
         limit 20
     """).fetchall()
-    recent = conn.execute("""
+    today_provider_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select id, created_at, path, coalesce(provider, 'anthropic') as provider,
+                   coalesce(routed_model_family, requested_model_family, routed_model, requested_model, 'unknown') as model_family,
+                   requested_model, routed_model, stream, cache_hit, status_code,
+                   latency_ms, input_tokens_est, output_tokens_est,
+                   actual_input_tokens, actual_output_tokens, cost_est_usd,
+                   cost_baseline_usd, crunch_json, routing_json, cache_json, error,
+                   request_json, response_json, session_id, category,
+                   cache_creation_input_tokens, cache_read_input_tokens, retry_count,
+                   thinking_output_tokens,
+                   1 as is_today
+            from calls
+            where created_at >= ?
+            """,
+            (today_start,),
+        ).fetchall()
+    ]
+    today_accounting_units = [_provider_accounting_unit(row) for row in today_provider_rows]
+    today_accounting = _accounting_rollup(today_accounting_units)
+    today_tokenclaw_savings = (
+        _as_float(today_accounting.get("routing_savings_usd"))
+        + _as_float(today_accounting.get("crunch_savings_usd"))
+        + _as_float(today_accounting.get("cache_savings_usd"))
+    )
+    today_provider_prompt_cache_discount = _as_float(today_accounting.get("provider_prompt_cache_discount_usd"))
+    today_volume_savings: dict[tuple[str, str], float] = {}
+    for row, unit in zip(today_provider_rows, today_accounting_units):
+        key = (str(row.get("provider") or "anthropic"), str(row.get("model_family") or "unknown"))
+        today_volume_savings[key] = today_volume_savings.get(key, 0.0) + (
+            _as_float(unit.get("routing_savings_usd"))
+            + _as_float(unit.get("crunch_savings_usd"))
+            + _as_float(unit.get("cache_savings_usd"))
+        )
+    for row in today_volume:
+        key = (str(row.get("provider") or "anthropic"), str(row.get("model_family") or "unknown"))
+        row["savings_usd"] = round(today_volume_savings.get(key, 0.0), 8)
+
+    recent = [
+        dict(row)
+        for row in conn.execute("""
         select coalesce(provider, 'anthropic') as provider,
+               path,
                created_at,
                requested_model,
                routed_model,
                cache_hit,
                status_code,
                latency_ms,
+               input_tokens_est,
+               output_tokens_est,
+               actual_input_tokens,
+               actual_output_tokens,
                coalesce(actual_input_tokens, input_tokens_est, 0) as tokens_in,
                coalesce(actual_output_tokens, output_tokens_est, 0) as tokens_out,
                cost_est_usd,
                cost_baseline_usd,
-               case
-                 when coalesce(cost_baseline_usd, 0) > coalesce(cost_est_usd, 0)
-                 then coalesce(cost_baseline_usd, 0) - coalesce(cost_est_usd, 0)
-                 else 0
-               end as saved_usd,
+               crunch_json,
+               routing_json,
+               cache_json,
+               cache_creation_input_tokens,
+               cache_read_input_tokens,
                coalesce(category, json_extract(routing_json, '$.category'), 'unknown') as category
         from calls
         order by created_at desc
         limit 50
     """).fetchall()
+    ]
+    for row in recent:
+        unit = _provider_accounting_unit({**row, "is_today": True})
+        row["saved_usd"] = round(
+            _as_float(unit.get("routing_savings_usd"))
+            + _as_float(unit.get("crunch_savings_usd"))
+            + _as_float(unit.get("cache_savings_usd")),
+            8,
+        )
     today_calls = int(today_summary["calls"] or 0)
     today_cost = float(today_summary["cost_est_usd"] or 0.0)
     total_cost = float(total_summary["cost_est_usd"] or 0.0)
-    today_savings = float(today_summary["savings_usd"] or 0.0)
+    today_savings = today_tokenclaw_savings
     today_routed = int(today_summary["routed_count"] or 0)
     today_cache_hits = int(today_summary["cache_hits"] or 0)
     today_crunch_tokens_saved = int(today_summary["crunch_tokens_saved"] or 0)
@@ -18037,10 +18093,11 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
                 "total_tokens": int(today_summary["total_tokens"] or 0),
                 "cost_est_usd": round(today_cost, 8),
                 "captured_savings_usd": round(today_savings, 8),
-                "routing_savings_usd": round(today_savings, 8),
-                "crunch_savings_usd": round(today_crunch_savings, 8),
-                "cache_savings_usd": 0.0,
-                "source_surfaces": [],
+                "routing_savings_usd": round(_as_float(today_accounting.get("routing_savings_usd")), 8),
+                "crunch_savings_usd": round(_as_float(today_accounting.get("crunch_savings_usd")), 8),
+                "cache_savings_usd": round(_as_float(today_accounting.get("cache_savings_usd")), 8),
+                "provider_prompt_cache_discount_usd": round(today_provider_prompt_cache_discount, 8),
+                "source_surfaces": today_accounting.get("source_surfaces", []),
             },
             "accounting_total": {
                 "cost_est_usd": round(total_cost, 8),
@@ -18061,16 +18118,18 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
                 "today_codex_app_estimated_spend_usd": 0.0,
             },
             "savings": {
-                "today_tokenclaw_generated_savings_usd": round(today_savings + today_crunch_savings, 8),
+                "today_tokenclaw_generated_savings_usd": round(today_savings, 8),
                 "today_tokenclaw_generated_buckets": {
-                    "routing_usd": round(today_savings, 8),
-                    "crunching_usd": round(today_crunch_savings, 8),
-                    "exact_local_cache_usd": 0.0,
+                    "routing_usd": round(_as_float(today_accounting.get("routing_savings_usd")), 8),
+                    "crunching_usd": round(_as_float(today_accounting.get("crunch_savings_usd")), 8),
+                    "exact_local_cache_usd": round(_as_float(today_accounting.get("cache_savings_usd")), 8),
                 },
+                "today_provider_prompt_cache_discount_usd": round(today_provider_prompt_cache_discount, 8),
                 "today_buckets": {
-                    "routing_usd": round(today_savings, 8),
-                    "crunching_usd": round(today_crunch_savings, 8),
-                    "exact_local_cache_usd": 0.0,
+                    "routing_usd": round(_as_float(today_accounting.get("routing_savings_usd")), 8),
+                    "crunching_usd": round(_as_float(today_accounting.get("crunch_savings_usd")), 8),
+                    "exact_local_cache_usd": round(_as_float(today_accounting.get("cache_savings_usd")), 8),
+                    "provider_prompt_cache_discount_usd": round(today_provider_prompt_cache_discount, 8),
                 },
             },
             "health": {
@@ -18784,7 +18843,8 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         category = r.get("category") or routing.get("category") or "unknown"
         text_chars = _as_int(routing.get("text_chars")) or input_tokens * 4
         thinking_tokens = _as_int(r.get("thinking_output_tokens"))
-        _add_accounting_to_usage_bucket(bucket, _provider_accounting_unit({**r, "is_today": True}))
+        accounting_unit = _provider_accounting_unit({**r, "is_today": True})
+        _add_accounting_to_usage_bucket(bucket, accounting_unit)
 
         bucket["provider_calls"] += 1
         bucket["turns"] += 1
@@ -18793,7 +18853,11 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         bucket["provider_total_tokens"] += provider_input_tokens + output_tokens
         bucket["spend_usd"] += cost
         bucket["baseline_provider_cost_usd"] += baseline
-        bucket["captured_savings_usd"] += max(baseline - cost, 0.0)
+        bucket["captured_savings_usd"] += (
+            _as_float(accounting_unit.get("routing_savings_usd"))
+            + _as_float(accounting_unit.get("crunch_savings_usd"))
+            + _as_float(accounting_unit.get("cache_savings_usd"))
+        )
         bucket["provider_cost_known"] = True
         bucket["hard_floor_usd"] = _as_float(bucket["hard_floor_usd"]) + cost
         bucket["prompt_cache_creation_tokens"] += cache_creation_tokens
@@ -18910,7 +18974,8 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         input_features = unit["input_features"]
         outcome_features = unit["outcome_features"]
         bucket = bucket_for("codex", r.get("session_id"))
-        _add_accounting_to_usage_bucket(bucket, _codex_accounting_unit({**r, "is_today": True}))
+        accounting_unit = _codex_accounting_unit({**r, "is_today": True})
+        _add_accounting_to_usage_bucket(bucket, accounting_unit)
         bucket["codex_turns"] += 1
         bucket["turns"] += 1
         bucket["codex_input_text_chars"] += _as_int(r.get("input_text_chars"))
@@ -18934,7 +18999,11 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
             _as_float(outcome_features.get("cost_baseline_usd")) - _as_float(outcome_features.get("cost_est_usd")),
             0.0,
         )
-        bucket["captured_savings_usd"] += codex_saved
+        bucket["captured_savings_usd"] += (
+            _as_float(accounting_unit.get("routing_savings_usd"))
+            + _as_float(accounting_unit.get("crunch_savings_usd"))
+            + _as_float(accounting_unit.get("cache_savings_usd"))
+        )
         cache_decision = unit["optimization_features"]["cache"]
         if cache_decision.get("status") == "hit":
             bucket["local_cache_hits"] += 1
@@ -20007,6 +20076,7 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
             "cost_est_usd": 0.0,
             "cost_baseline_usd": 0.0,
             "savings_usd": 0.0,
+            "provider_prompt_cache_discount_usd": 0.0,
             "provider_calls": 0,
             "codex_turns": 0,
             "total_units": 0,
@@ -20061,6 +20131,33 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
         row["cost_est_usd"] += _as_float(r.get("cost_est_usd"))
         row["cost_baseline_usd"] += _as_float(r.get("cost_baseline_usd"))
         row["provider_tokens"] += _as_int(r.get("provider_tokens"))
+
+    weekly_provider_accounting_rows = conn.execute("""
+        select id, created_at, path, coalesce(provider, 'anthropic') as provider,
+               requested_model, routed_model, stream, cache_hit, status_code,
+               latency_ms, input_tokens_est, output_tokens_est,
+               actual_input_tokens, actual_output_tokens, cost_est_usd,
+               cost_baseline_usd, crunch_json, routing_json, cache_json, error,
+               request_json, response_json, session_id, category,
+               cache_creation_input_tokens, cache_read_input_tokens, retry_count,
+               thinking_output_tokens,
+               (date(created_at) = date('now')) as is_today
+        from calls
+        where created_at >= ?
+    """, (first_day_start,)).fetchall()
+    for raw in weekly_provider_accounting_rows:
+        r = dict(raw)
+        day = str(r.get("created_at") or "")[:10]
+        row = days_by_key.get(day)
+        if row is None:
+            continue
+        unit = _provider_accounting_unit(r)
+        row["savings_usd"] += (
+            _as_float(unit.get("routing_savings_usd"))
+            + _as_float(unit.get("crunch_savings_usd"))
+            + _as_float(unit.get("cache_savings_usd"))
+        )
+        row["provider_prompt_cache_discount_usd"] += _as_float(unit.get("provider_prompt_cache_discount_usd"))
 
     codex_rows = conn.execute("""
         select s.id as start_event_id,
@@ -20137,6 +20234,7 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
         baseline = _as_float(estimates.get("baseline_cost_est_usd"))
         row["cost_est_usd"] += cost
         row["cost_baseline_usd"] += baseline
+        row["savings_usd"] += max(baseline - cost, 0.0)
         row["codex_cost_est_usd"] += cost
         row["codex_tokens_est"] += _as_int(estimates.get("total_tokens_est"))
 
@@ -20153,7 +20251,8 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
         row["cost_est_usd"] = round(row["cost_est_usd"], 6)
         row["cost_baseline_usd"] = round(row["cost_baseline_usd"], 6)
         row["codex_cost_est_usd"] = round(row["codex_cost_est_usd"], 6)
-        row["savings_usd"] = round(max(row["cost_baseline_usd"] - row["cost_est_usd"], 0.0), 6)
+        row["savings_usd"] = round(row["savings_usd"], 6)
+        row["provider_prompt_cache_discount_usd"] = round(row["provider_prompt_cache_discount_usd"], 6)
         row.pop("_latency_sum", None)
         row.pop("_latency_count", None)
         days.append(row)
@@ -20168,6 +20267,7 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
         "cost_est_usd": round(sum(r["cost_est_usd"] or 0 for r in days), 6),
         "cost_baseline_usd": round(sum(r["cost_baseline_usd"] or 0 for r in days), 6),
         "savings_usd": round(sum(r["savings_usd"] for r in days), 6),
+        "provider_prompt_cache_discount_usd": round(sum(r["provider_prompt_cache_discount_usd"] for r in days), 6),
         "provider_calls": sum(r["provider_calls"] for r in days),
         "codex_turns": sum(r["codex_turns"] for r in days),
         "total_units": sum(r["total_units"] for r in days),
@@ -25411,10 +25511,12 @@ async function refresh(){
     document.getElementById('c-spend').textContent=fmt(acct.cost_est_usd??spend.today_calculated_spend_usd??spend.today_provider_spend_usd??0,4);
     document.getElementById('c-spend-sub').textContent=fmt(acctTotal.cost_est_usd??spend.calculated_spend_usd??spend.total_provider_spend_usd??0,4)+' total · '+fmt(spend.today_provider_spend_usd||0,4)+' provider reported · '+fmt(spend.today_codex_app_estimated_spend_usd||0,4)+' Codex est';
     const tokenclawBuckets=savings.today_tokenclaw_generated_buckets||buckets;
-    const capturedSavings=acct.captured_savings_usd??savings.today_savings_usd??acct.routing_savings_usd??tokenclawBuckets.routing_usd??0;
-    const todayAgentflowSavings=capturedSavings||savings.today_tokenclaw_generated_savings_usd||0;
-    document.getElementById('c-savings').textContent=fmt(todayAgentflowSavings,4);
-    document.getElementById('c-savings-sub').textContent='captured '+fmt(capturedSavings,4)+' · crunch signal '+fmt(acct.crunch_savings_usd??tokenclawBuckets.crunching_usd??0,4)+' · cache hits '+((d.today_cache_hit_rate||0)*100).toFixed(1)+'%';
+    const todayTokenClawSavings=savings.today_tokenclaw_generated_savings_usd??(
+      (tokenclawBuckets.routing_usd||0)+(tokenclawBuckets.crunching_usd||0)+(tokenclawBuckets.exact_local_cache_usd||0)
+    );
+    const providerPromptCacheDiscount=savings.today_provider_prompt_cache_discount_usd??buckets.provider_prompt_cache_discount_usd??acct.provider_prompt_cache_discount_usd??0;
+    document.getElementById('c-savings').textContent=fmt(todayTokenClawSavings,4);
+    document.getElementById('c-savings-sub').textContent='TokenClaw only · routing '+fmt(tokenclawBuckets.routing_usd||0,4)+' · crunch '+fmt(tokenclawBuckets.crunching_usd||0,4)+' · local cache '+fmt(tokenclawBuckets.exact_local_cache_usd||0,4)+' · provider prompt-cache '+fmt(providerPromptCacheDiscount,4)+' separate';
     document.getElementById('c-health').textContent=(health.errors_today??health.errors??0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
     document.getElementById('c-savings-loop').textContent='on demand';
@@ -28826,9 +28928,10 @@ function renderToday(data){
   text('today-errors',`${num(summary.today_errors)} errors`);
   text('today-spend',money(data.today_cost_usd));
   text('today-tokens',`${num(tokens.total_tokens)} tokens`);
-  text('today-savings',money(savings.today_tokenclaw_generated_savings_usd||data.today_savings_usd));
+  text('today-savings',money(savings.today_tokenclaw_generated_savings_usd??data.today_savings_usd));
   const buckets=savings.today_tokenclaw_generated_buckets||{};
-  text('today-savings-detail',`routing ${money(buckets.routing_usd)} · crunch ${money(buckets.crunching_usd)} · cache ${money(buckets.exact_local_cache_usd)}`);
+  const providerPromptCache=savings.today_provider_prompt_cache_discount_usd??0;
+  text('today-savings-detail',`routing ${money(buckets.routing_usd)} · crunch ${money(buckets.crunching_usd)} · local cache ${money(buckets.exact_local_cache_usd)} · provider prompt-cache ${money(providerPromptCache)} separate`);
   text('today-health',summary.today_errors?'Check errors':'OK');
   document.getElementById('today-health').className='value '+(summary.today_errors?'warn':'money');
   text('today-latency',`${num(health.avg_latency_ms||summary.avg_latency_ms)} ms avg latency`);

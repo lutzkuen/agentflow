@@ -8834,6 +8834,80 @@ request_shape_repeated_context_canaries:
         self.assertNotIn("provider_prompt_cache_discount_usd", exec_savings["today_tokenclaw_generated_buckets"])
         json.dumps(result)
 
+    def test_usage_owner_captured_savings_excludes_provider_prompt_cache_only_discount(self):
+        old_engineer = os.environ.get("TOKENCLAW_ENGINEER")
+        old_app = os.environ.get("TOKENCLAW_APP")
+        os.environ["TOKENCLAW_ENGINEER"] = "ada"
+        os.environ["TOKENCLAW_APP"] = "provider-cache-only"
+        try:
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=0.00048,
+                cost_baseline_usd=0.00588,
+                crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+                routing_json=stable_json({"reason": "keep requested model"}),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="provider-cache-only",
+                category="chat",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=2_000,
+                retry_count=0,
+                thinking_output_tokens=0,
+                provider="anthropic",
+            )
+
+            lightweight = asyncio.run(stats_views.stats(server.store, self.tmp.name))
+            full = asyncio.run(stats_views.stats_full(server.store))
+            usage = asyncio.run(stats_views.stats_usage_by_owner(server.store))
+            weekly = asyncio.run(stats_views.stats_weekly(server.store))
+        finally:
+            if old_engineer is None:
+                os.environ.pop("TOKENCLAW_ENGINEER", None)
+            else:
+                os.environ["TOKENCLAW_ENGINEER"] = old_engineer
+            if old_app is None:
+                os.environ.pop("TOKENCLAW_APP", None)
+            else:
+                os.environ["TOKENCLAW_APP"] = old_app
+
+        exec_savings = full["executive_summary"]["savings"]
+        self.assertAlmostEqual(exec_savings["today_tokenclaw_generated_savings_usd"], 0.0, places=6)
+        self.assertGreater(exec_savings["today_provider_prompt_cache_discount_usd"], 0.0)
+        lightweight_savings = lightweight["executive_summary"]["savings"]
+        self.assertAlmostEqual(lightweight["today_savings_usd"], 0.0, places=6)
+        self.assertAlmostEqual(lightweight_savings["today_tokenclaw_generated_savings_usd"], 0.0, places=6)
+        self.assertGreater(lightweight_savings["today_provider_prompt_cache_discount_usd"], 0.0)
+        self.assertAlmostEqual(lightweight["recent"][0]["saved_usd"], 0.0, places=6)
+        self.assertAlmostEqual(lightweight["today_volume"][0]["savings_usd"], 0.0, places=6)
+        self.assertAlmostEqual(weekly["totals"]["savings_usd"], 0.0, places=6)
+        self.assertGreater(weekly["totals"]["provider_prompt_cache_discount_usd"], 0.0)
+        [bucket] = usage["buckets"]
+        self.assertAlmostEqual(bucket["captured_savings_usd"], 0.0, places=6)
+        self.assertAlmostEqual(usage["summary"]["captured_savings_usd"], 0.0, places=6)
+        self.assertGreater(bucket["prompt_cache_read_savings_usd"], 0.0)
+        self.assertAlmostEqual(bucket["baseline_provider_cost_usd"] - bucket["spend_usd"], 0.0054, places=6)
+        html = stats_views.dashboard_html()
+        self.assertIn("savings.today_tokenclaw_generated_savings_usd??data.today_savings_usd", html)
+        self.assertIn("provider prompt-cache ${money(providerPromptCache)} separate", html)
+        self.assertNotIn("savings.today_tokenclaw_generated_savings_usd||data.today_savings_usd", html)
+        json.dumps(full)
+        json.dumps(usage)
+
     def test_tokenclaw_generated_savings_excludes_provider_prompt_cache(self):
         # A call with routing+crunch savings AND provider prompt-cache reads.
         # tokenclaw_generated_savings_usd must equal only routing+crunch+cache, not prompt-cache.
@@ -9714,7 +9788,7 @@ request_shape_repeated_context_canaries:
         self.assertAlmostEqual(bucket["baseline_cost_usd"], 0.07556, places=6)
         self.assertAlmostEqual(bucket["cache_savings_usd"], 0.0, places=6)
         self.assertAlmostEqual(bucket["prompt_cache_read_savings_usd"], 0.000563, places=6)
-        self.assertAlmostEqual(bucket["captured_savings_usd"], 0.025, places=6)
+        self.assertAlmostEqual(bucket["captured_savings_usd"], 0.0, places=6)
         self.assertAlmostEqual(bucket["hard_floor_usd"], 0.05056, places=6)
         self.assertEqual(
             {row["source_surface"]: row["units"] for row in bucket["source_surfaces"]},
