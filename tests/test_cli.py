@@ -223,10 +223,19 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertNotIn("sk-", readme)
 
     def test_tokenclaw_start_dry_run_prints_default_urls_without_writing_config(self):
+        managed_env = {
+            "TOKENCLAW_RECOMMENDATIONS_ENABLED": "",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "",
+            "TOKENCLAW_POLICY_DECISIONS_ENABLED": "",
+            "TOKENCLAW_POLICY_DECISION_ENABLED": "",
+            "TOKENCLAW_RECOMMENDATION_SERVER_URL": "",
+        }
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
 
-            with patch("tokenclaw.cli_commands.onboarding.httpx.get", side_effect=httpx.ConnectError("offline")), patch(
+            with patch.dict(os.environ, managed_env, clear=False), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.get", side_effect=httpx.ConnectError("offline")
+            ), patch(
                 "tokenclaw.cli_commands.onboarding.subprocess.Popen"
             ) as popen:
                 code = cli.tokenclaw_cli(["start", "--config-dir", tmp, "--dry-run"], stdout=stdout)
@@ -239,9 +248,52 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn("Dashboard: http://127.0.0.1:4002/tokenclaw/dashboard", output)
         self.assertIn("- local crunching: on", output)
         self.assertIn("- local cache: on", output)
-        self.assertIn("- managed recommendations: off unless configured", output)
+        self.assertIn("- managed recommendations: off\n", output)
+        self.assertNotIn("off unless configured", output)
         self.assertIn("Dry run only; no services were started.", output)
         self.assertFalse((Path(tmp) / "activation.json").exists())
+
+    def test_managed_recommendations_line_off_when_disabled(self):
+        env = {
+            "TOKENCLAW_RECOMMENDATIONS_ENABLED": "",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "",
+            "TOKENCLAW_POLICY_DECISIONS_ENABLED": "",
+            "TOKENCLAW_POLICY_DECISION_ENABLED": "",
+            "TOKENCLAW_RECOMMENDATION_SERVER_URL": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            line = onboarding_cli._resolve_managed_recommendations_line()
+        self.assertEqual(line, "- managed recommendations: off")
+
+    def test_managed_recommendations_line_off_when_enabled_without_server(self):
+        env = {
+            "TOKENCLAW_RECOMMENDATIONS_ENABLED": "1",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "0",
+            "TOKENCLAW_POLICY_DECISIONS_ENABLED": "1",
+            "TOKENCLAW_POLICY_DECISION_ENABLED": "0",
+            "TOKENCLAW_RECOMMENDATION_SERVER_URL": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            line = onboarding_cli._resolve_managed_recommendations_line()
+        self.assertEqual(
+            line,
+            "- managed recommendations: off (enabled, but no server URL configured)",
+        )
+
+    def test_managed_recommendations_line_on_with_server(self):
+        env = {
+            "TOKENCLAW_RECOMMENDATIONS_ENABLED": "1",
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "0",
+            "TOKENCLAW_POLICY_DECISIONS_ENABLED": "1",
+            "TOKENCLAW_POLICY_DECISION_ENABLED": "0",
+            "TOKENCLAW_RECOMMENDATION_SERVER_URL": "https://optimizer.example.com:8443/",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            line = onboarding_cli._resolve_managed_recommendations_line()
+        self.assertEqual(
+            line,
+            "- managed recommendations: on (server: optimizer.example.com:8443)",
+        )
 
     def test_tokenclaw_start_launches_default_stack_and_writes_profiles(self):
         with TemporaryDirectory() as tmp:

@@ -257,6 +257,62 @@ def _wait_for_start_processes(processes: Sequence[subprocess.Popen[Any]]) -> int
     return exit_code
 
 
+def _savings_line_local(label: str, enabled: bool | None) -> str:
+    if enabled is None:
+        return f"- {label}: unknown"
+    return f"- {label}: {'on' if enabled else 'off'}"
+
+
+def _resolve_local_savings_enabled() -> tuple[bool | None, bool | None]:
+    """Return (crunching_enabled, cache_enabled) from the resolved local policy.
+
+    Both are cheap module-level booleans derived from the active policy at import
+    time. Failure to import degrades to ``None`` (rendered as "unknown") so the
+    start summary never overstates a feature as "on".
+    """
+    try:
+        from tokenclaw import crunch
+
+        crunch_enabled: bool | None = bool(crunch.CRUNCH_ENABLED)
+    except Exception:
+        crunch_enabled = None
+    try:
+        from tokenclaw import cache
+
+        cache_enabled: bool | None = bool(cache.CACHE_ENABLED)
+    except Exception:
+        cache_enabled = None
+    return crunch_enabled, cache_enabled
+
+
+def _resolve_managed_recommendations_line() -> str:
+    """Resolve the actual managed-recommendations state for the start summary.
+
+    Per the standalone-first contract, managed recommendations are honestly OFF
+    unless they are both enabled and pointed at a configured server URL. Enabled
+    without a URL is effectively off because local policy stays authoritative
+    (mirrors the dashboard warning in stats.py).
+    """
+    try:
+        from tokenclaw import recommendations
+
+        managed_enabled = (
+            recommendations.recommendations_enabled()
+            and recommendations.policy_decisions_enabled()
+        )
+        server_configured = recommendations.recommendation_server_configured()
+        server_url = recommendations.recommendation_server_url()
+    except Exception:
+        return "- managed recommendations: unknown"
+
+    if managed_enabled and server_configured:
+        host = urlsplit(server_url).netloc or server_url
+        return f"- managed recommendations: on (server: {host})"
+    if managed_enabled and not server_configured:
+        return "- managed recommendations: off (enabled, but no server URL configured)"
+    return "- managed recommendations: off"
+
+
 def _write_start_summary(stdout: Any, result: dict[str, Any]) -> None:
     services = result.get("services") if isinstance(result.get("services"), dict) else {}
     openai = services.get("openai") if isinstance(services.get("openai"), dict) else {}
@@ -269,10 +325,11 @@ def _write_start_summary(stdout: Any, result: dict[str, Any]) -> None:
         stdout.write(f"Anthropic-compatible proxy: {claude['local_base_url']}\n")
     if dashboard.get("url"):
         stdout.write(f"Dashboard: {dashboard['url']}\n")
+    crunch_enabled, cache_enabled = _resolve_local_savings_enabled()
     stdout.write("\nSavings active:\n")
-    stdout.write("- local crunching: on\n")
-    stdout.write("- local cache: on\n")
-    stdout.write("- managed recommendations: off unless configured\n")
+    stdout.write(_savings_line_local("local crunching", crunch_enabled) + "\n")
+    stdout.write(_savings_line_local("local cache", cache_enabled) + "\n")
+    stdout.write(_resolve_managed_recommendations_line() + "\n")
     stdout.write("\n")
     for name, service in services.items():
         if not isinstance(service, dict):
