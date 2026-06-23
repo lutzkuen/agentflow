@@ -9762,8 +9762,11 @@ request_shape_repeated_context_canaries:
         self.assertIn(">Activation next actions</button>", html)
         self.assertIn("id=\"evidence-activation-summary-tbody\"", html)
         self.assertIn("fetch('/tokenclaw/stats/evidence-to-activation-next-actions?limit=20')", html)
-        self.assertIn("Uncovered locally — suggest", html)
-        self.assertIn("Uncovered locally — add routing candidate", html)
+        self.assertIn("routing off", html)
+        self.assertIn("proposed", html)
+        self.assertIn("collecting shadow evidence", html)
+        self.assertNotIn("Uncovered locally — suggest", html)
+        self.assertNotIn("Uncovered locally — add routing candidate", html)
         self.assertNotIn("No routing candidate — not collecting shadow evidence", html)
         self.assertIn("Add to routing config", html)
         self.assertIn("routingCandidateAction(unit)", html)
@@ -9806,17 +9809,110 @@ request_shape_repeated_context_canaries:
         coverage = unit["optimization_features"]["routing_candidate"]
 
         self.assertEqual(coverage["schema"], "tokenclaw.routing_candidate_coverage.v1")
-        self.assertEqual(coverage["status"], "uncovered")
+        self.assertEqual(coverage["status"], "routing-off")
         self.assertFalse(coverage["covered"])
-        self.assertTrue(coverage["actionable"])
-        self.assertEqual(coverage["reason"], "no-routing-candidate")
-        self.assertEqual(coverage["add_payload"]["requested_model"], "claude-opus-9-9")
-        self.assertEqual(coverage["add_payload"]["routed_model"], "claude-sonnet-4-6")
-        self.assertEqual(coverage["add_payload"]["provider"], "anthropic")
-        self.assertEqual(coverage["add_payload"]["source_surface"], "anthropic_messages")
-        self.assertEqual(coverage["add_payload"]["category"], "chat")
+        self.assertFalse(coverage["actionable"])
+        self.assertEqual(coverage["reason"], "no-backed-routing")
+        self.assertEqual(coverage["provenance"], "none")
+        self.assertIsNone(coverage["add_payload"])
+        self.assertIsNone(coverage["suggested_routed_model"])
         self.assertFalse(coverage["privacy"]["provider_bodies_included"])
         self.assertFalse(coverage["privacy"]["request_ids_included"])
+
+    def test_recent_activity_routing_cell_shows_managed_proposal(self):
+        server.store.log_call(
+            id="call-managed-routing-proposal",
+            created_at=utc_now(),
+            path="/v1/messages",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            requested_model="claude-opus-9-8",
+            routed_model=None,
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=123,
+            input_tokens_est=3000,
+            output_tokens_est=100,
+            actual_input_tokens=3000,
+            actual_output_tokens=100,
+            cost_est_usd=0.01,
+            cost_baseline_usd=0.01,
+            category="chat",
+            routing_json=stable_json({
+                "requested_model": "claude-opus-9-8",
+                "routed_model": "claude-opus-9-8",
+                "category": "chat",
+                "workflow_phase": "planning",
+                "text_chars": 12000,
+                "managed_recommendation": {
+                    "enabled": True,
+                    "status": "received",
+                    "target_model": "claude-sonnet-4-6",
+                    "policy_source": "managed-recommended",
+                },
+            }),
+            cache_json=stable_json({"status": "miss"}),
+        )
+
+        activity = asyncio.run(stats_views.stats_activity(server.store, limit=1))
+        coverage = activity["units"][0]["optimization_features"]["routing_candidate"]
+
+        self.assertEqual(coverage["status"], "proposed")
+        self.assertFalse(coverage["covered"])
+        self.assertFalse(coverage["actionable"])
+        self.assertEqual(coverage["reason"], "managed-recommendation-proposed")
+        self.assertEqual(coverage["provenance"], "managed")
+        self.assertEqual(coverage["proposed_routed_model"], "claude-sonnet-4-6")
+        self.assertIsNone(coverage["add_payload"])
+        self.assertIsNone(coverage["suggested_routed_model"])
+
+    def test_recent_activity_routing_cell_shows_shadow_collection(self):
+        server.store.log_call(
+            id="call-shadow-routing-collection",
+            created_at=utc_now(),
+            path="/v1/messages",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            requested_model="claude-opus-9-7",
+            routed_model="claude-opus-9-7",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=123,
+            input_tokens_est=3000,
+            output_tokens_est=100,
+            actual_input_tokens=3000,
+            actual_output_tokens=100,
+            cost_est_usd=0.01,
+            cost_baseline_usd=0.01,
+            category="tool-result",
+            routing_json=stable_json({
+                "requested_model": "claude-opus-9-7",
+                "routed_model": "claude-opus-9-7",
+                "category": "tool-result",
+                "workflow_phase": "tool-execution",
+                "text_chars": 12000,
+                "routing_experiment": {
+                    "mode": "shadow_candidate_pass_through",
+                    "sampled": True,
+                    "managed_route_candidate_model": "claude-sonnet-4-6",
+                },
+            }),
+            cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+        )
+
+        activity = asyncio.run(stats_views.stats_activity(server.store, limit=1))
+        coverage = activity["units"][0]["optimization_features"]["routing_candidate"]
+
+        self.assertEqual(coverage["status"], "shadow-collecting")
+        self.assertFalse(coverage["covered"])
+        self.assertFalse(coverage["actionable"])
+        self.assertEqual(coverage["reason"], "shadow-candidate-pass-through")
+        self.assertEqual(coverage["provenance"], "managed-shadow")
+        self.assertEqual(coverage["shadow_routed_model"], "claude-sonnet-4-6")
+        self.assertIsNone(coverage["add_payload"])
+        self.assertIsNone(coverage["suggested_routed_model"])
 
     def test_routing_candidate_lifecycle_burndown_endpoint_dashboard_and_research_handoff(self):
         policy = {

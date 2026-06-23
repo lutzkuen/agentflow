@@ -1597,32 +1597,32 @@ def routing_candidate_coverage(
     )
     selected = selection.get("selected")
     suggested = str((selected or {}).get("routed_model") or "").strip()
-    if not suggested:
-        suggested = _legacy_route_down_candidate_for_requested(requested) or _suggest_adjacent_routed_model(requested)
     covered = selected is not None
-    payload: dict[str, Any] = {
-        "requested_model": requested,
-        "routed_model": suggested,
-        "provider": provider_label,
-        "source_surface": surface_label,
-        "app_family": app_family,
-        "category": category_label,
-        "stream": stream_bool,
-    }
-    if phase_label:
-        payload["workflow_phase"] = phase_label
-    if text_count > 0:
-        payload["max_text_chars"] = max(8000, text_count)
+    payload: dict[str, Any] | None = None
+    if covered and suggested:
+        payload = {
+            "requested_model": requested,
+            "routed_model": suggested,
+            "provider": provider_label,
+            "source_surface": surface_label,
+            "app_family": app_family,
+            "category": category_label,
+            "stream": stream_bool,
+        }
+        if phase_label:
+            payload["workflow_phase"] = phase_label
+        if text_count > 0:
+            payload["max_text_chars"] = max(8000, text_count)
     return {
         "schema": "tokenclaw.routing_candidate_coverage.v1",
         "status": "covered" if covered else "uncovered",
         "covered": covered,
-        "actionable": not covered,
+        "actionable": False,
         "reason": "matched-routing-candidate" if covered else "no-routing-candidate",
         "eligible_candidate_count": int(selection.get("eligible_candidate_count") or 0),
         "eligible_candidate_ids": list(selection.get("eligible_candidate_ids") or []),
         "selected_candidate_id": (selected or {}).get("candidate_id") if isinstance(selected, dict) else None,
-        "suggested_routed_model": suggested,
+        "suggested_routed_model": suggested or None,
         "policy_source": ROUTING_EXPERIMENT_POLICY_SOURCE,
         "rule_path": ROUTING_EXPERIMENT_RULES_PATH,
         "add_payload": payload,

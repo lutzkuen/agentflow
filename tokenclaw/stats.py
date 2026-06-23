@@ -11952,7 +11952,7 @@ async def stats_routing_candidate_lifecycle_burndown(store_obj: Any, limit: int 
         features = unit.get("optimization_features") if isinstance(unit.get("optimization_features"), dict) else {}
         coverage = features.get("routing_candidate") if isinstance(features.get("routing_candidate"), dict) else {}
         status = str(coverage.get("status") or "")
-        if status != "uncovered":
+        if status not in {"uncovered", "routing-off"}:
             continue
         state_counts["uncovered"] += 1
         source = "recent-activity"
@@ -17124,6 +17124,87 @@ def _add_usage_hint(bucket: dict[str, Any], code: str, label: str, detail: str) 
     })
 
 
+def _routing_candidate_target_from_meta(*items: Any) -> str | None:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key in (
+            "target_model_normalized",
+            "target_model",
+            "would_route_model",
+            "route_to",
+            "routed_model",
+            "managed_route_candidate_model",
+            "local_route_candidate_model",
+        ):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _activity_routing_candidate_state(candidate: dict[str, Any], routing: dict[str, Any]) -> dict[str, Any]:
+    state = dict(candidate or {})
+    experiment = routing.get("routing_experiment") if isinstance(routing.get("routing_experiment"), dict) else {}
+    shadow_collecting = (
+        isinstance(experiment, dict)
+        and experiment.get("mode") == "shadow_candidate_pass_through"
+        and bool(experiment.get("sampled"))
+    )
+    if state.get("covered") and not shadow_collecting:
+        state.setdefault("provenance", "local-rule")
+        state.setdefault("cell_status", "covered")
+        return state
+
+    managed = routing.get("managed_recommendation") if isinstance(routing.get("managed_recommendation"), dict) else {}
+    managed_target = _routing_candidate_target_from_meta(managed)
+    if isinstance(managed, dict) and managed.get("enabled") and managed_target:
+        state.update({
+            "status": "proposed",
+            "cell_status": "proposed",
+            "covered": False,
+            "actionable": False,
+            "reason": "managed-recommendation-proposed",
+            "provenance": "managed",
+            "proposed_routed_model": managed_target,
+            "suggested_routed_model": None,
+            "add_payload": None,
+        })
+        return state
+
+    if shadow_collecting:
+        shadow_target = _routing_candidate_target_from_meta(experiment, routing)
+        state.update({
+            "status": "shadow-collecting",
+            "cell_status": "shadow-collecting",
+            "covered": False,
+            "actionable": False,
+            "reason": "shadow-candidate-pass-through",
+            "provenance": "managed-shadow" if experiment.get("managed_route_candidate_model") else "local-shadow",
+            "shadow_routed_model": shadow_target,
+            "suggested_routed_model": None,
+            "add_payload": None,
+        })
+        return state
+
+    if state.get("covered"):
+        state.setdefault("provenance", "local-rule")
+        state.setdefault("cell_status", "covered")
+        return state
+
+    state.update({
+        "status": "routing-off",
+        "cell_status": "routing-off",
+        "covered": False,
+        "actionable": False,
+        "reason": "no-backed-routing",
+        "provenance": "none",
+        "suggested_routed_model": None,
+        "add_payload": None,
+    })
+    return state
+
+
 def _provider_activity_unit(
     row: sqlite3.Row | dict[str, Any],
     *,
@@ -17193,6 +17274,7 @@ def _provider_activity_unit(
                 "session_ids_included": False,
             },
         }
+    routing_candidate = _activity_routing_candidate_state(routing_candidate, routing)
     return {
         "feature_schema_version": "tokenclaw.optimization_unit_features.v1",
         "unit_id": f"provider_call:{r.get('id')}",
@@ -24559,13 +24641,24 @@ function routingCandidateAction(unit){
   if(unit.granularity!=='provider_request')return'';
   const candidate=((unit.optimization_features||{}).routing_candidate)||{};
   if(candidate.covered)return'<span class="badge hit">routing candidate covered</span>';
+  if(candidate.status==='proposed'||candidate.cell_status==='proposed'){
+    const target=candidate.proposed_routed_model||candidate.target_model||'';
+    return `<span class="badge routed">proposed${target?`: ${esc(target)}`:''}</span>`;
+  }
+  if(candidate.status==='shadow-collecting'||candidate.cell_status==='shadow-collecting'){
+    const target=candidate.shadow_routed_model||'';
+    return `<span class="badge stream">collecting shadow evidence${target?`: ${esc(target)}`:''}</span>`;
+  }
+  if(candidate.status==='routing-off'||candidate.cell_status==='routing-off'){
+    return '<span class="badge miss">routing off</span>';
+  }
   if(!candidate.actionable||!candidate.add_payload)return'';
   const payload=candidate.add_payload||{};
   const hidden=['requested_model','provider','source_surface','app_family','category','workflow_phase','stream','max_text_chars']
     .filter(key=>payload[key]!=null&&payload[key]!=='')
     .map(key=>`<input type="hidden" name="${esc(key)}" value="${esc(payload[key])}">`).join('');
   const suggested=payload.routed_model||'';
-  const label=suggested?`Uncovered locally — suggest ${esc(suggested)}`:'Uncovered locally — add routing candidate';
+  const label=suggested?`Backed routing candidate — ${esc(suggested)}`:'Routing off — enter target model';
   return `<span class="routing-candidate-form" data-routing-candidate="1">
     <span class="badge routed">${label}</span>
     ${hidden}

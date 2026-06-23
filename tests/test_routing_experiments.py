@@ -418,8 +418,9 @@ blocklist:
             input_tokens=3000,
         )
         self.assertEqual(before["status"], "uncovered")
-        self.assertTrue(before["actionable"])
-        self.assertEqual(before["suggested_routed_model"], "claude-sonnet-4-6")
+        self.assertFalse(before["actionable"])
+        self.assertIsNone(before["suggested_routed_model"])
+        self.assertIsNone(before["add_payload"])
 
         result = experiments.append_dashboard_routing_candidate({
             "requested_model": "claude-opus-5-0",
