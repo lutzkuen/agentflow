@@ -15,6 +15,7 @@ from tokenclaw import cli
 from tokenclaw.anthropic_thinking_compaction_impact import (
     MANAGED_FEEDBACK_SCHEMA,
     MANAGED_FEEDBACK_SOURCE_SURFACE,
+    SERVER_REQUESTED_OUTCOME_FIELDS,
     build_anthropic_thinking_compaction_impact_report,
     build_anthropic_thinking_compaction_managed_feedback,
     queue_anthropic_thinking_compaction_managed_feedback,
@@ -35,6 +36,7 @@ def _compaction_meta(
     cohort: str = "canary_applied",
     tokens_saved: int = 0,
     planned_tokens: int = 0,
+    fallback: bool = False,
 ) -> dict:
     meta = {
         "schema": "tokenclaw.anthropic_thinking_history_compaction_decision.v1",
@@ -62,6 +64,9 @@ def _compaction_meta(
             "raw_payload_included": False,
         },
     }
+    if fallback:
+        meta["fallback"] = True
+        meta["fallback_reason"] = "rate-limit"
     if status == "bypass":
         meta["safety_stop_state"] = "stopped"
         meta["safety_stop"] = {
@@ -89,6 +94,7 @@ def _log_call(
     planned_tokens: int = 0,
     retry_count: int = 0,
     thinking_tokens: int = 100,
+    fallback: bool = False,
 ) -> None:
     store.log_call(
         id=call_id,
@@ -114,6 +120,7 @@ def _log_call(
                 cohort=cohort,
                 tokens_saved=tokens_saved,
                 planned_tokens=planned_tokens,
+                fallback=fallback,
             )
         ),
         routing_json=stable_json({"category": "tool-result", "workflow_phase": "tool-execution", "text_chars": 24000}),
@@ -467,6 +474,135 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
             "raw response",
         ):
             self.assertNotIn(forbidden, rendered)
+
+    def test_managed_feedback_populates_server_requested_outcome_fields(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "thinking-applied",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=1200,
+                    planned_tokens=1200,
+                    cost_est=0.020,
+                )
+                _log_call(
+                    store,
+                    "thinking-holdout",
+                    created_at="2026-06-13T00:01:00+00:00",
+                    status="holdout",
+                    reason="canary_holdout",
+                    cohort="canary_holdout",
+                    planned_tokens=1300,
+                    cost_est=0.050,
+                )
+                report = build_anthropic_thinking_compaction_impact_report(store, limit=20)
+            finally:
+                store.conn.close()
+
+        event = build_anthropic_thinking_compaction_managed_feedback(report, now="2026-06-13T00:02:00+00:00")
+        self.assertIsNotNone(event)
+        assert event is not None
+
+        # The rollup declares full coverage of the server-requested outcome fields.
+        self.assertEqual(event["measured_outcome_fields"], list(SERVER_REQUESTED_OUTCOME_FIELDS))
+
+        outcome = event["crunch_outcomes"][0]
+        # Candidate-level treatment metadata is present (applied present, no stop).
+        self.assertEqual(outcome["traffic_treatment"], "canary")
+        self.assertEqual(outcome["action_state"], "applied")
+        self.assertEqual(outcome["applied_action_families"], ["crunch"])
+        self.assertEqual(outcome["vetoed_action_families"], [])
+        self.assertIsNone(outcome["safety_stop_reason"])
+        self.assertIsNone(outcome["rollback_reason"])
+
+        # Every cohort carries every server-requested outcome field by name.
+        for cohort_name in ("applied", "holdout", "skipped", "safety_stop"):
+            fields = outcome["outcomes"][cohort_name]["server_outcome_fields"]
+            present = set(fields) - {"schema"}
+            self.assertEqual(
+                present,
+                set(SERVER_REQUESTED_OUTCOME_FIELDS),
+                msg=f"cohort {cohort_name} missing fields: {set(SERVER_REQUESTED_OUTCOME_FIELDS) - present}",
+            )
+            self.assertEqual(fields["cohort"], cohort_name)
+            self.assertEqual(fields["traffic_treatment"], "canary")
+
+        applied_fields = outcome["outcomes"]["applied"]["server_outcome_fields"]
+        self.assertEqual(applied_fields["action_state"], "applied")
+        self.assertEqual(applied_fields["error_class"], "none")
+        self.assertEqual(applied_fields["fallback_count"], 0)
+        self.assertEqual(applied_fields["saved_tokens"], 1200)
+        self.assertEqual(applied_fields["actual_input_tokens"], 6000)
+        self.assertEqual(applied_fields["cache_read_input_tokens"], 3000)
+        self.assertEqual(applied_fields["cache_creation_input_tokens"], 100)
+        self.assertGreater(applied_fields["realized_savings_usd"], 0.0)
+        self.assertEqual(outcome["outcomes"]["holdout"]["server_outcome_fields"]["action_state"], "heldout")
+
+        # Privacy guarantees still hold.
+        self.assertEqual(managed_egress_violations(event), [])
+        rendered = json.dumps(event, sort_keys=True)
+        for forbidden in (RAW_SECRET, "private thinking", "raw-tool-id", "raw-session-id", "raw-cache-key", "/private/"):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_managed_feedback_reports_rollback_and_fallback_outcome_fields(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "thinking-applied",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=800,
+                    planned_tokens=800,
+                )
+                _log_call(
+                    store,
+                    "thinking-holdout",
+                    created_at="2026-06-13T00:01:00+00:00",
+                    status="holdout",
+                    reason="canary_holdout",
+                    cohort="canary_holdout",
+                    planned_tokens=900,
+                )
+                _log_call(
+                    store,
+                    "thinking-safety",
+                    created_at="2026-06-13T00:02:00+00:00",
+                    status="bypass",
+                    reason="local-canary-safety-stop",
+                    cohort="safety_stop",
+                    status_code=500,
+                    retry_count=2,
+                    fallback=True,
+                )
+                report = build_anthropic_thinking_compaction_impact_report(store, limit=20)
+            finally:
+                store.conn.close()
+
+        event = build_anthropic_thinking_compaction_managed_feedback(report, now="2026-06-13T00:03:00+00:00")
+        assert event is not None
+        outcome = event["crunch_outcomes"][0]
+        # A safety stop drives the candidate to a rollback treatment with a reason.
+        self.assertEqual(outcome["traffic_treatment"], "rollback")
+        self.assertEqual(outcome["action_state"], "safety_stopped")
+        self.assertIsNotNone(outcome["safety_stop_reason"])
+        self.assertIsNotNone(outcome["rollback_reason"])
+
+        safety_fields = outcome["outcomes"]["safety_stop"]["server_outcome_fields"]
+        self.assertEqual(safety_fields["action_state"], "safety_stopped")
+        self.assertEqual(safety_fields["error_class"], "server_error")
+        self.assertEqual(safety_fields["fallback_count"], 1)
+        self.assertEqual(safety_fields["retry_count"], 2)
+        self.assertIsNotNone(safety_fields["safety_stop_reason"])
+        self.assertEqual(managed_egress_violations(event), [])
 
     def test_managed_feedback_egress_guard_rejects_raw_like_fields(self) -> None:
         event = {

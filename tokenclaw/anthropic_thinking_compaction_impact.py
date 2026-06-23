@@ -19,8 +19,83 @@ FEEDBACK_SCHEMA = "tokenclaw.anthropic_thinking_compaction_budget_feedback.v1"
 MANAGED_FEEDBACK_SCHEMA = "tokenclaw.anthropic_thinking_compaction_outcome_feedback.v1"
 MANAGED_FEEDBACK_SOURCE_SURFACE = "anthropic_thinking_compaction_outcome"
 MANAGED_FEEDBACK_EVENT_TYPE = "crunch_outcome_rollup"
+SERVER_OUTCOME_FIELDS_SCHEMA = "tokenclaw.anthropic_thinking_compaction_server_outcome_fields.v1"
+
+# The metadata-only outcome fields the managed server asks local thinking-tail
+# clients to supply (tokenclaw_server#330, requested through ``/v1/client-contract``
+# for ``action_family=crunch`` + ``source_surface=anthropic_messages`` thinking-tail
+# coverage). The rollup carries each of these names so managed scoring can move a
+# cohort between hold/canary/widen/rollback from real applied-vs-holdout evidence.
+# Every value is a privacy-preserving aggregate; raw status codes, latencies, and
+# per-call identifiers are never emitted.
+SERVER_REQUESTED_OUTCOME_FIELDS = (
+    "action_state",
+    "traffic_treatment",
+    "cohort",
+    "applied_action_families",
+    "vetoed_action_families",
+    "status_code",
+    "error_class",
+    "latency_ms",
+    "retry_count",
+    "fallback_count",
+    "actual_input_tokens",
+    "actual_output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "saved_chars",
+    "saved_tokens",
+    "cost_est_usd",
+    "realized_savings_usd",
+    "safety_stop_reason",
+    "rollback_reason",
+)
 
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,95}$")
+
+# Map each observed canary cohort to the action state the executor reached for it.
+_COHORT_ACTION_STATE = {
+    "applied": "applied",
+    "holdout": "heldout",
+    "safety_stop": "safety_stopped",
+    "skipped": "skipped",
+}
+
+
+def _fallback_observed(value: Any) -> bool:
+    """Detect a fallback/rate-limit fallback from bounded metadata flags only.
+
+    Reads fixed boolean/count/enum flag names; never inspects raw bodies.
+    """
+    if isinstance(value, dict):
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in {"fallback", "fallback_observed", "fallback_used", "rate_limit_fallback"} and bool(item):
+                return True
+            if lowered in {"fallback_count", "fallbacks"} and _as_int(item) > 0:
+                return True
+            if lowered in {"fallback_reason", "fallback_model", "fallback_from_model"} and item:
+                return True
+            if _fallback_observed(item):
+                return True
+    elif isinstance(value, list):
+        return any(_fallback_observed(item) for item in value)
+    return False
+
+
+def _error_class(error_count: int, status_breakdown: list[dict[str, Any]]) -> str:
+    """Bucketed error class for a cohort, derived from status-class counts only."""
+    if error_count <= 0:
+        return "none"
+    has_client = any(item.get("value") == "4xx" and _as_int(item.get("count")) for item in status_breakdown)
+    has_server = any(item.get("value") == "5xx" and _as_int(item.get("count")) for item in status_breakdown)
+    if has_client and has_server:
+        return "mixed"
+    if has_client:
+        return "client_error"
+    if has_server:
+        return "server_error"
+    return "error"
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -138,6 +213,7 @@ def _empty_cohort() -> dict[str, Any]:
         "error_count": 0,
         "retry_rows": 0,
         "retry_attempts": 0,
+        "fallback_count": 0,
         "latency_ms_total": 0,
         "latency_sample_count": 0,
         "cost_est_usd": 0.0,
@@ -179,6 +255,7 @@ def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
         "error_count": error_count,
         "retry_rows": retry_rows,
         "retry_attempts": _as_int(raw.get("retry_attempts")),
+        "fallback_count": _as_int(raw.get("fallback_count")),
         "error_rate": round(error_count / count, 6) if count else 0.0,
         "retry_rate": round(retry_rows / count, 6) if count else 0.0,
         "latency_avg_ms": round(_as_int(raw.get("latency_ms_total")) / latency_samples, 2) if latency_samples else None,
@@ -337,6 +414,7 @@ def _add_row(group: dict[str, Any], row: dict[str, Any], meta: dict[str, Any], c
     cohort["error_count"] += int(errored)
     cohort["retry_rows"] += int(retry_count > 0)
     cohort["retry_attempts"] += retry_count
+    cohort["fallback_count"] += int(_fallback_observed(meta))
     if latency_ms >= 0:
         cohort["latency_ms_total"] += latency_ms
         cohort["latency_sample_count"] += 1
@@ -569,12 +647,57 @@ def _impact_decision(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _cohort_outcome(cohort: dict[str, Any]) -> dict[str, Any]:
+def _server_outcome_fields(
+    cohort: dict[str, Any],
+    *,
+    cohort_name: str,
+    ctx: dict[str, Any],
+) -> dict[str, Any]:
+    """Map the tokenclaw_server#330 outcome field names to local cohort aggregates.
+
+    Each requested field name is present so managed scoring stops asking for
+    missing coverage. Values are privacy-preserving aggregates (status is reported
+    as bucketed classes, latency/retry as cohort aggregates), never raw per-call
+    codes or identifiers. ``safety_stop_reason``/``rollback_reason`` carry the
+    candidate-level reason only when the cohort or treatment reached that state.
+    """
+    status_breakdown = cohort.get("status_breakdown") or []
+    error_count = _as_int(cohort.get("error_count"))
+    is_safety_stop = cohort_name == "safety_stop"
+    safety_stop_reason = ctx.get("safety_stop_reason") if is_safety_stop else None
+    return {
+        "schema": SERVER_OUTCOME_FIELDS_SCHEMA,
+        "action_state": _COHORT_ACTION_STATE.get(cohort_name, "skipped"),
+        "traffic_treatment": ctx.get("traffic_treatment", "hold"),
+        "cohort": cohort_name,
+        "applied_action_families": list(ctx.get("applied_action_families") or []),
+        "vetoed_action_families": list(ctx.get("vetoed_action_families") or []),
+        # Privacy-preserving status reporting: bucketed status classes, not raw codes.
+        "status_code": status_breakdown,
+        "error_class": _error_class(error_count, status_breakdown),
+        "latency_ms": cohort.get("latency_avg_ms"),
+        "retry_count": _as_int(cohort.get("retry_attempts")),
+        "fallback_count": _as_int(cohort.get("fallback_count")),
+        "actual_input_tokens": _as_int(cohort.get("actual_input_tokens")),
+        "actual_output_tokens": _as_int(cohort.get("actual_output_tokens")),
+        "cache_creation_input_tokens": _as_int(cohort.get("prompt_cache_creation_tokens")),
+        "cache_read_input_tokens": _as_int(cohort.get("prompt_cache_read_tokens")),
+        "saved_chars": _as_int(cohort.get("saved_chars")),
+        "saved_tokens": _as_int(cohort.get("tokens_saved_est")),
+        "cost_est_usd": round(_as_float(cohort.get("cost_est_usd")), 8),
+        "realized_savings_usd": round(_as_float(cohort.get("gross_savings_usd")), 8),
+        "safety_stop_reason": safety_stop_reason,
+        "rollback_reason": ctx.get("rollback_reason"),
+    }
+
+
+def _cohort_outcome(cohort: dict[str, Any], *, cohort_name: str = "unknown", ctx: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "count": _as_int(cohort.get("count")),
         "error_count": _as_int(cohort.get("error_count")),
         "retry_rows": _as_int(cohort.get("retry_rows")),
         "retry_attempts": _as_int(cohort.get("retry_attempts")),
+        "fallback_count": _as_int(cohort.get("fallback_count")),
         "error_rate": round(_as_float(cohort.get("error_rate")), 6),
         "retry_rate": round(_as_float(cohort.get("retry_rate")), 6),
         "latency_avg_ms": cohort.get("latency_avg_ms"),
@@ -600,6 +723,58 @@ def _cohort_outcome(cohort: dict[str, Any]) -> dict[str, Any]:
         },
         "missing_usage_count": _as_int(cohort.get("missing_usage_count")),
         "non_positive_savings_count": _as_int(cohort.get("non_positive_savings_count")),
+        "server_outcome_fields": _server_outcome_fields(cohort, cohort_name=cohort_name, ctx=ctx or {}),
+    }
+
+
+def _top_reason(breakdown: Any) -> str | None:
+    if not isinstance(breakdown, list):
+        return None
+    for item in breakdown:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        if value and str(value) != "unknown":
+            return str(value)
+    return None
+
+
+def _candidate_outcome_context(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Derive candidate-level treatment/action-state/family/reason metadata.
+
+    Treatment is inferred from the observed cohorts and impact decision: a stop or
+    safety-stop is a rollback, an applied cohort is a canary, a holdout-only cohort
+    is holdout, and anything else is a hold. All values are bounded enum strings.
+    """
+    cohorts = candidate.get("cohorts") if isinstance(candidate.get("cohorts"), dict) else {}
+    applied = _as_int(((cohorts.get("applied") or {})).get("count"))
+    holdout = _as_int(((cohorts.get("holdout") or {})).get("count"))
+    safety_stop = cohorts.get("safety_stop") if isinstance(cohorts.get("safety_stop"), dict) else {}
+    safety_count = _as_int(safety_stop.get("count"))
+    decision = str(candidate.get("canary_impact_decision") or candidate.get("verdict") or "").strip().lower()
+    safety_stop_reason = _top_reason(safety_stop.get("reason_breakdown")) if safety_count else None
+
+    if safety_count > 0 or decision in {"stop", "suppress", "rollback"}:
+        treatment = "rollback"
+        action_state = "safety_stopped"
+    elif applied > 0:
+        treatment = "canary"
+        action_state = "applied"
+    elif holdout > 0:
+        treatment = "holdout"
+        action_state = "heldout"
+    else:
+        treatment = "hold"
+        action_state = "held"
+
+    rollback_reason = safety_stop_reason if treatment == "rollback" else None
+    return {
+        "traffic_treatment": treatment,
+        "action_state": action_state,
+        "applied_action_families": ["crunch"] if applied > 0 else [],
+        "vetoed_action_families": [],
+        "safety_stop_reason": safety_stop_reason,
+        "rollback_reason": rollback_reason,
     }
 
 
@@ -610,6 +785,7 @@ def _crunch_outcome(candidate: dict[str, Any]) -> dict[str, Any]:
     skipped = cohorts.get("skipped") if isinstance(cohorts.get("skipped"), dict) else {}
     safety = cohorts.get("safety_stop") if isinstance(cohorts.get("safety_stop"), dict) else {}
     deltas = candidate.get("deltas") if isinstance(candidate.get("deltas"), dict) else {}
+    ctx = _candidate_outcome_context(candidate)
     return {
         "target_action_family": "anthropic_thinking_history_compaction",
         "candidate_id": public_id(candidate.get("candidate_id"), prefix="thinking-compaction-candidate", fallback="unknown"),
@@ -625,6 +801,13 @@ def _crunch_outcome(candidate: dict[str, Any]) -> dict[str, Any]:
         "stream": bool(candidate.get("stream")),
         "canary_impact_decision": public_label(candidate.get("canary_impact_decision") or candidate.get("verdict") or "unknown", "unknown"),
         "reason_codes": [public_label(value, "unknown") for value in candidate.get("reason_codes") or []],
+        # Candidate-level outcome treatment requested by tokenclaw_server#330.
+        "action_state": ctx["action_state"],
+        "traffic_treatment": ctx["traffic_treatment"],
+        "applied_action_families": ctx["applied_action_families"],
+        "vetoed_action_families": ctx["vetoed_action_families"],
+        "safety_stop_reason": ctx["safety_stop_reason"],
+        "rollback_reason": ctx["rollback_reason"],
         "cohort_counts": {
             "applied": _as_int(applied.get("count")),
             "holdout": _as_int(holdout.get("count")),
@@ -632,10 +815,10 @@ def _crunch_outcome(candidate: dict[str, Any]) -> dict[str, Any]:
             "safety_stop": _as_int(safety.get("count")),
         },
         "outcomes": {
-            "applied": _cohort_outcome(applied),
-            "holdout": _cohort_outcome(holdout),
-            "skipped": _cohort_outcome(skipped),
-            "safety_stop": _cohort_outcome(safety),
+            "applied": _cohort_outcome(applied, cohort_name="applied", ctx=ctx),
+            "holdout": _cohort_outcome(holdout, cohort_name="holdout", ctx=ctx),
+            "skipped": _cohort_outcome(skipped, cohort_name="skipped", ctx=ctx),
+            "safety_stop": _cohort_outcome(safety, cohort_name="safety_stop", ctx=ctx),
         },
         "applied_minus_holdout": {
             "error_rate_delta": round(_as_float(deltas.get("error_rate_delta")), 6),
@@ -702,6 +885,9 @@ def build_anthropic_thinking_compaction_managed_feedback(
         "recommendation_id": f"anthropic-thinking-compaction:{digest[:24]}",
         "bundle_hash": f"sha256:{digest}",
         "policy_sections": ["crunch"],
+        # Declares which tokenclaw_server#330 outcome fields this rollup supplies for
+        # each cohort under ``crunch_outcomes[].outcomes[].server_outcome_fields``.
+        "measured_outcome_fields": list(SERVER_REQUESTED_OUTCOME_FIELDS),
         "local_tool_version": __version__,
         "generated_from_schema": impact_report.get("schema"),
         "impact_generated_at": impact_report.get("generated_at"),
