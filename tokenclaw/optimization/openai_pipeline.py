@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from tokenclaw.action_executor import ActionExecutor
 from tokenclaw.cache import cache_decision_meta
+from tokenclaw.client_contract import filter_payload_by_client_contract
 from tokenclaw.crunch import crunch_body, estimate_tokens_from_text
 from tokenclaw.managed_egress import assert_managed_egress_safe
 from tokenclaw.optimization.managed_actions import (
@@ -53,6 +55,15 @@ class OpenAIPreflightStage:
     feature_unit: dict[str, Any]
     feature_summary: dict[str, Any]
     pattern_features: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class OpenAIMeasurementStage:
+    stage: str
+    unit: dict[str, Any]
+    summary: dict[str, Any]
+    pattern_features: dict[str, Any]
+    contract_diagnostics: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -132,6 +143,32 @@ def extract_openai_preflight_features(parsed: OpenAIParsedRequest, *, path: str)
     )
 
 
+def collect_openai_measurements(
+    unit: dict[str, Any],
+    *,
+    contract_meta: dict[str, Any] | None = None,
+    stage: str = "preflight",
+) -> OpenAIMeasurementStage:
+    """Apply the managed client contract to feature-only measurements for one pipeline stage."""
+    measured_unit, contract_diagnostics = filter_payload_by_client_contract(
+        unit,
+        contract_meta,
+        stage=stage,
+    )
+    assert_managed_egress_safe(measured_unit)
+    summary = summarize_openai_request_feature_unit(measured_unit)
+    assert_managed_egress_safe(summary)
+    pattern_features = pattern_feature_diagnostics(measured_unit)
+    assert_managed_egress_safe(pattern_features)
+    return OpenAIMeasurementStage(
+        stage=f"measure_{stage}",
+        unit=measured_unit,
+        summary=summary,
+        pattern_features=pattern_features,
+        contract_diagnostics=contract_diagnostics,
+    )
+
+
 async def fetch_openai_policy_decision(
     preflight: OpenAIPreflightStage,
     *,
@@ -145,6 +182,33 @@ async def fetch_openai_policy_decision(
         current_model=preflight.parsed.requested_model,
         input_tokens_est=preflight.parsed.input_tokens_est,
     )
+
+
+def execute_openai_managed_actions(
+    *,
+    body: dict[str, Any],
+    routing_meta: dict[str, Any],
+    decision: dict[str, Any],
+    applier: RecommendationApplier = apply_openai_recommendation_decision,
+    action_executor: ActionExecutor | None = None,
+) -> dict[str, Any]:
+    """Apply managed local actions through ActionExecutor-aware validation."""
+    executor = action_executor or ActionExecutor(provider="openai")
+    try:
+        return applier(
+            body=body,
+            routing_meta=routing_meta,
+            decision=decision,
+            executor=executor,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        return applier(
+            body=body,
+            routing_meta=routing_meta,
+            decision=decision,
+        )
 
 
 def execute_openai_local_policy(
@@ -161,6 +225,7 @@ def execute_openai_local_policy(
     cruncher: Cruncher = crunch_body,
     router: Router | None = None,
     applier: RecommendationApplier = apply_openai_recommendation_decision,
+    action_executor: ActionExecutor | None = None,
 ) -> OpenAILocalPolicyStage:
     """Apply local crunch, route, cache-profile, and safe managed actions without provider I/O."""
     managed_crunch_profile = crunch_profile_from_decision(policy_decision)
@@ -229,23 +294,39 @@ def execute_openai_local_policy(
         input_tokens_est=input_tokens,
         session_id=session_id,
     )
+    raw_contract_meta = policy_decision.get("client_contract")
+    contract_meta = raw_contract_meta if isinstance(raw_contract_meta, dict) else None
+    preflight_measurement = collect_openai_measurements(
+        preflight.feature_unit,
+        contract_meta=contract_meta,
+        stage="preflight",
+    )
+    local_measurement = collect_openai_measurements(
+        local_feature_unit,
+        contract_meta=contract_meta,
+        stage="preflight",
+    )
     local_pattern_features = pattern_feature_diagnostics(local_feature_unit)
-    routing_meta["openai_feature_unit"] = preflight.feature_summary
-    routing_meta["openai_preflight_unit"] = preflight.feature_summary
-    routing_meta["openai_local_feature_unit"] = summarize_openai_request_feature_unit(local_feature_unit)
+    routing_meta["openai_feature_unit"] = preflight_measurement.summary
+    routing_meta["openai_preflight_unit"] = preflight_measurement.summary
+    routing_meta["openai_preflight_measurement"] = preflight_measurement.contract_diagnostics
+    routing_meta["openai_local_feature_unit"] = local_measurement.summary
+    routing_meta["openai_local_measurement"] = local_measurement.contract_diagnostics
     routing_meta.update(openai_call_store_fields(
         path,
         resolved_requested_model,
         str(provider_body.get("model") or routed_model),
     ))
-    routing_meta["openai_preflight_pattern_features"] = preflight.pattern_features
+    routing_meta["openai_preflight_pattern_features"] = preflight_measurement.pattern_features
     routing_meta["managed_pattern_features"] = local_pattern_features
     if isinstance(policy_decision.get("local_actions"), dict):
         routing_meta["managed_local_actions"] = policy_decision["local_actions"]
-    recommendation_meta = applier(
+    recommendation_meta = execute_openai_managed_actions(
         body=provider_body,
         routing_meta=routing_meta,
         decision=policy_decision,
+        applier=applier,
+        action_executor=action_executor,
     )
     routing_meta["managed_recommendation"] = recommendation_meta
     return OpenAILocalPolicyStage(

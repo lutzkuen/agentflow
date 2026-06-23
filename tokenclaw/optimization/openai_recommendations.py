@@ -488,11 +488,12 @@ def apply_openai_recommendation_decision(
     body: dict[str, Any],
     routing_meta: dict[str, Any],
     decision: dict[str, Any],
+    executor: ActionExecutor | None = None,
 ) -> dict[str, Any]:
     """Apply a preflight managed decision to the locally mutated OpenAI request when safe."""
     applied = dict(decision)
     target_model = applied.get("target_model_normalized")
-    executor = ActionExecutor(provider="openai")
+    executor = executor or ActionExecutor(provider="openai")
     if applied.get("selected_for_shadow_evaluation") is True and isinstance(target_model, str):
         current_model = str(body.get("model") or routing_meta.get("routed_model") or "")
         execution = executor.execute(

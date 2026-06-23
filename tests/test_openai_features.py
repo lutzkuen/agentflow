@@ -465,6 +465,102 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertNotIn(raw_secret, rendered)
         self.assertNotIn("secret session id", rendered)
 
+    def test_pipeline_measurement_stage_obeys_active_client_contract(self):
+        raw_secret = "raw openai prompt secret"
+        body = {
+            "model": "gpt-5-codex",
+            "input": f"{raw_secret}\n2026-06-09T20:00:00Z ERROR pid=1234 secret-app failed",
+        }
+        parsed = openai_pipeline.parse_openai_request_body(body, ["gpt-5-codex"])
+        preflight = openai_pipeline.extract_openai_preflight_features(parsed, path="/v1/responses")
+        contract_meta = {
+            "status": "received",
+            "reason": "fetched",
+            "cache_status": "stored",
+            "active": True,
+            "contract": {
+                "schema": "tokenclaw.client_contract.v1",
+                "contract_id": "pipeline-contract",
+                "expires_at": "2999-01-01T00:00:00+00:00",
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "app_family": "codex",
+                "measurement_plan": {
+                    "preflight": [
+                        "input_features.text_bucket",
+                        "input_features.input_token_bucket",
+                        "tool_features.has_tools",
+                    ],
+                    "outcome": [],
+                },
+                "allowed_action_families": ["routing"],
+                "privacy": {"metadata_only": True},
+            },
+        }
+
+        local = openai_pipeline.execute_openai_local_policy(
+            raw_body=body,
+            path="/v1/responses",
+            requested_model=parsed.requested_model,
+            category=parsed.category,
+            stream=parsed.stream,
+            session_id="secret session id",
+            preflight=preflight,
+            policy_decision={"status": "skipped", "client_contract": contract_meta},
+            store_obj=None,
+        )
+
+        self.assertTrue(local.routing_meta["openai_preflight_measurement"]["filtered"])
+        self.assertTrue(local.routing_meta["openai_local_measurement"]["filtered"])
+        self.assertEqual(local.routing_meta["openai_local_feature_unit"]["text_bucket"], "lt_2k_chars")
+        self.assertEqual(local.routing_meta["openai_local_feature_unit"]["input_token_bucket"], "lt_1k_tokens")
+        self.assertNotIn("terminal_log_features", local.routing_meta["openai_local_feature_unit"])
+        self.assertNotIn("prompt_difficulty_features", local.routing_meta["openai_local_feature_unit"])
+        self.assertFalse(local.routing_meta["openai_preflight_pattern_features"]["present"])
+        rendered = json.dumps(local.routing_meta, sort_keys=True)
+        self.assertNotIn(raw_secret, rendered)
+        self.assertNotIn("secret-app", rendered)
+        self.assertEqual(managed_egress_violations(local.routing_meta["openai_local_feature_unit"]), [])
+
+    def test_pipeline_managed_action_stage_passes_action_executor_to_applier(self):
+        body = {"model": "gpt-5-codex", "input": "summarize this"}
+        parsed = openai_pipeline.parse_openai_request_body(body, ["gpt-5-codex"])
+        preflight = openai_pipeline.extract_openai_preflight_features(parsed, path="/v1/responses")
+        seen = {}
+
+        class FakeExecutor:
+            provider = "openai"
+
+        fake_executor = FakeExecutor()
+
+        def fake_applier(*, body, routing_meta, decision, executor):
+            seen["executor"] = executor
+            seen["model"] = body["model"]
+            return {
+                "status": "held",
+                "enabled": True,
+                "apply_reason": "test-applier",
+                "action_executor": {"provider": executor.provider},
+            }
+
+        local = openai_pipeline.execute_openai_local_policy(
+            raw_body=body,
+            path="/v1/responses",
+            requested_model=parsed.requested_model,
+            category=parsed.category,
+            stream=parsed.stream,
+            session_id="test-session",
+            preflight=preflight,
+            policy_decision={"status": "selected", "selected_for_local_application": True},
+            store_obj=None,
+            applier=fake_applier,
+            action_executor=fake_executor,
+        )
+
+        self.assertIs(seen["executor"], fake_executor)
+        self.assertEqual(seen["model"], local.provider_body["model"])
+        self.assertEqual(local.recommendation_meta["action_executor"]["provider"], "openai")
+
     def test_pipeline_outcome_serialization_is_feature_only_and_guarded(self):
         summary = openai_pipeline.serialize_openai_outcome_summary(
             path="/v1/responses",
