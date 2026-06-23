@@ -20,6 +20,8 @@ MANAGED_FEEDBACK_SCHEMA = "tokenclaw.anthropic_thinking_compaction_outcome_feedb
 MANAGED_FEEDBACK_SOURCE_SURFACE = "anthropic_thinking_compaction_outcome"
 MANAGED_FEEDBACK_EVENT_TYPE = "crunch_outcome_rollup"
 SERVER_OUTCOME_FIELDS_SCHEMA = "tokenclaw.anthropic_thinking_compaction_server_outcome_fields.v1"
+CONTINUATION_QUALITY_SCHEMA = "tokenclaw.thinking_tail_continuation_quality.v1"
+CONTINUATION_WINDOW_MINUTES = 30
 
 # The metadata-only outcome fields the managed server asks local thinking-tail
 # clients to supply (tokenclaw_server#330, requested through ``/v1/client-contract``
@@ -239,6 +241,24 @@ def _empty_cohort() -> dict[str, Any]:
     }
 
 
+def _empty_continuation_cohort() -> dict[str, Any]:
+    return {
+        "source_count": 0,
+        "evaluated_count": 0,
+        "missing_next_call_count": 0,
+        "success_continuation_count": 0,
+        "downstream_issue_count": 0,
+        "immediate_error_count": 0,
+        "retry_rows": 0,
+        "retry_attempts": 0,
+        "fallback_count": 0,
+        "tool_continuation_count": 0,
+        "latency_ms_total": 0,
+        "latency_sample_count": 0,
+        "status_counts": Counter(),
+    }
+
+
 def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
     count = _as_int(raw.get("count"))
     latency_samples = _as_int(raw.get("latency_sample_count"))
@@ -287,6 +307,68 @@ def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
         "non_positive_savings_rate": round(_as_int(raw.get("non_positive_savings_count")) / count, 6) if count else 0.0,
         "status_breakdown": _breakdown(raw.get("status_counts") if isinstance(raw.get("status_counts"), Counter) else Counter()),
         "reason_breakdown": _breakdown(raw.get("reason_counts") if isinstance(raw.get("reason_counts"), Counter) else Counter()),
+    }
+
+
+def _finalize_continuation_cohort(raw: dict[str, Any]) -> dict[str, Any]:
+    source_count = _as_int(raw.get("source_count"))
+    evaluated_count = _as_int(raw.get("evaluated_count"))
+    success_count = _as_int(raw.get("success_continuation_count"))
+    issue_count = _as_int(raw.get("downstream_issue_count"))
+    immediate_errors = _as_int(raw.get("immediate_error_count"))
+    retry_rows = _as_int(raw.get("retry_rows"))
+    fallback_count = _as_int(raw.get("fallback_count"))
+    tool_count = _as_int(raw.get("tool_continuation_count"))
+    latency_samples = _as_int(raw.get("latency_sample_count"))
+    return {
+        "source_count": source_count,
+        "evaluated_count": evaluated_count,
+        "missing_next_call_count": _as_int(raw.get("missing_next_call_count")),
+        "evaluation_coverage_rate": round(evaluated_count / source_count, 6) if source_count else 0.0,
+        "success_continuation_count": success_count,
+        "success_continuation_rate": round(success_count / evaluated_count, 6) if evaluated_count else 0.0,
+        "downstream_issue_count": issue_count,
+        "downstream_issue_rate": round(issue_count / evaluated_count, 6) if evaluated_count else 0.0,
+        "immediate_error_count": immediate_errors,
+        "immediate_error_rate": round(immediate_errors / evaluated_count, 6) if evaluated_count else 0.0,
+        "retry_rows": retry_rows,
+        "retry_attempts": _as_int(raw.get("retry_attempts")),
+        "retry_rate": round(retry_rows / evaluated_count, 6) if evaluated_count else 0.0,
+        "fallback_count": fallback_count,
+        "fallback_rate": round(fallback_count / evaluated_count, 6) if evaluated_count else 0.0,
+        "tool_continuation_count": tool_count,
+        "tool_continuation_rate": round(tool_count / evaluated_count, 6) if evaluated_count else 0.0,
+        "latency_avg_ms": round(_as_int(raw.get("latency_ms_total")) / latency_samples, 2) if latency_samples else None,
+        "status_breakdown": _breakdown(raw.get("status_counts") if isinstance(raw.get("status_counts"), Counter) else Counter()),
+    }
+
+
+def _continuation_deltas(applied: dict[str, Any], holdout: dict[str, Any]) -> dict[str, Any]:
+    applied_latency = applied.get("latency_avg_ms")
+    holdout_latency = holdout.get("latency_avg_ms")
+    latency_delta = None
+    if applied_latency is not None and holdout_latency is not None:
+        latency_delta = round(_as_float(applied_latency) - _as_float(holdout_latency), 2)
+    return {
+        "success_continuation_rate_delta": round(
+            _as_float(applied.get("success_continuation_rate")) - _as_float(holdout.get("success_continuation_rate")),
+            6,
+        ),
+        "downstream_issue_rate_delta": round(
+            _as_float(applied.get("downstream_issue_rate")) - _as_float(holdout.get("downstream_issue_rate")),
+            6,
+        ),
+        "immediate_error_rate_delta": round(
+            _as_float(applied.get("immediate_error_rate")) - _as_float(holdout.get("immediate_error_rate")),
+            6,
+        ),
+        "retry_rate_delta": round(_as_float(applied.get("retry_rate")) - _as_float(holdout.get("retry_rate")), 6),
+        "fallback_rate_delta": round(_as_float(applied.get("fallback_rate")) - _as_float(holdout.get("fallback_rate")), 6),
+        "tool_continuation_rate_delta": round(
+            _as_float(applied.get("tool_continuation_rate")) - _as_float(holdout.get("tool_continuation_rate")),
+            6,
+        ),
+        "latency_avg_ms_delta": latency_delta,
     }
 
 
@@ -355,6 +437,143 @@ def _new_group(parts: dict[str, Any]) -> dict[str, Any]:
         "affected_sessions": set(),
         "session_costs": {},
         "session_net_savings": {},
+        "continuation": {
+            "applied": _empty_continuation_cohort(),
+            "holdout": _empty_continuation_cohort(),
+            "skipped": _empty_continuation_cohort(),
+            "safety_stop": _empty_continuation_cohort(),
+        },
+    }
+
+
+def _sort_key(row: dict[str, Any]) -> tuple[datetime, str]:
+    parsed = _parse_time(row.get("created_at"))
+    if parsed is None:
+        parsed = datetime.min.replace(tzinfo=timezone.utc)
+    return parsed, str(row.get("id") or "")
+
+
+def _session_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    by_session: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        session = row.get("session_id")
+        if not session:
+            continue
+        by_session.setdefault(str(session), []).append(row)
+    for session_rows in by_session.values():
+        session_rows.sort(key=_sort_key)
+    return by_session
+
+
+def _next_session_row(
+    row: dict[str, Any],
+    by_session: dict[str, list[dict[str, Any]]],
+    *,
+    max_minutes: int = CONTINUATION_WINDOW_MINUTES,
+) -> dict[str, Any] | None:
+    session = row.get("session_id")
+    if not session:
+        return None
+    current_at = _parse_time(row.get("created_at"))
+    if current_at is None:
+        return None
+    max_age_seconds = max(60, int(max_minutes) * 60)
+    current_id = str(row.get("id") or "")
+    for candidate in by_session.get(str(session), []):
+        if str(candidate.get("id") or "") == current_id:
+            continue
+        candidate_at = _parse_time(candidate.get("created_at"))
+        if candidate_at is None or candidate_at <= current_at:
+            continue
+        if (candidate_at - current_at).total_seconds() > max_age_seconds:
+            return None
+        return candidate
+    return None
+
+
+def _row_category_and_phase(row: dict[str, Any]) -> tuple[str, str]:
+    routing = _json_obj(row.get("routing_json"))
+    category = public_label(row.get("category") or routing.get("category") or "unknown", "unknown")
+    phase = public_label(routing.get("workflow_phase") or routing.get("phase") or category or "unknown", "unknown")
+    return category, phase
+
+
+def _is_tool_continuation(row: dict[str, Any]) -> bool:
+    category, phase = _row_category_and_phase(row)
+    normalized = {category.lower().replace("_", "-"), phase.lower().replace("_", "-")}
+    return bool(normalized & {"tool-result", "tool-execution"})
+
+
+def _row_fallback_observed(row: dict[str, Any]) -> bool:
+    def runtime_fallback(value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if lowered == "managed_recommendation":
+                    continue
+                if lowered in {"fallback", "fallback_observed", "fallback_used", "rate_limit_fallback"}:
+                    if isinstance(item, bool) and item:
+                        return True
+                    if lowered != "fallback" and bool(item):
+                        return True
+                if lowered in {"fallback_count", "fallbacks"} and _as_int(item) > 0:
+                    return True
+                if lowered in {"fallback_reason", "fallback_model", "fallback_from_model"} and item:
+                    return True
+                if runtime_fallback(item):
+                    return True
+        elif isinstance(value, list):
+            return any(runtime_fallback(item) for item in value)
+        return False
+
+    return any(runtime_fallback(_json_obj(row.get(column))) for column in ("routing_json", "crunch_json", "cache_json"))
+
+
+def _add_continuation_row(raw: dict[str, Any], next_row: dict[str, Any] | None) -> None:
+    raw["source_count"] += 1
+    if next_row is None:
+        raw["missing_next_call_count"] += 1
+        return
+
+    raw["evaluated_count"] += 1
+    status_code = _as_int(next_row.get("status_code"), -1)
+    retry_count = _as_int(next_row.get("retry_count"))
+    fallback = _row_fallback_observed(next_row)
+    errored = status_code >= 400 if status_code >= 0 else False
+    issue = errored or retry_count > 0 or fallback
+    latency_ms = _as_int(next_row.get("latency_ms"), -1)
+
+    raw["status_counts"][_status_bucket(status_code)] += 1
+    raw["immediate_error_count"] += int(errored)
+    raw["retry_rows"] += int(retry_count > 0)
+    raw["retry_attempts"] += retry_count
+    raw["fallback_count"] += int(fallback)
+    raw["downstream_issue_count"] += int(issue)
+    raw["success_continuation_count"] += int(not issue)
+    raw["tool_continuation_count"] += int(_is_tool_continuation(next_row))
+    if latency_ms >= 0:
+        raw["latency_ms_total"] += latency_ms
+        raw["latency_sample_count"] += 1
+
+
+def _finalize_continuation_quality(group: dict[str, Any]) -> dict[str, Any]:
+    cohorts = {
+        name: _finalize_continuation_cohort(raw)
+        for name, raw in (group.get("continuation") or {}).items()
+        if isinstance(raw, dict)
+    }
+    for name in ("applied", "holdout", "skipped", "safety_stop"):
+        cohorts.setdefault(name, _finalize_continuation_cohort(_empty_continuation_cohort()))
+    return {
+        "schema": CONTINUATION_QUALITY_SCHEMA,
+        "window": {
+            "same_session_scoped": True,
+            "next_call_only": True,
+            "max_minutes": CONTINUATION_WINDOW_MINUTES,
+        },
+        "cohorts": cohorts,
+        "applied_minus_holdout": _continuation_deltas(cohorts["applied"], cohorts["holdout"]),
+        "privacy": _privacy(),
     }
 
 
@@ -585,6 +804,7 @@ def _finalize(group: dict[str, Any], thresholds: dict[str, Any]) -> dict[str, An
             "session_ids_included": False,
             "raw_session_ids_included": False,
         },
+        "continuation_quality": _finalize_continuation_quality(group),
         "privacy": _privacy(),
     }
     candidate["budget_governor_feedback"] = _budget_feedback(candidate, thresholds)
@@ -827,6 +1047,12 @@ def _crunch_outcome(candidate: dict[str, Any]) -> dict[str, Any]:
             "cost_avg_usd_delta": round(_as_float(deltas.get("cost_avg_usd_delta")), 8),
             "thinking_tokens_avg_delta": round(_as_float(deltas.get("thinking_tokens_avg_delta")), 2),
         },
+        "continuation_quality": candidate.get("continuation_quality") or {
+            "schema": CONTINUATION_QUALITY_SCHEMA,
+            "cohorts": {},
+            "applied_minus_holdout": {},
+            "privacy": _privacy(),
+        },
     }
 
 
@@ -996,8 +1222,10 @@ def build_anthropic_thinking_compaction_impact_report(
     reason_counts: Counter[str] = Counter()
     observed = 0
     skipped_blockers: Counter[str] = Counter()
+    compaction_events: list[tuple[dict[str, Any], dict[str, Any], str]] = []
 
     sampled_rows = _rows(store_obj, limit=lookback_limit, since=since)
+    rows_by_session = _session_rows(sampled_rows)
     for row in sampled_rows:
         meta = _row_meta(row)
         if not meta:
@@ -1009,12 +1237,18 @@ def build_anthropic_thinking_compaction_impact_report(
         group = groups.setdefault(key, _new_group(parts))
         cohort = _cohort(meta)
         _add_row(group, row, meta, cohort)
+        compaction_events.append((group, row, cohort))
         cohort_counts[cohort] += 1
         status_counts[_status_bucket(row.get("status_code"))] += 1
         reason = _reason(meta.get("reason"), "unknown")
         reason_counts[reason] += 1
         if cohort in {"skipped", "safety_stop"}:
             skipped_blockers[reason] += 1
+
+    for group, row, cohort in compaction_events:
+        continuation = group.get("continuation") if isinstance(group.get("continuation"), dict) else {}
+        raw = continuation.setdefault(cohort, _empty_continuation_cohort())
+        _add_continuation_row(raw, _next_session_row(row, rows_by_session))
 
     candidates = [_finalize(group, thresholds) for group in groups.values()]
     candidates.sort(

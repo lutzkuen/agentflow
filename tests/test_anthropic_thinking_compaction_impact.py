@@ -95,6 +95,7 @@ def _log_call(
     retry_count: int = 0,
     thinking_tokens: int = 100,
     fallback: bool = False,
+    session_id: str | None = None,
 ) -> None:
     store.log_call(
         id=call_id,
@@ -146,12 +147,64 @@ def _log_call(
             }
         ),
         response_json=stable_json({"text": f"raw response {RAW_SECRET}"}),
-        session_id=f"raw-session-id-{RAW_SECRET}",
+        session_id=session_id or f"raw-session-id-{RAW_SECRET}",
         category="tool-result",
         cache_creation_input_tokens=100,
         cache_read_input_tokens=3000,
         retry_count=retry_count,
         thinking_output_tokens=thinking_tokens,
+        provider="anthropic",
+        source_surface="anthropic_messages",
+        endpoint="messages",
+        requested_model_family="sonnet",
+        routed_model_family="sonnet",
+    )
+
+
+def _log_continuation_call(
+    store: Store,
+    call_id: str,
+    *,
+    created_at: str,
+    session_id: str,
+    status_code: int = 200,
+    retry_count: int = 0,
+    fallback: bool = False,
+    category: str = "tool-result",
+    workflow_phase: str = "tool-execution",
+) -> None:
+    routing = {"category": category, "workflow_phase": workflow_phase}
+    if fallback:
+        routing["fallback"] = True
+        routing["fallback_reason"] = "rate-limit"
+    store.log_call(
+        id=call_id,
+        created_at=created_at,
+        path="/v1/messages",
+        requested_model="claude-sonnet-4-6",
+        routed_model="claude-sonnet-4-6",
+        stream=1,
+        cache_hit=0,
+        status_code=status_code,
+        latency_ms=750,
+        input_tokens_est=5000,
+        output_tokens_est=200,
+        actual_input_tokens=5000,
+        actual_output_tokens=200,
+        cost_est_usd=0.015,
+        cost_baseline_usd=0.015,
+        crunch_json=stable_json({"status": "skipped", "reason": "not-compaction"}),
+        routing_json=stable_json(routing),
+        cache_json=stable_json({"status": "skipped", "reason": "streaming", "cache_key": f"raw-cache-key-{RAW_SECRET}"}),
+        error=f"continuation failure {RAW_SECRET}" if status_code >= 400 else None,
+        request_json=stable_json({"messages": [{"content": f"raw continuation prompt {RAW_SECRET}"}]}),
+        response_json=stable_json({"text": f"raw continuation response {RAW_SECRET}"}),
+        session_id=session_id,
+        category=category,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
+        retry_count=retry_count,
+        thinking_output_tokens=0,
         provider="anthropic",
         source_surface="anthropic_messages",
         endpoint="messages",
@@ -400,6 +453,90 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
         self.assertGreater(payload["summary"]["observed_saved_chars"], 0)
         self.assertGreater(payload["summary"]["projected_saved_usd"], 0)
 
+    def test_report_summarizes_downstream_continuation_quality_without_content(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
+            try:
+                applied_session = f"raw-applied-session-{RAW_SECRET}"
+                holdout_session = f"raw-holdout-session-{RAW_SECRET}"
+                _log_call(
+                    store,
+                    "thinking-continuation-applied",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=1000,
+                    planned_tokens=1000,
+                    session_id=applied_session,
+                )
+                _log_continuation_call(
+                    store,
+                    "thinking-continuation-applied-next",
+                    created_at="2026-06-13T00:01:00+00:00",
+                    session_id=applied_session,
+                    status_code=200,
+                    category="tool-result",
+                    workflow_phase="tool-execution",
+                )
+                _log_call(
+                    store,
+                    "thinking-continuation-holdout",
+                    created_at="2026-06-13T00:02:00+00:00",
+                    status="holdout",
+                    reason="canary_holdout",
+                    cohort="canary_holdout",
+                    planned_tokens=1100,
+                    session_id=holdout_session,
+                )
+                _log_continuation_call(
+                    store,
+                    "thinking-continuation-holdout-next",
+                    created_at="2026-06-13T00:03:00+00:00",
+                    session_id=holdout_session,
+                    status_code=500,
+                    retry_count=2,
+                    fallback=True,
+                    category="chat",
+                    workflow_phase="chat",
+                )
+                payload = build_anthropic_thinking_compaction_impact_report(store, limit=20)
+            finally:
+                store.conn.close()
+
+        quality = payload["candidates"][0]["continuation_quality"]
+        self.assertEqual(quality["schema"], "tokenclaw.thinking_tail_continuation_quality.v1")
+        self.assertTrue(quality["window"]["same_session_scoped"])
+        applied = quality["cohorts"]["applied"]
+        holdout = quality["cohorts"]["holdout"]
+        self.assertEqual(applied["source_count"], 1)
+        self.assertEqual(applied["evaluated_count"], 1)
+        self.assertEqual(applied["success_continuation_count"], 1)
+        self.assertEqual(applied["tool_continuation_count"], 1)
+        self.assertEqual(applied["downstream_issue_count"], 0)
+        self.assertEqual(holdout["source_count"], 1)
+        self.assertEqual(holdout["evaluated_count"], 1)
+        self.assertEqual(holdout["success_continuation_count"], 0)
+        self.assertEqual(holdout["downstream_issue_count"], 1)
+        self.assertEqual(holdout["immediate_error_count"], 1)
+        self.assertEqual(holdout["retry_attempts"], 2)
+        self.assertEqual(holdout["fallback_count"], 1)
+        self.assertEqual(quality["applied_minus_holdout"]["success_continuation_rate_delta"], 1.0)
+        self.assertEqual(quality["applied_minus_holdout"]["downstream_issue_rate_delta"], -1.0)
+        self.assertEqual(quality["applied_minus_holdout"]["retry_rate_delta"], -1.0)
+        self.assertEqual(quality["applied_minus_holdout"]["fallback_rate_delta"], -1.0)
+
+        rendered = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            RAW_SECRET,
+            "raw-applied-session",
+            "raw-holdout-session",
+            "raw continuation prompt",
+            "raw continuation response",
+            "raw-cache-key",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_managed_feedback_event_contains_crunch_outcome_rollups_only(self) -> None:
         with TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
@@ -547,6 +684,76 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
         self.assertEqual(managed_egress_violations(event), [])
         rendered = json.dumps(event, sort_keys=True)
         for forbidden in (RAW_SECRET, "private thinking", "raw-tool-id", "raw-session-id", "raw-cache-key", "/private/"):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_managed_feedback_includes_continuation_quality_summary(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
+            try:
+                applied_session = f"raw-managed-applied-session-{RAW_SECRET}"
+                holdout_session = f"raw-managed-holdout-session-{RAW_SECRET}"
+                _log_call(
+                    store,
+                    "thinking-managed-continuation-applied",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=1000,
+                    planned_tokens=1000,
+                    session_id=applied_session,
+                )
+                _log_continuation_call(
+                    store,
+                    "thinking-managed-continuation-applied-next",
+                    created_at="2026-06-13T00:01:00+00:00",
+                    session_id=applied_session,
+                )
+                _log_call(
+                    store,
+                    "thinking-managed-continuation-holdout",
+                    created_at="2026-06-13T00:02:00+00:00",
+                    status="holdout",
+                    reason="canary_holdout",
+                    cohort="canary_holdout",
+                    planned_tokens=900,
+                    session_id=holdout_session,
+                )
+                _log_continuation_call(
+                    store,
+                    "thinking-managed-continuation-holdout-next",
+                    created_at="2026-06-13T00:03:00+00:00",
+                    session_id=holdout_session,
+                    status_code=429,
+                    retry_count=1,
+                    fallback=True,
+                    category="chat",
+                    workflow_phase="chat",
+                )
+                report = build_anthropic_thinking_compaction_impact_report(store, limit=20)
+            finally:
+                store.conn.close()
+
+        event = build_anthropic_thinking_compaction_managed_feedback(report, now="2026-06-13T00:04:00+00:00")
+        self.assertIsNotNone(event)
+        assert event is not None
+        outcome = event["crunch_outcomes"][0]
+        quality = outcome["continuation_quality"]
+        self.assertEqual(quality["schema"], "tokenclaw.thinking_tail_continuation_quality.v1")
+        self.assertEqual(quality["cohorts"]["applied"]["success_continuation_count"], 1)
+        self.assertEqual(quality["cohorts"]["holdout"]["downstream_issue_count"], 1)
+        self.assertEqual(quality["cohorts"]["holdout"]["fallback_count"], 1)
+        self.assertEqual(quality["applied_minus_holdout"]["success_continuation_rate_delta"], 1.0)
+        self.assertEqual(managed_egress_violations(event), [])
+        rendered = json.dumps(event, sort_keys=True)
+        for forbidden in (
+            RAW_SECRET,
+            "raw-managed-applied-session",
+            "raw-managed-holdout-session",
+            "raw continuation prompt",
+            "raw continuation response",
+            "raw-cache-key",
+        ):
             self.assertNotIn(forbidden, rendered)
 
     def test_managed_feedback_reports_rollback_and_fallback_outcome_fields(self) -> None:
