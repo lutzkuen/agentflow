@@ -623,6 +623,15 @@ def _cache_key_variants_for_models(
 _ANTHROPIC_THINKING_BLOCK_TYPES = {"thinking", "redacted_thinking"}
 
 
+def _cache_ttl_seconds(cache_meta: dict[str, Any]) -> int:
+    pattern = cache_meta.get("pattern_rule") if isinstance(cache_meta.get("pattern_rule"), dict) else {}
+    raw = pattern.get("ttl_seconds") or cache_meta.get("ttl_seconds") or 3600
+    try:
+        return max(60, int(raw))
+    except (TypeError, ValueError):
+        return 3600
+
+
 def _anthropic_message_blocks(message: Any) -> list[dict[str, Any]]:
     if not isinstance(message, dict):
         return []
@@ -1721,6 +1730,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 len(stable_json(store_body)),
                                 stream_payload,
                                 file_deps=file_deps,
+                                ttl_seconds=_cache_ttl_seconds(cache_meta),
                             )
                             stored_stream_cache_entries += 1
                         cache_meta["stream_cache_store"] = {
@@ -2198,6 +2208,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 len(stable_json(crunched)),
                 response_body,
                 file_deps=file_deps,
+                ttl_seconds=_cache_ttl_seconds(cache_meta),
             )
         if can_semantic_cache and emb is not None and r.status_code < 400 and response_body is not None:
             context.store.set_semantic_cache(key, str(crunched.get("model")), emb, response_body, len(stable_json(crunched)))

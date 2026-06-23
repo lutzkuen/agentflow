@@ -33,6 +33,7 @@ class CacheDecisionMetaTest(unittest.TestCase):
         "TOKENCLAW_CACHE_WATCH_ROOT",
         "TOKENCLAW_CACHE_WATCH_MAX_PATHS",
         "TOKENCLAW_CACHE_CAPTURE_CANDIDATES",
+        "TOKENCLAW_CACHE_TTL_SECONDS",
         "TOKENCLAW_PATTERN_CANARY_SAFETY_STOP",
         "TOKENCLAW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
         "TOKENCLAW_POLICY_EVENTS",
@@ -1012,6 +1013,58 @@ pattern_rules:
                 cached, reason = store.get_cache_with_reason("cache-key")
                 self.assertIsNone(cached)
                 self.assertEqual(reason, "dependency-deleted")
+            finally:
+                store.conn.close()
+
+    def test_exact_cache_entry_without_dependency_evidence_expires_by_ttl(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = Store(str(tmp_path / "cache.sqlite3"))
+            try:
+                store.set_cache("cache-key", "model", 10, {"content": "old"}, file_deps=[], ttl_seconds=60)
+                row = store.conn.execute(
+                    "select expires_at from cache where cache_key = ?",
+                    ("cache-key",),
+                ).fetchone()
+                self.assertIsNotNone(row["expires_at"])
+
+                store.conn.execute(
+                    "update cache set expires_at = ? where cache_key = ?",
+                    ("2000-01-01T00:00:00+00:00", "cache-key"),
+                )
+                store.conn.commit()
+
+                cached, reason = store.get_cache_with_reason("cache-key")
+                self.assertIsNone(cached)
+                self.assertEqual(reason, "ttl-expired")
+                cache_row = store.conn.execute(
+                    "select 1 from cache where cache_key = ?",
+                    ("cache-key",),
+                ).fetchone()
+                self.assertIsNone(cache_row)
+            finally:
+                store.conn.close()
+
+    def test_exact_cache_entry_with_dependency_evidence_does_not_get_ttl_fallback(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            watched = tmp_path / "src" / "example.py"
+            watched.parent.mkdir()
+            watched.write_text("print('stable')\n", encoding="utf-8")
+            body = {"messages": [{"role": "user", "content": "Read src/example.py"}]}
+            os.chdir(tmp_path)
+            deps = cache_module.cache_file_dependency_snapshots(body)
+            store = Store(str(tmp_path / "cache.sqlite3"))
+            try:
+                store.set_cache("cache-key", "model", 10, {"content": "stable"}, file_deps=deps, ttl_seconds=60)
+                row = store.conn.execute(
+                    "select expires_at from cache where cache_key = ?",
+                    ("cache-key",),
+                ).fetchone()
+                self.assertIsNone(row["expires_at"])
+                cached, reason = store.get_cache_with_reason("cache-key")
+                self.assertEqual(cached, {"content": "stable"})
+                self.assertIsNone(reason)
             finally:
                 store.conn.close()
 

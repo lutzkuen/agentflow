@@ -319,6 +319,15 @@ def _openai_cache_replay_store_allowed(cache_meta: dict[str, Any], *, has_tool_b
     return True, "store-compatible"
 
 
+def _cache_ttl_seconds(cache_meta: dict[str, Any]) -> int:
+    pattern = cache_meta.get("pattern_rule") if isinstance(cache_meta.get("pattern_rule"), dict) else {}
+    raw = pattern.get("ttl_seconds") or cache_meta.get("ttl_seconds") or 3600
+    try:
+        return max(60, int(raw))
+    except (TypeError, ValueError):
+        return 3600
+
+
 async def _fetch_openai_old_context_summary(
     context: ProviderContext,
     summary_request: dict[str, Any],
@@ -1560,6 +1569,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     len(stable_json(crunched)),
                     response_body,
                     file_deps=file_deps,
+                    ttl_seconds=_cache_ttl_seconds(cache_meta),
                 )
                 if replay_pattern_rule is not None:
                     cache_meta["cache_replay_store"] = {

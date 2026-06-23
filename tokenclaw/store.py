@@ -17,10 +17,27 @@ from tokenclaw.paths import default_db_path
 DEFAULT_SQLITE_RETENTION_DAYS = 7
 RETENTION_DISABLED_VALUES = {"", "0", "false", "no", "off", "disabled", "none"}
 PENDING_MANAGED_FEEDBACK_STATUSES = {"queued", "retryable-error", "sending"}
+DEFAULT_CACHE_TTL_SECONDS = max(60, env_int("TOKENCLAW_CACHE_TTL_SECONDS", 3600))
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _utc_after(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=max(0, int(seconds)))).isoformat()
+
+
+def _parse_utc_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def stable_json(obj: Any) -> str:
@@ -415,6 +432,13 @@ def _cache_file_dependency_invalidation_reason(audit: dict[str, Any]) -> str | N
     return None
 
 
+def _cache_ttl_expired(row: Any) -> bool:
+    expires_at = _parse_utc_datetime(row["expires_at"] if "expires_at" in row.keys() else None)
+    if expires_at is None:
+        return False
+    return expires_at <= datetime.now(timezone.utc)
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -626,12 +650,14 @@ class SQLiteStore:
             create table if not exists cache (
               cache_key text primary key,
               created_at text not null,
+              expires_at text,
               model text not null,
               response_json text not null,
               request_chars integer,
               response_chars integer
             )
             """)
+            self._ensure_column("cache", "expires_at", "text")
             cur.execute("""
             create table if not exists semantic_cache (
               cache_key text primary key,
@@ -1025,9 +1051,12 @@ class SQLiteStore:
             if invalidation_reason:
                 self.delete_cache(key)
                 return None, invalidation_reason
-            row = self.conn.execute("select response_json from cache where cache_key = ?", (key,)).fetchone()
+            row = self.conn.execute("select response_json, expires_at from cache where cache_key = ?", (key,)).fetchone()
             if not row:
                 return None, None
+            if _cache_ttl_expired(row):
+                self.delete_cache(key)
+                return None, "ttl-expired"
             return json.loads(row["response_json"]), None
 
     def get_cache(self, key: str) -> Optional[dict[str, Any]]:
@@ -1041,15 +1070,19 @@ class SQLiteStore:
         request_chars: int,
         response: dict[str, Any],
         file_deps: list[dict[str, Any]] | None = None,
+        ttl_seconds: int | None = None,
     ) -> None:
         with self._lock:
             response_json = stable_json(response)
+            created_at = utc_now()
+            dependency_rows = list(file_deps or [])
+            expires_at = None if dependency_rows else _utc_after(ttl_seconds or DEFAULT_CACHE_TTL_SECONDS)
             self.conn.execute(
-                "insert or replace into cache(cache_key, created_at, model, response_json, request_chars, response_chars) values (?, ?, ?, ?, ?, ?)",
-                (key, utc_now(), model, response_json, request_chars, len(response_json)),
+                "insert or replace into cache(cache_key, created_at, expires_at, model, response_json, request_chars, response_chars) values (?, ?, ?, ?, ?, ?, ?)",
+                (key, created_at, expires_at, model, response_json, request_chars, len(response_json)),
             )
             self.conn.execute("delete from cache_file_deps where cache_key = ?", (key,))
-            for dep in file_deps or []:
+            for dep in dependency_rows:
                 path = dep.get("path")
                 if not path:
                     continue
@@ -2262,6 +2295,7 @@ class PostgresStore(SQLiteStore):
             create table if not exists cache (
               cache_key text primary key,
               created_at timestamptz not null,
+              expires_at timestamptz,
               model text not null,
               response_json text not null,
               request_chars integer,
@@ -2632,6 +2666,7 @@ class PostgresStore(SQLiteStore):
             create index if not exists idx_managed_activation_preview_outcomes_family
             on managed_activation_preview_outcomes(local_action_family, classification, updated_at)
         """)
+        self.conn.execute("alter table cache add column if not exists expires_at timestamptz")
 
     def set_cache(
         self,
@@ -2640,23 +2675,28 @@ class PostgresStore(SQLiteStore):
         request_chars: int,
         response: dict[str, Any],
         file_deps: list[dict[str, Any]] | None = None,
+        ttl_seconds: int | None = None,
     ) -> None:
         response_json = stable_json(response)
+        created_at = utc_now()
+        dependency_rows = list(file_deps or [])
+        expires_at = None if dependency_rows else _utc_after(ttl_seconds or DEFAULT_CACHE_TTL_SECONDS)
         self.conn.execute(
             """
-            insert into cache(cache_key, created_at, model, response_json, request_chars, response_chars)
-            values (?, ?, ?, ?, ?, ?)
+            insert into cache(cache_key, created_at, expires_at, model, response_json, request_chars, response_chars)
+            values (?, ?, ?, ?, ?, ?, ?)
             on conflict (cache_key) do update set
               created_at = excluded.created_at,
+              expires_at = excluded.expires_at,
               model = excluded.model,
               response_json = excluded.response_json,
               request_chars = excluded.request_chars,
               response_chars = excluded.response_chars
             """,
-            (key, utc_now(), model, response_json, request_chars, len(response_json)),
+            (key, created_at, expires_at, model, response_json, request_chars, len(response_json)),
         )
         self.conn.execute("delete from cache_file_deps where cache_key = ?", (key,))
-        for dep in file_deps or []:
+        for dep in dependency_rows:
             path = dep.get("path")
             if not path:
                 continue
@@ -2691,9 +2731,12 @@ class PostgresStore(SQLiteStore):
         if invalidation_reason:
             self.delete_cache(key)
             return None, invalidation_reason
-        row = self.conn.execute("select response_json from cache where cache_key = ?", (key,)).fetchone()
+        row = self.conn.execute("select response_json, expires_at from cache where cache_key = ?", (key,)).fetchone()
         if not row:
             return None, None
+        if _cache_ttl_expired(row):
+            self.delete_cache(key)
+            return None, "ttl-expired"
         return json.loads(row["response_json"]), None
 
     def get_cache(self, key: str) -> Optional[dict[str, Any]]:

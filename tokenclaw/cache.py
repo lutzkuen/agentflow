@@ -43,6 +43,7 @@ def _default_cache_policy() -> dict[str, Any]:
             "enabled": True,
             # Avoid caching tool-using agent turns by default. Exact cache can be dangerous when tools reflect filesystem state.
             "cache_tool_calls": False,
+            "ttl_seconds": 3600,
         },
         "semantic_cache": {
             "enabled": False,
@@ -107,6 +108,8 @@ def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> di
             exact.get("cache_tool_calls"),
             policy["exact_cache"]["cache_tool_calls"],
         )
+        if exact.get("ttl_seconds") is not None:
+            policy["exact_cache"]["ttl_seconds"] = max(60, int(exact["ttl_seconds"]))
     semantic = data.get("semantic_cache") or {}
     if isinstance(semantic, dict):
         policy["semantic_cache"]["enabled"] = _as_bool(
@@ -450,6 +453,10 @@ def _load_cache_policy() -> tuple[dict[str, Any], str, str]:
     if loaded_policy is None:
         policy["exact_cache"]["enabled"] = env("TOKENCLAW_CACHE", "1") != "0"
         policy["exact_cache"]["cache_tool_calls"] = env("TOKENCLAW_CACHE_TOOL_CALLS", "0") == "1"
+        policy["exact_cache"]["ttl_seconds"] = max(
+            60,
+            int(env("TOKENCLAW_CACHE_TTL_SECONDS", str(policy["exact_cache"]["ttl_seconds"]))),
+        )
         policy["semantic_cache"]["enabled"] = env("TOKENCLAW_SEMANTIC_CACHE", "0") == "1"
         policy["semantic_cache"]["threshold"] = float(
             env("TOKENCLAW_SEMANTIC_THRESHOLD", str(policy["semantic_cache"]["threshold"]))
@@ -478,6 +485,7 @@ CACHE_RULES_LOADED_AT = utc_now()
 CACHE_RULES_LOADED_FILE = policy_file_snapshot(CACHE_RULES_PATH)
 CACHE_ENABLED = bool(CACHE_POLICY["exact_cache"]["enabled"])
 CACHE_TOOL_CALLS = bool(CACHE_POLICY["exact_cache"]["cache_tool_calls"])
+CACHE_TTL_SECONDS = int(CACHE_POLICY["exact_cache"].get("ttl_seconds") or 3600)
 SEMANTIC_CACHE_ENABLED = bool(CACHE_POLICY["semantic_cache"]["enabled"])
 SEMANTIC_CACHE_THRESHOLD = float(CACHE_POLICY["semantic_cache"]["threshold"])
 CACHE_FILE_WATCH_ENABLED = bool(CACHE_POLICY["file_watch"]["enabled"])
@@ -511,6 +519,8 @@ def cache_decision_meta(
         "exact_enabled": bool(exact),
         "semantic_enabled": bool(semantic),
         "tool_cache_enabled": bool(tool_cache),
+        "ttl_seconds": CACHE_TTL_SECONDS,
+        "ttl_fallback_when_dependency_evidence_missing": True,
         "semantic_threshold": SEMANTIC_CACHE_THRESHOLD,
         "file_watch_enabled": CACHE_FILE_WATCH_ENABLED,
     }
@@ -860,6 +870,7 @@ def _cache_pattern_rule_match(
                 "safe_invalidation": bool(action.get("safe_invalidation")),
                 "scope": str(action.get("scope") or "session"),
                 "min_call_count": max(1, _as_int(action.get("min_call_count"), 1)),
+                "ttl_seconds": max(60, _as_int(action.get("ttl_seconds"), CACHE_TTL_SECONDS)),
                 "rollout": pattern_rollout_public_meta(rule.get("rollout")),
                 "canary": canary if canary.get("enabled") else None,
                 "graduation": rule.get("graduation"),
@@ -891,6 +902,7 @@ def _attach_cache_pattern_meta(
                 "safe_invalidation",
                 "scope",
                 "min_call_count",
+                "ttl_seconds",
                 "rollout",
                 "canary",
                 "graduation",

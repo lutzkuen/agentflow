@@ -528,18 +528,44 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.old_openai_auth_mode = server.OPENAI_AUTH_MODE
         self.old_log_bodies = server.LOG_BODIES
         self.saved_recommendation_enabled = os.environ.get("TOKENCLAW_RECOMMENDATION_ENABLED")
+        self.saved_openai_recommendation_mode = os.environ.get("TOKENCLAW_OPENAI_RECOMMENDATION_MODE")
+        self.saved_openai_recommendation_canary_fraction = os.environ.get("TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION")
         self.saved_policy_decision_enabled = os.environ.get("TOKENCLAW_POLICY_DECISION_ENABLED")
         self.saved_policy_decision_canary_fraction = os.environ.get("TOKENCLAW_POLICY_DECISION_CANARY_FRACTION")
         self.saved_routing_rules = os.environ.get("TOKENCLAW_ROUTING_RULES")
         self.saved_crunch_rules = os.environ.get("TOKENCLAW_CRUNCH_RULES")
+        self.saved_cache_env = {
+            key: os.environ.get(key)
+            for key in (
+                "TOKENCLAW_CACHE",
+                "TOKENCLAW_CACHE_TOOL_CALLS",
+                "TOKENCLAW_SEMANTIC_CACHE",
+                "TOKENCLAW_SEMANTIC_THRESHOLD",
+                "TOKENCLAW_CACHE_RULES",
+                "TOKENCLAW_CACHE_CANARY_POLICY",
+                "TOKENCLAW_CACHE_NAMESPACE",
+                "TOKENCLAW_CACHE_FILE_WATCH",
+                "TOKENCLAW_CACHE_WATCH_ROOT",
+                "TOKENCLAW_CACHE_WATCH_MAX_PATHS",
+                "TOKENCLAW_CACHE_CAPTURE_CANDIDATES",
+                "TOKENCLAW_CACHE_TTL_SECONDS",
+                "TOKENCLAW_PATTERN_CANARY_SAFETY_STOP",
+                "TOKENCLAW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
+            )
+        }
         self.saved_routing_experiments = os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS")
         self.saved_openai_summary_enabled = os.environ.get("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED")
         self.saved_tokenclaw_db = os.environ.get("TOKENCLAW_DB")
         os.environ.pop("TOKENCLAW_RECOMMENDATION_ENABLED", None)
+        os.environ.pop("TOKENCLAW_OPENAI_RECOMMENDATION_MODE", None)
+        os.environ.pop("TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION", None)
         os.environ.pop("TOKENCLAW_POLICY_DECISION_ENABLED", None)
         os.environ.pop("TOKENCLAW_POLICY_DECISION_CANARY_FRACTION", None)
         os.environ.pop("TOKENCLAW_ROUTING_EXPERIMENTS", None)
         os.environ.pop("TOKENCLAW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", None)
+        for key in self.saved_cache_env:
+            os.environ.pop(key, None)
+        importlib.reload(cache_module)
         importlib.reload(routing_experiments_module)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
@@ -565,6 +591,14 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             os.environ.pop("TOKENCLAW_RECOMMENDATION_ENABLED", None)
         else:
             os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = self.saved_recommendation_enabled
+        if self.saved_openai_recommendation_mode is None:
+            os.environ.pop("TOKENCLAW_OPENAI_RECOMMENDATION_MODE", None)
+        else:
+            os.environ["TOKENCLAW_OPENAI_RECOMMENDATION_MODE"] = self.saved_openai_recommendation_mode
+        if self.saved_openai_recommendation_canary_fraction is None:
+            os.environ.pop("TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION", None)
+        else:
+            os.environ["TOKENCLAW_OPENAI_RECOMMENDATION_CANARY_FRACTION"] = self.saved_openai_recommendation_canary_fraction
         if self.saved_policy_decision_enabled is None:
             os.environ.pop("TOKENCLAW_POLICY_DECISION_ENABLED", None)
         else:
@@ -581,6 +615,11 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             os.environ.pop("TOKENCLAW_CRUNCH_RULES", None)
         else:
             os.environ["TOKENCLAW_CRUNCH_RULES"] = self.saved_crunch_rules
+        for key, value in self.saved_cache_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         if self.saved_routing_experiments is None:
             os.environ.pop("TOKENCLAW_ROUTING_EXPERIMENTS", None)
         else:
@@ -594,6 +633,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         else:
             os.environ["TOKENCLAW_DB"] = self.saved_tokenclaw_db
         importlib.reload(router_module)
+        importlib.reload(cache_module)
         importlib.reload(routing_experiments_module)
         os.chdir(self.old_cwd)
         self.cwd_tmp.cleanup()
