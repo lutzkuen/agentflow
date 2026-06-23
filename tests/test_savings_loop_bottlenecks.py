@@ -97,6 +97,262 @@ pattern_rules:
             encoding="utf-8",
         )
 
+    def _log_phase_canary_call(
+        self,
+        store: Store,
+        *,
+        call_id: str,
+        cohort: str,
+        status: str,
+        cost_est_usd: float,
+        cost_baseline_usd: float,
+        status_code: int = 200,
+    ) -> None:
+        routed_model = "claude-haiku-4-5-20251001" if cohort == "canary_applied" else "claude-sonnet-4-5"
+        store.log_call(
+            id=call_id,
+            created_at="2026-06-21T11:45:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-5",
+            routed_model=routed_model,
+            stream=1,
+            cache_hit=0,
+            status_code=status_code,
+            latency_ms=100,
+            input_tokens_est=1000,
+            output_tokens_est=100,
+            actual_input_tokens=1000,
+            actual_output_tokens=100,
+            cost_est_usd=cost_est_usd,
+            cost_baseline_usd=cost_baseline_usd,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=stable_json({
+                "reason": "phase canary selected live route" if cohort == "canary_applied" else "phase canary holdout",
+                "category": "tool-result",
+                "workflow_phase": "tool-execution",
+                "has_tools": True,
+                "text_chars": 12000,
+                "phase_canary": {
+                    "enabled": True,
+                    "policy_id": "routing-canary-policy-secret",
+                    "rule_id": "routing-canary-rule-secret",
+                    "candidate_id": "routing-canary-candidate-secret",
+                    "target_candidate_id": "routing-canary-candidate-secret",
+                    "promotion_action_id": "routing-canary-action-secret",
+                    "status": status,
+                    "cohort": cohort,
+                    "reason": "selected-canary" if cohort == "canary_applied" else "selected-holdout",
+                    "source_surface": "anthropic_messages",
+                    "policy_source": "local-manual",
+                    "target_model": "claude-haiku-4-5-20251001",
+                    "promotion": {
+                        "source_report_schema": "tokenclaw.anthropic_routing_canary_stage.v1",
+                        "projected_savings_usd": 0.02,
+                    },
+                },
+            }),
+            cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+            category="tool-result",
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+            requested_model_family="claude-sonnet",
+            routed_model_family="claude-haiku" if cohort == "canary_applied" else "claude-sonnet",
+        )
+
+    def _log_cache_canary_call(
+        self,
+        store: Store,
+        *,
+        call_id: str,
+        cohort: str,
+        status: str,
+        cache_status: str,
+        cost_est_usd: float,
+        cost_baseline_usd: float,
+    ) -> None:
+        store.log_call(
+            id=call_id,
+            created_at="2026-06-21T11:46:00+00:00",
+            path="/v1/responses",
+            requested_model="gpt-5-mini",
+            routed_model="gpt-5-mini",
+            stream=0,
+            cache_hit=1 if cache_status == "hit" else 0,
+            status_code=200,
+            latency_ms=40,
+            input_tokens_est=800,
+            output_tokens_est=80,
+            actual_input_tokens=800,
+            actual_output_tokens=80,
+            cost_est_usd=cost_est_usd,
+            cost_baseline_usd=cost_baseline_usd,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=stable_json({
+                "enabled": False,
+                "provider": "openai",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "has_tools": False,
+            }),
+            cache_json=stable_json({
+                "status": cache_status,
+                "reason": "canary_holdout" if cohort == "canary_holdout" else "exact-hit",
+                "pattern_rule": {
+                    "rule_id": "cache-canary-rule-secret",
+                    "candidate_id": "cache-canary-candidate-secret",
+                    "policy_source": "local-manual",
+                    "graduation": {
+                        "source_schema": "tokenclaw.request_shape_cache_replayability_dry_run.v1",
+                        "projected_savings_usd": 0.02,
+                    },
+                },
+                "cache_replay_canary": {
+                    "schema": "tokenclaw.cache_replay_canary_decision.v1",
+                    "rule_id": "cache-canary-rule-secret",
+                    "candidate_id": "cache-canary-candidate-secret",
+                    "policy_source": "local-manual",
+                    "status": status,
+                    "reason": "selected-canary" if cohort == "canary_applied" else "canary_holdout",
+                    "canary_cohort": cohort,
+                    "projected_input_savings_usd": 0.02,
+                    "canary": {
+                        "enabled": True,
+                        "selected": cohort == "canary_applied",
+                        "cohort": cohort,
+                        "status": status,
+                    },
+                },
+                "estimated_saved_cost_usd": 0.02,
+            }),
+            category="chat",
+            provider="openai",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+        )
+
+    def test_reconciles_applied_canary_outcomes_and_captured_available_breakdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "tokenclaw.sqlite3"
+            store = Store(str(db))
+            try:
+                self._log_phase_canary_call(
+                    store,
+                    call_id="phase-canary-applied",
+                    cohort="canary_applied",
+                    status="applied",
+                    cost_est_usd=0.004,
+                    cost_baseline_usd=0.010,
+                )
+                self._log_phase_canary_call(
+                    store,
+                    call_id="phase-canary-holdout",
+                    cohort="canary_holdout",
+                    status="holdout",
+                    cost_est_usd=0.010,
+                    cost_baseline_usd=0.010,
+                )
+                self._log_cache_canary_call(
+                    store,
+                    call_id="cache-canary-applied",
+                    cohort="canary_applied",
+                    status="applied",
+                    cache_status="hit",
+                    cost_est_usd=0.0,
+                    cost_baseline_usd=0.03,
+                )
+                self._log_cache_canary_call(
+                    store,
+                    call_id="cache-canary-holdout",
+                    cohort="canary_holdout",
+                    status="holdout",
+                    cache_status="bypassed",
+                    cost_est_usd=0.03,
+                    cost_baseline_usd=0.03,
+                )
+                store.persist_request_shape_rollups(
+                    run_id="blocked-rollups",
+                    generated_at="2026-06-21T11:50:00+00:00",
+                    rows=[
+                        {
+                            "id": "blocked-rollup",
+                            "run_id": "blocked-rollups",
+                            "generated_at": "2026-06-21T11:50:00+00:00",
+                            "window_start": "2026-06-21T10:00:00+00:00",
+                            "window_end": "2026-06-21T11:00:00+00:00",
+                            "rollup_key": "surface:endpoint:tool-result",
+                            "candidate_id": "blocked-candidate-secret",
+                            "source_surface": "anthropic_messages",
+                            "endpoint": "messages",
+                            "provider_family": "anthropic",
+                            "requested_model_family": "sonnet",
+                            "routed_model_family": "sonnet",
+                            "category": "tool-result",
+                            "workflow_phase": "tool-execution",
+                            "stream": 1,
+                            "has_tools": 1,
+                            "text_bucket": "8k_32k_chars",
+                            "token_bucket": "2k_8k_tokens",
+                            "cache_status": "skipped",
+                            "routing_status": "kept",
+                            "candidate_families_json": stable_json(["routing"]),
+                            "blocker_codes_json": stable_json(["routing-rule-required"]),
+                            "row_count": 40,
+                            "error_count": 0,
+                            "retry_count": 0,
+                            "cache_hit_count": 0,
+                            "cost_est_usd": 0.7,
+                            "baseline_cost_usd": 1.2,
+                            "observed_savings_usd": 0.5,
+                            "input_tokens": 10000,
+                            "output_tokens": 1000,
+                            "metadata_json": stable_json({"metadata_only": True}),
+                        }
+                    ],
+                )
+
+                report = build_savings_loop_bottlenecks_report(
+                    store,
+                    db_path=db,
+                    config_dir=root / "config",
+                    activation_min_source_rows=1,
+                    policy_scan_limit=50,
+                    now=NOW,
+                )
+                again = build_savings_loop_bottlenecks_report(
+                    store,
+                    db_path=db,
+                    config_dir=root / "config",
+                    activation_min_source_rows=1,
+                    policy_scan_limit=50,
+                    now=NOW,
+                )
+                feedback_count = store.conn.execute("select count(*) from promotion_outcome_feedback").fetchone()[0]
+                eval_count = store.conn.execute("select count(*) from optimization_eval_results").fetchone()[0]
+            finally:
+                store.conn.close()
+
+        self.assertEqual(report["outcome_feedback_reconciliation"]["status"], "recorded")
+        self.assertEqual(report["summary"]["promotion_outcome_rows_written"], 2)
+        self.assertEqual(report["summary"]["optimization_eval_rows_written"], 2)
+        self.assertEqual(again["outcome_feedback_reconciliation"]["status"], "up-to-date")
+        self.assertEqual(feedback_count, 2)
+        self.assertEqual(eval_count, 2)
+        captured = report["captured_vs_available"]
+        self.assertEqual(captured["schema"], "tokenclaw.savings_loop_captured_vs_available.v1")
+        self.assertAlmostEqual(captured["captured_savings_usd"], 0.036, places=6)
+        self.assertAlmostEqual(captured["available_blocked_savings_usd"], 0.5, places=6)
+        self.assertAlmostEqual(captured["blocked_baseline_usd"], 1.2, places=6)
+        self.assertEqual(captured["top_available_blocker"]["blocker_code"], "routing-rule-required")
+        self.assertFalse(captured["privacy"]["raw_prompts_included"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("routing-canary-policy-secret", rendered)
+        self.assertNotIn("cache-canary-rule-secret", rendered)
+        self.assertNotIn("blocked-candidate-secret", rendered)
+
     def test_report_consolidates_source_legacy_rollup_and_stale_policy_stalls(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -18967,6 +18967,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         config_dir=os.getenv("TOKENCLAW_CONFIG_DIR") or os.getenv("TOKENCLAW_POLICY_CONFIG_DIR"),
         activation_burndown=activation_burndown,
         policy_scan_limit=1000,
+        persist_outcome_feedback=False,
     )
 
     def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
@@ -23217,7 +23218,7 @@ def dashboard_html() -> str:
   <div class="table-wrap">
   <table class="activity-table" data-table-id="savings-loop-bottlenecks" data-filter-label="Filter savings loop bottlenecks">
     <thead><tr>
-      <th data-sort-type="text">Signal</th><th data-sort-type="text">Status</th><th data-sort-type="text">Why stalled</th><th data-sort-type="text">Operator action</th><th data-sort-type="text">Command</th><th data-sort-type="number">Rows</th><th data-sort-type="number">Age</th><th data-sort-type="text">Privacy</th>
+      <th data-sort-type="text">Signal</th><th data-sort-type="text">Status</th><th data-sort-type="text">Why stalled</th><th data-sort-type="text">Operator action</th><th data-sort-type="text">Command</th><th data-sort-type="number">Rows</th><th data-sort-type="money">Blocked baseline</th><th data-sort-type="money">Available</th><th data-sort-type="number">Age</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="savings-loop-bottlenecks-tbody"></tbody>
   </table>
@@ -27470,6 +27471,8 @@ function renderClosedLoopActivation(d){
 function renderSavingsLoopBottlenecks(d){
   const report=d.savings_loop_bottlenecks||{};
   const summary=report.summary||{};
+  const capturedAvailable=report.captured_vs_available||{};
+  const topAvailable=capturedAvailable.top_available_blocker||{};
   const rows=report.rows||[];
   const status=report.status||summary.top_status||'unknown';
   const topCommand=summary.top_command||'none';
@@ -27481,8 +27484,8 @@ function renderSavingsLoopBottlenecks(d){
   const card=document.getElementById('c-savings-loop');
   if(card){
     card.textContent=status;
-    document.getElementById('c-savings-loop-action').textContent=`${summary.top_blocker_code||'none'} · ${topCommand}`;
-    document.getElementById('c-savings-loop-evidence').textContent=`source ${sourceRows.toLocaleString()} · stranded ${stranded.toLocaleString()} · rollups ${rollups.toLocaleString()} · crunch rows ${crunchRows.toLocaleString()} · stale policies ${stalePolicies.toLocaleString()}`;
+    document.getElementById('c-savings-loop-action').textContent=`captured ${fmt(capturedAvailable.captured_savings_usd||summary.captured_savings_usd||0,6)} · available ${fmt(capturedAvailable.available_blocked_savings_usd||summary.available_blocked_savings_usd||0,6)} · ${topAvailable.blocker_code||summary.top_available_blocker_code||summary.top_blocker_code||'none'}`;
+    document.getElementById('c-savings-loop-evidence').textContent=`blocked baseline ${fmt(capturedAvailable.blocked_baseline_usd||summary.blocked_baseline_usd||0,6)} · source ${sourceRows.toLocaleString()} · stranded ${stranded.toLocaleString()} · rollups ${rollups.toLocaleString()} · crunch rows ${crunchRows.toLocaleString()} · stale policies ${stalePolicies.toLocaleString()}`;
   }
   const target=document.getElementById('savings-loop-bottlenecks-tbody');
   if(!target)return;
@@ -27490,6 +27493,8 @@ function renderSavingsLoopBottlenecks(d){
     const metrics=row.metrics||{};
     const count=metrics.active_window_rows??metrics.stranded_legacy_rows??metrics.rows_considered??metrics.request_shape_rollup_count??metrics.stale_zero_traffic_rule_count??metrics.sample_count??'—';
     const age=metrics.newest_evidence_age_hours??metrics.age_hours??'—';
+    const blockedBaseline=metrics.blocked_baseline_usd??0;
+    const available=metrics.available_savings_usd??metrics.projected_savings_usd??0;
     return `<tr>
       <td><span class="badge provider">${esc(row.kind||'unknown')}</span><div class="sub">${esc(row.blocker_code||'no blocker')}</div></td>
       <td><span class="badge ${savingsLoopStatusBadge(row.status)}">${esc(row.status||'unknown')}</span></td>
@@ -27497,10 +27502,12 @@ function renderSavingsLoopBottlenecks(d){
       <td class="flags">${esc(row.operator_action||'—')}</td>
       <td class="model">${esc(row.command||'none')}</td>
       <td class="tokens">${typeof count==='number'?count.toLocaleString():esc(count)}</td>
+      <td class="savings">${fmt(blockedBaseline,6)}</td>
+      <td class="savings">${fmt(available,6)}</td>
       <td class="tokens">${typeof age==='number'?age.toLocaleString()+'h':esc(age)}</td>
       <td class="flags">${evidenceActivationPrivacyBadges(row.privacy||{})}</td>
     </tr>`;
-  }).join('')||'<tr><td colspan="8" style="color:#8b949e">No savings-loop bottlenecks available</td></tr>';
+  }).join('')||'<tr><td colspan="10" style="color:#8b949e">No savings-loop bottlenecks available</td></tr>';
 }
 function renderActivationBottleneckCard(d){
   const health=d.activation_successor_queue_health||{};

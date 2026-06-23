@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -15,11 +17,13 @@ from tokenclaw.request_shape_rollups import (
     build_request_shape_cache_replay_evidence_report,
     build_request_shape_rollups_report,
 )
-from tokenclaw.store import utc_now
+from tokenclaw.store import stable_json, utc_now
 
 
 SAVINGS_LOOP_BOTTLENECKS_SCHEMA = "tokenclaw.savings_loop_bottlenecks.v1"
 ROLLUP_REFRESH_PREFLIGHT_SCHEMA = "tokenclaw.request_shape_rollup_refresh_preflight.v1"
+CAPTURED_AVAILABLE_SCHEMA = "tokenclaw.savings_loop_captured_vs_available.v1"
+OUTCOME_RECONCILIATION_SCHEMA = "tokenclaw.savings_loop_outcome_reconciliation.v1"
 DEFAULT_ACTIVE_WINDOW_HOURS = 24.0
 DEFAULT_ACTIVATION_MIN_SOURCE_ROWS = 10
 
@@ -51,6 +55,73 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _json_obj(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _stable_id(prefix: str, *parts: Any) -> str:
+    payload = json.dumps(parts, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+    return f"{prefix}:{digest}"
+
+
+def _row_exists(conn: Any, table: str, row_id: str) -> bool:
+    try:
+        row = conn.execute(f"select 1 from {table} where id = ? limit 1", (row_id,)).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _new_cohort_bucket() -> dict[str, Any]:
+    return {
+        "count": 0,
+        "cost_est_usd": 0.0,
+        "baseline_cost_usd": 0.0,
+        "error_count": 0,
+        "retry_rows": 0,
+        "latency_ms_total": 0.0,
+        "latency_sample_count": 0,
+    }
+
+
+def _add_cohort_row(bucket: dict[str, Any], row: dict[str, Any]) -> None:
+    bucket["count"] += 1
+    bucket["cost_est_usd"] += _as_float(row.get("cost_est_usd"))
+    bucket["baseline_cost_usd"] += _as_float(row.get("cost_baseline_usd"))
+    bucket["error_count"] += int(_as_int(row.get("status_code")) >= 400)
+    bucket["retry_rows"] += int(_as_int(row.get("retry_count")) > 0)
+    latency = row.get("latency_ms")
+    if latency is not None:
+        bucket["latency_ms_total"] += _as_float(latency)
+        bucket["latency_sample_count"] += 1
+
+
+def _finalize_cohort_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    count = _as_int(bucket.get("count"))
+    return {
+        "count": count,
+        "cost_est_usd": round(_as_float(bucket.get("cost_est_usd")), 8),
+        "baseline_cost_usd": round(_as_float(bucket.get("baseline_cost_usd")), 8),
+        "observed_savings_usd": round(max(_as_float(bucket.get("baseline_cost_usd")) - _as_float(bucket.get("cost_est_usd")), 0.0), 8),
+        "error_count": _as_int(bucket.get("error_count")),
+        "error_rate": round(_as_int(bucket.get("error_count")) / count, 6) if count else 0.0,
+        "retry_rows": _as_int(bucket.get("retry_rows")),
+        "retry_rate": round(_as_int(bucket.get("retry_rows")) / count, 6) if count else 0.0,
+        "latency_avg_ms": round(_as_float(bucket.get("latency_ms_total")) / _as_int(bucket.get("latency_sample_count")), 3)
+        if _as_int(bucket.get("latency_sample_count"))
+        else None,
+    }
 
 
 def _metadata_privacy() -> dict[str, bool]:
@@ -532,6 +603,444 @@ def _cache_policy_rows(
     return rows
 
 
+def _routing_canary_group(row: dict[str, Any]) -> tuple[tuple[str, str], dict[str, Any], str] | None:
+    routing = _json_obj(row.get("routing_json"))
+    canary = routing.get("phase_canary") if isinstance(routing.get("phase_canary"), dict) else {}
+    if not canary or not canary.get("enabled"):
+        return None
+    status = str(canary.get("status") or "")
+    cohort = str(canary.get("cohort") or "")
+    if status not in {"applied", "holdout", "safety_stopped"} and cohort not in {"canary_applied", "canary_holdout", "safety_stopped"}:
+        return None
+    promotion = canary.get("promotion") if isinstance(canary.get("promotion"), dict) else {}
+    policy_id = str(canary.get("policy_id") or canary.get("rule_id") or "local-phase-sonnet-haiku-canary-v1")
+    group = {
+        "action_family": "routing",
+        "policy_section": "routing.phase_canary",
+        "policy_id": policy_id,
+        "rule_id": canary.get("rule_id") or policy_id,
+        "candidate_id": canary.get("candidate_id") or canary.get("target_candidate_id"),
+        "action_id": canary.get("promotion_action_id"),
+        "rule_source": canary.get("policy_source") or "local-manual",
+        "source_surface": canary.get("source_surface") or row.get("source_surface") or "anthropic_messages",
+        "source_evidence_schema": promotion.get("source_report_schema") or "tokenclaw.phase_routing_outcome_feedback.v1",
+        "projected_savings_usd": _as_float(promotion.get("projected_savings_usd")),
+    }
+    normalized_cohort = "safety_stopped" if status == "safety_stopped" or cohort == "safety_stopped" else cohort
+    if normalized_cohort == "canary_applied" or status == "applied":
+        normalized_cohort = "canary_applied"
+    elif normalized_cohort == "canary_holdout" or status == "holdout":
+        normalized_cohort = "canary_holdout"
+    elif normalized_cohort not in {"safety_stopped", "bypassed_or_disabled"}:
+        normalized_cohort = "skipped"
+    return ("routing", policy_id), group, normalized_cohort
+
+
+def _cache_canary_group(row: dict[str, Any]) -> tuple[tuple[str, str], dict[str, Any], str] | None:
+    cache = _json_obj(row.get("cache_json"))
+    canary = cache.get("cache_replay_canary") if isinstance(cache.get("cache_replay_canary"), dict) else {}
+    pattern_rule = cache.get("pattern_rule") if isinstance(cache.get("pattern_rule"), dict) else {}
+    if not canary and not pattern_rule:
+        return None
+    canary_status = str(canary.get("status") or "")
+    canary_obj = canary.get("canary") if isinstance(canary.get("canary"), dict) else {}
+    cohort = str(canary.get("canary_cohort") or canary_obj.get("cohort") or "")
+    if cohort not in {"canary_applied", "canary_holdout"} and canary_status not in {"applied", "holdout", "safety_stopped"}:
+        return None
+    graduation = pattern_rule.get("graduation") if isinstance(pattern_rule.get("graduation"), dict) else {}
+    policy_id = str(canary.get("rule_id") or pattern_rule.get("rule_id") or canary.get("candidate_id") or "cache-replay-canary")
+    projected = (
+        _as_float(canary.get("projected_input_savings_usd"))
+        or _as_float(cache.get("estimated_saved_cost_usd"))
+        or _as_float(graduation.get("projected_savings_usd"))
+    )
+    group = {
+        "action_family": "cache",
+        "policy_section": "cache.replay_canary",
+        "policy_id": policy_id,
+        "rule_id": canary.get("rule_id") or pattern_rule.get("rule_id") or policy_id,
+        "candidate_id": canary.get("candidate_id") or pattern_rule.get("candidate_id"),
+        "action_id": None,
+        "rule_source": canary.get("policy_source") or pattern_rule.get("policy_source") or "local-manual",
+        "source_surface": row.get("source_surface") or "openai_responses",
+        "source_evidence_schema": canary.get("schema") or graduation.get("source_schema") or "tokenclaw.cache_replay_canary_decision.v1",
+        "projected_savings_usd": projected,
+    }
+    if cohort == "canary_applied" or canary_status == "applied":
+        normalized_cohort = "canary_applied"
+    elif cohort == "canary_holdout" or canary_status == "holdout":
+        normalized_cohort = "canary_holdout"
+    elif canary_status == "safety_stopped":
+        normalized_cohort = "safety_stopped"
+    else:
+        normalized_cohort = "skipped"
+    return ("cache", policy_id), group, normalized_cohort
+
+
+def _reconcile_applied_canary_outcomes(
+    store_obj: Any,
+    *,
+    since: str,
+    limit: int,
+    generated_at: str,
+    persist: bool = True,
+) -> dict[str, Any]:
+    conn = store_obj.conn
+    capped = max(1, min(int(limit or 1), 10000))
+    result = {
+        "schema": OUTCOME_RECONCILIATION_SCHEMA,
+        "status": "no-canary-outcomes",
+        "rows_scanned": 0,
+        "group_count": 0,
+        "promotion_rows_written": 0,
+        "optimization_eval_rows_written": 0,
+        "persisted": bool(persist),
+        "groups": [],
+        "privacy": _metadata_privacy(),
+    }
+    if not (_table_exists(conn, "promotion_outcome_feedback") and _table_exists(conn, "optimization_eval_results")):
+        result["status"] = "tables-unavailable"
+        return result
+    try:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                select id, created_at, status_code, latency_ms, retry_count,
+                       cost_est_usd, cost_baseline_usd, routing_json, cache_json,
+                       source_surface, provider
+                from calls
+                where created_at >= ?
+                  and (routing_json is not null or cache_json is not null)
+                order by created_at desc
+                limit ?
+                """,
+                (since, capped),
+            ).fetchall()
+        ]
+    except Exception as exc:
+        result.update({"status": "unavailable", "error_type": public_label(exc.__class__.__name__, "Exception")})
+        return result
+    result["rows_scanned"] = len(rows)
+
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        for extractor in (_routing_canary_group, _cache_canary_group):
+            extracted = extractor(row)
+            if extracted is None:
+                continue
+            key, meta, cohort = extracted
+            group = groups.setdefault(key, {
+                **meta,
+                "cohorts": {
+                    "canary_applied": _new_cohort_bucket(),
+                    "canary_holdout": _new_cohort_bucket(),
+                    "skipped": _new_cohort_bucket(),
+                    "bypassed_or_disabled": _new_cohort_bucket(),
+                    "safety_stopped": _new_cohort_bucket(),
+                },
+                "newest_call_at": row.get("created_at"),
+            })
+            group["projected_savings_usd"] = max(_as_float(group.get("projected_savings_usd")), _as_float(meta.get("projected_savings_usd")))
+            if str(row.get("created_at") or "") > str(group.get("newest_call_at") or ""):
+                group["newest_call_at"] = row.get("created_at")
+            _add_cohort_row(group["cohorts"].setdefault(cohort, _new_cohort_bucket()), row)
+
+    public_groups: list[dict[str, Any]] = []
+    promotion_written = 0
+    eval_written = 0
+    for (_family, policy_id), group in sorted(groups.items()):
+        cohorts = {name: _finalize_cohort_bucket(bucket) for name, bucket in group["cohorts"].items()}
+        applied = cohorts["canary_applied"]
+        holdout = cohorts["canary_holdout"]
+        safety = cohorts["safety_stopped"]
+        applied_count = _as_int(applied.get("count"))
+        holdout_count = _as_int(holdout.get("count"))
+        if applied_count + holdout_count + _as_int(safety.get("count")) <= 0:
+            continue
+        observed = _as_float(applied.get("observed_savings_usd"))
+        projected = _as_float(group.get("projected_savings_usd"))
+        error_delta = _as_float(applied.get("error_rate")) - _as_float(holdout.get("error_rate"))
+        retry_delta = _as_float(applied.get("retry_rate")) - _as_float(holdout.get("retry_rate"))
+        latency_delta = None
+        if applied.get("latency_avg_ms") is not None and holdout.get("latency_avg_ms") is not None:
+            latency_delta = round(_as_float(applied.get("latency_avg_ms")) - _as_float(holdout.get("latency_avg_ms")), 3)
+        rollback_needed = _as_int(safety.get("count")) > 0 or error_delta > 0.05
+        recommendation = "rollback" if rollback_needed else "widen" if observed > 0 and applied_count > 0 else "keep-canary"
+        status = "rollback-needed" if rollback_needed else "positive" if observed > 0 and applied_count > 0 else "needs-more-samples"
+        reason_codes: list[str] = []
+        if rollback_needed:
+            reason_codes.append("safety-or-error-regression")
+        if applied_count <= 0:
+            reason_codes.append("no-applied-cohort")
+        if holdout_count <= 0:
+            reason_codes.append("no-holdout-cohort")
+        entry_id = _stable_id(
+            "savings-loop-outcome",
+            group.get("action_family"),
+            policy_id,
+            group.get("newest_call_at"),
+            applied_count,
+            holdout_count,
+            _as_int(safety.get("count")),
+            round(observed, 8),
+        )
+        entry = {
+            "schema": "tokenclaw.promotion_outcome_feedback_entry.v1",
+            "id": entry_id,
+            "created_at": generated_at,
+            "impact_generated_at": generated_at,
+            "policy_id": policy_id,
+            "action_family": group.get("action_family"),
+            "policy_section": group.get("policy_section"),
+            "rule_source": group.get("rule_source"),
+            "rule_id": group.get("rule_id"),
+            "candidate_id": group.get("candidate_id"),
+            "action_id": group.get("action_id"),
+            "source_evidence_schema": group.get("source_evidence_schema"),
+            "source_surface": group.get("source_surface"),
+            "status": status,
+            "recommendation": recommendation,
+            "rollback_needed": rollback_needed,
+            "reason_codes": reason_codes,
+            "observed_savings_usd": round(observed, 8),
+            "projected_savings_usd": round(projected, 8),
+            "projection_realization_ratio": round(observed / projected, 6) if projected > 0 else None,
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": _as_int(cohorts["skipped"].get("count")),
+            "bypassed_count": _as_int(cohorts["bypassed_or_disabled"].get("count")),
+            "safety_stop_count": _as_int(safety.get("count")),
+            "error_rate_delta": round(error_delta, 6),
+            "retry_rate_delta": round(retry_delta, 6),
+            "latency_delta_ms": latency_delta,
+            "cohort_metrics": cohorts,
+            "privacy": _metadata_privacy(),
+        }
+        if persist and not _row_exists(conn, "promotion_outcome_feedback", entry_id):
+            store_obj.log_promotion_outcome_feedback(
+                id=entry_id,
+                created_at=generated_at,
+                impact_generated_at=generated_at,
+                policy_id=policy_id,
+                action_family=group.get("action_family"),
+                policy_section=group.get("policy_section"),
+                rule_source=group.get("rule_source"),
+                rule_id=group.get("rule_id"),
+                candidate_id=group.get("candidate_id"),
+                action_id=group.get("action_id"),
+                source_evidence_schema=group.get("source_evidence_schema"),
+                status=status,
+                recommendation=recommendation,
+                rollback_needed=1 if rollback_needed else 0,
+                observed_savings_usd=round(observed, 8),
+                projected_savings_usd=round(projected, 8),
+                projection_realization_ratio=entry.get("projection_realization_ratio"),
+                applied_count=applied_count,
+                holdout_count=holdout_count,
+                skipped_count=entry["skipped_count"],
+                bypassed_count=entry["bypassed_count"],
+                safety_stop_count=entry["safety_stop_count"],
+                error_rate_delta=entry["error_rate_delta"],
+                retry_rate_delta=entry["retry_rate_delta"],
+                latency_delta_ms=latency_delta,
+                feedback_json=stable_json(entry),
+            )
+            promotion_written += 1
+        eval_id = _stable_id("savings-loop-eval", entry_id)
+        if persist and not _row_exists(conn, "optimization_eval_results", eval_id):
+            store_obj.log_optimization_eval_result(
+                id=eval_id,
+                run_id="savings-loop-outcome-reconciliation",
+                created_at=generated_at,
+                candidate_id=str(group.get("candidate_id") or policy_id),
+                source_surface=group.get("source_surface"),
+                optimization_family=f"{group.get('action_family')}_canary",
+                action_family=group.get("action_family"),
+                status_class=status,
+                reason_codes_json=stable_json(reason_codes),
+                score_json=stable_json({
+                    "observed_savings_usd": round(observed, 8),
+                    "projected_savings_usd": round(projected, 8),
+                    "projection_realization_ratio": entry.get("projection_realization_ratio"),
+                }),
+                cost_json=stable_json({
+                    "applied": applied,
+                    "holdout": holdout,
+                    "safety_stopped": safety,
+                }),
+                result_json=stable_json(entry),
+            )
+            eval_written += 1
+        public_groups.append({
+            "action_family": group.get("action_family"),
+            "policy_id": public_id(policy_id, prefix="policy"),
+            "candidate_id": public_id(group.get("candidate_id"), prefix="candidate") if group.get("candidate_id") else None,
+            "status": status,
+            "recommendation": recommendation,
+            "observed_savings_usd": round(observed, 8),
+            "projected_savings_usd": round(projected, 8),
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "top_blocker_code": reason_codes[0] if reason_codes else None,
+        })
+
+    result.update({
+        "status": "recorded"
+        if promotion_written or eval_written
+        else "dry-run"
+        if public_groups and not persist
+        else "up-to-date"
+        if public_groups
+        else "no-canary-outcomes",
+        "group_count": len(public_groups),
+        "promotion_rows_written": promotion_written,
+        "optimization_eval_rows_written": eval_written,
+        "groups": public_groups,
+    })
+    return result
+
+
+def _blocked_savings_from_rollups(conn: Any, *, since: str, limit: int) -> list[dict[str, Any]]:
+    if not _table_exists(conn, "request_shape_rollups"):
+        return []
+    capped = max(1, min(int(limit or 1), 10000))
+    try:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                select generated_at, blocker_codes_json, baseline_cost_usd, observed_savings_usd, cost_est_usd, row_count
+                from request_shape_rollups
+                where generated_at >= ?
+                order by generated_at desc
+                limit ?
+                """,
+                (since, capped),
+            ).fetchall()
+        ]
+    except Exception:
+        return []
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        codes = []
+        try:
+            parsed = json.loads(row.get("blocker_codes_json") or "[]")
+        except Exception:
+            parsed = []
+        if isinstance(parsed, list):
+            codes = [public_label(code, "unknown") for code in parsed if code]
+        if not codes:
+            continue
+        for code in codes:
+            bucket = buckets.setdefault(code, {
+                "blocker_code": code,
+                "blocked_baseline_usd": 0.0,
+                "available_savings_usd": 0.0,
+                "row_count": 0,
+                "source_rollup_count": 0,
+            })
+            bucket["blocked_baseline_usd"] += _as_float(row.get("baseline_cost_usd"))
+            bucket["available_savings_usd"] += max(
+                _as_float(row.get("observed_savings_usd")),
+                _as_float(row.get("baseline_cost_usd")) - _as_float(row.get("cost_est_usd")),
+                0.0,
+            )
+            bucket["row_count"] += _as_int(row.get("row_count"), 1)
+            bucket["source_rollup_count"] += 1
+    result = []
+    for bucket in buckets.values():
+        result.append({
+            **bucket,
+            "blocked_baseline_usd": round(_as_float(bucket.get("blocked_baseline_usd")), 8),
+            "available_savings_usd": round(_as_float(bucket.get("available_savings_usd")), 8),
+        })
+    result.sort(key=lambda item: (_as_float(item.get("available_savings_usd")), _as_float(item.get("blocked_baseline_usd"))), reverse=True)
+    return result
+
+
+def _captured_savings_from_feedback(store_obj: Any, *, since: str, limit: int) -> list[dict[str, Any]]:
+    if not hasattr(store_obj, "promotion_outcome_feedback_rows"):
+        return []
+    since_dt = _parse_utc(since)
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in store_obj.promotion_outcome_feedback_rows(limit=max(1, min(int(limit or 1), 10000))):
+        created_at = _parse_utc(row.get("created_at"))
+        if since_dt is not None and created_at is not None and created_at < since_dt:
+            continue
+        family = public_label(row.get("action_family"), "unknown")
+        status = public_label(row.get("status"), "unknown")
+        key = f"{family}:{status}"
+        bucket = buckets.setdefault(key, {
+            "action_family": family,
+            "status": status,
+            "captured_savings_usd": 0.0,
+            "projected_savings_usd": 0.0,
+            "entry_count": 0,
+            "applied_count": 0,
+            "holdout_count": 0,
+            "top_blocker_code": None,
+        })
+        bucket["captured_savings_usd"] += _as_float(row.get("observed_savings_usd"))
+        bucket["projected_savings_usd"] += _as_float(row.get("projected_savings_usd"))
+        bucket["entry_count"] += 1
+        bucket["applied_count"] += _as_int(row.get("applied_count"))
+        bucket["holdout_count"] += _as_int(row.get("holdout_count"))
+        feedback = _json_obj(row.get("feedback_json"))
+        reasons = feedback.get("reason_codes") if isinstance(feedback.get("reason_codes"), list) else []
+        if reasons and not bucket.get("top_blocker_code"):
+            bucket["top_blocker_code"] = public_label(reasons[0], "unknown")
+    result = []
+    for bucket in buckets.values():
+        result.append({
+            **bucket,
+            "captured_savings_usd": round(_as_float(bucket.get("captured_savings_usd")), 8),
+            "projected_savings_usd": round(_as_float(bucket.get("projected_savings_usd")), 8),
+        })
+    result.sort(key=lambda item: _as_float(item.get("captured_savings_usd")), reverse=True)
+    return result
+
+
+def _captured_vs_available_report(
+    store_obj: Any,
+    *,
+    since: str,
+    limit: int,
+    reconciliation: dict[str, Any],
+) -> dict[str, Any]:
+    captured = _captured_savings_from_feedback(store_obj, since=since, limit=limit)
+    available = _blocked_savings_from_rollups(store_obj.conn, since=since, limit=limit)
+    top_captured = captured[0] if captured else {}
+    top_available = available[0] if available else {}
+    return {
+        "schema": CAPTURED_AVAILABLE_SCHEMA,
+        "status": "available" if captured or available else "empty",
+        "captured_savings_usd": round(sum(_as_float(row.get("captured_savings_usd")) for row in captured), 8),
+        "available_blocked_savings_usd": round(sum(_as_float(row.get("available_savings_usd")) for row in available), 8),
+        "blocked_baseline_usd": round(sum(_as_float(row.get("blocked_baseline_usd")) for row in available), 8),
+        "top_captured_bucket": {
+            "action_family": top_captured.get("action_family"),
+            "status": top_captured.get("status"),
+            "captured_savings_usd": top_captured.get("captured_savings_usd", 0.0),
+            "top_blocker_code": top_captured.get("top_blocker_code"),
+        } if top_captured else None,
+        "top_available_blocker": {
+            "blocker_code": top_available.get("blocker_code"),
+            "available_savings_usd": top_available.get("available_savings_usd", 0.0),
+            "blocked_baseline_usd": top_available.get("blocked_baseline_usd", 0.0),
+        } if top_available else None,
+        "captured_buckets": captured[:10],
+        "available_blocker_buckets": available[:10],
+        "outcome_feedback_reconciliation": {
+            "status": reconciliation.get("status"),
+            "promotion_rows_written": _as_int(reconciliation.get("promotion_rows_written")),
+            "optimization_eval_rows_written": _as_int(reconciliation.get("optimization_eval_rows_written")),
+            "group_count": _as_int(reconciliation.get("group_count")),
+        },
+        "privacy": _metadata_privacy(),
+    }
+
+
 def _status_order(status: str) -> int:
     return {"blocked": 0, "unavailable": 1, "clear": 2}.get(status, 3)
 
@@ -549,6 +1058,7 @@ def build_savings_loop_bottlenecks_report(
     policy_max_age_hours: float = DEFAULT_CACHE_REPLAY_CANARY_MAX_EVIDENCE_AGE_HOURS,
     policy_scan_limit: int = 1000,
     adopt_legacy_preflight: bool = False,
+    persist_outcome_feedback: bool = True,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build a compact operator report for conditions that stall savings activation."""
@@ -615,6 +1125,20 @@ def build_savings_loop_bottlenecks_report(
     blocked = [row for row in rows if row.get("status") == "blocked"]
     top = blocked[0] if blocked else rows[0] if rows else {}
     status = "stalled" if blocked else "alive"
+    generated_at = now_dt.isoformat()
+    outcome_reconciliation = _reconcile_applied_canary_outcomes(
+        store_obj,
+        since=since,
+        limit=max(1, min(int(policy_scan_limit or 1), 10000)),
+        generated_at=generated_at,
+        persist=bool(persist_outcome_feedback),
+    )
+    captured_vs_available = _captured_vs_available_report(
+        store_obj,
+        since=since,
+        limit=max(1, min(int(policy_scan_limit or 1), 10000)),
+        reconciliation=outcome_reconciliation,
+    )
     source_metrics = next((row.get("metrics") for row in rows if row.get("kind") == "source-traffic"), {}) or {}
     legacy_metrics = next((row.get("metrics") for row in rows if row.get("kind") == "stranded-legacy-db"), {}) or {}
     rollup_metrics = next((row.get("metrics") for row in rows if row.get("kind") == "rollup-freshness"), {}) or {}
@@ -622,7 +1146,7 @@ def build_savings_loop_bottlenecks_report(
     stale_policy_count = sum(1 for row in rows if row.get("kind") == "stale-policy-rule" and row.get("status") == "blocked")
     return {
         "schema": SAVINGS_LOOP_BOTTLENECKS_SCHEMA,
-        "generated_at": now_dt.isoformat(),
+        "generated_at": generated_at,
         "status": status,
         "read_only": not bool(adopt_legacy_preflight),
         "summary": {
@@ -653,8 +1177,21 @@ def build_savings_loop_bottlenecks_report(
             "request_shape_rollup_refresh_crunch_dry_run_rows_considered": _as_int(
                 refresh_preflight.get("crunch_dry_run_rows_considered")
             ),
+            "captured_savings_usd": _as_float(captured_vs_available.get("captured_savings_usd")),
+            "available_blocked_savings_usd": _as_float(captured_vs_available.get("available_blocked_savings_usd")),
+            "blocked_baseline_usd": _as_float(captured_vs_available.get("blocked_baseline_usd")),
+            "top_available_blocker_code": (
+                (captured_vs_available.get("top_available_blocker") or {}).get("blocker_code")
+                if isinstance(captured_vs_available.get("top_available_blocker"), dict)
+                else None
+            ),
+            "outcome_reconciliation_status": outcome_reconciliation.get("status"),
+            "promotion_outcome_rows_written": _as_int(outcome_reconciliation.get("promotion_rows_written")),
+            "optimization_eval_rows_written": _as_int(outcome_reconciliation.get("optimization_eval_rows_written")),
         },
         "rows": rows,
+        "captured_vs_available": captured_vs_available,
+        "outcome_feedback_reconciliation": outcome_reconciliation,
         "legacy_adoption_preflight": adoption_preflight,
         "request_shape_rollup_refresh": refresh_preflight,
         "privacy": _metadata_privacy(),
