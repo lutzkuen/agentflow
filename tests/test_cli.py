@@ -218,6 +218,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "GitHub Copilot non-goal",
             "unsupported: GitHub Copilot is not a base-url target",
             "pip install tokenclaw",
+            "For TokenClaw development",
+            "pip install -e .",
             "tokenclaw --help",
             "tokenclaw start",
             "tokenclaw internal --list",
@@ -227,6 +229,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn("tokenclaw internal dashboard", readme)
         self.assertNotIn("tokenclaw-proxy --provider", readme)
         self.assertNotIn("tokenclaw-dashboard --host", readme)
+        self.assertNotIn("public package name is migrated", readme)
         self.assertNotIn("agentflow", readme)
         self.assertNotIn("sk-", readme)
         for expected in (

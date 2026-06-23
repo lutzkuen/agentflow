@@ -15,7 +15,7 @@ By default, TokenClaw does **not** store raw prompts or responses.
 
 Requires Python 3.10+.
 
-The target packaged install is:
+Install the published package from PyPI:
 
 ```bash
 pip install tokenclaw
@@ -32,7 +32,8 @@ pip install 'tokenclaw[openai-realtime]'  # OpenAI realtime WebSocket proxy brid
 pip install 'tokenclaw[all]'              # all optional runtime extras
 ```
 
-Until the public package name is migrated, install from this repository:
+For TokenClaw development, clone this repository and install it in editable
+mode instead:
 
 ```bash
 git clone https://github.com/lutzkuen/tokenclaw.git
