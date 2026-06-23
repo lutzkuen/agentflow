@@ -24564,9 +24564,10 @@ function routingCandidateAction(unit){
   const hidden=['requested_model','provider','source_surface','app_family','category','workflow_phase','stream','max_text_chars']
     .filter(key=>payload[key]!=null&&payload[key]!=='')
     .map(key=>`<input type="hidden" name="${esc(key)}" value="${esc(payload[key])}">`).join('');
-  const suggested=payload.routed_model||candidate.suggested_routed_model||'';
+  const suggested=payload.routed_model||'';
+  const label=suggested?`Uncovered locally — suggest ${esc(suggested)}`:'Uncovered locally — add routing candidate';
   return `<span class="routing-candidate-form" data-routing-candidate="1">
-    <span class="badge routed">No routing candidate — not collecting shadow evidence</span>
+    <span class="badge routed">${label}</span>
     ${hidden}
     <input name="routed_model" value="${esc(suggested)}" aria-label="Target routing model">
     <button type="button" onclick="addRoutingCandidate(this.closest('[data-routing-candidate]'))">Add to routing config</button>
