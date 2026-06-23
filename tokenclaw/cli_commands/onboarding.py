@@ -202,13 +202,17 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any], *, brand: str
         stdout.write(f"Depends on {brand} target: {result['depends_on']}\n")
         if result.get("claude_target_created"):
             stdout.write("Claude target was not configured; created the default Claude activation profile.\n")
-        stdout.write("Routing snippet for a terminal that already has your Claude API key:\n")
+        stdout.write(
+            "Activation writes future launch configuration only; already-running VS Code windows "
+            "and extension hosts keep their launch-time environment.\n"
+        )
+        stdout.write("Immediate no-logout relaunch from a terminal that already has your Claude API key:\n")
         stdout.write(result["routing_snippet"] + "\n")
         stdout.write(f"Run configured proxy: {result['run_command']}\n")
         stdout.write(f"Config file: {result['config_path']}\n")
         stdout.write(
             "GNOME and other graphical launchers read the systemd user env file at login; "
-            "log out and back in before launching VS Code from the desktop.\n"
+            "log out and back in, or reboot, before launching VS Code from the desktop.\n"
         )
         stdout.write(
             "For terminal-launched VS Code, open a new shell or source the shell profile before running code .\n"
@@ -1005,7 +1009,14 @@ def _target_activation_base(
         "reasons": [],
     }
     if configured:
-        for key in ("codex_config_path", "env_file_path", "desktop_file_path", "shell_profile_path", "depends_on"):
+        for key in (
+            "codex_config_path",
+            "env_file_path",
+            "systemd_env_file_path",
+            "desktop_file_path",
+            "shell_profile_path",
+            "depends_on",
+        ):
             if profile.get(key):
                 result[key] = str(profile.get(key))
     else:
@@ -1271,6 +1282,8 @@ def _env_file_value(path: Path, key: str) -> str | None:
 
 
 def _doctor_claude_vscode_target(base: dict[str, Any]) -> dict[str, Any]:
+    from tokenclaw import activation
+
     result = dict(base)
     result["ok"] = False
     if not result.get("configured"):
@@ -1291,21 +1304,64 @@ def _doctor_claude_vscode_target(base: dict[str, Any]) -> dict[str, Any]:
         result["reasons"].append("claude-vscode-env-file-missing" if not env_file_base_url else "claude-vscode-env-file-mismatch")
         return result
 
+    systemd_env_file_base_url = None
+    systemd_env_path_value = result.get("systemd_env_file_path")
+    if systemd_env_path_value:
+        systemd_env_path = Path(str(systemd_env_path_value)).expanduser()
+        result["systemd_env_file_exists"] = systemd_env_path.exists()
+        systemd_env_file_base_url = _env_file_value(systemd_env_path, "ANTHROPIC_BASE_URL") if systemd_env_path.exists() else None
+        result["systemd_env_file_base_url"] = _redact_url(systemd_env_file_base_url) if systemd_env_file_base_url else None
+        if systemd_env_file_base_url != expected:
+            result["reasons"].append(
+                "systemd-env-file-missing" if not systemd_env_file_base_url else "systemd-env-file-mismatch"
+            )
+    else:
+        result["systemd_env_file_exists"] = False
+        result["reasons"].append("systemd-env-file-path-missing")
+
+    configured_shell_path_value = result.get("shell_profile_path")
+    configured_shell_path = Path(str(configured_shell_path_value)).expanduser() if configured_shell_path_value else None
+    current_shell_path = activation.default_shell_profile_path()
+    result["current_shell_profile_path"] = str(current_shell_path)
+    result["current_shell_profile_exists"] = current_shell_path.exists()
+    result["current_shell_profile_matches_activation"] = (
+        configured_shell_path is not None
+        and configured_shell_path.expanduser().resolve(strict=False) == current_shell_path.expanduser().resolve(strict=False)
+    )
+    current_shell_profile_raw = current_shell_path.read_text(encoding="utf-8") if current_shell_path.exists() else ""
+    result["current_shell_profile_sources_env_file"] = bool(
+        env_path_value and activation._shell_profile_sources_env(current_shell_profile_raw, Path(str(env_path_value)).expanduser())
+    )
+    if not result["current_shell_profile_sources_env_file"]:
+        result["reasons"].append("current-shell-profile-does-not-source-tokenclaw-env")
+    elif not result["current_shell_profile_matches_activation"]:
+        result["reasons"].append("current-shell-profile-differs-from-activation-profile")
+
     current_shell_base_url = os.environ.get("ANTHROPIC_BASE_URL")
     result["current_shell_base_url"] = _redact_url(current_shell_base_url) if current_shell_base_url else None
     if current_shell_base_url and current_shell_base_url != expected:
         result["status"] = "not routed via tokenclaw"
         result["reasons"].append("current-shell-anthropic-base-url-mismatch")
         result["reasons"].append("vscode-runtime-env-uncertain")
+        result["next_steps"] = [
+            f"Run `ANTHROPIC_BASE_URL={expected} code .` from a terminal to relaunch VS Code through TokenClaw now.",
+            "Log out and back in, or reboot, before launching VS Code from GNOME or another desktop launcher.",
+        ]
         return result
     if current_shell_base_url == expected:
         result["status"] = "healthy"
         result["reasons"].append("current-shell-routed")
+        result["ok"] = True
     else:
-        result["status"] = "configured"
+        result["status"] = "configured on disk; current session not routed"
         result["reasons"].append("shell-env-missing")
+        result["reasons"].append("activated-on-disk-runtime-env-missing")
+        result["next_steps"] = [
+            f"Run `ANTHROPIC_BASE_URL={expected} code .` from a terminal to relaunch VS Code through TokenClaw now.",
+            "Log out and back in, or reboot, before launching VS Code from GNOME or another desktop launcher.",
+            "Already-running VS Code windows and extension hosts must be fully quit and relaunched.",
+        ]
     result["reasons"].append("vscode-runtime-env-uncertain")
-    result["ok"] = True
     return result
 
 
@@ -1417,6 +1473,9 @@ def _write_activation_doctor_summary(stdout: Any, result: dict[str, Any]) -> Non
         if target.get("reasons"):
             parts.append("reasons: " + ", ".join(str(reason) for reason in target["reasons"]))
         stdout.write(", ".join(parts) + "\n")
+        next_steps = target.get("next_steps") if isinstance(target.get("next_steps"), list) else []
+        for step in next_steps:
+            stdout.write(f"  next: {step}\n")
 
 
 def _write_savings_report_summary(stdout: Any, result: dict[str, Any], *, brand: str = "TokenClaw") -> None:

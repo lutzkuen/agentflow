@@ -791,7 +791,9 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertIn("Shell profile changed: false", output)
             self.assertIn("Claude target was not configured; created the default Claude activation profile.", output)
             self.assertIn("export ANTHROPIC_BASE_URL=http://127.0.0.1:4000\ncode .", output)
-            self.assertIn("log out and back in before launching VS Code from the desktop", output)
+            self.assertIn("already-running VS Code windows and extension hosts keep their launch-time environment", output)
+            self.assertIn("Immediate no-logout relaunch", output)
+            self.assertIn("log out and back in, or reboot, before launching VS Code from the desktop", output)
             self.assertIn("For terminal-launched VS Code, open a new shell", output)
 
     def test_activate_claude_vscode_appends_shell_profile_source_line(self):
@@ -1615,12 +1617,54 @@ class AgentflowActivationCliTests(unittest.TestCase):
             with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
                 code = cli.tokenclaw_cli(["doctor", "claude-vscode", "--config-dir", tmp, "--json"], stdout=stdout)
 
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
         target = json.loads(stdout.getvalue())["targets"]["claude-vscode"]
-        self.assertEqual(target["status"], "configured")
+        self.assertEqual(target["status"], "configured on disk; current session not routed")
         self.assertEqual(target["env_file_base_url"], "http://127.0.0.1:4000")
+        self.assertEqual(target["systemd_env_file_base_url"], "http://127.0.0.1:4000")
         self.assertIn("shell-env-missing", target["reasons"])
+        self.assertIn("activated-on-disk-runtime-env-missing", target["reasons"])
         self.assertIn("vscode-runtime-env-uncertain", target["reasons"])
+        self.assertIn("ANTHROPIC_BASE_URL=http://127.0.0.1:4000 code .", target["next_steps"][0])
+
+    def test_tokenclaw_doctor_claude_vscode_text_prints_stale_session_remedy(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", tmp, "--no-shell-profile"], stdout=io.StringIO())
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                code = cli.tokenclaw_cli(["doctor", "claude-vscode", "--config-dir", tmp], stdout=stdout)
+
+        self.assertEqual(code, 1)
+        output = stdout.getvalue()
+        self.assertIn("claude-vscode: configured on disk; current session not routed", output)
+        self.assertIn("activated-on-disk-runtime-env-missing", output)
+        self.assertIn("next: Run `ANTHROPIC_BASE_URL=http://127.0.0.1:4000 code .`", output)
+        self.assertIn("Already-running VS Code windows and extension hosts must be fully quit and relaunched.", output)
+
+    def test_tokenclaw_doctor_claude_vscode_reports_current_shell_profile_hook(self):
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            bashrc = home / ".bashrc"
+            bashrc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+            config_dir = home / ".tokenclaw"
+            with patch.dict(os.environ, {"HOME": str(home), "SHELL": "/bin/bash"}, clear=True):
+                cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=io.StringIO())
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {"HOME": str(home), "SHELL": "/bin/bash"}, clear=True):
+                code = cli.tokenclaw_cli(["doctor", "claude-vscode", "--config-dir", str(config_dir), "--json"], stdout=stdout)
+
+        self.assertEqual(code, 1)
+        target = json.loads(stdout.getvalue())["targets"]["claude-vscode"]
+        self.assertEqual(target["current_shell_profile_path"], str(bashrc))
+        self.assertTrue(target["current_shell_profile_matches_activation"])
+        self.assertTrue(target["current_shell_profile_sources_env_file"])
+        self.assertNotIn("current-shell-profile-does-not-source-tokenclaw-env", target["reasons"])
 
     def test_tokenclaw_doctor_claude_vscode_detects_shell_base_url_mismatch(self):
         with TemporaryDirectory() as tmp:
