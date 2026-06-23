@@ -192,6 +192,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
     def test_readme_onboarding_happy_path_stays_primary_and_private(self):
         readme = Path("README.md").read_text(encoding="utf-8")
+        boundary_note = Path("docs/client-server-boundary.md").read_text(encoding="utf-8")
 
         self.assertLess(readme.index("## Quick start"), readme.index("## Manual proxy fallback"))
         self.assertLess(readme.index("tokenclaw activate openai"), readme.index("tokenclaw internal proxy"))
@@ -206,6 +207,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "openai_base_url = \"http://127.0.0.1:4003/v1\"",
             "ANTHROPIC_BASE_URL=http://127.0.0.1:4000",
             "tokenclaw_server",
+            "policy brain",
+            "metadata-only measurement contracts",
+            "docs/client-server-boundary.md",
+            "no learned route discovery",
+            "no local savings research bench",
+            "no managed policy candidate generation",
+            "provider request or response bodies",
             "not a provider proxy",
             "GitHub Copilot non-goal",
             "unsupported: GitHub Copilot is not a base-url target",
@@ -221,6 +229,15 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertNotIn("tokenclaw-dashboard --host", readme)
         self.assertNotIn("agentflow", readme)
         self.assertNotIn("sk-", readme)
+        for expected in (
+            "The client is the boring executor. The server is the policy brain.",
+            "provider request bodies, provider response bodies",
+            "Route discovery and learned/adaptive routing policy.",
+            "Managed policy candidate generation.",
+        ):
+            self.assertIn(expected, boundary_note)
+        self.assertNotIn("agentflow", boundary_note.lower())
+        self.assertNotIn("sk-", boundary_note)
 
     def test_tokenclaw_start_dry_run_prints_default_urls_without_writing_config(self):
         managed_env = {

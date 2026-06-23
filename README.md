@@ -1,9 +1,13 @@
 # TokenClaw
 
-TokenClaw is a **local proxy for token savings and telemetry on LLM traffic**.
+TokenClaw is a **local proxy and executor for token savings and telemetry on
+LLM traffic**.
 
 Run it on localhost, point OpenAI-compatible or Anthropic-compatible clients at it, and keep using your normal provider credentials. TokenClaw forwards the real provider call, records local usage metadata, and shows cost and traffic behavior in a read-only dashboard.
-It will apply crunching, caching and routing to decrease your token spend while preserving quality.
+It applies explicit local rules and opted-in managed policy decisions for
+crunching, caching, and routing while preserving quality. The local client is
+the proxy/executor; `tokenclaw_server` is the policy brain for measurement
+contracts, learned recommendations, canaries, and research.
 
 By default, TokenClaw does **not** store raw prompts or responses.
 
@@ -148,7 +152,11 @@ tokenclaw doctor --json
 ## Managed optimizer modes
 
 TokenClaw is local-first. Managed optimizer communication is off unless you opt in, and
-local hard gates always win over a server recommendation.
+local hard gates always win over a server recommendation. The managed split is
+deliberate: the TokenClaw client proxies provider traffic, captures local
+metadata, executes supported local actions, and reports outcomes; the managed
+server decides what to measure, which policy decision to recommend, and how to
+size canaries or holdouts.
 
 ```text
 TOKENCLAW_MANAGED=0
@@ -177,6 +185,12 @@ paths, cache keys, or secrets, and it is queued locally with bounded retry/backo
 send failure can never block provider forwarding. Queue retry behavior is shared with
 other managed feedback via `TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS` and
 `TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS`.
+
+Managed server requests and responses are metadata-only. The server must not
+receive provider request bodies, provider response bodies, raw prompts, raw
+responses, secrets, local file paths, cache keys, or un-hashed local
+identifiers. See [Client/server responsibility boundary](docs/client-server-boundary.md)
+for the design note follow-up implementation issues should reference.
 
 ## OpenAI API apps
 
@@ -438,11 +452,36 @@ python -m unittest discover -s tests
 
 ## Managed control plane boundary
 
-`tokenclaw_server` is the future managed control plane for metadata-only policy
-recommendations. It is not a provider proxy and should not receive or forward
-raw provider request bodies. Local TokenClaw still owns provider forwarding,
-request mutation, cache lookup/storage, local rule files, rollback, and the
-read-only dashboard.
+`tokenclaw_server` is the managed control plane and policy brain for
+metadata-only measurement contracts, policy decisions, canaries, holdouts, and
+research rollups. It is not a provider proxy and must not receive or forward
+provider request or response bodies. Local TokenClaw still owns provider
+forwarding, request mutation, cache lookup/storage/replay, local rule files,
+rollback, the read-only dashboard, and safe fallback when the server is
+unavailable.
+
+Future managed request flow:
+
+1. The server provides a measurement contract describing the metadata fields the
+   client should collect.
+2. The client collects only requested derived metadata and hashed grouping
+   identifiers.
+3. The server returns a signed, expiring policy decision for local routing,
+   crunch, or cache actions.
+4. The client verifies the decision, applies local opt-in flags and hard gates,
+   executes only supported local actions, and forwards provider traffic itself.
+5. The client reports metadata-only local outcomes so the server can improve
+   later decisions.
+
+Client non-goals:
+
+- no learned route discovery or adaptive routing policy in the local package
+- no local savings research bench or cross-install optimization learning
+- no managed policy candidate generation in the local package
+- no billing, tenant accounts, hosted shared caches, or fleet policy ownership
+
+The longer boundary note is in
+[docs/client-server-boundary.md](docs/client-server-boundary.md).
 
 ## Dashboard
 
