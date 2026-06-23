@@ -77,6 +77,12 @@ class RecommendationTest(unittest.TestCase):
         "TOKENCLAW_POLICY_DECISION_MIN_CONFIDENCE",
         "TOKENCLAW_POLICY_DECISION_CANARY_FRACTION",
         "TOKENCLAW_POLICY_DECISION_CANARY_SALT",
+        "TOKENCLAW_MANAGED",
+        "TOKENCLAW_MANAGED_MODE",
+        "TOKENCLAW_LOCAL_RULES_ONLY",
+        "TOKENCLAW_MANAGED_ROUTING",
+        "TOKENCLAW_MANAGED_CRUNCH",
+        "TOKENCLAW_MANAGED_CACHE",
         "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS",
         "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS",
     )
@@ -176,6 +182,21 @@ class RecommendationTest(unittest.TestCase):
         self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(envelope)))
         self._assert_no_sensitive_strings(envelope)
         recommendations.assert_managed_egress_safe(envelope)
+
+    def test_local_rules_only_disables_policy_fetch_before_network(self):
+        os.environ["TOKENCLAW_LOCAL_RULES_ONLY"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        FakeAsyncClient.response = FakeResponse(body={"unexpected": True})
+
+        with patch("tokenclaw.recommendations.httpx.AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_policy_decision({"input_features": {}}))
+
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "disabled")
+        self.assertEqual(meta["product_mode"]["mode"], "local_only")
+        self.assertIsNone(FakeAsyncClient.last_url)
 
     def test_policy_decision_fetch_can_use_request_facts_instead_of_rich_unit(self):
         os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"

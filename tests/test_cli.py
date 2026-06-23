@@ -295,6 +295,21 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "- managed recommendations: on (server: optimizer.example.com:8443)",
         )
 
+    def test_stats_and_doctor_json_include_managed_product_mode(self):
+        config = {"targets": {}}
+        with TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"TOKENCLAW_MANAGED": "1", "TOKENCLAW_MANAGED_MODE": "canary"},
+            clear=False,
+        ):
+            stats = onboarding_cli._activation_stats_result(config, config_dir=tmp, target=None)
+            doctor = onboarding_cli._activation_doctor_result(config, config_dir=tmp, target=None, timeout=0.01)
+
+        self.assertEqual(stats["managed_mode"]["mode"], "canary")
+        self.assertTrue(stats["managed_mode"]["server_calls_enabled"])
+        self.assertTrue(stats["managed_mode"]["local_application_enabled"])
+        self.assertEqual(doctor["managed_mode"]["mode"], "canary")
+
     def test_tokenclaw_start_launches_default_stack_and_writes_profiles(self):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()

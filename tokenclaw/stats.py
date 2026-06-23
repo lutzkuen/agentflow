@@ -31,6 +31,7 @@ from tokenclaw.pricing import (
     provider_prompt_cache_accounting,
 )
 from tokenclaw.golden_path import build_golden_path_summary
+from tokenclaw.managed_mode import managed_mode_public_meta, managed_product_mode
 from tokenclaw.paths import tokenclaw_config_path
 from tokenclaw.public_metadata import public_id, public_label
 from tokenclaw.quality import (
@@ -1033,6 +1034,7 @@ async def stats_safety(
         recommendations_enabled,
     )
 
+    product_mode = managed_product_mode()
     recommendation_enabled = recommendations_enabled()
     recommendation_url = recommendation_server_url()
     policy_bundle_url = os.getenv("TOKENCLAW_POLICY_BUNDLE_RECOMMENDATION_URL")
@@ -1082,6 +1084,12 @@ async def stats_safety(
             "managed-recommendation-server-unconfigured",
             "medium",
             "Managed recommendations are enabled but no recommendation server URL is configured; local policy will remain authoritative.",
+        )
+    if product_mode.mode != "local_only" and not any(product_mode.family_enabled.values()):
+        warn(
+            "managed-actions-all-locally-disabled",
+            "info",
+            "Managed mode is enabled but routing, crunching, and cache actions are all locally disabled.",
         )
     if _as_int(feedback_summary.get("due")) > 0:
         warn(
@@ -1148,6 +1156,9 @@ async def stats_safety(
             "proxy_loopback": proxy_loopback,
             "body_logging_enabled": log_bodies_enabled,
             "managed_communication_enabled": bool(recommendation_enabled or policy_bundle_url),
+            "managed_mode": product_mode.mode,
+            "managed_server_calls_enabled": product_mode.server_calls_enabled,
+            "managed_local_application_enabled": product_mode.local_application_enabled,
             "managed_auth_configured": auth_configured,
             "managed_feedback_due": _as_int(feedback_summary.get("due")),
             "managed_feedback_retryable_error": _as_int(feedback_summary.get("retryable_error")),
@@ -1175,7 +1186,8 @@ async def stats_safety(
             },
             "managed": {
                 "recommendations_enabled": recommendation_enabled,
-                "mode": "managed-recommendation-bridge" if recommendation_enabled else "local-only",
+                "mode": product_mode.mode,
+                "product_mode": product_mode.public_meta(),
                 "recommendation_server": recommendation_state,
                 "recommendation_server_configured": recommendation_server_configured(),
                 "recommendation_timeout_seconds": recommendation_timeout_seconds(),
@@ -19106,6 +19118,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         policy_scan_limit=1000,
         persist_outcome_feedback=False,
     )
+    managed_mode = managed_mode_public_meta()
 
     def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -19819,6 +19832,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
 
     return {
         "executive_summary": executive_summary,
+        "managed_mode": managed_mode,
         "source_surface_accounting": accounting_total["source_surfaces"],
         "today_source_surface_accounting": accounting_today["source_surfaces"],
         "savings_by_source_surface": accounting_total["savings_by_source_surface"],
@@ -19932,6 +19946,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "savings_loop_bottlenecks": savings_loop_bottlenecks.get("summary", {}),
             "activation_successor_queue_health": activation_successor_queue_health.get("summary", {}),
             "managed_preview_coverage": (activation_burndown.get("managed_preview_coverage") or {}).get("summary", {}),
+            "managed_mode": managed_mode,
         },
         "savings_loop_bottlenecks": savings_loop_bottlenecks,
         "activation_burndown": activation_burndown,

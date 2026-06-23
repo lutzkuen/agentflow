@@ -21,6 +21,7 @@ from tokenclaw.client_contract import (
     filter_payload_by_client_contract,
 )
 from tokenclaw.env import env
+from tokenclaw.managed_mode import managed_product_mode
 from tokenclaw.managed_egress import (
     LIFECYCLE_METADATA_COMMAND_SCHEMAS,
     RAW_FEATURE_KEYS,
@@ -721,10 +722,16 @@ def _as_bool(value: str | None, default: bool = False) -> bool:
 
 
 def recommendations_enabled() -> bool:
+    product_mode = managed_product_mode()
+    if product_mode.local_rules_only or product_mode.mode == "local_only":
+        return False
     raw = env(RECOMMENDATIONS_ENABLED_ENV)
     if raw is not None:
         return _as_bool(raw, False)
-    return _as_bool(env(RECOMMENDATION_ENABLED_ENV), False)
+    legacy = env(RECOMMENDATION_ENABLED_ENV)
+    if legacy is not None:
+        return _as_bool(legacy, False)
+    return product_mode.server_calls_enabled
 
 
 def recommendation_server_url() -> str:
@@ -1075,6 +1082,7 @@ def build_codex_turn_optimization_unit(
 
 
 def _base_meta() -> dict[str, Any]:
+    product_mode = managed_product_mode()
     return {
         "enabled": recommendations_enabled(),
         "server_url": recommendation_server_url(),
@@ -1086,6 +1094,7 @@ def _base_meta() -> dict[str, Any]:
         "loopback_unauthenticated_allowed": managed_loopback_auth_allowed(),
         "api_key_value_included": False,
         "policy_source": "local-default",
+        "product_mode": product_mode.public_meta(),
     }
 
 
@@ -1138,9 +1147,14 @@ async def _client_contract_for_payload(payload: dict[str, Any]) -> dict[str, Any
 
 
 def policy_decisions_enabled() -> bool:
+    product_mode = managed_product_mode()
+    if not product_mode.server_calls_enabled:
+        return False
     if env(POLICY_DECISIONS_ENABLED_ENV) is not None:
         return _as_bool(env(POLICY_DECISIONS_ENABLED_ENV), False)
-    return _env_enabled(POLICY_DECISION_ENABLED_ENV)
+    if env(POLICY_DECISION_ENABLED_ENV) is not None:
+        return _env_enabled(POLICY_DECISION_ENABLED_ENV)
+    return product_mode.server_calls_enabled if product_mode.configured else False
 
 
 def policy_decision_min_confidence() -> float:

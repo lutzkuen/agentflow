@@ -379,7 +379,9 @@ def _resolve_managed_recommendations_line() -> str:
     """
     try:
         from tokenclaw import recommendations
+        from tokenclaw.managed_mode import managed_product_mode
 
+        product_mode = managed_product_mode()
         managed_enabled = (
             recommendations.recommendations_enabled()
             and recommendations.policy_decisions_enabled()
@@ -389,8 +391,12 @@ def _resolve_managed_recommendations_line() -> str:
     except Exception:
         return "- managed recommendations: unknown"
 
+    if product_mode.mode == "local_only" and (product_mode.configured or product_mode.local_rules_only):
+        return f"- managed recommendations: off ({product_mode.reason})"
     if managed_enabled and server_configured:
         host = urlsplit(server_url).netloc or server_url
+        if product_mode.configured:
+            return f"- managed recommendations: on (mode: {product_mode.mode.replace('_', '-')}, server: {host})"
         return f"- managed recommendations: on (server: {host})"
     if managed_enabled and not server_configured:
         return "- managed recommendations: off (enabled, but no server URL configured)"
@@ -1622,6 +1628,7 @@ def _activation_stats_result(
     target: str | None,
 ) -> dict[str, Any]:
     from tokenclaw import activation
+    from tokenclaw.managed_mode import managed_mode_public_meta
 
     targets = {
         name: _target_activation_base(config, config_dir=config_dir, target=name)
@@ -1633,6 +1640,7 @@ def _activation_stats_result(
         "target": target,
         "config_path": str(activation.activation_config_path(config_dir)),
         "targets": targets,
+        "managed_mode": managed_mode_public_meta(),
         "activation_successor_queue_health": _activation_successor_queue_health(),
     }
 
@@ -1645,6 +1653,7 @@ def _activation_doctor_result(
     timeout: float,
 ) -> dict[str, Any]:
     from tokenclaw import activation
+    from tokenclaw.managed_mode import managed_mode_public_meta
 
     if target == "start":
         start = _start_doctor_result(config, config_dir=config_dir, timeout=timeout)
@@ -1654,6 +1663,7 @@ def _activation_doctor_result(
             "target": target,
             "config_path": str(activation.activation_config_path(config_dir)),
             "targets": {},
+            "managed_mode": managed_mode_public_meta(),
             "start": start,
             "activation_successor_queue_health": _activation_successor_queue_health(),
         }
@@ -1682,6 +1692,7 @@ def _activation_doctor_result(
         "target": target,
         "config_path": str(activation.activation_config_path(config_dir)),
         "targets": targets,
+        "managed_mode": managed_mode_public_meta(),
         "activation_successor_queue_health": _activation_successor_queue_health(),
     }
 
@@ -2028,6 +2039,13 @@ def _doctor_claude_desktop_target(base: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_activation_stats_summary(stdout: Any, result: dict[str, Any]) -> None:
+    managed = result.get("managed_mode") if isinstance(result.get("managed_mode"), dict) else {}
+    if managed and (managed.get("configured") or managed.get("local_rules_only") or managed.get("server_calls_enabled")):
+        stdout.write(
+            f"managed: {managed.get('mode')} "
+            f"(server calls: {str(bool(managed.get('server_calls_enabled'))).lower()}, "
+            f"local apply: {str(bool(managed.get('local_application_enabled'))).lower()})\n"
+        )
     targets = result.get("targets") if isinstance(result.get("targets"), dict) else {}
     for name in _selected_activation_targets(result.get("target")):
         target = targets.get(name) if isinstance(targets.get(name), dict) else {}
@@ -2045,6 +2063,13 @@ def _write_activation_stats_summary(stdout: Any, result: dict[str, Any]) -> None
 
 
 def _write_activation_doctor_summary(stdout: Any, result: dict[str, Any]) -> None:
+    managed = result.get("managed_mode") if isinstance(result.get("managed_mode"), dict) else {}
+    if managed and (managed.get("configured") or managed.get("local_rules_only") or managed.get("server_calls_enabled")):
+        stdout.write(
+            f"managed: {managed.get('mode')} "
+            f"(server calls: {str(bool(managed.get('server_calls_enabled'))).lower()}, "
+            f"local apply: {str(bool(managed.get('local_application_enabled'))).lower()})\n"
+        )
     if result.get("target") == "start":
         start = result.get("start") if isinstance(result.get("start"), dict) else {}
         stdout.write(f"start: {start.get('status') or 'unknown'}\n")

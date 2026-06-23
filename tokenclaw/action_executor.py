@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from tokenclaw.env import env
+from tokenclaw.managed_mode import managed_product_mode
 from tokenclaw.optimization.managed_actions import (
     cache_profile_from_decision,
     crunch_profile_from_decision,
@@ -47,6 +48,9 @@ LOCAL_RUNTIME_DECISION_KEYS = {
     "min_confidence",
     "mode",
     "policy_decision_enabled",
+    "product_mode",
+    "product_mode_application_enabled",
+    "product_mode_enforced",
     "projection",
     "selected_for_local_application",
     "selected_for_shadow_evaluation",
@@ -144,7 +148,23 @@ class ActionExecutor:
         source_surface: str | None = None,
     ) -> dict[str, Any]:
         current_model = str(body.get("model") or routing_meta.get("routed_model") or "")
-        supported = {family.strip().lower() for family in self.supported_action_families}
+        product_mode = managed_product_mode()
+        enforce_product_mode = product_mode.configured or product_mode.local_rules_only
+        configured_supported = {family.strip().lower() for family in self.supported_action_families}
+        supported = (
+            {
+                family
+                for family in configured_supported
+                if product_mode.family_enabled.get(family, False)
+            }
+            if enforce_product_mode
+            else set(configured_supported)
+        )
+        application_allowed = bool(
+            application_enabled
+            and self.enabled
+            and (product_mode.local_application_enabled if enforce_product_mode else True)
+        )
         action_decision = {
             key: value
             for key, value in decision.items()
@@ -172,7 +192,7 @@ class ActionExecutor:
             provider=self.provider,
             current_model=current_model,
             source_surface=source_surface,
-            application_enabled=bool(application_enabled and self.enabled),
+            application_enabled=application_allowed,
             now=self.now,
         )
         result = {
@@ -183,8 +203,12 @@ class ActionExecutor:
             "decision_id": decision.get("decision_id"),
             "policy_source": "managed-recommended",
             "application_enabled": bool(application_enabled),
+            "product_mode_application_enabled": product_mode.local_application_enabled if enforce_product_mode else True,
+            "product_mode": product_mode.public_meta(),
+            "product_mode_enforced": enforce_product_mode,
             "shadow_only": bool(shadow_only),
-            "supported_local_action_families": sorted(supported),
+            "supported_local_action_families": sorted(configured_supported),
+            "enabled_local_action_families": sorted(supported),
             "local_model_before": current_model,
             "local_model_after": current_model,
             "status": "held",
@@ -211,8 +235,12 @@ class ActionExecutor:
 
         if not self.enabled:
             return self._finish(result, "held", "action-executor-disabled")
+        if enforce_product_mode and not product_mode.server_calls_enabled:
+            return self._finish(result, "held", product_mode.reason)
         if not application_enabled:
             return self._finish(result, "held", "local-application-disabled")
+        if enforce_product_mode and not product_mode.local_application_enabled:
+            return self._finish(result, "held", f"managed-mode-{product_mode.mode}")
         if shadow_only:
             target = _target_model(decision, local_actions)
             if target:
@@ -327,6 +355,7 @@ class ActionExecutor:
                 for family in DEFAULT_ACTION_FAMILIES
                 if isinstance(result.get(family), dict) and result[family].get("status") == "held"
             ],
+            "product_mode": result.get("product_mode"),
             "raw_payload_included": False,
         }
         return result

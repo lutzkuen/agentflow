@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 from tokenclaw.action_executor import ActionExecutor
+from tokenclaw.managed_mode import managed_product_mode
 from tokenclaw.optimization.managed_actions import evaluate_managed_local_actions
 from tokenclaw.pricing import estimate_cost
 from tokenclaw.recommendations import (
@@ -21,6 +22,16 @@ LIVE_POLICY_DECISION_MODES = {"live", "enforced", "promoted", "promotion", "rout
 
 
 def openai_recommendation_mode() -> str:
+    product_mode = managed_product_mode()
+    if product_mode.configured or product_mode.local_rules_only:
+        if product_mode.mode == "local_only":
+            return "observe-only"
+        return {
+            "observe_only": "observe-only",
+            "dry_run": "dry-run",
+            "canary": "canary",
+            "live": "apply",
+        }.get(product_mode.mode, "observe-only")
     raw = os.getenv(OPENAI_RECOMMENDATION_MODE_ENV, "observe-only").strip().lower()
     aliases = {
         "observe": "observe-only",
@@ -161,6 +172,9 @@ def _traffic_treatment(meta: dict[str, Any]) -> str:
 
 
 def _local_application_enabled(mode: str) -> bool:
+    product_mode = managed_product_mode()
+    if product_mode.configured:
+        return product_mode.local_application_enabled
     return mode not in {"observe-only", "dry-run"}
 
 

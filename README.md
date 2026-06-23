@@ -145,6 +145,28 @@ tokenclaw stats --json
 tokenclaw doctor --json
 ```
 
+## Managed optimizer modes
+
+TokenClaw is local-first. Managed optimizer communication is off unless you opt in, and
+local hard gates always win over a server recommendation.
+
+```text
+TOKENCLAW_MANAGED=0
+TOKENCLAW_MANAGED_MODE=observe_only|dry_run|canary|live
+TOKENCLAW_MANAGED_ROUTING=0
+TOKENCLAW_MANAGED_CRUNCH=0
+TOKENCLAW_MANAGED_CACHE=0
+TOKENCLAW_LOCAL_RULES_ONLY=1
+```
+
+`TOKENCLAW_LOCAL_RULES_ONLY=1` is the strongest opt-out: TokenClaw never calls the
+managed server and only applies local rules. `observe_only` may fetch feature-only
+server decisions for review, but does not apply them. `dry_run` validates and reports
+what would happen without mutating provider requests. `canary` and `live` allow local
+application only for action families still enabled by the local routing/crunch/cache
+gates. Expired, invalid, unsafe, unsupported, or locally disabled managed actions are
+vetoed and reported as metadata-only outcome feedback.
+
 ## OpenAI API apps
 
 Configure the local OpenAI target:

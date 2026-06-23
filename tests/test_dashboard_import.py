@@ -3566,6 +3566,8 @@ class DashboardImportTests(unittest.TestCase):
             "TOKENCLAW_RECOMMENDATION_SERVER_URL": "https://user:supersecret@managed.test/v1/recommendation?api_key=managedsecret&mode=dev",
             "TOKENCLAW_POLICY_BUNDLE_RECOMMENDATION_URL": "https://managed.test/v1/policy-bundle-recommendation?token=policysecret",
             "TOKENCLAW_MANAGED_API_KEY": "",
+            "TOKENCLAW_MANAGED": "1",
+            "TOKENCLAW_MANAGED_MODE": "dry_run",
             "TOKENCLAW_POLICY_EVENTS": "0",
         }
         try:
@@ -3594,6 +3596,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["raw_prompts_included"])
             self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
             self.assertFalse(payload["checks"]["managed"]["api_key_value_included"])
+            self.assertEqual(payload["checks"]["managed"]["product_mode"]["mode"], "dry_run")
+            self.assertTrue(payload["checks"]["managed"]["product_mode"]["server_calls_enabled"])
+            self.assertFalse(payload["checks"]["managed"]["product_mode"]["local_application_enabled"])
             redacted = str(payload)
             self.assertIn("[redacted]", redacted)
             self.assertNotIn("supersecret", redacted)

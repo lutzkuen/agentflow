@@ -145,6 +145,69 @@ class TokenClawEnvironmentTests(unittest.TestCase):
                     else:
                         os.environ[key] = value
 
+    def test_managed_product_mode_defaults_to_local_only(self):
+        from tokenclaw.managed_mode import managed_product_mode
+
+        keys = (
+            "TOKENCLAW_MANAGED",
+            "TOKENCLAW_MANAGED_MODE",
+            "TOKENCLAW_LOCAL_RULES_ONLY",
+            "TOKENCLAW_MANAGED_ROUTING",
+            "TOKENCLAW_MANAGED_CRUNCH",
+            "TOKENCLAW_MANAGED_CACHE",
+            "TOKENCLAW_RECOMMENDATION_ENABLED",
+            "TOKENCLAW_RECOMMENDATIONS_ENABLED",
+            "TOKENCLAW_POLICY_DECISION_ENABLED",
+            "TOKENCLAW_POLICY_DECISIONS_ENABLED",
+        )
+        with patch.dict(os.environ, {key: "" for key in ()}, clear=False):
+            for key in keys:
+                os.environ.pop(key, None)
+            mode = managed_product_mode()
+
+        self.assertEqual(mode.mode, "local_only")
+        self.assertFalse(mode.server_calls_enabled)
+        self.assertFalse(mode.local_application_enabled)
+
+    def test_managed_product_mode_enforces_local_rules_only_over_legacy_flags(self):
+        from tokenclaw.managed_mode import managed_product_mode
+
+        with patch.dict(
+            os.environ,
+            {
+                "TOKENCLAW_LOCAL_RULES_ONLY": "1",
+                "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+                "TOKENCLAW_POLICY_DECISION_ENABLED": "1",
+            },
+            clear=False,
+        ):
+            mode = managed_product_mode()
+
+        self.assertEqual(mode.mode, "local_only")
+        self.assertEqual(mode.reason, "local-rules-only")
+        self.assertFalse(mode.server_calls_enabled)
+
+    def test_managed_product_mode_live_with_family_opt_out(self):
+        from tokenclaw.managed_mode import managed_product_mode
+
+        with patch.dict(
+            os.environ,
+            {
+                "TOKENCLAW_MANAGED": "1",
+                "TOKENCLAW_MANAGED_MODE": "live",
+                "TOKENCLAW_MANAGED_ROUTING": "0",
+            },
+            clear=False,
+        ):
+            mode = managed_product_mode()
+
+        self.assertEqual(mode.mode, "live")
+        self.assertTrue(mode.server_calls_enabled)
+        self.assertTrue(mode.local_application_enabled)
+        self.assertFalse(mode.family_enabled["routing"])
+        self.assertTrue(mode.family_enabled["crunch"])
+        self.assertTrue(mode.family_enabled["cache"])
+
 
 if __name__ == "__main__":
     unittest.main()

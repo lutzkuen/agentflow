@@ -354,6 +354,7 @@ def _unsupported_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "recommendation_family",
             "candidate_id",
             "policy_source",
+            "product_mode",
             "recommended_mode",
             "local_policy_decision_mode",
             "model_artifact_version",

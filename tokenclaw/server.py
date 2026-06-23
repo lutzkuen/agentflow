@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, WebSocket
 
 from tokenclaw.env import env, env_float, env_int
+from tokenclaw.managed_mode import managed_mode_public_meta
 from tokenclaw.paths import default_db_path
 from tokenclaw.upstream_url import normalize_openai_upstream_base_url, redact_url
 
@@ -401,6 +402,7 @@ async def health() -> dict[str, Any]:
         "db": DEFAULT_DB,
         "upstream": redact_url(DEFAULT_UPSTREAM),
         "openai_auth_mode": OPENAI_AUTH_MODE if PROVIDER == "openai" else None,
+        "managed_mode": managed_mode_public_meta(),
         "time": utc_now(),
     }
 
