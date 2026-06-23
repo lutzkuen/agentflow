@@ -69,6 +69,27 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    if name not in os.environ:
+        return default
+    return _as_bool(os.environ.get(name), default)
+
+
+def _managed_policy_decisions_configured() -> bool:
+    recommendations_enabled = (
+        _env_bool("TOKENCLAW_RECOMMENDATIONS_ENABLED", False)
+        if "TOKENCLAW_RECOMMENDATIONS_ENABLED" in os.environ
+        else _env_bool("TOKENCLAW_RECOMMENDATION_ENABLED", False)
+    )
+    policy_decisions_enabled = (
+        _env_bool("TOKENCLAW_POLICY_DECISIONS_ENABLED", False)
+        if "TOKENCLAW_POLICY_DECISIONS_ENABLED" in os.environ
+        else _env_bool("TOKENCLAW_POLICY_DECISION_ENABLED", False)
+    )
+    server_url = str(os.environ.get("TOKENCLAW_RECOMMENDATION_SERVER_URL") or "").strip()
+    return bool(recommendations_enabled and policy_decisions_enabled and server_url)
+
+
 def _as_non_negative_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
@@ -1555,6 +1576,7 @@ def routing_candidate_coverage(
     text_chars: Any = 0,
     input_tokens: Any = 0,
 ) -> dict[str, Any]:
+    refresh_experiment_policy_if_changed()
     requested = str(requested_model or "").strip()
     provider_label = str(provider or "").strip() or "unknown"
     surface_label = str(source_surface or "").strip() or "unknown"
@@ -1582,6 +1604,31 @@ def routing_candidate_coverage(
                 "provider_bodies_included": False,
                 "request_ids_included": False,
                 "session_ids_included": False,
+            },
+        }
+
+    if ROUTING_EXPERIMENT_POLICY_SOURCE == "local-default" and not _managed_policy_decisions_configured():
+        return {
+            "schema": "tokenclaw.routing_candidate_coverage.v1",
+            "status": "routing-off",
+            "covered": False,
+            "actionable": False,
+            "reason": "no-backed-routing",
+            "eligible_candidate_count": 0,
+            "eligible_candidate_ids": [],
+            "selected_candidate_id": None,
+            "suggested_routed_model": None,
+            "policy_source": ROUTING_EXPERIMENT_POLICY_SOURCE,
+            "rule_path": ROUTING_EXPERIMENT_RULES_PATH,
+            "add_payload": None,
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "file_paths_included": False,
+                "cache_keys_included": False,
             },
         }
 

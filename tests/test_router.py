@@ -90,7 +90,7 @@ class RouterTest(unittest.TestCase):
         env.update(extra_env or {})
         return patch.dict(os.environ, env)
 
-    def test_tool_result_sonnet_routes_to_haiku_without_thinking(self):
+    def test_default_tool_result_sonnet_routing_is_off_without_backing(self):
         body = {
             "model": SONNET_DEFAULT,
             "messages": [
@@ -103,11 +103,14 @@ class RouterTest(unittest.TestCase):
 
         routed, meta = route_model(body)
 
-        self.assertEqual(routed, HAIKU_DEFAULT)
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
         self.assertEqual(meta["category"], "tool-result")
         self.assertEqual(meta["workflow_phase"], "tool-execution")
         self.assertEqual(meta["workflow_phase_reason"], "last-user-tool-result")
         self.assertEqual(meta["policy_source"], "local-default")
+        self.assertFalse(meta["routing_backing"]["backed"])
 
     def test_thinking_tool_result_keeps_requested_model(self):
         body = {
@@ -127,7 +130,8 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(meta["category"], "tool-result")
         self.assertEqual(meta["workflow_phase"], "thinking")
         self.assertEqual(meta["workflow_phase_reason"], "thinking-current-request")
-        self.assertEqual(meta["reason"], "keep requested model for thinking request")
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
         self.assertEqual(meta["thinking_gate"]["status"], "blocked")
         self.assertEqual(meta["thinking_gate"]["reason"], "current-thinking-request")
         self.assertEqual(meta["policy_source"], "local-default")
@@ -156,7 +160,8 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(meta["category"], "tool-result")
         self.assertEqual(meta["workflow_phase"], "tool-execution")
         self.assertEqual(meta["workflow_phase_reason"], "last-user-tool-result")
-        self.assertEqual(meta["reason"], "keep requested model for thinking request")
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
         self.assertEqual(meta["thinking_gate"]["status"], "blocked")
         self.assertEqual(meta["thinking_gate"]["reason"], "assistant-thinking-history")
 
@@ -257,7 +262,8 @@ class RouterTest(unittest.TestCase):
         routed, meta = route_model(body)
 
         self.assertEqual(routed, SONNET_DEFAULT)
-        self.assertEqual(meta["reason"], "keep requested model")
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
         self.assertEqual(meta["workflow_phase"], "chat")
 
     def test_manual_routing_source_reported_for_thinking_keep(self):
@@ -324,7 +330,8 @@ rules:
                     routed, meta = manual_router.route_model(body)
 
                     self.assertEqual(routed, manual_router.SONNET_DEFAULT)
-                    self.assertEqual(meta["reason"], "keep requested model")
+                    self.assertFalse(meta["enabled"])
+                    self.assertEqual(meta["reason"], "routing off: no matching manual hard rule")
             finally:
                 importlib.reload(router_module)
 
@@ -360,6 +367,52 @@ rules:
             finally:
                 importlib.reload(router_module)
 
+    def test_manual_hard_rule_routes_only_matching_shapes(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      category: tool-result
+    action:
+      route_to: haiku
+      reason: manual tool-result rule
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(os.environ, {"TOKENCLAW_ROUTING_RULES": str(rules_path)}):
+                    manual_router = importlib.reload(router_module)
+                    matching = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+                    nonmatching = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [{"role": "user", "content": "Please explain this setting."}],
+                    }
+
+                    routed, meta = manual_router.route_model(matching)
+                    kept, kept_meta = manual_router.route_model(nonmatching)
+
+                    self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
+                    self.assertTrue(meta["enabled"])
+                    self.assertEqual(meta["reason"], "manual tool-result rule")
+                    self.assertEqual(meta["policy_source"], "local-manual")
+                    self.assertEqual(kept, manual_router.SONNET_DEFAULT)
+                    self.assertFalse(kept_meta["enabled"])
+                    self.assertEqual(kept_meta["reason"], "routing off: no matching manual hard rule")
+                    self.assertEqual(kept_meta["routing_backing"]["manual_hard_rule_count"], 1)
+            finally:
+                importlib.reload(router_module)
+
     def test_disabled_thinking_with_assistant_thinking_history_keeps_tool_result_on_sonnet(self):
         body = {
             "model": SONNET_DEFAULT,
@@ -384,11 +437,12 @@ rules:
         self.assertEqual(routed, SONNET_DEFAULT)
         self.assertEqual(meta["category"], "tool-result")
         self.assertEqual(meta["workflow_phase"], "tool-execution")
-        self.assertEqual(meta["reason"], "keep requested model for thinking request")
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
         self.assertEqual(meta["thinking_gate"]["status"], "blocked")
         self.assertEqual(meta["thinking_gate"]["reason"], "assistant-thinking-history")
 
-    def test_openai_promoted_tool_light_rule_stays_on_requested_model_by_default(self):
+    def test_openai_default_canary_is_off_without_backing(self):
         routed, meta = router_module.route_openai_model({
             "model": "gpt-5.4",
             "input": "Inspect the small tool result and decide whether another lookup is needed.",
@@ -396,35 +450,26 @@ rules:
         })
 
         self.assertEqual(routed, "gpt-5.4")
-        self.assertTrue(meta["enabled"])
+        self.assertFalse(meta["enabled"])
         self.assertEqual(meta["provider"], "openai")
         self.assertEqual(meta["category"], "tool-light")
         self.assertTrue(meta["has_tools"])
-        self.assertIn(meta["reason"], {
-            "OpenAI canary selected shadow route; keep requested model",
-            "OpenAI canary holdout; keep requested model",
-            "OpenAI canary not selected; keep requested model",
-        })
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
         self.assertEqual(meta["routed_model"], "gpt-5.4")
-        self.assertEqual(meta["openai_canary"]["target_model"], "gpt-5.4-mini")
 
-    def test_openai_canary_remains_enabled_for_non_promoted_chat_gpt_5_4_by_default(self):
+    def test_openai_default_chat_canary_is_off_without_backing(self):
         routed, meta = router_module.route_openai_model({
             "model": "gpt-5.4",
             "input": "Summarize the recent result.\n" + ("context " * 260),
         })
 
-        self.assertIn(routed, {"gpt-5.4", "gpt-5.4-mini"})
-        self.assertTrue(meta["enabled"])
+        self.assertEqual(routed, "gpt-5.4")
+        self.assertFalse(meta["enabled"])
         self.assertEqual(meta["provider"], "openai")
         self.assertEqual(meta["category"], "chat")
-        canary = meta["openai_canary"]
-        self.assertEqual(canary["policy_id"], "local-openai-routing-canary-v1")
-        self.assertEqual(canary["target_model"], "gpt-5.4-mini")
-        self.assertIn(canary["status"], {"applied", "holdout", "not_selected"})
-        self.assertEqual(router_module.ROUTING_OPENAI_CANARY["safety_stop"]["max_error_rate"], 0.03)
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
 
-    def test_openai_tool_light_canary_covers_wider_cohort_without_live_downroute(self):
+    def test_openai_tool_light_canary_requires_manual_policy_file(self):
         routed, meta = router_module.route_openai_model({
             "model": "gpt-5.4",
             "input": "Inspect this tool-light payload.\n" + ("x" * 12000),
@@ -433,7 +478,8 @@ rules:
 
         self.assertEqual(routed, "gpt-5.4")
         self.assertEqual(meta["category"], "tool-light")
-        self.assertEqual(meta["openai_canary"]["target_model"], "gpt-5.4-mini")
+        self.assertFalse(meta["enabled"])
+        self.assertNotIn("openai_canary", meta)
 
         _, heavy_meta = router_module.route_openai_model({
             "model": "gpt-5.4",
@@ -441,8 +487,7 @@ rules:
             "tools": [{"type": "function", "name": "lookup_file"}],
         })
         self.assertEqual(heavy_meta["category"], "tool-heavy")
-        self.assertEqual(heavy_meta["openai_canary"]["status"], "ineligible")
-        self.assertEqual(heavy_meta["openai_canary"]["reason"], "category-not-enabled")
+        self.assertFalse(heavy_meta["enabled"])
 
     def test_openai_canary_ignores_non_target_models_by_default(self):
         routed, meta = router_module.route_openai_model({
@@ -451,12 +496,11 @@ rules:
         })
 
         self.assertEqual(routed, "gpt-5-codex")
-        self.assertTrue(meta["enabled"])
+        self.assertFalse(meta["enabled"])
         self.assertEqual(meta["provider"], "openai")
-        self.assertEqual(meta["openai_canary"]["status"], "ineligible")
-        self.assertEqual(meta["openai_canary"]["reason"], "requested-model-not-enabled")
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
 
-    def test_openai_routing_stays_inside_openai_models(self):
+    def test_openai_env_routing_alone_does_not_back_default_heuristics(self):
         try:
             with patch.dict(os.environ, {"TOKENCLAW_OPENAI_ROUTING": "1"}):
                 manual_router = importlib.reload(router_module)
@@ -466,10 +510,10 @@ rules:
                     "input": "small task",
                 })
 
-                self.assertEqual(routed, manual_router.OPENAI_SMALL_DEFAULT)
-                self.assertTrue(meta["enabled"])
+                self.assertEqual(routed, manual_router.OPENAI_LARGE_DEFAULT)
+                self.assertFalse(meta["enabled"])
                 self.assertEqual(meta["provider"], "openai")
-                self.assertNotIn("claude", routed)
+                self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
         finally:
             importlib.reload(router_module)
 
@@ -822,7 +866,7 @@ rules: []
             finally:
                 importlib.reload(router_module)
 
-    def test_small_non_tool_sonnet_routes_to_haiku_under_10000_chars(self):
+    def test_small_non_tool_sonnet_default_routing_is_off_without_backing(self):
         body = {
             "model": SONNET_DEFAULT,
             "messages": [{"role": "user", "content": "```python\n" + ("print('x')\n" * 860) + "```"}],
@@ -830,8 +874,9 @@ rules: []
 
         routed, meta = route_model(body)
 
-        self.assertEqual(routed, HAIKU_DEFAULT)
-        self.assertEqual(meta["reason"], "small non-tool Sonnet request routed to Haiku")
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
         self.assertEqual(meta["category"], "code-gen")
         self.assertFalse(meta["has_tools"])
         self.assertLess(meta["text_chars"], 10000)
@@ -846,10 +891,11 @@ rules: []
             routed, meta = route_model(body)
 
         self.assertEqual(routed, SONNET_DEFAULT)
-        self.assertEqual(meta["reason"], "keep requested model")
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
         self.assertEqual(meta["text_chars"], 10000)
 
-    def test_midsize_non_tool_sonnet_routes_to_haiku_when_enabled(self):
+    def test_midsize_env_flag_alone_does_not_back_default_routing(self):
         body = {
             "model": SONNET_DEFAULT,
             "messages": [{"role": "user", "content": "summarize this report\n" + ("a" * 11900)}],
@@ -858,8 +904,9 @@ rules: []
         with patch.dict(os.environ, {"TOKENCLAW_ROUTE_MIDSIZE": "1"}):
             routed, meta = route_model(body)
 
-        self.assertEqual(routed, HAIKU_DEFAULT)
-        self.assertEqual(meta["reason"], "midsize non-tool Sonnet request routed to Haiku")
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
         self.assertEqual(meta["category"], "chat")
         self.assertFalse(meta["has_tools"])
 
@@ -873,7 +920,8 @@ rules: []
             routed, meta = route_model(body)
 
         self.assertEqual(routed, SONNET_DEFAULT)
-        self.assertEqual(meta["reason"], "keep requested model")
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
 
     def test_midsize_code_gen_sonnet_does_not_route_to_haiku(self):
         body = {
@@ -886,7 +934,8 @@ rules: []
 
         self.assertEqual(routed, SONNET_DEFAULT)
         self.assertEqual(meta["category"], "code-gen")
-        self.assertEqual(meta["reason"], "keep requested model")
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
 
     def test_large_non_tool_sonnet_above_midsize_window_stays_requested(self):
         body = {
@@ -899,7 +948,8 @@ rules: []
 
         self.assertEqual(routed, SONNET_DEFAULT)
         self.assertEqual(meta["category"], "chat")
-        self.assertEqual(meta["reason"], "keep requested model")
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
 
     def test_midsize_tool_request_sonnet_does_not_route_as_non_tool(self):
         body = {
@@ -911,9 +961,10 @@ rules: []
         with patch.dict(os.environ, {"TOKENCLAW_ROUTE_MIDSIZE": "1"}):
             routed, meta = route_model(body)
 
-        self.assertEqual(routed, HAIKU_DEFAULT)
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertFalse(meta["enabled"])
         self.assertEqual(meta["category"], "tool-light")
-        self.assertEqual(meta["reason"], "tool-light Sonnet request routed to Haiku")
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
 
     def test_midsize_thinking_request_keeps_requested_model_when_enabled(self):
         body = {
@@ -926,7 +977,8 @@ rules: []
             routed, meta = route_model(body)
 
         self.assertEqual(routed, SONNET_DEFAULT)
-        self.assertEqual(meta["reason"], "keep requested model for thinking request")
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["reason"], "routing off: no managed server or manual hard rules")
 
     def test_phase_canary_applies_seeded_eligible_tool_execution(self):
         with TemporaryDirectory() as tmp:

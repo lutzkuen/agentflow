@@ -417,7 +417,7 @@ blocklist:
             text_chars=12000,
             input_tokens=3000,
         )
-        self.assertEqual(before["status"], "uncovered")
+        self.assertEqual(before["status"], "routing-off")
         self.assertFalse(before["actionable"])
         self.assertIsNone(before["suggested_routed_model"])
         self.assertIsNone(before["add_payload"])
@@ -478,7 +478,7 @@ blocklist:
             text_chars=12000,
             input_tokens=3000,
         )
-        self.assertEqual(before["status"], "uncovered")
+        self.assertEqual(before["status"], "routing-off")
 
         result = experiments.append_dashboard_routing_candidate({
             "requested_model": "claude-opus-5-2",
@@ -518,7 +518,7 @@ blocklist:
             text_chars=12000,
             input_tokens=3000,
         )
-        self.assertEqual(before["status"], "uncovered")
+        self.assertEqual(before["status"], "routing-off")
 
         config_path.write_text(
             """
@@ -639,7 +639,7 @@ routing_candidates:
             text_chars=12000,
             input_tokens=3000,
         )
-        self.assertEqual(before["status"], "uncovered")
+        self.assertEqual(before["status"], "routing-off")
 
         strict_path.parent.mkdir(parents=True, exist_ok=True)
         strict_path.write_text(

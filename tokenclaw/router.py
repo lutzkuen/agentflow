@@ -10,7 +10,7 @@ import yaml
 from pathlib import Path
 from typing import Any
 
-from tokenclaw.env import env, env_int
+from tokenclaw.env import env
 from tokenclaw.policy_files import policy_file_snapshot, utc_now
 from tokenclaw.paths import tokenclaw_config_path, default_db_path, safe_expanduser
 from tokenclaw.pricing import estimate_cost
@@ -563,7 +563,18 @@ def _rules_list(data: Any) -> list[dict[str, Any]]:
     return [rule for rule in rules if isinstance(rule, dict)]
 
 
-def _load_routing_rules() -> tuple[list[dict], dict[str, Any], list[dict[str, Any]], str, str]:
+def _hard_rule_count(rules: list[dict[str, Any]]) -> int:
+    count = 0
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("enabled") is False:
+            continue
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        if str(action.get("route_to") or "").strip():
+            count += 1
+    return count
+
+
+def _load_routing_rules() -> tuple[list[dict], dict[str, Any], list[dict[str, Any]], str, str, int]:
     defaults_path = Path(__file__).parent / "routing_rules.yaml"
     defaults = _load_routing_yaml(defaults_path) or {"rules": []}
     env_path = env("TOKENCLAW_ROUTING_RULES")
@@ -573,21 +584,23 @@ def _load_routing_rules() -> tuple[list[dict], dict[str, Any], list[dict[str, An
         if data is not None:
             canary = _phase_canary_from_yaml(data, missing_enabled=False)
             openai_canaries = _openai_canaries_from_yaml(data)
-            return _rules_list(data), canary, openai_canaries, "local-manual", str(p)
+            rules = _rules_list(data)
+            return rules, canary, openai_canaries, "local-manual", str(p), _hard_rule_count(rules)
 
     local_path = tokenclaw_config_path("routing_rules.yaml")
     local = _load_routing_yaml(local_path)
     if local is not None:
         canary = _phase_canary_from_yaml(local, missing_enabled=False)
         openai_canaries = _openai_canaries_from_yaml(local)
-        return _rules_list(local) + _rules_list(defaults), canary, openai_canaries, "local-manual", str(local_path)
+        local_rules = _rules_list(local)
+        return local_rules + _rules_list(defaults), canary, openai_canaries, "local-manual", str(local_path), _hard_rule_count(local_rules)
 
     canary = _phase_canary_from_yaml(defaults, missing_enabled=False)
     openai_canaries = _openai_canaries_from_yaml(defaults)
-    return _rules_list(defaults), canary, openai_canaries, "local-default", str(defaults_path)
+    return _rules_list(defaults), canary, openai_canaries, "local-default", str(defaults_path), 0
 
 
-ROUTING_RULES, ROUTING_PHASE_CANARY, ROUTING_OPENAI_CANARIES, ROUTING_RULES_SOURCE, ROUTING_RULES_PATH = _load_routing_rules()
+ROUTING_RULES, ROUTING_PHASE_CANARY, ROUTING_OPENAI_CANARIES, ROUTING_RULES_SOURCE, ROUTING_RULES_PATH, ROUTING_MANUAL_HARD_RULE_COUNT = _load_routing_rules()
 ROUTING_OPENAI_CANARY = ROUTING_OPENAI_CANARIES[0] if ROUTING_OPENAI_CANARIES else _default_openai_canary_policy()
 ROUTING_RULES_LOADED_AT = utc_now()
 ROUTING_RULES_LOADED_FILE = policy_file_snapshot(ROUTING_RULES_PATH)
@@ -1948,6 +1961,64 @@ def _openai_promoted_rule_semantic_gate_passed(rule: dict[str, Any]) -> bool:
     return bool(semantic_quality.get("gate_passed"))
 
 
+def routing_has_manual_hard_rules() -> bool:
+    return ROUTING_MANUAL_HARD_RULE_COUNT > 0
+
+
+def routing_is_unbacked_default_policy() -> bool:
+    return ROUTING_RULES_SOURCE == "local-default" and not routing_has_manual_hard_rules()
+
+
+def _unbacked_routing_meta(
+    *,
+    requested: str,
+    text_chars: int,
+    tools: bool,
+    category: str,
+    phase_meta: dict[str, str],
+    policy_source: str,
+    stream: bool | None = None,
+    input_tokens_est: int | None = None,
+    provider: str = "anthropic",
+    source_surface: str | None = None,
+    endpoint: str | None = None,
+    thinking_gate: dict[str, Any] | None = None,
+    reason: str = "routing off: no managed server or manual hard rules",
+    backing_reason: str = "no-manual-hard-rules",
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "enabled": False,
+        "requested_model": requested,
+        "routed_model": requested,
+        "reason": reason,
+        "text_chars": text_chars,
+        "has_tools": tools,
+        "category": category,
+        **phase_meta,
+        "policy_source": policy_source,
+        "routing_backing": {
+            "schema": "tokenclaw.routing_backing.v1",
+            "backed": False,
+            "manual_hard_rule_count": ROUTING_MANUAL_HARD_RULE_COUNT,
+            "managed_policy_decision_checked_later": True,
+            "reason": backing_reason,
+        },
+    }
+    if stream is not None:
+        meta["stream"] = stream
+    if input_tokens_est is not None:
+        meta["input_tokens_est"] = input_tokens_est
+    if provider:
+        meta["provider"] = provider
+    if source_surface is not None:
+        meta["source_surface"] = source_surface
+    if endpoint is not None:
+        meta["endpoint"] = endpoint
+    if thinking_gate is not None:
+        meta["thinking_gate"] = thinking_gate
+    return meta
+
+
 def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple[str, dict[str, Any]]:
     requested = str(body.get("model") or SONNET_DEFAULT)
     text_chars = len(extract_text(body))
@@ -1970,6 +2041,21 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             "policy_source": "local-default",
             "thinking_gate": thinking_gate,
         }
+
+    if routing_is_unbacked_default_policy():
+        return requested, _unbacked_routing_meta(
+            requested=requested,
+            text_chars=text_chars,
+            tools=tools,
+            category=category,
+            phase_meta=phase_meta,
+            policy_source=ROUTING_RULES_SOURCE,
+            stream=stream,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+            thinking_gate=thinking_gate,
+        )
 
     requested_l = requested.lower()
 
@@ -2094,16 +2180,23 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             return routed, meta
 
     meta = {
-        "enabled": True,
+        "enabled": False,
         "requested_model": requested,
         "routed_model": requested,
-        "reason": "keep requested model",
+        "reason": "routing off: no matching manual hard rule",
         "text_chars": text_chars,
         "has_tools": tools,
         "category": category,
         **phase_meta,
         "policy_source": ROUTING_RULES_SOURCE,
         "thinking_gate": thinking_gate,
+        "routing_backing": {
+            "schema": "tokenclaw.routing_backing.v1",
+            "backed": False,
+            "manual_hard_rule_count": ROUTING_MANUAL_HARD_RULE_COUNT,
+            "managed_policy_decision_checked_later": True,
+            "reason": "no-matching-manual-hard-rule",
+        },
     }
     if last_session_memory_meta:
         meta["session_phase_memory"] = last_session_memory_meta
@@ -2148,6 +2241,24 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         meta["enabled"] = False
         meta["reason"] = "routing disabled"
         return requested, meta
+    if routing_is_unbacked_default_policy():
+        return requested, _unbacked_routing_meta(
+            requested=requested,
+            text_chars=text_chars,
+            tools=tools,
+            category=category,
+            phase_meta={
+                "workflow_phase": workflow_phase,
+                "workflow_phase_reason": "openai-request-category",
+                "workflow_phase_confidence": workflow_phase_confidence,
+            },
+            policy_source=ROUTING_RULES_SOURCE,
+            stream=stream,
+            input_tokens_est=input_tokens_est,
+            provider="openai",
+            source_surface=source_surface,
+            endpoint=endpoint,
+        )
 
     requested_l = requested.lower()
     for rule in ROUTING_RULES:
@@ -2245,27 +2356,13 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if not (OPENAI_ROUTING_ENABLED and canary_meta.get("status") in {"ineligible", "noop"}):
             return routed, meta
 
-    if not OPENAI_ROUTING_ENABLED:
-        return requested, meta
-
-    if tools:
-        meta["reason"] = "keep requested OpenAI model for tool request"
-        meta["enabled"] = True
-        meta["policy_source"] = "local-default"
-        return requested, meta
-
-    routed = requested
-    reason = "keep requested OpenAI model"
-    if requested_l == OPENAI_LARGE_DEFAULT.lower() and text_chars < env_int("TOKENCLAW_OPENAI_SMALL_TEXT_CHARS_LT", 6000):
-        routed = OPENAI_SMALL_DEFAULT
-        reason = "small non-tool OpenAI request"
-    elif requested_l == OPENAI_SMALL_DEFAULT.lower() and text_chars < env_int("TOKENCLAW_OPENAI_TINY_TEXT_CHARS_LT", 1500):
-        routed = OPENAI_TINY_DEFAULT
-        reason = "tiny non-tool OpenAI request"
-
-    meta.update({
-        "enabled": True,
-        "routed_model": routed,
-        "reason": reason,
-    })
-    return routed, meta
+    meta["enabled"] = False
+    meta["reason"] = "routing off: no matching manual hard rule"
+    meta["routing_backing"] = {
+        "schema": "tokenclaw.routing_backing.v1",
+        "backed": False,
+        "manual_hard_rule_count": ROUTING_MANUAL_HARD_RULE_COUNT,
+        "managed_policy_decision_checked_later": True,
+        "reason": "no-matching-manual-hard-rule",
+    }
+    return requested, meta
