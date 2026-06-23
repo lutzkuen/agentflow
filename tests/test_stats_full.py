@@ -71,6 +71,51 @@ class StatsFullTest(unittest.TestCase):
         warning_codes = {item["code"] for item in safety["warnings"]}
         self.assertIn("managed-feedback-stale-sending", warning_codes)
 
+    def test_managed_feedback_queue_health_reports_blocked_drain_aggregate(self):
+        server.store.enqueue_managed_outcome_feedback(
+            id="managed-feedback-blocked-drain",
+            created_at="2000-01-01T10:00:00+00:00",
+            updated_at="2000-01-01T10:00:00+00:00",
+            source_surface="managed_action_outcome",
+            endpoint="/v1/policy-events",
+            optimization_unit_id=0,
+            payload_json=stable_json({"prompt": "raw queued payload must not leak"}),
+            status="queued",
+            attempts=0,
+            next_attempt_at="2000-01-01T10:00:00+00:00",
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "TOKENCLAW_MANAGED": "0",
+                "TOKENCLAW_RECOMMENDATION_ENABLED": "0",
+            },
+            clear=False,
+        ):
+            health = stats_views._managed_feedback_queue_health(server.store, sample_limit=5)
+            safety = asyncio.run(
+                stats_views.stats_safety(
+                    store_obj=server.store,
+                    default_db=self.tmp.name,
+                    proxy_host="127.0.0.1",
+                    dashboard_host="127.0.0.1",
+                )
+            )
+
+        self.assertEqual(health["summary"]["queued"], 1)
+        self.assertEqual(health["summary"]["due"], 1)
+        self.assertGreater(health["summary"]["oldest_queued_age_seconds"], 0)
+        self.assertEqual(health["summary"]["sent_last_window"], 0)
+        self.assertEqual(health["summary"]["failed_last_window"], 0)
+        self.assertFalse(health["drain"]["enabled"])
+        self.assertEqual(health["drain"]["blocked_reason"], "local-only-managed-mode")
+        self.assertFalse(health["privacy"]["payload_json_included"])
+        warning_codes = {item["code"] for item in safety["warnings"]}
+        self.assertIn("managed-feedback-due-queue", warning_codes)
+        self.assertIn("managed-feedback-drain-blocked", warning_codes)
+        self.assertNotIn("raw queued payload must not leak", json.dumps(safety))
+
     def _keys_in(self, value):
         keys = set()
         if isinstance(value, dict):

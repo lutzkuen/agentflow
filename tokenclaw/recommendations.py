@@ -805,6 +805,22 @@ def outcome_feedback_queue_retry_delay_seconds() -> float:
         return 60.0
 
 
+def outcome_feedback_queue_max_retry_delay_seconds() -> float:
+    base = outcome_feedback_queue_retry_delay_seconds()
+    try:
+        return max(base, float(env("TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_RETRY_DELAY_SECONDS", "3600")))
+    except ValueError:
+        return max(base, 3600.0)
+
+
+def outcome_feedback_queue_retry_delay_for_attempt(attempts: int) -> float:
+    base = outcome_feedback_queue_retry_delay_seconds()
+    if base <= 0:
+        return 0.0
+    exponent = max(0, int(attempts or 1) - 1)
+    return min(outcome_feedback_queue_max_retry_delay_seconds(), base * (2 ** exponent))
+
+
 def _future_iso(seconds: float) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=max(0.0, seconds))).isoformat()
 
@@ -4055,9 +4071,11 @@ async def _flush_claimed_outcome_feedback(store_obj: Any, row: dict[str, Any]) -
         return meta
 
     status = _queue_error_status(meta, attempts)
-    retry_delay = 0.0 if status == "dropped-after-limit" else outcome_feedback_queue_retry_delay_seconds()
+    retry_delay = 0.0 if status == "dropped-after-limit" else outcome_feedback_queue_retry_delay_for_attempt(attempts)
     reason = "attempt-limit-reached" if status == "dropped-after-limit" else meta.get("reason") or "request-failed"
     error = meta.get("error")
+    if not error:
+        error = f"{meta.get('status') or 'error'}: {reason}"
     if hasattr(store_obj, "mark_managed_outcome_feedback_retry"):
         store_obj.mark_managed_outcome_feedback_retry(
             queue_id,

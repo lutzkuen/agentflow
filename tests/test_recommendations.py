@@ -85,6 +85,7 @@ class RecommendationTest(unittest.TestCase):
         "TOKENCLAW_MANAGED_CACHE",
         "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS",
         "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS",
+        "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_RETRY_DELAY_SECONDS",
     )
 
     def setUp(self):
@@ -1993,6 +1994,97 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("raw_response", row["payload_json"])
         self.assertIn("quality_signals", row["payload_json"])
         self.assertIn("pattern_decisions", row["payload_json"])
+
+    def test_flush_queued_policy_event_feedback_marks_sent(self):
+        from tokenclaw.store import Store
+
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        FakeAsyncClient.response = FakeResponse(status_code=202, body={"accepted": True})
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                store.enqueue_managed_outcome_feedback(
+                    id="queued-policy-event",
+                    source_surface="managed_action_outcome",
+                    endpoint=recommendations.POLICY_EVENTS_PATH,
+                    optimization_unit_id=0,
+                    payload_json=json.dumps({
+                        "schema": "tokenclaw.managed_action_outcome_feedback.v1",
+                        "event_type": "managed_action_outcome",
+                        "privacy_summary": {"metadata_only": True},
+                    }),
+                    status="queued",
+                    attempts=0,
+                    next_attempt_at="2000-01-01T00:00:00+00:00",
+                )
+                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                    results = asyncio.run(recommendations.flush_queued_outcome_feedback(store, limit=10))
+                row = store.conn.execute(
+                    "select status, attempts, sent_at, last_status_code, last_error "
+                    "from managed_outcome_feedback_queue where id = 'queued-policy-event'"
+                ).fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(results[0]["status"], "sent")
+        self.assertEqual(FakeAsyncClient.last_url, "http://managed.test/v1/policy-events")
+        self.assertEqual(row["status"], "sent")
+        self.assertEqual(row["attempts"], 1)
+        self.assertIsNotNone(row["sent_at"])
+        self.assertEqual(row["last_status_code"], 202)
+        self.assertIsNone(row["last_error"])
+
+    def test_flush_queued_policy_event_feedback_drops_after_permanent_failure(self):
+        from tokenclaw.store import Store
+
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS"] = "1"
+        FakeAsyncClient.response = FakeResponse(status_code=400, text="bad feedback")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                store.enqueue_managed_outcome_feedback(
+                    id="queued-policy-event-bad",
+                    source_surface="managed_action_outcome",
+                    endpoint=recommendations.POLICY_EVENTS_PATH,
+                    optimization_unit_id=0,
+                    payload_json=json.dumps({
+                        "schema": "tokenclaw.managed_action_outcome_feedback.v1",
+                        "event_type": "managed_action_outcome",
+                        "privacy_summary": {"metadata_only": True},
+                    }),
+                    status="queued",
+                    attempts=0,
+                    next_attempt_at="2000-01-01T00:00:00+00:00",
+                )
+                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                    results = asyncio.run(recommendations.flush_queued_outcome_feedback(store, limit=10))
+                row = store.conn.execute(
+                    "select status, attempts, sent_at, last_status_code, last_error "
+                    "from managed_outcome_feedback_queue where id = 'queued-policy-event-bad'"
+                ).fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(results[0]["status"], "dropped-after-limit")
+        self.assertEqual(results[0]["reason"], "attempt-limit-reached")
+        self.assertEqual(row["status"], "dropped-after-limit")
+        self.assertEqual(row["attempts"], 1)
+        self.assertIsNone(row["sent_at"])
+        self.assertEqual(row["last_status_code"], 400)
+        self.assertIn("bad feedback", row["last_error"])
+
+    def test_outcome_feedback_retry_delay_is_bounded_exponential(self):
+        os.environ["TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS"] = "10"
+        os.environ["TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_RETRY_DELAY_SECONDS"] = "25"
+
+        self.assertEqual(recommendations.outcome_feedback_queue_retry_delay_for_attempt(1), 10)
+        self.assertEqual(recommendations.outcome_feedback_queue_retry_delay_for_attempt(2), 20)
+        self.assertEqual(recommendations.outcome_feedback_queue_retry_delay_for_attempt(3), 25)
 
     def test_queued_provider_outcome_feedback_egress_guard_does_not_enqueue_raw_payload(self):
         from tokenclaw.store import Store

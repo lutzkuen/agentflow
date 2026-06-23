@@ -1064,9 +1064,47 @@ def _managed_feedback_queue_health(
     source_surface: str | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
+    try:
+        from tokenclaw import recommendations as recommendations_module
+
+        drain_recommendations_enabled = recommendations_module.recommendations_enabled()
+        drain_server_configured = recommendations_module.recommendation_server_configured()
+        drain_auth_configured = recommendations_module.managed_auth_configured()
+        drain_max_attempts = recommendations_module.outcome_feedback_queue_max_attempts()
+        drain_retry_delay_seconds = recommendations_module.outcome_feedback_queue_retry_delay_seconds()
+        drain_max_retry_delay_seconds = recommendations_module.outcome_feedback_queue_max_retry_delay_seconds()
+    except Exception:
+        drain_recommendations_enabled = False
+        drain_server_configured = False
+        drain_auth_configured = False
+        drain_max_attempts = None
+        drain_retry_delay_seconds = None
+        drain_max_retry_delay_seconds = None
+
+    product_mode = managed_product_mode()
+    drain_blocked_reason = None
+    if not drain_recommendations_enabled:
+        if product_mode.local_rules_only or product_mode.mode == "local_only":
+            drain_blocked_reason = "local-only-managed-mode"
+        else:
+            drain_blocked_reason = "recommendations-disabled"
+    elif not drain_server_configured:
+        drain_blocked_reason = "server-url-not-configured"
+    drain_state = {
+        "schema": "tokenclaw.managed_feedback_drain_state.v1",
+        "enabled": bool(drain_recommendations_enabled and drain_server_configured),
+        "blocked_reason": drain_blocked_reason,
+        "recommendations_enabled": bool(drain_recommendations_enabled),
+        "server_configured": bool(drain_server_configured),
+        "auth_configured": bool(drain_auth_configured),
+        "max_attempts": drain_max_attempts,
+        "retry_delay_seconds": drain_retry_delay_seconds,
+        "max_retry_delay_seconds": drain_max_retry_delay_seconds,
+    }
     if store_obj is None or not hasattr(store_obj, "managed_outcome_feedback_rows"):
         return {
             "available": False,
+            "drain": drain_state,
             "summary": {
                 "total": 0,
                 "queued": 0,
@@ -1100,13 +1138,21 @@ def _managed_feedback_queue_health(
     due_rows: list[dict[str, Any]] = []
     stale_sending_rows: list[dict[str, Any]] = []
     sent_rows: list[dict[str, Any]] = []
+    queued_rows: list[dict[str, Any]] = []
+    pending_rows: list[dict[str, Any]] = []
+    recent_window = now - timedelta(hours=1)
+    sent_last_window = 0
+    failed_last_window = 0
     stale_sending_cutoff = now - timedelta(minutes=10)
     for row in rows:
         status = str(row.get("status") or "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
         source = str(row.get("source_surface") or "unknown")
         source_counts[source] = source_counts.get(source, 0) + 1
+        if status == "queued":
+            queued_rows.append(row)
         if status in {"queued", "retryable-error"}:
+            pending_rows.append(row)
             due_at = _parse_utc_datetime(row.get("next_attempt_at"))
             if due_at is not None and due_at <= now:
                 due_rows.append(row)
@@ -1116,11 +1162,28 @@ def _managed_feedback_queue_health(
                 stale_sending_rows.append(row)
         if status == "sent":
             sent_rows.append(row)
+            sent_at = _parse_utc_datetime(row.get("sent_at") or row.get("updated_at"))
+            if sent_at is not None and sent_at >= recent_window:
+                sent_last_window += 1
+        if status in {"retryable-error", "dropped-after-limit", "error"}:
+            failed_at = _parse_utc_datetime(row.get("updated_at"))
+            if failed_at is not None and failed_at >= recent_window:
+                failed_last_window += 1
 
     due_rows.sort(key=lambda row: _parse_utc_datetime(row.get("next_attempt_at")) or now)
     stale_sending_rows.sort(key=lambda row: _parse_utc_datetime(row.get("updated_at")) or now)
     oldest_due = due_rows[0] if due_rows else None
     oldest_stale_sending = stale_sending_rows[0] if stale_sending_rows else None
+    oldest_pending = min(
+        pending_rows,
+        key=lambda row: _parse_utc_datetime(row.get("created_at")) or now,
+        default={},
+    )
+    oldest_queued = min(
+        queued_rows,
+        key=lambda row: _parse_utc_datetime(row.get("created_at")) or now,
+        default={},
+    )
     sent_rows.sort(
         key=lambda row: _parse_utc_datetime(row.get("sent_at") or row.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
@@ -1137,20 +1200,18 @@ def _managed_feedback_queue_health(
         "error": status_counts.get("error", 0),
         "stale_sending": len(stale_sending_rows),
         "oldest_due_age_seconds": _seconds_since_iso(oldest_due.get("next_attempt_at"), now) if oldest_due else None,
+        "oldest_queued_age_seconds": _seconds_since_iso(oldest_queued.get("created_at"), now),
         "oldest_stale_sending_age_seconds": _seconds_since_iso(
             oldest_stale_sending.get("updated_at"), now
         ) if oldest_stale_sending else None,
-        "oldest_pending_age_seconds": _seconds_since_iso(
-            min(
-                (row for row in rows if row.get("status") in {"queued", "retryable-error"}),
-                key=lambda row: _parse_utc_datetime(row.get("created_at")) or now,
-                default={},
-            ).get("created_at"),
-            now,
-        ),
+        "oldest_pending_age_seconds": _seconds_since_iso(oldest_pending.get("created_at"), now),
+        "recent_window_seconds": 3600,
+        "sent_last_window": sent_last_window,
+        "failed_last_window": failed_last_window,
     }
     return {
         "available": True,
+        "drain": drain_state,
         "summary": summary,
         "status_breakdown": _breakdown_from_counts(status_counts),
         "source_surface_breakdown": _breakdown_from_counts(source_counts),
@@ -1217,6 +1278,7 @@ async def stats_safety(
     policy_bundle_state = _url_host_state(policy_bundle_url)
     feedback_queue = _managed_feedback_queue_health(store_obj)
     feedback_summary = feedback_queue.get("summary") or {}
+    feedback_drain = feedback_queue.get("drain") if isinstance(feedback_queue.get("drain"), dict) else {}
 
     warnings: list[dict[str, Any]] = []
 
@@ -1264,6 +1326,12 @@ async def stats_safety(
             "managed-feedback-due-queue",
             "medium",
             "Managed outcome feedback has retryable rows due for flush; the managed feedback loop may be stuck.",
+        )
+    if _as_int(feedback_summary.get("due")) > 0 and feedback_drain.get("blocked_reason"):
+        warn(
+            "managed-feedback-drain-blocked",
+            "medium",
+            "Managed outcome feedback is due but the drain loop is blocked by current managed opt-in configuration.",
         )
     if _as_int(feedback_summary.get("retryable_error")) > 0:
         warn(
