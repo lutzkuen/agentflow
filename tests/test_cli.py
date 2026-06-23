@@ -61,6 +61,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn("127.0.0.1", output)
         self.assertIn("TokenClaw local proxy onboarding", output)
         self.assertIn("TOKENCLAW_CONFIG_DIR or ~/.tokenclaw", output)
+        self.assertNotIn("openai-routing-report", output)
+        self.assertNotIn("policy-draft-stage", output)
 
     def test_public_tokenclaw_subcommand_help_works(self):
         commands = [
@@ -79,8 +81,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 self.assertIn("usage:", stdout.getvalue())
 
     def test_tokenclaw_cli_reexports_onboarding_command_group(self):
-        self.assertIs(cli.tokenclaw_cli, onboarding_cli.tokenclaw_cli)
-        self.assertIs(cli.tokenclaw_cli, onboarding_cli.tokenclaw_cli)
+        self.assertIsNot(cli.tokenclaw_cli, onboarding_cli.tokenclaw_cli)
         self.assertIs(cli._activation_stats_result, onboarding_cli._activation_stats_result)
         self.assertIs(cli._doctor_codex_target, onboarding_cli._doctor_codex_target)
         self.assertIs(cli._doctor_claude_desktop_target, onboarding_cli._doctor_claude_desktop_target)
@@ -108,30 +109,36 @@ class AgentflowActivationCliTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIs(getattr(cli, command), getattr(optimization_reports_cli, command))
 
-    def test_optimization_report_console_script_entrypoints_import(self):
-        script_lines = Path("pyproject.toml").read_text(encoding="utf-8").splitlines()
-        affected_tokens = ("tokenclaw-openai-", "tokenclaw-optimization-", "tokenclaw-local-activation-")
-        report_tokens = ("opportunity", "compaction", "report", "rollout-actions")
-        checked = []
+    def test_internal_namespace_lists_representative_advanced_commands(self):
+        stdout = io.StringIO()
 
-        for line in script_lines:
-            stripped = line.strip()
-            if not stripped.startswith("tokenclaw-") or "=" not in stripped:
-                continue
-            script_name, target = [part.strip().strip('"') for part in stripped.split("=", 1)]
-            if not (
-                script_name.startswith(affected_tokens)
-                or any(token in script_name for token in report_tokens)
-            ):
-                continue
-            module_name, attr = target.split(":", 1)
-            module = importlib.import_module(module_name)
-            self.assertTrue(callable(getattr(module, attr)), script_name)
-            checked.append(script_name)
+        code = cli.tokenclaw_cli(["internal", "--list"], stdout=stdout)
 
-        self.assertIn("tokenclaw-openai-routing-report", checked)
-        self.assertIn("tokenclaw-optimization-eval-plan", checked)
-        self.assertIn("tokenclaw-repeated-scaffold-opportunity", checked)
+        self.assertEqual(code, 0)
+        listed = set(stdout.getvalue().splitlines())
+        self.assertIn("proxy", listed)
+        self.assertIn("dashboard", listed)
+        self.assertIn("openai-routing-report", listed)
+        self.assertIn("optimization-eval-plan", listed)
+        self.assertIn("repeated-scaffold-opportunity", listed)
+
+    def test_internal_namespace_accepts_legacy_tokenclaw_prefix(self):
+        from tokenclaw.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            Store(db_path).conn.close()
+            stdout = io.StringIO()
+
+            code = cli.tokenclaw_cli(
+                ["internal", "tokenclaw-openai-routing-report", "--db", db_path, "--limit", "10"],
+                stdout=stdout,
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["schema"], "tokenclaw.openai_routing_opportunity.v1")
+        self.assertEqual(payload["summary"]["candidate_count"], 0)
 
     def test_optimization_reports_module_openai_routing_report_empty_db(self):
         from tokenclaw.store import Store
@@ -174,7 +181,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         readme = Path("README.md").read_text(encoding="utf-8")
 
         self.assertLess(readme.index("## Quick start"), readme.index("## Manual proxy fallback"))
-        self.assertLess(readme.index("tokenclaw activate openai"), readme.index("tokenclaw-proxy --provider"))
+        self.assertLess(readme.index("tokenclaw activate openai"), readme.index("tokenclaw internal proxy"))
         for expected in (
             "tokenclaw activate openai",
             "tokenclaw activate claude",
@@ -191,8 +198,13 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "unsupported: GitHub Copilot is not a base-url target",
             "pip install tokenclaw",
             "tokenclaw --help",
+            "tokenclaw internal --list",
         ):
             self.assertIn(expected, readme)
+        self.assertIn("tokenclaw internal proxy", readme)
+        self.assertIn("tokenclaw internal dashboard", readme)
+        self.assertNotIn("tokenclaw-proxy --provider", readme)
+        self.assertNotIn("tokenclaw-dashboard --host", readme)
         self.assertNotIn("agentflow", readme)
         self.assertNotIn("sk-", readme)
 
@@ -240,7 +252,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 cli.tokenclaw_cli(["run", "openai", "--config-dir", str(config_dir), "--dry-run"], stdout=run_stdout),
                 0,
             )
-            self.assertIn("--provider openai", run_stdout.getvalue())
+            self.assertIn("tokenclaw internal proxy --provider openai", run_stdout.getvalue())
 
             with patch("tokenclaw.cli.httpx.get") as http_get:
                 http_get.return_value = httpx.Response(
@@ -331,12 +343,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 name, value = stripped.split("=", 1)
                 scripts[name.strip()] = value.strip().strip('"')
 
-        self.assertEqual(scripts["tokenclaw"], "tokenclaw.cli:tokenclaw_main")
-        self.assertEqual(scripts["tokenclaw-proxy"], "tokenclaw.cli:proxy_main")
-        self.assertEqual(scripts["tokenclaw-dashboard"], "tokenclaw.dashboard:main")
-        self.assertEqual(scripts["tokenclaw-openai-routing-report"], "tokenclaw.cli:openai_routing_report_main")
-        self.assertEqual(scripts["tokenclaw-optimization-eval-plan"], "tokenclaw.cli:optimization_eval_plan_main")
-        self.assertGreater(len(scripts), 80)
+        self.assertEqual(scripts, {"tokenclaw": "tokenclaw.cli:tokenclaw_main"})
         self.assertFalse([name for name in scripts if name.startswith("agentflow")])
 
         for name, target in scripts.items():
@@ -344,13 +351,6 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 module_name, attr_name = target.split(":", 1)
                 module = importlib.import_module(module_name)
                 self.assertTrue(callable(getattr(module, attr_name)))
-
-        cli_exceptions = {"tokenclaw-dashboard": "tokenclaw.dashboard:main"}
-        for name, target in scripts.items():
-            if name in cli_exceptions:
-                self.assertEqual(target, cli_exceptions[name])
-            else:
-                self.assertTrue(target.startswith("tokenclaw.cli:"), f"{name} moved away from cli.py")
 
     def test_pyproject_distribution_metadata_uses_tokenclaw_name(self):
         raw = Path("pyproject.toml").read_text(encoding="utf-8")

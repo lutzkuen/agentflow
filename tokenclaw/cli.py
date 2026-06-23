@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -87,8 +88,7 @@ from tokenclaw.cli_commands.onboarding import (
     _write_doctor_summary,
     _write_savings_report_summary,
     _write_stats_summary,
-    tokenclaw_cli,
-    tokenclaw_cli,
+    tokenclaw_cli as _onboarding_tokenclaw_cli,
 )
 
 from tokenclaw.cli_commands.optimization_reports import (
@@ -196,6 +196,15 @@ from tokenclaw.cli_commands.optimization_reports import (
 def _env_enabled(name: str, default: bool = False) -> bool:
     fallback = "1" if default else "0"
     return os.getenv(name, fallback).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _parse_cli_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 
@@ -1621,6 +1630,7 @@ def managed_routing_pathway_candidates_cli(
         default=float(os.getenv("TOKENCLAW_MANAGED_ROUTING_PATHWAY_STALE_AFTER_HOURS", "72")),
         help="Classify pathway matrix rows as stale after this many hours, default: 72.",
     )
+    parser.add_argument("--now", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     args = parser.parse_args(argv)
 
@@ -1649,6 +1659,7 @@ def managed_routing_pathway_candidates_cli(
 
     result = build_managed_routing_pathway_shadow_candidates(
         source,
+        now=_parse_cli_datetime(args.now),
         stale_after_hours=float(args.preview_stale_after_hours),
     )
     write_json(stdout, result, pretty=args.pretty)
@@ -1681,6 +1692,7 @@ def managed_routing_pathway_outcomes_cli(
         default=float(os.getenv("TOKENCLAW_MANAGED_ROUTING_PATHWAY_STALE_AFTER_HOURS", "72")),
         help="Classify pathway matrix rows as stale after this many hours, default: 72.",
     )
+    parser.add_argument("--now", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     args = parser.parse_args(argv)
 
@@ -1714,6 +1726,7 @@ def managed_routing_pathway_outcomes_cli(
             source,
             limit=int(args.limit),
             stale_after_hours=float(args.preview_stale_after_hours),
+            now=_parse_cli_datetime(args.now),
         )
     finally:
         store.conn.close()
@@ -1776,6 +1789,126 @@ def proxy_main() -> None:
     from tokenclaw.server import main
 
     main()
+
+
+def _internal_proxy_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
+    if "TOKENCLAW_HOST" not in os.environ:
+        os.environ["TOKENCLAW_HOST"] = "127.0.0.1"
+
+    from tokenclaw.server import main
+
+    main(list(argv or []))
+    return 0
+
+
+def _internal_dashboard_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
+    from tokenclaw import dashboard
+
+    old_argv = sys.argv
+    try:
+        sys.argv = ["tokenclaw internal dashboard", *list(argv or [])]
+        dashboard.main()
+    finally:
+        sys.argv = old_argv
+    return 0
+
+
+def _internal_command_names() -> list[str]:
+    names = {
+        name[:-4].replace("_", "-")
+        for name, value in globals().items()
+        if name.endswith("_cli")
+        and not name.startswith("_")
+        and name not in {"internal_cli", "tokenclaw_cli"}
+        and callable(value)
+    }
+    names.update({"proxy", "dashboard"})
+    return sorted(names)
+
+
+def _internal_command_handler(command: str) -> Any | None:
+    command = command.strip()
+    if command.startswith("tokenclaw-"):
+        command = command.removeprefix("tokenclaw-")
+    if command == "proxy":
+        return _internal_proxy_cli
+    if command == "dashboard":
+        return _internal_dashboard_cli
+    name = command.replace("-", "_") + "_cli"
+    handler = globals().get(name)
+    return handler if callable(handler) else None
+
+
+def _invoke_internal_command(
+    handler: Any,
+    argv: Sequence[str],
+    *,
+    stdout: Any,
+    stderr: Any,
+) -> int:
+    parameters = inspect.signature(handler).parameters
+    kwargs: dict[str, Any] = {"stdout": stdout}
+    if "stderr" in parameters:
+        kwargs["stderr"] = stderr
+    return int(handler(list(argv), **kwargs))
+
+
+def internal_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+    args = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(
+        prog="tokenclaw internal",
+        description="Advanced TokenClaw development, policy, report, and diagnostic commands.",
+        epilog="Use `tokenclaw internal --list` to print available internal command names.",
+    )
+    parser.add_argument("--list", action="store_true", help="List internal commands and exit.")
+    parser.add_argument("command", nargs="?", help="Internal command name, without the tokenclaw- prefix.")
+    parser.add_argument("command_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+
+    if not args:
+        parser.print_help(stdout)
+        return 0
+    if args[0] in {"-h", "--help"}:
+        parser.print_help(stdout)
+        return 0
+    if args[0] == "--list":
+        for name in _internal_command_names():
+            stdout.write(name + "\n")
+        return 0
+
+    parsed = parser.parse_args(args)
+    if parsed.list:
+        for name in _internal_command_names():
+            stdout.write(name + "\n")
+        return 0
+    if not parsed.command:
+        parser.print_help(stdout)
+        return 0
+
+    handler = _internal_command_handler(parsed.command)
+    if handler is None:
+        stderr.write(f"unknown internal command: {parsed.command}\n")
+        stderr.write("Run `tokenclaw internal --list` to see available commands.\n")
+        return 2
+    return _invoke_internal_command(handler, parsed.command_args, stdout=stdout, stderr=stderr)
+
+
+def tokenclaw_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "internal":
+        return internal_cli(args[1:], stdout=stdout, stderr=stderr)
+    return _onboarding_tokenclaw_cli(args, stdout=stdout, stderr=stderr)
 
 
 def tokenclaw_main() -> None:

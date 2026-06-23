@@ -331,7 +331,7 @@ def proxy_args_for_target(config: dict[str, Any], target: str) -> list[str]:
 
 
 def shell_command_for_profile(profile: dict[str, Any], *, redact: bool = False) -> str:
-    return " ".join(["tokenclaw-proxy", *[shlex.quote(arg) for arg in _profile_command_args(profile, redact=redact)]])
+    return " ".join(["tokenclaw", "internal", "proxy", *[shlex.quote(arg) for arg in _profile_command_args(profile, redact=redact)]])
 
 
 def activation_profile(
@@ -379,7 +379,7 @@ def activation_profile(
     profile["last_activation_at"] = activated_at
     profile["updated_at"] = activated_at
     profile["command_profile"] = {
-        "entrypoint": "tokenclaw-proxy",
+        "entrypoint": "tokenclaw internal proxy",
         "argv": _profile_command_args(profile),
     }
     return profile

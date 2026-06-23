@@ -169,7 +169,14 @@ class ManagedRoutingPathwayCandidateTests(unittest.TestCase):
             output = io.StringIO()
 
             code = cli.managed_routing_pathway_candidates_cli(
-                ["--decision-json", str(path), "--preview-stale-after-hours", "72"],
+                [
+                    "--decision-json",
+                    str(path),
+                    "--preview-stale-after-hours",
+                    "72",
+                    "--now",
+                    "2026-06-20T02:00:00+00:00",
+                ],
                 stdout=output,
             )
 

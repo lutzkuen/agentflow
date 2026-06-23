@@ -356,20 +356,20 @@ It is meant for answering "where did the tokens and cost go?" without sending pr
 
 ## Manual proxy fallback
 
-The packaged install name is `tokenclaw`. The `tokenclaw` onboarding command
-and specialist scripts such as `tokenclaw-proxy` remain available for backward
-compatibility during the rename.
+The packaged install exposes one public command, `tokenclaw`. Use `tokenclaw run`
+for normal provider proxies. Advanced direct proxy invocation is available under
+the hidden internal namespace for development and diagnostics.
 
 Run the Anthropic-compatible proxy directly:
 
 ```bash
-tokenclaw-proxy --provider anthropic --host 127.0.0.1 --port 4000
+tokenclaw internal proxy --provider anthropic --host 127.0.0.1 --port 4000
 ```
 
 Run the OpenAI-compatible proxy directly:
 
 ```bash
-tokenclaw-proxy --provider openai --openai-auth-mode proxy --host 127.0.0.1 --port 4003
+tokenclaw internal proxy --provider openai --openai-auth-mode proxy --host 127.0.0.1 --port 4003
 ```
 
 `--openai-auth-mode proxy` means TokenClaw uses `TOKENCLAW_OPENAI_API_KEY` or
@@ -403,7 +403,7 @@ http://127.0.0.1:4003/tokenclaw/dashboard
 Or run a dashboard-only process that reads the same local database:
 
 ```bash
-tokenclaw-dashboard --host 127.0.0.1 --port 4002
+tokenclaw internal dashboard --host 127.0.0.1 --port 4002
 ```
 
 Then open:
@@ -534,15 +534,10 @@ pattern_rules:
 
 ## Advanced policy and diagnostics
 
-The README keeps the happy path short. Advanced local policy review/apply/rollback, managed recommendation bridge, replayability reports, routing experiments, and promotion diagnostics are available as CLI entry points installed by `pip install -e .`. Commands that need optional managed storage, zstd decoding, or OpenAI realtime bridging will print the matching extra install hint instead of making those dependencies part of the first-run install.
+The README keeps the happy path short. Advanced local policy review/apply/rollback, managed recommendation bridge, replayability reports, routing experiments, and promotion diagnostics are available under `tokenclaw internal`. Commands that need optional managed storage, zstd decoding, or OpenAI realtime bridging will print the matching extra install hint instead of making those dependencies part of the first-run install.
 
 List them with:
 
 ```bash
-python - <<'PY'
-import importlib.metadata as md
-for ep in md.entry_points(group="console_scripts"):
-    if ep.name.startswith("tokenclaw-"):
-        print(ep.name)
-PY
+tokenclaw internal --list
 ```

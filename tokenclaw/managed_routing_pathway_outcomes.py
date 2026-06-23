@@ -96,7 +96,7 @@ def _parse_utc(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _candidate_rows(source: dict[str, Any], *, stale_after_hours: float) -> list[dict[str, Any]]:
+def _candidate_rows(source: dict[str, Any], *, stale_after_hours: float, now: datetime | None = None) -> list[dict[str, Any]]:
     if source.get("schema") == "tokenclaw.managed_routing_pathway_shadow_candidates.v1":
         rows: list[dict[str, Any]] = []
         for key in ("accepted", "blocked", "stale", "omitted"):
@@ -105,7 +105,11 @@ def _candidate_rows(source: dict[str, Any], *, stale_after_hours: float) -> list
                 rows.extend([row for row in values if isinstance(row, dict)])
         if rows:
             return rows
-    report = build_managed_routing_pathway_shadow_candidates(source, stale_after_hours=stale_after_hours)
+    report = build_managed_routing_pathway_shadow_candidates(
+        source,
+        now=now,
+        stale_after_hours=stale_after_hours,
+    )
     rows = []
     for key in ("accepted", "blocked", "stale", "omitted"):
         values = report.get(key)
@@ -453,8 +457,9 @@ def build_local_routing_pathway_outcome_feedback(
     *,
     limit: int = 1000,
     stale_after_hours: float = DEFAULT_STALE_AFTER_HOURS,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    candidates = _candidate_rows(source, stale_after_hours=stale_after_hours)
+    candidates = _candidate_rows(source, stale_after_hours=stale_after_hours, now=now)
     rows = [_outcome_row(store, candidate, limit=limit) for candidate in candidates]
     status_counts = Counter(str(row.get("status") or "unknown") for row in rows)
     source_counts = Counter(str(row.get("source_surface") or "unknown") for row in rows)

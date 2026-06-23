@@ -171,6 +171,7 @@ class ManagedRoutingPathwayOutcomeFeedbackTests(unittest.TestCase):
                     self._source(),
                     limit=100,
                     stale_after_hours=72,
+                    now=datetime(2026, 6, 20, 2, 0, tzinfo=timezone.utc),
                 )
             finally:
                 store.conn.close()
@@ -221,7 +222,16 @@ class ManagedRoutingPathwayOutcomeFeedbackTests(unittest.TestCase):
             output = io.StringIO()
 
             code = cli.managed_routing_pathway_outcomes_cli(
-                ["--decision-json", str(source_path), "--db", str(db_path), "--limit", "100"],
+                [
+                    "--decision-json",
+                    str(source_path),
+                    "--db",
+                    str(db_path),
+                    "--limit",
+                    "100",
+                    "--now",
+                    "2026-06-20T02:00:00+00:00",
+                ],
                 stdout=output,
             )
 
