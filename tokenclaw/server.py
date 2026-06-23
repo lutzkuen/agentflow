@@ -181,7 +181,7 @@ _limiter = TierLimiter(
 _tier_backoff_until = _limiter.backoff_until
 
 store = Store(DEFAULT_DB)
-app = FastAPI(title=f"AgentFlow {PROVIDER.title()} Proxy", version="0.1.0")
+app = FastAPI(title=f"TokenClaw {PROVIDER.title()} Proxy", version="0.1.0")
 _routing_outcome_label_task: asyncio.Task[Any] | None = None
 _managed_feedback_drainer_task: asyncio.Task[Any] | None = None
 
@@ -380,7 +380,7 @@ def configure_provider(
     OPENAI_UPSTREAM = normalize_openai_upstream_base_url(openai_upstream)
     OPENAI_AUTH_MODE = openai_auth_mode
     DEFAULT_UPSTREAM = ANTHROPIC_UPSTREAM if PROVIDER == "anthropic" else OPENAI_UPSTREAM
-    app.title = f"AgentFlow {PROVIDER.title()} Proxy"
+    app.title = f"TokenClaw {PROVIDER.title()} Proxy"
 
 def build_openai_forward_headers(request: Request, *, force_json: bool = True) -> dict[str, str]:
     return openai_proxy.build_forward_headers(_provider_context(), request, force_json=force_json)
@@ -475,7 +475,7 @@ async def openai_uploads_passthrough(request: Request, rest: str) -> Response:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="AgentFlow provider-specific local proxy")
+    parser = argparse.ArgumentParser(description="TokenClaw provider-specific local proxy")
     parser.add_argument("--provider", choices=("anthropic", "openai"), default=PROVIDER)
     parser.add_argument("--anthropic-upstream", default=ANTHROPIC_UPSTREAM)
     parser.add_argument("--openai-upstream", default=OPENAI_UPSTREAM)
