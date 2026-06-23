@@ -167,6 +167,17 @@ application only for action families still enabled by the local routing/crunch/c
 gates. Expired, invalid, unsafe, unsupported, or locally disabled managed actions are
 vetoed and reported as metadata-only outcome feedback.
 
+After each managed decision the local executor records normalized, metadata-only
+feedback for the managed server: which action families were applied, held out, vetoed
+by a local opt-out, unsupported by the local executor, or skipped via fallback, along
+with the decision/policy/contract ids and (when available) numeric outcome metrics
+(status code, latency, retry/fallback counts, token usage, estimated cost and
+baseline). Feedback never includes raw prompts, raw responses, provider bodies, file
+paths, cache keys, or secrets, and it is queued locally with bounded retry/backoff so a
+send failure can never block provider forwarding. Queue retry behavior is shared with
+other managed feedback via `TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS` and
+`TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS`.
+
 ## OpenAI API apps
 
 Configure the local OpenAI target:
