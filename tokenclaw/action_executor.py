@@ -50,6 +50,9 @@ LOCAL_RUNTIME_DECISION_KEYS = {
     "projection",
     "selected_for_local_application",
     "selected_for_shadow_evaluation",
+    "server_action_selection",
+    "server_recommended_mode",
+    "server_traffic_treatment",
     "server_url",
     "shadow_model",
     "shadow_only",
@@ -159,6 +162,7 @@ class ActionExecutor:
             "noop",
             "holdout",
             "hold",
+            "held",
         }:
             action_decision["status"] = "received"
         if "enabled" not in action_decision and action_decision.get("status") == "received":

@@ -1546,6 +1546,13 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                 "model_artifact_version": "routing-predictor-v1-openai",
                 "model_evidence_hash": "sha256:evidence",
                 "predictor_rule_id": "routing-evidence:openai:gpt5->mini",
+                "routing": {
+                    "target_model": "gpt-5-mini",
+                    "route_proposal": {
+                        "traffic_treatment": "shadow",
+                        "route_selected": False,
+                    },
+                },
                 "policy_id": "openai-predictor-policy",
                 "reason": "active predictor",
                 "policy_source": "managed-recommended",
@@ -1568,14 +1575,14 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         routing = json.loads(row["routing_json"])
         managed = routing["managed_recommendation"]
         self.assertEqual(row["routed_model"], "gpt-5-codex")
-        self.assertEqual(managed["status"], "shadow")
-        self.assertEqual(managed["apply_reason"], "shadow-only")
+        self.assertEqual(managed["status"], "held")
+        self.assertEqual(managed["apply_reason"], "observe-only-local-gate")
         self.assertEqual(managed["would_route_model"], "gpt-5-mini")
         self.assertFalse(managed["applied"])
         self.assertIn("unit", seen)
         self.assertNotIn("raw openai prompt secret", row["routing_json"])
 
-    def test_openai_policy_decision_canary_shadows_without_legacy_recommendation_mode(self):
+    def test_openai_policy_decision_server_shadow_runs_without_local_sampling(self):
         request_body = {
             "model": "gpt-5-codex",
             "input": "raw canary prompt secret",
@@ -1599,10 +1606,17 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                 "target_model": "gpt-5-mini",
                 "confidence": 0.91,
                 "route_down_probability": 0.9,
-                "recommended_mode": "canary",
+                "recommended_mode": "shadow",
                 "model_artifact_version": "routing-predictor-v1-openai",
                 "model_evidence_hash": "sha256:evidence",
                 "predictor_rule_id": "routing-evidence:openai:gpt5->mini",
+                "routing": {
+                    "target_model": "gpt-5-mini",
+                    "route_proposal": {
+                        "traffic_treatment": "shadow",
+                        "route_selected": False,
+                    },
+                },
                 "policy_id": "openai-predictor-policy",
                 "reason": "active predictor",
                 "policy_source": "managed-recommended",
@@ -1611,7 +1625,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         with patch.dict(os.environ, {
             "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
             "TOKENCLAW_POLICY_DECISION_ENABLED": "1",
-            "TOKENCLAW_POLICY_DECISION_CANARY_FRACTION": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
         }):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
@@ -1628,14 +1642,14 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         routing = json.loads(row["routing_json"])
         managed = routing["managed_recommendation"]
         self.assertEqual(row["routed_model"], "gpt-5-codex")
-        self.assertEqual(managed["mode"], "policy-decision-canary")
-        self.assertEqual(managed["status"], "shadow_selected")
+        self.assertEqual(managed["mode"], "policy-decision-shadow")
+        self.assertEqual(managed["status"], "held")
         self.assertFalse(managed["applied"])
         self.assertFalse(managed["changed_model"])
         self.assertTrue(managed["shadow_only"])
         self.assertEqual(managed["shadow_model"], "gpt-5-mini")
         self.assertEqual(managed["would_route_model"], "gpt-5-mini")
-        self.assertEqual(managed["canary"]["cohort"], "canary_applied")
+        self.assertEqual(managed["server_traffic_treatment"], "shadow")
         self.assertEqual(routing["managed_route_candidate_model"], "gpt-5-mini")
         self.assertTrue(routing["managed_route_shadow_only"])
         self.assertEqual(routing["routing_experiment"]["trigger"], "managed-policy-routing-canary")
@@ -1663,6 +1677,13 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                 "model_artifact_version": "routing-predictor-v1-openai",
                 "model_evidence_hash": "sha256:evidence",
                 "predictor_rule_id": "routing-evidence:openai:gpt5->mini",
+                "routing": {
+                    "target_model": "gpt-5-mini",
+                    "route_proposal": {
+                        "traffic_treatment": "holdout",
+                        "route_selected": False,
+                    },
+                },
                 "policy_id": "openai-predictor-policy",
                 "reason": "active predictor",
                 "policy_source": "managed-recommended",
@@ -1671,7 +1692,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         with patch.dict(os.environ, {
             "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
             "TOKENCLAW_POLICY_DECISION_ENABLED": "1",
-            "TOKENCLAW_POLICY_DECISION_CANARY_FRACTION": "0",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
         }):
             with patch(
                 "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
@@ -1686,9 +1707,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         routing = json.loads(row["routing_json"])
         managed = routing["managed_recommendation"]
         self.assertEqual(row["routed_model"], "gpt-5-codex")
-        self.assertEqual(managed["status"], "holdout")
-        self.assertEqual(managed["apply_reason"], "canary-holdout")
-        self.assertEqual(managed["canary"]["cohort"], "canary_holdout")
+        self.assertEqual(managed["status"], "held")
+        self.assertEqual(managed["apply_reason"], "server-canary-holdout")
+        self.assertEqual(managed["server_traffic_treatment"], "holdout")
         self.assertFalse(managed["applied"])
 
     def test_openai_dry_run_recommendation_records_projection_without_changing_request(self):
@@ -1765,23 +1786,19 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     response = TestClient(server.app).post("/v1/responses", json=request_body)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        self.assertEqual(len(CapturingOpenAIClient.calls), 1)
         self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
-        self.assertEqual(CapturingOpenAIClient.calls[1]["json"]["model"], "gpt-5-mini")
         [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
         routing = json.loads(row["routing_json"])
         managed = routing["managed_recommendation"]
 
         self.assertEqual(row["routed_model"], "gpt-5-codex")
         self.assertEqual(managed["mode"], "canary")
-        self.assertEqual(managed["status"], "shadow_selected")
+        self.assertEqual(managed["status"], "skipped")
+        self.assertEqual(managed["apply_reason"], "server-action-state-missing")
         self.assertFalse(managed["applied"])
         self.assertFalse(managed["changed_model"])
-        self.assertTrue(managed["shadow_only"])
-        self.assertEqual(managed["shadow_model"], "gpt-5-mini")
-        self.assertEqual(managed["canary"]["cohort"], "canary_applied")
-        self.assertEqual(routing["managed_route_candidate_model"], "gpt-5-mini")
-        self.assertTrue(routing["routing_experiment"]["shadow_only"])
+        self.assertNotIn("managed_route_candidate_model", routing)
 
     def test_openai_bad_recommendation_falls_back_to_local_request(self):
         request_body = {
@@ -2000,7 +2017,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         [row] = server.store.conn.execute("select routing_json, crunch_json from calls").fetchall()
         routing = json.loads(row["routing_json"])
         crunch = json.loads(row["crunch_json"])
-        self.assertEqual(routing["managed_recommendation"]["status"], "skipped")
+        self.assertEqual(routing["managed_recommendation"]["status"], "vetoed")
         self.assertEqual(routing["managed_recommendation"]["apply_reason"], "privacy-not-metadata-only")
         self.assertEqual(crunch["policy_source"], "local-default")
 
@@ -2055,7 +2072,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(action["status"], "configured")
         self.assertEqual(action["old_context_summarization"]["state"], "configured")
         self.assertEqual(action["enhanced_crunch"]["state"], "configured")
-        self.assertEqual(crunch["policy_source"], "local-default")
+        self.assertEqual(crunch["policy_source"], "managed-recommended")
         self.assertNotIn("SECRET_ENHANCED_CRUNCH", row["routing_json"])
 
     def test_openai_policy_decision_rejects_expired_provider_mismatch_and_unknown_actions(self):
@@ -2135,12 +2152,12 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                         managed["local_actions"]["unsupported_actions"][0]["reason"],
                         "unsupported-action-type",
                     )
-                    self.assertEqual(managed["status"], "skipped")
+                    self.assertEqual(managed["status"], "vetoed")
                     self.assertEqual(managed["apply_reason"], "unsupported-action-type")
                     self.assertFalse(managed["changed_model"])
                 else:
                     self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
-                    self.assertEqual(managed["status"], "skipped")
+                    self.assertEqual(managed["status"], "vetoed")
                     self.assertEqual(managed["apply_reason"], expected)
 
     def test_openai_policy_decision_falls_back_when_managed_disabled(self):
