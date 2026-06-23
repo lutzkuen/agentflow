@@ -33,7 +33,7 @@ MANAGED_ACTION_OUTCOME_ENDPOINT = "/v1/policy-events"
 
 # Local results that the executor can produce for a managed decision. Each is a
 # fixed enum value, never free-form text derived from a request.
-LOCAL_RESULTS = ("applied", "held", "vetoed", "noop")
+LOCAL_RESULTS = ("applied", "held", "heldout", "vetoed", "unsupported", "fallback", "noop")
 
 # Numeric outcome metrics the recorder is allowed to forward. Anything not in
 # this whitelist is dropped, keeping the payload metadata-only. Note that keys
@@ -187,6 +187,10 @@ def build_managed_action_feedback(
         "applied": bool(result.get("applied")),
         "fallback": result.get("fallback"),
         "shadow_only": bool(result.get("shadow_only")),
+        "server_traffic_treatment": result.get("server_traffic_treatment"),
+        "server_route_selected": result.get("server_route_selected"),
+        "canary_fraction": result.get("canary_fraction"),
+        "holdout_fraction": result.get("holdout_fraction"),
         "enabled": bool(result.get("enabled")),
         "application_enabled": bool(result.get("application_enabled")),
         "product_mode_enforced": bool(result.get("product_mode_enforced")),
@@ -195,6 +199,7 @@ def build_managed_action_feedback(
         "applied_families": sorted(result.get("applied_families") or []),
         "vetoed_families": _families_with_status(actions, "vetoed"),
         "held_families": _families_with_status(actions, "held"),
+        "heldout_families": _families_with_status(actions, "heldout"),
         "unsupported_action_count": len(result.get("unsupported_actions") or []),
         "veto_reason_codes": _veto_reason_codes(result, actions),
         "capability_reason_codes": _capability_reason_codes(result),
