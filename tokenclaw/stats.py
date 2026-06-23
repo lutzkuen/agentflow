@@ -48,6 +48,7 @@ from tokenclaw.recommendations import (
 )
 from tokenclaw.routing_experiments import build_post_fix_shadow_yield_report, build_routing_experiment_report
 from tokenclaw.savings_loop_bottlenecks import build_savings_loop_bottlenecks_report
+from tokenclaw.savings_attribution import realized_savings_attribution
 from tokenclaw.session_phase_memory import build_session_phase_memory
 from tokenclaw.store import utc_now
 
@@ -17579,42 +17580,36 @@ def _provider_accounting_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     input_tokens = base_input_tokens + cache_creation_tokens + cache_read_tokens
     cost = _as_float(r.get("cost_est_usd"))
     baseline = _as_float(r.get("cost_baseline_usd")) or cost
-    routing_savings = 0.0
-    if routed_model and requested_model != routed_model:
-        requested_cost = estimate_cost(
-            str(requested_model or ""),
-            base_input_tokens,
-            output_tokens,
-            provider=provider,
-        ) or 0.0
-        routed_cost = estimate_cost(
-            str(routed_model or ""),
-            base_input_tokens,
-            output_tokens,
-            provider=provider,
-        ) or 0.0
-        routing_savings = max(requested_cost - routed_cost, 0.0)
-
-    crunch_tokens_saved = _as_int(crunch.get("tokens_saved_est"))
-    summary = crunch.get("old_context_summarization") if isinstance(crunch.get("old_context_summarization"), dict) else {}
-    if summary:
-        crunch_tokens_saved += _as_int(summary.get("tokens_saved_est"))
-    crunch_gross = estimate_blended_input_savings(
-        str(target_model or ""),
-        tokens_saved=crunch_tokens_saved,
-        input_tokens=base_input_tokens,
-        cache_read_tokens=cache_read_tokens,
+    attribution = realized_savings_attribution(
+        requested_model=requested_model,
+        routed_model=routed_model,
         provider=provider,
-    ) or 0.0
-    crunch_savings = max(crunch_gross - _as_float(summary.get("summary_cost_est_usd")), 0.0)
-
-    cache_savings = 0.003 if _as_int(r.get("cache_hit")) else 0.0
-    prompt_cache = provider_prompt_cache_accounting(
-        str(target_model or ""),
-        provider=provider,
-        cache_creation_tokens=cache_creation_tokens,
-        cache_read_tokens=cache_read_tokens,
+        actual_input_tokens=r.get("actual_input_tokens"),
+        input_tokens_est=r.get("input_tokens_est"),
+        actual_output_tokens=r.get("actual_output_tokens"),
+        output_tokens_est=r.get("output_tokens_est"),
+        cache_creation_input_tokens=cache_creation_tokens,
+        cache_read_input_tokens=cache_read_tokens,
+        cost_est_usd=r.get("cost_est_usd"),
+        cost_baseline_usd=r.get("cost_baseline_usd"),
+        crunch_json=crunch,
+        routing_json=routing,
+        cache_json=cache,
+        cache_hit=r.get("cache_hit"),
     )
+    routing_savings = _as_float(routing.get("realized_routing_savings_usd"))
+    if routing_savings <= 0:
+        routing_savings = _as_float(attribution.get("realized_routing_savings_usd"))
+
+    crunch_savings = _as_float(crunch.get("realized_crunch_savings_usd"))
+    if crunch_savings <= 0 and isinstance(crunch.get("realized_savings"), dict):
+        crunch_savings = _as_float(crunch["realized_savings"].get("realized_crunch_savings_usd"))
+    if crunch_savings <= 0:
+        crunch_savings = _as_float(attribution.get("realized_crunch_savings_usd"))
+
+    cache_savings = _as_float(cache.get("realized_cache_savings_usd"))
+    if cache_savings <= 0:
+        cache_savings = _as_float(attribution.get("realized_cache_savings_usd"))
 
     token_basis = "provider-reported"
     if r.get("actual_input_tokens") is None and r.get("actual_output_tokens") is None:
@@ -17635,8 +17630,8 @@ def _provider_accounting_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "routing_savings_usd": routing_savings,
         "crunch_savings_usd": crunch_savings,
         "cache_savings_usd": cache_savings,
-        "provider_prompt_cache_discount_usd": _as_float(prompt_cache.get("read_discount_usd")),
-        "provider_prompt_cache_net_discount_usd": _as_float(prompt_cache.get("net_provider_cache_discount_usd")),
+        "provider_prompt_cache_discount_usd": _as_float(attribution.get("provider_prompt_cache_discount_usd")),
+        "provider_prompt_cache_net_discount_usd": _as_float(attribution.get("provider_prompt_cache_net_discount_usd")),
         "hard_floor_usd": cost,
         "policy_sources": _policy_sources_from(routing, crunch, cache),
         "is_today": bool(r.get("is_today")),
@@ -18058,7 +18053,7 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
     today_routed = int(today_summary["routed_count"] or 0)
     today_cache_hits = int(today_summary["cache_hits"] or 0)
     today_crunch_tokens_saved = int(today_summary["crunch_tokens_saved"] or 0)
-    today_crunch_savings = max(0.0, today_crunch_tokens_saved / 1_000_000 * 3.0)
+    today_crunch_savings = _as_float(today_accounting.get("crunch_savings_usd"))
     return {
         "schema": "tokenclaw.lightweight_dashboard_stats.v1",
         "generated_at": utc_now(),
@@ -19605,20 +19600,24 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     )
     accounting_total = _accounting_rollup(accounting_units)
     accounting_today = _accounting_rollup([unit for unit in accounting_units if unit.get("is_today")])
-    today_crunching_net_savings = today_crunch_savings + (today_summary_savings - today_summary_extra_cost)
-    crunching_net_savings = crunch_savings + (summary_savings - summary_extra_cost)
+    realized_routing_savings = _as_float(accounting_total.get("routing_savings_usd"))
+    today_realized_routing_savings = _as_float(accounting_today.get("routing_savings_usd"))
+    realized_crunch_savings = _as_float(accounting_total.get("crunch_savings_usd"))
+    today_realized_crunch_savings = _as_float(accounting_today.get("crunch_savings_usd"))
+    realized_cache_savings = _as_float(accounting_total.get("cache_savings_usd"))
+    today_realized_cache_savings = _as_float(accounting_today.get("cache_savings_usd"))
     today_savings_buckets = {
-        "routing_usd": round(today_routing_savings, 6),
-        "crunching_usd": round(max(0.0, today_crunching_net_savings), 6),
-        "exact_local_cache_usd": round(today_cache_savings + today_codex_cache_savings, 6),
+        "routing_usd": round(today_realized_routing_savings, 6),
+        "crunching_usd": round(today_realized_crunch_savings, 6),
+        "exact_local_cache_usd": round(today_realized_cache_savings, 6),
         "provider_exact_local_cache_usd": round(today_cache_savings, 6),
         "codex_app_exact_local_cache_usd": round(today_codex_cache_savings, 6),
         "provider_prompt_cache_discount_usd": round(today_prompt_cache_savings, 6),
     }
     savings_buckets = {
-        "routing_usd": round(routing_savings, 6),
-        "crunching_usd": round(max(0.0, crunching_net_savings), 6),
-        "exact_local_cache_usd": round(cache_cost_saved + codex_cache_savings, 6),
+        "routing_usd": round(realized_routing_savings, 6),
+        "crunching_usd": round(realized_crunch_savings, 6),
+        "exact_local_cache_usd": round(realized_cache_savings, 6),
         "provider_exact_local_cache_usd": round(cache_cost_saved, 6),
         "codex_app_exact_local_cache_usd": round(codex_cache_savings, 6),
         "provider_prompt_cache_discount_usd": round(prompt_cache_savings, 6),
@@ -19913,22 +19912,22 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "today_cost_usd": round(today_cost, 6),
             "cache_hits": cache_hits,
             "cache_hit_rate": round(cache_hits / total_calls, 4) if total_calls else 0,
-            "routing_savings_usd": round(routing_savings, 6),
-            "today_routing_savings_usd": round(today_routing_savings, 6),
-            "cache_savings_usd": round(cache_cost_saved + codex_cache_savings, 6),
-            "today_cache_savings_usd": round(today_cache_savings + today_codex_cache_savings, 6),
+            "routing_savings_usd": round(realized_routing_savings, 6),
+            "today_routing_savings_usd": round(today_realized_routing_savings, 6),
+            "cache_savings_usd": round(realized_cache_savings, 6),
+            "today_cache_savings_usd": round(today_realized_cache_savings, 6),
             "provider_cache_savings_usd": round(cache_cost_saved, 6),
             "today_provider_cache_savings_usd": round(today_cache_savings, 6),
             "codex_app_cache_savings_usd": round(codex_cache_savings, 6),
             "today_codex_app_cache_savings_usd": round(today_codex_cache_savings, 6),
-            "total_savings_usd": round(routing_savings + cache_cost_saved + codex_cache_savings, 6),
+            "total_savings_usd": round(realized_routing_savings + realized_crunch_savings + realized_cache_savings, 6),
             "avg_latency_ms": round(avg_latency),
             "routed_count": routed_count,
             "crunched_count": crunched_count,
             "crunch_chars_saved": crunch_chars_saved,
             "crunch_tokens_saved": int(crunch_tokens_saved),
-            "crunch_savings_usd": round(crunch_savings, 6),
-            "today_crunch_savings_usd": round(today_crunch_savings, 6),
+            "crunch_savings_usd": round(realized_crunch_savings, 6),
+            "today_crunch_savings_usd": round(today_realized_crunch_savings, 6),
             "crunch_captured_savings_usd": round(_as_float(crunch_canary_captured_summary.get("captured_saved_usd")), 6),
             "crunch_captured_saved_tokens": _as_int(crunch_canary_captured_summary.get("captured_saved_tokens")),
             "crunch_captured_applied_count": _as_int(crunch_canary_captured_summary.get("applied_count")),

@@ -21,6 +21,7 @@ if HAS_RUNTIME_DEPS:
     from tokenclaw import server, stats as stats_views
     from tokenclaw.dashboard_app import create_dashboard_app
     from tokenclaw import routing_experiments
+    from tokenclaw.savings_attribution import realized_savings_attribution
     from tokenclaw.store import Store, stable_json, utc_now
 
 
@@ -502,7 +503,7 @@ request_shape_repeated_context_canaries:
         rendered = json.dumps(result, sort_keys=True)
         self.assertNotIn("raw-anthropic-session-secret", rendered)
 
-    def test_crunch_savings_uses_cache_blended_input_rate(self):
+    def test_realized_crunch_savings_excludes_provider_cache_overlap(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
             created_at=utc_now(),
@@ -536,8 +537,35 @@ request_shape_repeated_context_canaries:
         result = asyncio.run(stats_views.stats_full(server.store))
         summary = result["summary"]
 
-        self.assertAlmostEqual(summary["crunch_savings_usd"], 0.00057, places=6)
-        self.assertAlmostEqual(summary["today_crunch_savings_usd"], 0.00057, places=6)
+        self.assertAlmostEqual(summary["crunch_savings_usd"], 0.0, places=8)
+        self.assertAlmostEqual(summary["today_crunch_savings_usd"], 0.0, places=8)
+        row = server.store.conn.execute("select crunch_json from calls").fetchone()
+        crunch = json.loads(row["crunch_json"])
+        self.assertEqual(crunch["realized_savings"]["provider_cache_overlap_tokens"], 1_000)
+        self.assertEqual(crunch["realized_savings"]["realized_input_tokens_saved"], 0)
+        self.assertAlmostEqual(crunch["realized_crunch_savings_usd"], 0.0, places=8)
+
+    def test_realized_crunch_savings_prices_uncached_billed_input_delta(self):
+        attribution = realized_savings_attribution(
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            provider="anthropic",
+            actual_input_tokens=1_000,
+            actual_output_tokens=0,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            cost_est_usd=0.003,
+            cost_baseline_usd=0.0045,
+            crunch_json={"changed": True, "tokens_saved_est": 500},
+            routing_json={},
+            cache_json={},
+            cache_hit=0,
+        )
+
+        self.assertEqual(attribution["provider_cache_overlap_tokens"], 0)
+        self.assertEqual(attribution["realized_crunch_input_tokens_saved"], 500)
+        self.assertAlmostEqual(attribution["realized_crunch_savings_usd"], 0.0015, places=8)
+        self.assertAlmostEqual(attribution["provider_prompt_cache_discount_usd"], 0.0, places=8)
 
     def test_executive_health_errors_use_today_boundary(self):
         today = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0)
@@ -986,7 +1014,7 @@ request_shape_repeated_context_canaries:
         self.assertEqual(provider_row["total_calls"], 1)
         self.assertEqual(provider_row["provider_tokens"], 160)
         self.assertAlmostEqual(provider_row["cost_est_usd"], 0.001, places=6)
-        self.assertAlmostEqual(provider_row["savings_usd"], 0.002, places=6)
+        self.assertAlmostEqual(provider_row["savings_usd"], 0.0, places=6)
 
         zero_row = by_day[empty_day]
         self.assertEqual(zero_row["total_units"], 0)

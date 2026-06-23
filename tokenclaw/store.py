@@ -12,6 +12,10 @@ from uuid import uuid4
 
 from tokenclaw.env import env, env_int
 from tokenclaw.paths import default_db_path
+from tokenclaw.savings_attribution import (
+    attach_realized_savings_to_metadata,
+    realized_savings_attribution,
+)
 
 
 DEFAULT_SQLITE_RETENTION_DAYS = 7
@@ -1173,6 +1177,29 @@ class SQLiteStore:
             routed_model=kwargs.get("routed_model"),
             stream=kwargs.get("stream"),
             category=kwargs.get("category"),
+        )
+        attribution = realized_savings_attribution(
+            requested_model=kwargs.get("requested_model"),
+            routed_model=kwargs.get("routed_model"),
+            provider=kwargs.get("provider", "anthropic"),
+            actual_input_tokens=kwargs.get("actual_input_tokens"),
+            input_tokens_est=kwargs.get("input_tokens_est"),
+            actual_output_tokens=kwargs.get("actual_output_tokens"),
+            output_tokens_est=kwargs.get("output_tokens_est"),
+            cache_creation_input_tokens=kwargs.get("cache_creation_input_tokens"),
+            cache_read_input_tokens=kwargs.get("cache_read_input_tokens"),
+            cost_est_usd=kwargs.get("cost_est_usd"),
+            cost_baseline_usd=kwargs.get("cost_baseline_usd"),
+            crunch_json=kwargs.get("crunch_json"),
+            routing_json=kwargs.get("routing_json"),
+            cache_json=kwargs.get("cache_json"),
+            cache_hit=kwargs.get("cache_hit"),
+        )
+        kwargs["crunch_json"], kwargs["routing_json"], kwargs["cache_json"] = attach_realized_savings_to_metadata(
+            crunch_json=kwargs.get("crunch_json"),
+            routing_json=kwargs.get("routing_json"),
+            cache_json=kwargs.get("cache_json"),
+            attribution=attribution,
         )
         if kwargs.get("managed_routing_json") in (None, ""):
             kwargs["managed_routing_json"] = _managed_routing_json_from_routing(kwargs.get("routing_json"))
