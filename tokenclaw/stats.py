@@ -17205,6 +17205,58 @@ def _activity_routing_candidate_state(candidate: dict[str, Any], routing: dict[s
     return state
 
 
+def _activity_routing_cell(candidate: dict[str, Any]) -> dict[str, Any]:
+    status = str(candidate.get("cell_status") or candidate.get("status") or "").strip()
+    provenance = str(candidate.get("provenance") or candidate.get("policy_source") or "").strip()
+    normalized_provenance = "managed" if provenance.startswith("managed") else "local"
+    if bool(candidate.get("covered")):
+        return {
+            "schema": "tokenclaw.dashboard_routing_cell.v1",
+            "state": "covered",
+            "routed_model": (
+                candidate.get("suggested_routed_model")
+                or candidate.get("routed_model")
+                or candidate.get("target_model")
+            ),
+            "provenance": normalized_provenance,
+            "add_payload": None,
+        }
+    if status == "proposed":
+        return {
+            "schema": "tokenclaw.dashboard_routing_cell.v1",
+            "state": "proposed",
+            "routed_model": candidate.get("proposed_routed_model") or candidate.get("target_model"),
+            "provenance": "managed",
+            "add_payload": None,
+        }
+    if status == "shadow-collecting":
+        return {
+            "schema": "tokenclaw.dashboard_routing_cell.v1",
+            "state": "shadow",
+            "routed_model": candidate.get("shadow_routed_model") or candidate.get("target_model"),
+            "provenance": normalized_provenance,
+            "add_payload": None,
+        }
+    if bool(candidate.get("actionable")) and isinstance(candidate.get("add_payload"), dict):
+        return {
+            "schema": "tokenclaw.dashboard_routing_cell.v1",
+            "state": "uncovered_actionable",
+            "routed_model": (
+                (candidate.get("add_payload") or {}).get("routed_model")
+                or candidate.get("suggested_routed_model")
+            ),
+            "provenance": normalized_provenance,
+            "add_payload": dict(candidate.get("add_payload") or {}),
+        }
+    return {
+        "schema": "tokenclaw.dashboard_routing_cell.v1",
+        "state": "none",
+        "routed_model": None,
+        "provenance": "none",
+        "add_payload": None,
+    }
+
+
 def _provider_activity_unit(
     row: sqlite3.Row | dict[str, Any],
     *,
@@ -17275,10 +17327,12 @@ def _provider_activity_unit(
             },
         }
     routing_candidate = _activity_routing_candidate_state(routing_candidate, routing)
+    routing_cell = _activity_routing_cell(routing_candidate)
     return {
         "feature_schema_version": "tokenclaw.optimization_unit_features.v1",
         "unit_id": f"provider_call:{r.get('id')}",
         "created_at": r.get("created_at"),
+        "routing_cell": routing_cell,
         "source_surface": source_surface,
         "granularity": "provider_request",
         "app_family": _app_family_for_call(provider, requested_model, str(r.get("path") or "")),
@@ -17313,6 +17367,7 @@ def _provider_activity_unit(
         "optimization_features": {
             "routing": routing,
             "routing_candidate": routing_candidate,
+            "routing_cell": routing_cell,
             "crunch": crunch,
             "cache": cache,
             "policy_sources": sorted({
@@ -24639,33 +24694,38 @@ function adminControlUrl(path){
 }
 function routingCandidateAction(unit){
   if(unit.granularity!=='provider_request')return'';
-  const candidate=((unit.optimization_features||{}).routing_candidate)||{};
-  if(candidate.covered)return'<span class="badge hit">routing candidate covered</span>';
-  if(candidate.status==='proposed'||candidate.cell_status==='proposed'){
-    const target=candidate.proposed_routed_model||candidate.target_model||'';
-    return `<span class="badge routed">proposed${target?`: ${esc(target)}`:''}</span>`;
+  const cell=unit.routing_cell||((unit.optimization_features||{}).routing_cell)||{state:'none'};
+  switch (cell.state) {
+    case 'covered':
+      return'<span class="badge hit">routing candidate covered</span>';
+    case 'proposed': {
+      const target=cell.routed_model||'';
+      return `<span class="badge routed">proposed${target?`: ${esc(target)}`:''}</span>`;
+    }
+    case 'shadow': {
+      const target=cell.routed_model||'';
+      return `<span class="badge stream">collecting shadow evidence${target?`: ${esc(target)}`:''}</span>`;
+    }
+    case 'uncovered_actionable': {
+      const payload=cell.add_payload||{};
+      const hidden=['requested_model','provider','source_surface','app_family','category','workflow_phase','stream','max_text_chars']
+        .filter(key=>payload[key]!=null&&payload[key]!=='')
+        .map(key=>`<input type="hidden" name="${esc(key)}" value="${esc(payload[key])}">`).join('');
+      const suggested=payload.routed_model||cell.routed_model||'';
+      const label=suggested?`Backed routing candidate — ${esc(suggested)}`:'Routing off — enter target model';
+      return `<span class="routing-candidate-form" data-routing-candidate="1">
+        <span class="badge routed">${label}</span>
+        ${hidden}
+        <input name="routed_model" value="${esc(suggested)}" aria-label="Target routing model">
+        <button type="button" onclick="addRoutingCandidate(this.closest('[data-routing-candidate]'))">Add to routing config</button>
+        <span class="routing-candidate-status" data-routing-result></span>
+      </span>`;
+    }
+    case 'none':
+      return'<span class="badge miss">routing off</span>';
+    default:
+      return'';
   }
-  if(candidate.status==='shadow-collecting'||candidate.cell_status==='shadow-collecting'){
-    const target=candidate.shadow_routed_model||'';
-    return `<span class="badge stream">collecting shadow evidence${target?`: ${esc(target)}`:''}</span>`;
-  }
-  if(candidate.status==='routing-off'||candidate.cell_status==='routing-off'){
-    return '<span class="badge miss">routing off</span>';
-  }
-  if(!candidate.actionable||!candidate.add_payload)return'';
-  const payload=candidate.add_payload||{};
-  const hidden=['requested_model','provider','source_surface','app_family','category','workflow_phase','stream','max_text_chars']
-    .filter(key=>payload[key]!=null&&payload[key]!=='')
-    .map(key=>`<input type="hidden" name="${esc(key)}" value="${esc(payload[key])}">`).join('');
-  const suggested=payload.routed_model||'';
-  const label=suggested?`Backed routing candidate — ${esc(suggested)}`:'Routing off — enter target model';
-  return `<span class="routing-candidate-form" data-routing-candidate="1">
-    <span class="badge routed">${label}</span>
-    ${hidden}
-    <input name="routed_model" value="${esc(suggested)}" aria-label="Target routing model">
-    <button type="button" onclick="addRoutingCandidate(this.closest('[data-routing-candidate]'))">Add to routing config</button>
-    <span class="routing-candidate-status" data-routing-result></span>
-  </span>`;
 }
 async function addRoutingCandidate(container){
   const result=container.querySelector('[data-routing-result]');

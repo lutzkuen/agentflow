@@ -9770,6 +9770,14 @@ request_shape_repeated_context_canaries:
         self.assertNotIn("No routing candidate — not collecting shadow evidence", html)
         self.assertIn("Add to routing config", html)
         self.assertIn("routingCandidateAction(unit)", html)
+        function_start = html.index("function routingCandidateAction(unit)")
+        function_end = html.index("async function addRoutingCandidate", function_start)
+        routing_action = html[function_start:function_end]
+        self.assertIn("switch (cell.state)", routing_action)
+        self.assertNotIn("candidate.covered", routing_action)
+        self.assertNotIn("candidate.actionable", routing_action)
+        self.assertNotIn("candidate.status", routing_action)
+        self.assertNotIn("candidate.cell_status", routing_action)
         self.assertIn("adminControlUrl('/tokenclaw/admin/routing-experiments/candidates')", html)
         self.assertIn("'/tokenclaw/dashboard/admin/routing-experiments/candidates'", html)
         self.assertNotIn("http://127.0.0.1:4000", html)
@@ -9818,6 +9826,13 @@ request_shape_repeated_context_canaries:
         self.assertIsNone(coverage["suggested_routed_model"])
         self.assertFalse(coverage["privacy"]["provider_bodies_included"])
         self.assertFalse(coverage["privacy"]["request_ids_included"])
+        cell = unit["routing_cell"]
+        self.assertEqual(cell["schema"], "tokenclaw.dashboard_routing_cell.v1")
+        self.assertEqual(cell["state"], "none")
+        self.assertEqual(cell["provenance"], "none")
+        self.assertIsNone(cell["routed_model"])
+        self.assertIsNone(cell["add_payload"])
+        self.assertEqual(unit["optimization_features"]["routing_cell"], cell)
 
     def test_recent_activity_routing_cell_shows_managed_proposal(self):
         server.store.log_call(
@@ -9866,6 +9881,12 @@ request_shape_repeated_context_canaries:
         self.assertEqual(coverage["proposed_routed_model"], "claude-sonnet-4-6")
         self.assertIsNone(coverage["add_payload"])
         self.assertIsNone(coverage["suggested_routed_model"])
+        cell = activity["units"][0]["routing_cell"]
+        self.assertEqual(cell["state"], "proposed")
+        self.assertEqual(cell["provenance"], "managed")
+        self.assertEqual(cell["routed_model"], "claude-sonnet-4-6")
+        self.assertIsNone(cell["add_payload"])
+        self.assertEqual(activity["units"][0]["optimization_features"]["routing_cell"], cell)
 
     def test_recent_activity_routing_cell_shows_shadow_collection(self):
         server.store.log_call(
@@ -9913,6 +9934,39 @@ request_shape_repeated_context_canaries:
         self.assertEqual(coverage["shadow_routed_model"], "claude-sonnet-4-6")
         self.assertIsNone(coverage["add_payload"])
         self.assertIsNone(coverage["suggested_routed_model"])
+        cell = activity["units"][0]["routing_cell"]
+        self.assertEqual(cell["state"], "shadow")
+        self.assertEqual(cell["provenance"], "managed")
+        self.assertEqual(cell["routed_model"], "claude-sonnet-4-6")
+        self.assertIsNone(cell["add_payload"])
+        self.assertEqual(activity["units"][0]["optimization_features"]["routing_cell"], cell)
+
+    def test_routing_cell_normalizes_covered_and_actionable_candidates(self):
+        covered = stats_views._activity_routing_cell({
+            "covered": True,
+            "suggested_routed_model": "claude-haiku-4-5",
+            "provenance": "local-rule",
+            "add_payload": {"routed_model": "claude-haiku-4-5"},
+        })
+        self.assertEqual(covered["state"], "covered")
+        self.assertEqual(covered["routed_model"], "claude-haiku-4-5")
+        self.assertEqual(covered["provenance"], "local")
+        self.assertIsNone(covered["add_payload"])
+
+        actionable = stats_views._activity_routing_cell({
+            "covered": False,
+            "actionable": True,
+            "policy_source": "local-manual",
+            "add_payload": {
+                "requested_model": "claude-opus-4-5",
+                "routed_model": "claude-sonnet-4-5",
+                "stream": True,
+            },
+        })
+        self.assertEqual(actionable["state"], "uncovered_actionable")
+        self.assertEqual(actionable["routed_model"], "claude-sonnet-4-5")
+        self.assertEqual(actionable["provenance"], "local")
+        self.assertEqual(actionable["add_payload"]["requested_model"], "claude-opus-4-5")
 
     def test_routing_candidate_lifecycle_burndown_endpoint_dashboard_and_research_handoff(self):
         policy = {
