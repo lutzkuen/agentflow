@@ -3,7 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from copy import deepcopy
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from tokenclaw.store import utc_now
 
@@ -16,6 +21,7 @@ BLOCKED_REVIEW_SCHEMA = "tokenclaw.anthropic_routing_canary_blocked_review.v1"
 ACCEPTANCE_SCHEMA = "tokenclaw.anthropic_routing_canary_stage_acceptance.v1"
 EXECUTOR_GUARD_DRY_RUN_SCHEMA = "tokenclaw.anthropic_routing_executor_guard_dry_run.v1"
 PASS_THROUGH_SCHEMA = "tokenclaw.pass_through_routing_activation_candidates.v1"
+APPLY_SCHEMA = "tokenclaw.anthropic_routing_canary_apply.v1"
 SUPPORTED_EXECUTORS = {"anthropic-routing-rules", "claude-phase-routing-canary", "phase-canary"}
 
 PRIVACY = {
@@ -186,7 +192,7 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
     if isinstance(lifecycle, dict):
         lifecycle_blockers = _lifecycle_blockers(lifecycle)
         blockers.extend(lifecycle_blockers)
-    if actionability and actionability not in {"actionable", "needs-lifecycle-evidence", "review-ready"}:
+    if actionability and actionability not in {"actionable", "needs-lifecycle-evidence", "review-ready", "routing-rule-required"}:
         blockers.append(actionability)
     if provider != "anthropic":
         blockers.append("unsupported-provider")
@@ -1085,6 +1091,204 @@ def _error_result(error_type: str, message: str, *, errors: list[dict[str, str]]
         "privacy": PRIVACY,
         "acceptance": _acceptance_report([], projected_applied=0, projected_holdout=0),
         "error": {"type": error_type, "message": message, "errors": errors or []},
+    }
+
+
+def _apply_error_result(error_type: str, message: str, *, errors: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    return {
+        "schema": APPLY_SCHEMA,
+        "ok": False,
+        "generated_at": utc_now(),
+        "dry_run": True,
+        "active_policy_changed": False,
+        "wrote_active_policy_files": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "summary": {"staged_count": 0, "applied_count": 0, "omitted_count": 0, "error_count": 1},
+        "applied": [],
+        "omitted": [],
+        "files": [],
+        "privacy": PRIVACY,
+        "error": {"type": error_type, "message": message, "errors": errors or []},
+    }
+
+
+def _load_routing_policy(path: Path) -> tuple[dict[str, Any], str | None]:
+    if not path.exists():
+        return {"rules": []}, None
+    text = path.read_text(encoding="utf-8")
+    data = yaml.safe_load(text) or {}
+    if isinstance(data, list):
+        data = {"rules": data}
+    if not isinstance(data, dict):
+        data = {"rules": []}
+    if not isinstance(data.get("rules"), list):
+        data["rules"] = []
+    return data, text
+
+
+def _backup_suffix() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _write_policy_file(path: Path, text: str, *, backup_id: str | None = None) -> str | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path: str | None = None
+    if path.exists():
+        backup = path.with_name(f"{path.name}.bak-{backup_id or _backup_suffix()}")
+        backup.write_bytes(path.read_bytes())
+        backup_path = str(backup)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return backup_path
+
+
+def _active_phase_canary_from_draft(draft: dict[str, Any]) -> dict[str, Any] | None:
+    policies = draft.get("policies") if isinstance(draft.get("policies"), dict) else {}
+    routing = policies.get("routing") if isinstance(policies.get("routing"), dict) else {}
+    canary = routing.get("phase_canary") if isinstance(routing.get("phase_canary"), dict) else None
+    if not isinstance(canary, dict):
+        return None
+    active = deepcopy(canary)
+    active["enabled"] = True
+    active["review_only"] = False
+    active["live_routing_enabled"] = True
+    active["shadow_only"] = False
+    active["policy_source"] = active.get("policy_source") or "local-manual"
+    promotion = active.get("promotion") if isinstance(active.get("promotion"), dict) else {}
+    promotion = deepcopy(promotion)
+    promotion["applied_at"] = utc_now()
+    promotion["apply_source"] = "anthropic_routing_canary_stage"
+    promotion["target_local_rule_file"] = "routing_rules.yaml"
+    promotion["target_local_policy"] = "routing.phase_canary"
+    rollback = promotion.get("rollback_metadata") if isinstance(promotion.get("rollback_metadata"), dict) else {}
+    rollback = deepcopy(rollback)
+    rollback.setdefault("schema", "tokenclaw.anthropic_routing_canary_rollback.v1")
+    rollback["rollback_action_type"] = "disable_phase_canary"
+    rollback["disabled_patch"] = {
+        "phase_canary": {
+            "enabled": False,
+            "canary_fraction": 0.0,
+            "holdout_fraction": active.get("holdout_fraction", 0.0),
+            "disabled_reason": "operator-or-safety-rollback",
+            "target_candidate_id": active.get("target_candidate_id"),
+            "policy_id": active.get("policy_id"),
+        }
+    }
+    rollback.setdefault("rollback_reason_codes", [
+        "safety-stop-observed",
+        "error-rate-regression",
+        "retry-or-fallback-regression",
+        "latency-regression",
+        "thinking-history-blocked",
+        "operator-requested",
+    ])
+    rollback["preserve_previous_rule_required"] = True
+    promotion["rollback_metadata"] = rollback
+    promotion["privacy"] = PRIVACY
+    active["promotion"] = promotion
+    return active
+
+
+def apply_anthropic_routing_canary_stage_report(
+    stage_report: dict[str, Any],
+    *,
+    config_dir: str | Path,
+    dry_run: bool = True,
+    backup_id: str | None = None,
+    top_candidates: int = 1,
+) -> dict[str, Any]:
+    if not isinstance(stage_report, dict) or stage_report.get("schema") != SCHEMA:
+        return _apply_error_result("invalid_stage_report", f"expected {SCHEMA}")
+    errors = _privacy_errors(stage_report)
+    if errors:
+        return _apply_error_result(
+            "raw_payload_rejected",
+            "Anthropic routing canary apply received raw request content or identifiers",
+            errors=errors,
+        )
+
+    drafts = [draft for draft in stage_report.get("staged_drafts") or [] if isinstance(draft, dict)]
+    config_path = Path(config_dir).expanduser()
+    routing_path = config_path / "routing_rules.yaml"
+    routing_data, old_text = _load_routing_policy(routing_path)
+    applied: list[dict[str, Any]] = []
+    omitted: list[dict[str, Any]] = []
+
+    for index, draft in enumerate(drafts):
+        if len(applied) >= max(1, int(top_candidates or 1)):
+            omitted.append({
+                "status": "omitted",
+                "reason": "top-candidate-limit",
+                "target_candidate_id": draft.get("target_candidate_id"),
+                "privacy": PRIVACY,
+            })
+            continue
+        canary = _active_phase_canary_from_draft(draft)
+        if canary is None:
+            omitted.append({
+                "status": "omitted",
+                "reason": "missing-phase-canary",
+                "path": f"$.staged_drafts[{index}]",
+                "target_candidate_id": draft.get("target_candidate_id"),
+                "privacy": PRIVACY,
+            })
+            continue
+        routing_data["phase_canary"] = canary
+        applied.append({
+            "status": "applied" if not dry_run else "planned",
+            "target_candidate_id": draft.get("target_candidate_id") or canary.get("target_candidate_id"),
+            "policy_id": canary.get("policy_id"),
+            "target_local_policy": "routing.phase_canary",
+            "target_local_rule_file": "routing_rules.yaml",
+            "canary_fraction": canary.get("canary_fraction"),
+            "holdout_fraction": canary.get("holdout_fraction"),
+            "live_routing_enabled": True,
+            "rollback_metadata": canary.get("promotion", {}).get("rollback_metadata") if isinstance(canary.get("promotion"), dict) else {},
+            "privacy": PRIVACY,
+        })
+
+    new_text = yaml.safe_dump(routing_data, sort_keys=False)
+    changed = bool(applied) and old_text != new_text
+    backup_path = None
+    if changed and not dry_run:
+        backup_path = _write_policy_file(routing_path, new_text, backup_id=backup_id)
+
+    wrote = bool(changed and not dry_run)
+    return {
+        "schema": APPLY_SCHEMA,
+        "ok": bool(applied),
+        "generated_at": utc_now(),
+        "dry_run": bool(dry_run),
+        "active_policy_changed": wrote,
+        "wrote_active_policy_files": wrote,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "target_local_policy": "routing.phase_canary",
+        "target_local_rule_file": "routing_rules.yaml",
+        "applied": applied,
+        "omitted": omitted,
+        "files": [
+            {
+                "section": "routing",
+                "path": str(routing_path),
+                "changed": bool(changed),
+                "backup_path": backup_path,
+                "bytes_after": len(new_text.encode("utf-8")),
+            }
+        ],
+        "summary": {
+            "staged_count": len(drafts),
+            "applied_count": len(applied),
+            "omitted_count": len(omitted),
+            "error_count": 0,
+            "canary_fraction": applied[0].get("canary_fraction") if applied else None,
+            "holdout_fraction": applied[0].get("holdout_fraction") if applied else None,
+            "live_routing_enabled": bool(applied),
+        },
+        "privacy": PRIVACY,
+        "error": None if applied else {"type": "no_applicable_drafts", "message": "no staged Anthropic routing canary drafts were applied"},
     }
 
 

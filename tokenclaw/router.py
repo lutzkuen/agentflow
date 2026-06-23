@@ -428,6 +428,9 @@ def _apply_phase_canary_yaml(policy: dict[str, Any], data: Any) -> dict[str, Any
             policy[key] = _int_min(data.get(key), int(policy[key]), 0)
     if "stream" in data:
         policy["stream"] = _as_bool(data.get("stream"), False)
+    for key in ("live_routing_enabled", "live_routing"):
+        if key in data:
+            policy["live_routing_enabled"] = _as_bool(data.get(key), False)
     for key in ("canary_fraction", "rollout_fraction", "holdout_fraction"):
         if key in data:
             target_key = "canary_fraction" if key == "rollout_fraction" else key
@@ -866,6 +869,7 @@ def _phase_canary_base_meta(
         "stream": stream,
         "canary_fraction": float(ROUTING_PHASE_CANARY.get("canary_fraction") or 0.0),
         "holdout_fraction": float(ROUTING_PHASE_CANARY.get("holdout_fraction") or 0.0),
+        "live_routing_enabled": _as_bool(ROUTING_PHASE_CANARY.get("live_routing_enabled"), False),
         "policy_source": ROUTING_PHASE_CANARY.get("policy_source") or ROUTING_RULES_SOURCE,
         "safety_gates": ROUTING_PHASE_CANARY.get("safety_gates") if isinstance(ROUTING_PHASE_CANARY.get("safety_gates"), dict) else {},
     }
@@ -1134,17 +1138,20 @@ def phase_canary_decision(
         })
         return requested, meta
     if score < holdout_fraction + canary_fraction:
+        live_routing = _as_bool(ROUTING_PHASE_CANARY.get("live_routing_enabled"), False)
+        forwarded_model = target_model if live_routing else requested
         meta.update({
             "status": "applied",
             "cohort": "canary_applied",
-            "reason": "selected-canary-shadow-only",
-            "actual_forwarded_model": requested,
-            "shadow_model": target_model,
-            "shadow_only": True,
-            "requires_shadow_comparison": not stream,
-            "live_promotion_required": True,
+            "reason": "selected-canary" if live_routing else "selected-canary-shadow-only",
+            "actual_forwarded_model": forwarded_model,
+            "shadow_model": None if live_routing else target_model,
+            "shadow_only": not live_routing,
+            "requires_shadow_comparison": (not stream) and not live_routing,
+            "live_promotion_required": not live_routing,
+            "live_routing_enabled": live_routing,
         })
-        return requested, meta
+        return forwarded_model, meta
     meta.update({
         "status": "not_selected",
         "cohort": "skipped",
@@ -2018,6 +2025,8 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             reason = "phase canary selected shadow route; keep requested model"
             if canary_meta.get("status") == "holdout":
                 reason = "phase canary holdout; keep requested model"
+            elif canary_meta.get("status") == "applied" and not canary_meta.get("shadow_only") and routed != requested:
+                reason = "phase canary selected live route"
             elif canary_meta.get("status") == "not_selected":
                 reason = "phase canary not selected; keep requested model"
             elif canary_meta.get("status") == "safety_stopped":

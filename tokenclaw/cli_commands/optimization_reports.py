@@ -4682,6 +4682,12 @@ def anthropic_routing_canary_stage_cli(
     parser.add_argument("--holdout-fraction", type=float, default=0.10, help="Proposed deterministic holdout fraction, default: 0.10.")
     parser.add_argument("--min-samples", type=int, default=5, help="Minimum candidate samples before staging, default: 5.")
     parser.add_argument("--top-candidates", type=int, default=1, help="Maximum ranked eligible candidates to stage, default: 1.")
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("TOKENCLAW_CONFIG_DIR", str(Path.home() / ".tokenclaw")),
+        help="Directory containing local AgentFlow YAML policy files when --apply is used, default: TOKENCLAW_CONFIG_DIR or ~/.tokenclaw.",
+    )
+    parser.add_argument("--apply", action="store_true", help="Write the top staged Anthropic routing canary into routing_rules.yaml.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
     args = parser.parse_args(argv)
 
@@ -4705,9 +4711,12 @@ def anthropic_routing_canary_stage_cli(
         )
         return 1
 
-    from tokenclaw.anthropic_routing_canary_stage import build_anthropic_routing_canary_stage_report
+    from tokenclaw.anthropic_routing_canary_stage import (
+        apply_anthropic_routing_canary_stage_report,
+        build_anthropic_routing_canary_stage_report,
+    )
 
-    result = build_anthropic_routing_canary_stage_report(
+    stage = build_anthropic_routing_canary_stage_report(
         _extract_anthropic_routing_report(payload),
         canary_fraction=args.canary_fraction,
         holdout_fraction=args.holdout_fraction,
@@ -4715,11 +4724,28 @@ def anthropic_routing_canary_stage_cli(
         top_candidates=args.top_candidates,
         draft_id=args.draft_id,
     )
+    result = (
+        apply_anthropic_routing_canary_stage_report(
+            stage,
+            config_dir=args.config_dir,
+            dry_run=False,
+            top_candidates=args.top_candidates,
+        )
+        if args.apply
+        else stage
+    )
+    if args.apply:
+        result["stage_report"] = {
+            "schema": stage.get("schema"),
+            "ok": stage.get("ok"),
+            "summary": stage.get("summary"),
+            "acceptance": stage.get("acceptance"),
+        }
     if args.pretty:
         stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
     else:
         _write_json(stdout, result)
-    return 0
+    return 0 if result.get("ok") else 1
 
 
 def claude_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:

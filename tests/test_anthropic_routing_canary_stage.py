@@ -1,9 +1,19 @@
 import io
+import importlib
 import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
+
+import yaml
 
 from tokenclaw import cli
-from tokenclaw.anthropic_routing_canary_stage import build_anthropic_routing_canary_stage_report
+from tokenclaw.anthropic_routing_canary_stage import (
+    apply_anthropic_routing_canary_stage_report,
+    build_anthropic_routing_canary_stage_report,
+)
+from tokenclaw.recommendations import build_phase_routing_outcome_feedback
 
 
 def _pass_through_report() -> dict:
@@ -250,6 +260,154 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertEqual(omitted_by_reason["missing-routed-model"]["status"], "omitted")
         self.assertEqual(omitted_by_reason["missing-routed-model"]["target_model"], "claude-haiku-4-5-20251001")
         _assert_privacy_clean(self, result)
+
+    def test_applies_routing_rule_required_rollup_to_live_local_phase_canary(self) -> None:
+        report = _pass_through_report()
+        bucket = report["buckets"][0]
+        bucket["actionability"] = "routing-rule-required"
+        bucket["next_action"] = "apply-local-canary-routing-rule"
+
+        stage = build_anthropic_routing_canary_stage_report(
+            report,
+            canary_fraction=1.0,
+            holdout_fraction=0.10,
+            min_samples=5,
+        )
+        self.assertTrue(stage["ok"])
+        self.assertEqual(stage["summary"]["staged_count"], 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            routing_file = tmp_path / "routing_rules.yaml"
+            dry = apply_anthropic_routing_canary_stage_report(stage, config_dir=tmp_path, dry_run=True)
+            self.assertTrue(dry["ok"])
+            self.assertFalse(dry["active_policy_changed"])
+            self.assertFalse(dry["wrote_active_policy_files"])
+            self.assertFalse(routing_file.exists())
+
+            applied = apply_anthropic_routing_canary_stage_report(stage, config_dir=tmp_path, dry_run=False)
+            self.assertTrue(applied["ok"])
+            self.assertTrue(applied["active_policy_changed"])
+            self.assertTrue(applied["wrote_active_policy_files"])
+            self.assertFalse(applied["provider_calls_made"])
+            self.assertFalse(applied["managed_server_calls_made"])
+
+            written = yaml.safe_load(routing_file.read_text(encoding="utf-8"))
+            canary = written["phase_canary"]
+            self.assertTrue(canary["enabled"])
+            self.assertFalse(canary["review_only"])
+            self.assertTrue(canary["live_routing_enabled"])
+            self.assertEqual(canary["target_model"], "claude-haiku-4-5-20251001")
+            self.assertEqual(canary["canary_fraction"], 1.0)
+            self.assertEqual(canary["holdout_fraction"], 0.1)
+            rollback = canary["promotion"]["rollback_metadata"]
+            self.assertEqual(rollback["rollback_action_type"], "disable_phase_canary")
+            self.assertFalse(rollback["disabled_patch"]["phase_canary"]["enabled"])
+
+            old_rules = os.environ.get("TOKENCLAW_ROUTING_RULES")
+            old_database_url = os.environ.get("TOKENCLAW_DATABASE_URL")
+            os.environ["TOKENCLAW_ROUTING_RULES"] = str(routing_file)
+            os.environ["TOKENCLAW_DATABASE_URL"] = f"sqlite:///{tmp_path / 'empty.sqlite3'}"
+            try:
+                import tokenclaw.router as router_module
+
+                manual_router = importlib.reload(router_module)
+                body = {
+                    "model": manual_router.SONNET_DEFAULT,
+                    "stream": True,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                        }
+                    ],
+                }
+                applied_route = None
+                holdout_route = None
+                for index in range(1000):
+                    routed, meta = manual_router.route_model(body, session_id=f"session-{index}")
+                    phase = meta.get("phase_canary") if isinstance(meta.get("phase_canary"), dict) else {}
+                    if phase.get("status") == "applied" and applied_route is None:
+                        applied_route = (routed, meta)
+                    if phase.get("status") == "holdout" and holdout_route is None:
+                        holdout_route = (routed, meta)
+                    if applied_route and holdout_route:
+                        break
+            finally:
+                if old_rules is None:
+                    os.environ.pop("TOKENCLAW_ROUTING_RULES", None)
+                else:
+                    os.environ["TOKENCLAW_ROUTING_RULES"] = old_rules
+                if old_database_url is None:
+                    os.environ.pop("TOKENCLAW_DATABASE_URL", None)
+                else:
+                    os.environ["TOKENCLAW_DATABASE_URL"] = old_database_url
+                import tokenclaw.router as router_module
+
+                importlib.reload(router_module)
+
+            self.assertIsNotNone(applied_route)
+            applied_routed, applied_meta = applied_route
+            self.assertEqual(applied_routed, "claude-haiku-4-5-20251001")
+            self.assertEqual(applied_meta["routed_model"], "claude-haiku-4-5-20251001")
+            self.assertEqual(applied_meta["reason"], "phase canary selected live route")
+            applied_canary = applied_meta["phase_canary"]
+            self.assertEqual(applied_canary["cohort"], "canary_applied")
+            self.assertFalse(applied_canary["shadow_only"])
+            self.assertTrue(applied_canary["live_routing_enabled"])
+            self.assertEqual(applied_canary["actual_forwarded_model"], "claude-haiku-4-5-20251001")
+
+            feedback = build_phase_routing_outcome_feedback(
+                provider="anthropic",
+                path="/v1/messages",
+                requested_model=manual_router.SONNET_DEFAULT,
+                routed_model=applied_routed,
+                status_code=200,
+                latency_ms=100,
+                retry_count=0,
+                input_tokens_est=1000,
+                output_tokens_est=100,
+                actual_input_tokens=1000,
+                actual_output_tokens=100,
+                thinking_output_tokens=0,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.002,
+                cache_meta={"status": "skipped"},
+                crunch_meta={"changed": False},
+                routing_meta=applied_meta,
+                category="tool-result",
+            )
+            self.assertIsNotNone(feedback)
+            self.assertEqual(feedback["status"], "applied")
+            self.assertEqual(feedback["cohort"], "canary_applied")
+
+            self.assertIsNotNone(holdout_route)
+            holdout_routed, holdout_meta = holdout_route
+            self.assertEqual(holdout_routed, manual_router.SONNET_DEFAULT)
+            self.assertEqual(holdout_meta["phase_canary"]["status"], "holdout")
+            self.assertEqual(holdout_meta["phase_canary"]["cohort"], "canary_holdout")
+            _assert_privacy_clean(self, applied)
+
+    def test_apply_rejects_raw_payloads_and_keeps_blocked_lifecycle_noop(self) -> None:
+        blocked = build_anthropic_routing_canary_stage_report(
+            _pass_through_report_with_blocked_lifecycle(),
+            canary_fraction=0.25,
+            holdout_fraction=0.10,
+            min_samples=5,
+        )
+        self.assertEqual(blocked["summary"]["staged_count"], 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = apply_anthropic_routing_canary_stage_report(blocked, config_dir=tmp, dry_run=False)
+            self.assertFalse(result["ok"])
+            self.assertFalse(result["wrote_active_policy_files"])
+            self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
+
+            unsafe = json.loads(json.dumps(blocked))
+            unsafe["raw_prompt"] = "raw prompt secret"
+            rejected = apply_anthropic_routing_canary_stage_report(unsafe, config_dir=tmp, dry_run=True)
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["error"]["type"], "raw_payload_rejected")
+            self.assertNotIn("raw prompt secret", json.dumps(rejected, sort_keys=True))
 
     def test_current_thinking_no_op_remains_guarded_with_specific_blocker(self) -> None:
         report = _pass_through_report()
