@@ -1471,6 +1471,87 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(drill["status"], "blocked")
         self.assertIn("top-level-thinking-blocked", drill["blocker_codes"])
 
+    def test_gte_128k_thinking_tool_streaming_shape_is_crunch_not_cache_replay(self) -> None:
+        for _ in range(3):
+            self._log_call(
+                provider="anthropic",
+                path="/v1/messages",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+                category="tool-result",
+                workflow_phase="tool-execution",
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for assistant thinking history",
+                routing_extra={
+                    "thinking_gate": {
+                        "status": "blocked",
+                        "reason": "assistant-thinking-history",
+                        "top_level_thinking": False,
+                        "assistant_thinking_history": True,
+                    }
+                },
+                text_chars=160_000,
+                cost=0.08,
+                baseline=0.10,
+            )
+
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="gte-thinking-crunch")
+        [rollup] = report["rollups"]
+
+        self.assertEqual(rollup["text_bucket"], "gte_128k_chars")
+        self.assertIn("crunch_candidate", rollup["candidate_families"])
+        self.assertNotIn("cache_replay", rollup["candidate_families"])
+        self.assertNotIn("cache_blocker", rollup["candidate_families"])
+        self.assertIn("repeated_context", rollup["candidate_work_classes"])
+        self.assertIn("crunch", rollup["candidate_work_classes"])
+        self.assertNotIn("replayability", rollup["candidate_work_classes"])
+        self.assertGreater(rollup["projected_crunch_tokens_saved"], 0)
+        self.assertGreater(rollup["projected_crunch_savings_usd"], 0)
+        projection = rollup["metadata"]["crunch_projection_basis"]
+        self.assertEqual(projection["basis"], "large-context-cache-prefix-breakpoint-ceiling")
+        self.assertEqual(projection["cache_breakpoint_chars"], 128_000)
+        self.assertEqual(projection["compactible_chars"], 384_000)
+        self.assertEqual(report["follow_up_candidates"]["top_candidate"]["local_action_family"], "crunch")
+        self.assertTrue(
+            all(row["text_bucket"] != "gte_128k_chars" for row in report["cache_replayability_dry_run"]["cohorts"])
+        )
+
+    def test_no_tool_deterministic_repeat_still_attributes_to_cache_replay(self) -> None:
+        for _ in range(3):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=4_000,
+                cost=0.01,
+                baseline=0.01,
+            )
+
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="deterministic-repeat")
+        [rollup] = report["rollups"]
+
+        self.assertIn("cache_replay", rollup["candidate_families"])
+        self.assertIn("replayability", rollup["candidate_work_classes"])
+        self.assertNotIn("crunch_candidate", rollup["candidate_families"])
+        ready = report["cache_replayability_dry_run"]["cohorts"][0]
+        self.assertEqual(ready["readiness"], "replay-ready")
+        self.assertEqual(ready["reason"], "replay-ready-exact-non-tool-shape")
+        self.assertEqual(ready["projected_hits"], 2)
+
     def test_repeated_shapes_collapse_and_persist_without_raw_fields(self) -> None:
         for cost in (0.02, 0.03, 0.04):
             self._log_call(cost=cost, baseline=cost + 0.01)

@@ -108,6 +108,7 @@ REPEATED_CONTEXT_TEXT_BUCKET_ORDINALS = {
 REPEATED_CONTEXT_CRUNCH_MIN_SAMPLES = 2
 REPLAY_SUPPORTED_ENDPOINTS = {"messages", "responses", "chat_completions", "chat"}
 REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE = 0.05
+REPEATED_CONTEXT_CACHE_BREAKPOINT_CHARS = 128_000
 DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION = 0.10
 DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION = 0.10
 DEFAULT_CRUNCH_CANARY_MAX_NEW_STAGE_ACTIONS = 10
@@ -701,11 +702,14 @@ def _candidate_families(
     blockers: list[str],
     observed_savings: float,
     cost: float,
+    exact_replay_infeasible: bool = False,
 ) -> list[str]:
     families: set[str] = set()
-    if cache_status != "hit":
+    if exact_replay_infeasible:
+        families.add("crunch_candidate")
+    elif cache_status != "hit":
         families.add("cache_replay")
-    if any(
+    if not exact_replay_infeasible and any(
         code.startswith("exact-cache")
         or code.startswith("cache-")
         or code in {"unsupported-streaming-shape", "tool-call-cache-disabled", "semantic-cache-disabled"}
@@ -717,6 +721,34 @@ def _candidate_families(
     if routing_status == "routed" or observed_savings > 0:
         families.add("routing_evidence")
     return sorted(families or {"observability"})
+
+
+def _exact_replay_infeasible_agentic_shape(
+    *,
+    text_bucket: str,
+    stream: bool,
+    has_tools: bool,
+    category: str,
+    workflow_phase: str,
+    blockers: list[str],
+) -> bool:
+    blocker_set = {public_label(item, "unknown") for item in blockers}
+    thinking_blocked = bool(
+        blocker_set
+        & {
+            "thinking-routing-guard",
+            "top-level-thinking-blocked",
+            "thinking-history-blocked",
+        }
+    )
+    tool_or_agentic = bool(
+        has_tools
+        or str(category or "").startswith("tool")
+        or str(workflow_phase or "").startswith("tool")
+    )
+    tool_streaming_blocked = bool(stream and tool_or_agentic and "unsupported-streaming-shape" in blocker_set)
+    very_large_context = public_label(text_bucket, "unknown") == "gte_128k_chars"
+    return very_large_context and (thinking_blocked or tool_streaming_blocked)
 
 
 def _candidate_id(basis: dict[str, Any]) -> str:
@@ -3295,6 +3327,8 @@ def _new_group(basis: dict[str, Any], *, candidate_id: str, rollup_key: str) -> 
         "input_tokens": 0,
         "output_tokens": 0,
         "successful_input_tokens": 0,
+        "successful_text_chars": 0,
+        "successful_row_count": 0,
         "input_token_cost_usd": 0.0,
         "current_crunch_tokens_saved": 0,
         "current_crunch_chars_saved": 0,
@@ -3311,6 +3345,7 @@ def _new_group(basis: dict[str, Any], *, candidate_id: str, rollup_key: str) -> 
         "file_dependency_audit": None,
         "crunch_canary_lifecycle_counts": {},
         "crunch_canary_policy_counts": {},
+        "exact_replay_infeasible_count": 0,
     }
 
 
@@ -3322,8 +3357,10 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
     file_dependency_audit = group.pop("file_dependency_audit", None)
     crunch_canary_lifecycle_counts = group.pop("crunch_canary_lifecycle_counts", {})
     crunch_canary_policy_counts = group.pop("crunch_canary_policy_counts", {})
+    exact_replay_infeasible_count = _as_int(group.pop("exact_replay_infeasible_count", 0))
     candidate_families = sorted(candidate_family_counts)
     blocker_codes = sorted(blocker_counts)
+    exact_replay_infeasible = exact_replay_infeasible_count > 0
     candidate_classes = _candidate_work_classes(
         row_count=_as_int(group.get("row_count")),
         text_bucket=str(group.get("text_bucket") or "unknown"),
@@ -3332,6 +3369,7 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
         blocker_codes=blocker_codes,
         routing_status=str(group.get("routing_status") or "unknown"),
         observed_savings=_as_float(group.get("observed_savings_usd")),
+        exact_replay_infeasible=exact_replay_infeasible,
     )
     metadata = {
         "schema": "tokenclaw.request_shape_rollup_metadata.v1",
@@ -3347,6 +3385,7 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
         "crunch_canary_lifecycle_breakdown": _breakdown(crunch_canary_lifecycle_counts),
         "crunch_canary_policy_breakdown": _breakdown(crunch_canary_policy_counts),
         "candidate_class_breakdown": [{"value": value, "count": _as_int(group.get("row_count"))} for value in candidate_classes],
+        "exact_replay_infeasible_count": exact_replay_infeasible_count,
         "raw_body_required": False,
         "aggregate_only": True,
     }
@@ -3368,16 +3407,40 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
     if row_count > 1:
         repeated_weight = (row_count - 1) / float(row_count)
     if "repeated_context" in candidate_classes and "crunch" in candidate_classes:
-        projected_tokens = int(
-            _as_int(group.get("successful_input_tokens"))
-            * REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE
-            * repeated_weight
-        )
+        successful_input_tokens = _as_int(group.get("successful_input_tokens"))
+        successful_text_chars = _as_int(group.get("successful_text_chars"))
+        successful_rows = _as_int(group.get("successful_row_count")) or row_count
+        compactible_chars = successful_text_chars
+        projection_basis = "repeated-context-input"
+        if exact_replay_infeasible and str(group.get("text_bucket") or "") == "gte_128k_chars":
+            compactible_chars = min(
+                successful_text_chars,
+                successful_rows * REPEATED_CONTEXT_CACHE_BREAKPOINT_CHARS,
+            )
+            projection_basis = "large-context-cache-prefix-breakpoint-ceiling"
+        compactible_tokens = max(0, min(successful_input_tokens, compactible_chars // 4))
+        projected_tokens = int(compactible_tokens * REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE * repeated_weight)
+        token_cost_ratio = compactible_tokens / float(successful_input_tokens) if successful_input_tokens > 0 else 0.0
         projected_savings = (
             _as_float(group.get("input_token_cost_usd"))
+            * token_cost_ratio
             * REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE
             * repeated_weight
         )
+        metadata["crunch_projection_basis"] = {
+            "schema": "tokenclaw.request_shape_crunch_projection_basis.v1",
+            "basis": projection_basis,
+            "exact_replay_infeasible": exact_replay_infeasible,
+            "cache_breakpoint_chars": REPEATED_CONTEXT_CACHE_BREAKPOINT_CHARS
+            if projection_basis == "large-context-cache-prefix-breakpoint-ceiling"
+            else None,
+            "compactible_chars": compactible_chars,
+            "compactible_tokens": compactible_tokens,
+            "projection_rate": REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE,
+            "repeated_weight": round(repeated_weight, 6),
+            "metadata_only": True,
+            "aggregate_only": True,
+        }
     else:
         projected_tokens = 0
         projected_savings = 0.0
@@ -12967,6 +13030,7 @@ def _candidate_work_classes(
     blocker_codes: list[str],
     routing_status: str,
     observed_savings: float,
+    exact_replay_infeasible: bool = False,
 ) -> list[str]:
     classes: set[str] = set()
     repeated_large_context = (
@@ -12976,16 +13040,18 @@ def _candidate_work_classes(
     if repeated_large_context or (row_count >= REPEATED_CONTEXT_CRUNCH_MIN_SAMPLES and token_heavy_context):
         classes.add("repeated_context")
         classes.add("crunch")
-    if any(family in {"cache_replay", "cache_blocker"} for family in candidate_families) or any(
-        code
-        in {
-            "unsupported-streaming-shape",
-            "tool-call-cache-disabled",
-            "semantic-cache-disabled",
-            "exact-cache-miss",
-            "cache-skipped",
-        }
-        for code in blocker_codes
+    if not exact_replay_infeasible and (
+        any(family in {"cache_replay", "cache_blocker"} for family in candidate_families) or any(
+            code
+            in {
+                "unsupported-streaming-shape",
+                "tool-call-cache-disabled",
+                "semantic-cache-disabled",
+                "exact-cache-miss",
+                "cache-skipped",
+            }
+            for code in blocker_codes
+        )
     ):
         classes.add("replayability")
     if "routing_candidate" in candidate_families or routing_status == "passthrough":
@@ -15343,6 +15409,8 @@ def build_request_shape_rollups_report(
         if text_chars <= 0 and input_tokens > 0:
             text_chars = input_tokens * 4
         projection_input_tokens = max(input_tokens, text_chars // 4 if text_chars > 0 else 0)
+        text_bucket = _text_bucket(text_chars)
+        token_bucket = _token_bucket(input_tokens)
         output_tokens = _as_int(row.get("actual_output_tokens")) or _as_int(row.get("output_tokens_est"))
         cost = _as_float(row.get("cost_est_usd"))
         baseline = _as_float(row.get("cost_baseline_usd"))
@@ -15382,12 +15450,21 @@ def build_request_shape_rollups_report(
             has_tools=has_tools,
             file_dependency_status=file_dependency_status,
         )
+        exact_replay_infeasible = _exact_replay_infeasible_agentic_shape(
+            text_bucket=text_bucket,
+            stream=stream,
+            has_tools=has_tools,
+            category=category,
+            workflow_phase=workflow_phase,
+            blockers=blockers,
+        )
         candidate_families = _candidate_families(
             cache_status=cache_status,
             routing_status=routing_status,
             blockers=blockers,
             observed_savings=observed_savings,
             cost=cost,
+            exact_replay_infeasible=exact_replay_infeasible,
         )
         basis = {
             "source_surface": source_surface,
@@ -15399,8 +15476,8 @@ def build_request_shape_rollups_report(
             "workflow_phase": workflow_phase,
             "stream": stream,
             "has_tools": has_tools,
-            "text_bucket": _text_bucket(text_chars),
-            "token_bucket": _token_bucket(input_tokens),
+            "text_bucket": text_bucket,
+            "token_bucket": token_bucket,
             "cache_status": cache_status,
             "routing_status": routing_status,
             "file_dependency_status": file_dependency_status,
@@ -15428,6 +15505,8 @@ def build_request_shape_rollups_report(
         group["output_tokens"] += output_tokens
         if status_bucket in {"2xx", "3xx"}:
             group["successful_input_tokens"] += projection_input_tokens
+            group["successful_text_chars"] += max(text_chars, projection_input_tokens * 4 if projection_input_tokens > 0 else 0)
+            group["successful_row_count"] += 1
             group["input_token_cost_usd"] += input_token_cost
         group["current_crunch_tokens_saved"] += current_crunch_tokens
         group["current_crunch_chars_saved"] += current_crunch_chars
@@ -15453,6 +15532,8 @@ def build_request_shape_rollups_report(
         for blocker in blockers:
             _increment(blocker_counts, blocker)
             _increment(group["blocker_counts"], blocker)
+        if exact_replay_infeasible:
+            group["exact_replay_infeasible_count"] += 1
         if crunch_canary_lifecycle:
             status = str(crunch_canary_lifecycle.get("status") or "unknown")
             _increment(group["crunch_canary_lifecycle_counts"], status)
