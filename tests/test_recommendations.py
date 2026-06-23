@@ -241,6 +241,90 @@ class RecommendationTest(unittest.TestCase):
         self._assert_no_sensitive_strings(sent)
         recommendations.assert_managed_egress_safe(sent)
 
+    def test_policy_decision_fetch_filters_payload_with_active_client_contract(self):
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        FakeAsyncClient.response = FakeResponse(body={
+            "schema": "tokenclaw.policy_decision.v1",
+            "policy_id": "contract-filtered-policy",
+            "confidence": 0.86,
+            "provider_forwarding": False,
+            "server_content_processing": False,
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+            "routing": {
+                "status": "recommended",
+                "target_model": "gpt-5-mini",
+                "confidence": 0.86,
+                "reason_codes": ["contract-filtered"],
+            },
+        })
+        unit = openai_features.build_openai_preflight_feature_unit(
+            body={
+                "model": "gpt-5-codex",
+                "input": "raw openai prompt should stay local",
+                "stream": False,
+            },
+            path="/v1/responses",
+            requested_model="gpt-5-codex",
+            routing_meta={
+                "text_chars": 4096,
+                "has_tools": False,
+                "category": "chat",
+                "workflow_phase": "chat",
+            },
+            category="chat",
+            stream=False,
+            input_tokens_est=1024,
+        )
+        contract_meta = {
+            "status": "received",
+            "reason": "fetched",
+            "cache_status": "stored",
+            "active": True,
+            "contract": {
+                "schema": "tokenclaw.client_contract.v1",
+                "contract_id": "contract-filter",
+                "expires_at": "2999-01-01T00:00:00+00:00",
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "app_family": "codex",
+                "measurement_plan": {
+                    "preflight": [
+                        "input_features.text_bucket",
+                        "input_features.input_token_bucket",
+                        "tool_features.has_tools",
+                    ],
+                    "outcome": [],
+                },
+                "allowed_action_families": ["routing"],
+                "privacy": {"metadata_only": True},
+            },
+        }
+
+        async def fake_contract(_payload):
+            return contract_meta
+
+        with patch.object(recommendations, "_client_contract_for_payload", fake_contract):
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_policy_decision(unit))
+
+        sent = FakeAsyncClient.last_json
+        self.assertEqual(meta["status"], "received")
+        self.assertEqual(meta["client_contract"]["status"], "active")
+        self.assertTrue(meta["client_contract"]["filtered"])
+        self.assertEqual(sent["source_surface"], "openai_responses")
+        self.assertEqual(
+            sent["input_features"],
+            {"text_bucket": "2k_8k_chars", "input_token_bucket": "1k_4k_tokens"},
+        )
+        self.assertEqual(sent["tool_features"], {"has_tools": False})
+        self.assertNotIn("prompt_difficulty_features", self._keys_in(sent))
+        self.assertNotIn("terminal_log_features", self._keys_in(sent))
+        self.assertNotIn("pattern_hash", self._keys_in(sent))
+        self._assert_no_sensitive_strings(sent)
+        recommendations.assert_managed_egress_safe(sent)
+
     def test_success_path_posts_feature_unit_with_auth_and_applies_target_model(self):
         os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"

@@ -84,6 +84,15 @@ class ManagedFeedbackAsyncClient:
         return False
 
     async def post(self, url, *, headers=None, json=None, **kwargs):
+        if url.endswith("/v1/client-contract"):
+            ManagedFeedbackAsyncClient.calls.append({
+                "kind": "client-contract",
+                "url": url,
+                "headers": dict(headers or {}),
+                "json": json,
+                "kwargs": kwargs,
+            })
+            return FakeJsonResponse({"error": "not configured"}, 404)
         if url.endswith("/v1/session-tier"):
             if ManagedFeedbackAsyncClient.session_tier_error is not None:
                 raise ManagedFeedbackAsyncClient.session_tier_error
@@ -634,13 +643,19 @@ class SafetyRegressionRouteTests(unittest.TestCase):
             response = TestClient(server.app).post("/v1/messages", json=request_body)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([call["kind"] for call in ManagedFeedbackAsyncClient.calls], ["policy-decision", "upstream"])
-        decision_call = ManagedFeedbackAsyncClient.calls[0]
+        self.assertEqual(
+            [call["kind"] for call in ManagedFeedbackAsyncClient.calls],
+            ["client-contract", "policy-decision", "upstream"],
+        )
+        contract_call = ManagedFeedbackAsyncClient.calls[0]
+        self.assertEqual(contract_call["url"], "http://127.0.0.1:4100/v1/client-contract")
+        self.assertFalse({"messages", "content", "raw_request"}.intersection(self._keys_in(contract_call["json"])))
+        decision_call = ManagedFeedbackAsyncClient.calls[1]
         self.assertEqual(decision_call["url"], "http://127.0.0.1:4100/v1/policy-decision")
         self.assertNotIn("authorization", decision_call["headers"])
         self.assertEqual(decision_call["json"]["schema"], "tokenclaw.policy_decision_preflight.v1")
         self.assertTrue({"messages", "content", "raw_request"}.isdisjoint(self._keys_in(decision_call["json"])))
-        upstream = ManagedFeedbackAsyncClient.calls[1]["json"]
+        upstream = ManagedFeedbackAsyncClient.calls[2]["json"]
         self.assertEqual(upstream["model"], "claude-haiku-4-5-20251001")
 
         [row] = server.store.conn.execute("select routing_json from calls").fetchall()

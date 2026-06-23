@@ -11,7 +11,14 @@ from urllib.parse import urlparse
 
 import httpx
 
+from tokenclaw import __version__ as TOKENCLAW_VERSION
 from tokenclaw.codex_turn_policy import CODEX_APP_SOURCE_SURFACE
+from tokenclaw.client_contract import (
+    ContractClient,
+    ClientContractRequest,
+    fetch_or_get_client_contract,
+    filter_payload_by_client_contract,
+)
 from tokenclaw.env import env
 from tokenclaw.managed_egress import (
     LIFECYCLE_METADATA_COMMAND_SCHEMAS,
@@ -1081,6 +1088,54 @@ def _base_meta() -> dict[str, Any]:
     }
 
 
+def _provider_from_source_surface(source_surface: str | None) -> str:
+    surface = (source_surface or "").strip().lower()
+    if surface.startswith("openai") or surface == CODEX_APP_SOURCE_SURFACE:
+        return "openai"
+    if surface.startswith("anthropic"):
+        return "anthropic"
+    return "unknown"
+
+
+def _contract_scope_from_payload(payload: dict[str, Any]) -> ClientContractRequest:
+    source_surface = str(payload.get("source_surface") or "unknown")
+    app_family = str(payload.get("app_family") or "unknown")
+    provider = str(payload.get("provider") or payload.get("provider_family") or "")
+    if not provider or provider == "unknown":
+        input_features = payload.get("input_features") if isinstance(payload.get("input_features"), dict) else {}
+        request_facts = payload.get("request_facts") if isinstance(payload.get("request_facts"), dict) else {}
+        provider = str(
+            input_features.get("provider_family")
+            or input_features.get("provider")
+            or request_facts.get("provider_family")
+            or _provider_from_source_surface(source_surface)
+        )
+    return ClientContractRequest(
+        provider=provider,
+        source_surface=source_surface,
+        app_family=app_family,
+        client_version=TOKENCLAW_VERSION,
+    )
+
+
+async def _client_contract_for_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    request = _contract_scope_from_payload(payload)
+    client = ContractClient(
+        base_url=recommendation_server_url(),
+        headers=_managed_headers(),
+        timeout_seconds=recommendation_timeout_seconds(),
+        async_client_factory=httpx.AsyncClient,
+    )
+    return await fetch_or_get_client_contract(
+        request,
+        enabled=recommendations_enabled(),
+        server_url=recommendation_server_url(),
+        auth_configured=managed_auth_configured(),
+        auth_source=managed_auth_source(),
+        client=client,
+    )
+
+
 def policy_decisions_enabled() -> bool:
     if env(POLICY_DECISIONS_ENABLED_ENV) is not None:
         return _as_bool(env(POLICY_DECISIONS_ENABLED_ENV), False)
@@ -1372,6 +1427,13 @@ async def fetch_policy_decision(unit: dict[str, Any], *, request_facts: dict[str
             if request_facts is not None
             else _policy_decision_preflight_payload(unit)
         )
+        contract_meta = await _client_contract_for_payload(payload)
+        payload, contract_diagnostics = filter_payload_by_client_contract(
+            payload,
+            contract_meta,
+            stage="preflight",
+        )
+        meta["client_contract"] = contract_diagnostics
         assert_managed_egress_safe(payload)
     except ManagedEgressBlocked as exc:
         meta.update(managed_egress_blocked_meta(endpoint=POLICY_DECISION_PATH, violations=exc.violations))
@@ -1566,7 +1628,14 @@ async def fetch_recommendation(unit: dict[str, Any]) -> dict[str, Any]:
 
     meta = _base_meta()
     try:
-        assert_managed_egress_safe(unit)
+        contract_meta = await _client_contract_for_payload(unit)
+        payload, contract_diagnostics = filter_payload_by_client_contract(
+            unit,
+            contract_meta,
+            stage="preflight",
+        )
+        meta["client_contract"] = contract_diagnostics
+        assert_managed_egress_safe(payload)
     except ManagedEgressBlocked as exc:
         meta.update(managed_egress_blocked_meta(endpoint=RECOMMENDATION_PATH, violations=exc.violations))
         return meta
@@ -1585,7 +1654,7 @@ async def fetch_recommendation(unit: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
             response = await client.post(
                 recommendation_server_url() + RECOMMENDATION_PATH,
-                json=unit,
+                json=payload,
                 headers=_managed_headers(),
             )
         meta["latency_ms"] = int((time.time() - started) * 1000)
