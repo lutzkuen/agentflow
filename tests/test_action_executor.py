@@ -71,14 +71,15 @@ class ActionExecutorTests(unittest.TestCase):
                 decision[key] = value
         return decision
 
-    def _write_crunch_rules(self, config: Path, *, fraction: float = 0.05, holdout: float = 0.10) -> Path:
+    def _write_crunch_rules(self, config: Path, *, fraction: float = 0.05, holdout: float = 0.10, manual_disabled: bool = False) -> Path:
         config.mkdir(parents=True, exist_ok=True)
         path = config / "crunch_rules.yaml"
+        enabled = not manual_disabled
         path.write_text(
             f"""
 enabled: true
 anthropic_thinking_history_compaction:
-  enabled: true
+  enabled: {str(enabled).lower()}
   policy_source: local-manual
   canary:
     enabled: true
@@ -86,7 +87,7 @@ anthropic_thinking_history_compaction:
     holdout_fraction: {holdout}
   rules:
     - id: local-repeated-context-thinking-tool-result-canary
-      enabled: true
+      enabled: {str(enabled).lower()}
       policy_source: local-manual
       candidate_id: repeated-context-thinking-tool-result-gte-128k
       canary:
@@ -470,6 +471,26 @@ anthropic_thinking_history_compaction:
         self.assertAlmostEqual(rule["canary"]["canary_fraction"], 0.0)
         self.assertEqual(rule["safety_stop"]["last_managed_rollback_reason"], "server-rollback")
         self.assertEqual(rule["managed_controller"]["server_traffic_treatment"], "rollback")
+
+    def test_managed_crunch_treatment_respects_local_manual_disabled_rule(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.0, holdout=0.10, manual_disabled=True)
+            before = path.read_text(encoding="utf-8")
+            result = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision(treatment="widen", fraction=0.25),
+            )
+            after = path.read_text(encoding="utf-8")
+
+        policy_file = result["crunch"]["traffic_treatment_policy_file"]
+        self.assertEqual(result["status"], "noop")
+        self.assertEqual(result["apply_reason"], "no-local-actions-applied")
+        self.assertEqual(result["crunch"]["status"], "held")
+        self.assertEqual(result["crunch"]["apply_reason"], "local-manual-disabled")
+        self.assertTrue(policy_file["manual_disabled_authoritative"])
+        self.assertEqual(policy_file["reason"], "local-manual-disabled")
+        self.assertEqual(before, after)
 
     def test_managed_crunch_dry_run_reports_exact_policy_file_diff_without_writing(self):
         with TemporaryDirectory() as tmp:

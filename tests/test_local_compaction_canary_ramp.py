@@ -21,7 +21,8 @@ from tokenclaw.store import Store, stable_json
 RAW_SECRET = "raw-local-ramp-secret"
 
 
-def _rules_yaml(*, fraction: float = 0.0, holdout: float = 1.0) -> str:
+def _rules_yaml(*, fraction: float = 0.0, holdout: float = 1.0, manual_disabled: bool = False) -> str:
+    enabled = fraction > 0 and not manual_disabled
     return f"""
 enabled: true
 old_context_summarization:
@@ -33,7 +34,7 @@ old_context_summarization:
     fraction: 0.0
     salt: old-context-ramp-test
 anthropic_thinking_history_compaction:
-  enabled: {str(fraction > 0).lower()}
+  enabled: {str(enabled).lower()}
   policy_source: local-manual
   rule_id: local-anthropic-thinking-history-compaction-canary
   min_text_chars: 8000
@@ -56,7 +57,7 @@ anthropic_thinking_history_compaction:
     max_error_rate_delta: 0.05
   rules:
     - id: local-repeated-context-thinking-tool-result-canary
-      enabled: {str(fraction > 0).lower()}
+      enabled: {str(enabled).lower()}
       policy_source: local-manual
       candidate_id: repeated-context-thinking-tool-result-gte-128k
       conditions:
@@ -145,7 +146,9 @@ def _thinking_crunch_meta(
     applied: bool,
     cohort: str,
     tokens_saved: int = 1000,
+    realized_savings: float = 0.003,
     output_similarity: float | None = None,
+    fallback: bool = False,
 ) -> dict:
     status = "applied" if applied else "holdout"
     meta: dict = {
@@ -166,6 +169,8 @@ def _thinking_crunch_meta(
         "canary": {"cohort": cohort, "selected": applied},
         "lifecycle_feedback": {"status": status, "cohort": cohort, "metadata_only": True},
     }
+    if fallback:
+        meta["fallback_reason"] = "rate_limited"
     if output_similarity is not None:
         meta["quality"] = {"output_similarity": output_similarity}
     return {
@@ -174,7 +179,7 @@ def _thinking_crunch_meta(
         "tokens_saved_est": tokens_saved if applied else 0,
         "realized_savings": {
             "schema": "tokenclaw.realized_crunch_savings.v1",
-            "realized_crunch_savings_usd": 0.003 if applied else 0.0,
+            "realized_crunch_savings_usd": realized_savings if applied else 0.0,
         },
         "anthropic_thinking_history_compaction": meta,
     }
@@ -211,6 +216,8 @@ def _log_call(
     status_code: int = 200,
     retry_count: int = 0,
     cost_est: float = 0.01,
+    actual_input_tokens: int = 5000,
+    actual_output_tokens: int = 300,
 ) -> None:
     store.log_call(
         id=call_id,
@@ -224,8 +231,8 @@ def _log_call(
         latency_ms=1000,
         input_tokens_est=6000,
         output_tokens_est=300,
-        actual_input_tokens=5000,
-        actual_output_tokens=300,
+        actual_input_tokens=actual_input_tokens,
+        actual_output_tokens=actual_output_tokens,
         cost_est_usd=cost_est,
         cost_baseline_usd=cost_est + 0.01,
         crunch_json=stable_json(crunch_json),
@@ -334,6 +341,7 @@ class LocalCompactionCanaryRampTests(unittest.TestCase):
                     now="2026-06-23T11:00:00+00:00",
                 )
                 data = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+                queued = store.conn.execute("select source_surface, endpoint, payload_json from managed_outcome_feedback_queue").fetchall()
             finally:
                 store.conn.close()
 
@@ -347,6 +355,80 @@ class LocalCompactionCanaryRampTests(unittest.TestCase):
         self.assertEqual(rule["canary"]["canary_fraction"], 0.0)
         self.assertIn("applied-error-rate-above-threshold", rule["ramp_controller"]["reason_codes"])
         self.assertEqual(rule["safety_stop"]["last_ramp_stop_reason"], "applied-error-rate-above-threshold")
+        self.assertEqual(result["feedback_events"][0]["status"], "queued")
+        self.assertEqual(result["feedback_events"][0]["payload"]["traffic_treatment"], "rollback")
+        self.assertFalse(result["feedback_events"][0]["payload"]["privacy"]["raw_request_bodies_included"])
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["source_surface"], "anthropic_thinking_compaction_rollback")
+        self.assertEqual(queued[0]["endpoint"], "/v1/policy-events")
+        payload = json.loads(queued[0]["payload_json"])
+        self.assertEqual(payload["schema"], "tokenclaw.local_compaction_rollback_feedback.v1")
+        self.assertNotIn(RAW_SECRET, queued[0]["payload_json"])
+
+    def test_non_positive_savings_missing_usage_and_fallback_regression_stop_canary(self) -> None:
+        cases = [
+            ("zero-savings", _thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=0, realized_savings=0.0), {}, "non-positive-realized-savings"),
+            ("missing-usage", _thinking_crunch_meta(applied=True, cohort="canary_applied"), {"actual_input_tokens": 0}, "missing-usage"),
+            ("fallback", _thinking_crunch_meta(applied=True, cohort="canary_applied", fallback=True), {}, "applied-fallback-rate-regression"),
+        ]
+        for label, applied_meta, call_kwargs, reason in cases:
+            with self.subTest(label=label), TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                config = tmp_path / "config"
+                config.mkdir()
+                rules_path = config / "crunch_rules.yaml"
+                rules_path.write_text(_rules_yaml(fraction=0.10, holdout=0.10), encoding="utf-8")
+                store = Store(str(tmp_path / "tokenclaw.sqlite3"))
+                try:
+                    _log_call(store, f"{label}-applied", crunch_json=applied_meta, **call_kwargs)
+                    _log_call(store, f"{label}-holdout", crunch_json=_thinking_crunch_meta(applied=False, cohort="canary_holdout"))
+                    result = build_local_compaction_canary_ramp(
+                        store,
+                        config_dir=config,
+                        apply=True,
+                        min_applied_samples=1,
+                        min_holdout_samples=1,
+                        max_fallback_rate_delta=0.0,
+                        now="2026-06-23T11:10:00+00:00",
+                    )
+                    data = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+                    queued = store.conn.execute("select count(*) as c from managed_outcome_feedback_queue").fetchone()["c"]
+                finally:
+                    store.conn.close()
+
+            decision = next(item for item in result["decisions"] if item["family"] == "anthropic_thinking_history_compaction")
+            self.assertEqual(decision["action"], "stop")
+            self.assertIn(reason, decision["reason_codes"])
+            self.assertFalse(data["anthropic_thinking_history_compaction"]["rules"][0]["enabled"])
+            self.assertEqual(queued, 1)
+
+    def test_insufficient_or_positive_evidence_does_not_rollback(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            rules_path = config / "crunch_rules.yaml"
+            rules_path.write_text(_rules_yaml(fraction=0.10, holdout=0.10), encoding="utf-8")
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
+            try:
+                _log_call(store, "thinking-applied", crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied"), cost_est=0.010)
+                result = build_local_compaction_canary_ramp(
+                    store,
+                    config_dir=config,
+                    apply=True,
+                    min_applied_samples=2,
+                    min_holdout_samples=1,
+                    now="2026-06-23T11:20:00+00:00",
+                )
+                queued = store.conn.execute("select count(*) as c from managed_outcome_feedback_queue").fetchone()["c"]
+                data = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+            finally:
+                store.conn.close()
+
+        decision = next(item for item in result["decisions"] if item["family"] == "anthropic_thinking_history_compaction")
+        self.assertEqual(decision["action"], "hold")
+        self.assertEqual(queued, 0)
+        self.assertTrue(data["anthropic_thinking_history_compaction"]["rules"][0]["enabled"])
 
     def test_similarity_floor_breach_halts_ramp(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -488,6 +488,13 @@ class ActionExecutor:
                     policy_file_result = None
                     if family == "crunch":
                         policy_file_result = self._apply_managed_crunch_treatment(result, decision)
+                        if isinstance(policy_file_result, dict) and policy_file_result.get("reason") == "local-manual-disabled":
+                            result[family].update(_hold_family(
+                                family,
+                                status="held",
+                                reason="local-manual-disabled",
+                            ))
+                            continue
                     result[family].update({
                         "status": result[family].get("status") if result[family].get("status") == "configured" else "applied",
                         "applied": result[family].get("applied") is not False,

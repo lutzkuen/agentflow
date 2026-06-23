@@ -7,15 +7,19 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
 
-from tokenclaw.store import utc_now
+from tokenclaw.store import stable_json, utc_now
 
 
 SCHEMA = "tokenclaw.local_compaction_canary_ramp.v1"
 DECISION_SCHEMA = "tokenclaw.local_compaction_canary_ramp_decision.v1"
 MANAGED_TREATMENT_SCHEMA = "tokenclaw.managed_thinking_compaction_treatment_apply.v1"
+ROLLBACK_FEEDBACK_SCHEMA = "tokenclaw.local_compaction_rollback_feedback.v1"
+ROLLBACK_FEEDBACK_SOURCE_SURFACE = "anthropic_thinking_compaction_rollback"
+POLICY_EVENTS_PATH = "/v1/policy-events"
 CRUNCH_RULES_FILE = "crunch_rules.yaml"
 THINKING_SECTION = "anthropic_thinking_history_compaction"
 THINKING_TARGET_CANDIDATE = "repeated-context-thinking-tool-result-gte-128k"
@@ -205,6 +209,17 @@ def _managed_controller_meta(
     }
 
 
+def _local_manual_disabled(rule: dict[str, Any] | None, section: dict[str, Any]) -> bool:
+    if not isinstance(rule, dict):
+        return False
+    rule_source = str(rule.get("policy_source") or "").strip()
+    section_source = str(section.get("policy_source") or "").strip()
+    return (
+        (rule_source == "local-manual" or section_source == "local-manual")
+        and (rule.get("enabled") is False or section.get("enabled") is False)
+    )
+
+
 def _apply_managed_thinking_edit(
     data: dict[str, Any],
     *,
@@ -315,6 +330,13 @@ def apply_managed_thinking_compaction_treatment(
         return result
     if rule is None:
         result.update({"ok": False, "status": "unsupported", "reason": "target-rule-not-found"})
+        return result
+    if _local_manual_disabled(rule, section):
+        result.update({
+            "status": "no-change",
+            "reason": "local-manual-disabled",
+            "manual_disabled_authoritative": True,
+        })
         return result
     if treatment in {"hold", "held", "observe", "none", "shadow", "holdout"}:
         result["reason"] = f"server-{treatment}"
@@ -482,6 +504,11 @@ def _empty_family(family: str) -> dict[str, Any]:
         "holdout_errors": 0,
         "applied_retries": 0,
         "holdout_retries": 0,
+        "applied_fallbacks": 0,
+        "holdout_fallbacks": 0,
+        "applied_missing_usage": 0,
+        "holdout_missing_usage": 0,
+        "applied_non_positive_savings": 0,
         "applied_cost_usd": 0.0,
         "holdout_cost_usd": 0.0,
         "applied_realized_savings_usd": 0.0,
@@ -491,17 +518,44 @@ def _empty_family(family: str) -> dict[str, Any]:
     }
 
 
+def _missing_usage(row: dict[str, Any]) -> bool:
+    return _as_int(row.get("actual_input_tokens")) <= 0 or _as_int(row.get("actual_output_tokens")) <= 0
+
+
+def _fallback_observed(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in {"fallback", "fallback_observed", "fallback_used"} and bool(item):
+                return True
+            if lowered in {"fallback_count", "fallbacks"} and _as_int(item) > 0:
+                return True
+            if lowered in {"fallback_reason", "fallback_model", "fallback_from_model"} and item:
+                return True
+            if _fallback_observed(item):
+                return True
+    elif isinstance(value, list):
+        return any(_fallback_observed(item) for item in value)
+    return False
+
+
 def _add_sample(family: dict[str, Any], row: dict[str, Any], crunch: dict[str, Any], meta: dict[str, Any], cohort: str) -> None:
     family["observed"] += 1
     errored = _as_int(row.get("status_code"), -1) >= 400
     retried = _as_int(row.get("retry_count")) > 0
+    missing_usage = _missing_usage(row)
+    fallback = _fallback_observed(meta)
     cost = _as_float(row.get("cost_est_usd"))
     if cohort == "applied":
+        realized_savings = _realized_crunch_savings(crunch, meta, cohort)
         family["applied_count"] += 1
         family["applied_errors"] += int(errored)
         family["applied_retries"] += int(retried)
+        family["applied_fallbacks"] += int(fallback)
+        family["applied_missing_usage"] += int(missing_usage)
+        family["applied_non_positive_savings"] += int(realized_savings <= 0.0)
         family["applied_cost_usd"] += cost
-        family["applied_realized_savings_usd"] += _realized_crunch_savings(crunch, meta, cohort)
+        family["applied_realized_savings_usd"] += realized_savings
         values = _extract_similarity_values(meta)
         family["similarity_samples"].extend(values)
         if values:
@@ -512,6 +566,8 @@ def _add_sample(family: dict[str, Any], row: dict[str, Any], crunch: dict[str, A
         family["holdout_count"] += 1
         family["holdout_errors"] += int(errored)
         family["holdout_retries"] += int(retried)
+        family["holdout_fallbacks"] += int(fallback)
+        family["holdout_missing_usage"] += int(missing_usage)
         family["holdout_cost_usd"] += cost
         family["holdout_projected_savings_usd"] += _planned_savings(meta)
     elif cohort == "safety_stop":
@@ -531,6 +587,11 @@ def _finalize_family(family: dict[str, Any]) -> dict[str, Any]:
         "holdout_error_rate": round(_as_int(family.get("holdout_errors")) / holdout, 6) if holdout else 0.0,
         "applied_retry_rate": round(_as_int(family.get("applied_retries")) / applied, 6) if applied else 0.0,
         "holdout_retry_rate": round(_as_int(family.get("holdout_retries")) / holdout, 6) if holdout else 0.0,
+        "applied_fallback_rate": round(_as_int(family.get("applied_fallbacks")) / applied, 6) if applied else 0.0,
+        "holdout_fallback_rate": round(_as_int(family.get("holdout_fallbacks")) / holdout, 6) if holdout else 0.0,
+        "applied_missing_usage_rate": round(_as_int(family.get("applied_missing_usage")) / applied, 6) if applied else 0.0,
+        "holdout_missing_usage_rate": round(_as_int(family.get("holdout_missing_usage")) / holdout, 6) if holdout else 0.0,
+        "applied_non_positive_savings_rate": round(_as_int(family.get("applied_non_positive_savings")) / applied, 6) if applied else 0.0,
         "applied_cost_avg_usd": round(_as_float(family.get("applied_cost_usd")) / applied, 8) if applied else 0.0,
         "holdout_cost_avg_usd": round(_as_float(family.get("holdout_cost_usd")) / holdout, 8) if holdout else 0.0,
         "applied_realized_savings_avg_usd": round(_as_float(family.get("applied_realized_savings_usd")) / applied, 8) if applied else 0.0,
@@ -542,6 +603,8 @@ def _finalize_family(family: dict[str, Any]) -> dict[str, Any]:
     result["applied_minus_holdout_cost_avg_usd"] = round(result["applied_cost_avg_usd"] - result["holdout_cost_avg_usd"], 8)
     result["applied_minus_holdout_error_rate"] = round(result["applied_error_rate"] - result["holdout_error_rate"], 6)
     result["applied_minus_holdout_retry_rate"] = round(result["applied_retry_rate"] - result["holdout_retry_rate"], 6)
+    result["applied_minus_holdout_fallback_rate"] = round(result["applied_fallback_rate"] - result["holdout_fallback_rate"], 6)
+    result["applied_minus_holdout_missing_usage_rate"] = round(result["applied_missing_usage_rate"] - result["holdout_missing_usage_rate"], 6)
     for key in ("applied_cost_usd", "holdout_cost_usd", "applied_realized_savings_usd", "holdout_projected_savings_usd"):
         result[key] = round(_as_float(result.get(key)), 8)
     return result
@@ -597,6 +660,9 @@ def _decision(
     max_error_rate: float,
     max_error_rate_delta: float,
     max_retry_rate_delta: float,
+    max_fallback_rate_delta: float,
+    max_non_positive_savings_rate: float,
+    max_missing_usage_rate: float,
     similarity_floor: float,
 ) -> dict[str, Any]:
     applied = _as_int(evidence.get("applied_count"))
@@ -617,6 +683,16 @@ def _decision(
     if _as_float(evidence.get("applied_minus_holdout_retry_rate")) >= max_retry_rate_delta and applied and holdout:
         action = "stop"
         reasons.append("applied-retry-rate-regression")
+    if family == THINKING_SECTION:
+        if _as_float(evidence.get("applied_minus_holdout_fallback_rate")) > max_fallback_rate_delta and applied and holdout:
+            action = "stop"
+            reasons.append("applied-fallback-rate-regression")
+        if _as_float(evidence.get("applied_non_positive_savings_rate")) > max_non_positive_savings_rate and applied:
+            action = "stop"
+            reasons.append("non-positive-realized-savings")
+        if _as_float(evidence.get("applied_missing_usage_rate")) > max_missing_usage_rate and applied:
+            action = "stop"
+            reasons.append("missing-usage")
     min_similarity = evidence.get("min_similarity")
     if min_similarity is not None and _as_float(min_similarity, 1.0) < similarity_floor:
         action = "stop"
@@ -674,6 +750,9 @@ def _decision(
             "max_error_rate": max_error_rate,
             "max_error_rate_delta": max_error_rate_delta,
             "max_retry_rate_delta": max_retry_rate_delta,
+            "max_fallback_rate_delta": max_fallback_rate_delta,
+            "max_non_positive_savings_rate": max_non_positive_savings_rate,
+            "max_missing_usage_rate": max_missing_usage_rate,
             "similarity_floor": similarity_floor,
         },
         "privacy": _privacy(),
@@ -695,11 +774,77 @@ def _controller_meta(decision: dict[str, Any], *, now: str) -> dict[str, Any]:
             "applied_realized_savings_usd": decision["evidence"]["applied_realized_savings_usd"],
             "applied_minus_holdout_cost_avg_usd": decision["evidence"]["applied_minus_holdout_cost_avg_usd"],
             "applied_minus_holdout_error_rate": decision["evidence"]["applied_minus_holdout_error_rate"],
+            "applied_minus_holdout_retry_rate": decision["evidence"]["applied_minus_holdout_retry_rate"],
+            "applied_minus_holdout_fallback_rate": decision["evidence"]["applied_minus_holdout_fallback_rate"],
+            "applied_non_positive_savings_rate": decision["evidence"]["applied_non_positive_savings_rate"],
+            "applied_missing_usage_rate": decision["evidence"]["applied_missing_usage_rate"],
             "min_similarity": decision["evidence"].get("min_similarity"),
         },
         "local_only": True,
         "metadata_only": True,
         "raw_content_included": False,
+    }
+
+
+def _rollback_feedback_event(decision: dict[str, Any], *, now: str) -> dict[str, Any]:
+    evidence = decision.get("evidence") if isinstance(decision.get("evidence"), dict) else {}
+    return {
+        "schema": ROLLBACK_FEEDBACK_SCHEMA,
+        "event_type": "crunch_rollback",
+        "created_at": now,
+        "source_surface": "anthropic_messages",
+        "local_action_family": "crunch",
+        "local_result": "rollback",
+        "traffic_treatment": "rollback",
+        "candidate_id": THINKING_TARGET_CANDIDATE,
+        "rule_file": CRUNCH_RULES_FILE,
+        "rule_id": "local-repeated-context-thinking-tool-result-canary",
+        "reason_codes": [str(item) for item in decision.get("reason_codes", [])],
+        "previous_fraction": decision.get("current_fraction"),
+        "recommended_fraction": decision.get("recommended_fraction"),
+        "recommended_holdout_fraction": decision.get("recommended_holdout_fraction"),
+        "evidence": {
+            "applied_count": _as_int(evidence.get("applied_count")),
+            "holdout_count": _as_int(evidence.get("holdout_count")),
+            "safety_stop_count": _as_int(evidence.get("safety_stop_count")),
+            "applied_error_rate": _as_float(evidence.get("applied_error_rate")),
+            "holdout_error_rate": _as_float(evidence.get("holdout_error_rate")),
+            "applied_minus_holdout_error_rate": _as_float(evidence.get("applied_minus_holdout_error_rate")),
+            "applied_minus_holdout_retry_rate": _as_float(evidence.get("applied_minus_holdout_retry_rate")),
+            "applied_minus_holdout_fallback_rate": _as_float(evidence.get("applied_minus_holdout_fallback_rate")),
+            "applied_non_positive_savings_rate": _as_float(evidence.get("applied_non_positive_savings_rate")),
+            "applied_missing_usage_rate": _as_float(evidence.get("applied_missing_usage_rate")),
+            "applied_realized_savings_usd": _as_float(evidence.get("applied_realized_savings_usd")),
+            "min_similarity": evidence.get("min_similarity"),
+        },
+        "privacy": _privacy(),
+    }
+
+
+def _queue_rollback_feedback(store_obj: Any, decision: dict[str, Any], *, now: str) -> dict[str, Any]:
+    event = _rollback_feedback_event(decision, now=now)
+    if not hasattr(store_obj, "enqueue_managed_outcome_feedback"):
+        return {"status": "skipped", "reason": "feedback-queue-unavailable", "payload": event}
+    queue_id = str(uuid4())
+    store_obj.enqueue_managed_outcome_feedback(
+        id=queue_id,
+        created_at=now,
+        updated_at=now,
+        source_surface=ROLLBACK_FEEDBACK_SOURCE_SURFACE,
+        endpoint=POLICY_EVENTS_PATH,
+        optimization_unit_id=0,
+        payload_json=stable_json(event),
+        status="queued",
+        attempts=0,
+        next_attempt_at=now,
+    )
+    return {
+        "status": "queued",
+        "reason": "rollback-feedback-queued",
+        "queue_id": queue_id,
+        "source_surface": ROLLBACK_FEEDBACK_SOURCE_SURFACE,
+        "endpoint": POLICY_EVENTS_PATH,
+        "payload": event,
     }
 
 
@@ -769,6 +914,9 @@ def build_local_compaction_canary_ramp(
     max_error_rate: float = 0.10,
     max_error_rate_delta: float = 0.05,
     max_retry_rate_delta: float = 0.10,
+    max_fallback_rate_delta: float = 0.10,
+    max_non_positive_savings_rate: float = 0.0,
+    max_missing_usage_rate: float = 0.0,
     similarity_floor: float = 0.98,
     now: str | None = None,
 ) -> dict[str, Any]:
@@ -796,6 +944,9 @@ def build_local_compaction_canary_ramp(
             max_error_rate=max(0.0, _as_float(max_error_rate, 0.10)),
             max_error_rate_delta=max(0.0, _as_float(max_error_rate_delta, 0.05)),
             max_retry_rate_delta=max(0.0, _as_float(max_retry_rate_delta, 0.10)),
+            max_fallback_rate_delta=max(0.0, _as_float(max_fallback_rate_delta, 0.10)),
+            max_non_positive_savings_rate=max(0.0, _as_float(max_non_positive_savings_rate, 0.0)),
+            max_missing_usage_rate=max(0.0, _as_float(max_missing_usage_rate, 0.0)),
             similarity_floor=_bounded_fraction(similarity_floor, 0.98),
         ),
         _decision(
@@ -811,6 +962,9 @@ def build_local_compaction_canary_ramp(
             max_error_rate=max(0.0, _as_float(max_error_rate, 0.10)),
             max_error_rate_delta=max(0.0, _as_float(max_error_rate_delta, 0.05)),
             max_retry_rate_delta=max(0.0, _as_float(max_retry_rate_delta, 0.10)),
+            max_fallback_rate_delta=max(0.0, _as_float(max_fallback_rate_delta, 0.10)),
+            max_non_positive_savings_rate=max(0.0, _as_float(max_non_positive_savings_rate, 0.0)),
+            max_missing_usage_rate=max(0.0, _as_float(max_missing_usage_rate, 0.0)),
             similarity_floor=_bounded_fraction(similarity_floor, 0.98),
         ),
     ]
@@ -827,6 +981,11 @@ def build_local_compaction_canary_ramp(
     changed = proposed_text != (original_text or "")
     if apply and changed:
         _write_atomic(target_path, proposed_text)
+    feedback_events = []
+    if apply and changed:
+        for decision in decisions:
+            if decision.get("family") == THINKING_SECTION and decision.get("action") == "stop":
+                feedback_events.append(_queue_rollback_feedback(store_obj, decision, now=timestamp))
 
     return {
         "schema": SCHEMA,
@@ -849,6 +1008,7 @@ def build_local_compaction_canary_ramp(
             "hold_count": sum(1 for decision in decisions if decision.get("action") == "hold"),
         },
         "diff": _diff(original_text, proposed_text, target_path) if changed else "",
+        "feedback_events": feedback_events,
         "wrote_policy_files": bool(apply and changed),
         "provider_calls_made": False,
         "managed_server_calls_made": False,
