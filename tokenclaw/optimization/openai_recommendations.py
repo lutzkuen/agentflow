@@ -4,6 +4,7 @@ import hashlib
 import os
 from typing import Any
 
+from tokenclaw.action_executor import ActionExecutor
 from tokenclaw.optimization.managed_actions import evaluate_managed_local_actions
 from tokenclaw.pricing import estimate_cost
 from tokenclaw.recommendations import (
@@ -495,8 +496,31 @@ def apply_openai_recommendation_decision(
     """Apply a preflight managed decision to the locally mutated OpenAI request when safe."""
     applied = dict(decision)
     target_model = applied.get("target_model_normalized")
+    executor = ActionExecutor(provider="openai")
     if applied.get("selected_for_shadow_evaluation") is True and isinstance(target_model, str):
         current_model = str(body.get("model") or routing_meta.get("routed_model") or "")
+        execution = executor.execute(
+            body=body,
+            routing_meta=routing_meta,
+            decision=applied,
+            application_enabled=True,
+            shadow_only=True,
+            source_surface=str(routing_meta.get("source_surface") or ""),
+        )
+        if execution.get("status") == "vetoed":
+            applied.update({
+                "status": "skipped",
+                "applied": False,
+                "changed_model": False,
+                "fallback": "local-policy",
+                "apply_reason": execution.get("apply_reason") or "local-action-vetoed",
+                "local_action_taken": "vetoed",
+                "local_actions": execution,
+                "action_executor": execution,
+                "lifecycle_event": "fallback",
+            })
+            routing_meta["managed_local_actions"] = execution
+            return applied
         applied["local_model_at_application"] = current_model
         applied.update({
             "status": "shadow_selected",
@@ -510,6 +534,7 @@ def apply_openai_recommendation_decision(
             "shadow_only": True,
             "live_promotion_required": True,
             "lifecycle_event": "canary_shadow_selected",
+            "action_executor": execution,
         })
         routing_meta["managed_route_candidate_model"] = target_model
         routing_meta["managed_route_candidate_reason"] = applied.get("reason")
@@ -528,6 +553,8 @@ def apply_openai_recommendation_decision(
                     "apply_reason": "canary-shadow-selected",
                 })
             routing_meta["managed_local_actions"] = local_actions
+        else:
+            routing_meta["managed_local_actions"] = execution
         return applied
 
     if not applied.get("selected_for_local_application") or not isinstance(target_model, str):
@@ -537,39 +564,60 @@ def apply_openai_recommendation_decision(
         return applied
 
     current_model = str(body.get("model") or routing_meta.get("routed_model") or "")
+    execution = executor.execute(
+        body=body,
+        routing_meta=routing_meta,
+        decision=applied,
+        application_enabled=True,
+        shadow_only=False,
+        source_surface=str(routing_meta.get("source_surface") or ""),
+    )
     applied["local_model_at_application"] = current_model
-    if target_model == current_model:
+    if execution.get("status") == "vetoed":
+        applied.update({
+            "status": "skipped",
+            "applied": False,
+            "changed_model": False,
+            "fallback": "local-policy",
+            "apply_reason": execution.get("apply_reason") or "local-action-vetoed",
+            "local_action_taken": "vetoed",
+            "local_actions": execution,
+            "action_executor": execution,
+            "lifecycle_event": "fallback",
+        })
+        routing_meta["managed_local_actions"] = execution
+        return applied
+    if target_model == current_model or execution.get("status") == "noop":
         applied.update({
             "status": "noop",
             "applied": False,
             "changed_model": False,
             "apply_reason": "target-model-already-selected-locally",
             "lifecycle_event": "noop",
+            "action_executor": execution,
         })
         return applied
 
-    body["model"] = target_model
-    routing_meta["routed_model"] = target_model
-    routing_meta["final_policy_source"] = "managed-recommended"
-    routing_meta["managed_policy_id"] = applied.get("policy_id")
-    routing_meta["managed_reason"] = applied.get("reason")
     applied.update({
-        "status": "applied",
-        "applied": True,
-        "changed_model": True,
-        "fallback": None,
-        "apply_reason": "canary-selected",
-        "lifecycle_event": "canary_applied",
+        "status": "applied" if execution.get("status") == "applied" else execution.get("status"),
+        "applied": execution.get("status") == "applied",
+        "changed_model": bool(execution.get("changed_model")),
+        "fallback": execution.get("fallback"),
+        "apply_reason": "canary-selected" if execution.get("changed_model") else execution.get("apply_reason"),
+        "lifecycle_event": "canary_applied" if execution.get("changed_model") else execution.get("status"),
+        "action_executor": execution,
     })
     local_actions = applied.get("local_actions")
     if isinstance(local_actions, dict):
         local_actions.setdefault("routing", {})
         if isinstance(local_actions["routing"], dict):
             local_actions["routing"].update({
-                "status": "applied",
-                "applied": True,
+                "status": execution.get("routing", {}).get("status", "applied") if isinstance(execution.get("routing"), dict) else "applied",
+                "applied": bool(execution.get("changed_model")),
                 "target_model": target_model,
-                "apply_reason": "provider-compatible-local-route",
+                "apply_reason": "provider-compatible-local-route" if execution.get("changed_model") else execution.get("apply_reason"),
             })
         routing_meta["managed_local_actions"] = local_actions
+    else:
+        routing_meta["managed_local_actions"] = execution
     return applied

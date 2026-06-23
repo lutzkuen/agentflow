@@ -1,0 +1,336 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
+
+from tokenclaw.env import env
+from tokenclaw.optimization.managed_actions import (
+    cache_profile_from_decision,
+    crunch_profile_from_decision,
+    evaluate_managed_local_actions,
+)
+
+
+ACTION_EXECUTOR_RESULT_SCHEMA = "tokenclaw.action_executor_result.v1"
+ACTION_EXECUTOR_OUTCOME_SCHEMA = "tokenclaw.action_executor_outcome_feedback.v1"
+DEFAULT_ACTION_FAMILIES = ("routing", "crunch", "cache")
+ACTION_EXECUTOR_ENABLED_ENV = "TOKENCLAW_ACTION_EXECUTOR_ENABLED"
+ACTION_EXECUTOR_FAMILIES_ENV = "TOKENCLAW_ACTION_EXECUTOR_FAMILIES"
+ACTION_EXECUTOR_REQUIRE_SIGNATURE_ENV = "TOKENCLAW_ACTION_EXECUTOR_REQUIRE_SIGNATURE"
+LOCAL_RUNTIME_DECISION_KEYS = {
+    "action_executor",
+    "api_key_value_included",
+    "applied",
+    "applied_families",
+    "apply_reason",
+    "auth_configured",
+    "auth_source",
+    "canary",
+    "canary_fraction",
+    "changed_model",
+    "client_contract",
+    "client_routing_policy",
+    "endpoint",
+    "enabled",
+    "fallback",
+    "failure_mode",
+    "latency_ms",
+    "lifecycle_event",
+    "live_promotion_mode",
+    "local_action_taken",
+    "local_actions",
+    "local_canary",
+    "local_model_at_application",
+    "local_model_before_recommendation",
+    "loopback_unauthenticated_allowed",
+    "min_confidence",
+    "mode",
+    "policy_decision_enabled",
+    "projection",
+    "selected_for_local_application",
+    "selected_for_shadow_evaluation",
+    "server_url",
+    "shadow_model",
+    "shadow_only",
+    "status",
+    "status_code",
+    "timeout_seconds",
+    "would_change_model",
+    "would_route_model",
+}
+
+
+def _env_enabled(name: str, default: str = "1") -> bool:
+    return str(env(name, default) or default).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _env_families() -> tuple[str, ...]:
+    raw = str(env(ACTION_EXECUTOR_FAMILIES_ENV, ",".join(DEFAULT_ACTION_FAMILIES)) or "")
+    families = tuple(
+        item.strip().lower()
+        for item in raw.replace(";", ",").split(",")
+        if item.strip()
+    )
+    return families or DEFAULT_ACTION_FAMILIES
+
+
+def _provider_compatible(provider: str, target_model: str) -> bool:
+    target_l = target_model.lower()
+    if provider == "anthropic":
+        return target_l.startswith("claude-")
+    if provider == "openai":
+        return not target_l.startswith("claude-")
+    return False
+
+
+def _supported_target_model(provider: str, target_model: str) -> bool:
+    if not _provider_compatible(provider, target_model):
+        return False
+    target_l = target_model.lower()
+    if provider == "anthropic":
+        return any(tier in target_l for tier in ("haiku", "sonnet", "opus"))
+    return bool(target_l)
+
+
+def _target_model(decision: dict[str, Any], local_actions: dict[str, Any]) -> str | None:
+    for value in (
+        decision.get("target_model_normalized"),
+        decision.get("target_model_after_client_policy"),
+        decision.get("target_model"),
+        decision.get("route_to"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    routing = local_actions.get("routing") if isinstance(local_actions.get("routing"), dict) else {}
+    value = routing.get("target_model")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _disabled_family(name: str) -> dict[str, Any]:
+    return {
+        "status": "vetoed",
+        "applied": False,
+        "apply_reason": "local-action-family-disabled",
+        "veto_reason": "local-action-family-disabled",
+        "outcome_status": "vetoed",
+    }
+
+
+def _copy_family(local_actions: dict[str, Any], name: str) -> dict[str, Any]:
+    value = local_actions.get(name)
+    return dict(value) if isinstance(value, dict) else {"status": "not-present", "applied": False}
+
+
+@dataclass(frozen=True)
+class ActionExecutor:
+    provider: str
+    supported_action_families: tuple[str, ...] = field(default_factory=_env_families)
+    enabled: bool = field(default_factory=lambda: _env_enabled(ACTION_EXECUTOR_ENABLED_ENV, "1"))
+    require_signature: bool = field(default_factory=lambda: _env_enabled(ACTION_EXECUTOR_REQUIRE_SIGNATURE_ENV, "0"))
+    now: datetime | None = None
+
+    def execute(
+        self,
+        *,
+        body: dict[str, Any],
+        routing_meta: dict[str, Any],
+        decision: dict[str, Any],
+        application_enabled: bool,
+        shadow_only: bool = False,
+        source_surface: str | None = None,
+    ) -> dict[str, Any]:
+        current_model = str(body.get("model") or routing_meta.get("routed_model") or "")
+        supported = {family.strip().lower() for family in self.supported_action_families}
+        action_decision = {
+            key: value
+            for key, value in decision.items()
+            if key not in LOCAL_RUNTIME_DECISION_KEYS
+        }
+        if "enabled" in decision:
+            action_decision["enabled"] = decision["enabled"]
+        if "status" in decision:
+            action_decision["status"] = decision["status"]
+        if action_decision.get("status") in {
+            "selected",
+            "shadow_selected",
+            "dry-run",
+            "applied",
+            "noop",
+            "holdout",
+            "hold",
+        }:
+            action_decision["status"] = "received"
+        if "enabled" not in action_decision and action_decision.get("status") == "received":
+            action_decision["enabled"] = True
+        local_actions = evaluate_managed_local_actions(
+            action_decision,
+            provider=self.provider,
+            current_model=current_model,
+            source_surface=source_surface,
+            application_enabled=bool(application_enabled and self.enabled),
+            now=self.now,
+        )
+        result = {
+            "schema": ACTION_EXECUTOR_RESULT_SCHEMA,
+            "enabled": bool(self.enabled),
+            "provider": self.provider,
+            "policy_id": decision.get("policy_id"),
+            "decision_id": decision.get("decision_id"),
+            "policy_source": "managed-recommended",
+            "application_enabled": bool(application_enabled),
+            "shadow_only": bool(shadow_only),
+            "supported_local_action_families": sorted(supported),
+            "local_model_before": current_model,
+            "local_model_after": current_model,
+            "status": "held",
+            "applied": False,
+            "changed_model": False,
+            "fallback": "local-policy",
+            "routing": _copy_family(local_actions, "routing"),
+            "crunch": _copy_family(local_actions, "crunch"),
+            "cache": _copy_family(local_actions, "cache"),
+            "unsupported_actions": list(local_actions.get("unsupported_actions") or []),
+            "effective_profiles": dict(local_actions.get("effective_profiles") or {}),
+            "raw_payload_included": False,
+        }
+
+        if self.require_signature and not (
+            decision.get("signed")
+            or (isinstance(decision.get("provenance"), dict) and decision["provenance"].get("signature"))
+        ):
+            return self._finish(result, "vetoed", "unsigned-policy")
+        if local_actions.get("status") == "skipped":
+            return self._finish(result, "vetoed", str(local_actions.get("apply_reason") or "local-action-validation-failed"))
+        if result["unsupported_actions"]:
+            return self._finish(result, "vetoed", "unsupported-action-type")
+
+        if not self.enabled:
+            return self._finish(result, "held", "action-executor-disabled")
+        if not application_enabled:
+            return self._finish(result, "held", "local-application-disabled")
+        if shadow_only:
+            target = _target_model(decision, local_actions)
+            if target:
+                result["would_route_model"] = target
+                result["routing"].update({
+                    "status": "held",
+                    "applied": False,
+                    "target_model": target,
+                    "apply_reason": "shadow-only",
+                })
+            return self._finish(result, "held", "shadow-only")
+
+        for family in DEFAULT_ACTION_FAMILIES:
+            if family not in supported and self._family_present(decision, local_actions, family):
+                result[family] = _disabled_family(family)
+                profiles = result.get("effective_profiles")
+                if isinstance(profiles, dict):
+                    profiles.pop(family, None)
+
+        applied_families: list[str] = []
+        target_model = _target_model(decision, local_actions)
+        if target_model:
+            if "routing" not in supported:
+                result["routing"] = _disabled_family("routing")
+            elif not _provider_compatible(self.provider, target_model):
+                result["routing"].update({
+                    "status": "vetoed",
+                    "applied": False,
+                    "target_model": target_model,
+                    "apply_reason": "provider-mismatch",
+                    "veto_reason": "provider-mismatch",
+                })
+            elif not _supported_target_model(self.provider, target_model):
+                result["routing"].update({
+                    "status": "vetoed",
+                    "applied": False,
+                    "target_model": target_model,
+                    "apply_reason": "unsupported-target-model",
+                    "veto_reason": "unsupported-target-model",
+                })
+            elif target_model == current_model:
+                result["routing"].update({
+                    "status": "noop",
+                    "applied": False,
+                    "target_model": target_model,
+                    "apply_reason": "target-model-already-selected-locally",
+                })
+            else:
+                body["model"] = target_model
+                routing_meta["routed_model"] = target_model
+                routing_meta["managed_routing_applied"] = True
+                routing_meta["final_policy_source"] = "managed-recommended"
+                routing_meta["managed_policy_id"] = decision.get("policy_id")
+                routing_meta["managed_reason"] = decision.get("reason")
+                routing_meta["managed_route_recommended_mode"] = decision.get("local_policy_decision_mode") or decision.get("recommended_mode")
+                result["routing"].update({
+                    "status": "applied",
+                    "applied": True,
+                    "target_model": target_model,
+                    "apply_reason": "provider-body-model-rewrite",
+                })
+                result["local_model_after"] = target_model
+                result["changed_model"] = True
+                applied_families.append("routing")
+
+        for family in ("crunch", "cache"):
+            profile = result.get("effective_profiles", {}).get(family) if isinstance(result.get("effective_profiles"), dict) else None
+            if isinstance(profile, dict):
+                if family in supported:
+                    result[family].update({
+                        "status": result[family].get("status") if result[family].get("status") == "configured" else "applied",
+                        "applied": result[family].get("applied") is not False,
+                        "apply_reason": result[family].get("apply_reason") or "local-profile-selected",
+                    })
+                    applied_families.append(family)
+                else:
+                    result[family] = _disabled_family(family)
+
+        if any(result[family].get("status") == "vetoed" for family in DEFAULT_ACTION_FAMILIES):
+            return self._finish(result, "vetoed", "local-action-vetoed")
+        if applied_families:
+            result["applied_families"] = sorted(set(applied_families))
+            return self._finish(result, "applied", "local-actions-applied")
+        return self._finish(result, "noop", "no-local-actions-applied")
+
+    def _family_present(self, decision: dict[str, Any], local_actions: dict[str, Any], family: str) -> bool:
+        if isinstance(decision.get(family), dict):
+            return True
+        section = local_actions.get(family)
+        return isinstance(section, dict) and section.get("status") not in {None, "not-present"}
+
+    def _finish(self, result: dict[str, Any], status: str, reason: str) -> dict[str, Any]:
+        result["status"] = status
+        result["apply_reason"] = reason
+        result["fallback"] = None if status == "applied" else "local-policy"
+        result["applied"] = status == "applied"
+        result["outcome_feedback"] = {
+            "schema": ACTION_EXECUTOR_OUTCOME_SCHEMA,
+            "policy_id": result.get("policy_id"),
+            "decision_id": result.get("decision_id"),
+            "provider": self.provider,
+            "status": status,
+            "reason": reason,
+            "applied_families": list(result.get("applied_families") or []),
+            "vetoed_families": [
+                family
+                for family in DEFAULT_ACTION_FAMILIES
+                if isinstance(result.get(family), dict) and result[family].get("status") == "vetoed"
+            ],
+            "held_families": [
+                family
+                for family in DEFAULT_ACTION_FAMILIES
+                if isinstance(result.get(family), dict) and result[family].get("status") == "held"
+            ],
+            "raw_payload_included": False,
+        }
+        return result
+
+
+def crunch_profile_from_executor_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    return crunch_profile_from_decision({"local_actions": result})
+
+
+def cache_profile_from_executor_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    return cache_profile_from_decision({"local_actions": result})

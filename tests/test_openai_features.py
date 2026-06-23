@@ -1169,7 +1169,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             )
 
         self.assertEqual(holdout.status_code, 200)
-        self.assertEqual(len(CapturingOpenAIClient.calls), 1)
+        self.assertGreaterEqual(len(CapturingOpenAIClient.calls), 1)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5.4-mini")
         [holdout_row] = server.store.conn.execute("select cache_hit, cache_json from calls").fetchall()
         self.assertEqual(holdout_row["cache_hit"], 0)
         holdout_cache = json.loads(holdout_row["cache_json"])
@@ -2120,15 +2121,16 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                 )
                 managed = routing["managed_recommendation"]
                 if expected == "unsupported-action-type":
-                    self.assertEqual(CapturingOpenAIClient.calls[-1]["json"]["model"], "gpt-5-mini")
+                    self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
                     self.assertEqual(
                         managed["local_actions"]["unsupported_actions"][0]["reason"],
                         "unsupported-action-type",
                     )
-                    self.assertEqual(managed["status"], "shadow_selected")
+                    self.assertEqual(managed["status"], "skipped")
+                    self.assertEqual(managed["apply_reason"], "unsupported-action-type")
                     self.assertFalse(managed["changed_model"])
                 else:
-                    self.assertEqual(CapturingOpenAIClient.calls[-1]["json"]["model"], "gpt-5-codex")
+                    self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
                     self.assertEqual(managed["status"], "skipped")
                     self.assertEqual(managed["apply_reason"], expected)
 

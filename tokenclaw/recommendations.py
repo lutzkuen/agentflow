@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import httpx
 
 from tokenclaw import __version__ as TOKENCLAW_VERSION
+from tokenclaw.action_executor import ActionExecutor
 from tokenclaw.codex_turn_policy import CODEX_APP_SOURCE_SURFACE
 from tokenclaw.client_contract import (
     ContractClient,
@@ -1806,6 +1807,7 @@ def apply_policy_decision_routing_to_body(
     recommendation_meta: dict[str, Any],
 ) -> dict[str, Any]:
     meta = dict(recommendation_meta)
+    executor = ActionExecutor(provider=provider)
     if meta.get("status") != "received":
         meta.setdefault("applied", False)
         meta.setdefault("local_action_taken", "fallback")
@@ -1909,27 +1911,66 @@ def apply_policy_decision_routing_to_body(
                     "local_policy_decision_mode": "route_to",
                 })
                 return meta
-        body["model"] = target_model
-        routing_meta["routed_model"] = target_model
-        routing_meta["managed_routing_applied"] = True
+        meta["target_model_after_client_policy"] = target_model
+        execution = executor.execute(
+            body=body,
+            routing_meta=routing_meta,
+            decision=meta,
+            application_enabled=True,
+            source_surface=str(routing_meta.get("source_surface") or meta.get("source_surface") or ""),
+        )
+        if execution.get("status") == "vetoed":
+            meta.update({
+                "applied": False,
+                "changed_model": False,
+                "apply_reason": execution.get("apply_reason") or "local-action-vetoed",
+                "fallback": "local-policy",
+                "would_route_model": target_model,
+                "local_action_taken": "vetoed",
+                "action_executor": execution,
+                "local_actions": execution,
+            })
+            routing_meta["managed_local_actions"] = execution
+            return meta
         routing_meta["managed_routing_confidence"] = meta.get("confidence")
-        routing_meta["final_policy_source"] = "managed-recommended"
-        routing_meta["managed_policy_id"] = meta.get("policy_id")
-        routing_meta["managed_reason"] = meta.get("reason")
         routing_meta["managed_route_recommended_mode"] = "route_to"
         meta.update({
-            "applied": True,
-            "changed_model": True,
-            "fallback": None,
-            "apply_reason": "local-canary-selected" if policy_decision_canary_fraction() > 0.0 else "route-to-local-safety-gate-passed",
-            "local_action_taken": "canary_applied" if policy_decision_canary_fraction() > 0.0 else "route_to",
+            "applied": bool(execution.get("changed_model")),
+            "changed_model": bool(execution.get("changed_model")),
+            "fallback": execution.get("fallback"),
+            "apply_reason": "local-canary-selected" if policy_decision_canary_fraction() > 0.0 and execution.get("changed_model") else "route-to-local-safety-gate-passed",
+            "local_action_taken": "canary_applied" if policy_decision_canary_fraction() > 0.0 and execution.get("changed_model") else "route_to",
             "local_policy_decision_mode": "route_to",
+            "action_executor": execution,
+            "local_actions": execution,
         })
+        routing_meta["managed_local_actions"] = execution
         if policy_decision_canary_fraction() > 0.0:
             meta["local_canary"] = canary
         return meta
 
     if recommended_mode in {"observe", "shadow"}:
+        execution = executor.execute(
+            body=body,
+            routing_meta=routing_meta,
+            decision=meta,
+            application_enabled=True,
+            shadow_only=True,
+            source_surface=str(routing_meta.get("source_surface") or meta.get("source_surface") or ""),
+        )
+        if execution.get("status") == "vetoed":
+            meta.update({
+                "applied": False,
+                "changed_model": False,
+                "apply_reason": execution.get("apply_reason") or "local-action-vetoed",
+                "fallback": "local-policy",
+                "would_route_model": target_model,
+                "local_action_taken": "vetoed",
+                "action_executor": execution,
+                "local_actions": execution,
+            })
+            routing_meta["managed_local_actions"] = execution
+            return meta
         meta.update({
             "applied": False,
             "changed_model": False,
@@ -1937,10 +1978,13 @@ def apply_policy_decision_routing_to_body(
             "fallback": "local-policy",
             "would_route_model": target_model,
             "local_action_taken": recommended_mode,
+            "action_executor": execution,
+            "local_actions": execution,
         })
         routing_meta["managed_route_candidate_model"] = target_model
         routing_meta["managed_route_candidate_reason"] = meta.get("reason")
         routing_meta["managed_route_recommended_mode"] = recommended_mode
+        routing_meta["managed_local_actions"] = execution
         return meta
     if recommended_mode != "canary":
         meta.update({
@@ -1966,21 +2010,39 @@ def apply_policy_decision_routing_to_body(
         })
         return meta
 
-    body["model"] = target_model
-    routing_meta["routed_model"] = target_model
-    routing_meta["managed_routing_applied"] = True
+    meta["target_model_after_client_policy"] = target_model
+    execution = executor.execute(
+        body=body,
+        routing_meta=routing_meta,
+        decision=meta,
+        application_enabled=True,
+        source_surface=str(routing_meta.get("source_surface") or meta.get("source_surface") or ""),
+    )
+    if execution.get("status") == "vetoed":
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": execution.get("apply_reason") or "local-action-vetoed",
+            "fallback": "local-policy",
+            "would_route_model": target_model,
+            "local_action_taken": "vetoed",
+            "action_executor": execution,
+            "local_actions": execution,
+        })
+        routing_meta["managed_local_actions"] = execution
+        return meta
     routing_meta["managed_routing_confidence"] = meta.get("confidence")
-    routing_meta["final_policy_source"] = "managed-recommended"
-    routing_meta["managed_policy_id"] = meta.get("policy_id")
-    routing_meta["managed_reason"] = meta.get("reason")
     routing_meta["managed_route_recommended_mode"] = recommended_mode
     meta.update({
-        "applied": True,
-        "changed_model": True,
-        "fallback": None,
-        "apply_reason": "local-canary-selected",
-        "local_action_taken": "canary_applied",
+        "applied": bool(execution.get("changed_model")),
+        "changed_model": bool(execution.get("changed_model")),
+        "fallback": execution.get("fallback"),
+        "apply_reason": "local-canary-selected" if execution.get("changed_model") else execution.get("apply_reason"),
+        "local_action_taken": "canary_applied" if execution.get("changed_model") else "noop",
+        "action_executor": execution,
+        "local_actions": execution,
     })
+    routing_meta["managed_local_actions"] = execution
     return meta
 
 
