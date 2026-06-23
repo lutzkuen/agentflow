@@ -76,6 +76,7 @@ from tokenclaw.recommendations import (
     build_phase_routing_outcome_event,
     build_phase_routing_outcome_feedback,
     build_optimization_unit,
+    build_request_facts_envelope,
     fetch_policy_decision,
     fetch_recommendation,
     CACHE_REPLAY_LIFECYCLE_SOURCE_SURFACE,
@@ -1179,6 +1180,15 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         preflight_cache_meta = cache_decision_meta("skipped", "preflight")
         preflight_crunch_meta = {"old_context_summarization": summary_meta}
         preflight_input_tokens = estimate_tokens_from_text(extract_text(raw_body))
+        preflight_request_facts = build_request_facts_envelope(
+            provider="anthropic",
+            path=path,
+            body=raw_body,
+            requested_model=str(raw_body.get("model") or requested_model),
+            stream=stream,
+            input_tokens_est=preflight_input_tokens,
+            session_id=session_id,
+        )
         preflight_recommendation_unit = build_optimization_unit(
             provider="anthropic",
             path=path,
@@ -1307,8 +1317,9 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         )
         routing_meta["managed_pattern_features"] = pattern_feature_diagnostics(recommendation_unit)
         routing_meta["managed_preflight_pattern_features"] = preflight_pattern_features
+        routing_meta["managed_request_facts"] = preflight_request_facts
         if policy_decisions_enabled():
-            recommendation_meta = await fetch_policy_decision(recommendation_unit)
+            recommendation_meta = await fetch_policy_decision(recommendation_unit, request_facts=preflight_request_facts)
         recommendation_meta = apply_recommendation_to_body(
             provider="anthropic",
             body=crunched,

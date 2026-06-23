@@ -319,10 +319,13 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertEqual(parsed.stage, "parse_request")
         self.assertEqual(preflight.stage, "extract_preflight_features")
         self.assertEqual(preflight.feature_unit["schema"], "tokenclaw.openai_preflight_feature_unit.v1")
+        self.assertEqual(preflight.request_facts["schema"], "tokenclaw.request_facts_envelope.v1")
         self.assertEqual(preflight.feature_summary["local_mutation_stage"], "preflight")
         self.assertEqual(managed_egress_violations(preflight.feature_unit), [])
+        self.assertEqual(managed_egress_violations(preflight.request_facts), [])
         self.assertEqual(managed_egress_violations(preflight.feature_summary), [])
         self._assert_no_raw_values(preflight.feature_unit)
+        self._assert_no_raw_values(preflight.request_facts)
         self._assert_no_raw_values(preflight.feature_summary)
 
     def test_pipeline_policy_fetch_uses_only_guarded_preflight_unit(self):
@@ -333,8 +336,9 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         preflight = openai_pipeline.extract_openai_preflight_features(parsed, path="/v1/responses")
         seen = {}
 
-        async def fake_fetcher(*, recommendation_unit, current_model, input_tokens_est):
+        async def fake_fetcher(*, recommendation_unit, request_facts, current_model, input_tokens_est):
             seen["unit"] = recommendation_unit
+            seen["request_facts"] = request_facts
             seen["current_model"] = current_model
             seen["input_tokens_est"] = input_tokens_est
             return {"status": "skipped", "apply_reason": "test-fallback"}
@@ -343,9 +347,12 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
 
         self.assertEqual(decision["apply_reason"], "test-fallback")
         self.assertIs(seen["unit"], preflight.feature_unit)
+        self.assertIs(seen["request_facts"], preflight.request_facts)
         self.assertEqual(seen["current_model"], "gpt-5-codex")
         self.assertEqual(managed_egress_violations(seen["unit"]), [])
+        self.assertEqual(managed_egress_violations(seen["request_facts"]), [])
         self._assert_no_raw_values(seen["unit"])
+        self._assert_no_raw_values(seen["request_facts"])
 
     def test_pipeline_local_policy_stage_applies_local_actions_without_provider_io(self):
         body = {
@@ -1468,11 +1475,15 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         }
         seen = {}
 
-        async def fake_policy_decision(unit):
+        async def fake_policy_decision(unit, *, request_facts=None):
             seen["unit"] = copy.deepcopy(unit)
+            seen["request_facts"] = copy.deepcopy(request_facts)
             rendered = json.dumps(unit, sort_keys=True)
+            facts_rendered = json.dumps(request_facts, sort_keys=True)
             self.assertEqual(unit["schema"], "tokenclaw.openai_preflight_feature_unit.v1")
+            self.assertEqual(request_facts["schema"], "tokenclaw.request_facts_envelope.v1")
             self.assertNotIn("raw openai prompt secret", rendered)
+            self.assertNotIn("raw openai prompt secret", facts_rendered)
             return {
                 "enabled": True,
                 "status": "received",
@@ -1521,11 +1532,15 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         }
         seen = {}
 
-        async def fake_policy_decision(unit):
+        async def fake_policy_decision(unit, *, request_facts=None):
             seen["unit"] = copy.deepcopy(unit)
+            seen["request_facts"] = copy.deepcopy(request_facts)
             rendered = json.dumps(unit, sort_keys=True)
+            facts_rendered = json.dumps(request_facts, sort_keys=True)
             self.assertEqual(unit["schema"], "tokenclaw.openai_preflight_feature_unit.v1")
+            self.assertEqual(request_facts["schema"], "tokenclaw.request_facts_envelope.v1")
             self.assertNotIn("raw canary prompt secret", rendered)
+            self.assertNotIn("raw canary prompt secret", facts_rendered)
             return {
                 "enabled": True,
                 "status": "received",
@@ -1584,7 +1599,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "input": "holdout prompt",
         }
 
-        async def fake_policy_decision(_unit):
+        async def fake_policy_decision(_unit, *, request_facts=None):
+            self.assertEqual(request_facts["schema"], "tokenclaw.request_facts_envelope.v1")
             return {
                 "enabled": True,
                 "status": "received",

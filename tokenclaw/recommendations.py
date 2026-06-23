@@ -34,6 +34,8 @@ OUTCOME_PATH_TEMPLATE = "/v1/optimization-units/{unit_id}/outcome"
 POLICY_EVENTS_PATH = "/v1/policy-events"
 PROMOTION_BLOCKER_ACTION_OUTCOME_ROLLUPS_PATH = "/v1/promotion-blocker-action-outcome-rollups"
 FEATURE_SCHEMA_VERSION = "tokenclaw.optimization_unit_features.v1"
+REQUEST_FACTS_SCHEMA = "tokenclaw.request_facts.v1"
+REQUEST_FACTS_ENVELOPE_SCHEMA = "tokenclaw.request_facts_envelope.v1"
 POLICY_DECISION_PREFLIGHT_SCHEMA = "tokenclaw.policy_decision_preflight.v1"
 POLICY_DECISION_SCHEMA = "tokenclaw.policy_decision.v1"
 MANAGED_API_KEY_ENV = "TOKENCLAW_MANAGED_API_KEY"
@@ -222,6 +224,154 @@ def _compact_grouping_identifiers(values: dict[str, str | None]) -> dict[str, st
         for key, value in values.items()
         if (hashed := _hash_identifier(value)) is not None
     }
+
+
+def _provider_family(value: str | None) -> str:
+    provider = (value or "").strip().lower()
+    if provider in {"anthropic", "openai"}:
+        return provider
+    return "unknown"
+
+
+def _endpoint_label(path: str | None) -> str:
+    cleaned = str(path or "").strip().strip("/")
+    if not cleaned:
+        return "unknown"
+    parts = [part for part in cleaned.split("/") if part and not part.startswith("v")]
+    if not parts:
+        return "unknown"
+    return "_".join(part.replace("-", "_") for part in parts[-2:])[:96] or "unknown"
+
+
+def _metadata_text_char_count(value: Any) -> int:
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, list):
+        return sum(_metadata_text_char_count(item) for item in value)
+    if isinstance(value, dict):
+        return sum(_metadata_text_char_count(item) for item in value.values())
+    return 0
+
+
+def _message_item_counts(body: dict[str, Any]) -> dict[str, int]:
+    messages = body.get("messages")
+    input_items = body.get("input")
+    return {
+        "message_item_count": len(messages) if isinstance(messages, list) else 0,
+        "input_item_count": len(input_items) if isinstance(input_items, list) else (1 if input_items is not None else 0),
+    }
+
+
+def _tool_fact_counts(body: dict[str, Any]) -> dict[str, Any]:
+    tools = body.get("tools")
+    functions = body.get("functions")
+    tool_count = (len(tools) if isinstance(tools, list) else 0) + (len(functions) if isinstance(functions, list) else 0)
+    has_tool_context = tool_count > 0 or bool(body.get("tool_choice") or body.get("function_call"))
+    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+    input_items = body.get("input") if isinstance(body.get("input"), list) else []
+    for item in input_items:
+        if isinstance(item, dict) and str(item.get("type") or "").lower() in {
+            "function_call",
+            "function_call_output",
+            "tool_call",
+            "tool_result",
+            "computer_call",
+            "file_search_call",
+            "web_search_call",
+        }:
+            has_tool_context = True
+            break
+    if not has_tool_context:
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, list) and any(
+                isinstance(block, dict) and str(block.get("type") or "").lower() == "tool_result"
+                for block in content
+            ):
+                has_tool_context = True
+                break
+            if isinstance(message.get("tool_calls"), list) or message.get("tool_call_id"):
+                has_tool_context = True
+                break
+    return {
+        "has_tools": bool(has_tool_context),
+        "tool_count": tool_count,
+        "tool_context_present": bool(has_tool_context),
+    }
+
+
+def build_request_facts_envelope(
+    *,
+    provider: str | None = None,
+    path: str | None = None,
+    body: dict[str, Any] | None = None,
+    requested_model: str | None = None,
+    stream: bool | None = None,
+    input_tokens_est: int | None = None,
+    session_id: str | None = None,
+    thread_id: str | None = None,
+    request_id: str | None = None,
+    local_executor_capabilities: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a thin managed-optimizer envelope from directly known request facts."""
+
+    raw_body = body if isinstance(body, dict) else {}
+    model = requested_model if requested_model is not None else raw_body.get("model")
+    model_text = str(model).strip() if model not in (None, "") else None
+    text_chars = _metadata_text_char_count(raw_body)
+    token_estimate = input_tokens_est
+    if token_estimate is None and text_chars > 0:
+        token_estimate = max(1, text_chars // TOKEN_CHARS)
+    counts = _message_item_counts(raw_body)
+    tool_facts = _tool_fact_counts(raw_body)
+    capabilities = dict(local_executor_capabilities or {})
+    capabilities.setdefault("schema", "tokenclaw.local_executor_capabilities.v1")
+    capabilities.setdefault("supported_local_action_families", ["routing", "crunch", "cache", "old_context_summarization"])
+    capabilities.setdefault("locally_executed", True)
+    capabilities.setdefault("server_content_processing", False)
+    facts = {
+        "schema": REQUEST_FACTS_SCHEMA,
+        "provider_family": _provider_family(provider),
+        "endpoint": _endpoint_label(path),
+        "endpoint_known": bool(path),
+        "requested_model": model_text,
+        "requested_model_present": bool(model_text),
+        "stream": bool(raw_body.get("stream") if stream is None else stream),
+        "text_chars": text_chars,
+        "input_tokens_est": token_estimate,
+        "text_bucket": _text_bucket(text_chars),
+        "input_token_bucket": _token_bucket(token_estimate),
+        "message_item_count": counts["message_item_count"],
+        "input_item_count": counts["input_item_count"],
+        "has_tools": tool_facts["has_tools"],
+        "tool_count": tool_facts["tool_count"],
+        "tool_context_present": tool_facts["tool_context_present"],
+        "response_format_present": bool(raw_body.get("response_format")),
+        "local_executor_capabilities": capabilities,
+        "grouping_identifiers": _compact_grouping_identifiers({
+            "session_id_hash": session_id,
+            "thread_id_hash": thread_id,
+            "request_id_hash": request_id,
+        }),
+        "raw_payload_included": False,
+        "raw_body_storage": False,
+    }
+    envelope = {
+        "schema": REQUEST_FACTS_ENVELOPE_SCHEMA,
+        "request_facts_schema": REQUEST_FACTS_SCHEMA,
+        "feature_only": True,
+        "locally_executed": True,
+        "server_content_processing": False,
+        "provider_forwarding": False,
+        "request_facts": facts,
+        "privacy_summary": _metadata_only_privacy_summary(),
+        "raw_payload_included": False,
+    }
+    envelope = _sanitize_features(envelope)
+    assert_managed_egress_safe(envelope)
+    return envelope
 
 
 def _bucket_number(value: Any, buckets: tuple[tuple[int, str], ...], fallback: str) -> str:
@@ -1013,6 +1163,68 @@ def _policy_decision_preflight_payload(unit: dict[str, Any]) -> dict[str, Any]:
     return _sanitize_features(payload)
 
 
+def _request_facts_from_envelope(envelope: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(envelope, dict):
+        return None
+    if envelope.get("schema") == REQUEST_FACTS_SCHEMA:
+        return envelope
+    facts = envelope.get("request_facts")
+    if isinstance(facts, dict) and facts.get("schema") == REQUEST_FACTS_SCHEMA:
+        return facts
+    return None
+
+
+def _policy_decision_payload_from_request_facts(envelope: dict[str, Any]) -> dict[str, Any]:
+    facts = _request_facts_from_envelope(envelope)
+    if facts is None:
+        raise ValueError("request facts envelope is missing tokenclaw.request_facts.v1 facts")
+    provider = str(facts.get("provider_family") or "unknown")
+    endpoint = str(facts.get("endpoint") or "unknown")
+    requested_model = facts.get("requested_model")
+    input_features = {
+        "request_facts_schema": facts.get("schema"),
+        "thin_request_facts": True,
+        "api_endpoint": endpoint,
+        "provider_family": provider,
+        "stream": bool(facts.get("stream")),
+        "text_chars": facts.get("text_chars"),
+        "input_tokens_est": facts.get("input_tokens_est"),
+        "text_bucket": facts.get("text_bucket"),
+        "input_token_bucket": facts.get("input_token_bucket"),
+        "message_item_count": facts.get("message_item_count"),
+        "input_item_count": facts.get("input_item_count"),
+        "response_format_present": bool(facts.get("response_format_present")),
+        "requested_local_actions": ["cache", "crunch", "routing"],
+        "use_routing_predictor": True,
+    }
+    capabilities = facts.get("local_executor_capabilities")
+    if isinstance(capabilities, dict):
+        supported = capabilities.get("supported_local_action_families")
+        if isinstance(supported, list):
+            input_features["requested_local_actions"] = sorted({str(item) for item in supported if item})
+        input_features["local_executor_capabilities"] = capabilities
+    payload = {
+        "schema": POLICY_DECISION_PREFLIGHT_SCHEMA,
+        "feature_schema_version": REQUEST_FACTS_SCHEMA,
+        "source_surface": _source_surface(provider, endpoint) if provider in {"anthropic", "openai"} else "unknown",
+        "granularity": "provider_request",
+        "app_family": _app_family(provider, str(requested_model or ""), endpoint) if provider in {"anthropic", "openai"} else "unknown",
+        "requested_model": requested_model if isinstance(requested_model, str) else None,
+        "candidate_target_model": None,
+        "input_features": input_features,
+        "tool_features": {
+            "has_tools": bool(facts.get("has_tools")),
+            "tool_count": facts.get("tool_count"),
+            "tool_context_present": bool(facts.get("tool_context_present")),
+        },
+        "outcome_features": {},
+        "grouping_identifiers": dict(facts.get("grouping_identifiers") or {}),
+        "replayability_level": "features_only",
+        "request_facts": facts,
+    }
+    return _sanitize_features(payload)
+
+
 def _policy_decision_input_features(value: Any) -> dict[str, Any]:
     """Return endpoint-safe feature fields for /v1/policy-decision input_features."""
 
@@ -1142,7 +1354,7 @@ def _normalize_policy_decision(body: Any) -> tuple[dict[str, Any] | None, str | 
     return normalized, None
 
 
-async def fetch_policy_decision(unit: dict[str, Any]) -> dict[str, Any]:
+async def fetch_policy_decision(unit: dict[str, Any], *, request_facts: dict[str, Any] | None = None) -> dict[str, Any]:
     if not recommendations_enabled() or not policy_decisions_enabled():
         meta = _policy_decision_base_meta()
         meta.update({
@@ -1155,10 +1367,23 @@ async def fetch_policy_decision(unit: dict[str, Any]) -> dict[str, Any]:
 
     meta = _policy_decision_base_meta()
     try:
-        payload = _policy_decision_preflight_payload(unit)
+        payload = (
+            _policy_decision_payload_from_request_facts(request_facts)
+            if request_facts is not None
+            else _policy_decision_preflight_payload(unit)
+        )
         assert_managed_egress_safe(payload)
     except ManagedEgressBlocked as exc:
         meta.update(managed_egress_blocked_meta(endpoint=POLICY_DECISION_PATH, violations=exc.violations))
+        return meta
+    except ValueError as exc:
+        meta.update({
+            "status": "skipped",
+            "reason": "invalid-request-facts",
+            "error": str(exc),
+            "fallback": "local-policy",
+            "applied": False,
+        })
         return meta
 
     if not recommendation_server_configured():

@@ -22,7 +22,7 @@ from tokenclaw.optimization.openai_recommendations import (
     apply_openai_recommendation_decision,
     fetch_openai_recommendation_decision,
 )
-from tokenclaw.recommendations import pattern_feature_diagnostics
+from tokenclaw.recommendations import build_request_facts_envelope, pattern_feature_diagnostics
 from tokenclaw.router import categorize_request, extract_text, has_tools, route_openai_model
 
 
@@ -49,6 +49,7 @@ class OpenAIPreflightStage:
     parsed: OpenAIParsedRequest
     path: str
     routing_meta: dict[str, Any]
+    request_facts: dict[str, Any]
     feature_unit: dict[str, Any]
     feature_summary: dict[str, Any]
     pattern_features: dict[str, Any]
@@ -107,7 +108,16 @@ def extract_openai_preflight_features(parsed: OpenAIParsedRequest, *, path: str)
         stream=parsed.stream,
         input_tokens_est=parsed.input_tokens_est,
     )
+    request_facts = build_request_facts_envelope(
+        provider="openai",
+        path=path,
+        body=parsed.body,
+        requested_model=parsed.requested_model,
+        stream=parsed.stream,
+        input_tokens_est=parsed.input_tokens_est,
+    )
     assert_managed_egress_safe(feature_unit)
+    assert_managed_egress_safe(request_facts)
     feature_summary = summarize_openai_request_feature_unit(feature_unit)
     pattern_features = pattern_feature_diagnostics(feature_unit)
     return OpenAIPreflightStage(
@@ -115,6 +125,7 @@ def extract_openai_preflight_features(parsed: OpenAIParsedRequest, *, path: str)
         parsed=parsed,
         path=path,
         routing_meta=routing_meta,
+        request_facts=request_facts,
         feature_unit=feature_unit,
         feature_summary=feature_summary,
         pattern_features=pattern_features,
@@ -130,6 +141,7 @@ async def fetch_openai_policy_decision(
     assert_managed_egress_safe(preflight.feature_unit)
     return await fetcher(
         recommendation_unit=preflight.feature_unit,
+        request_facts=preflight.request_facts,
         current_model=preflight.parsed.requested_model,
         input_tokens_est=preflight.parsed.input_tokens_est,
     )

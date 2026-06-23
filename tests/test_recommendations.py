@@ -139,6 +139,108 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["fallback"], "local-policy")
         self.assertIsNone(FakeAsyncClient.last_url)
 
+    def test_request_facts_envelope_is_thin_feature_only_metadata(self):
+        envelope = recommendations.build_request_facts_envelope(
+            provider="unknown-provider",
+            path=None,
+            body={
+                "messages": [{"role": "user", "content": "raw prompt should stay local"}],
+                "metadata": {"session_id": "session-secret", "api_key": "api-key-secret"},
+                "stream": True,
+            },
+            requested_model=None,
+            session_id="session-secret",
+            thread_id="thread-secret",
+            request_id="request-secret",
+        )
+
+        facts = envelope["request_facts"]
+        self.assertEqual(envelope["schema"], recommendations.REQUEST_FACTS_ENVELOPE_SCHEMA)
+        self.assertEqual(facts["schema"], recommendations.REQUEST_FACTS_SCHEMA)
+        self.assertEqual(facts["provider_family"], "unknown")
+        self.assertEqual(facts["endpoint"], "unknown")
+        self.assertIsNone(facts["requested_model"])
+        self.assertFalse(facts["requested_model_present"])
+        self.assertTrue(facts["stream"])
+        self.assertEqual(facts["message_item_count"], 1)
+        self.assertIn("session_id_hash", facts["grouping_identifiers"])
+        self.assertIn("thread_id_hash", facts["grouping_identifiers"])
+        self.assertIn("request_id_hash", facts["grouping_identifiers"])
+        self.assertTrue(envelope["privacy_summary"]["metadata_only"])
+        self.assertNotIn("candidate_target_model", self._keys_in(envelope))
+        self.assertNotIn("source_surface", self._keys_in(envelope))
+        self.assertNotIn("app_family", self._keys_in(envelope))
+        self.assertNotIn("messages", self._keys_in(envelope))
+        self.assertNotIn("content", self._keys_in(envelope))
+        self.assertNotIn("request_body", self._keys_in(envelope))
+        self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(envelope)))
+        self._assert_no_sensitive_strings(envelope)
+        recommendations.assert_managed_egress_safe(envelope)
+
+    def test_policy_decision_fetch_can_use_request_facts_instead_of_rich_unit(self):
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        FakeAsyncClient.response = FakeResponse(body={
+            "schema": "tokenclaw.policy_decision.v1",
+            "policy_id": "facts-policy",
+            "confidence": 0.88,
+            "provider_forwarding": False,
+            "server_content_processing": False,
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+            "routing": {
+                "status": "recommended",
+                "target_model": "claude-haiku-4-5-20251001",
+                "confidence": 0.88,
+                "reason_codes": ["request-facts-route"],
+            },
+        })
+        envelope = recommendations.build_request_facts_envelope(
+            provider="anthropic",
+            path="/v1/messages",
+            body={
+                "model": "claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": "raw prompt should stay local"}],
+                "tools": [{"name": "lookup", "description": "raw tool description"}],
+            },
+            requested_model="claude-sonnet-4-6",
+            stream=False,
+            input_tokens_est=120,
+            session_id="session-secret",
+        )
+        rich_unit = {
+            "source_surface": "server-side-rich-unit-would-be-ignored",
+            "app_family": "server-side-app",
+            "candidate_target_model": "claude-haiku-4-5-20251001",
+            "input_features": {
+                "local_routing_reason": "local interpretation should not be posted",
+                "pattern_hash": "sha256:local-rich-pattern",
+                "messages": "raw prompt should not be posted",
+            },
+        }
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_policy_decision(rich_unit, request_facts=envelope))
+
+        sent = FakeAsyncClient.last_json
+        self.assertEqual(meta["status"], "received")
+        self.assertEqual(sent["schema"], recommendations.POLICY_DECISION_PREFLIGHT_SCHEMA)
+        self.assertEqual(sent["feature_schema_version"], recommendations.REQUEST_FACTS_SCHEMA)
+        self.assertEqual(sent["source_surface"], "anthropic_messages")
+        self.assertEqual(sent["app_family"], "claude_code")
+        self.assertIsNone(sent["candidate_target_model"])
+        self.assertEqual(sent["request_facts"]["schema"], recommendations.REQUEST_FACTS_SCHEMA)
+        self.assertTrue(sent["input_features"]["thin_request_facts"])
+        self.assertEqual(sent["input_features"]["api_endpoint"], "messages")
+        self.assertEqual(sent["tool_features"]["tool_count"], 1)
+        self.assertIn("session_id_hash", sent["grouping_identifiers"])
+        self.assertNotIn("local_routing_reason", self._keys_in(sent))
+        self.assertNotIn("pattern_hash", self._keys_in(sent))
+        self.assertNotIn("messages", self._keys_in(sent))
+        self.assertNotIn("content", self._keys_in(sent))
+        self._assert_no_sensitive_strings(sent)
+        recommendations.assert_managed_egress_safe(sent)
+
     def test_success_path_posts_feature_unit_with_auth_and_applies_target_model(self):
         os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"

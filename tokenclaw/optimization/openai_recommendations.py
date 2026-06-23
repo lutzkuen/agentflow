@@ -222,6 +222,7 @@ async def evaluate_openai_recommendation(
 async def fetch_openai_recommendation_decision(
     *,
     recommendation_unit: dict[str, Any],
+    request_facts: dict[str, Any] | None = None,
     current_model: str,
     input_tokens_est: int | None,
 ) -> dict[str, Any]:
@@ -230,7 +231,11 @@ async def fetch_openai_recommendation_decision(
     if mode == "observe-only" and not policy_decisions_enabled():
         return _base_decision(mode=mode, current_model=current_model, input_tokens_est=input_tokens_est)
 
-    fetched = await (fetch_policy_decision(recommendation_unit) if policy_decisions_enabled() else fetch_recommendation(recommendation_unit))
+    fetched = await (
+        fetch_policy_decision(recommendation_unit, request_facts=request_facts)
+        if policy_decisions_enabled()
+        else fetch_recommendation(recommendation_unit)
+    )
     decision = _base_decision(
         mode=mode,
         current_model=current_model,
@@ -287,6 +292,21 @@ async def fetch_openai_recommendation_decision(
             "status": "skipped",
             "apply_reason": "prompt-shaping-not-locally-representable",
             "replacement_prompt_applied": False,
+            "lifecycle_event": "fallback",
+        })
+        return decision
+    validation_actions = evaluate_managed_local_actions(
+        fetched,
+        provider="openai",
+        current_model=current_model,
+        source_surface=recommendation_unit.get("source_surface"),
+        application_enabled=False,
+    )
+    if validation_actions.get("status") == "skipped":
+        decision.update({
+            "status": "skipped",
+            "apply_reason": validation_actions.get("apply_reason") or "local-action-validation-failed",
+            "local_actions": validation_actions,
             "lifecycle_event": "fallback",
         })
         return decision
