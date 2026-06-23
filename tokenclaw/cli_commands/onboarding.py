@@ -88,6 +88,14 @@ def _configured_proxy_port(proxy_args: Sequence[str]) -> int | None:
         return None
 
 
+def _configured_proxy_health_url(proxy_args: Sequence[str]) -> str | None:
+    host = _proxy_arg_value(proxy_args, "--host") or "127.0.0.1"
+    port = _configured_proxy_port(proxy_args)
+    if port is None:
+        return None
+    return f"http://{host}:{port}/health"
+
+
 def _prod_routing_experiments_path(
     *,
     target: str,
@@ -158,6 +166,74 @@ def _provider_start_command(proxy_args: Sequence[str]) -> list[str]:
     return [sys.executable, "-m", "tokenclaw.server", *list(proxy_args)]
 
 
+def _provider_launch_plan(
+    *,
+    target: str,
+    proxy_args: Sequence[str],
+    config_dir: str | Path,
+) -> dict[str, Any]:
+    durable_routing_experiments = _prod_routing_experiments_path(
+        target=target,
+        proxy_args=proxy_args,
+        config_dir=config_dir,
+    )
+    env_overrides: dict[str, str] = {}
+    if durable_routing_experiments is not None:
+        env_overrides[ROUTING_EXPERIMENTS_ENV] = str(durable_routing_experiments)
+        env_overrides[ROUTING_EXPERIMENTS_STRICT_ENV] = "1"
+    env_display = dict(env_overrides)
+    inherited_routing_experiments = os.environ.get(ROUTING_EXPERIMENTS_ENV)
+    inherited_routing_experiments_strict = os.environ.get(ROUTING_EXPERIMENTS_STRICT_ENV)
+    if ROUTING_EXPERIMENTS_ENV not in env_display and inherited_routing_experiments:
+        env_display[ROUTING_EXPERIMENTS_ENV] = inherited_routing_experiments
+    if ROUTING_EXPERIMENTS_STRICT_ENV not in env_display and inherited_routing_experiments_strict:
+        env_display[ROUTING_EXPERIMENTS_STRICT_ENV] = inherited_routing_experiments_strict
+    return {
+        "target": target,
+        "proxy_args": list(proxy_args),
+        "port": _configured_proxy_port(proxy_args),
+        "durable_routing_experiments": str(durable_routing_experiments) if durable_routing_experiments is not None else None,
+        "routing_experiments": env_display.get(ROUTING_EXPERIMENTS_ENV),
+        "env_overrides": env_overrides,
+        "env_display": env_display,
+    }
+
+
+def _command_env_prefix(env_overrides: dict[str, str]) -> list[str]:
+    if not env_overrides:
+        return []
+    return ["env", *[f"{key}={env_overrides[key]}" for key in sorted(env_overrides)]]
+
+
+def _redacted_command_with_env(command: Sequence[str], env_overrides: dict[str, str] | None = None) -> str:
+    return _redacted_command([*_command_env_prefix(env_overrides or {}), *list(command)])
+
+
+def _apply_launch_env_overrides(env_overrides: dict[str, str]) -> dict[str, str | None]:
+    previous: dict[str, str | None] = {}
+    for key, value in env_overrides.items():
+        previous[key] = os.environ.get(key)
+        os.environ[key] = value
+    return previous
+
+
+def _restore_launch_env(previous: dict[str, str | None]) -> None:
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+def _write_provider_launch_log(stderr: Any, *, brand: str, launch_plan: dict[str, Any]) -> None:
+    launched_path = launch_plan.get("routing_experiments")
+    if launched_path:
+        stderr.write(
+            f"{brand} run launch: target={launch_plan.get('target')} port={launch_plan.get('port')} "
+            f"routing_experiments={launched_path}\n"
+        )
+
+
 def _dashboard_start_command() -> list[str]:
     return [
         sys.executable,
@@ -184,17 +260,21 @@ def _launch_start_service(
     *,
     name: str,
     command: Sequence[str],
+    env_overrides: dict[str, str] | None = None,
     health_url: str | None,
     timeout: float,
     dry_run: bool,
 ) -> tuple[dict[str, Any], subprocess.Popen[Any] | None]:
+    env_overrides = dict(env_overrides or {})
     result: dict[str, Any] = {
         "name": name,
-        "command": _redacted_command(command),
+        "command": _redacted_command_with_env(command, env_overrides),
         "status": "not-started",
         "started": False,
         "already_running": False,
     }
+    if env_overrides:
+        result["env_overrides"] = dict(env_overrides)
     if health_url:
         result["health_url"] = health_url
         healthy, payload, reason = _health_probe(health_url, timeout=timeout)
@@ -211,7 +291,11 @@ def _launch_start_service(
         return result, None
 
     try:
-        process = subprocess.Popen(list(command))
+        process_env = None
+        if env_overrides:
+            process_env = os.environ.copy()
+            process_env.update(env_overrides)
+        process = subprocess.Popen(list(command), env=process_env)
     except OSError as exc:
         result["status"] = "failed to start"
         result["error"] = type(exc).__name__
@@ -336,6 +420,10 @@ def _write_start_summary(stdout: Any, result: dict[str, Any]) -> None:
             continue
         status = service.get("status") or "unknown"
         stdout.write(f"{name}: {status}\n")
+        if service.get("command"):
+            stdout.write(f"  command: {service['command']}\n")
+        if service.get("routing_experiments"):
+            stdout.write(f"  routing_experiments: {service['routing_experiments']}\n")
         if service.get("reason"):
             stdout.write(f"  reason: {service['reason']}\n")
     if result.get("dry_run"):
@@ -398,15 +486,22 @@ def _start_result(
                 "reason": type(exc).__name__,
             }
             continue
+        launch_plan = _provider_launch_plan(target=target, proxy_args=proxy_args, config_dir=config_dir)
         service, process = _launch_start_service(
             name=target,
             command=_provider_start_command(proxy_args),
-            health_url=str(profile.get("health_url") or ""),
+            env_overrides=launch_plan["env_overrides"],
+            health_url=_configured_proxy_health_url(proxy_args) or str(profile.get("health_url") or ""),
             timeout=timeout,
             dry_run=dry_run,
         )
+        env_prefix = _redacted_command(_command_env_prefix(launch_plan["env_display"]))
+        profile_command = activation.shell_command_for_profile(profile, redact=True)
+        service["command"] = f"{env_prefix} {profile_command}" if env_prefix else profile_command
         service["local_base_url"] = profile.get("local_base_url")
         service["provider"] = profile.get("provider")
+        service["routing_experiments"] = launch_plan.get("routing_experiments")
+        service["port"] = launch_plan.get("port")
         result["services"][target] = service
         if process is not None:
             processes.append(process)
@@ -415,6 +510,7 @@ def _start_result(
         service, process = _launch_start_service(
             name="dashboard",
             command=_dashboard_start_command(),
+            env_overrides=None,
             health_url=DEFAULT_STATS_URL,
             timeout=timeout,
             dry_run=dry_run,
@@ -1207,39 +1303,28 @@ def _onboarding_cli(
             stderr.write(f"{brand} target is not configured: {args.target}. Run `{command_name} activate {args.target}` first.\n")
             return 1
         profile = config["targets"][args.target]
-        if args.dry_run:
-            stdout.write(activation.shell_command_for_profile(profile, redact=True) + "\n")
-            return 0
-        durable_routing_experiments = _prod_routing_experiments_path(
+        launch_plan = _provider_launch_plan(
             target=args.target,
             proxy_args=proxy_args,
             config_dir=args.config_dir,
         )
-        old_routing_experiments = os.environ.get(ROUTING_EXPERIMENTS_ENV)
-        old_routing_experiments_strict = os.environ.get(ROUTING_EXPERIMENTS_STRICT_ENV)
-        if durable_routing_experiments is not None:
-            os.environ[ROUTING_EXPERIMENTS_ENV] = str(durable_routing_experiments)
-            os.environ[ROUTING_EXPERIMENTS_STRICT_ENV] = "1"
-        launched_path = os.environ.get(ROUTING_EXPERIMENTS_ENV)
-        if launched_path:
-            stderr.write(
-                f"{brand} run launch: target={args.target} port={_configured_proxy_port(proxy_args)} "
-                f"routing_experiments={launched_path}\n"
-            )
+        if args.dry_run:
+            env_prefix = _redacted_command(_command_env_prefix(launch_plan["env_display"]))
+            command = activation.shell_command_for_profile(profile, redact=True)
+            stdout.write(f"{env_prefix} {command}\n" if env_prefix else command + "\n")
+            return 0
         from tokenclaw import server
 
+        previous_env = _apply_launch_env_overrides(launch_plan["env_overrides"])
+        launch_plan["routing_experiments"] = (
+            launch_plan["env_overrides"].get(ROUTING_EXPERIMENTS_ENV)
+            or os.environ.get(ROUTING_EXPERIMENTS_ENV)
+        )
+        _write_provider_launch_log(stderr, brand=brand, launch_plan=launch_plan)
         try:
             server.main(proxy_args)
         finally:
-            if durable_routing_experiments is not None:
-                if old_routing_experiments is None:
-                    os.environ.pop(ROUTING_EXPERIMENTS_ENV, None)
-                else:
-                    os.environ[ROUTING_EXPERIMENTS_ENV] = old_routing_experiments
-                if old_routing_experiments_strict is None:
-                    os.environ.pop(ROUTING_EXPERIMENTS_STRICT_ENV, None)
-                else:
-                    os.environ[ROUTING_EXPERIMENTS_STRICT_ENV] = old_routing_experiments_strict
+            _restore_launch_env(previous_env)
         return 0
 
     if args.command == "doctor":

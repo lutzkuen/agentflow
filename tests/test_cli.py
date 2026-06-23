@@ -300,8 +300,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
             stdout = io.StringIO()
             launched = []
 
-            def fake_popen(command):
-                launched.append(command)
+            def fake_popen(command, **kwargs):
+                launched.append({"command": command, "env": kwargs.get("env")})
                 return DummyStartProcess()
 
             with patch("tokenclaw.cli_commands.onboarding.httpx.get", side_effect=httpx.ConnectError("offline")), patch(
@@ -312,13 +312,93 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(len(launched), 3)
-            joined = "\n".join(" ".join(command) for command in launched)
+            joined = "\n".join(" ".join(launch["command"]) for launch in launched)
             self.assertIn("-m tokenclaw.server --provider openai", joined)
             self.assertIn("-m tokenclaw.server --provider anthropic", joined)
             self.assertIn("-m tokenclaw.dashboard", joined)
+            claude_launch = next(launch for launch in launched if "--provider" in launch["command"] and "anthropic" in launch["command"])
+            self.assertIsNotNone(claude_launch["env"])
+            self.assertEqual(
+                claude_launch["env"].get("TOKENCLAW_ROUTING_EXPERIMENTS"),
+                str(Path(tmp) / "routing_experiments.yaml"),
+            )
+            self.assertEqual(claude_launch["env"].get("TOKENCLAW_ROUTING_EXPERIMENTS_STRICT"), "1")
             config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
             self.assertEqual(sorted(config["targets"].keys()), ["claude", "openai"])
             self.assertIn("Press Ctrl-C to stop services started by this command.", stdout.getvalue())
+
+    def test_tokenclaw_start_claude_prod_dry_run_matches_run_routing_experiments_env(self):
+        upstream = "https://anthropic.example"
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "tokenclaw"
+            transient_path = Path(tmp) / "transient-routing-experiments.yaml"
+            cli.tokenclaw_cli(
+                ["activate", "claude", "--config-dir", str(config_dir), "--claude-base-url", upstream],
+                stdout=io.StringIO(),
+            )
+            start_stdout = io.StringIO()
+            run_stdout = io.StringIO()
+
+            with patch.dict(os.environ, {"TOKENCLAW_ROUTING_EXPERIMENTS": str(transient_path)}, clear=False), patch(
+                "tokenclaw.cli_commands.onboarding.httpx.get", side_effect=httpx.ConnectError("offline")
+            ):
+                start_code = cli.tokenclaw_cli(
+                    ["start", "--claude", "--no-dashboard", "--config-dir", str(config_dir), "--dry-run"],
+                    stdout=start_stdout,
+                )
+                run_code = cli.tokenclaw_cli(
+                    ["run", "claude", "--config-dir", str(config_dir), "--dry-run"],
+                    stdout=run_stdout,
+                )
+                self.assertEqual(os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS"), str(transient_path))
+                self.assertIsNone(os.environ.get("TOKENCLAW_ROUTING_EXPERIMENTS_STRICT"))
+
+        durable_path = config_dir / "routing_experiments.yaml"
+        self.assertEqual(start_code, 0)
+        self.assertEqual(run_code, 0)
+        for output in (start_stdout.getvalue(), run_stdout.getvalue()):
+            self.assertIn(f"TOKENCLAW_ROUTING_EXPERIMENTS={durable_path}", output)
+            self.assertIn("TOKENCLAW_ROUTING_EXPERIMENTS_STRICT=1", output)
+            self.assertIn("tokenclaw internal proxy --provider anthropic", output)
+            self.assertNotIn(str(transient_path), output)
+        self.assertIn(f"routing_experiments: {durable_path}", start_stdout.getvalue())
+
+    def test_tokenclaw_start_claude_dev_port_dry_run_preserves_transient_routing_experiments_env(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "tokenclaw"
+            transient_path = Path(tmp) / "transient-routing-experiments.yaml"
+            cli.tokenclaw_cli(
+                ["activate", "claude", "--config-dir", str(config_dir)],
+                stdout=io.StringIO(),
+            )
+            start_stdout = io.StringIO()
+            run_stdout = io.StringIO()
+
+            with patch.dict(
+                os.environ,
+                {"TOKENCLAW_PORT": "4001", "TOKENCLAW_ROUTING_EXPERIMENTS": str(transient_path)},
+                clear=False,
+            ), patch("tokenclaw.cli_commands.onboarding.httpx.get", side_effect=httpx.ConnectError("offline")):
+                start_code = cli.tokenclaw_cli(
+                    ["start", "--claude", "--no-dashboard", "--config-dir", str(config_dir), "--dry-run"],
+                    stdout=start_stdout,
+                )
+                run_code = cli.tokenclaw_cli(
+                    ["run", "claude", "--config-dir", str(config_dir), "--dry-run"],
+                    stdout=run_stdout,
+                )
+
+        durable_path = config_dir / "routing_experiments.yaml"
+        self.assertEqual(start_code, 0)
+        self.assertEqual(run_code, 0)
+        for output in (start_stdout.getvalue(), run_stdout.getvalue()):
+            self.assertIn(f"TOKENCLAW_ROUTING_EXPERIMENTS={transient_path}", output)
+            self.assertIn("tokenclaw internal proxy --provider anthropic", output)
+            self.assertIn("--port 4001", output)
+            self.assertNotIn("TOKENCLAW_ROUTING_EXPERIMENTS_STRICT=1", output)
+            self.assertNotIn(str(durable_path), output)
+        self.assertIn("claude: would start", start_stdout.getvalue())
+        self.assertIn(f"routing_experiments: {transient_path}", start_stdout.getvalue())
 
     def test_tokenclaw_start_flags_select_provider_or_dashboard_only(self):
         with TemporaryDirectory() as tmp:
