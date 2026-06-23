@@ -1378,7 +1378,9 @@ def _onboarding_cli(
                 stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
             else:
                 _write_json(stdout, result)
-            return 0 if result.get("ok") else 1
+            # A clean install has no legacy DB; "nothing to adopt" is a successful
+            # no-op, not an error. Real adoption failures raise instead.
+            return 0 if result.get("ok") or result.get("status") == "legacy-db-missing" else 1
 
     if args.command == "savings":
         if args.savings_command == "loop-bottlenecks":
