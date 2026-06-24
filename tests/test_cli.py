@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib
 import io
 import json
@@ -45,6 +45,27 @@ class ManagedFeedbackFlushClient:
     async def post(self, url, json, headers=None):
         self.calls.append({"url": url, "json": json, "timeout": self.timeout, "headers": dict(headers or {})})
         return httpx.Response(self.status_code, text=self.text, headers=dict(self.headers))
+
+
+class ManagedReadinessContractClient:
+    calls = []
+    contract_body = {}
+
+    def __init__(self, *, timeout=None):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, url, params=None, headers=None):
+        self.calls.append({"url": url, "params": dict(params or {}), "timeout": self.timeout, "headers": dict(headers or {})})
+        body = dict(self.contract_body)
+        if "expires_at" not in body:
+            body["expires_at"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        return httpx.Response(200, json=body)
 
 
 class DummyStartProcess:
@@ -331,6 +352,206 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertTrue(stats["managed_mode"]["server_calls_enabled"])
         self.assertTrue(stats["managed_mode"]["local_application_enabled"])
         self.assertEqual(doctor["managed_mode"]["mode"], "canary")
+
+    def test_doctor_json_managed_readiness_local_only_is_not_blocked(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "missing.sqlite3")
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            stdout = io.StringIO()
+            env = {
+                "TOKENCLAW_DB": db_path,
+                "TOKENCLAW_DATABASE_URL": "",
+                "TOKENCLAW_LOCAL_RULES_ONLY": "1",
+                "TOKENCLAW_MANAGED": "1",
+                "TOKENCLAW_MANAGED_MODE": "live",
+                "TOKENCLAW_RECOMMENDATION_SERVER_URL": "",
+                "TOKENCLAW_MANAGED_API_KEY": "",
+            }
+            def fake_get(url, **kwargs):
+                if str(url) == "http://127.0.0.1:4003/health":
+                    return httpx.Response(200, json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"})
+                raise AssertionError("local-only readiness must not call the managed server")
+
+            with patch.dict(os.environ, env, clear=False), patch("tokenclaw.managed_readiness.httpx.get", side_effect=fake_get):
+                code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        readiness = result["managed_readiness"]
+        self.assertTrue(readiness["ok"])
+        self.assertEqual(readiness["state"], "local_only")
+        self.assertEqual(readiness["status"], "local_only")
+        self.assertIn("local-rules-only", readiness["reason_codes"])
+        self.assertFalse(readiness["privacy"]["managed_server_calls_made"])
+
+    def test_doctor_json_managed_readiness_blocks_when_server_url_absent(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "missing.sqlite3")
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            stdout = io.StringIO()
+            env = {
+                "TOKENCLAW_DB": db_path,
+                "TOKENCLAW_DATABASE_URL": "",
+                "TOKENCLAW_LOCAL_RULES_ONLY": "0",
+                "TOKENCLAW_MANAGED": "1",
+                "TOKENCLAW_MANAGED_MODE": "dry_run",
+                "TOKENCLAW_RECOMMENDATION_SERVER_URL": "",
+                "TOKENCLAW_MANAGED_API_KEY": "",
+            }
+            def fake_get(url, **kwargs):
+                if str(url) == "http://127.0.0.1:4003/health":
+                    return httpx.Response(200, json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"})
+                raise AssertionError("missing server URL must not make a network call")
+
+            with patch.dict(os.environ, env, clear=False), patch("tokenclaw.managed_readiness.httpx.get", side_effect=fake_get):
+                code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
+
+        self.assertEqual(code, 1)
+        result = json.loads(stdout.getvalue())
+        readiness = result["managed_readiness"]
+        self.assertFalse(readiness["ok"])
+        self.assertEqual(readiness["state"], "blocked")
+        self.assertIn("server-url-not-configured", readiness["reason_codes"])
+        self.assertFalse(readiness["privacy"]["api_key_value_included"])
+
+    def test_doctor_json_managed_readiness_observe_only_ready_with_fake_server(self):
+        from tokenclaw.client_contract import CLIENT_CONTRACT_SCHEMA, clear_client_contract_cache
+
+        clear_client_contract_cache()
+        ManagedReadinessContractClient.calls = []
+        ManagedReadinessContractClient.contract_body = {
+            "schema": CLIENT_CONTRACT_SCHEMA,
+            "contract_id": "doctor-contract",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "app_family": "tokenclaw_doctor",
+            "measurement_plan": {
+                "preflight": ["input_features.api_endpoint"],
+                "outcome": ["outcome_features.status_bucket"],
+            },
+            "allowed_action_families": ["routing", "crunch", "cache"],
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_responses_included": False,
+                "provider_bodies_included": False,
+            },
+            "server_content_processing": False,
+            "provider_forwarding": False,
+        }
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "missing.sqlite3")
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            stdout = io.StringIO()
+            env = {
+                "TOKENCLAW_DB": db_path,
+                "TOKENCLAW_DATABASE_URL": "",
+                "TOKENCLAW_LOCAL_RULES_ONLY": "0",
+                "TOKENCLAW_MANAGED": "1",
+                "TOKENCLAW_MANAGED_MODE": "observe_only",
+                "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
+                "TOKENCLAW_MANAGED_API_KEY": "",
+            }
+            def fake_get(url, **kwargs):
+                if str(url) == "http://127.0.0.1:4003/health":
+                    return httpx.Response(200, json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"})
+                if str(url) == "http://127.0.0.1:4100/health":
+                    return httpx.Response(200, json={"ok": True, "schema": "tokenclaw.server_health.v1"})
+                raise AssertionError(f"unexpected GET {url}")
+
+            with patch.dict(os.environ, env, clear=False), patch(
+                "tokenclaw.managed_readiness.httpx.get",
+                side_effect=fake_get,
+            ), patch("tokenclaw.managed_readiness.httpx.AsyncClient", ManagedReadinessContractClient):
+                code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        readiness = result["managed_readiness"]
+        self.assertTrue(readiness["ok"])
+        self.assertEqual(readiness["state"], "observe_only_ready")
+        self.assertEqual(readiness["checks"]["server_reachability"]["status"], "reachable")
+        self.assertTrue(readiness["checks"]["client_contract"]["active"])
+        self.assertEqual(readiness["checks"]["client_contract"]["allowed_action_families"], ["cache", "crunch", "routing"])
+        self.assertIn("old_context_summarization", readiness["supported_local_action_families"])
+        self.assertEqual(readiness["enabled_local_action_families"], ["cache", "crunch", "routing"])
+        self.assertTrue(readiness["privacy"]["managed_server_calls_made"])
+        rendered = json.dumps(readiness, sort_keys=True)
+        self.assertNotIn("Bearer", rendered)
+        self.assertNotIn("raw prompt", rendered)
+        self.assertEqual(ManagedReadinessContractClient.calls[0]["params"]["app_family"], "tokenclaw_doctor")
+
+    def test_doctor_json_managed_readiness_blocks_on_stale_feedback_queue(self):
+        from tokenclaw.client_contract import CLIENT_CONTRACT_SCHEMA, clear_client_contract_cache
+        from tokenclaw.store import Store
+
+        clear_client_contract_cache()
+        ManagedReadinessContractClient.calls = []
+        ManagedReadinessContractClient.contract_body = {
+            "schema": CLIENT_CONTRACT_SCHEMA,
+            "contract_id": "doctor-contract",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "app_family": "tokenclaw_doctor",
+            "measurement_plan": {"preflight": ["input_features.api_endpoint"], "outcome": []},
+            "allowed_action_families": ["crunch"],
+            "privacy": {"metadata_only": True},
+        }
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+            store = Store(db_path)
+            try:
+                store.enqueue_managed_outcome_feedback(
+                    id="stale-feedback",
+                    created_at=old,
+                    updated_at=old,
+                    source_surface="anthropic_messages",
+                    endpoint="/v1/policy-events",
+                    optimization_unit_id=1,
+                    payload_json=json.dumps({"schema": "metadata-only"}),
+                    status="queued",
+                    attempts=0,
+                    next_attempt_at=old,
+                )
+            finally:
+                store.conn.close()
+            cli.tokenclaw_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            stdout = io.StringIO()
+            env = {
+                "TOKENCLAW_DB": db_path,
+                "TOKENCLAW_DATABASE_URL": "",
+                "TOKENCLAW_LOCAL_RULES_ONLY": "0",
+                "TOKENCLAW_MANAGED": "1",
+                "TOKENCLAW_MANAGED_MODE": "dry_run",
+                "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
+                "TOKENCLAW_MANAGED_API_KEY": "",
+                "TOKENCLAW_MANAGED_READINESS_QUEUE_STALE_SECONDS": "60",
+            }
+            def fake_get(url, **kwargs):
+                if str(url) == "http://127.0.0.1:4003/health":
+                    return httpx.Response(200, json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"})
+                if str(url) == "http://127.0.0.1:4100/health":
+                    return httpx.Response(200, json={"ok": True})
+                raise AssertionError(f"unexpected GET {url}")
+
+            with patch.dict(os.environ, env, clear=False), patch(
+                "tokenclaw.managed_readiness.httpx.get",
+                side_effect=fake_get,
+            ), patch("tokenclaw.managed_readiness.httpx.AsyncClient", ManagedReadinessContractClient):
+                code = cli.tokenclaw_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
+
+        self.assertEqual(code, 1)
+        result = json.loads(stdout.getvalue())
+        readiness = result["managed_readiness"]
+        self.assertEqual(readiness["state"], "blocked")
+        self.assertIn("managed-feedback-queue-stale", readiness["reason_codes"])
+        queue = readiness["checks"]["feedback_queue"]
+        self.assertEqual(queue["status"], "stale")
+        self.assertEqual(queue["pending_count"], 1)
+        self.assertEqual(queue["status_counts"]["queued"], 1)
+        self.assertGreater(queue["oldest_pending_age_seconds"], 60)
+        self.assertFalse(queue["raw_payload_included"])
 
     def test_tokenclaw_start_launches_default_stack_and_writes_profiles(self):
         with TemporaryDirectory() as tmp:

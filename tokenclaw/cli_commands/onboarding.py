@@ -1656,16 +1656,21 @@ def _activation_doctor_result(
 ) -> dict[str, Any]:
     from tokenclaw import activation
     from tokenclaw.managed_mode import managed_mode_public_meta
+    from tokenclaw.managed_readiness import build_managed_readiness
+
+    managed_readiness = build_managed_readiness(timeout=timeout)
+    managed_ready = bool(managed_readiness.get("ok")) or managed_readiness.get("state") == "local_only"
 
     if target == "start":
         start = _start_doctor_result(config, config_dir=config_dir, timeout=timeout)
         return {
             "schema": "tokenclaw.activation_doctor.v1",
-            "ok": bool(start.get("ok")),
+            "ok": bool(start.get("ok")) and managed_ready,
             "target": target,
             "config_path": str(activation.activation_config_path(config_dir)),
             "targets": {},
             "managed_mode": managed_mode_public_meta(),
+            "managed_readiness": managed_readiness,
             "start": start,
             "activation_successor_queue_health": _activation_successor_queue_health(),
         }
@@ -1690,11 +1695,12 @@ def _activation_doctor_result(
         targets[name] = checked
     return {
         "schema": "tokenclaw.activation_doctor.v1",
-        "ok": all(bool(item.get("ok")) for item in targets.values()),
+        "ok": all(bool(item.get("ok")) for item in targets.values()) and managed_ready,
         "target": target,
         "config_path": str(activation.activation_config_path(config_dir)),
         "targets": targets,
         "managed_mode": managed_mode_public_meta(),
+        "managed_readiness": managed_readiness,
         "activation_successor_queue_health": _activation_successor_queue_health(),
     }
 
@@ -2072,6 +2078,13 @@ def _write_activation_doctor_summary(stdout: Any, result: dict[str, Any]) -> Non
             f"(server calls: {str(bool(managed.get('server_calls_enabled'))).lower()}, "
             f"local apply: {str(bool(managed.get('local_application_enabled'))).lower()})\n"
         )
+    readiness = result.get("managed_readiness") if isinstance(result.get("managed_readiness"), dict) else {}
+    if readiness and (managed.get("configured") or managed.get("local_rules_only") or managed.get("server_calls_enabled")):
+        reasons = readiness.get("reason_codes") if isinstance(readiness.get("reason_codes"), list) else []
+        line = f"managed readiness: {readiness.get('state') or readiness.get('status') or 'unknown'}"
+        if reasons:
+            line += " (" + ", ".join(str(reason) for reason in reasons) + ")"
+        stdout.write(line + "\n")
     if result.get("target") == "start":
         start = result.get("start") if isinstance(result.get("start"), dict) else {}
         stdout.write(f"start: {start.get('status') or 'unknown'}\n")
