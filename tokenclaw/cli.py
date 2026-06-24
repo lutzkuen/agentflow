@@ -28,6 +28,7 @@ from tokenclaw.cli_common import (
 )
 from tokenclaw.env import env, env_float
 from tokenclaw.managed_egress import managed_egress_violations
+from tokenclaw.managed_activation_proof import managed_activation_proof_cli
 from tokenclaw.upstream_url import redact_url as _redact_url
 
 from tokenclaw.cli_commands.policy_bundle import (
@@ -1958,6 +1959,10 @@ def managed_activation_bundle_stage_main() -> None:
 
 def managed_activation_bundle_apply_main() -> None:
     raise SystemExit(managed_activation_bundle_apply_cli())
+
+
+def managed_activation_proof_main() -> None:
+    raise SystemExit(managed_activation_proof_cli())
 
 
 def openai_optimization_draft_dry_run_main() -> None:
