@@ -19,6 +19,7 @@ SUPPORTED_CRUNCH_PROFILES = {
     "compression",
 }
 SUPPORTED_CACHE_PROFILES = {"default", "exact", "semantic", "disabled", "managed"}
+THINKING_TAIL_WIDENING_SCHEDULE_SCHEMA = "agentflow.thinking_tail_widening_schedule.v1"
 RAW_ACTION_KEYS = {
     "prompt",
     "replacement_prompt",
@@ -85,6 +86,27 @@ def _iso_expired(value: Any, *, now: datetime | None = None) -> bool:
     return expires_at <= now
 
 
+def _version_tuple(value: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in value.replace("-", ".").split("."):
+        if not piece.isdigit():
+            break
+        parts.append(int(piece))
+    return tuple(parts)
+
+
+def _minimum_local_version_compatible(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return True
+    from tokenclaw import __version__
+
+    current = _version_tuple(__version__)
+    required = _version_tuple(value)
+    if not current or not required:
+        return True
+    return current >= required
+
+
 def _contains_raw_like_key(value: Any) -> bool:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -139,11 +161,20 @@ def _routing_section(payload: dict[str, Any], recommendation: dict[str, Any]) ->
     return result
 
 
-def _crunch_section(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _thinking_tail_schedule(section: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    readiness = section.get("thinking_tail_readiness")
+    if not isinstance(readiness, dict):
+        return {}, None
+    schedule = readiness.get("widening_schedule")
+    return readiness, schedule if isinstance(schedule, dict) else None
+
+
+def _crunch_section(payload: dict[str, Any], *, now: datetime | None = None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     section = payload.get("crunch")
     if not isinstance(section, dict):
         return {"status": "not-present", "applied": False}, None
     profile = str(section.get("profile") or "managed").strip().lower()
+    readiness, schedule = _thinking_tail_schedule(section)
     result = {
         "status": "candidate",
         "applied": False,
@@ -151,6 +182,40 @@ def _crunch_section(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         "policy_id": section.get("policy_id"),
         "candidate_id": section.get("candidate_id"),
     }
+    if readiness:
+        result["thinking_tail_readiness"] = readiness
+    if schedule:
+        result["widening_schedule"] = schedule
+        if schedule.get("schema") != THINKING_TAIL_WIDENING_SCHEDULE_SCHEMA:
+            result.update({
+                "status": "vetoed",
+                "applied": False,
+                "apply_reason": "unsupported-widening-schedule",
+                "veto_reason": "unsupported-widening-schedule",
+            })
+            return result, None
+        if _iso_expired(schedule.get("expires_at"), now=now):
+            result.update({
+                "status": "vetoed",
+                "applied": False,
+                "apply_reason": "expired-widening-schedule",
+                "veto_reason": "expired-widening-schedule",
+            })
+            return result, None
+    min_version = (
+        readiness.get("minimum_local_client_version")
+        if readiness
+        else section.get("minimum_local_client_version")
+    )
+    if not _minimum_local_version_compatible(min_version):
+        result.update({
+            "status": "vetoed",
+            "applied": False,
+            "apply_reason": "minimum-local-client-version-not-met",
+            "veto_reason": "minimum-local-client-version-not-met",
+            "minimum_local_client_version": min_version,
+        })
+        return result, None
     for key in (
         "traffic_treatment",
         "server_traffic_treatment",
@@ -170,6 +235,10 @@ def _crunch_section(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         "policy_id": section.get("policy_id"),
         "candidate_id": section.get("candidate_id"),
     }
+    if readiness:
+        effective["thinking_tail_readiness"] = readiness
+    if schedule:
+        effective["widening_schedule"] = schedule
     for key in (
         "traffic_treatment",
         "server_traffic_treatment",
@@ -405,6 +474,7 @@ def _unsupported_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "server_content_processing",
             "omitted_actions",
             "raw_payload_included",
+            "thinking_tail_readiness",
         }:
             unsupported.append({"section": key, "status": "unsupported", "reason": "unknown-section"})
     return unsupported
@@ -463,10 +533,13 @@ def evaluate_managed_local_actions(
         meta.update({"status": "skipped", "apply_reason": privacy_reason})
         return meta
 
-    crunch_meta, crunch_profile = _crunch_section(payload)
+    crunch_meta, crunch_profile = _crunch_section(payload, now=now)
     cache_meta, cache_profile = _cache_section(payload)
     meta["crunch"] = crunch_meta
     meta["cache"] = cache_meta
+    if crunch_meta.get("status") == "vetoed":
+        meta.update({"status": "skipped", "apply_reason": crunch_meta.get("apply_reason") or "local-crunch-vetoed"})
+        return meta
 
     if not application_enabled:
         meta.update({"status": "dry-run", "apply_reason": "local-action-dry-run"})

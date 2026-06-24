@@ -72,6 +72,72 @@ class ActionExecutorTests(unittest.TestCase):
                 decision[key] = value
         return decision
 
+    def _crunch_schedule(
+        self,
+        *,
+        target: str = "widen",
+        current: float = 0.10,
+        cap: float = 0.50,
+        increment: float = 0.40,
+        holdout: float = 0.05,
+        expires_at: str = "2026-01-02T00:00:00+00:00",
+    ) -> dict[str, object]:
+        return {
+            "schema": "agentflow.thinking_tail_widening_schedule.v1",
+            "action_family": "crunch",
+            "candidate_id": "thinking-tail-compaction",
+            "policy_id": "managed-crunch-policy",
+            "schedule_status": "widen-ready",
+            "treatment_target": target,
+            "current_fraction": current,
+            "next_fraction_cap": cap,
+            "max_fraction_increment": increment,
+            "holdout_fraction": holdout,
+            "minimum_applied_samples": 20,
+            "minimum_holdout_samples": 3,
+            "freshness_window_seconds": 604800,
+            "expires_at": expires_at,
+            "reason_codes": ["thinking-tail-widening-schedule-bounded"],
+            "feature_only": True,
+            "metadata_only": True,
+            "locally_executed": True,
+        }
+
+    def _crunch_decision_with_schedule(self, *, schedule: dict[str, object] | None = None, **overrides):
+        schedule = schedule or self._crunch_schedule()
+        extra_crunch = overrides.pop("crunch", {})
+        if not isinstance(extra_crunch, dict):
+            extra_crunch = {}
+        crunch_section = {
+            "candidate_id": "thinking-tail-compaction",
+            "thinking_tail_readiness": {
+                "schema": "agentflow.thinking_tail_readiness_summary.v1",
+                "source": "policy-decision",
+                "action_family": "crunch",
+                "candidate_id": "thinking-tail-compaction",
+                "policy_id": "managed-crunch-policy",
+                "readiness_state": "widen-ready",
+                "requested_next_local_action": "widen",
+                "minimum_local_client_version": "0.1.0",
+                "required_local_capabilities": ["crunch"],
+                "traffic_treatment": str(schedule.get("treatment_target") or "widen"),
+                "canary_fraction": float(schedule.get("next_fraction_cap") or 0.0),
+                "holdout_fraction": float(schedule.get("holdout_fraction") or 0.0),
+                "widening_schedule": schedule,
+                "feature_only": True,
+                "metadata_only": True,
+                "locally_executed": True,
+            },
+        }
+        crunch_section.update(extra_crunch)
+        decision = self._crunch_decision(
+            treatment=str(schedule.get("treatment_target") or "widen"),
+            fraction=float(schedule.get("next_fraction_cap") or 0.0),
+            crunch=crunch_section,
+            **overrides,
+        )
+        return decision
+
     def _write_crunch_rules(self, config: Path, *, fraction: float = 0.05, holdout: float = 0.10, manual_disabled: bool = False) -> Path:
         config.mkdir(parents=True, exist_ok=True)
         path = config / "crunch_rules.yaml"
@@ -441,6 +507,119 @@ anthropic_thinking_history_compaction:
         self.assertEqual(rule["policy_source"], "managed-recommended")
         self.assertEqual(rule["managed_controller"]["server_traffic_treatment"], "widen")
         self.assertIn("crunch", result["outcome_feedback"]["applied_families"])
+
+    def test_managed_crunch_widening_schedule_caps_fraction_and_records_metadata(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.10, holdout=0.10)
+            result = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision_with_schedule(
+                    schedule=self._crunch_schedule(current=0.10, cap=0.90, increment=0.20, holdout=0.07)
+                ),
+                now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        rule = data["anthropic_thinking_history_compaction"]["rules"][0]
+        policy_file = result["crunch"]["traffic_treatment_policy_file"]
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["server_traffic_treatment"], "widen")
+        self.assertAlmostEqual(rule["canary"]["canary_fraction"], 0.30)
+        self.assertAlmostEqual(rule["canary"]["holdout_fraction"], 0.07)
+        self.assertAlmostEqual(policy_file["recommended_fraction"], 0.30)
+        self.assertAlmostEqual(policy_file["schedule_next_fraction_cap"], 0.90)
+        self.assertEqual(
+            rule["managed_controller"]["widening_schedule"]["schema"],
+            "agentflow.thinking_tail_widening_schedule.v1",
+        )
+        self.assertIn("crunch", result["outcome_feedback"]["applied_families"])
+
+    def test_expired_managed_crunch_widening_schedule_vetoes_without_file_write(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.10, holdout=0.10)
+            before = path.read_text(encoding="utf-8")
+            result = self._execute_crunch(
+                config=config,
+                decision=self._crunch_decision_with_schedule(
+                    schedule=self._crunch_schedule(expires_at="2026-01-01T00:00:00+00:00")
+                ),
+                now=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+            after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["status"], "vetoed")
+        self.assertEqual(result["apply_reason"], "expired-widening-schedule")
+        self.assertEqual(result["crunch"]["status"], "vetoed")
+        self.assertEqual(result["crunch"]["veto_reason"], "expired-widening-schedule")
+        self.assertIn("crunch", result["outcome_feedback"]["vetoed_families"])
+        self.assertEqual(before, after)
+
+    def test_widening_schedule_respects_local_crunch_gate_without_assignment(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.10, holdout=0.10)
+            before = path.read_text(encoding="utf-8")
+            store = self._assignment_store(tmp)
+            try:
+                result = self._execute_crunch(
+                    config=config,
+                    decision=self._crunch_decision_with_schedule(),
+                    env={**self.managed_live_env, "TOKENCLAW_MANAGED_CRUNCH": "0"},
+                    store_obj=store,
+                    session_id="raw-schedule-disabled",
+                    now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                )
+                rows = store.managed_thinking_tail_assignment_rows()
+            finally:
+                store.conn.close()
+            after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["status"], "vetoed")
+        self.assertEqual(result["crunch"]["veto_reason"], "local-action-family-disabled")
+        self.assertEqual(before, after)
+        self.assertEqual(rows, [])
+
+    def test_rollback_assignment_retains_stop_for_later_widening_schedule_action(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.25, holdout=0.10)
+            store = self._assignment_store(tmp)
+            try:
+                rollback = self._execute_crunch(
+                    config=config,
+                    decision=self._crunch_decision_with_schedule(
+                        schedule=self._crunch_schedule(target="rollback", current=0.25, cap=0.0, increment=0.0),
+                        crunch={"action_id": "rollback-action"},
+                    ),
+                    store_obj=store,
+                    session_id="raw-schedule-rollback",
+                    now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                )
+                widen = self._execute_crunch(
+                    config=config,
+                    decision=self._crunch_decision_with_schedule(
+                        schedule=self._crunch_schedule(target="widen", current=0.0, cap=0.50, increment=0.25),
+                        crunch={"action_id": "new-widen-action"},
+                    ),
+                    store_obj=store,
+                    session_id="raw-schedule-rollback",
+                    now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                )
+                rows = store.managed_thinking_tail_assignment_rows()
+            finally:
+                store.conn.close()
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        rule = data["anthropic_thinking_history_compaction"]["rules"][0]
+        self.assertEqual(rollback["server_traffic_treatment"], "rollback")
+        self.assertEqual(widen["server_traffic_treatment"], "rollback")
+        self.assertEqual(widen["managed_thinking_tail_assignment"]["reason"], "rollback-retained")
+        self.assertFalse(rule["enabled"])
+        self.assertAlmostEqual(rule["canary"]["canary_fraction"], 0.0)
+        self.assertGreaterEqual(len(rows), 2)
+        self.assertTrue(all(row["treatment"] == "rollback" for row in rows))
 
     def test_managed_crunch_canary_updates_policy_file_without_route_membership(self):
         with TemporaryDirectory() as tmp:

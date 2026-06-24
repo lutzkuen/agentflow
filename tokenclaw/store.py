@@ -2314,6 +2314,42 @@ class SQLiteStore:
         ).fetchone()
         return dict(row) if row else None
 
+    def managed_thinking_tail_rollback_assignment(
+        self,
+        *,
+        source_surface: str | None,
+        session_id: str | None,
+        policy_id: str | None = None,
+        candidate_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        _assignment_id, session_key_hash, _cohort_key_hash = self._managed_thinking_tail_assignment_keys(
+            source_surface=source_surface,
+            session_id=session_id,
+            policy_id=policy_id,
+            action_id=None,
+            candidate_id=candidate_id,
+        )
+        row = self.conn.execute(
+            """
+            select *
+            from managed_thinking_tail_assignments
+            where source_surface = ?
+              and session_key_hash = ?
+              and policy_id = ?
+              and candidate_id = ?
+              and treatment = 'rollback'
+            order by updated_at desc
+            limit 1
+            """,
+            (
+                _safe_metadata_label(source_surface, fallback="anthropic_messages"),
+                session_key_hash,
+                _safe_metadata_label(policy_id, fallback="unknown-policy"),
+                _safe_metadata_label(candidate_id, fallback="unknown-candidate"),
+            ),
+        ).fetchone()
+        return dict(row) if row else None
+
     def upsert_managed_thinking_tail_assignment(self, **kwargs: Any) -> dict[str, Any]:
         now = kwargs.get("now") or utc_now()
         source_surface = _safe_metadata_label(kwargs.get("source_surface"), fallback="anthropic_messages")

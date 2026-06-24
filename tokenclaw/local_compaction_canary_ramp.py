@@ -24,6 +24,8 @@ POLICY_EVENTS_PATH = "/v1/policy-events"
 CRUNCH_RULES_FILE = "crunch_rules.yaml"
 THINKING_SECTION = "anthropic_thinking_history_compaction"
 THINKING_TARGET_CANDIDATE = "repeated-context-thinking-tool-result-gte-128k"
+THINKING_SERVER_CANDIDATE = "thinking-tail-compaction"
+THINKING_SUPPORTED_CANDIDATES = {THINKING_TARGET_CANDIDATE, THINKING_SERVER_CANDIDATE}
 OLD_CONTEXT_SECTION = "old_context_summarization"
 
 
@@ -158,6 +160,14 @@ def _source_crunch_section(decision: dict[str, Any]) -> dict[str, Any]:
     return section if isinstance(section, dict) else {}
 
 
+def _widening_schedule(crunch: dict[str, Any]) -> dict[str, Any]:
+    readiness = crunch.get("thinking_tail_readiness")
+    if not isinstance(readiness, dict):
+        return {}
+    schedule = readiness.get("widening_schedule")
+    return schedule if isinstance(schedule, dict) else {}
+
+
 def _managed_fraction(crunch: dict[str, Any], decision: dict[str, Any], key: str) -> float | None:
     for source in (crunch, decision):
         value = source.get(key)
@@ -204,6 +214,7 @@ def _managed_controller_meta(
         "candidate_id": crunch.get("candidate_id") or THINKING_TARGET_CANDIDATE,
         "policy_source": "managed-recommended",
         "server_traffic_treatment": treatment,
+        "widening_schedule": _widening_schedule(crunch) or None,
         "local_only": True,
         "metadata_only": True,
         "raw_content_included": False,
@@ -292,9 +303,11 @@ def apply_managed_thinking_compaction_treatment(
     timestamp = now or utc_now()
     crunch = _source_crunch_section(decision)
     candidate_id = str(crunch.get("candidate_id") or decision.get("candidate_id") or "")
+    schedule = _widening_schedule(crunch)
     treatment = _normalized_treatment(
         crunch.get("traffic_treatment")
         or crunch.get("server_traffic_treatment")
+        or schedule.get("treatment_target")
         or decision.get("traffic_treatment")
         or decision.get("server_traffic_treatment")
     )
@@ -326,7 +339,7 @@ def apply_managed_thinking_compaction_treatment(
         "privacy": _privacy(),
         "diff": "",
     }
-    if candidate_id and candidate_id != THINKING_TARGET_CANDIDATE:
+    if candidate_id and candidate_id not in THINKING_SUPPORTED_CANDIDATES:
         result.update({"ok": False, "status": "unsupported", "reason": "unsupported-crunch-candidate"})
         return result
     if rule is None:
@@ -346,15 +359,33 @@ def apply_managed_thinking_compaction_treatment(
     holdout = current_holdout
     if treatment in {"canary", "widen"}:
         fraction = _managed_fraction(crunch, decision, "canary_fraction")
+        if fraction is None and schedule.get("next_fraction_cap") is not None:
+            fraction = _bounded_fraction(schedule.get("next_fraction_cap"), current_fraction)
         if fraction is None:
             fraction = current_fraction
+        if schedule:
+            next_cap = _bounded_fraction(schedule.get("next_fraction_cap"), fraction)
+            current_from_schedule = _bounded_fraction(schedule.get("current_fraction"), current_fraction)
+            increment = _bounded_fraction(schedule.get("max_fraction_increment"), max(0.0, next_cap - current_from_schedule))
+            fraction = min(fraction, next_cap, current_from_schedule + increment)
+            if schedule.get("holdout_fraction") is not None:
+                holdout = _bounded_fraction(schedule.get("holdout_fraction"), holdout)
         reason = "managed-crunch-canary-fraction"
     elif treatment == "live":
         fraction = _managed_fraction(crunch, decision, "canary_fraction")
+        if fraction is None and schedule.get("next_fraction_cap") is not None:
+            fraction = _bounded_fraction(schedule.get("next_fraction_cap"), 1.0)
         if fraction is None:
             fraction = 1.0
+        if schedule:
+            next_cap = _bounded_fraction(schedule.get("next_fraction_cap"), fraction)
+            current_from_schedule = _bounded_fraction(schedule.get("current_fraction"), current_fraction)
+            increment = _bounded_fraction(schedule.get("max_fraction_increment"), max(0.0, next_cap - current_from_schedule))
+            fraction = min(fraction, next_cap, current_from_schedule + increment)
         server_holdout = _managed_fraction(crunch, decision, "holdout_fraction")
         holdout = 0.0 if server_holdout is None else server_holdout
+        if schedule and schedule.get("holdout_fraction") is not None:
+            holdout = _bounded_fraction(schedule.get("holdout_fraction"), holdout)
         reason = "managed-crunch-live-treatment"
     elif treatment == "rollback":
         fraction = 0.0
@@ -367,6 +398,10 @@ def apply_managed_thinking_compaction_treatment(
         holdout = max(0.0, 1.0 - fraction)
     result["recommended_fraction"] = fraction
     result["recommended_holdout_fraction"] = holdout
+    if schedule:
+        result["widening_schedule"] = schedule
+        result["schedule_next_fraction_cap"] = _bounded_fraction(schedule.get("next_fraction_cap"), fraction)
+        result["schedule_max_fraction_increment"] = _bounded_fraction(schedule.get("max_fraction_increment"), 0.0)
     result["reason"] = reason
     _apply_managed_thinking_edit(
         proposed,
@@ -728,7 +763,7 @@ def _current_thinking_rule(data: dict[str, Any]) -> tuple[dict[str, Any] | None,
         section["rules"] = []
         rules = section["rules"]
     for rule in rules:
-        if isinstance(rule, dict) and rule.get("candidate_id") == THINKING_TARGET_CANDIDATE:
+        if isinstance(rule, dict) and rule.get("candidate_id") in THINKING_SUPPORTED_CANDIDATES:
             return rule, section
     return None, section
 

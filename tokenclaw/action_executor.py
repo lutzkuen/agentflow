@@ -156,6 +156,15 @@ def _route_proposal(decision: dict[str, Any]) -> dict[str, Any]:
     return proposal if isinstance(proposal, dict) else {}
 
 
+def _thinking_tail_widening_schedule(decision: dict[str, Any]) -> dict[str, Any]:
+    crunch = decision.get("crunch") if isinstance(decision.get("crunch"), dict) else {}
+    readiness = crunch.get("thinking_tail_readiness")
+    if not isinstance(readiness, dict):
+        return {}
+    schedule = readiness.get("widening_schedule")
+    return schedule if isinstance(schedule, dict) else {}
+
+
 def _traffic_treatment(decision: dict[str, Any]) -> str | None:
     routing = decision.get("routing") if isinstance(decision.get("routing"), dict) else {}
     crunch = decision.get("crunch") if isinstance(decision.get("crunch"), dict) else {}
@@ -164,12 +173,16 @@ def _traffic_treatment(decision: dict[str, Any]) -> str | None:
         _route_proposal(decision),
         routing,
         crunch,
+        _thinking_tail_widening_schedule(decision),
         decision,
     ):
         if not isinstance(source, dict):
             continue
         treatment = _normalized_treatment(source.get("traffic_treatment") or source.get("server_traffic_treatment"))
         if treatment:
+            return treatment
+        treatment = _normalized_treatment(source.get("treatment_target"))
+        if treatment in STICKY_THINKING_TAIL_TREATMENTS:
             return treatment
     if decision.get("route_to_present") is True:
         return None
@@ -220,6 +233,11 @@ def _treatment_fraction(decision: dict[str, Any], name: str) -> float | None:
         value = _bounded_fraction(source.get(name))
         if value is not None:
             return value
+    schedule = _thinking_tail_widening_schedule(decision)
+    if name == "canary_fraction" and schedule.get("next_fraction_cap") is not None:
+        return _bounded_fraction(schedule.get("next_fraction_cap"))
+    if name == "holdout_fraction" and schedule.get("holdout_fraction") is not None:
+        return _bounded_fraction(schedule.get("holdout_fraction"))
     return None
 
 
@@ -645,6 +663,17 @@ class ActionExecutor:
             action_id=action_id,
             candidate_id=candidate_id,
         )
+        if (
+            treatment != "rollback"
+            and not existing
+            and hasattr(store_obj, "managed_thinking_tail_rollback_assignment")
+        ):
+            existing = store_obj.managed_thinking_tail_rollback_assignment(
+                source_surface=source_surface or decision.get("source_surface") or "anthropic_messages",
+                session_id=session_id,
+                policy_id=policy_id,
+                candidate_id=candidate_id,
+            )
         if treatment == "rollback" or not existing:
             row = store_obj.upsert_managed_thinking_tail_assignment(
                 now=now_iso,
@@ -696,7 +725,8 @@ class ActionExecutor:
             holdout_fraction=existing.get("holdout_fraction"),
             fraction_source="session-sticky-assignment",
         )
-        return effective, self._assignment_public_meta(row, status="reused", reason="session-sticky-assignment")
+        reason = "rollback-retained" if assigned_treatment == "rollback" else "session-sticky-assignment"
+        return effective, self._assignment_public_meta(row, status="reused", reason=reason)
 
     @staticmethod
     def _assignment_public_meta(row: dict[str, Any], *, status: str, reason: str) -> dict[str, Any]:
