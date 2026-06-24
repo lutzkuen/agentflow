@@ -87,6 +87,7 @@ from tokenclaw.recommendations import (
     queue_policy_event_feedback,
     queue_outcome_feedback,
 )
+from tokenclaw.local_compaction_canary_ramp import build_thinking_tail_feedback_freshness
 from tokenclaw.managed_session_tier import (
     apply_session_tier_to_body,
     count_tool_definitions,
@@ -1328,6 +1329,9 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         routing_meta["managed_preflight_pattern_features"] = preflight_pattern_features
         routing_meta["managed_request_facts"] = preflight_request_facts
         if policy_decisions_enabled():
+            recommendation_unit.setdefault("input_features", {})[
+                "thinking_tail_feedback_freshness"
+            ] = build_thinking_tail_feedback_freshness(context.store)
             recommendation_meta = await fetch_policy_decision(recommendation_unit, request_facts=preflight_request_facts)
         recommendation_meta = apply_recommendation_to_body(
             provider="anthropic",

@@ -9,6 +9,8 @@ import httpx
 
 from tokenclaw import recommendations
 from tokenclaw.crunch import crunch_body
+from tokenclaw.local_compaction_canary_ramp import build_thinking_tail_feedback_freshness
+from tokenclaw.managed_egress import ManagedEgressBlocked, assert_managed_egress_safe
 from tokenclaw.optimization import openai_features
 from tokenclaw.prompt_features import prompt_difficulty_features_from_text
 
@@ -62,6 +64,14 @@ class FakeAsyncClient:
 
 class _NoQueueStore:
     pass
+
+
+class _FeedbackFreshnessStore:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def managed_outcome_feedback_freshness_rows(self, *, limit=10000):
+        return list(self.rows[:limit])
 
 
 class RecommendationTest(unittest.TestCase):
@@ -134,6 +144,35 @@ class RecommendationTest(unittest.TestCase):
             "arbitrary payload string",
         ):
             self.assertNotIn(secret, text)
+
+    def _thinking_tail_feedback_row(
+        self,
+        *,
+        status,
+        created_at,
+        sent_at=None,
+        next_attempt_at=None,
+        last_error=None,
+    ):
+        return {
+            "id": f"thinking-{status}",
+            "created_at": created_at,
+            "updated_at": sent_at or created_at,
+            "source_surface": "anthropic_messages",
+            "endpoint": "/v1/policy-events",
+            "status": status,
+            "attempts": 1 if status != "queued" else 0,
+            "next_attempt_at": next_attempt_at or created_at,
+            "last_error": last_error,
+            "last_status_code": None,
+            "sent_at": sent_at,
+            "payload_json": json.dumps({
+                "schema": "tokenclaw.anthropic_thinking_history_compaction_lifecycle_feedback.v1",
+                "action_family": "crunch",
+                "candidate_id": "thinking-tail-compaction",
+                "policy_section": "anthropic_thinking_history_compaction.rules",
+            }),
+        }
 
     def _active_policy_contract_meta(
         self,
@@ -928,6 +967,131 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["route_down_probability"], 0.93)
         self.assertEqual(meta["model_artifact_version"], "routing-predictor-v1-abcd")
         self.assertEqual(meta["predictor_rule_id"], "routing-evidence:anthropic:sonnet->haiku")
+
+    def test_thinking_tail_feedback_freshness_marks_stale_and_fresh_backlog_proof(self):
+        stale = build_thinking_tail_feedback_freshness(
+            _FeedbackFreshnessStore([
+                self._thinking_tail_feedback_row(
+                    status="queued",
+                    created_at="2026-06-23T08:00:00+00:00",
+                    next_attempt_at="2026-06-23T08:01:00+00:00",
+                )
+            ]),
+            now="2026-06-24T08:00:00+00:00",
+            max_age_seconds=3600,
+        )
+        fresh = build_thinking_tail_feedback_freshness(
+            _FeedbackFreshnessStore([
+                self._thinking_tail_feedback_row(
+                    status="sent",
+                    created_at="2026-06-24T07:58:00+00:00",
+                    sent_at="2026-06-24T07:59:00+00:00",
+                )
+            ]),
+            now="2026-06-24T08:00:00+00:00",
+            max_age_seconds=3600,
+        )
+
+        self.assertEqual(stale["schema"], "tokenclaw.thinking_tail_feedback_freshness.v1")
+        self.assertEqual(stale["status"], "stale")
+        self.assertTrue(stale["stale"])
+        self.assertIn("thinking-tail-feedback-pending", stale["reason_codes"])
+        self.assertIn("thinking-tail-feedback-no-successful-drain", stale["reason_codes"])
+        self.assertEqual(stale["backlog_proof"]["queued"], 1)
+        self.assertEqual(stale["backlog_proof"]["pending"], 1)
+        self.assertEqual(stale["backlog_proof"]["queue_fraction"], 1.0)
+        self.assertFalse(stale["payload_json_included"])
+
+        self.assertEqual(fresh["status"], "fresh")
+        self.assertFalse(fresh["stale"])
+        self.assertEqual(fresh["reason_codes"], ["thinking-tail-feedback-fresh"])
+        self.assertEqual(fresh["backlog_proof"]["sent"], 1)
+        self.assertEqual(fresh["backlog_proof"]["queue_fraction"], 0.0)
+        self.assertEqual(fresh["last_successful_drain_age_seconds"], 60)
+
+    def test_policy_decision_preflight_includes_thinking_tail_feedback_freshness_without_raw_fields(self):
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        FakeAsyncClient.response = FakeResponse(body={
+            "schema": "tokenclaw.policy_decision.v1",
+            "policy_id": "thinking-tail-policy-decision",
+            "confidence": 0.91,
+            "provider_forwarding": False,
+            "server_content_processing": False,
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+            "routing": {
+                "status": "recommended",
+                "target_model": "claude-sonnet-4-6",
+                "confidence": 0.91,
+                "reason_codes": ["thinking-tail-readiness-evaluated"],
+            },
+        })
+        freshness = build_thinking_tail_feedback_freshness(
+            _FeedbackFreshnessStore([
+                self._thinking_tail_feedback_row(
+                    status="sent",
+                    created_at="2026-06-24T07:58:00+00:00",
+                    sent_at="2026-06-24T07:59:00+00:00",
+                )
+            ]),
+            now="2026-06-24T08:00:00+00:00",
+            max_age_seconds=3600,
+        )
+        freshness["raw_request"] = "raw request body must not leave local"
+        freshness["file_path"] = "/tmp/raw/local/file.py"
+        freshness["cache_key"] = "raw-cache-key"
+        unit = {
+            "source_surface": "anthropic_messages",
+            "granularity": "provider_request",
+            "app_family": "claude_code",
+            "requested_model": "claude-sonnet-4-6",
+            "candidate_target_model": "claude-sonnet-4-6",
+            "input_features": {
+                "category": "tool-result",
+                "text_chars": 131072,
+                "input_tokens_est": 32768,
+                "thinking_tail_feedback_freshness": freshness,
+            },
+            "tool_features": {"has_tools": True},
+        }
+        request_facts = recommendations.build_request_facts_envelope(
+            provider="anthropic",
+            path="/v1/messages",
+            body={"model": "claude-sonnet-4-6", "stream": True, "messages": []},
+            requested_model="claude-sonnet-4-6",
+            stream=True,
+            input_tokens_est=32768,
+            session_id="local-session-secret",
+        )
+        paths = self._active_policy_contract_meta()["contract"]["measurement_plan"]["preflight"] + [
+            "input_features.thinking_tail_feedback_freshness",
+        ]
+
+        with self._active_policy_contract_patch(paths=paths):
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_policy_decision(unit, request_facts=request_facts))
+
+        sent = FakeAsyncClient.last_json
+        proof = sent["input_features"]["thinking_tail_feedback_freshness"]
+        self.assertEqual(meta["status"], "received")
+        self.assertEqual(proof["schema"], "tokenclaw.thinking_tail_feedback_freshness.v1")
+        self.assertEqual(proof["status"], "fresh")
+        self.assertEqual(proof["backlog_proof"]["sent"], 1)
+        self.assertFalse(proof["payload_json_included"])
+        self.assertNotIn("raw_request", self._keys_in(proof))
+        self.assertNotIn("file_path", self._keys_in(proof))
+        self.assertNotIn("cache_key", self._keys_in(proof))
+        self.assertNotIn("raw request body must not leave local", str(sent))
+        self.assertNotIn("/tmp/raw/local/file.py", str(sent))
+        self.assertNotIn("raw-cache-key", str(sent))
+
+        unsafe = json.loads(json.dumps(sent))
+        unsafe["input_features"]["thinking_tail_feedback_freshness"]["raw_request"] = "raw request body"
+        unsafe["input_features"]["thinking_tail_feedback_freshness"]["file_path"] = "/tmp/raw/local/file.py"
+        unsafe["input_features"]["thinking_tail_feedback_freshness"]["cache_key"] = "raw-cache-key"
+        with self.assertRaises(ManagedEgressBlocked):
+            assert_managed_egress_safe(unsafe)
 
     def test_policy_decision_fetch_omits_openai_non_feature_input_diagnostics(self):
         os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"

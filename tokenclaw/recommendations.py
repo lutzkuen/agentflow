@@ -1392,6 +1392,16 @@ def _policy_decision_payload_from_request_facts(envelope: dict[str, Any]) -> dic
     return _sanitize_features(payload)
 
 
+def _policy_decision_extra_input_features(unit: dict[str, Any]) -> dict[str, Any]:
+    raw_input_features = unit.get("input_features") if isinstance(unit.get("input_features"), dict) else {}
+    safe_input_features = _policy_decision_input_features(raw_input_features)
+    extra: dict[str, Any] = {}
+    thinking_tail_freshness = safe_input_features.get("thinking_tail_feedback_freshness")
+    if isinstance(thinking_tail_freshness, dict):
+        extra["thinking_tail_feedback_freshness"] = thinking_tail_freshness
+    return _sanitize_features(extra)
+
+
 def _policy_decision_input_features(value: Any) -> dict[str, Any]:
     """Return endpoint-safe feature fields for /v1/policy-decision input_features."""
 
@@ -1539,6 +1549,8 @@ async def fetch_policy_decision(unit: dict[str, Any], *, request_facts: dict[str
             if request_facts is not None
             else _policy_decision_preflight_payload(unit)
         )
+        if request_facts is not None:
+            payload.setdefault("input_features", {}).update(_policy_decision_extra_input_features(unit))
         contract_meta = await _client_contract_for_payload(payload)
         payload = _attach_client_contract_to_preflight(payload, contract_meta)
         measurement = execute_preflight_measurement_plan(payload, contract_meta)

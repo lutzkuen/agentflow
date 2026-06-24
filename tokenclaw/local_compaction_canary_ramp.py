@@ -6,6 +6,7 @@ import difflib
 import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,6 +21,8 @@ SCHEMA = "tokenclaw.local_compaction_canary_ramp.v1"
 DECISION_SCHEMA = "tokenclaw.local_compaction_canary_ramp_decision.v1"
 MANAGED_TREATMENT_SCHEMA = "tokenclaw.managed_thinking_compaction_treatment_apply.v1"
 MANAGED_FEEDBACK_DRAIN_SCHEMA = "tokenclaw.thinking_tail_feedback_pre_widen_drain.v1"
+MANAGED_FEEDBACK_FRESHNESS_SCHEMA = "tokenclaw.thinking_tail_feedback_freshness.v1"
+MANAGED_FEEDBACK_BACKLOG_PROOF_SCHEMA = "tokenclaw.thinking_tail_feedback_backlog_proof.v1"
 ROLLBACK_FEEDBACK_SCHEMA = "tokenclaw.local_compaction_rollback_feedback.v1"
 ROLLBACK_FEEDBACK_SOURCE_SURFACE = "anthropic_thinking_compaction_rollback"
 POLICY_EVENTS_PATH = "/v1/policy-events"
@@ -175,6 +178,120 @@ def _feedback_snapshot(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "latest_sent_at": latest_sent_at,
         "last_error_class": last_error_class,
         "payload_json_included": False,
+    }
+
+
+def _parse_utc_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _age_seconds(value: Any, now: datetime) -> int | None:
+    parsed = _parse_utc_datetime(value)
+    if parsed is None:
+        return None
+    return max(0, int((now - parsed).total_seconds()))
+
+
+def _dropped_feedback_count(status_counts: dict[str, int]) -> int:
+    return sum(
+        int(status_counts.get(status, 0))
+        for status in ("dropped-after-limit", "error", "expired")
+    )
+
+
+def build_thinking_tail_feedback_freshness(
+    store_obj: Any,
+    *,
+    limit: int = 10_000,
+    max_age_seconds: int = 24 * 60 * 60,
+    now: str | datetime | None = None,
+) -> dict[str, Any]:
+    """Build compact feature-only freshness proof for managed thinking-tail preflights."""
+
+    if isinstance(now, datetime):
+        now_dt = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    else:
+        now_dt = _parse_utc_datetime(now) or datetime.now(timezone.utc)
+    max_age = max(1, int(max_age_seconds or 1))
+    rows = _thinking_tail_feedback_rows(store_obj, limit=limit)
+    snapshot = _feedback_snapshot(rows)
+    status_counts = {
+        str(key): int(value)
+        for key, value in snapshot["status_counts"].items()
+        if int(value)
+    }
+    newest_outcome_at = None
+    for row in rows:
+        created_at = str(row.get("created_at") or "")
+        if created_at and (newest_outcome_at is None or created_at > newest_outcome_at):
+            newest_outcome_at = created_at
+    latest_sent_at = snapshot.get("latest_sent_at")
+    newest_outcome_age = _age_seconds(newest_outcome_at, now_dt)
+    last_successful_drain_age = _age_seconds(latest_sent_at, now_dt)
+    total = int(snapshot["row_count"])
+    pending = int(snapshot["pending_count"])
+    sent = int(snapshot["sent_count"])
+    dropped = _dropped_feedback_count(status_counts)
+    due = int(snapshot["due_count"])
+    reason_codes: list[str] = []
+    if total <= 0:
+        reason_codes.append("thinking-tail-feedback-missing")
+    if pending:
+        reason_codes.append("thinking-tail-feedback-pending")
+    if due:
+        reason_codes.append("thinking-tail-feedback-due")
+    if dropped:
+        reason_codes.append("thinking-tail-feedback-dropped")
+    if sent <= 0:
+        reason_codes.append("thinking-tail-feedback-no-successful-drain")
+    if newest_outcome_age is not None and newest_outcome_age > max_age:
+        reason_codes.append("thinking-tail-feedback-outcome-stale")
+    if last_successful_drain_age is not None and last_successful_drain_age > max_age:
+        reason_codes.append("thinking-tail-feedback-drain-stale")
+
+    queue_fraction = round((pending / total), 6) if total else 0.0
+    backlog_proof = {
+        "schema": MANAGED_FEEDBACK_BACKLOG_PROOF_SCHEMA,
+        "action_family": "crunch",
+        "candidate_id": THINKING_SERVER_CANDIDATE,
+        "row_count": total,
+        "queued": int(status_counts.get("queued", 0)),
+        "retryable_error": int(status_counts.get("retryable-error", 0)),
+        "sent": sent,
+        "dropped": dropped,
+        "due": due,
+        "pending": pending,
+        "queue_fraction": queue_fraction,
+        "status_counts": status_counts,
+        "payload_json_included": False,
+    }
+    return {
+        "schema": MANAGED_FEEDBACK_FRESHNESS_SCHEMA,
+        "action_family": "crunch",
+        "candidate_id": THINKING_SERVER_CANDIDATE,
+        "status": "fresh" if not reason_codes else "stale",
+        "stale": bool(reason_codes),
+        "reason_codes": reason_codes or ["thinking-tail-feedback-fresh"],
+        "generated_at": now_dt.isoformat(),
+        "max_age_seconds": max_age,
+        "newest_local_outcome_at": newest_outcome_at,
+        "newest_local_outcome_age_seconds": newest_outcome_age,
+        "last_successful_drain_at": latest_sent_at,
+        "last_successful_drain_age_seconds": last_successful_drain_age,
+        "backlog_proof": backlog_proof,
+        "payload_json_included": False,
+        "privacy": _privacy(),
     }
 
 
