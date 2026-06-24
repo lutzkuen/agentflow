@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -24,6 +25,7 @@ HOLD_TRAFFIC_TREATMENTS = {"hold", "held", "observe", "none"}
 HOLDOUT_TRAFFIC_TREATMENTS = {"holdout"}
 SHADOW_TRAFFIC_TREATMENTS = {"shadow"}
 VETO_TRAFFIC_TREATMENTS = {"veto", "vetoed", "safety_blocked", "blocked", "unsupported"}
+STICKY_THINKING_TAIL_TREATMENTS = {"holdout", "canary", "widen", "live", "rollback"}
 LOCAL_RUNTIME_DECISION_KEYS = {
     "action_executor",
     "api_key_value_included",
@@ -211,7 +213,8 @@ def _bounded_fraction(value: Any) -> float | None:
 
 def _treatment_fraction(decision: dict[str, Any], name: str) -> float | None:
     routing = decision.get("routing") if isinstance(decision.get("routing"), dict) else {}
-    for source in (_route_proposal(decision), routing, decision):
+    crunch = decision.get("crunch") if isinstance(decision.get("crunch"), dict) else {}
+    for source in (_route_proposal(decision), routing, crunch, decision):
         if not isinstance(source, dict):
             continue
         value = _bounded_fraction(source.get(name))
@@ -274,6 +277,8 @@ class ActionExecutor:
     now: datetime | None = None
     config_dir: str | None = None
     crunch_rules_path: str | None = None
+    store_obj: Any | None = None
+    session_id: str | None = None
 
     def execute(
         self,
@@ -302,6 +307,13 @@ class ActionExecutor:
             application_enabled
             and self.enabled
             and (product_mode.local_application_enabled if enforce_product_mode else True)
+        )
+        decision, thinking_tail_assignment = self._apply_sticky_thinking_tail_treatment(
+            decision,
+            source_surface=source_surface,
+            application_allowed=application_allowed,
+            product_mode=product_mode,
+            supported=supported,
         )
         action_decision = {
             key: value
@@ -368,6 +380,8 @@ class ActionExecutor:
             "effective_profiles": dict(local_actions.get("effective_profiles") or {}),
             "raw_payload_included": False,
         }
+        if thinking_tail_assignment is not None:
+            result["managed_thinking_tail_assignment"] = thinking_tail_assignment
 
         if self.require_signature and not (
             decision.get("signed")
@@ -537,7 +551,179 @@ class ActionExecutor:
             "server_traffic_treatment": treatment_result.get("server_traffic_treatment"),
             "candidate_id": treatment_result.get("candidate_id"),
         })
+        if treatment_result.get("reason") == "local-manual-disabled":
+            self._record_sticky_thinking_tail_veto(decision, "local-manual-disabled")
         return treatment_result
+
+    def _record_sticky_thinking_tail_veto(self, decision: dict[str, Any], reason: str) -> None:
+        store_obj = self.store_obj
+        if store_obj is None or not self.session_id or not hasattr(store_obj, "upsert_managed_thinking_tail_assignment"):
+            return
+        crunch = decision.get("crunch") if isinstance(decision.get("crunch"), dict) else {}
+        candidate_id = crunch.get("candidate_id") or decision.get("candidate_id")
+        if not candidate_id:
+            return
+        existing = None
+        if hasattr(store_obj, "managed_thinking_tail_assignment"):
+            existing = store_obj.managed_thinking_tail_assignment(
+                source_surface=decision.get("source_surface") or "anthropic_messages",
+                session_id=self.session_id,
+                policy_id=decision.get("policy_id") or crunch.get("policy_id"),
+                action_id=crunch.get("action_id") or decision.get("action_id"),
+                candidate_id=candidate_id,
+            )
+        treatment = str((existing or {}).get("treatment") or _traffic_treatment(decision) or "hold")
+        store_obj.upsert_managed_thinking_tail_assignment(
+            now=self.now.isoformat() if self.now else None,
+            provider=self.provider,
+            source_surface=decision.get("source_surface") or "anthropic_messages",
+            session_id=self.session_id,
+            policy_id=decision.get("policy_id") or crunch.get("policy_id"),
+            decision_id=decision.get("decision_id"),
+            action_id=crunch.get("action_id") or decision.get("action_id"),
+            candidate_id=candidate_id,
+            treatment=treatment,
+            server_traffic_treatment=treatment,
+            canary_fraction=(existing or {}).get("canary_fraction") if existing else _treatment_fraction(decision, "canary_fraction"),
+            holdout_fraction=(existing or {}).get("holdout_fraction") if existing else _treatment_fraction(decision, "holdout_fraction"),
+            fraction_source=(existing or {}).get("fraction_source") or "server",
+            local_veto_reason=reason,
+        )
+
+    def _apply_sticky_thinking_tail_treatment(
+        self,
+        decision: dict[str, Any],
+        *,
+        source_surface: str | None,
+        application_allowed: bool,
+        product_mode: Any,
+        supported: set[str],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Pin managed thinking-tail crunch treatment to a hashed session cohort.
+
+        The managed server still owns the policy and rollback decision. Local
+        stickiness only prevents widening/live fraction changes from mixing
+        treatment cohorts inside one long session.
+        """
+        store_obj = self.store_obj
+        session_id = self.session_id
+        crunch = decision.get("crunch") if isinstance(decision.get("crunch"), dict) else {}
+        candidate_id = crunch.get("candidate_id") or decision.get("candidate_id")
+        if (
+            store_obj is None
+            or not session_id
+            or self.provider != "anthropic"
+            or not isinstance(crunch, dict)
+            or not candidate_id
+            or "crunch" not in supported
+            or not application_allowed
+            or not bool(getattr(product_mode, "server_calls_enabled", False))
+            or not bool(getattr(product_mode, "local_application_enabled", False))
+        ):
+            return decision, None
+        if not hasattr(store_obj, "managed_thinking_tail_assignment") or not hasattr(
+            store_obj,
+            "upsert_managed_thinking_tail_assignment",
+        ):
+            return decision, None
+
+        treatment = _traffic_treatment(decision)
+        if treatment not in STICKY_THINKING_TAIL_TREATMENTS:
+            return decision, None
+
+        policy_id = decision.get("policy_id") or crunch.get("policy_id")
+        action_id = crunch.get("action_id") or decision.get("action_id")
+        now_iso = self.now.isoformat() if self.now else None
+        fraction = _treatment_fraction(decision, "canary_fraction")
+        holdout = _treatment_fraction(decision, "holdout_fraction")
+        if treatment == "rollback":
+            fraction = 0.0
+        existing = store_obj.managed_thinking_tail_assignment(
+            source_surface=source_surface or decision.get("source_surface") or "anthropic_messages",
+            session_id=session_id,
+            policy_id=policy_id,
+            action_id=action_id,
+            candidate_id=candidate_id,
+        )
+        if treatment == "rollback" or not existing:
+            row = store_obj.upsert_managed_thinking_tail_assignment(
+                now=now_iso,
+                provider=self.provider,
+                source_surface=source_surface or decision.get("source_surface") or "anthropic_messages",
+                session_id=session_id,
+                policy_id=policy_id,
+                decision_id=decision.get("decision_id"),
+                action_id=action_id,
+                candidate_id=candidate_id,
+                treatment=treatment,
+                server_traffic_treatment=treatment,
+                canary_fraction=fraction,
+                holdout_fraction=holdout,
+                fraction_source="server",
+            )
+            return decision, self._assignment_public_meta(row, status="recorded", reason="new-session-assignment")
+
+        assigned_treatment = str(existing.get("treatment") or "").strip().lower()
+        if assigned_treatment not in STICKY_THINKING_TAIL_TREATMENTS:
+            return decision, self._assignment_public_meta(existing, status="ignored", reason="stored-treatment-invalid")
+
+        effective = copy.deepcopy(decision)
+        effective_crunch = effective.setdefault("crunch", {})
+        if isinstance(effective_crunch, dict):
+            effective_crunch["traffic_treatment"] = assigned_treatment
+            effective_crunch["server_traffic_treatment"] = assigned_treatment
+            if existing.get("canary_fraction") is not None:
+                effective_crunch["canary_fraction"] = float(existing["canary_fraction"])
+            if existing.get("holdout_fraction") is not None:
+                effective_crunch["holdout_fraction"] = float(existing["holdout_fraction"])
+        effective["server_traffic_treatment"] = assigned_treatment
+        if existing.get("canary_fraction") is not None:
+            effective["canary_fraction"] = float(existing["canary_fraction"])
+        if existing.get("holdout_fraction") is not None:
+            effective["holdout_fraction"] = float(existing["holdout_fraction"])
+        row = store_obj.upsert_managed_thinking_tail_assignment(
+            now=now_iso,
+            provider=self.provider,
+            source_surface=source_surface or decision.get("source_surface") or "anthropic_messages",
+            session_id=session_id,
+            policy_id=policy_id,
+            decision_id=decision.get("decision_id"),
+            action_id=action_id,
+            candidate_id=candidate_id,
+            treatment=assigned_treatment,
+            server_traffic_treatment=assigned_treatment,
+            canary_fraction=existing.get("canary_fraction"),
+            holdout_fraction=existing.get("holdout_fraction"),
+            fraction_source="session-sticky-assignment",
+        )
+        return effective, self._assignment_public_meta(row, status="reused", reason="session-sticky-assignment")
+
+    @staticmethod
+    def _assignment_public_meta(row: dict[str, Any], *, status: str, reason: str) -> dict[str, Any]:
+        return {
+            "schema": "tokenclaw.managed_thinking_tail_assignment_public.v1",
+            "status": status,
+            "reason": reason,
+            "assignment_id": row.get("id"),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "source_surface": row.get("source_surface"),
+            "policy_id": row.get("policy_id"),
+            "action_id": row.get("action_id"),
+            "candidate_id": row.get("candidate_id"),
+            "treatment": row.get("treatment"),
+            "server_traffic_treatment": row.get("server_traffic_treatment"),
+            "canary_fraction": row.get("canary_fraction"),
+            "holdout_fraction": row.get("holdout_fraction"),
+            "fraction_source": row.get("fraction_source"),
+            "session_key_hash": row.get("session_key_hash"),
+            "cohort_key_hash": row.get("cohort_key_hash"),
+            "metadata_only": True,
+            "raw_session_ids_included": False,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "raw_thinking_text_included": False,
+        }
 
     def _preview_managed_crunch_treatment(self, result: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any] | None:
         crunch = decision.get("crunch")

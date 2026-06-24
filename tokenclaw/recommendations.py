@@ -1915,9 +1915,11 @@ def apply_policy_decision_routing_to_body(
     body: dict[str, Any],
     routing_meta: dict[str, Any],
     recommendation_meta: dict[str, Any],
+    store_obj: Any | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     meta = dict(recommendation_meta)
-    executor = ActionExecutor(provider=provider)
+    executor = ActionExecutor(provider=provider, store_obj=store_obj, session_id=session_id)
     if meta.get("status") != "received":
         meta.setdefault("applied", False)
         meta.setdefault("local_action_taken", "fallback")
@@ -2162,6 +2164,8 @@ def apply_recommendation_to_body(
     body: dict[str, Any],
     routing_meta: dict[str, Any],
     recommendation_meta: dict[str, Any],
+    store_obj: Any | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     if recommendation_meta.get("policy_decision_schema") == POLICY_DECISION_SCHEMA:
         return apply_policy_decision_routing_to_body(
@@ -2169,6 +2173,8 @@ def apply_recommendation_to_body(
             body=body,
             routing_meta=routing_meta,
             recommendation_meta=recommendation_meta,
+            store_obj=store_obj,
+            session_id=session_id,
         )
 
     meta = dict(recommendation_meta)

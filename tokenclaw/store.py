@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sqlite3
@@ -95,6 +96,11 @@ def _safe_metadata_label(value: Any, *, fallback: str = "unknown") -> str:
     if len(text) > 160 or any(marker in lowered for marker in raw_markers):
         return "redacted-metadata-label"
     return text
+
+
+def _metadata_hash(value: Any, *, fallback: str = "unknown") -> str:
+    text = str(value or fallback)
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _infer_source_surface(*, provider: Any, source_surface: Any, endpoint: Any, path: Any) -> str:
@@ -881,6 +887,28 @@ class SQLiteStore:
             )
             """)
             cur.execute("""
+            create table if not exists managed_thinking_tail_assignments (
+              id text primary key,
+              created_at text not null,
+              updated_at text not null,
+              provider text not null,
+              source_surface text not null,
+              session_key_hash text not null,
+              cohort_key_hash text not null,
+              policy_id text,
+              decision_id text,
+              action_id text,
+              candidate_id text,
+              treatment text not null,
+              server_traffic_treatment text,
+              canary_fraction real,
+              holdout_fraction real,
+              fraction_source text,
+              local_veto_reason text,
+              assignment_json text not null
+            )
+            """)
+            cur.execute("""
             create table if not exists request_shape_rollups (
               id text primary key,
               run_id text not null,
@@ -1018,6 +1046,14 @@ class SQLiteStore:
             cur.execute("""
             create index if not exists idx_promotion_outcome_feedback_key
             on promotion_outcome_feedback(policy_id, action_family, policy_section, created_at)
+            """)
+            cur.execute("""
+            create unique index if not exists idx_managed_thinking_tail_assignments_key
+            on managed_thinking_tail_assignments(source_surface, session_key_hash, cohort_key_hash)
+            """)
+            cur.execute("""
+            create index if not exists idx_managed_thinking_tail_assignments_recent
+            on managed_thinking_tail_assignments(updated_at, treatment)
             """)
             cur.execute("""
             create index if not exists idx_request_shape_rollups_recent
@@ -2228,6 +2264,181 @@ class SQLiteStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def _managed_thinking_tail_assignment_keys(
+        self,
+        *,
+        source_surface: str | None,
+        session_id: str | None,
+        policy_id: str | None,
+        action_id: str | None,
+        candidate_id: str | None,
+    ) -> tuple[str, str, str]:
+        surface = _safe_metadata_label(source_surface, fallback="anthropic_messages")
+        session_key_hash = _metadata_hash(f"{surface}:{session_id or 'missing-session'}")
+        cohort_key_hash = _metadata_hash(
+            stable_json(
+                {
+                    "source_surface": surface,
+                    "policy_id": _safe_metadata_label(policy_id, fallback="unknown-policy"),
+                    "action_id": _safe_metadata_label(action_id, fallback="unknown-action"),
+                    "candidate_id": _safe_metadata_label(candidate_id, fallback="unknown-candidate"),
+                }
+            )
+        )
+        assignment_id = _metadata_hash(f"{surface}:{session_key_hash}:{cohort_key_hash}")
+        return assignment_id, session_key_hash, cohort_key_hash
+
+    def managed_thinking_tail_assignment(
+        self,
+        *,
+        source_surface: str | None,
+        session_id: str | None,
+        policy_id: str | None = None,
+        action_id: str | None = None,
+        candidate_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        assignment_id, session_key_hash, cohort_key_hash = self._managed_thinking_tail_assignment_keys(
+            source_surface=source_surface,
+            session_id=session_id,
+            policy_id=policy_id,
+            action_id=action_id,
+            candidate_id=candidate_id,
+        )
+        row = self.conn.execute(
+            """
+            select *
+            from managed_thinking_tail_assignments
+            where id = ? and session_key_hash = ? and cohort_key_hash = ?
+            """,
+            (assignment_id, session_key_hash, cohort_key_hash),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_managed_thinking_tail_assignment(self, **kwargs: Any) -> dict[str, Any]:
+        now = kwargs.get("now") or utc_now()
+        source_surface = _safe_metadata_label(kwargs.get("source_surface"), fallback="anthropic_messages")
+        policy_id = _safe_metadata_label(kwargs.get("policy_id"), fallback="unknown-policy")
+        action_id = _safe_metadata_label(kwargs.get("action_id"), fallback="unknown-action")
+        candidate_id = _safe_metadata_label(kwargs.get("candidate_id"), fallback="unknown-candidate")
+        assignment_id, session_key_hash, cohort_key_hash = self._managed_thinking_tail_assignment_keys(
+            source_surface=source_surface,
+            session_id=kwargs.get("session_id"),
+            policy_id=policy_id,
+            action_id=action_id,
+            candidate_id=candidate_id,
+        )
+        existing = self.managed_thinking_tail_assignment(
+            source_surface=source_surface,
+            session_id=kwargs.get("session_id"),
+            policy_id=policy_id,
+            action_id=action_id,
+            candidate_id=candidate_id,
+        )
+        created_at = existing.get("created_at") if existing else kwargs.get("created_at") or now
+        treatment = _safe_metadata_label(kwargs.get("treatment"), fallback="hold")
+        server_treatment = _safe_metadata_label(kwargs.get("server_traffic_treatment") or treatment, fallback=treatment)
+        local_veto_reason = (
+            _safe_metadata_label(kwargs.get("local_veto_reason"), fallback="")
+            if kwargs.get("local_veto_reason")
+            else None
+        )
+        assignment_json = {
+            "schema": "tokenclaw.managed_thinking_tail_assignment.v1",
+            "id": assignment_id,
+            "created_at": created_at,
+            "updated_at": now,
+            "provider": _safe_metadata_label(kwargs.get("provider"), fallback="anthropic"),
+            "source_surface": source_surface,
+            "policy_id": policy_id,
+            "decision_id": _safe_metadata_label(kwargs.get("decision_id"), fallback="unknown-decision"),
+            "action_id": action_id,
+            "candidate_id": candidate_id,
+            "treatment": treatment,
+            "server_traffic_treatment": server_treatment,
+            "canary_fraction": kwargs.get("canary_fraction"),
+            "holdout_fraction": kwargs.get("holdout_fraction"),
+            "fraction_source": _safe_metadata_label(kwargs.get("fraction_source"), fallback="server"),
+            "local_veto_reason": local_veto_reason,
+            "session_key_hash": session_key_hash,
+            "cohort_key_hash": cohort_key_hash,
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "raw_thinking_text_included": False,
+            "raw_session_ids_included": False,
+            "file_paths_included": False,
+        }
+        with self._lock:
+            self.conn.execute(
+                """
+                insert into managed_thinking_tail_assignments(
+                  id, created_at, updated_at, provider, source_surface,
+                  session_key_hash, cohort_key_hash, policy_id, decision_id,
+                  action_id, candidate_id, treatment, server_traffic_treatment,
+                  canary_fraction, holdout_fraction, fraction_source,
+                  local_veto_reason, assignment_json
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict (id) do update set
+                  updated_at = excluded.updated_at,
+                  provider = excluded.provider,
+                  source_surface = excluded.source_surface,
+                  session_key_hash = excluded.session_key_hash,
+                  cohort_key_hash = excluded.cohort_key_hash,
+                  policy_id = excluded.policy_id,
+                  decision_id = excluded.decision_id,
+                  action_id = excluded.action_id,
+                  candidate_id = excluded.candidate_id,
+                  treatment = excluded.treatment,
+                  server_traffic_treatment = excluded.server_traffic_treatment,
+                  canary_fraction = excluded.canary_fraction,
+                  holdout_fraction = excluded.holdout_fraction,
+                  fraction_source = excluded.fraction_source,
+                  local_veto_reason = excluded.local_veto_reason,
+                  assignment_json = excluded.assignment_json
+                """,
+                (
+                    assignment_id,
+                    created_at,
+                    now,
+                    assignment_json["provider"],
+                    source_surface,
+                    session_key_hash,
+                    cohort_key_hash,
+                    policy_id,
+                    assignment_json["decision_id"],
+                    action_id,
+                    candidate_id,
+                    treatment,
+                    server_treatment,
+                    kwargs.get("canary_fraction"),
+                    kwargs.get("holdout_fraction"),
+                    assignment_json["fraction_source"],
+                    local_veto_reason,
+                    stable_json(assignment_json),
+                ),
+            )
+            self.conn.commit()
+        return self.managed_thinking_tail_assignment(
+            source_surface=source_surface,
+            session_id=kwargs.get("session_id"),
+            policy_id=policy_id,
+            action_id=action_id,
+            candidate_id=candidate_id,
+        ) or {}
+
+    def managed_thinking_tail_assignment_rows(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        capped = max(1, min(int(limit or 1), 10000))
+        rows = self.conn.execute(
+            """
+            select *
+            from managed_thinking_tail_assignments
+            order by updated_at desc
+            limit ?
+            """,
+            (capped,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def persist_request_shape_rollups(
         self,
         *,
@@ -2590,6 +2801,28 @@ class PostgresStore(SQLiteStore):
             )
             """,
             """
+            create table if not exists managed_thinking_tail_assignments (
+              id text primary key,
+              created_at timestamptz not null,
+              updated_at timestamptz not null,
+              provider text not null,
+              source_surface text not null,
+              session_key_hash text not null,
+              cohort_key_hash text not null,
+              policy_id text,
+              decision_id text,
+              action_id text,
+              candidate_id text,
+              treatment text not null,
+              server_traffic_treatment text,
+              canary_fraction numeric,
+              holdout_fraction numeric,
+              fraction_source text,
+              local_veto_reason text,
+              assignment_json text not null
+            )
+            """,
+            """
             create table if not exists request_shape_rollups (
               id text primary key,
               run_id text not null,
@@ -2726,6 +2959,14 @@ class PostgresStore(SQLiteStore):
         self.conn.execute("""
             create index if not exists idx_promotion_outcome_feedback_key
             on promotion_outcome_feedback(policy_id, action_family, policy_section, created_at)
+        """)
+        self.conn.execute("""
+            create unique index if not exists idx_managed_thinking_tail_assignments_key
+            on managed_thinking_tail_assignments(source_surface, session_key_hash, cohort_key_hash)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_managed_thinking_tail_assignments_recent
+            on managed_thinking_tail_assignments(updated_at, treatment)
         """)
         self.conn.execute("""
             create index if not exists idx_request_shape_rollups_recent

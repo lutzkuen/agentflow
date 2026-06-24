@@ -11,6 +11,7 @@ import yaml
 
 from tokenclaw.action_executor import ActionExecutor
 from tokenclaw.managed_action_outcome_feedback import build_managed_action_feedback
+from tokenclaw.store import Store
 
 
 class ActionExecutorTests(unittest.TestCase):
@@ -112,6 +113,9 @@ anthropic_thinking_history_compaction:
                 source_surface="anthropic_messages",
             )
         return result
+
+    def _assignment_store(self, tmp: str):
+        return Store(str(Path(tmp) / "assignments.sqlite3"))
 
     def test_applies_only_provider_body_model_rewrite_for_routing(self):
         body = {"model": "gpt-5-codex", "input": "hello"}
@@ -453,6 +457,98 @@ anthropic_thinking_history_compaction:
         self.assertAlmostEqual(rule["canary"]["canary_fraction"], 0.15)
         self.assertEqual(rule["managed_controller"]["server_traffic_treatment"], "canary")
 
+    def test_managed_crunch_sticky_assignment_reuses_session_treatment_despite_later_widen(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.05, holdout=0.10)
+            store = self._assignment_store(tmp)
+            try:
+                first = self._execute_crunch(
+                    config=config,
+                    decision=self._crunch_decision(treatment="canary", fraction=0.15),
+                    store_obj=store,
+                    session_id="raw-session-id-1",
+                )
+                second = self._execute_crunch(
+                    config=config,
+                    decision=self._crunch_decision(treatment="widen", fraction=0.55),
+                    store_obj=store,
+                    session_id="raw-session-id-1",
+                )
+                rows = store.managed_thinking_tail_assignment_rows()
+            finally:
+                store.conn.close()
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        rule = data["anthropic_thinking_history_compaction"]["rules"][0]
+        self.assertEqual(first["managed_thinking_tail_assignment"]["status"], "recorded")
+        self.assertEqual(second["managed_thinking_tail_assignment"]["status"], "reused")
+        self.assertEqual(second["server_traffic_treatment"], "canary")
+        self.assertEqual(second["crunch"]["traffic_treatment_policy_file"]["server_traffic_treatment"], "canary")
+        self.assertAlmostEqual(rule["canary"]["canary_fraction"], 0.15)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["treatment"], "canary")
+        self.assertAlmostEqual(row["canary_fraction"], 0.15)
+        self.assertTrue(str(row["session_key_hash"]).startswith("sha256:"))
+        self.assertNotIn("raw-session-id-1", str(row))
+        self.assertNotIn("thinking text", str(row).lower())
+        self.assertNotIn("/home/", str(row))
+
+    def test_managed_crunch_rollback_overrides_sticky_assignment(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.05, holdout=0.10)
+            store = self._assignment_store(tmp)
+            try:
+                self._execute_crunch(
+                    config=config,
+                    decision=self._crunch_decision(treatment="canary", fraction=0.15),
+                    store_obj=store,
+                    session_id="raw-session-id-2",
+                )
+                result = self._execute_crunch(
+                    config=config,
+                    decision=self._crunch_decision(treatment="rollback", fraction=0.0),
+                    store_obj=store,
+                    session_id="raw-session-id-2",
+                )
+                rows = store.managed_thinking_tail_assignment_rows()
+            finally:
+                store.conn.close()
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        rule = data["anthropic_thinking_history_compaction"]["rules"][0]
+        self.assertEqual(result["server_traffic_treatment"], "rollback")
+        self.assertEqual(result["managed_thinking_tail_assignment"]["status"], "recorded")
+        self.assertFalse(rule["enabled"])
+        self.assertEqual(rows[0]["treatment"], "rollback")
+        self.assertAlmostEqual(rows[0]["canary_fraction"], 0.0)
+
+    def test_managed_crunch_sticky_assignment_skips_disabled_crunch_gate(self):
+        with TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config"
+            path = self._write_crunch_rules(config, fraction=0.05, holdout=0.10)
+            before = path.read_text(encoding="utf-8")
+            store = self._assignment_store(tmp)
+            try:
+                result = self._execute_crunch(
+                    config=config,
+                    decision=self._crunch_decision(treatment="widen", fraction=0.25),
+                    env={**self.managed_live_env, "TOKENCLAW_MANAGED_CRUNCH": "0"},
+                    store_obj=store,
+                    session_id="raw-session-id-3",
+                )
+                rows = store.managed_thinking_tail_assignment_rows()
+            finally:
+                store.conn.close()
+            after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["status"], "vetoed")
+        self.assertNotIn("managed_thinking_tail_assignment", result)
+        self.assertEqual(before, after)
+        self.assertEqual(rows, [])
+
     def test_managed_crunch_rollback_disables_candidate_and_sets_safety_stop(self):
         with TemporaryDirectory() as tmp:
             config = Path(tmp) / "config"
@@ -477,10 +573,17 @@ anthropic_thinking_history_compaction:
             config = Path(tmp) / "config"
             path = self._write_crunch_rules(config, fraction=0.0, holdout=0.10, manual_disabled=True)
             before = path.read_text(encoding="utf-8")
-            result = self._execute_crunch(
-                config=config,
-                decision=self._crunch_decision(treatment="widen", fraction=0.25),
-            )
+            store = self._assignment_store(tmp)
+            try:
+                result = self._execute_crunch(
+                    config=config,
+                    decision=self._crunch_decision(treatment="widen", fraction=0.25),
+                    store_obj=store,
+                    session_id="raw-session-id-manual-disabled",
+                )
+                rows = store.managed_thinking_tail_assignment_rows()
+            finally:
+                store.conn.close()
             after = path.read_text(encoding="utf-8")
 
         policy_file = result["crunch"]["traffic_treatment_policy_file"]
@@ -491,6 +594,8 @@ anthropic_thinking_history_compaction:
         self.assertTrue(policy_file["manual_disabled_authoritative"])
         self.assertEqual(policy_file["reason"], "local-manual-disabled")
         self.assertEqual(before, after)
+        self.assertEqual(rows[0]["local_veto_reason"], "local-manual-disabled")
+        self.assertNotIn("raw-session-id-manual-disabled", str(rows[0]))
 
     def test_managed_crunch_dry_run_reports_exact_policy_file_diff_without_writing(self):
         with TemporaryDirectory() as tmp:

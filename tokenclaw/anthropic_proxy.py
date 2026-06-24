@@ -1334,6 +1334,8 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             body=crunched,
             routing_meta=routing_meta,
             recommendation_meta=recommendation_meta,
+            store_obj=context.store,
+            session_id=session_id,
         )
         if crunched.get("model") in MODEL_ALIASES:
             normalized_model = MODEL_ALIASES[str(crunched.get("model"))]
