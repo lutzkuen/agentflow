@@ -1462,6 +1462,7 @@ def stats_managed_feedback_queue_freshness(store_obj: Any | None, *, limit: int 
             str(item.get("status")),
         ),
     )
+    due_count = sum(_as_int(group.get("due_count")) for group in groups)
     return {
         "schema": "tokenclaw.managed_feedback_queue_freshness.v1",
         "generated_at": utc_now(),
@@ -1472,6 +1473,7 @@ def stats_managed_feedback_queue_freshness(store_obj: Any | None, *, limit: int 
             "group_memberships": emitted_memberships,
             "group_count": len(groups),
             "queued": status_counts.get("queued", 0),
+            "due": due_count,
             "sent": status_counts.get("sent", 0),
             "retryable_error": status_counts.get("retryable-error", 0),
             "dropped_after_limit": status_counts.get("dropped-after-limit", 0),
@@ -1496,6 +1498,211 @@ def stats_managed_feedback_queue_freshness(store_obj: Any | None, *, limit: int 
             "secrets_included": False,
             "provider_calls_made": False,
             "managed_server_calls_made": False,
+        },
+    }
+
+
+def _find_nested_dict(value: Any, key: str) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        found = value.get(key)
+        if isinstance(found, dict):
+            return found
+        for item in value.values():
+            nested = _find_nested_dict(item, key)
+            if nested is not None:
+                return nested
+    elif isinstance(value, list):
+        for item in value:
+            nested = _find_nested_dict(item, key)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _safe_thinking_tail_readiness(readiness: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(readiness, dict):
+        return {
+            "available": False,
+            "status": "missing",
+            "reason_codes": ["thinking-tail-readiness-missing"],
+            "metadata_only": True,
+            "raw_payload_included": False,
+        }
+    schedule = readiness.get("widening_schedule") if isinstance(readiness.get("widening_schedule"), dict) else {}
+    reason_codes = readiness.get("reason_codes")
+    if not isinstance(reason_codes, list):
+        reason_codes = []
+    return {
+        "available": True,
+        "schema": readiness.get("schema"),
+        "status": readiness.get("status") or ("ready" if readiness.get("ready") is True else "blocked"),
+        "ready": bool(readiness.get("ready")),
+        "candidate_id": readiness.get("candidate_id") or schedule.get("candidate_id"),
+        "traffic_treatment": readiness.get("traffic_treatment") or schedule.get("traffic_treatment"),
+        "next_fraction_cap": schedule.get("next_fraction_cap"),
+        "holdout_fraction": schedule.get("holdout_fraction"),
+        "expires_at": schedule.get("expires_at"),
+        "reason_codes": [str(code) for code in reason_codes if str(code or "").strip()],
+        "metadata_only": True,
+        "raw_payload_included": False,
+    }
+
+
+def _safe_latest_managed_activation_proof(conn: Any, *, limit: int = 1000) -> dict[str, Any]:
+    capped = max(1, min(int(limit or 1), 10000))
+    try:
+        rows = conn.execute(
+            """
+            select created_at, managed_routing_json, routing_json
+            from calls
+            where managed_routing_json is not null
+               or routing_json like '%managed_recommendation%'
+            order by created_at desc
+            limit ?
+            """,
+            (capped,),
+        ).fetchall()
+    except Exception:
+        rows = []
+    for row in rows:
+        raw_managed = row["managed_routing_json"] if hasattr(row, "keys") else row[1]
+        raw_routing = row["routing_json"] if hasattr(row, "keys") else row[2]
+        managed = _json_obj(raw_managed)
+        if not managed:
+            routing = _json_obj(raw_routing)
+            managed = _json_obj(routing.get("managed_recommendation"))
+        if not managed:
+            continue
+        crunch = managed.get("crunch") if isinstance(managed.get("crunch"), dict) else {}
+        contract = managed.get("client_contract") if isinstance(managed.get("client_contract"), dict) else {}
+        readiness = _safe_thinking_tail_readiness(_find_nested_dict(managed, "thinking_tail_readiness"))
+        status = str(managed.get("status") or "observed")
+        return {
+            "status": "observed",
+            "latest_observed_at": row["created_at"] if hasattr(row, "keys") else row[0],
+            "decision_status": status,
+            "decision_reason": managed.get("reason"),
+            "policy_id": managed.get("policy_id"),
+            "decision_id": managed.get("decision_id"),
+            "local_action_family": "crunch" if readiness.get("available") else managed.get("local_action_family"),
+            "candidate_id": readiness.get("candidate_id") or crunch.get("candidate_id") or managed.get("candidate_id"),
+            "contract": {
+                "status": contract.get("status"),
+                "active": bool(contract.get("active")),
+                "contract_id": contract.get("contract_id"),
+                "cache_status": contract.get("cache_status"),
+                "metadata_only": True,
+            },
+            "thinking_tail_readiness": readiness,
+            "metadata_only": True,
+            "raw_payload_included": False,
+        }
+    return {
+        "status": "missing",
+        "reason": "managed-activation-proof-not-observed",
+        "latest_observed_at": None,
+        "decision_status": None,
+        "candidate_id": None,
+        "thinking_tail_readiness": _safe_thinking_tail_readiness(None),
+        "metadata_only": True,
+        "raw_payload_included": False,
+    }
+
+
+def stats_managed_activation_status(store_obj: Any | None, *, limit: int = 10000) -> dict[str, Any]:
+    capped = max(1, min(int(limit or 1), 10000))
+    managed_state = _managed_feed_state()
+    freshness = stats_managed_feedback_queue_freshness(store_obj, limit=capped)
+    freshness_summary = freshness.get("summary") if isinstance(freshness.get("summary"), dict) else {}
+    try:
+        from tokenclaw.local_compaction_canary_ramp import build_thinking_tail_feedback_freshness
+
+        thinking_tail_feedback = build_thinking_tail_feedback_freshness(store_obj, limit=capped) if store_obj is not None else {}
+    except Exception as exc:
+        thinking_tail_feedback = {
+            "schema": "tokenclaw.thinking_tail_feedback_freshness.v1",
+            "status": "unavailable",
+            "reason_codes": ["thinking-tail-feedback-freshness-unavailable"],
+            "error_type": type(exc).__name__,
+            "payload_json_included": False,
+        }
+    proof = _safe_latest_managed_activation_proof(store_obj.conn, limit=capped) if store_obj is not None else _safe_latest_managed_activation_proof(None, limit=capped)
+    backlog_proof = thinking_tail_feedback.get("backlog_proof") if isinstance(thinking_tail_feedback.get("backlog_proof"), dict) else {}
+    reason_codes: list[str] = []
+    if proof.get("status") != "observed":
+        reason_codes.append(str(proof.get("reason") or "managed-activation-proof-not-observed"))
+    for code in thinking_tail_feedback.get("reason_codes") or []:
+        text = str(code or "")
+        if text and text != "thinking-tail-feedback-fresh":
+            reason_codes.append(text)
+    if _as_int(freshness_summary.get("actionable_groups")):
+        reason_codes.append("managed-feedback-actionable-groups")
+    elif _as_int(freshness_summary.get("watch_groups")):
+        reason_codes.append("managed-feedback-watch-groups")
+    clean_reasons = sorted({code for code in reason_codes if code})
+    status = "ready" if not clean_reasons else "blocked"
+    if proof.get("status") != "observed":
+        status = "no-proof"
+    return {
+        "schema": "tokenclaw.managed_activation_dashboard_status.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "status": status,
+        "top_blocker_reason": clean_reasons[0] if clean_reasons else None,
+        "reason_codes": clean_reasons,
+        "managed_mode": managed_state,
+        "activation_proof": proof,
+        "thinking_tail_feedback_freshness": {
+            "schema": thinking_tail_feedback.get("schema"),
+            "status": thinking_tail_feedback.get("status"),
+            "stale": bool(thinking_tail_feedback.get("stale")),
+            "reason_codes": [str(code) for code in thinking_tail_feedback.get("reason_codes") or []],
+            "newest_local_outcome_at": thinking_tail_feedback.get("newest_local_outcome_at"),
+            "newest_local_outcome_age_seconds": thinking_tail_feedback.get("newest_local_outcome_age_seconds"),
+            "last_successful_drain_at": thinking_tail_feedback.get("last_successful_drain_at"),
+            "last_successful_drain_age_seconds": thinking_tail_feedback.get("last_successful_drain_age_seconds"),
+            "backlog_proof": {
+                "action_family": backlog_proof.get("action_family"),
+                "candidate_id": backlog_proof.get("candidate_id"),
+                "row_count": _as_int(backlog_proof.get("row_count")),
+                "queued": _as_int(backlog_proof.get("queued")),
+                "retryable_error": _as_int(backlog_proof.get("retryable_error")),
+                "sent": _as_int(backlog_proof.get("sent")),
+                "dropped": _as_int(backlog_proof.get("dropped")),
+                "due": _as_int(backlog_proof.get("due")),
+                "pending": _as_int(backlog_proof.get("pending")),
+                "queue_fraction": _as_float(backlog_proof.get("queue_fraction")),
+                "status_counts": dict(backlog_proof.get("status_counts") or {}),
+                "payload_json_included": False,
+            },
+            "payload_json_included": False,
+        },
+        "feedback_burndown": {
+            "schema": "tokenclaw.managed_activation_feedback_burndown.v1",
+            "queue_rows_scanned": _as_int(freshness_summary.get("queue_rows_scanned")),
+            "queued": _as_int(freshness_summary.get("queued")),
+            "due": _as_int(freshness_summary.get("due")),
+            "sent": _as_int(freshness_summary.get("sent")),
+            "retryable_error": _as_int(freshness_summary.get("retryable_error")),
+            "dropped_after_limit": _as_int(freshness_summary.get("dropped_after_limit")),
+            "actionable_groups": _as_int(freshness_summary.get("actionable_groups")),
+            "watch_groups": _as_int(freshness_summary.get("watch_groups")),
+            "expected_groups": _as_int(freshness_summary.get("expected_groups")),
+            "status_breakdown": freshness.get("status_breakdown") or [],
+            "action_family_breakdown": freshness.get("action_family_breakdown") or [],
+            "expectation_breakdown": freshness.get("expectation_breakdown") or [],
+            "drain": freshness.get("drain") if isinstance(freshness.get("drain"), dict) else {},
+            "payload_json_included": False,
+        },
+        "privacy": {
+            **_metadata_only_privacy(),
+            "payload_json_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_server_responses_included": False,
+            "api_key_value_included": False,
+            "managed_server_calls_made": False,
+            "provider_calls_made": False,
         },
     }
 
@@ -29432,6 +29639,7 @@ def dashboard_html() -> str:
       <div class="card"><div class="label">Saved today</div><div class="value money" id="today-savings">-</div><div class="hint" id="today-savings-detail">local routing, crunching, exact cache</div></div>
       <div class="card"><div class="label">Health</div><div class="value" id="today-health">-</div><div class="hint" id="today-latency">- avg latency</div></div>
       <div class="card"><div class="label">Managed feed</div><div class="value" id="today-managed-state">-</div><div class="hint" id="today-managed-detail">-</div></div>
+      <div class="card"><div class="label">Managed activation proof</div><div class="value" id="managed-activation-status">-</div><div class="hint" id="managed-activation-detail">-</div></div>
     </div>
     <div class="section">
       <h2>Managed Backing</h2>
@@ -29441,6 +29649,17 @@ def dashboard_html() -> str:
             <th>Window</th><th>Mode</th><th>Server</th><th>Auth</th><th>Attempted</th><th>Succeeded</th><th>Skipped</th><th>Manual</th><th>Managed</th><th>Off / pass-through</th>
           </tr></thead>
           <tbody id="today-managed-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="section">
+      <h2>Managed activation proof</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Proof</th><th>Decision</th><th>Candidate</th><th>Thinking-tail</th><th>Feedback</th><th>Due</th><th>Last drain</th><th>Top blocker</th><th>Privacy</th>
+          </tr></thead>
+          <tbody id="managed-activation-tbody"></tbody>
         </table>
       </div>
     </div>
@@ -29635,6 +29854,34 @@ function renderFeedbackFreshness(data){
   }).join('');
   document.getElementById('managed-feedback-freshness-tbody').innerHTML=rows||'<tr><td colspan="11" class="muted">No managed feedback queue rows.</td></tr>';
 }
+function renderManagedActivation(data){
+  data=data||{};
+  const proof=data.activation_proof||{};
+  const readiness=proof.thinking_tail_readiness||{};
+  const feedback=data.feedback_burndown||{};
+  const fresh=data.thinking_tail_feedback_freshness||{};
+  const backlog=fresh.backlog_proof||{};
+  const blocker=data.top_blocker_reason||'none';
+  const status=data.status||'unknown';
+  text('managed-activation-status',status);
+  text('managed-activation-detail',`${proof.status||'missing'} proof · ${num(feedback.queued)} queued · ${blocker}`);
+  document.getElementById('managed-activation-status').className='value '+(status==='ready'?'money':(status==='no-proof'?'muted':'warn'));
+  const privacy=data.privacy||{};
+  const privacyBadge=(privacy.raw_request_bodies_included||privacy.raw_responses_included||privacy.payload_json_included)
+    ?'<span class="badge err">raw included</span>'
+    :'<span class="badge ok">metadata only</span>';
+  document.getElementById('managed-activation-tbody').innerHTML=`<tr>
+    <td><span class="badge ${proof.status==='observed'?'ok':'miss'}">${esc(proof.status||'missing')}</span><div class="muted">${localTime(proof.latest_observed_at)}</div></td>
+    <td>${esc(proof.decision_status||'-')}<div class="muted">${esc(proof.policy_id||proof.decision_id||'-')}</div></td>
+    <td>${esc(proof.candidate_id||readiness.candidate_id||backlog.candidate_id||'-')}</td>
+    <td><span class="badge ${readiness.ready?'ok':'miss'}">${esc(readiness.status||'missing')}</span><div class="muted">${esc((readiness.reason_codes||[]).join(', ')||'-')}</div></td>
+    <td>${num(feedback.queued)} queued · ${num(feedback.sent)} sent<div class="muted">${num(feedback.retryable_error)} retryable · ${num(feedback.dropped_after_limit)} dropped</div></td>
+    <td>${num(feedback.due||backlog.due)}</td>
+    <td>${fmtSec(fresh.last_successful_drain_age_seconds)}</td>
+    <td>${esc(blocker)}</td>
+    <td>${privacyBadge}</td>
+  </tr>`;
+}
 function renderWeekly(data){
   const totals=data.totals||{};
   text('week-units',num(totals.total_units));
@@ -29667,14 +29914,16 @@ function renderWeekly(data){
 }
 async function refresh(){
   try{
-    const [today,weekly,freshness]=await Promise.all([
+    const [today,weekly,freshness,activation]=await Promise.all([
       getJson('/tokenclaw/stats'),
       getJson('/tokenclaw/stats/weekly'),
       getJson('/tokenclaw/stats/managed-feedback-queue-freshness?limit=10000'),
+      getJson('/tokenclaw/stats/managed-activation-status?limit=10000'),
     ]);
     renderToday(today);
     renderWeekly(weekly);
     renderFeedbackFreshness(freshness);
+    renderManagedActivation(activation);
     statusEl.textContent='updated '+new Date().toLocaleTimeString();
   }catch(error){
     statusEl.textContent='error loading dashboard';

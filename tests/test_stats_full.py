@@ -116,6 +116,112 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("managed-feedback-drain-blocked", warning_codes)
         self.assertNotIn("raw queued payload must not leak", json.dumps(safety))
 
+    def test_managed_activation_status_endpoint_reports_proof_and_feedback_burndown(self):
+        managed = {
+            "schema": "tokenclaw.policy_decision.v1",
+            "status": "received",
+            "reason": "managed-activation-proof-received",
+            "policy_id": "managed-proof-policy",
+            "decision_id": "managed-proof-decision",
+            "client_contract": {
+                "status": "active",
+                "active": True,
+                "contract_id": "managed-proof-contract",
+                "cache_status": "hit",
+                "raw_response": "raw server response must not leak",
+            },
+            "crunch": {
+                "status": "recommended",
+                "profile": "managed",
+                "candidate_id": "thinking-tail-compaction",
+                "thinking_tail_readiness": {
+                    "schema": "agentflow.thinking_tail_readiness_summary.v1",
+                    "ready": False,
+                    "status": "blocked",
+                    "candidate_id": "thinking-tail-compaction",
+                    "reason_codes": ["thinking-tail-feedback-pending"],
+                    "widening_schedule": {
+                        "candidate_id": "thinking-tail-compaction",
+                        "traffic_treatment": "canary",
+                        "next_fraction_cap": 0.05,
+                        "holdout_fraction": 0.1,
+                        "expires_at": "2099-01-01T00:00:00+00:00",
+                    },
+                },
+            },
+        }
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-5-20240620",
+            routed_model="claude-sonnet-4-5-20240620",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=10,
+            input_tokens_est=1000,
+            output_tokens_est=100,
+            cost_est_usd=0.01,
+            routing_json=stable_json({"managed_recommendation": managed}),
+            managed_routing_json=stable_json(managed),
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="v1_messages",
+            category="tool-result",
+        )
+        server.store.enqueue_managed_outcome_feedback(
+            id="managed-activation-proof-feedback",
+            created_at="2000-01-01T00:00:00+00:00",
+            updated_at="2000-01-01T00:00:00+00:00",
+            source_surface="managed_action_outcome",
+            endpoint="/v1/policy-events",
+            optimization_unit_id=123,
+            payload_json=stable_json({
+                "event_type": "managed_action_outcome",
+                "local_action_family": "crunch",
+                "candidate_id": "thinking-tail-compaction",
+                "raw_payload": "raw queued activation proof payload must not leak",
+            }),
+            status="queued",
+            attempts=0,
+            next_attempt_at="2000-01-01T00:00:00+00:00",
+        )
+
+        payload = stats_views.stats_managed_activation_status(server.store)
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        with TestClient(app) as client:
+            endpoint = client.get("/tokenclaw/stats/managed-activation-status")
+            dashboard = client.get("/tokenclaw/dashboard")
+
+        self.assertEqual(payload["schema"], "tokenclaw.managed_activation_dashboard_status.v1")
+        self.assertEqual(payload["activation_proof"]["status"], "observed")
+        self.assertEqual(payload["activation_proof"]["decision_status"], "received")
+        self.assertEqual(payload["activation_proof"]["candidate_id"], "thinking-tail-compaction")
+        self.assertEqual(payload["activation_proof"]["thinking_tail_readiness"]["status"], "blocked")
+        self.assertEqual(payload["feedback_burndown"]["queued"], 1)
+        self.assertEqual(payload["feedback_burndown"]["due"], 1)
+        self.assertIn("thinking-tail-feedback-pending", payload["reason_codes"])
+        self.assertFalse(payload["privacy"]["payload_json_included"])
+        self.assertFalse(payload["feedback_burndown"]["payload_json_included"])
+        self.assertEqual(endpoint.status_code, 200)
+        self.assertEqual(endpoint.json()["activation_proof"]["decision_status"], "received")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn("Managed activation proof", dashboard.text)
+        self.assertIn("managed-activation-tbody", dashboard.text)
+        self.assertIn("/tokenclaw/stats/managed-activation-status", dashboard.text)
+
+        rendered = json.dumps(payload, sort_keys=True) + endpoint.text + dashboard.text
+        self.assertNotIn("raw queued activation proof payload", rendered)
+        self.assertNotIn("raw server response", rendered)
+
     def _keys_in(self, value):
         keys = set()
         if isinstance(value, dict):
