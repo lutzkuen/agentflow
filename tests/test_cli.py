@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import importlib
 import io
 import json
@@ -26,6 +27,7 @@ class ManagedFeedbackFlushClient:
     calls = []
     status_code = 200
     text = '{"ok":true}'
+    headers = {}
 
     def __init__(self, *, timeout=None):
         self.timeout = timeout
@@ -38,11 +40,11 @@ class ManagedFeedbackFlushClient:
 
     async def patch(self, url, json, headers=None):
         self.calls.append({"url": url, "json": json, "timeout": self.timeout, "headers": dict(headers or {})})
-        return httpx.Response(self.status_code, text=self.text)
+        return httpx.Response(self.status_code, text=self.text, headers=dict(self.headers))
 
     async def post(self, url, json, headers=None):
         self.calls.append({"url": url, "json": json, "timeout": self.timeout, "headers": dict(headers or {})})
-        return httpx.Response(self.status_code, text=self.text)
+        return httpx.Response(self.status_code, text=self.text, headers=dict(self.headers))
 
 
 class DummyStartProcess:
@@ -11738,54 +11740,67 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         ManagedFeedbackFlushClient.calls = []
         ManagedFeedbackFlushClient.status_code = 200
         ManagedFeedbackFlushClient.text = '{"ok":true}'
+        ManagedFeedbackFlushClient.headers = {}
 
-    def _enqueue_feedback(self, store, *, status="queued", attempts=0):
+    def _enqueue_feedback(
+        self,
+        store,
+        *,
+        status="queued",
+        attempts=0,
+        queue_id=None,
+        source_surface="codex_turn",
+        payload=None,
+        created_at="2026-06-08T10:00:00+00:00",
+        next_attempt_at="2000-01-01T00:00:00+00:00",
+    ):
         from tokenclaw.store import stable_json
 
+        payload = payload or {
+            "status": "success",
+            "quality_signals": {"status": "success"},
+            "pattern_decisions": [
+                {
+                    "schema": "tokenclaw.pattern_decision_summary.v1",
+                    "decision_type": "routing",
+                    "status": "applied",
+                    "policy_source": "managed-recommended",
+                }
+            ],
+            "pattern_policy_evidence": [
+                {
+                    "schema": "tokenclaw.managed_pattern_policy_evidence.v1",
+                    "source_surface": "codex_turn",
+                    "app_family": "codex",
+                    "action_family": "routing",
+                    "pattern_family": "routing",
+                    "pattern_hash": "sha256:" + "4" * 64,
+                    "pattern_hashes": ["sha256:" + "4" * 64],
+                    "candidate_id": "candidate-routing",
+                    "rule_id": "rule-routing",
+                    "policy_source": "managed-recommended",
+                    "cohort": "canary_applied",
+                    "outcome": "applied",
+                    "status_code_bucket": "2xx",
+                    "retry_bucket": "none",
+                    "latency_bucket": "lt_500ms",
+                    "savings_bucket": "lt_0_001_usd",
+                    "raw_pattern_strings_included": False,
+                    "raw_payload_included": False,
+                }
+            ],
+        }
         store.enqueue_managed_outcome_feedback(
-            id=f"queue-{status}-{attempts}",
-            created_at="2026-06-08T10:00:00+00:00",
-            updated_at="2026-06-08T10:00:00+00:00",
-            source_surface="codex_turn",
+            id=queue_id or f"queue-{status}-{attempts}",
+            created_at=created_at,
+            updated_at=created_at,
+            source_surface=source_surface,
             endpoint="/v1/optimization-units/77/outcome",
             optimization_unit_id=77,
-            payload_json=stable_json({
-                "status": "success",
-                "quality_signals": {"status": "success"},
-                "pattern_decisions": [
-                    {
-                        "schema": "tokenclaw.pattern_decision_summary.v1",
-                        "decision_type": "routing",
-                        "status": "applied",
-                        "policy_source": "managed-recommended",
-                    }
-                ],
-                "pattern_policy_evidence": [
-                    {
-                        "schema": "tokenclaw.managed_pattern_policy_evidence.v1",
-                        "source_surface": "codex_turn",
-                        "app_family": "codex",
-                        "action_family": "routing",
-                        "pattern_family": "routing",
-                        "pattern_hash": "sha256:" + "4" * 64,
-                        "pattern_hashes": ["sha256:" + "4" * 64],
-                        "candidate_id": "candidate-routing",
-                        "rule_id": "rule-routing",
-                        "policy_source": "managed-recommended",
-                        "cohort": "canary_applied",
-                        "outcome": "applied",
-                        "status_code_bucket": "2xx",
-                        "retry_bucket": "none",
-                        "latency_bucket": "lt_500ms",
-                        "savings_bucket": "lt_0_001_usd",
-                        "raw_pattern_strings_included": False,
-                        "raw_payload_included": False,
-                    }
-                ],
-            }),
+            payload_json=stable_json(payload),
             status=status,
             attempts=attempts,
-            next_attempt_at="2026-06-08T10:00:00+00:00",
+            next_attempt_at=next_attempt_at,
         )
 
     def _log_post_promotion_feedback(
@@ -12027,6 +12042,229 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         self.assertEqual(row["last_status_code"], 503)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["flush"]["retryable_error"], 1)
+
+    def test_managed_feedback_activation_local_rules_only_does_not_send(self):
+        from tokenclaw.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            store = Store(db_path)
+            try:
+                self._enqueue_feedback(store)
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "TOKENCLAW_LOCAL_RULES_ONLY": "1",
+                    "TOKENCLAW_MANAGED": "1",
+                    "TOKENCLAW_MANAGED_MODE": "observe_only",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_feedback_flush_cli(
+                        ["--db", db_path, "--activation", "--limit", "5"],
+                        stdout=stdout,
+                    )
+
+            store = Store(db_path)
+            try:
+                row = store.get_managed_outcome_feedback("queue-queued-0")
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(ManagedFeedbackFlushClient.calls, [])
+        self.assertEqual(row["status"], "queued")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["activation_drain"]["status"], "disabled")
+        self.assertEqual(payload["activation_drain"]["reason"], "local-rules-only")
+        self.assertEqual(payload["flush"]["attempted"], 0)
+
+    def test_managed_feedback_activation_flushes_due_rows_by_family_in_bounded_batch(self):
+        from tokenclaw.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            store = Store(db_path)
+            try:
+                self._enqueue_feedback(
+                    store,
+                    queue_id="routing-fresh",
+                    payload={"action_family": "routing", "status": "success"},
+                    created_at="2099-01-01T00:03:00+00:00",
+                    next_attempt_at="2000-01-01T00:00:00+00:00",
+                )
+                self._enqueue_feedback(
+                    store,
+                    queue_id="routing-older",
+                    payload={"action_family": "routing", "status": "success"},
+                    created_at="2099-01-01T00:01:00+00:00",
+                    next_attempt_at="2000-01-01T00:00:00+00:00",
+                )
+                self._enqueue_feedback(
+                    store,
+                    queue_id="crunch-fresh",
+                    payload={"action_family": "crunch", "status": "success"},
+                    created_at="2099-01-01T00:02:00+00:00",
+                    next_attempt_at="2000-01-01T00:00:00+00:00",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "TOKENCLAW_MANAGED": "1",
+                    "TOKENCLAW_MANAGED_MODE": "observe_only",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_feedback_flush_cli(
+                        [
+                            "--db", db_path,
+                            "--activation",
+                            "--limit", "2",
+                            "--per-family-limit", "1",
+                            "--max-age-seconds", "0",
+                        ],
+                        stdout=stdout,
+                    )
+
+            store = Store(db_path)
+            try:
+                rows = {
+                    queue_id: store.get_managed_outcome_feedback(queue_id)
+                    for queue_id in ("routing-fresh", "routing-older", "crunch-fresh")
+                }
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(ManagedFeedbackFlushClient.calls), 2)
+        self.assertEqual(rows["routing-fresh"]["status"], "sent")
+        self.assertEqual(rows["crunch-fresh"]["status"], "sent")
+        self.assertEqual(rows["routing-older"]["status"], "queued")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["activation_drain"]["selected_queue_ids"], ["routing-fresh", "crunch-fresh"])
+        families = {
+            row["action_family"]: row
+            for row in payload["activation_drain"]["family_freshness_after"]
+        }
+        self.assertEqual(families["routing"]["sent"], 1)
+        self.assertEqual(families["routing"]["queued"], 1)
+        self.assertEqual(families["crunch"]["sent"], 1)
+        self.assertFalse(payload["activation_drain"]["privacy"]["payload_json_included"])
+
+    def test_managed_feedback_activation_expires_stale_rows_before_send(self):
+        from tokenclaw.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            store = Store(db_path)
+            try:
+                self._enqueue_feedback(
+                    store,
+                    queue_id="stale-routing",
+                    payload={"action_family": "routing", "raw_prompt": "raw stale payload secret"},
+                    created_at="2000-01-01T00:00:00+00:00",
+                    next_attempt_at="2000-01-01T00:00:00+00:00",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "TOKENCLAW_MANAGED": "1",
+                    "TOKENCLAW_MANAGED_MODE": "dry_run",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_feedback_flush_cli(
+                        ["--db", db_path, "--activation", "--limit", "5", "--max-age-seconds", "1"],
+                        stdout=stdout,
+                    )
+
+            store = Store(db_path)
+            try:
+                row = store.get_managed_outcome_feedback("stale-routing")
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(ManagedFeedbackFlushClient.calls, [])
+        self.assertEqual(row["status"], "expired")
+        rendered = stdout.getvalue()
+        self.assertNotIn("raw stale payload secret", rendered)
+        payload = json.loads(rendered)
+        self.assertEqual(payload["activation_drain"]["expired"], 1)
+        families = {row["action_family"]: row for row in payload["activation_drain"]["family_freshness_after"]}
+        self.assertEqual(families["routing"]["expired"], 1)
+        self.assertEqual(families["routing"]["dropped"], 1)
+
+    def test_managed_feedback_activation_preserves_retry_after_backoff(self):
+        from tokenclaw.store import Store
+
+        ManagedFeedbackFlushClient.status_code = 429
+        ManagedFeedbackFlushClient.text = "retry later"
+        ManagedFeedbackFlushClient.headers = {"retry-after": "123"}
+        started = datetime.now(timezone.utc)
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
+            store = Store(db_path)
+            try:
+                self._enqueue_feedback(
+                    store,
+                    queue_id="backoff-routing",
+                    payload={"action_family": "routing", "status": "success"},
+                    created_at="2099-01-01T00:00:00+00:00",
+                    next_attempt_at="2000-01-01T00:00:00+00:00",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "TOKENCLAW_MANAGED": "1",
+                    "TOKENCLAW_MANAGED_MODE": "observe_only",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "1",
+                },
+                clear=False,
+            ):
+                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_feedback_flush_cli(
+                        ["--db", db_path, "--activation", "--limit", "1", "--max-age-seconds", "0"],
+                        stdout=stdout,
+                    )
+
+            store = Store(db_path)
+            try:
+                row = store.get_managed_outcome_feedback("backoff-routing")
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["status"], "retryable-error")
+        self.assertEqual(row["last_status_code"], 429)
+        next_attempt = datetime.fromisoformat(row["next_attempt_at"])
+        self.assertGreaterEqual((next_attempt - started).total_seconds(), 100)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["activation_drain"]["result_breakdown"][0]["value"], "retryable-error")
 
     def test_managed_feedback_background_drainer_recovers_stale_sending_row(self):
         from tokenclaw import server

@@ -228,21 +228,30 @@ async def build_managed_activation_proof(
                 return report
 
             from tokenclaw import recommendations
+            from tokenclaw.optimization.feedback import managed_feedback_activation_drain_result
 
             queue_before = _queue_counts(store_obj)
-            drain_results = await recommendations.flush_queued_outcome_feedback(
+            activation_drain = await managed_feedback_activation_drain_result(
                 store_obj,
                 limit=max(1, min(int(drain_limit or 1), 100)),
+                per_family_limit=max(1, min(int(drain_limit or 1), 100)),
+                max_age_seconds=7 * 24 * 60 * 60,
             )
+            drain_results = activation_drain.get("results") if isinstance(activation_drain.get("results"), list) else []
             queue_after = _queue_counts(store_obj)
             stages["drain"] = _stage(
                 "drain",
-                status="drained" if drain_results else "no-due-feedback",
+                status="drained" if drain_results else activation_drain.get("status") if activation_drain.get("status") != "completed" else "no-due-feedback",
                 attempted=True,
                 limit=max(1, min(int(drain_limit or 1), 100)),
+                per_family_limit=max(1, min(int(drain_limit or 1), 100)),
                 result_counts=_status_counts(drain_results),
                 queue_before=queue_before,
                 queue_after=queue_after,
+                expired=activation_drain.get("expired"),
+                exhausted_dropped=activation_drain.get("exhausted_dropped"),
+                recovered_stale_sending=activation_drain.get("recovered_stale_sending"),
+                family_freshness_after=activation_drain.get("family_freshness_after"),
                 managed_server_calls_made=bool(drain_results),
             )
 

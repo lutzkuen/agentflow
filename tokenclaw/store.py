@@ -2013,6 +2013,64 @@ class SQLiteStore:
             self.conn.commit()
             return int(cur.rowcount or 0)
 
+    def expire_stale_managed_outcome_feedback(
+        self,
+        *,
+        cutoff_at: str,
+        now: str | None = None,
+        source_surface: str | None = None,
+        error: str = "expired stale queued managed outcome feedback before activation drain",
+    ) -> int:
+        now = now or utc_now()
+        source_clause = "and source_surface = ?" if source_surface else ""
+        params: tuple[Any, ...]
+        if source_surface:
+            params = ("expired", now, error, now, cutoff_at, source_surface)
+        else:
+            params = ("expired", now, error, now, cutoff_at)
+        with self._lock:
+            cur = self.conn.execute(
+                f"""
+                update managed_outcome_feedback_queue
+                set status = ?, updated_at = ?, last_error = ?, next_attempt_at = ?
+                where status in ('queued', 'retryable-error')
+                  and created_at < ?
+                  {source_clause}
+                """,
+                params,
+            )
+            self.conn.commit()
+            return int(cur.rowcount or 0)
+
+    def drop_exhausted_managed_outcome_feedback(
+        self,
+        *,
+        max_attempts: int,
+        now: str | None = None,
+        source_surface: str | None = None,
+        error: str = "managed outcome feedback retry limit reached before activation drain",
+    ) -> int:
+        now = now or utc_now()
+        source_clause = "and source_surface = ?" if source_surface else ""
+        params: tuple[Any, ...]
+        if source_surface:
+            params = ("dropped-after-limit", now, error, now, max(1, int(max_attempts or 1)), source_surface)
+        else:
+            params = ("dropped-after-limit", now, error, now, max(1, int(max_attempts or 1)))
+        with self._lock:
+            cur = self.conn.execute(
+                f"""
+                update managed_outcome_feedback_queue
+                set status = ?, updated_at = ?, last_error = coalesce(last_error, ?), next_attempt_at = ?
+                where status in ('queued', 'retryable-error')
+                  and attempts >= ?
+                  {source_clause}
+                """,
+                params,
+            )
+            self.conn.commit()
+            return int(cur.rowcount or 0)
+
     def due_managed_outcome_feedback(
         self,
         *,

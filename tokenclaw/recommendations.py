@@ -6,6 +6,7 @@ import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -825,6 +826,27 @@ def _future_iso(seconds: float) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=max(0.0, seconds))).isoformat()
 
 
+def _response_retry_after_seconds(response: httpx.Response) -> float | None:
+    headers = getattr(response, "headers", None)
+    raw = headers.get("retry-after") if headers is not None else None
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    try:
+        parsed = parsedate_to_datetime(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (parsed.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return None
+
+
 def _sanitize_features(value: Any) -> Any:
     if isinstance(value, dict):
         allow_command = value.get("schema") in LIFECYCLE_METADATA_COMMAND_SCHEMAS
@@ -1576,6 +1598,9 @@ async def fetch_policy_decision(unit: dict[str, Any], *, request_facts: dict[str
             )
         meta["latency_ms"] = int((time.time() - started) * 1000)
         meta["status_code"] = response.status_code
+        retry_after = _response_retry_after_seconds(response)
+        if retry_after is not None:
+            meta["retry_after_seconds"] = retry_after
         if response.status_code >= 400:
             meta.update({
                 "status": "error",
@@ -1770,6 +1795,9 @@ async def fetch_recommendation(unit: dict[str, Any]) -> dict[str, Any]:
             )
         meta["latency_ms"] = int((time.time() - started) * 1000)
         meta["status_code"] = response.status_code
+        retry_after = _response_retry_after_seconds(response)
+        if retry_after is not None:
+            meta["retry_after_seconds"] = retry_after
         if response.status_code >= 400:
             meta.update({
                 "status": "error",
@@ -3876,6 +3904,9 @@ async def _send_outcome_payload(*, endpoint: str, payload: dict[str, Any], unit_
                 response = await client.patch(url, json=payload, headers=_managed_headers())
         meta["latency_ms"] = int((time.time() - started) * 1000)
         meta["status_code"] = response.status_code
+        retry_after = _response_retry_after_seconds(response)
+        if retry_after is not None:
+            meta["retry_after_seconds"] = retry_after
         if response.status_code >= 400:
             meta.update({
                 "status": "error",
@@ -3965,6 +3996,9 @@ async def _send_policy_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
             )
         meta["latency_ms"] = int((time.time() - started) * 1000)
         meta["status_code"] = response.status_code
+        retry_after = _response_retry_after_seconds(response)
+        if retry_after is not None:
+            meta["retry_after_seconds"] = retry_after
         if response.status_code >= 400:
             meta.update({
                 "status": "error",
@@ -4084,7 +4118,14 @@ async def _flush_claimed_outcome_feedback(store_obj: Any, row: dict[str, Any]) -
         return meta
 
     status = _queue_error_status(meta, attempts)
-    retry_delay = 0.0 if status == "dropped-after-limit" else outcome_feedback_queue_retry_delay_for_attempt(attempts)
+    retry_after = meta.get("retry_after_seconds")
+    try:
+        retry_after_delay = float(retry_after) if retry_after is not None else None
+    except (TypeError, ValueError):
+        retry_after_delay = None
+    retry_delay = 0.0 if status == "dropped-after-limit" else (
+        retry_after_delay if retry_after_delay is not None else outcome_feedback_queue_retry_delay_for_attempt(attempts)
+    )
     status_code = meta.get("status_code")
     permanent_client_error = False
     try:
@@ -4117,6 +4158,24 @@ async def _flush_claimed_outcome_feedback(store_obj: Any, row: dict[str, Any]) -
         "attempts": attempts,
     })
     return meta
+
+
+async def flush_selected_outcome_feedback(
+    store_obj: Any,
+    *,
+    queue_ids: list[str],
+) -> list[dict[str, Any]]:
+    if not recommendations_enabled():
+        return []
+    if not hasattr(store_obj, "claim_managed_outcome_feedback"):
+        return []
+    results: list[dict[str, Any]] = []
+    for queue_id in queue_ids:
+        claimed = store_obj.claim_managed_outcome_feedback(str(queue_id), now=utc_now())
+        if not claimed:
+            continue
+        results.append(await _flush_claimed_outcome_feedback(store_obj, claimed))
+    return results
 
 
 async def flush_queued_outcome_feedback(

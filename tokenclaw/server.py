@@ -273,6 +273,39 @@ async def _drain_managed_outcome_feedback_once(*, limit: int, stale_after_second
     return results
 
 
+async def _activation_drain_managed_outcome_feedback_once(
+    *,
+    limit: int,
+    per_family_limit: int,
+    stale_after_seconds: int,
+    max_age_seconds: int,
+) -> dict[str, Any]:
+    from tokenclaw.optimization.feedback import managed_feedback_activation_drain_result
+
+    result = await managed_feedback_activation_drain_result(
+        store,
+        limit=max(1, int(limit)),
+        per_family_limit=max(1, int(per_family_limit)),
+        max_age_seconds=max(0, int(max_age_seconds)),
+        stale_sending_after_seconds=max(1, int(stale_after_seconds)),
+    )
+    counts = {
+        str(item.get("value") or "unknown"): int(item.get("count") or 0)
+        for item in result.get("result_breakdown", [])
+        if isinstance(item, dict)
+    }
+    if result.get("status") != "disabled" or result.get("expired") or result.get("exhausted_dropped") or counts:
+        print(
+            "tokenclaw_managed_feedback_activation_drain "
+            f"status={str(result.get('status') or 'unknown').replace('-', '_')} "
+            f"expired={int(result.get('expired') or 0)} "
+            f"exhausted_dropped={int(result.get('exhausted_dropped') or 0)} "
+            + " ".join(f"{key.replace('-', '_')}={value}" for key, value in sorted(counts.items())),
+            file=sys.stderr,
+        )
+    return result
+
+
 async def _periodic_managed_outcome_feedback_drainer(
     *,
     interval_seconds: int,
@@ -317,7 +350,20 @@ async def _log_startup_session_spending_summary() -> None:
         )
     feedback_interval = env_int("TOKENCLAW_MANAGED_FEEDBACK_DRAIN_INTERVAL_SECONDS", 60)
     feedback_limit = env_int("TOKENCLAW_MANAGED_FEEDBACK_DRAIN_BATCH_LIMIT", 100)
+    feedback_activation_limit = env_int("TOKENCLAW_MANAGED_FEEDBACK_ACTIVATION_DRAIN_BATCH_LIMIT", 25)
+    feedback_activation_per_family_limit = env_int("TOKENCLAW_MANAGED_FEEDBACK_ACTIVATION_DRAIN_PER_FAMILY_LIMIT", 5)
+    feedback_activation_max_age = env_int("TOKENCLAW_MANAGED_FEEDBACK_ACTIVATION_MAX_AGE_SECONDS", 7 * 24 * 60 * 60)
     feedback_stale_after = env_int("TOKENCLAW_MANAGED_FEEDBACK_STALE_SENDING_SECONDS", 600)
+    if feedback_activation_limit > 0:
+        try:
+            await _activation_drain_managed_outcome_feedback_once(
+                limit=max(1, min(feedback_activation_limit, 100)),
+                per_family_limit=max(1, min(feedback_activation_per_family_limit, 100)),
+                stale_after_seconds=max(1, feedback_stale_after),
+                max_age_seconds=max(0, feedback_activation_max_age),
+            )
+        except Exception as exc:
+            print(f"tokenclaw_managed_feedback_activation_drain_error: {exc}", file=sys.stderr)
     if feedback_interval > 0 and _managed_feedback_drainer_task is None:
         _managed_feedback_drainer_task = asyncio.create_task(
             _periodic_managed_outcome_feedback_drainer(

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
 from typing import Any, Sequence
 
+from tokenclaw.managed_mode import managed_product_mode
 from tokenclaw.optimization.cli_support import (
     default_db_path,
     open_store_for_db,
@@ -251,9 +252,85 @@ def _queue_state(status: Any) -> str:
         return "sent"
     if raw_status in {"queued", "sending", "retryable-error"}:
         return "pending"
-    if raw_status in {"error", "dropped-after-limit"}:
+    if raw_status in {"error", "dropped-after-limit", "expired"}:
         return "error"
     return raw_status
+
+
+def _normalize_feedback_dimension(value: Any, default: str = "unknown") -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    return text or default
+
+
+def _collect_action_family(value: Any, families: set[str]) -> None:
+    family = _normalize_feedback_dimension(value, "")
+    if family:
+        families.add(family)
+
+
+def _inferred_action_family(payload: dict[str, Any], source_surface: Any) -> str | None:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    haystack = " ".join(
+        str(value or "").lower()
+        for value in (
+            source_surface,
+            payload.get("schema"),
+            payload.get("event_type"),
+            metadata.get("schema"),
+        )
+    )
+    if "routing" in haystack:
+        return "routing"
+    if "cache" in haystack:
+        return "cache"
+    if any(token in haystack for token in ("crunch", "compaction", "summary", "dedup", "scaffold", "thinking")):
+        return "crunch"
+    return None
+
+
+def _payload_action_families(payload: dict[str, Any], *, source_surface: Any = None) -> list[str]:
+    families: set[str] = set()
+    for key in ("action_family", "local_action_family", "policy_section", "optimization_family"):
+        _collect_action_family(payload.get(key), families)
+    for key in (
+        "applied_families",
+        "vetoed_families",
+        "held_families",
+        "heldout_families",
+        "unsupported_families",
+        "supported_local_action_families",
+        "enabled_local_action_families",
+    ):
+        values = payload.get(key)
+        if isinstance(values, list):
+            for value in values:
+                _collect_action_family(value, families)
+    actions = payload.get("actions")
+    if isinstance(actions, list):
+        for action in actions:
+            if isinstance(action, dict):
+                _collect_action_family(action.get("family") or action.get("action_family") or action.get("type"), families)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    for key in ("action_family", "local_action_family", "policy_section", "optimization_family"):
+        _collect_action_family(metadata.get(key), families)
+    for key in ("action_snapshots", "actions", "pattern_policy_evidence"):
+        items = metadata.get(key) if key != "pattern_policy_evidence" else payload.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    _collect_action_family(
+                        item.get("action_family")
+                        or item.get("local_action_family")
+                        or item.get("policy_section")
+                        or item.get("optimization_family")
+                        or item.get("family"),
+                        families,
+                    )
+    if not families:
+        inferred = _inferred_action_family(payload, source_surface)
+        if inferred:
+            families.add(inferred)
+    return sorted(families) or ["unknown"]
 
 
 def _add_count(counts: dict[str, int], value: Any, increment: int = 1) -> None:
@@ -1032,6 +1109,291 @@ def managed_feedback_config() -> dict[str, Any]:
     }
 
 
+def _all_feedback_rows(store: Any, *, source_surface: str | None, limit: int = 10000) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not hasattr(store, "managed_outcome_feedback_freshness_rows"):
+        if hasattr(store, "managed_outcome_feedback_rows"):
+            rows = store.managed_outcome_feedback_rows(source_surface=source_surface, limit=limit)
+        return rows
+    rows = store.managed_outcome_feedback_freshness_rows(limit=limit)
+    if source_surface:
+        rows = [row for row in rows if row.get("source_surface") == source_surface]
+    return rows
+
+
+def _feedback_row_families(row: dict[str, Any]) -> list[str]:
+    return _payload_action_families(
+        _safe_payload_json(row),
+        source_surface=row.get("source_surface"),
+    )
+
+
+def _family_freshness_summary(rows: list[dict[str, Any]], *, now: datetime) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        due = False
+        if status in {"queued", "retryable-error"}:
+            next_attempt = parse_utc_iso(row.get("next_attempt_at"))
+            due = next_attempt is not None and next_attempt <= now
+        for family in _feedback_row_families(row):
+            bucket = buckets.setdefault(
+                family,
+                {
+                    "action_family": family,
+                    "queued": 0,
+                    "retryable_error": 0,
+                    "sent": 0,
+                    "dropped": 0,
+                    "expired": 0,
+                    "due": 0,
+                    "oldest_pending_age_seconds": None,
+                    "newest_sent_at": None,
+                    "payload_json_included": False,
+                },
+            )
+            if status == "queued":
+                bucket["queued"] += 1
+            elif status == "retryable-error":
+                bucket["retryable_error"] += 1
+            elif status == "sent":
+                bucket["sent"] += 1
+            elif status == "expired":
+                bucket["expired"] += 1
+                bucket["dropped"] += 1
+            elif status in {"dropped-after-limit", "error"}:
+                bucket["dropped"] += 1
+            if due:
+                bucket["due"] += 1
+            if status in {"queued", "retryable-error"}:
+                age = seconds_since(row.get("created_at"), now)
+                if age is not None and (
+                    bucket["oldest_pending_age_seconds"] is None
+                    or age > bucket["oldest_pending_age_seconds"]
+                ):
+                    bucket["oldest_pending_age_seconds"] = age
+            if status == "sent" and row.get("sent_at"):
+                if bucket["newest_sent_at"] is None or str(row.get("sent_at")) > str(bucket["newest_sent_at"]):
+                    bucket["newest_sent_at"] = row.get("sent_at")
+    return sorted(
+        buckets.values(),
+        key=lambda item: (-int(item["due"]), -int(item["queued"] + item["retryable_error"]), str(item["action_family"])),
+    )
+
+
+def _row_due(row: dict[str, Any], *, now: datetime) -> bool:
+    if row.get("status") not in {"queued", "retryable-error"}:
+        return False
+    next_attempt = parse_utc_iso(row.get("next_attempt_at"))
+    return bool(next_attempt is not None and next_attempt <= now)
+
+
+def _row_enabled_for_mode(row: dict[str, Any], enabled_families: dict[str, bool]) -> bool:
+    families = _feedback_row_families(row)
+    known = [family for family in families if family in enabled_families]
+    if not known:
+        return True
+    return any(enabled_families.get(family) for family in known)
+
+
+def _select_activation_feedback_queue_ids(
+    rows: list[dict[str, Any]],
+    *,
+    now: datetime,
+    limit: int,
+    per_family_limit: int,
+    enabled_families: dict[str, bool],
+) -> list[str]:
+    due_rows = [
+        row
+        for row in rows
+        if row.get("id") and _row_due(row, now=now) and _row_enabled_for_mode(row, enabled_families)
+    ]
+    due_rows.sort(
+        key=lambda row: (
+            parse_utc_iso(row.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc),
+            str(row.get("id") or ""),
+        ),
+        reverse=True,
+    )
+    selected: list[str] = []
+    selected_set: set[str] = set()
+    per_family_counts: dict[str, int] = {}
+    capped = max(1, min(int(limit or 1), 100))
+    family_cap = max(1, min(int(per_family_limit or 1), capped))
+    preferred_families = [family for family in ("routing", "crunch", "cache") if enabled_families.get(family)]
+    preferred_families.append("unknown")
+    for family in preferred_families:
+        for row in due_rows:
+            if len(selected) >= capped:
+                return selected
+            queue_id = str(row.get("id"))
+            if queue_id in selected_set:
+                continue
+            families = _feedback_row_families(row)
+            if family not in families:
+                continue
+            if per_family_counts.get(family, 0) >= family_cap:
+                continue
+            selected.append(queue_id)
+            selected_set.add(queue_id)
+            per_family_counts[family] = per_family_counts.get(family, 0) + 1
+    for row in due_rows:
+        if len(selected) >= capped:
+            break
+        queue_id = str(row.get("id"))
+        if queue_id in selected_set:
+            continue
+        selected.append(queue_id)
+        selected_set.add(queue_id)
+    return selected
+
+
+async def managed_feedback_activation_drain_result(
+    store: Any,
+    *,
+    limit: int = 25,
+    per_family_limit: int = 5,
+    max_age_seconds: int = 7 * 24 * 60 * 60,
+    source_surface: str | None = None,
+    stale_sending_after_seconds: int = 600,
+) -> dict[str, Any]:
+    from tokenclaw import recommendations
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    capped = max(1, min(int(limit or 1), 100))
+    family_cap = max(1, min(int(per_family_limit or 1), capped))
+    product_mode = managed_product_mode()
+    before_rows = _all_feedback_rows(store, source_surface=source_surface, limit=10000)
+    before_summary = managed_feedback_status_result(store, source_surface=source_surface, sample_limit=capped)["summary"]
+    if product_mode.local_rules_only or not product_mode.server_calls_enabled:
+        return {
+            "schema": "tokenclaw.managed_feedback_activation_drain.v1",
+            "status": "disabled",
+            "reason": product_mode.reason or "managed-server-calls-disabled",
+            "generated_at": now_iso,
+            "limit": capped,
+            "per_family_limit": family_cap,
+            "source_surface": source_surface,
+            "product_mode": product_mode.public_meta(),
+            "before": before_summary,
+            "after": before_summary,
+            "family_freshness_before": _family_freshness_summary(before_rows, now=now),
+            "family_freshness_after": _family_freshness_summary(before_rows, now=now),
+            "expired": 0,
+            "exhausted_dropped": 0,
+            "recovered_stale_sending": 0,
+            "selected_queue_ids": [],
+            "results": [],
+            "result_breakdown": [],
+            "managed_server_calls_made": False,
+            "privacy": {
+                "metadata_only": True,
+                "payload_json_included": False,
+                "raw_prompts_included": False,
+                "raw_responses_included": False,
+                "secrets_included": False,
+            },
+        }
+    if not recommendations.recommendations_enabled():
+        return {
+            "schema": "tokenclaw.managed_feedback_activation_drain.v1",
+            "status": "disabled",
+            "reason": "managed-feedback-disabled",
+            "generated_at": now_iso,
+            "limit": capped,
+            "per_family_limit": family_cap,
+            "source_surface": source_surface,
+            "product_mode": product_mode.public_meta(),
+            "before": before_summary,
+            "after": before_summary,
+            "family_freshness_before": _family_freshness_summary(before_rows, now=now),
+            "family_freshness_after": _family_freshness_summary(before_rows, now=now),
+            "expired": 0,
+            "exhausted_dropped": 0,
+            "recovered_stale_sending": 0,
+            "selected_queue_ids": [],
+            "results": [],
+            "result_breakdown": [],
+            "managed_server_calls_made": False,
+            "privacy": {
+                "metadata_only": True,
+                "payload_json_included": False,
+                "raw_prompts_included": False,
+                "raw_responses_included": False,
+                "secrets_included": False,
+            },
+        }
+
+    recovered = 0
+    if hasattr(store, "recover_stale_managed_outcome_feedback_sends"):
+        stale_before = (now - timedelta(seconds=max(1, int(stale_sending_after_seconds or 1)))).isoformat()
+        recovered = store.recover_stale_managed_outcome_feedback_sends(
+            stale_before=stale_before,
+            now=now_iso,
+        )
+    expired = 0
+    if max_age_seconds and int(max_age_seconds) > 0 and hasattr(store, "expire_stale_managed_outcome_feedback"):
+        cutoff_at = (now - timedelta(seconds=max(1, int(max_age_seconds)))).isoformat()
+        expired = store.expire_stale_managed_outcome_feedback(
+            cutoff_at=cutoff_at,
+            now=now_iso,
+            source_surface=source_surface,
+        )
+    exhausted = 0
+    if hasattr(store, "drop_exhausted_managed_outcome_feedback"):
+        exhausted = store.drop_exhausted_managed_outcome_feedback(
+            max_attempts=recommendations.outcome_feedback_queue_max_attempts(),
+            now=now_iso,
+            source_surface=source_surface,
+        )
+
+    selectable_rows = _all_feedback_rows(store, source_surface=source_surface, limit=10000)
+    selected = _select_activation_feedback_queue_ids(
+        selectable_rows,
+        now=now,
+        limit=capped,
+        per_family_limit=family_cap,
+        enabled_families=product_mode.family_enabled,
+    )
+    results = await recommendations.flush_selected_outcome_feedback(store, queue_ids=selected)
+    result_counts: dict[str, int] = {}
+    for item in results:
+        status = str(item.get("status") or "unknown")
+        result_counts[status] = result_counts.get(status, 0) + 1
+    after_rows = _all_feedback_rows(store, source_surface=source_surface, limit=10000)
+    after_summary = managed_feedback_status_result(store, source_surface=source_surface, sample_limit=capped)["summary"]
+    return {
+        "schema": "tokenclaw.managed_feedback_activation_drain.v1",
+        "status": "completed",
+        "reason": "ok",
+        "generated_at": now_iso,
+        "limit": capped,
+        "per_family_limit": family_cap,
+        "source_surface": source_surface,
+        "product_mode": product_mode.public_meta(),
+        "before": before_summary,
+        "after": after_summary,
+        "family_freshness_before": _family_freshness_summary(before_rows, now=now),
+        "family_freshness_after": _family_freshness_summary(after_rows, now=now),
+        "expired": expired,
+        "exhausted_dropped": exhausted,
+        "recovered_stale_sending": recovered,
+        "selected_queue_ids": selected,
+        "results": results,
+        "result_breakdown": breakdown_from_counts(result_counts),
+        "managed_server_calls_made": bool(results),
+        "privacy": {
+            "metadata_only": True,
+            "payload_json_included": False,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "secrets_included": False,
+        },
+    }
+
+
 def managed_feedback_status_result(
     store: Any,
     *,
@@ -1184,6 +1546,18 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
         default=1000,
         help="Maximum local promotion outcome feedback rows to roll up when --post-promotion-action-outcomes is set.",
     )
+    parser.add_argument(
+        "--activation",
+        action="store_true",
+        help="Run the managed-mode activation drain: expire stale rows, preserve backoff, and flush due rows by action family.",
+    )
+    parser.add_argument("--per-family-limit", type=int, default=5, help="Maximum activation-drain rows per action family, default: 5.")
+    parser.add_argument(
+        "--max-age-seconds",
+        type=int,
+        default=7 * 24 * 60 * 60,
+        help="Expire pending activation-drain feedback older than this many seconds, default: 7 days.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Report due rows without claiming or sending them.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
     args = parser.parse_args(argv)
@@ -1223,7 +1597,22 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
                     )
                 )
         before = managed_feedback_status_result(store, source_surface=args.source_surface, sample_limit=limit)
-        if args.dry_run:
+        activation_drain: dict[str, Any] | None = None
+        if args.activation and not args.dry_run:
+            activation_drain = asyncio.run(
+                managed_feedback_activation_drain_result(
+                    store,
+                    limit=limit,
+                    per_family_limit=max(1, min(args.per_family_limit, 100)),
+                    max_age_seconds=max(0, int(args.max_age_seconds or 0)),
+                    source_surface=flush_source_surface,
+                )
+            )
+            raw_results = activation_drain.get("results") if isinstance(activation_drain.get("results"), list) else []
+            results = raw_results
+            flush_status = str(activation_drain.get("status") or "completed")
+            reason = str(activation_drain.get("reason") or "ok")
+        elif args.dry_run:
             results = [
                 {**row, "status": "would-send"}
                 for row in before.get("due_samples", [])
@@ -1278,6 +1667,7 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
             "dropped_after_limit": result_counts.get("dropped-after-limit", 0),
         },
         "managed_feedback": managed_feedback_config(),
+        "activation_drain": activation_drain,
         "post_promotion_action_outcome_rollups": post_promotion_rollups,
         "before": before["summary"],
         "after": after["summary"],
