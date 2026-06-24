@@ -166,6 +166,7 @@ def _thinking_crunch_meta(
         "planned_saved_chars": tokens_saved * 4,
         "tokens_saved_est": tokens_saved if applied else 0,
         "planned_saved_tokens": tokens_saved,
+        "realized_crunch_savings_usd": realized_savings if applied else 0.0,
         "canary": {"cohort": cohort, "selected": applied},
         "lifecycle_feedback": {"status": status, "cohort": cohort, "metadata_only": True},
     }
@@ -218,6 +219,8 @@ def _log_call(
     cost_est: float = 0.01,
     actual_input_tokens: int = 5000,
     actual_output_tokens: int = 300,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
 ) -> None:
     store.log_call(
         id=call_id,
@@ -235,6 +238,8 @@ def _log_call(
         actual_output_tokens=actual_output_tokens,
         cost_est_usd=cost_est,
         cost_baseline_usd=cost_est + 0.01,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
         crunch_json=stable_json(crunch_json),
         routing_json=stable_json({"category": "tool-result", "workflow_phase": "tool-result", "text_chars": 200000}),
         cache_json=stable_json({"status": "skipped"}),
@@ -320,6 +325,116 @@ class LocalCompactionCanaryRampTests(unittest.TestCase):
         self.assertFalse(second["privacy"]["raw_request_bodies_included"])
         self.assertFalse(second["provider_calls_made"])
         self.assertFalse(second["managed_server_calls_made"])
+
+    def test_positive_net_after_prompt_cache_churn_widens_thinking_tail(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            rules_path = config / "crunch_rules.yaml"
+            rules_path.write_text(_rules_yaml(fraction=0.05, holdout=0.10), encoding="utf-8")
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "thinking-positive-applied-a",
+                    crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=2000, realized_savings=0.050),
+                    cache_creation_input_tokens=1000,
+                    cache_read_input_tokens=0,
+                )
+                _log_call(
+                    store,
+                    "thinking-positive-applied-b",
+                    crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=2000, realized_savings=0.050),
+                    cache_creation_input_tokens=1000,
+                    cache_read_input_tokens=0,
+                )
+                _log_call(
+                    store,
+                    "thinking-positive-holdout",
+                    crunch_json=_thinking_crunch_meta(applied=False, cohort="canary_holdout", tokens_saved=2000),
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=100,
+                )
+                result = build_local_compaction_canary_ramp(
+                    store,
+                    config_dir=config,
+                    apply=True,
+                    ramp_step=0.05,
+                    min_applied_samples=2,
+                    min_holdout_samples=1,
+                    now="2026-06-23T10:30:00+00:00",
+                )
+                data = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+            finally:
+                store.conn.close()
+
+        decision = next(item for item in result["decisions"] if item["family"] == "anthropic_thinking_history_compaction")
+        self.assertEqual(decision["action"], "widen")
+        self.assertIn("realized-canary-advantage", decision["reason_codes"])
+        self.assertGreater(decision["evidence"]["net_savings_after_prompt_cache_churn_usd"], 0.0)
+        self.assertGreater(decision["evidence"]["prompt_cache_churn_usd"], 0.0)
+        self.assertAlmostEqual(data["anthropic_thinking_history_compaction"]["rules"][0]["canary"]["canary_fraction"], 0.10)
+
+    def test_prompt_cache_churn_regression_stops_thinking_tail_even_with_saved_tokens(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            rules_path = config / "crunch_rules.yaml"
+            rules_path.write_text(_rules_yaml(fraction=0.10, holdout=0.10), encoding="utf-8")
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "thinking-churn-applied-a",
+                    crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=5000, realized_savings=0.003),
+                    cache_creation_input_tokens=20000,
+                    cache_read_input_tokens=0,
+                )
+                _log_call(
+                    store,
+                    "thinking-churn-applied-b",
+                    crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=5000, realized_savings=0.003),
+                    cache_creation_input_tokens=20000,
+                    cache_read_input_tokens=0,
+                )
+                _log_call(
+                    store,
+                    "thinking-churn-holdout",
+                    crunch_json=_thinking_crunch_meta(applied=False, cohort="canary_holdout", tokens_saved=5000),
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=10000,
+                )
+                result = build_local_compaction_canary_ramp(
+                    store,
+                    config_dir=config,
+                    apply=True,
+                    min_applied_samples=2,
+                    min_holdout_samples=1,
+                    now="2026-06-23T10:40:00+00:00",
+                )
+                data = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+                queued = store.conn.execute("select payload_json from managed_outcome_feedback_queue").fetchall()
+            finally:
+                store.conn.close()
+
+        decision = next(item for item in result["decisions"] if item["family"] == "anthropic_thinking_history_compaction")
+        self.assertEqual(decision["action"], "stop")
+        self.assertEqual(decision["recommended_fraction"], 0.0)
+        self.assertIn("prompt-cache-churn-regression", decision["reason_codes"])
+        self.assertIn("cache-read-savings-regression", decision["reason_codes"])
+        self.assertIn("non-positive-net-realized-savings", decision["reason_codes"])
+        self.assertGreater(decision["evidence"]["applied_realized_savings_usd"], 0.0)
+        self.assertLessEqual(decision["evidence"]["net_savings_after_prompt_cache_churn_usd"], 0.0)
+        rule = data["anthropic_thinking_history_compaction"]["rules"][0]
+        self.assertFalse(rule["enabled"])
+        self.assertEqual(rule["canary"]["canary_fraction"], 0.0)
+        self.assertEqual(rule["safety_stop"]["last_ramp_stop_reason"], "non-positive-net-realized-savings")
+        self.assertEqual(len(queued), 1)
+        payload = json.loads(queued[0]["payload_json"])
+        self.assertIn("prompt-cache-churn-regression", payload["reason_codes"])
+        self.assertLessEqual(payload["evidence"]["net_savings_after_prompt_cache_churn_usd"], 0.0)
 
     def test_regression_safety_stop_ramps_to_zero_and_records_reason(self) -> None:
         with TemporaryDirectory() as tmp:

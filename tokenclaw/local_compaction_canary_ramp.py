@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import yaml
 
+from tokenclaw.pricing import provider_prompt_cache_accounting
 from tokenclaw.store import stable_json, utc_now
 
 
@@ -395,9 +396,10 @@ def _rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[str, An
     where = "where created_at >= ?" if since else ""
     params: tuple[Any, ...] = (since, capped) if since else (capped,)
     sql = f"""
-        select id, created_at, status_code, retry_count, latency_ms,
-               cost_est_usd, cost_baseline_usd, actual_input_tokens,
-               actual_output_tokens, input_tokens_est, cache_read_input_tokens,
+        select id, created_at, requested_model, routed_model, provider,
+               status_code, retry_count, latency_ms, cost_est_usd,
+               cost_baseline_usd, actual_input_tokens, actual_output_tokens,
+               input_tokens_est, cache_creation_input_tokens, cache_read_input_tokens,
                crunch_json, routing_json, cache_json
         from calls
         {where}
@@ -509,10 +511,22 @@ def _empty_family(family: str) -> dict[str, Any]:
         "applied_missing_usage": 0,
         "holdout_missing_usage": 0,
         "applied_non_positive_savings": 0,
+        "applied_missing_cache_economics": 0,
+        "holdout_missing_cache_economics": 0,
         "applied_cost_usd": 0.0,
         "holdout_cost_usd": 0.0,
         "applied_realized_savings_usd": 0.0,
         "holdout_projected_savings_usd": 0.0,
+        "applied_prompt_cache_creation_tokens": 0,
+        "holdout_prompt_cache_creation_tokens": 0,
+        "applied_prompt_cache_read_tokens": 0,
+        "holdout_prompt_cache_read_tokens": 0,
+        "applied_prompt_cache_creation_premium_usd": 0.0,
+        "holdout_prompt_cache_creation_premium_usd": 0.0,
+        "applied_prompt_cache_read_discount_usd": 0.0,
+        "holdout_prompt_cache_read_discount_usd": 0.0,
+        "applied_prompt_cache_net_discount_usd": 0.0,
+        "holdout_prompt_cache_net_discount_usd": 0.0,
         "similarity_samples": [],
         "min_similarity": None,
     }
@@ -539,6 +553,29 @@ def _fallback_observed(value: Any) -> bool:
     return False
 
 
+def _prompt_cache_economics(row: dict[str, Any]) -> dict[str, Any]:
+    creation_tokens = max(_as_int(row.get("cache_creation_input_tokens")), 0)
+    read_tokens = max(_as_int(row.get("cache_read_input_tokens")), 0)
+    model = str(row.get("routed_model") or row.get("requested_model") or "claude-sonnet-4-6")
+    provider = str(row.get("provider") or "anthropic")
+    accounting = provider_prompt_cache_accounting(
+        model,
+        provider=provider,
+        cache_creation_tokens=creation_tokens,
+        cache_read_tokens=read_tokens,
+    )
+    missing = row.get("cache_creation_input_tokens") is None or row.get("cache_read_input_tokens") is None
+    missing = missing or not bool(accounting.get("cost_known"))
+    return {
+        "missing": missing,
+        "creation_tokens": creation_tokens,
+        "read_tokens": read_tokens,
+        "creation_premium_usd": _as_float(accounting.get("creation_premium_usd")),
+        "read_discount_usd": _as_float(accounting.get("read_discount_usd")),
+        "net_discount_usd": _as_float(accounting.get("net_provider_cache_discount_usd")),
+    }
+
+
 def _add_sample(family: dict[str, Any], row: dict[str, Any], crunch: dict[str, Any], meta: dict[str, Any], cohort: str) -> None:
     family["observed"] += 1
     errored = _as_int(row.get("status_code"), -1) >= 400
@@ -546,6 +583,7 @@ def _add_sample(family: dict[str, Any], row: dict[str, Any], crunch: dict[str, A
     missing_usage = _missing_usage(row)
     fallback = _fallback_observed(meta)
     cost = _as_float(row.get("cost_est_usd"))
+    cache_economics = _prompt_cache_economics(row)
     if cohort == "applied":
         realized_savings = _realized_crunch_savings(crunch, meta, cohort)
         family["applied_count"] += 1
@@ -554,8 +592,14 @@ def _add_sample(family: dict[str, Any], row: dict[str, Any], crunch: dict[str, A
         family["applied_fallbacks"] += int(fallback)
         family["applied_missing_usage"] += int(missing_usage)
         family["applied_non_positive_savings"] += int(realized_savings <= 0.0)
+        family["applied_missing_cache_economics"] += int(cache_economics["missing"])
         family["applied_cost_usd"] += cost
         family["applied_realized_savings_usd"] += realized_savings
+        family["applied_prompt_cache_creation_tokens"] += cache_economics["creation_tokens"]
+        family["applied_prompt_cache_read_tokens"] += cache_economics["read_tokens"]
+        family["applied_prompt_cache_creation_premium_usd"] += cache_economics["creation_premium_usd"]
+        family["applied_prompt_cache_read_discount_usd"] += cache_economics["read_discount_usd"]
+        family["applied_prompt_cache_net_discount_usd"] += cache_economics["net_discount_usd"]
         values = _extract_similarity_values(meta)
         family["similarity_samples"].extend(values)
         if values:
@@ -568,8 +612,14 @@ def _add_sample(family: dict[str, Any], row: dict[str, Any], crunch: dict[str, A
         family["holdout_retries"] += int(retried)
         family["holdout_fallbacks"] += int(fallback)
         family["holdout_missing_usage"] += int(missing_usage)
+        family["holdout_missing_cache_economics"] += int(cache_economics["missing"])
         family["holdout_cost_usd"] += cost
         family["holdout_projected_savings_usd"] += _planned_savings(meta)
+        family["holdout_prompt_cache_creation_tokens"] += cache_economics["creation_tokens"]
+        family["holdout_prompt_cache_read_tokens"] += cache_economics["read_tokens"]
+        family["holdout_prompt_cache_creation_premium_usd"] += cache_economics["creation_premium_usd"]
+        family["holdout_prompt_cache_read_discount_usd"] += cache_economics["read_discount_usd"]
+        family["holdout_prompt_cache_net_discount_usd"] += cache_economics["net_discount_usd"]
     elif cohort == "safety_stop":
         family["safety_stop_count"] += 1
     else:
@@ -582,6 +632,20 @@ def _finalize_family(family: dict[str, Any]) -> dict[str, Any]:
     observed = _as_int(family.get("observed"))
     result = dict(family)
     result.pop("similarity_samples", None)
+    applied_creation_premium_avg = _as_float(family.get("applied_prompt_cache_creation_premium_usd")) / applied if applied else 0.0
+    holdout_creation_premium_avg = _as_float(family.get("holdout_prompt_cache_creation_premium_usd")) / holdout if holdout else 0.0
+    applied_read_discount_avg = _as_float(family.get("applied_prompt_cache_read_discount_usd")) / applied if applied else 0.0
+    holdout_read_discount_avg = _as_float(family.get("holdout_prompt_cache_read_discount_usd")) / holdout if holdout else 0.0
+    applied_net_discount_avg = _as_float(family.get("applied_prompt_cache_net_discount_usd")) / applied if applied else 0.0
+    holdout_net_discount_avg = _as_float(family.get("holdout_prompt_cache_net_discount_usd")) / holdout if holdout else 0.0
+    creation_premium_delta = applied_creation_premium_avg - holdout_creation_premium_avg
+    read_discount_delta = applied_read_discount_avg - holdout_read_discount_avg
+    net_discount_delta = applied_net_discount_avg - holdout_net_discount_avg
+    creation_churn = max(creation_premium_delta, 0.0)
+    read_savings_loss = max(-read_discount_delta, 0.0)
+    prompt_cache_churn_avg = creation_churn + read_savings_loss
+    prompt_cache_churn_total = prompt_cache_churn_avg * applied
+    net_after_churn = _as_float(family.get("applied_realized_savings_usd")) - prompt_cache_churn_total
     result.update({
         "applied_error_rate": round(_as_int(family.get("applied_errors")) / applied, 6) if applied else 0.0,
         "holdout_error_rate": round(_as_int(family.get("holdout_errors")) / holdout, 6) if holdout else 0.0,
@@ -592,10 +656,27 @@ def _finalize_family(family: dict[str, Any]) -> dict[str, Any]:
         "applied_missing_usage_rate": round(_as_int(family.get("applied_missing_usage")) / applied, 6) if applied else 0.0,
         "holdout_missing_usage_rate": round(_as_int(family.get("holdout_missing_usage")) / holdout, 6) if holdout else 0.0,
         "applied_non_positive_savings_rate": round(_as_int(family.get("applied_non_positive_savings")) / applied, 6) if applied else 0.0,
+        "applied_missing_cache_economics_rate": round(_as_int(family.get("applied_missing_cache_economics")) / applied, 6) if applied else 0.0,
+        "holdout_missing_cache_economics_rate": round(_as_int(family.get("holdout_missing_cache_economics")) / holdout, 6) if holdout else 0.0,
         "applied_cost_avg_usd": round(_as_float(family.get("applied_cost_usd")) / applied, 8) if applied else 0.0,
         "holdout_cost_avg_usd": round(_as_float(family.get("holdout_cost_usd")) / holdout, 8) if holdout else 0.0,
         "applied_realized_savings_avg_usd": round(_as_float(family.get("applied_realized_savings_usd")) / applied, 8) if applied else 0.0,
         "holdout_projected_savings_avg_usd": round(_as_float(family.get("holdout_projected_savings_usd")) / holdout, 8) if holdout else 0.0,
+        "prompt_cache_creation_input_tokens_delta": _as_int(round(
+            (_as_float(family.get("applied_prompt_cache_creation_tokens")) / applied if applied else 0.0)
+            - (_as_float(family.get("holdout_prompt_cache_creation_tokens")) / holdout if holdout else 0.0)
+        )),
+        "prompt_cache_read_input_tokens_delta": _as_int(round(
+            (_as_float(family.get("applied_prompt_cache_read_tokens")) / applied if applied else 0.0)
+            - (_as_float(family.get("holdout_prompt_cache_read_tokens")) / holdout if holdout else 0.0)
+        )),
+        "prompt_cache_creation_cost_delta_usd": round(creation_premium_delta, 8),
+        "prompt_cache_read_savings_delta_usd": round(read_discount_delta, 8),
+        "prompt_cache_net_discount_delta_usd": round(net_discount_delta, 8),
+        "prompt_cache_churn_usd": round(prompt_cache_churn_total, 8),
+        "prompt_cache_churn_avg_usd": round(prompt_cache_churn_avg, 8),
+        "net_savings_after_prompt_cache_churn_usd": round(net_after_churn, 8) if applied else 0.0,
+        "net_savings_after_prompt_cache_churn_avg_usd": round(net_after_churn / applied, 8) if applied else 0.0,
         "applied_rate": round(applied / observed, 6) if observed else 0.0,
         "holdout_rate": round(holdout / observed, 6) if observed else 0.0,
         "similarity_sample_count": len(family.get("similarity_samples") or []),
@@ -605,7 +686,18 @@ def _finalize_family(family: dict[str, Any]) -> dict[str, Any]:
     result["applied_minus_holdout_retry_rate"] = round(result["applied_retry_rate"] - result["holdout_retry_rate"], 6)
     result["applied_minus_holdout_fallback_rate"] = round(result["applied_fallback_rate"] - result["holdout_fallback_rate"], 6)
     result["applied_minus_holdout_missing_usage_rate"] = round(result["applied_missing_usage_rate"] - result["holdout_missing_usage_rate"], 6)
-    for key in ("applied_cost_usd", "holdout_cost_usd", "applied_realized_savings_usd", "holdout_projected_savings_usd"):
+    for key in (
+        "applied_cost_usd",
+        "holdout_cost_usd",
+        "applied_realized_savings_usd",
+        "holdout_projected_savings_usd",
+        "applied_prompt_cache_creation_premium_usd",
+        "holdout_prompt_cache_creation_premium_usd",
+        "applied_prompt_cache_read_discount_usd",
+        "holdout_prompt_cache_read_discount_usd",
+        "applied_prompt_cache_net_discount_usd",
+        "holdout_prompt_cache_net_discount_usd",
+    ):
         result[key] = round(_as_float(result.get(key)), 8)
     return result
 
@@ -693,6 +785,22 @@ def _decision(
         if _as_float(evidence.get("applied_missing_usage_rate")) > max_missing_usage_rate and applied:
             action = "stop"
             reasons.append("missing-usage")
+        missing_cache_economics = (
+            _as_float(evidence.get("applied_missing_cache_economics_rate")) > 0.0
+            or (_as_float(evidence.get("holdout_missing_cache_economics_rate")) > 0.0 and holdout)
+        )
+        prompt_cache_churn = _as_float(evidence.get("prompt_cache_churn_usd"))
+        net_after_prompt_cache_churn = _as_float(evidence.get("net_savings_after_prompt_cache_churn_usd"))
+        read_savings_delta = _as_float(evidence.get("prompt_cache_read_savings_delta_usd"))
+        if missing_cache_economics and applied:
+            reasons.append("missing-cache-economics")
+        if applied and holdout and net_after_prompt_cache_churn <= 0.0:
+            action = "stop"
+            reasons.append("non-positive-net-realized-savings")
+            if prompt_cache_churn > 0.0:
+                reasons.append("prompt-cache-churn-regression")
+            if read_savings_delta < 0.0:
+                reasons.append("cache-read-savings-regression")
     min_similarity = evidence.get("min_similarity")
     if min_similarity is not None and _as_float(min_similarity, 1.0) < similarity_floor:
         action = "stop"
@@ -701,17 +809,28 @@ def _decision(
     if action == "stop":
         recommended = 0.0
     elif applied >= min_applied_samples and holdout >= min_holdout_samples:
-        cheaper = (
-            _as_float(evidence.get("applied_minus_holdout_cost_avg_usd")) < 0.0
-            or _as_float(evidence.get("applied_realized_savings_avg_usd")) > 0.0
-        )
+        if family == THINKING_SECTION:
+            cheaper = (
+                _as_float(evidence.get("net_savings_after_prompt_cache_churn_usd")) > 0.0
+                and "missing-cache-economics" not in reasons
+            )
+        else:
+            cheaper = (
+                _as_float(evidence.get("applied_minus_holdout_cost_avg_usd")) < 0.0
+                or _as_float(evidence.get("applied_realized_savings_avg_usd")) > 0.0
+            )
         if cheaper:
             action = "widen"
             reasons.append("realized-canary-advantage")
             recommended = max(initial_fraction, current_fraction + ramp_step)
         else:
             action = "hold"
-            reasons.append("missing-realized-canary-advantage")
+            if family == THINKING_SECTION and "missing-cache-economics" in reasons:
+                reasons.append("missing-realized-canary-advantage")
+            elif family == THINKING_SECTION:
+                reasons.append("missing-net-realized-canary-advantage")
+            else:
+                reasons.append("missing-realized-canary-advantage")
     elif current_fraction <= 0.0 and holdout >= min_holdout_samples and _as_float(evidence.get("holdout_projected_savings_avg_usd")) > 0.0:
         action = "widen"
         reasons.append("initial-canary-enable-from-holdout-projection")
@@ -778,6 +897,14 @@ def _controller_meta(decision: dict[str, Any], *, now: str) -> dict[str, Any]:
             "applied_minus_holdout_fallback_rate": decision["evidence"]["applied_minus_holdout_fallback_rate"],
             "applied_non_positive_savings_rate": decision["evidence"]["applied_non_positive_savings_rate"],
             "applied_missing_usage_rate": decision["evidence"]["applied_missing_usage_rate"],
+            "applied_missing_cache_economics_rate": decision["evidence"].get("applied_missing_cache_economics_rate"),
+            "holdout_missing_cache_economics_rate": decision["evidence"].get("holdout_missing_cache_economics_rate"),
+            "prompt_cache_creation_input_tokens_delta": decision["evidence"].get("prompt_cache_creation_input_tokens_delta"),
+            "prompt_cache_read_input_tokens_delta": decision["evidence"].get("prompt_cache_read_input_tokens_delta"),
+            "prompt_cache_creation_cost_delta_usd": decision["evidence"].get("prompt_cache_creation_cost_delta_usd"),
+            "prompt_cache_read_savings_delta_usd": decision["evidence"].get("prompt_cache_read_savings_delta_usd"),
+            "prompt_cache_churn_usd": decision["evidence"].get("prompt_cache_churn_usd"),
+            "net_savings_after_prompt_cache_churn_usd": decision["evidence"].get("net_savings_after_prompt_cache_churn_usd"),
             "min_similarity": decision["evidence"].get("min_similarity"),
         },
         "local_only": True,
@@ -815,6 +942,14 @@ def _rollback_feedback_event(decision: dict[str, Any], *, now: str) -> dict[str,
             "applied_non_positive_savings_rate": _as_float(evidence.get("applied_non_positive_savings_rate")),
             "applied_missing_usage_rate": _as_float(evidence.get("applied_missing_usage_rate")),
             "applied_realized_savings_usd": _as_float(evidence.get("applied_realized_savings_usd")),
+            "applied_missing_cache_economics_rate": _as_float(evidence.get("applied_missing_cache_economics_rate")),
+            "holdout_missing_cache_economics_rate": _as_float(evidence.get("holdout_missing_cache_economics_rate")),
+            "prompt_cache_creation_input_tokens_delta": _as_int(evidence.get("prompt_cache_creation_input_tokens_delta")),
+            "prompt_cache_read_input_tokens_delta": _as_int(evidence.get("prompt_cache_read_input_tokens_delta")),
+            "prompt_cache_creation_cost_delta_usd": _as_float(evidence.get("prompt_cache_creation_cost_delta_usd")),
+            "prompt_cache_read_savings_delta_usd": _as_float(evidence.get("prompt_cache_read_savings_delta_usd")),
+            "prompt_cache_churn_usd": _as_float(evidence.get("prompt_cache_churn_usd")),
+            "net_savings_after_prompt_cache_churn_usd": _as_float(evidence.get("net_savings_after_prompt_cache_churn_usd")),
             "min_similarity": evidence.get("min_similarity"),
         },
         "privacy": _privacy(),
