@@ -43,6 +43,11 @@ _RAW_LIKE_KEY_PARTS = (
 _ALLOWED_RAW_LIKE_KEYS = {
     "cache_keys_included",
     "content_free",
+    "prompt_cache_blended_pricing_inputs",
+    "prompt_cache_churn_adjustment",
+    "prompt_cache_creation_tokens",
+    "prompt_cache_read_tokens",
+    "prompt_cache_read_to_creation_ratio",
     "raw_content_included",
     "raw_messages_included",
     "raw_params_included",
@@ -561,6 +566,9 @@ def build_promotion_outcome_feedback_entries(impact_report: dict[str, Any], *, r
             "error_rate_delta": _rounded(actual.get("applied_minus_holdout_error_rate"), 6),
             "retry_rate_delta": _rounded(actual.get("applied_minus_holdout_retry_rate"), 6),
             "latency_delta_ms": actual.get("applied_minus_holdout_latency_avg_ms"),
+            "feedback_freshness": actual.get("feedback_freshness") if isinstance(actual.get("feedback_freshness"), dict) else {},
+            "prompt_cache_churn_adjustment": actual.get("prompt_cache_churn_adjustment") if isinstance(actual.get("prompt_cache_churn_adjustment"), dict) else {},
+            "continuation_quality": actual.get("continuation_quality") if isinstance(actual.get("continuation_quality"), dict) else {},
             "cohort_metrics": {
                 "canary_applied": applied,
                 "canary_holdout": holdout,

@@ -21,6 +21,7 @@ MANAGED_FEEDBACK_SOURCE_SURFACE = "anthropic_thinking_compaction_outcome"
 MANAGED_FEEDBACK_EVENT_TYPE = "crunch_outcome_rollup"
 SERVER_OUTCOME_FIELDS_SCHEMA = "tokenclaw.anthropic_thinking_compaction_server_outcome_fields.v1"
 CONTINUATION_QUALITY_SCHEMA = "tokenclaw.thinking_tail_continuation_quality.v1"
+POST_WIDEN_PROMOTION_FEEDBACK_SCHEMA = "tokenclaw.anthropic_thinking_compaction_post_widen_promotion_feedback.v1"
 CONTINUATION_WINDOW_MINUTES = 30
 
 # The metadata-only outcome fields the managed server asks local thinking-tail
@@ -1163,6 +1164,178 @@ def build_anthropic_thinking_compaction_managed_feedback(
     }
     assert_managed_egress_safe(payload)
     return payload
+
+
+def _promotion_feedback_action(candidate: dict[str, Any]) -> dict[str, Any]:
+    cohorts = candidate.get("cohorts") if isinstance(candidate.get("cohorts"), dict) else {}
+    applied = cohorts.get("applied") if isinstance(cohorts.get("applied"), dict) else {}
+    holdout = cohorts.get("holdout") if isinstance(cohorts.get("holdout"), dict) else {}
+    skipped = cohorts.get("skipped") if isinstance(cohorts.get("skipped"), dict) else {}
+    safety = cohorts.get("safety_stop") if isinstance(cohorts.get("safety_stop"), dict) else {}
+    deltas = candidate.get("deltas") if isinstance(candidate.get("deltas"), dict) else {}
+    budget = candidate.get("budget_governor_feedback") if isinstance(candidate.get("budget_governor_feedback"), dict) else {}
+    recommendation = str(budget.get("recommended_budget_action") or candidate.get("verdict") or "hold")
+    if recommendation == "suppress":
+        recommendation = "rollback"
+    elif recommendation == "widen":
+        recommendation = "promote"
+    elif recommendation == "keep-holdout":
+        recommendation = "keep-canary"
+
+    projected_savings = round(
+        _as_float(applied.get("projected_savings_usd")) + _as_float(holdout.get("projected_savings_usd")),
+        8,
+    )
+    action_id_basis = {
+        "schema": POST_WIDEN_PROMOTION_FEEDBACK_SCHEMA,
+        "candidate_id": candidate.get("candidate_id"),
+        "rule_id": candidate.get("rule_id"),
+        "first_observed_at": candidate.get("first_observed_at"),
+        "last_observed_at": candidate.get("last_observed_at"),
+        "applied_count": _as_int(applied.get("count")),
+        "holdout_count": _as_int(holdout.get("count")),
+    }
+    action_digest = hashlib.sha256(
+        json.dumps(action_id_basis, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()[:24]
+    action_id = f"thinking-compaction-post-widen:{action_digest}"
+    return {
+        "schema": "tokenclaw.optimization_promotion_impact_action.v1",
+        "action_id": action_id,
+        "action_family": "crunch",
+        "policy_section": "anthropic_thinking_history_compaction.rules",
+        "rule_source": public_label(candidate.get("policy_source") or "unknown", "unknown"),
+        "target_rule_id": public_id(candidate.get("rule_id"), prefix="thinking-compaction-rule", fallback="unknown"),
+        "target_candidate_id": public_id(candidate.get("candidate_id"), prefix="thinking-compaction-candidate", fallback="unknown"),
+        "source_evidence_schema": SCHEMA,
+        "actual": {
+            "observed_savings_usd": round(_as_float(applied.get("net_savings_usd")), 8),
+            "actual_canary_applied_count": _as_int(applied.get("count")),
+            "actual_canary_holdout_count": _as_int(holdout.get("count")),
+            "actual_skipped_count": _as_int(skipped.get("count")),
+            "actual_bypassed_or_disabled_count": 0,
+            "actual_safety_stopped_count": _as_int(safety.get("count")),
+            "applied_minus_holdout_error_rate": round(_as_float(deltas.get("applied_minus_holdout_error_rate")), 6),
+            "applied_minus_holdout_retry_rate": round(_as_float(deltas.get("applied_minus_holdout_retry_rate")), 6),
+            "applied_minus_holdout_latency_avg_ms": deltas.get("applied_minus_holdout_latency_avg_ms"),
+            "cohorts": {
+                "canary_applied": applied,
+                "canary_holdout": holdout,
+                "skipped": skipped,
+                "bypassed_or_disabled": {},
+                "safety_stopped": safety,
+            },
+            "feedback_freshness": {
+                "first_observed_at": candidate.get("first_observed_at"),
+                "last_observed_at": candidate.get("last_observed_at"),
+            },
+            "prompt_cache_churn_adjustment": {
+                "applied_cache_creation_tokens": _as_int(applied.get("prompt_cache_creation_tokens")),
+                "holdout_cache_creation_tokens": _as_int(holdout.get("prompt_cache_creation_tokens")),
+                "applied_cache_read_tokens": _as_int(applied.get("prompt_cache_read_tokens")),
+                "holdout_cache_read_tokens": _as_int(holdout.get("prompt_cache_read_tokens")),
+            },
+            "continuation_quality": candidate.get("continuation_quality"),
+        },
+        "projection": {
+            "projected_savings_usd": projected_savings,
+        },
+        "thresholds": {},
+        "next_step": {
+            "verdict": str(candidate.get("canary_impact_decision") or "remain-staged"),
+            "recommendation": recommendation,
+            "reason_codes": [public_label(value, "unknown") for value in candidate.get("reason_codes") or []],
+            "warning_codes": [],
+        },
+    }
+
+
+def build_anthropic_thinking_compaction_promotion_outcome_feedback(
+    impact_report: dict[str, Any],
+    *,
+    recorded_at: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(impact_report, dict):
+        return {
+            "schema": POST_WIDEN_PROMOTION_FEEDBACK_SCHEMA,
+            "ok": False,
+            "status": "invalid",
+            "error": {"type": "invalid_impact_report", "message": "impact report must be a JSON object"},
+            "privacy": _privacy(),
+        }
+
+    actions = [
+        _promotion_feedback_action(candidate)
+        for candidate in impact_report.get("candidates") or []
+        if isinstance(candidate, dict)
+        and _as_int(((candidate.get("cohorts") or {}).get("applied") or {}).get("count")) > 0
+        and _as_int(((candidate.get("cohorts") or {}).get("holdout") or {}).get("count")) > 0
+    ]
+    synthetic_impact = {
+        "schema": POST_WIDEN_PROMOTION_FEEDBACK_SCHEMA,
+        "generated_at": impact_report.get("generated_at"),
+        "source_action_bundle": {"schema": SCHEMA},
+        "actions": actions,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _privacy(),
+    }
+    from tokenclaw.promotion_outcome_feedback import build_promotion_outcome_feedback_entries
+
+    ledger = build_promotion_outcome_feedback_entries(synthetic_impact, recorded_at=recorded_at)
+    ledger["source_report_schema"] = SCHEMA
+    ledger["source_feedback_schema"] = POST_WIDEN_PROMOTION_FEEDBACK_SCHEMA
+    return ledger
+
+
+def record_anthropic_thinking_compaction_promotion_outcome_feedback(
+    impact_report: dict[str, Any],
+    *,
+    store_obj: Any,
+    recorded_at: str | None = None,
+) -> dict[str, Any]:
+    feedback = build_anthropic_thinking_compaction_promotion_outcome_feedback(impact_report, recorded_at=recorded_at)
+    if not feedback.get("ok"):
+        return feedback
+    rows_written = 0
+    from tokenclaw.store import stable_json
+
+    for entry in feedback.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        store_obj.log_promotion_outcome_feedback(
+            id=entry.get("id"),
+            created_at=entry.get("created_at"),
+            impact_generated_at=entry.get("impact_generated_at"),
+            policy_id=entry.get("policy_id"),
+            action_family=entry.get("action_family"),
+            policy_section=entry.get("policy_section"),
+            rule_source=entry.get("rule_source"),
+            rule_id=entry.get("rule_id"),
+            candidate_id=entry.get("candidate_id"),
+            action_id=entry.get("action_id"),
+            source_evidence_schema=entry.get("source_evidence_schema"),
+            status=entry.get("status"),
+            recommendation=entry.get("recommendation"),
+            rollback_needed=1 if entry.get("rollback_needed") else 0,
+            observed_savings_usd=entry.get("observed_savings_usd"),
+            projected_savings_usd=entry.get("projected_savings_usd"),
+            projection_realization_ratio=entry.get("projection_realization_ratio"),
+            applied_count=entry.get("applied_count"),
+            holdout_count=entry.get("holdout_count"),
+            skipped_count=entry.get("skipped_count"),
+            bypassed_count=entry.get("bypassed_count"),
+            safety_stop_count=entry.get("safety_stop_count"),
+            error_rate_delta=entry.get("error_rate_delta"),
+            retry_rate_delta=entry.get("retry_rate_delta"),
+            latency_delta_ms=entry.get("latency_delta_ms"),
+            feedback_json=stable_json(entry),
+        )
+        rows_written += 1
+    feedback["wrote_store"] = rows_written > 0
+    feedback.setdefault("summary", {})["rows_written"] = rows_written
+    feedback["status"] = "recorded" if rows_written else feedback.get("status")
+    return feedback
 
 
 async def queue_anthropic_thinking_compaction_managed_feedback(

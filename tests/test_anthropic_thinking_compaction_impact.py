@@ -15,10 +15,13 @@ from tokenclaw import cli
 from tokenclaw.anthropic_thinking_compaction_impact import (
     MANAGED_FEEDBACK_SCHEMA,
     MANAGED_FEEDBACK_SOURCE_SURFACE,
+    POST_WIDEN_PROMOTION_FEEDBACK_SCHEMA,
     SERVER_REQUESTED_OUTCOME_FIELDS,
     build_anthropic_thinking_compaction_impact_report,
     build_anthropic_thinking_compaction_managed_feedback,
+    build_anthropic_thinking_compaction_promotion_outcome_feedback,
     queue_anthropic_thinking_compaction_managed_feedback,
+    record_anthropic_thinking_compaction_promotion_outcome_feedback,
 )
 from tokenclaw.dashboard_app import create_dashboard_app
 from tokenclaw.managed_egress import managed_egress_violations
@@ -452,6 +455,137 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
         self.assertEqual(payload["candidates"][0]["canary_impact_decision"], "widen")
         self.assertGreater(payload["summary"]["observed_saved_chars"], 0)
         self.assertGreater(payload["summary"]["projected_saved_usd"], 0)
+
+    def test_post_widen_promotion_outcome_feedback_records_one_metadata_only_row(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "thinking-post-widen-applied-1",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=1000,
+                    planned_tokens=1000,
+                    cost_est=0.020,
+                )
+                _log_call(
+                    store,
+                    "thinking-post-widen-applied-2",
+                    created_at="2026-06-13T00:01:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=900,
+                    planned_tokens=900,
+                    cost_est=0.022,
+                )
+                _log_call(
+                    store,
+                    "thinking-post-widen-holdout",
+                    created_at="2026-06-13T00:02:00+00:00",
+                    status="holdout",
+                    reason="canary_holdout",
+                    cohort="canary_holdout",
+                    planned_tokens=1000,
+                    cost_est=0.050,
+                )
+                report = build_anthropic_thinking_compaction_impact_report(store, limit=20)
+                preview = build_anthropic_thinking_compaction_promotion_outcome_feedback(
+                    report,
+                    recorded_at="2026-06-13T00:03:00+00:00",
+                )
+                recorded = record_anthropic_thinking_compaction_promotion_outcome_feedback(
+                    report,
+                    store_obj=store,
+                    recorded_at="2026-06-13T00:03:00+00:00",
+                )
+                rows = store.promotion_outcome_feedback_rows(action_family="crunch", limit=10)
+            finally:
+                store.conn.close()
+
+        self.assertEqual(preview["source_feedback_schema"], POST_WIDEN_PROMOTION_FEEDBACK_SCHEMA)
+        self.assertTrue(recorded["ok"])
+        self.assertTrue(recorded["wrote_store"])
+        self.assertEqual(recorded["summary"]["rows_written"], 1)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["action_family"], "crunch")
+        self.assertEqual(row["policy_section"], "anthropic_thinking_history_compaction.rules")
+        self.assertEqual(row["source_evidence_schema"], "tokenclaw.anthropic_thinking_compaction_impact.v1")
+        self.assertEqual(row["applied_count"], 2)
+        self.assertEqual(row["holdout_count"], 1)
+        self.assertGreater(row["observed_savings_usd"], 0)
+        self.assertGreater(row["projected_savings_usd"], 0)
+        entry = json.loads(row["feedback_json"])
+        self.assertEqual(entry["schema"], "tokenclaw.promotion_outcome_feedback_entry.v1")
+        self.assertEqual(entry["status"], "positive")
+        self.assertEqual(entry["recommendation"], "promote")
+        self.assertEqual(entry["feedback_freshness"]["first_observed_at"], "2026-06-13T00:00:00+00:00")
+        self.assertEqual(entry["feedback_freshness"]["last_observed_at"], "2026-06-13T00:02:00+00:00")
+        self.assertEqual(entry["prompt_cache_churn_adjustment"]["applied_cache_read_tokens"], 6000)
+        rendered = json.dumps(recorded, sort_keys=True) + row["feedback_json"]
+        for forbidden in (
+            RAW_SECRET,
+            "private thinking",
+            "raw-tool-id",
+            "raw-request-id",
+            "raw-session-id",
+            "raw-cache-key",
+            "/private/",
+            "raw response",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_cli_can_record_post_widen_promotion_feedback_without_content(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tokenclaw.sqlite3"
+            store = Store(str(db_path))
+            try:
+                _log_call(
+                    store,
+                    "thinking-cli-post-widen-applied",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=1000,
+                    planned_tokens=1000,
+                )
+                _log_call(
+                    store,
+                    "thinking-cli-post-widen-holdout",
+                    created_at="2026-06-13T00:01:00+00:00",
+                    status="holdout",
+                    reason="canary_holdout",
+                    cohort="canary_holdout",
+                    planned_tokens=1000,
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.anthropic_thinking_compaction_impact_cli(
+                ["--db", str(db_path), "--limit", "10", "--min-applied-samples", "1", "--record-promotion-outcome-feedback"],
+                stdout=stdout,
+            )
+            store = Store(str(db_path))
+            try:
+                rows = store.promotion_outcome_feedback_rows(action_family="crunch", limit=10)
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["wrote_store"])
+        self.assertEqual(payload["promotion_outcome_feedback"]["summary"]["rows_written"], 1)
+        self.assertEqual(len(rows), 1)
+        rendered = stdout.getvalue() + rows[0]["feedback_json"]
+        self.assertNotIn(RAW_SECRET, rendered)
+        self.assertNotIn("raw-session-id", rendered)
+        self.assertNotIn("raw-request-id", rendered)
 
     def test_report_summarizes_downstream_continuation_quality_without_content(self) -> None:
         with TemporaryDirectory() as tmp:

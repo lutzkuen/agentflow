@@ -3312,6 +3312,11 @@ def anthropic_thinking_compaction_impact_cli(argv: Sequence[str] | None = None, 
     parser.add_argument("--since", default=None, help="Optional inclusive UTC timestamp lower bound.")
     parser.add_argument("--min-applied-samples", type=int, default=2, help="Minimum applied samples for budget feedback.")
     parser.add_argument("--min-holdout-samples", type=int, default=1, help="Minimum holdout samples for budget feedback.")
+    parser.add_argument(
+        "--record-promotion-outcome-feedback",
+        action="store_true",
+        help="Persist aggregate-only post-widen promotion outcome feedback rows for thinking compaction.",
+    )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
     args = parser.parse_args(argv)
 
@@ -3329,6 +3334,14 @@ def anthropic_thinking_compaction_impact_cli(argv: Sequence[str] | None = None, 
             min_applied_samples=args.min_applied_samples,
             min_holdout_samples=args.min_holdout_samples,
         )
+        if args.record_promotion_outcome_feedback and result.get("status") == "matched":
+            from tokenclaw.anthropic_thinking_compaction_impact import (
+                record_anthropic_thinking_compaction_promotion_outcome_feedback,
+            )
+
+            feedback = record_anthropic_thinking_compaction_promotion_outcome_feedback(result, store_obj=store)
+            result["promotion_outcome_feedback"] = feedback
+            result["wrote_store"] = bool(feedback.get("wrote_store"))
     finally:
         store.conn.close()
     if args.pretty:
