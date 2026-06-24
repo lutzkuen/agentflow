@@ -1861,6 +1861,36 @@ class SQLiteStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def streaming_agentic_cohort_feedback_rows(
+        self,
+        *,
+        window_hours: int = 24,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        capped = max(1, min(int(limit or 1), 10000))
+        hours = max(1, min(int(window_hours or 1), 24 * 14))
+        rows = self.conn.execute(
+            """
+            select created_at, path, requested_model, routed_model, stream, cache_hit,
+                   status_code, latency_ms, input_tokens_est, output_tokens_est,
+                   actual_input_tokens, actual_output_tokens, cost_est_usd,
+                   cost_baseline_usd, crunch_json, routing_json, cache_json,
+                   case when error is not null then 1 else 0 end as error_present,
+                   category, cache_creation_input_tokens, cache_read_input_tokens,
+                   retry_count, thinking_output_tokens, provider, source_surface,
+                   endpoint, requested_model_family, routed_model_family,
+                   routing_outcome_label, managed_routing_json
+            from calls
+            where datetime(created_at) >= datetime('now', ?)
+              and coalesce(stream, 0) = 1
+              and category in ('tool-result', 'tool-heavy')
+            order by created_at desc
+            limit ?
+            """,
+            (f"-{hours} hours", capped),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def enqueue_managed_outcome_feedback(self, **kwargs: Any) -> None:
         cols = [
             "id", "created_at", "updated_at", "source_surface", "endpoint",

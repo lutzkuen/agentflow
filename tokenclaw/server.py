@@ -15,6 +15,10 @@ from fastapi import FastAPI, Request, Response, WebSocket
 from tokenclaw.env import env, env_float, env_int
 from tokenclaw.managed_mode import managed_mode_public_meta
 from tokenclaw.paths import default_db_path
+from tokenclaw.streaming_cohort_feedback import (
+    record_streaming_agentic_cohort_rollup_feedback,
+    streaming_agentic_cohort_feedback_config,
+)
 from tokenclaw.upstream_url import normalize_openai_upstream_base_url, redact_url
 
 load_dotenv()
@@ -184,6 +188,7 @@ store = Store(DEFAULT_DB)
 app = FastAPI(title=f"TokenClaw {PROVIDER.title()} Proxy", version="0.1.0")
 _routing_outcome_label_task: asyncio.Task[Any] | None = None
 _managed_feedback_drainer_task: asyncio.Task[Any] | None = None
+_streaming_cohort_feedback_task: asyncio.Task[Any] | None = None
 
 
 def _provider_context() -> ProviderContext:
@@ -323,6 +328,49 @@ async def _periodic_managed_outcome_feedback_drainer(
         await asyncio.sleep(max(1, int(interval_seconds)))
 
 
+async def _queue_streaming_agentic_cohort_rollup_once(
+    *,
+    window_hours: int,
+    max_rows: int,
+    max_cohorts: int,
+) -> dict[str, Any]:
+    result = await record_streaming_agentic_cohort_rollup_feedback(
+        store,
+        window_hours=max(1, int(window_hours)),
+        max_rows=max(1, min(int(max_rows), 10000)),
+        max_cohorts=max(1, min(int(max_cohorts), 100)),
+        flush_immediately=False,
+    )
+    if result.get("status") not in {"disabled", "queued"} or int(result.get("rows_considered") or 0) > 0:
+        print(
+            "tokenclaw_streaming_cohort_feedback "
+            f"status={str(result.get('status') or 'unknown').replace('-', '_')} "
+            f"rows={int(result.get('rows_considered') or 0)} "
+            f"cohorts={int(result.get('cohort_count') or 0)}",
+            file=sys.stderr,
+        )
+    return result
+
+
+async def _periodic_streaming_agentic_cohort_feedback(
+    *,
+    interval_seconds: int,
+    window_hours: int,
+    max_rows: int,
+    max_cohorts: int,
+) -> None:
+    while True:
+        try:
+            await _queue_streaming_agentic_cohort_rollup_once(
+                window_hours=window_hours,
+                max_rows=max_rows,
+                max_cohorts=max_cohorts,
+            )
+        except Exception as exc:
+            print(f"tokenclaw_streaming_cohort_feedback_error: {exc}", file=sys.stderr)
+        await asyncio.sleep(max(1, int(interval_seconds)))
+
+
 app.include_router(
     create_dashboard_router(
         store_obj=lambda: store,
@@ -337,7 +385,7 @@ app.include_router(create_admin_router(after_reload=_refresh_policy_module_bindi
 
 @app.on_event("startup")
 async def _log_startup_session_spending_summary() -> None:
-    global _routing_outcome_label_task, _managed_feedback_drainer_task
+    global _routing_outcome_label_task, _managed_feedback_drainer_task, _streaming_cohort_feedback_task
     _log_recent_session_spending_summary("startup")
     await _finalize_routing_outcome_labels_once()
     try:
@@ -372,6 +420,16 @@ async def _log_startup_session_spending_summary() -> None:
                 stale_after_seconds=max(1, feedback_stale_after),
             )
         )
+    streaming_feedback = streaming_agentic_cohort_feedback_config()
+    if streaming_feedback["interval_seconds"] > 0 and _streaming_cohort_feedback_task is None:
+        _streaming_cohort_feedback_task = asyncio.create_task(
+            _periodic_streaming_agentic_cohort_feedback(
+                interval_seconds=streaming_feedback["interval_seconds"],
+                window_hours=streaming_feedback["window_hours"],
+                max_rows=streaming_feedback["max_rows"],
+                max_cohorts=streaming_feedback["max_cohorts"],
+            )
+        )
     if env("TOKENCLAW_SQLITE_MAINTENANCE_ON_STARTUP", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
     try:
@@ -398,13 +456,16 @@ async def _log_startup_session_spending_summary() -> None:
 
 @app.on_event("shutdown")
 async def _log_shutdown_session_spending_summary() -> None:
-    global _routing_outcome_label_task, _managed_feedback_drainer_task
+    global _routing_outcome_label_task, _managed_feedback_drainer_task, _streaming_cohort_feedback_task
     if _routing_outcome_label_task is not None:
         _routing_outcome_label_task.cancel()
         _routing_outcome_label_task = None
     if _managed_feedback_drainer_task is not None:
         _managed_feedback_drainer_task.cancel()
         _managed_feedback_drainer_task = None
+    if _streaming_cohort_feedback_task is not None:
+        _streaming_cohort_feedback_task.cancel()
+        _streaming_cohort_feedback_task = None
     _log_recent_session_spending_summary("shutdown")
 
 
