@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 import unittest
 
 import yaml
@@ -253,12 +254,89 @@ def _log_call(
     )
 
 
+def _thinking_feedback_payload() -> dict:
+    return {
+        "schema": "tokenclaw.local_compaction_rollback_feedback.v1",
+        "event_type": "crunch_rollback",
+        "source_surface": "anthropic_messages",
+        "local_action_family": "crunch",
+        "candidate_id": "thinking-tail-compaction",
+        "rule_id": "local-repeated-context-thinking-tool-result-canary",
+        "reason_codes": ["test-feedback"],
+        "privacy": {
+            "metadata_only": True,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_thinking_text_included": False,
+        },
+    }
+
+
+def _enqueue_thinking_feedback(store: Store, *, queue_id: str = "thinking-feedback-queued") -> None:
+    store.enqueue_managed_outcome_feedback(
+        id=queue_id,
+        created_at="2026-06-23T09:55:00+00:00",
+        updated_at="2026-06-23T09:55:00+00:00",
+        source_surface="anthropic_thinking_compaction_rollback",
+        endpoint="/v1/policy-events",
+        optimization_unit_id=0,
+        payload_json=stable_json(_thinking_feedback_payload()),
+        status="queued",
+        attempts=0,
+        next_attempt_at="2026-06-23T09:55:00+00:00",
+    )
+
+
+class ManagedFeedbackRampResponse:
+    def __init__(self, status_code: int, text: str) -> None:
+        self.status_code = status_code
+        self.text = text
+
+
+class ManagedFeedbackRampClient:
+    calls: list[dict[str, object]] = []
+    status_code = 200
+    text = '{"ok":true}'
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    async def post(self, url: str, **kwargs):
+        self.calls.append({"method": "POST", "url": url, **kwargs})
+        return ManagedFeedbackRampResponse(self.status_code, self.text)
+
+    async def patch(self, url: str, **kwargs):
+        self.calls.append({"method": "PATCH", "url": url, **kwargs})
+        return ManagedFeedbackRampResponse(self.status_code, self.text)
+
+
 class LocalCompactionCanaryRampTests(unittest.TestCase):
-    ENV_KEYS = ("TOKENCLAW_CRUNCH", "TOKENCLAW_CRUNCH_RULES", "HOME")
+    ENV_KEYS = (
+        "TOKENCLAW_CRUNCH",
+        "TOKENCLAW_CRUNCH_RULES",
+        "HOME",
+        "TOKENCLAW_MANAGED",
+        "TOKENCLAW_MANAGED_MODE",
+        "TOKENCLAW_MANAGED_CRUNCH",
+        "TOKENCLAW_LOCAL_RULES_ONLY",
+        "TOKENCLAW_RECOMMENDATION_ENABLED",
+        "TOKENCLAW_RECOMMENDATION_SERVER_URL",
+        "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS",
+    )
 
     def setUp(self) -> None:
         self.old_cwd = Path.cwd()
         self.home = TemporaryDirectory()
+        ManagedFeedbackRampClient.calls = []
+        ManagedFeedbackRampClient.status_code = 200
+        ManagedFeedbackRampClient.text = '{"ok":true}'
         self.saved_env = {key: os.environ.get(key) for key in self.ENV_KEYS}
         for key in self.ENV_KEYS:
             os.environ.pop(key, None)
@@ -375,6 +453,177 @@ class LocalCompactionCanaryRampTests(unittest.TestCase):
         self.assertGreater(decision["evidence"]["net_savings_after_prompt_cache_churn_usd"], 0.0)
         self.assertGreater(decision["evidence"]["prompt_cache_churn_usd"], 0.0)
         self.assertAlmostEqual(data["anthropic_thinking_history_compaction"]["rules"][0]["canary"]["canary_fraction"], 0.10)
+
+    def test_pre_widen_drains_queued_thinking_tail_feedback_and_exposes_freshness(self) -> None:
+        from tokenclaw import stats as stats_views
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            rules_path = config / "crunch_rules.yaml"
+            rules_path.write_text(_rules_yaml(fraction=0.05, holdout=0.10), encoding="utf-8")
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
+            try:
+                _enqueue_thinking_feedback(store)
+                _log_call(
+                    store,
+                    "thinking-drain-applied-a",
+                    crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=2000, realized_savings=0.050),
+                    cache_creation_input_tokens=1000,
+                )
+                _log_call(
+                    store,
+                    "thinking-drain-applied-b",
+                    crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=2000, realized_savings=0.050),
+                    cache_creation_input_tokens=1000,
+                )
+                _log_call(
+                    store,
+                    "thinking-drain-holdout",
+                    crunch_json=_thinking_crunch_meta(applied=False, cohort="canary_holdout", tokens_saved=2000),
+                    cache_read_input_tokens=100,
+                )
+                with patch.dict(
+                    os.environ,
+                    {
+                        "TOKENCLAW_MANAGED": "1",
+                        "TOKENCLAW_MANAGED_MODE": "live",
+                        "TOKENCLAW_MANAGED_CRUNCH": "1",
+                        "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    },
+                    clear=False,
+                ), patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackRampClient):
+                    result = build_local_compaction_canary_ramp(
+                        store,
+                        config_dir=config,
+                        apply=True,
+                        ramp_step=0.05,
+                        min_applied_samples=2,
+                        min_holdout_samples=1,
+                        now="2026-06-23T10:30:00+00:00",
+                    )
+                row = store.get_managed_outcome_feedback("thinking-feedback-queued")
+                freshness = stats_views.stats_managed_feedback_queue_freshness(store)
+                data = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+            finally:
+                store.conn.close()
+
+        decision = next(item for item in result["decisions"] if item["family"] == "anthropic_thinking_history_compaction")
+        self.assertEqual(decision["action"], "widen")
+        self.assertEqual(decision["managed_feedback_pre_widen_gate"]["status"], "passed")
+        self.assertEqual(decision["managed_feedback_pre_widen_gate"]["before"]["pending_count"], 1)
+        self.assertEqual(decision["managed_feedback_pre_widen_gate"]["after"]["pending_count"], 0)
+        self.assertTrue(result["managed_server_calls_made"])
+        self.assertEqual(row["status"], "sent")
+        self.assertIsNotNone(row["sent_at"])
+        self.assertEqual(ManagedFeedbackRampClient.calls[0]["method"], "POST")
+        self.assertEqual(ManagedFeedbackRampClient.calls[0]["url"], "http://managed.test/v1/policy-events")
+        self.assertAlmostEqual(data["anthropic_thinking_history_compaction"]["rules"][0]["canary"]["canary_fraction"], 0.10)
+        crunch_sent = [
+            group
+            for group in freshness["groups"]
+            if group["action_family"] == "crunch" and group["status"] == "sent"
+        ]
+        self.assertTrue(crunch_sent)
+        self.assertFalse(crunch_sent[0]["payload_json_included"])
+
+    def test_pre_widen_preserves_permanent_feedback_failure_and_blocks_widening(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            rules_path = config / "crunch_rules.yaml"
+            rules_path.write_text(_rules_yaml(fraction=0.05, holdout=0.10), encoding="utf-8")
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
+            try:
+                _enqueue_thinking_feedback(store)
+                _log_call(store, "thinking-permanent-applied-a", crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=2000, realized_savings=0.050))
+                _log_call(store, "thinking-permanent-applied-b", crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=2000, realized_savings=0.050))
+                _log_call(store, "thinking-permanent-holdout", crunch_json=_thinking_crunch_meta(applied=False, cohort="canary_holdout", tokens_saved=2000))
+                ManagedFeedbackRampClient.status_code = 422
+                ManagedFeedbackRampClient.text = "invalid thinking-tail metadata"
+                with patch.dict(
+                    os.environ,
+                    {
+                        "TOKENCLAW_MANAGED": "1",
+                        "TOKENCLAW_MANAGED_MODE": "live",
+                        "TOKENCLAW_MANAGED_CRUNCH": "1",
+                        "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                        "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS": "3",
+                    },
+                    clear=False,
+                ), patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackRampClient):
+                    result = build_local_compaction_canary_ramp(
+                        store,
+                        config_dir=config,
+                        apply=True,
+                        ramp_step=0.05,
+                        min_applied_samples=2,
+                        min_holdout_samples=1,
+                        now="2026-06-23T10:30:00+00:00",
+                    )
+                row = store.get_managed_outcome_feedback("thinking-feedback-queued")
+                data = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+            finally:
+                store.conn.close()
+
+        decision = next(item for item in result["decisions"] if item["family"] == "anthropic_thinking_history_compaction")
+        self.assertEqual(decision["action"], "hold")
+        self.assertEqual(decision["blocked_action"], "widen")
+        self.assertIn("managed-feedback-not-fresh", decision["reason_codes"])
+        self.assertIn("managed-feedback-failed", decision["reason_codes"])
+        self.assertEqual(row["status"], "dropped-after-limit")
+        self.assertEqual(row["last_status_code"], 422)
+        self.assertEqual(row["last_error"], "invalid thinking-tail metadata")
+        drain_result = decision["managed_feedback_pre_widen_gate"]["drain"]["results"][0]
+        self.assertEqual(drain_result["status"], "dropped-after-limit")
+        self.assertEqual(drain_result["reason"], "permanent-client-error")
+        self.assertAlmostEqual(data["anthropic_thinking_history_compaction"]["rules"][0]["canary"]["canary_fraction"], 0.05)
+
+    def test_pre_widen_local_rules_only_leaves_feedback_queued_without_network(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            rules_path = config / "crunch_rules.yaml"
+            rules_path.write_text(_rules_yaml(fraction=0.05, holdout=0.10), encoding="utf-8")
+            store = Store(str(tmp_path / "tokenclaw.sqlite3"))
+            try:
+                _enqueue_thinking_feedback(store)
+                _log_call(store, "thinking-disabled-applied-a", crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=2000, realized_savings=0.050))
+                _log_call(store, "thinking-disabled-applied-b", crunch_json=_thinking_crunch_meta(applied=True, cohort="canary_applied", tokens_saved=2000, realized_savings=0.050))
+                _log_call(store, "thinking-disabled-holdout", crunch_json=_thinking_crunch_meta(applied=False, cohort="canary_holdout", tokens_saved=2000))
+                with patch.dict(
+                    os.environ,
+                    {
+                        "TOKENCLAW_LOCAL_RULES_ONLY": "1",
+                        "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    },
+                    clear=False,
+                ), patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackRampClient):
+                    result = build_local_compaction_canary_ramp(
+                        store,
+                        config_dir=config,
+                        apply=True,
+                        ramp_step=0.05,
+                        min_applied_samples=2,
+                        min_holdout_samples=1,
+                        now="2026-06-23T10:30:00+00:00",
+                    )
+                row = store.get_managed_outcome_feedback("thinking-feedback-queued")
+                data = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+            finally:
+                store.conn.close()
+
+        decision = next(item for item in result["decisions"] if item["family"] == "anthropic_thinking_history_compaction")
+        self.assertEqual(decision["action"], "hold")
+        self.assertEqual(decision["managed_feedback_pre_widen_gate"]["drain"]["status"], "disabled")
+        self.assertEqual(row["status"], "queued")
+        self.assertEqual(row["attempts"], 0)
+        self.assertEqual(ManagedFeedbackRampClient.calls, [])
+        self.assertFalse(result["managed_server_calls_made"])
+        self.assertAlmostEqual(data["anthropic_thinking_history_compaction"]["rules"][0]["canary"]["canary_fraction"], 0.05)
 
     def test_prompt_cache_churn_regression_stops_thinking_tail_even_with_saved_tokens(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -2071,7 +2071,7 @@ class RecommendationTest(unittest.TestCase):
                 store.conn.close()
 
         self.assertEqual(results[0]["status"], "dropped-after-limit")
-        self.assertEqual(results[0]["reason"], "attempt-limit-reached")
+        self.assertEqual(results[0]["reason"], "permanent-client-error")
         self.assertEqual(row["status"], "dropped-after-limit")
         self.assertEqual(row["attempts"], 1)
         self.assertIsNone(row["sent_at"])

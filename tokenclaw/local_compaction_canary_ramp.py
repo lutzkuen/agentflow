@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import difflib
 import hashlib
@@ -18,6 +19,7 @@ from tokenclaw.store import stable_json, utc_now
 SCHEMA = "tokenclaw.local_compaction_canary_ramp.v1"
 DECISION_SCHEMA = "tokenclaw.local_compaction_canary_ramp_decision.v1"
 MANAGED_TREATMENT_SCHEMA = "tokenclaw.managed_thinking_compaction_treatment_apply.v1"
+MANAGED_FEEDBACK_DRAIN_SCHEMA = "tokenclaw.thinking_tail_feedback_pre_widen_drain.v1"
 ROLLBACK_FEEDBACK_SCHEMA = "tokenclaw.local_compaction_rollback_feedback.v1"
 ROLLBACK_FEEDBACK_SOURCE_SURFACE = "anthropic_thinking_compaction_rollback"
 POLICY_EVENTS_PATH = "/v1/policy-events"
@@ -27,6 +29,8 @@ THINKING_TARGET_CANDIDATE = "repeated-context-thinking-tool-result-gte-128k"
 THINKING_SERVER_CANDIDATE = "thinking-tail-compaction"
 THINKING_SUPPORTED_CANDIDATES = {THINKING_TARGET_CANDIDATE, THINKING_SERVER_CANDIDATE}
 OLD_CONTEXT_SECTION = "old_context_summarization"
+_PENDING_FEEDBACK_STATUSES = {"queued", "retryable-error", "sending"}
+_FAILED_FEEDBACK_STATUSES = {"dropped-after-limit", "error"}
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -82,6 +86,195 @@ def _privacy() -> dict[str, Any]:
         "managed_server_calls_made": False,
         "provider_calls_made": False,
     }
+
+
+def _is_thinking_tail_feedback_row(row: dict[str, Any]) -> bool:
+    payload = _json_obj(row.get("payload_json"))
+    haystack_parts: list[str] = [
+        str(row.get("source_surface") or ""),
+        str(row.get("endpoint") or ""),
+        str(payload.get("schema") or ""),
+        str(payload.get("event_type") or ""),
+        str(payload.get("candidate_id") or ""),
+        str(payload.get("rule_id") or ""),
+        str(payload.get("local_action_family") or ""),
+        str(payload.get("action_family") or ""),
+        str(payload.get("policy_section") or ""),
+    ]
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    haystack_parts.extend(
+        str(metadata.get(key) or "")
+        for key in ("schema", "candidate_id", "rule_id", "local_action_family", "action_family", "policy_section")
+    )
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    haystack_parts.extend(str(evidence.get(key) or "") for key in ("candidate_id", "rule_id"))
+    haystack = " ".join(haystack_parts).lower().replace("_", "-")
+    family = str(
+        payload.get("local_action_family")
+        or payload.get("action_family")
+        or payload.get("policy_section")
+        or metadata.get("local_action_family")
+        or metadata.get("action_family")
+        or metadata.get("policy_section")
+        or ""
+    ).strip().lower()
+    return (
+        family in {"crunch", "compaction"}
+        and (
+            "thinking" in haystack
+            or THINKING_TARGET_CANDIDATE in haystack
+            or THINKING_SERVER_CANDIDATE in haystack
+            or "thinking-tail-compaction" in haystack
+        )
+    )
+
+
+def _thinking_tail_feedback_rows(store_obj: Any, *, limit: int) -> list[dict[str, Any]]:
+    if not hasattr(store_obj, "managed_outcome_feedback_freshness_rows") and not hasattr(store_obj, "managed_outcome_feedback_rows"):
+        return []
+    capped = max(1, min(int(limit or 100), 10_000))
+    if hasattr(store_obj, "managed_outcome_feedback_freshness_rows"):
+        rows = store_obj.managed_outcome_feedback_freshness_rows(limit=capped)
+    else:
+        rows = store_obj.managed_outcome_feedback_rows(limit=capped)
+    return [dict(row) for row in rows if _is_thinking_tail_feedback_row(dict(row))]
+
+
+def _feedback_snapshot(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    due_count = 0
+    oldest_pending_at: str | None = None
+    latest_sent_at: str | None = None
+    last_error_class: str | None = None
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if status in _PENDING_FEEDBACK_STATUSES:
+            if oldest_pending_at is None or str(row.get("created_at") or "") < oldest_pending_at:
+                oldest_pending_at = str(row.get("created_at") or "")
+            next_attempt = str(row.get("next_attempt_at") or "")
+            if status == "sending" or not next_attempt or next_attempt <= utc_now():
+                due_count += 1
+        if status == "sent":
+            sent_at = str(row.get("sent_at") or row.get("updated_at") or "")
+            if latest_sent_at is None or sent_at > latest_sent_at:
+                latest_sent_at = sent_at
+        if status in _FAILED_FEEDBACK_STATUSES and row.get("last_error"):
+            last_error_class = str(row.get("last_error")).split(":", 1)[0][:120]
+    pending_count = sum(status_counts.get(status, 0) for status in _PENDING_FEEDBACK_STATUSES)
+    failed_count = sum(status_counts.get(status, 0) for status in _FAILED_FEEDBACK_STATUSES)
+    return {
+        "row_count": len(rows),
+        "action_family": "crunch",
+        "status_counts": status_counts,
+        "pending_count": pending_count,
+        "failed_count": failed_count,
+        "due_count": due_count,
+        "sent_count": status_counts.get("sent", 0),
+        "oldest_pending_at": oldest_pending_at,
+        "latest_sent_at": latest_sent_at,
+        "last_error_class": last_error_class,
+        "payload_json_included": False,
+    }
+
+
+def _run_feedback_drain(store_obj: Any, *, limit: int) -> dict[str, Any]:
+    from tokenclaw import recommendations
+
+    meta: dict[str, Any] = {
+        "schema": MANAGED_FEEDBACK_DRAIN_SCHEMA,
+        "attempted": False,
+        "enabled": bool(recommendations.recommendations_enabled()),
+        "server_configured": bool(recommendations.recommendation_server_configured()),
+        "managed_server_calls_made": False,
+        "results": [],
+        "result_counts": {},
+    }
+    if not meta["enabled"]:
+        meta.update({"status": "disabled", "reason": "managed-feedback-disabled"})
+        return meta
+    if not meta["server_configured"]:
+        meta.update({"status": "blocked", "reason": "managed-server-url-not-configured"})
+        return meta
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        meta.update({"status": "skipped", "reason": "event-loop-already-running"})
+        return meta
+
+    async def _flush() -> list[dict[str, Any]]:
+        return await recommendations.flush_queued_outcome_feedback(store_obj, limit=max(1, min(int(limit or 100), 100)))
+
+    results = asyncio.run(_flush())
+    counts: dict[str, int] = {}
+    for result in results:
+        status = str(result.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    meta.update({
+        "attempted": True,
+        "managed_server_calls_made": bool(results),
+        "status": "drained" if results else "no-due-rows",
+        "reason": "flush-attempted" if results else "no-due-feedback",
+        "results": [
+            {
+                "queue_id": item.get("queue_id"),
+                "status": item.get("status"),
+                "reason": item.get("reason"),
+                "status_code": item.get("status_code"),
+                "payload_included": False,
+            }
+            for item in results
+        ],
+        "result_counts": counts,
+    })
+    return meta
+
+
+def _thinking_tail_pre_widen_feedback_gate(store_obj: Any, *, limit: int) -> dict[str, Any]:
+    rows_before = _thinking_tail_feedback_rows(store_obj, limit=limit)
+    before = _feedback_snapshot(rows_before)
+    drain = {"schema": MANAGED_FEEDBACK_DRAIN_SCHEMA, "attempted": False, "reason": "no-pending-thinking-tail-feedback"}
+    if before["pending_count"] or before["failed_count"]:
+        drain = _run_feedback_drain(store_obj, limit=limit)
+    rows_after = _thinking_tail_feedback_rows(store_obj, limit=limit)
+    after = _feedback_snapshot(rows_after)
+    blockers: list[str] = []
+    if after["pending_count"]:
+        blockers.append("managed-feedback-pending")
+    if after["failed_count"]:
+        blockers.append("managed-feedback-failed")
+    if after["due_count"]:
+        blockers.append("managed-feedback-due")
+    return {
+        "schema": "tokenclaw.thinking_tail_feedback_pre_widen_gate.v1",
+        "action_family": "crunch",
+        "candidate_id": THINKING_SERVER_CANDIDATE,
+        "status": "passed" if not blockers else "blocked",
+        "reason_codes": blockers or ["managed-feedback-fresh"],
+        "before": before,
+        "after": after,
+        "drain": drain,
+        "payload_json_included": False,
+        "privacy": _privacy(),
+    }
+
+
+def _block_thinking_widening_for_feedback(decision: dict[str, Any], gate: dict[str, Any]) -> None:
+    if decision.get("family") != THINKING_SECTION or decision.get("action") != "widen":
+        return
+    if gate.get("status") == "passed":
+        decision["managed_feedback_pre_widen_gate"] = gate
+        return
+    original_reasons = [str(item) for item in decision.get("reason_codes", [])]
+    decision["blocked_action"] = "widen"
+    decision["blocked_recommended_fraction"] = decision.get("recommended_fraction")
+    decision["action"] = "hold"
+    decision["recommended_fraction"] = decision.get("current_fraction", 0.0)
+    decision["changed"] = False
+    decision["reason_codes"] = ["managed-feedback-not-fresh", *gate.get("reason_codes", []), *original_reasons]
+    decision["managed_feedback_pre_widen_gate"] = gate
 
 
 def _default_rules_path(config_dir: str | Path | None = None) -> Path:
@@ -1138,6 +1331,11 @@ def build_local_compaction_canary_ramp(
             similarity_floor=_bounded_fraction(similarity_floor, 0.98),
         ),
     ]
+    feedback_gate = None
+    thinking_decision = next((item for item in decisions if item.get("family") == THINKING_SECTION), None)
+    if isinstance(thinking_decision, dict) and thinking_decision.get("action") == "widen":
+        feedback_gate = _thinking_tail_pre_widen_feedback_gate(store_obj, limit=limit)
+        _block_thinking_widening_for_feedback(thinking_decision, feedback_gate)
 
     for decision in decisions:
         if not decision["changed"]:
@@ -1179,9 +1377,14 @@ def build_local_compaction_canary_ramp(
         },
         "diff": _diff(original_text, proposed_text, target_path) if changed else "",
         "feedback_events": feedback_events,
+        "managed_feedback_pre_widen_gate": feedback_gate,
         "wrote_policy_files": bool(apply and changed),
         "provider_calls_made": False,
-        "managed_server_calls_made": False,
+        "managed_server_calls_made": bool(
+            feedback_gate
+            and isinstance(feedback_gate.get("drain"), dict)
+            and feedback_gate["drain"].get("managed_server_calls_made")
+        ),
         "privacy": _privacy(),
     }
 

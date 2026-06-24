@@ -3988,6 +3988,13 @@ async def _send_policy_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _queue_error_status(meta: dict[str, Any], attempts: int) -> str:
+    status_code = meta.get("status_code")
+    try:
+        code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        code = None
+    if code is not None and 400 <= code < 500 and code not in {408, 409, 425, 429}:
+        return "dropped-after-limit"
     if attempts >= outcome_feedback_queue_max_attempts():
         return "dropped-after-limit"
     return "retryable-error"
@@ -4078,7 +4085,20 @@ async def _flush_claimed_outcome_feedback(store_obj: Any, row: dict[str, Any]) -
 
     status = _queue_error_status(meta, attempts)
     retry_delay = 0.0 if status == "dropped-after-limit" else outcome_feedback_queue_retry_delay_for_attempt(attempts)
-    reason = "attempt-limit-reached" if status == "dropped-after-limit" else meta.get("reason") or "request-failed"
+    status_code = meta.get("status_code")
+    permanent_client_error = False
+    try:
+        code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        code = None
+    if code is not None and 400 <= code < 500 and code not in {408, 409, 425, 429}:
+        permanent_client_error = True
+    if permanent_client_error:
+        reason = "permanent-client-error"
+    elif status == "dropped-after-limit":
+        reason = "attempt-limit-reached"
+    else:
+        reason = meta.get("reason") or "request-failed"
     error = meta.get("error")
     if not error:
         error = f"{meta.get('status') or 'error'}: {reason}"
