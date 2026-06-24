@@ -379,6 +379,10 @@ def create_dashboard_router(
     async def stats_managed_recommendations(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_managed_recommendations(_store(store_obj), limit=limit)
 
+    @router.get("/tokenclaw/stats/managed-feedback-queue-freshness")
+    async def stats_managed_feedback_queue_freshness(limit: int = 10000) -> dict[str, Any]:
+        return stats_views.stats_managed_feedback_queue_freshness(_store(store_obj), limit=limit)
+
     @router.get("/tokenclaw/stats/openai-scoreboard")
     async def stats_openai_scoreboard(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_scoreboard(_store(store_obj), limit=limit)

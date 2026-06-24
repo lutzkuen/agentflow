@@ -1033,6 +1033,15 @@ def _managed_feedback_error_class(row: dict[str, Any]) -> str | None:
     return head[:80] if head else "error"
 
 
+def _managed_feedback_safe_error_class(row: dict[str, Any]) -> str | None:
+    status_code = _as_int(row.get("last_status_code"))
+    if status_code:
+        return f"http_{status_code}"
+    if row.get("last_error"):
+        return "error-present"
+    return None
+
+
 def _public_managed_feedback_row(row: dict[str, Any] | None, *, now: datetime) -> dict[str, Any] | None:
     if not row:
         return None
@@ -1242,6 +1251,251 @@ def _managed_feedback_queue_health(
             "raw_responses_included": False,
             "provider_bodies_included": False,
             "secrets_included": False,
+        },
+    }
+
+
+def _normalize_feedback_dimension(value: Any, default: str = "unknown") -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    return text or default
+
+
+def _collect_action_family(value: Any, families: set[str]) -> None:
+    family = _normalize_feedback_dimension(value, "")
+    if family:
+        families.add(family)
+
+
+def _managed_feedback_inferred_action_family(payload: dict[str, Any], source_surface: Any) -> str | None:
+    haystack = " ".join(
+        str(value or "").lower()
+        for value in (
+            source_surface,
+            payload.get("schema"),
+            payload.get("event_type"),
+            (payload.get("metadata") or {}).get("schema") if isinstance(payload.get("metadata"), dict) else None,
+        )
+    )
+    if "routing" in haystack:
+        return "routing"
+    if "cache" in haystack:
+        return "cache"
+    if any(token in haystack for token in ("crunch", "compaction", "summary", "dedup", "scaffold", "thinking")):
+        return "crunch"
+    return None
+
+
+def _managed_feedback_payload_action_families(payload: dict[str, Any], *, source_surface: Any = None) -> list[str]:
+    families: set[str] = set()
+    for key in ("action_family", "local_action_family", "policy_section", "optimization_family"):
+        _collect_action_family(payload.get(key), families)
+    for key in (
+        "applied_families",
+        "vetoed_families",
+        "held_families",
+        "heldout_families",
+        "unsupported_families",
+        "supported_local_action_families",
+        "enabled_local_action_families",
+    ):
+        values = payload.get(key)
+        if isinstance(values, list):
+            for value in values:
+                _collect_action_family(value, families)
+    actions = payload.get("actions")
+    if isinstance(actions, list):
+        for action in actions:
+            if isinstance(action, dict):
+                _collect_action_family(action.get("family") or action.get("action_family") or action.get("type"), families)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    for key in ("action_family", "local_action_family", "policy_section", "optimization_family"):
+        _collect_action_family(metadata.get(key), families)
+    for key in ("action_snapshots", "actions", "pattern_policy_evidence"):
+        items = metadata.get(key) if key != "pattern_policy_evidence" else payload.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    _collect_action_family(
+                        item.get("action_family")
+                        or item.get("local_action_family")
+                        or item.get("policy_section")
+                        or item.get("optimization_family")
+                        or item.get("family"),
+                        families,
+                    )
+    if not families:
+        inferred = _managed_feedback_inferred_action_family(payload, source_surface)
+        if inferred:
+            families.add(inferred)
+    return sorted(families) or ["unknown"]
+
+
+def _managed_feedback_queue_expectation(action_family: str, status: str, drain_state: dict[str, Any]) -> tuple[str, str]:
+    product_mode = managed_product_mode()
+    if status in {"dropped-after-limit", "error"}:
+        return "actionable", "feedback delivery has failed permanently or with an unclassified error"
+    if status == "retryable-error":
+        return "actionable", "retryable feedback delivery errors are waiting for another drain attempt"
+    if status == "sending":
+        return "actionable", "feedback row is in-flight; stale sending rows require recovery if age keeps growing"
+    if not product_mode.server_calls_enabled:
+        return "expected", product_mode.reason or "managed server calls are disabled"
+    if action_family in product_mode.family_enabled and not product_mode.family_enabled.get(action_family):
+        return "expected", f"managed {action_family} family is disabled locally"
+    if drain_state.get("blocked_reason"):
+        return "expected", str(drain_state.get("blocked_reason"))
+    if not drain_state.get("enabled"):
+        return "expected", "managed feedback drain is not enabled"
+    if status == "queued":
+        return "watch", "queued feedback should drain when due; stale age growth is actionable"
+    return "ok", "feedback row does not currently require operator action"
+
+
+def stats_managed_feedback_queue_freshness(store_obj: Any | None, *, limit: int = 10000) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    base_health = _managed_feedback_queue_health(store_obj, sample_limit=5)
+    drain_state = base_health.get("drain") if isinstance(base_health.get("drain"), dict) else {}
+    product_mode = managed_product_mode()
+    rows: list[dict[str, Any]] = []
+    if store_obj is not None:
+        try:
+            if hasattr(store_obj, "managed_outcome_feedback_freshness_rows"):
+                rows = store_obj.managed_outcome_feedback_freshness_rows(limit=limit)
+            elif hasattr(store_obj, "managed_outcome_feedback_rows"):
+                rows = store_obj.managed_outcome_feedback_rows(limit=limit)
+        except Exception:
+            rows = []
+
+    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    status_counts: dict[str, int] = {}
+    family_counts: dict[str, int] = {}
+    expectation_counts: dict[str, int] = {}
+    scanned_rows = 0
+    emitted_memberships = 0
+    for row in rows[: max(1, min(int(limit or 1), 10000))]:
+        scanned_rows += 1
+        status = _normalize_feedback_dimension(row.get("status"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        payload = _json_obj(row.get("payload_json"))
+        source_surface = _normalize_feedback_dimension(row.get("source_surface"))
+        families = _managed_feedback_payload_action_families(payload, source_surface=source_surface)
+        endpoint = str(row.get("endpoint") or "unknown")
+        created_at = _parse_utc_datetime(row.get("created_at"))
+        updated_at = _parse_utc_datetime(row.get("updated_at"))
+        sent_at = _parse_utc_datetime(row.get("sent_at"))
+        next_attempt_at = _parse_utc_datetime(row.get("next_attempt_at"))
+        for family in families:
+            emitted_memberships += 1
+            family_counts[family] = family_counts.get(family, 0) + 1
+            expectation_state, expectation_reason = _managed_feedback_queue_expectation(family, status, drain_state)
+            expectation_counts[expectation_state] = expectation_counts.get(expectation_state, 0) + 1
+            key = (family, source_surface, endpoint, status)
+            bucket = grouped.setdefault(
+                key,
+                {
+                    "action_family": family,
+                    "source_surface": source_surface,
+                    "endpoint": endpoint,
+                    "status": status,
+                    "row_count": 0,
+                    "attempt_count": 0,
+                    "max_attempts": 0,
+                    "last_status_code": None,
+                    "last_error_class": None,
+                    "oldest_queued_at": None,
+                    "newest_queued_at": None,
+                    "oldest_queued_age_seconds": None,
+                    "oldest_pending_age_seconds": None,
+                    "newest_updated_at": None,
+                    "latest_sent_at": None,
+                    "next_attempt_at": None,
+                    "due_count": 0,
+                    "expectation_state": expectation_state,
+                    "expectation_reason": expectation_reason,
+                    "payload_json_included": False,
+                },
+            )
+            bucket["row_count"] += 1
+            attempts = _as_int(row.get("attempts"))
+            bucket["attempt_count"] += attempts
+            bucket["max_attempts"] = max(_as_int(bucket.get("max_attempts")), attempts)
+            if row.get("last_status_code") is not None:
+                bucket["last_status_code"] = row.get("last_status_code")
+            error_class = _managed_feedback_safe_error_class(row)
+            if error_class:
+                bucket["last_error_class"] = error_class
+            if status in {"queued", "retryable-error"}:
+                created_text = row.get("created_at")
+                if bucket["oldest_queued_at"] is None or str(created_text or "") < str(bucket["oldest_queued_at"]):
+                    bucket["oldest_queued_at"] = created_text
+                    bucket["oldest_queued_age_seconds"] = _seconds_since_iso(created_text, now)
+                if bucket["newest_queued_at"] is None or str(created_text or "") > str(bucket["newest_queued_at"]):
+                    bucket["newest_queued_at"] = created_text
+                if next_attempt_at is not None and next_attempt_at <= now:
+                    bucket["due_count"] += 1
+                    pending_age = _seconds_since_iso(row.get("next_attempt_at"), now)
+                    if bucket["oldest_pending_age_seconds"] is None or (
+                        pending_age is not None and pending_age > bucket["oldest_pending_age_seconds"]
+                    ):
+                        bucket["oldest_pending_age_seconds"] = pending_age
+                if bucket["next_attempt_at"] is None or str(row.get("next_attempt_at") or "") < str(bucket["next_attempt_at"]):
+                    bucket["next_attempt_at"] = row.get("next_attempt_at")
+            if updated_at is not None and (
+                bucket["newest_updated_at"] is None or str(row.get("updated_at") or "") > str(bucket["newest_updated_at"])
+            ):
+                bucket["newest_updated_at"] = row.get("updated_at")
+            if sent_at is not None and (
+                bucket["latest_sent_at"] is None or str(row.get("sent_at") or "") > str(bucket["latest_sent_at"])
+            ):
+                bucket["latest_sent_at"] = row.get("sent_at")
+            if created_at is not None and status == "sent" and bucket["latest_sent_at"] is None:
+                bucket["latest_sent_at"] = row.get("updated_at")
+
+    groups = sorted(
+        grouped.values(),
+        key=lambda item: (
+            {"actionable": 0, "watch": 1, "expected": 2, "ok": 3}.get(str(item.get("expectation_state")), 9),
+            -_as_int(item.get("row_count")),
+            str(item.get("action_family")),
+            str(item.get("source_surface")),
+            str(item.get("endpoint")),
+            str(item.get("status")),
+        ),
+    )
+    return {
+        "schema": "tokenclaw.managed_feedback_queue_freshness.v1",
+        "generated_at": utc_now(),
+        "available": bool(store_obj is not None and rows is not None),
+        "read_only": True,
+        "summary": {
+            "queue_rows_scanned": scanned_rows,
+            "group_memberships": emitted_memberships,
+            "group_count": len(groups),
+            "queued": status_counts.get("queued", 0),
+            "sent": status_counts.get("sent", 0),
+            "retryable_error": status_counts.get("retryable-error", 0),
+            "dropped_after_limit": status_counts.get("dropped-after-limit", 0),
+            "actionable_groups": expectation_counts.get("actionable", 0),
+            "watch_groups": expectation_counts.get("watch", 0),
+            "expected_groups": expectation_counts.get("expected", 0),
+        },
+        "managed_mode": product_mode.public_meta(),
+        "drain": drain_state,
+        "status_breakdown": _breakdown_from_counts(status_counts),
+        "action_family_breakdown": _breakdown_from_counts(family_counts),
+        "expectation_breakdown": _breakdown_from_counts(expectation_counts),
+        "groups": groups,
+        "privacy": {
+            "metadata_only": True,
+            "payload_json_included": False,
+            "raw_prompts_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "raw_error_text_included": False,
+            "secrets_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
         },
     }
 
@@ -24703,6 +24957,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Managed feedback freshness by family</h2>
+  <table class="activity-table" data-table-id="managed-feedback-freshness" data-filter-label="Filter managed feedback freshness">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Endpoint</th><th data-sort-type="text">Status</th><th data-sort-type="number">Rows</th><th data-sort-type="number">Due</th><th data-sort-type="number">Attempts</th><th data-sort-type="time">Oldest queued</th><th data-sort-type="time">Newest queued</th><th data-sort-type="time">Last sent</th><th data-sort-type="text">State</th><th data-sort-type="text">Last error</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="managed-feedback-freshness-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Local pattern coverage</h2>
   <table class="activity-table" data-table-id="local-pattern-coverage" data-filter-label="Filter local pattern coverage">
     <thead><tr>
@@ -28400,16 +28663,18 @@ async function refreshPromotionBlockerNextActions(){
 }
 async function refreshManaged(){
   try{
-    const [managedResponse,safetyResponse,rolloutResponse,coverageResponse]=await Promise.all([
+    const [managedResponse,safetyResponse,rolloutResponse,coverageResponse,freshnessResponse]=await Promise.all([
       fetch('/tokenclaw/stats/managed-recommendations?limit=500'),
       fetch('/tokenclaw/stats/safety'),
       fetch('/tokenclaw/stats/rollout-actions/readiness?limit=500'),
-      fetch('/tokenclaw/stats/local-pattern-coverage?limit=250')
+      fetch('/tokenclaw/stats/local-pattern-coverage?limit=250'),
+      fetch('/tokenclaw/stats/managed-feedback-queue-freshness?limit=10000')
     ]);
     const d=await managedResponse.json();
     const safety=await safetyResponse.json();
     const rollout=await rolloutResponse.json();
     const coverage=await coverageResponse.json();
+    const freshness=await freshnessResponse.json();
     const s=d.summary||{};
     const cfg=d.current_config||{};
     const queue=((((safety||{}).checks||{}).managed||{}).feedback_queue)||{};
@@ -28452,6 +28717,29 @@ async function refreshManaged(){
       <td class="ts">${lastSent.sent_at?ago(lastSent.sent_at):'—'}</td>
       <td class="flags">${compactBreakdown(queue.source_surface_breakdown,'none')} <span class="badge hit">payload omitted</span></td>
     </tr>`;
+    const freshnessGroups=freshness.groups||[];
+    document.getElementById('managed-feedback-freshness-tbody').innerHTML=freshnessGroups.slice(0,40).map(row=>{
+      const state=row.expectation_state||'unknown';
+      const stateClass=state==='actionable'?'err':(state==='watch'?'routed':(state==='expected'?'miss':'hit'));
+      const errorParts=[];
+      if(row.last_status_code!=null) errorParts.push(`HTTP ${row.last_status_code}`);
+      if(row.last_error_class) errorParts.push(row.last_error_class);
+      return `<tr>
+        <td><span class="badge provider">${esc(row.action_family||'unknown')}</span></td>
+        <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+        <td class="model">${esc(row.endpoint||'unknown')}</td>
+        <td><span class="badge ${queueStatusBadge(row.status)}">${esc(row.status||'unknown')}</span></td>
+        <td class="tokens">${(row.row_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.due_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.attempt_count||0).toLocaleString()}<div class="sub">max ${(row.max_attempts||0).toLocaleString()}</div></td>
+        <td class="latency">${fmtSec(row.oldest_queued_age_seconds)}</td>
+        <td class="ts">${row.newest_queued_at?ago(row.newest_queued_at):'—'}</td>
+        <td class="ts">${row.latest_sent_at?ago(row.latest_sent_at):'—'}</td>
+        <td class="flags"><span class="badge ${stateClass}">${esc(state)}</span> <span class="badge miss">${esc(row.expectation_reason||'')}</span></td>
+        <td class="flags">${errorParts.length?errorParts.map(item=>`<span class="badge miss">${esc(item)}</span>`).join(' '):'<span class="badge hit">none</span>'}</td>
+        <td>${row.payload_json_included?'<span class="badge err">payload included</span>':'<span class="badge hit">payload omitted</span>'}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="13" style="color:#8b949e">No managed feedback queue rows</td></tr>';
     const coverageRows=coverage.families||[];
     document.getElementById('local-pattern-coverage-tbody').innerHTML=coverageRows.map(row=>{
       const eligibility=row.managed_eligibility||{};
@@ -29157,6 +29445,17 @@ def dashboard_html() -> str:
       </div>
     </div>
     <div class="section">
+      <h2>Managed feedback freshness</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Family</th><th>Surface</th><th>Status</th><th>Rows</th><th>Due</th><th>Attempts</th><th>Oldest queued</th><th>Newest queued</th><th>State</th><th>Last error</th><th>Privacy</th>
+          </tr></thead>
+          <tbody id="managed-feedback-freshness-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="section">
       <h2>Recent Calls</h2>
       <div class="table-wrap">
         <table>
@@ -29207,6 +29506,17 @@ const statusEl=document.getElementById('status');
 function text(id,value){document.getElementById(id).textContent=value}
 function money(value){return '$'+Number(value||0).toFixed(4)}
 function num(value){return Number(value||0).toLocaleString()}
+function esc(value){
+  return String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function fmtSec(value){
+  if(value==null)return '-';
+  const n=Number(value||0);
+  if(n<60)return `${Math.round(n)}s`;
+  if(n<3600)return `${Math.round(n/60)}m`;
+  if(n<86400)return `${Math.round(n/3600)}h`;
+  return `${Math.round(n/86400)}d`;
+}
 function localTime(value){
   if(!value)return '-';
   const d=new Date(value);
@@ -29245,6 +29555,17 @@ function managedCompactText(summary){
   const backing=summary.backing_counts||{};
   const managed=Number(backing['managed-recommended']||0)+Number(backing['managed-enforced']||0);
   return `${num(calls.succeeded)} succeeded · ${num(calls.skipped)} skipped · ${num(managed)} managed-backed`;
+}
+function queueStatusClass(status){
+  if(status==='sent')return'ok';
+  if(status==='retryable-error'||status==='dropped-after-limit'||status==='error')return'err';
+  return'miss';
+}
+function expectationClass(state){
+  if(state==='actionable')return'err';
+  if(state==='watch')return'warn';
+  if(state==='expected')return'miss';
+  return'ok';
 }
 function showTab(name){
   document.querySelectorAll('.tab-btn').forEach(btn=>btn.classList.toggle('active',btn.dataset.tabName===name));
@@ -29294,6 +29615,26 @@ function renderToday(data){
   }).join('');
   document.getElementById('recent-tbody').innerHTML=rows||'<tr><td colspan="9" class="muted">No calls recorded yet.</td></tr>';
 }
+function renderFeedbackFreshness(data){
+  const groups=(data.groups||[]).slice(0,20);
+  const rows=groups.map(row=>{
+    const error=row.last_error_class||row.last_status_code?`HTTP ${row.last_status_code||''} ${row.last_error_class||''}`.trim():'none';
+    return `<tr>
+      <td><span class="badge miss">${esc(row.action_family||'unknown')}</span></td>
+      <td>${esc(row.source_surface||'unknown')}</td>
+      <td><span class="badge ${queueStatusClass(row.status)}">${esc(row.status||'unknown')}</span></td>
+      <td>${num(row.row_count)}</td>
+      <td>${num(row.due_count)}</td>
+      <td>${num(row.attempt_count)}</td>
+      <td>${fmtSec(row.oldest_queued_age_seconds)}</td>
+      <td>${row.newest_queued_at?localTime(row.newest_queued_at):'-'}</td>
+      <td><span class="badge ${expectationClass(row.expectation_state)}">${esc(row.expectation_state||'unknown')}</span></td>
+      <td>${esc(error)}</td>
+      <td>${row.payload_json_included?'<span class="badge err">payload included</span>':'<span class="badge ok">payload omitted</span>'}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('managed-feedback-freshness-tbody').innerHTML=rows||'<tr><td colspan="11" class="muted">No managed feedback queue rows.</td></tr>';
+}
 function renderWeekly(data){
   const totals=data.totals||{};
   text('week-units',num(totals.total_units));
@@ -29326,12 +29667,14 @@ function renderWeekly(data){
 }
 async function refresh(){
   try{
-    const [today,weekly]=await Promise.all([
+    const [today,weekly,freshness]=await Promise.all([
       getJson('/tokenclaw/stats'),
       getJson('/tokenclaw/stats/weekly'),
+      getJson('/tokenclaw/stats/managed-feedback-queue-freshness?limit=10000'),
     ]);
     renderToday(today);
     renderWeekly(weekly);
+    renderFeedbackFreshness(freshness);
     statusEl.textContent='updated '+new Date().toLocaleTimeString();
   }catch(error){
     statusEl.textContent='error loading dashboard';

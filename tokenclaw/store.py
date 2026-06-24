@@ -2126,6 +2126,25 @@ class SQLiteStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def managed_outcome_feedback_freshness_rows(
+        self,
+        *,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        capped = max(1, min(int(limit or 1), 10000))
+        rows = self.conn.execute(
+            """
+            select id, created_at, updated_at, source_surface, endpoint, optimization_unit_id,
+                   status, attempts, next_attempt_at, last_error, last_status_code, sent_at,
+                   payload_json
+            from managed_outcome_feedback_queue
+            order by created_at desc
+            limit ?
+            """,
+            (capped,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def log_routing_experiment(self, **kwargs: Any) -> None:
         cols = [
             "id", "call_id", "created_at", "provider", "source_surface", "stream", "requested_model", "routed_model",

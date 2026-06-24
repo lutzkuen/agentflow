@@ -4598,6 +4598,143 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn(ops_plan, candidates)
             self.assertLess(candidates.index(ops_plan), len(candidates) - 1)
 
+    def test_managed_feedback_queue_freshness_groups_by_action_family_without_payloads(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+        try:
+            rows = [
+                {
+                    "id": "queued-routing",
+                    "created_at": "2026-06-24T00:00:00+00:00",
+                    "updated_at": "2026-06-24T00:00:00+00:00",
+                    "source_surface": "openai_responses",
+                    "endpoint": "/v1/policy-events",
+                    "optimization_unit_id": 1,
+                    "status": "queued",
+                    "attempts": 0,
+                    "next_attempt_at": "2026-06-24T00:00:00+00:00",
+                    "payload_json": stable_json({
+                        "schema": "tokenclaw.managed_action_outcome_feedback.v1",
+                        "actions": [{"family": "routing", "status": "applied"}],
+                        "raw_prompt": "raw queue payload secret must not render",
+                    }),
+                },
+                {
+                    "id": "sent-crunch",
+                    "created_at": "2026-06-24T00:05:00+00:00",
+                    "updated_at": "2026-06-24T00:06:00+00:00",
+                    "sent_at": "2026-06-24T00:06:00+00:00",
+                    "source_surface": "anthropic_messages",
+                    "endpoint": "/v1/policy-events",
+                    "optimization_unit_id": 2,
+                    "status": "sent",
+                    "attempts": 1,
+                    "next_attempt_at": "2026-06-24T00:05:00+00:00",
+                    "last_status_code": 202,
+                    "payload_json": stable_json({
+                        "metadata": {
+                            "action_snapshots": [{"action_family": "crunch", "candidate_id": "raw candidate secret"}],
+                        },
+                    }),
+                },
+                {
+                    "id": "retry-cache",
+                    "created_at": "2026-06-24T00:10:00+00:00",
+                    "updated_at": "2026-06-24T00:11:00+00:00",
+                    "source_surface": "openai_responses",
+                    "endpoint": "/v1/policy-events",
+                    "optimization_unit_id": 3,
+                    "status": "retryable-error",
+                    "attempts": 2,
+                    "next_attempt_at": "2026-06-24T00:10:00+00:00",
+                    "last_status_code": 503,
+                    "last_error": "raw feedback delivery error must not render",
+                    "payload_json": stable_json({"action_family": "cache"}),
+                },
+                {
+                    "id": "dropped-routing",
+                    "created_at": "2026-06-24T00:15:00+00:00",
+                    "updated_at": "2026-06-24T00:16:00+00:00",
+                    "source_surface": "anthropic_messages",
+                    "endpoint": "/v1/policy-events",
+                    "optimization_unit_id": 4,
+                    "status": "dropped-after-limit",
+                    "attempts": 5,
+                    "next_attempt_at": "2026-06-24T00:15:00+00:00",
+                    "last_error": "raw dropped feedback error must not render",
+                    "payload_json": stable_json({"applied_families": ["routing"]}),
+                },
+                {
+                    "id": "queued-compaction-inferred",
+                    "created_at": "2026-06-24T00:20:00+00:00",
+                    "updated_at": "2026-06-24T00:20:00+00:00",
+                    "source_surface": "terminal_output_compaction_lifecycle",
+                    "endpoint": "/v1/policy-events",
+                    "optimization_unit_id": 5,
+                    "status": "queued",
+                    "attempts": 0,
+                    "next_attempt_at": "2026-06-24T00:20:00+00:00",
+                    "payload_json": stable_json({
+                        "metadata": {
+                            "schema": "tokenclaw.terminal_output_compaction_lifecycle_feedback.v1",
+                            "candidate_id": "raw compaction candidate secret",
+                        },
+                    }),
+                },
+            ]
+            for row in rows:
+                store.enqueue_managed_outcome_feedback(**row)
+
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            with patch.dict(os.environ, {"TOKENCLAW_MANAGED": "0"}, clear=False):
+                response = client.get("/tokenclaw/stats/managed-feedback-queue-freshness?limit=100")
+                dashboard = client.get("/tokenclaw/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(dashboard.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "tokenclaw.managed_feedback_queue_freshness.v1")
+            self.assertEqual(payload["summary"]["queue_rows_scanned"], 5)
+            self.assertEqual(payload["summary"]["queued"], 2)
+            self.assertEqual(payload["summary"]["sent"], 1)
+            self.assertEqual(payload["summary"]["retryable_error"], 1)
+            self.assertEqual(payload["summary"]["dropped_after_limit"], 1)
+            self.assertFalse(payload["privacy"]["payload_json_included"])
+            self.assertFalse(payload["privacy"]["raw_error_text_included"])
+            groups = {
+                (row["action_family"], row["source_surface"], row["status"]): row
+                for row in payload["groups"]
+            }
+            self.assertEqual(groups[("routing", "openai-responses", "queued")]["row_count"], 1)
+            self.assertEqual(groups[("routing", "openai-responses", "queued")]["expectation_state"], "expected")
+            self.assertEqual(groups[("crunch", "anthropic-messages", "sent")]["latest_sent_at"], "2026-06-24T00:06:00+00:00")
+            self.assertEqual(groups[("cache", "openai-responses", "retryable-error")]["expectation_state"], "actionable")
+            self.assertEqual(groups[("cache", "openai-responses", "retryable-error")]["last_error_class"], "http_503")
+            self.assertEqual(groups[("routing", "anthropic-messages", "dropped-after-limit")]["expectation_state"], "actionable")
+            self.assertEqual(groups[("crunch", "terminal-output-compaction-lifecycle", "queued")]["row_count"], 1)
+            self.assertIn("managed-feedback-freshness-tbody", dashboard.text)
+
+            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            for forbidden in (
+                "raw queue payload secret",
+                "raw candidate secret",
+                "raw feedback delivery error",
+                "raw dropped feedback error",
+                "raw compaction candidate secret",
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            store.conn.close()
+            tmp.close()
+
 
 if __name__ == "__main__":
     unittest.main()
