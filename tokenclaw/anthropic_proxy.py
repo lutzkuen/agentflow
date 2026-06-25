@@ -220,6 +220,14 @@ def _record_routing_rate_limit_fallback(
     from_model: Any,
 ) -> None:
     routing_meta["fallback_reason"] = "rate_limited"
+    routing_meta["local_result"] = "fallback"
+    routing_meta["routing_outcome_label"] = "fallback"
+    session_tier = routing_meta.get("managed_session_tier")
+    if isinstance(session_tier, dict) and session_tier.get("applied"):
+        session_tier["fallback_reason"] = "rate_limited"
+        session_tier["fallback_from_model"] = str(from_model)
+        session_tier["actual_forwarded_model"] = str(requested_model)
+        session_tier["local_result"] = "fallback"
     phase_canary = routing_meta.get("phase_canary")
     if isinstance(phase_canary, dict):
         phase_canary["fallback_reason"] = "rate_limited"
@@ -1294,6 +1302,8 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             crunched,
             routing_meta,
             session_tier_meta,
+            session_id=session_id,
+            stream=stream,
         )
         if session_tier_routed_model:
             routed_model = session_tier_routed_model

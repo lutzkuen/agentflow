@@ -65,10 +65,38 @@ def _managed_routing_json_from_routing(routing_json: Any) -> str | None:
     routing = _parse_json_object(routing_json)
     if not isinstance(routing, dict):
         return None
+    session_tier = routing.get("managed_session_tier")
+    if isinstance(session_tier, dict) and session_tier and (
+        session_tier.get("local_result") is not None
+        or session_tier.get("applied") is True
+        or session_tier.get("policy_id") is not None
+    ):
+        return stable_json(session_tier)
     managed = routing.get("managed_recommendation")
+    if not isinstance(managed, dict) or not managed:
+        managed = session_tier
     if not isinstance(managed, dict) or not managed:
         return None
     return stable_json(managed)
+
+
+def _routing_outcome_label_from_routing(routing_json: Any) -> str:
+    routing = _parse_json_object(routing_json)
+    if not isinstance(routing, dict):
+        return "unknown"
+    for key in ("routing_outcome_label", "local_result"):
+        value = routing.get(key)
+        if isinstance(value, str) and value.strip():
+            return _safe_metadata_label(value)
+    for section_name in ("managed_session_tier", "managed_recommendation"):
+        section = routing.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for key in ("local_result",):
+            value = section.get(key)
+            if isinstance(value, str) and value.strip():
+                return _safe_metadata_label(value)
+    return "unknown"
 
 
 def _safe_metadata_label(value: Any, *, fallback: str = "unknown") -> str:
@@ -1239,7 +1267,8 @@ class SQLiteStore:
         )
         if kwargs.get("managed_routing_json") in (None, ""):
             kwargs["managed_routing_json"] = _managed_routing_json_from_routing(kwargs.get("routing_json"))
-        kwargs.setdefault("routing_outcome_label", "unknown")
+        if kwargs.get("routing_outcome_label") in (None, ""):
+            kwargs["routing_outcome_label"] = _routing_outcome_label_from_routing(kwargs.get("routing_json"))
         cols = [
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
@@ -1593,10 +1622,12 @@ class SQLiteStore:
         return result
 
     def update_call_routing_json(self, call_id: str, routing_json: str) -> None:
+        managed_routing_json = _managed_routing_json_from_routing(routing_json)
+        routing_outcome_label = _routing_outcome_label_from_routing(routing_json)
         with self._lock:
             self.conn.execute(
-                "update calls set routing_json = ? where id = ?",
-                (routing_json, call_id),
+                "update calls set routing_json = ?, managed_routing_json = ?, routing_outcome_label = ? where id = ?",
+                (routing_json, managed_routing_json, routing_outcome_label, call_id),
             )
             self.conn.commit()
 

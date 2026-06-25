@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
+from tokenclaw.action_executor import ActionExecutor
 from tokenclaw.managed_egress import (
     ManagedEgressBlocked,
     assert_managed_egress_safe,
     managed_egress_blocked_meta,
 )
+from tokenclaw.managed_mode import managed_product_mode
 from tokenclaw.pricing import MODEL_ALIASES
 from tokenclaw.recommendations import (
     _managed_headers,
@@ -30,6 +34,7 @@ SESSION_TIER_PATH = "/v1/session-tier"
 SESSION_TIER_REQUEST_SCHEMA = "tokenclaw.session_tier_request.v1"
 SESSION_TIER_DECISION_SCHEMA = "tokenclaw.session_tier_decision.v1"
 SESSION_TIER_ENABLED_ENV = "TOKENCLAW_SESSION_TIER_ENABLED"
+SESSION_TIER_CANARY_SALT_ENV = "TOKENCLAW_SESSION_TIER_CANARY_SALT"
 
 _SESSION_TIER_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -81,6 +86,134 @@ def _target_model_for_tier(tier: str | None, decision: dict[str, Any]) -> str | 
     if tier == "opus":
         return OPUS_DEFAULT
     return None
+
+
+def _target_model_for_canary(canary: dict[str, Any], *, fallback_tier: str | None) -> str | None:
+    explicit = canary.get("target_model") or canary.get("routed_model")
+    if isinstance(explicit, str) and explicit:
+        return MODEL_ALIASES.get(explicit, explicit)
+    target_tier = str(canary.get("target_tier") or fallback_tier or "").strip().lower()
+    family = str(canary.get("target_model_family") or "").strip().lower()
+    if target_tier == "haiku" or family == "claude-haiku":
+        return HAIKU_DEFAULT
+    if target_tier == "sonnet" or family == "claude-sonnet":
+        return SONNET_DEFAULT
+    if target_tier == "opus" or family == "claude-opus":
+        return OPUS_DEFAULT
+    return None
+
+
+def _bounded_fraction(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return max(0.0, min(1.0, float(value)))
+    if isinstance(value, str):
+        try:
+            return max(0.0, min(1.0, float(value.strip())))
+        except ValueError:
+            return default
+    return default
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _expired(value: Any, *, now: datetime | None = None) -> bool:
+    expires_at = _parse_time(value)
+    if expires_at is None:
+        return False
+    return expires_at <= (now or datetime.now(timezone.utc))
+
+
+def _canary_assignment(
+    *,
+    session_id: str | None,
+    session_tier_meta: dict[str, Any],
+    current_model: str,
+) -> dict[str, Any] | None:
+    canary = session_tier_meta.get("session_tier_canary")
+    if not isinstance(canary, dict) or canary.get("status") != "recommended":
+        return None
+    existing = session_tier_meta.get("local_canary_assignment")
+    if isinstance(existing, dict) and existing.get("treatment") in {"canary", "holdout", "hold", "veto"}:
+        return dict(existing)
+    target_model = _target_model_for_canary(canary, fallback_tier=session_tier_meta.get("tier"))
+    if not target_model:
+        return {
+            "schema": "tokenclaw.local_session_tier_canary_assignment.v1",
+            "status": "vetoed",
+            "treatment": "veto",
+            "reason": "missing-canary-target-model",
+            "selected": False,
+            "target_model": None,
+            "metadata_only": True,
+        }
+    if _expired(canary.get("expires_at")):
+        return {
+            "schema": "tokenclaw.local_session_tier_canary_assignment.v1",
+            "status": "vetoed",
+            "treatment": "veto",
+            "reason": "expired-session-tier-canary",
+            "selected": False,
+            "target_model": target_model,
+            "metadata_only": True,
+        }
+    canary_fraction = _bounded_fraction(canary.get("canary_fraction"), 0.0)
+    holdout_fraction = _bounded_fraction(canary.get("holdout_fraction"), 0.0)
+    salt = os.getenv(SESSION_TIER_CANARY_SALT_ENV, "tokenclaw-session-tier-canary-v1")
+    basis = {
+        "session_id": session_id or "missing-session",
+        "policy_id": canary.get("policy_id"),
+        "cohort_bucket": canary.get("cohort_bucket"),
+        "target_model": target_model,
+        "current_model": current_model,
+    }
+    digest = hashlib.sha256(f"{salt}:{basis}".encode("utf-8")).hexdigest()
+    bucket = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+    if bucket < holdout_fraction:
+        treatment = "holdout"
+        selected = False
+        status = "heldout"
+        reason = "session-tier-canary-holdout"
+    elif bucket < min(1.0, holdout_fraction + canary_fraction):
+        treatment = "canary"
+        selected = True
+        status = "selected"
+        reason = "session-tier-canary-selected"
+    else:
+        treatment = "hold"
+        selected = False
+        status = "held"
+        reason = "session-tier-canary-not-selected"
+    return {
+        "schema": "tokenclaw.local_session_tier_canary_assignment.v1",
+        "status": status,
+        "treatment": treatment,
+        "reason": reason,
+        "selected": selected,
+        "bucket": round(bucket, 8),
+        "canary_fraction": canary_fraction,
+        "holdout_fraction": holdout_fraction,
+        "cohort_key_hash": f"sha256:{digest}",
+        "target_model": target_model,
+        "metadata_only": True,
+        "raw_session_ids_included": False,
+        "raw_prompts_included": False,
+        "raw_responses_included": False,
+    }
 
 
 def _session_tier_payload(unit: dict[str, Any], *, tool_count: int) -> dict[str, Any]:
@@ -142,15 +275,25 @@ def _normalize_decision(body: Any) -> tuple[dict[str, Any] | None, str | None]:
     reason_codes = body.get("reason_codes")
     if not isinstance(reason_codes, list):
         reason_codes = []
+    canary = body.get("session_tier_canary")
+    if not isinstance(canary, dict):
+        canary = None
+    omitted_actions = body.get("omitted_actions")
+    if not isinstance(omitted_actions, list):
+        omitted_actions = []
     return {
         "status": "received",
         "session_tier_source": body.get("session_tier_source") or "managed",
         "policy_source": "managed-recommended",
+        "policy_id": (canary or {}).get("policy_id") or body.get("policy_id"),
+        "decision_id": body.get("decision_id"),
         "tier": tier,
         "target_model": target_model,
         "confidence": body.get("confidence"),
         "session_type": body.get("session_type"),
         "reason_codes": [str(item) for item in reason_codes if isinstance(item, (str, int, float))],
+        "session_tier_canary": copy.deepcopy(canary),
+        "omitted_actions": [copy.deepcopy(item) for item in omitted_actions if isinstance(item, dict)],
         "hold_tier_for_session": bool(body.get("hold_tier_for_session", True)),
         "feature_only": True,
         "locally_executed": True,
@@ -261,6 +404,9 @@ def apply_session_tier_to_body(
     body: dict[str, Any],
     routing_meta: dict[str, Any],
     session_tier_meta: dict[str, Any],
+    *,
+    session_id: str | None = None,
+    stream: bool = False,
 ) -> str | None:
     routing_meta["managed_session_tier"] = session_tier_meta
     if session_tier_meta.get("session_tier_source") == "managed":
@@ -273,16 +419,36 @@ def apply_session_tier_to_body(
     if session_tier_meta.get("status") != "received":
         session_tier_meta["applied"] = False
         session_tier_meta.setdefault("apply_reason", "no-managed-session-tier")
+        session_tier_meta.setdefault("local_result", "noop")
         return None
+
+    current_model = str(body.get("model") or routing_meta.get("routed_model") or routing_meta.get("requested_model") or "")
+    assignment = _canary_assignment(
+        session_id=session_id,
+        session_tier_meta=session_tier_meta,
+        current_model=current_model,
+    )
+    if assignment is not None:
+        return _apply_session_tier_canary_to_body(
+            body,
+            routing_meta,
+            session_tier_meta,
+            assignment,
+            session_id=session_id,
+            stream=stream,
+        )
+
     if session_tier_meta.get("cache_status") != "hit":
         session_tier_meta["applied"] = False
         session_tier_meta["apply_reason"] = "first-turn-classification-only"
+        session_tier_meta["local_result"] = "held"
         return None
 
     target_model = session_tier_meta.get("target_model")
     if not isinstance(target_model, str) or not target_model:
         session_tier_meta["applied"] = False
         session_tier_meta["apply_reason"] = "missing-target-model"
+        session_tier_meta["local_result"] = "vetoed"
         return None
     if (
         target_model == HAIKU_DEFAULT
@@ -291,14 +457,167 @@ def apply_session_tier_to_body(
     ):
         session_tier_meta["applied"] = False
         session_tier_meta["apply_reason"] = "local-thinking-safety-guard"
+        session_tier_meta["local_result"] = "vetoed"
         return None
 
-    current_model = str(body.get("model") or routing_meta.get("routed_model") or routing_meta.get("requested_model") or "")
     body["model"] = target_model
     routing_meta["routed_model"] = target_model
     routing_meta["policy_source"] = "managed-recommended"
     session_tier_meta["applied"] = True
     session_tier_meta["changed_model"] = target_model != current_model
     session_tier_meta["apply_reason"] = "cached-session-tier"
+    session_tier_meta["local_result"] = "applied" if session_tier_meta["changed_model"] else "noop"
     session_tier_meta["local_action_taken"] = "session_tier"
     return target_model
+
+
+def _apply_session_tier_canary_to_body(
+    body: dict[str, Any],
+    routing_meta: dict[str, Any],
+    session_tier_meta: dict[str, Any],
+    assignment: dict[str, Any],
+    *,
+    session_id: str | None,
+    stream: bool,
+) -> str | None:
+    canary = session_tier_meta.get("session_tier_canary")
+    if not isinstance(canary, dict):
+        return None
+    session_tier_meta["local_canary_assignment"] = assignment
+    target_model = assignment.get("target_model")
+    current_model = str(body.get("model") or routing_meta.get("routed_model") or routing_meta.get("requested_model") or "")
+    phase_canary = {
+        "enabled": True,
+        "policy_id": canary.get("policy_id"),
+        "policy_source": "managed-recommended",
+        "target_model": target_model,
+        "target_tier": canary.get("target_tier"),
+        "category": routing_meta.get("category"),
+        "cohort": canary.get("cohort_bucket"),
+        "cohort_hash": assignment.get("cohort_key_hash"),
+        "canary_fraction": assignment.get("canary_fraction"),
+        "holdout_fraction": assignment.get("holdout_fraction"),
+        "has_tools": routing_meta.get("has_tools"),
+        "workflow_phase": routing_meta.get("workflow_phase"),
+        "metadata_only": True,
+    }
+    routing_meta["phase_canary"] = phase_canary
+
+    if not stream:
+        session_tier_meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "session-tier-canary-streaming-only",
+            "local_result": "held",
+            "would_route_model": target_model,
+        })
+        phase_canary.update({"status": "holdout", "reason": "session-tier-canary-streaming-only"})
+        _cache_session_tier_assignment(session_id, session_tier_meta)
+        return None
+    if assignment.get("treatment") == "veto":
+        session_tier_meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": assignment.get("reason"),
+            "local_result": "vetoed",
+            "would_route_model": target_model,
+        })
+        phase_canary.update({"status": "safety_stopped", "reason": "safety-stop-tripped"})
+        _cache_session_tier_assignment(session_id, session_tier_meta)
+        return None
+    if assignment.get("treatment") != "canary":
+        local_result = "heldout" if assignment.get("treatment") == "holdout" else "held"
+        session_tier_meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": assignment.get("reason"),
+            "local_result": local_result,
+            "would_route_model": target_model,
+        })
+        phase_canary.update({"status": "holdout", "reason": "selected-holdout"})
+        routing_meta["local_result"] = local_result
+        routing_meta["routing_outcome_label"] = local_result
+        _cache_session_tier_assignment(session_id, session_tier_meta)
+        return None
+    if (
+        target_model == HAIKU_DEFAULT
+        and isinstance(routing_meta.get("thinking_gate"), dict)
+        and routing_meta["thinking_gate"].get("status") == "blocked"
+    ):
+        session_tier_meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "local-thinking-safety-guard",
+            "local_result": "vetoed",
+            "would_route_model": target_model,
+        })
+        phase_canary.update({"status": "safety_stopped", "reason": "safety-stop-tripped"})
+        routing_meta["local_result"] = "vetoed"
+        routing_meta["routing_outcome_label"] = "vetoed"
+        _cache_session_tier_assignment(session_id, session_tier_meta)
+        return None
+
+    decision = {
+        "enabled": True,
+        "status": "received",
+        "policy_id": canary.get("policy_id") or session_tier_meta.get("policy_id"),
+        "decision_id": session_tier_meta.get("decision_id"),
+        "source_surface": "anthropic_messages",
+        "target_model": target_model,
+        "reason": "managed-session-tier-canary",
+        "routing": {
+            "status": "recommended",
+            "target_model": target_model,
+            "route_proposal": {
+                "target_model": target_model,
+                "traffic_treatment": "canary",
+                "route_selected": True,
+                "server_selected_canary_membership": True,
+                "canary_fraction": assignment.get("canary_fraction"),
+                "holdout_fraction": assignment.get("holdout_fraction"),
+            },
+        },
+    }
+    execution = ActionExecutor(provider="anthropic").execute(
+        body=body,
+        routing_meta=routing_meta,
+        decision=decision,
+        application_enabled=managed_product_mode().local_application_enabled,
+        source_surface="anthropic_messages",
+    )
+    session_tier_meta["action_executor"] = execution
+    session_tier_meta["local_actions"] = execution
+    status = str(execution.get("status") or "held")
+    changed_model = bool(execution.get("changed_model"))
+    local_result = status if status in {"applied", "held", "heldout", "vetoed", "fallback", "noop"} else "held"
+    session_tier_meta.update({
+        "applied": bool(execution.get("applied") and changed_model),
+        "changed_model": changed_model,
+        "apply_reason": execution.get("apply_reason"),
+        "fallback": execution.get("fallback"),
+        "local_result": local_result,
+        "would_route_model": target_model,
+    })
+    routing_meta["local_result"] = local_result
+    routing_meta["routing_outcome_label"] = local_result
+    if local_result == "applied":
+        phase_canary.update({"status": "applied", "reason": "selected-canary"})
+        session_tier_meta["local_action_taken"] = "session_tier_canary"
+        routed = str(body.get("model") or target_model)
+        _cache_session_tier_assignment(session_id, session_tier_meta)
+        return routed if routed != current_model else None
+    if local_result == "vetoed":
+        phase_canary.update({"status": "safety_stopped", "reason": "safety-stop-tripped"})
+    else:
+        phase_canary.update({"status": "holdout", "reason": "selected-holdout"})
+    _cache_session_tier_assignment(session_id, session_tier_meta)
+    return None
+
+
+def _cache_session_tier_assignment(session_id: str | None, session_tier_meta: dict[str, Any]) -> None:
+    if not session_id:
+        return
+    cached = copy.deepcopy(session_tier_meta)
+    cached["cache_status"] = "hit"
+    cached["turn_role"] = "subsequent-turn"
+    _SESSION_TIER_CACHE[session_id] = cached
