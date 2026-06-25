@@ -19,6 +19,10 @@ from tokenclaw.streaming_cohort_feedback import (
     record_streaming_agentic_cohort_rollup_feedback,
     streaming_agentic_cohort_feedback_config,
 )
+from tokenclaw.streaming_tool_cache_invalidation_drill import (
+    record_streaming_tool_cache_invalidation_drill_feedback,
+    streaming_tool_cache_invalidation_drill_config,
+)
 from tokenclaw.upstream_url import normalize_openai_upstream_base_url, redact_url
 
 load_dotenv()
@@ -189,6 +193,7 @@ app = FastAPI(title=f"TokenClaw {PROVIDER.title()} Proxy", version="0.1.0")
 _routing_outcome_label_task: asyncio.Task[Any] | None = None
 _managed_feedback_drainer_task: asyncio.Task[Any] | None = None
 _streaming_cohort_feedback_task: asyncio.Task[Any] | None = None
+_streaming_tool_cache_drill_task: asyncio.Task[Any] | None = None
 
 
 def _provider_context() -> ProviderContext:
@@ -371,6 +376,49 @@ async def _periodic_streaming_agentic_cohort_feedback(
         await asyncio.sleep(max(1, int(interval_seconds)))
 
 
+async def _queue_streaming_tool_cache_drill_once(
+    *,
+    window_hours: int,
+    max_rows: int,
+    max_cohorts: int,
+) -> dict[str, Any]:
+    result = await record_streaming_tool_cache_invalidation_drill_feedback(
+        store,
+        window_hours=max(1, int(window_hours)),
+        max_rows=max(1, min(int(max_rows), 10000)),
+        max_cohorts=max(1, min(int(max_cohorts), 100)),
+        flush_immediately=False,
+    )
+    if result.get("status") not in {"disabled", "queued"} or int(result.get("rows_considered") or 0) > 0:
+        print(
+            "tokenclaw_streaming_tool_cache_drill "
+            f"status={str(result.get('status') or 'unknown').replace('-', '_')} "
+            f"rows={int(result.get('rows_considered') or 0)} "
+            f"cohorts={int(result.get('cohort_count') or 0)}",
+            file=sys.stderr,
+        )
+    return result
+
+
+async def _periodic_streaming_tool_cache_drill_feedback(
+    *,
+    interval_seconds: int,
+    window_hours: int,
+    max_rows: int,
+    max_cohorts: int,
+) -> None:
+    while True:
+        try:
+            await _queue_streaming_tool_cache_drill_once(
+                window_hours=window_hours,
+                max_rows=max_rows,
+                max_cohorts=max_cohorts,
+            )
+        except Exception as exc:
+            print(f"tokenclaw_streaming_tool_cache_drill_error: {exc}", file=sys.stderr)
+        await asyncio.sleep(max(1, int(interval_seconds)))
+
+
 app.include_router(
     create_dashboard_router(
         store_obj=lambda: store,
@@ -386,6 +434,7 @@ app.include_router(create_admin_router(after_reload=_refresh_policy_module_bindi
 @app.on_event("startup")
 async def _log_startup_session_spending_summary() -> None:
     global _routing_outcome_label_task, _managed_feedback_drainer_task, _streaming_cohort_feedback_task
+    global _streaming_tool_cache_drill_task
     _log_recent_session_spending_summary("startup")
     await _finalize_routing_outcome_labels_once()
     try:
@@ -430,6 +479,16 @@ async def _log_startup_session_spending_summary() -> None:
                 max_cohorts=streaming_feedback["max_cohorts"],
             )
         )
+    tool_cache_drill = streaming_tool_cache_invalidation_drill_config()
+    if tool_cache_drill["interval_seconds"] > 0 and _streaming_tool_cache_drill_task is None:
+        _streaming_tool_cache_drill_task = asyncio.create_task(
+            _periodic_streaming_tool_cache_drill_feedback(
+                interval_seconds=tool_cache_drill["interval_seconds"],
+                window_hours=tool_cache_drill["window_hours"],
+                max_rows=tool_cache_drill["max_rows"],
+                max_cohorts=tool_cache_drill["max_cohorts"],
+            )
+        )
     if env("TOKENCLAW_SQLITE_MAINTENANCE_ON_STARTUP", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
     try:
@@ -457,6 +516,7 @@ async def _log_startup_session_spending_summary() -> None:
 @app.on_event("shutdown")
 async def _log_shutdown_session_spending_summary() -> None:
     global _routing_outcome_label_task, _managed_feedback_drainer_task, _streaming_cohort_feedback_task
+    global _streaming_tool_cache_drill_task
     if _routing_outcome_label_task is not None:
         _routing_outcome_label_task.cancel()
         _routing_outcome_label_task = None
@@ -466,6 +526,9 @@ async def _log_shutdown_session_spending_summary() -> None:
     if _streaming_cohort_feedback_task is not None:
         _streaming_cohort_feedback_task.cancel()
         _streaming_cohort_feedback_task = None
+    if _streaming_tool_cache_drill_task is not None:
+        _streaming_tool_cache_drill_task.cancel()
+        _streaming_tool_cache_drill_task = None
     _log_recent_session_spending_summary("shutdown")
 
 

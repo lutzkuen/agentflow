@@ -1891,6 +1891,38 @@ class SQLiteStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def streaming_tool_cache_invalidation_drill_rows(
+        self,
+        *,
+        window_hours: int = 24,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        """Read-only rows for the streaming tool-cache invalidation drill.
+
+        Includes all streaming categories (not just tool categories) so the drill
+        can also observe streaming no-tool repeats. Only path-free metadata columns
+        are selected; raw request/response bodies and cache keys are never read.
+        """
+        capped = max(1, min(int(limit or 1), 10000))
+        hours = max(1, min(int(window_hours or 1), 24 * 14))
+        rows = self.conn.execute(
+            """
+            select created_at, path, requested_model, routed_model, stream, cache_hit,
+                   status_code, input_tokens_est, output_tokens_est,
+                   cost_est_usd, cost_baseline_usd, cache_json,
+                   category, cache_creation_input_tokens, cache_read_input_tokens,
+                   provider, source_surface, endpoint,
+                   requested_model_family, routed_model_family
+            from calls
+            where datetime(created_at) >= datetime('now', ?)
+              and coalesce(stream, 0) = 1
+            order by created_at desc
+            limit ?
+            """,
+            (f"-{hours} hours", capped),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def enqueue_managed_outcome_feedback(self, **kwargs: Any) -> None:
         cols = [
             "id", "created_at", "updated_at", "source_surface", "endpoint",

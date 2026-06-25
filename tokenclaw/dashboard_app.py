@@ -463,6 +463,23 @@ def create_dashboard_router(
             ),
         )
 
+    @router.get("/tokenclaw/stats/streaming-tool-cache-invalidation-drill")
+    async def stats_streaming_tool_cache_invalidation_drill(
+        window_hours: int = 24,
+        max_rows: int = 10000,
+        max_cohorts: int = 50,
+    ) -> dict[str, Any]:
+        return await cached_expensive_stats(
+            "streaming-tool-cache-invalidation-drill",
+            (int(window_hours), int(max_rows), int(max_cohorts)),
+            lambda: stats_views.stats_streaming_tool_cache_invalidation_drill(
+                _store(store_obj),
+                window_hours=window_hours,
+                max_rows=max_rows,
+                max_cohorts=max_cohorts,
+            ),
+        )
+
     @router.get("/tokenclaw/stats/repeated-scaffold-opportunity")
     async def stats_repeated_scaffold_opportunity(
         limit: int = 1000,

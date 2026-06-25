@@ -12800,6 +12800,25 @@ async def stats_openai_cache_replay_report(store_obj: Any, limit: int = 1000) ->
     return build_openai_cache_replay_report(store_obj, limit=limit)
 
 
+async def stats_streaming_tool_cache_invalidation_drill(
+    store_obj: Any,
+    *,
+    window_hours: int = 24,
+    max_rows: int = 10000,
+    max_cohorts: int = 50,
+) -> dict[str, Any]:
+    from tokenclaw.streaming_tool_cache_invalidation_drill import (
+        build_streaming_tool_cache_invalidation_drill_from_store,
+    )
+
+    return build_streaming_tool_cache_invalidation_drill_from_store(
+        store_obj,
+        window_hours=window_hours,
+        max_rows=max_rows,
+        max_cohorts=max_cohorts,
+    )
+
+
 async def stats_repeated_scaffold_opportunity(
     store_obj: Any,
     *,
