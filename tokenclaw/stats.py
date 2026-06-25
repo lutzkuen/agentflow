@@ -1609,6 +1609,179 @@ def _safe_latest_managed_activation_proof(conn: Any, *, limit: int = 1000) -> di
     }
 
 
+def _safe_thinking_tail_loop_status(
+    store_obj: Any | None,
+    *,
+    activation_proof: dict[str, Any],
+    feedback_freshness: dict[str, Any],
+    managed_state: dict[str, Any],
+    limit: int = 500,
+) -> dict[str, Any]:
+    capped = max(1, min(int(limit or 1), 500))
+    try:
+        from tokenclaw.anthropic_thinking_compaction_impact import build_anthropic_thinking_compaction_impact_report
+
+        impact = build_anthropic_thinking_compaction_impact_report(store_obj, limit=capped) if store_obj is not None else {}
+    except Exception as exc:
+        impact = {
+            "schema": "tokenclaw.anthropic_thinking_compaction_impact.v1",
+            "status": "unavailable",
+            "summary": {},
+            "candidates": [],
+            "error_type": type(exc).__name__,
+            "privacy": _metadata_only_privacy(),
+        }
+    summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    lifecycle = summary.get("lifecycle_coverage") if isinstance(summary.get("lifecycle_coverage"), dict) else {}
+    readiness = (
+        activation_proof.get("thinking_tail_readiness")
+        if isinstance(activation_proof.get("thinking_tail_readiness"), dict)
+        else {}
+    )
+    backlog = (
+        feedback_freshness.get("backlog_proof")
+        if isinstance(feedback_freshness.get("backlog_proof"), dict)
+        else {}
+    )
+    candidates = [row for row in impact.get("candidates") or [] if isinstance(row, dict)]
+    first_observed_at = None
+    latest_outcome_at = None
+    for row in candidates:
+        first = row.get("first_observed_at")
+        latest = row.get("last_observed_at")
+        if first and (first_observed_at is None or str(first) < first_observed_at):
+            first_observed_at = str(first)
+        if latest and (latest_outcome_at is None or str(latest) > latest_outcome_at):
+            latest_outcome_at = str(latest)
+    if latest_outcome_at is None:
+        latest_outcome_at = feedback_freshness.get("newest_local_outcome_at")
+
+    applied = _as_int(summary.get("applied_count"))
+    holdout = _as_int(summary.get("holdout_count"))
+    skipped = _as_int(summary.get("skipped_count"))
+    safety_stop = _as_int(summary.get("safety_stop_count"))
+    observed = _as_int(summary.get("observed_thinking_compaction_metadata_row_count"))
+    feedback_pending = _as_int(backlog.get("pending"))
+    feedback_due = _as_int(backlog.get("due"))
+    feedback_sent = _as_int(backlog.get("sent"))
+    feedback_dropped = _as_int(backlog.get("dropped"))
+    reason_codes = [str(code) for code in feedback_freshness.get("reason_codes") or [] if str(code or "").strip()]
+
+    if safety_stop:
+        state = "safety-stopped"
+    elif applied and _as_float(summary.get("net_savings_usd")) > 0:
+        state = "saving"
+    elif applied:
+        state = "applied-observed"
+    elif holdout:
+        state = "held-for-evidence"
+    elif readiness.get("ready"):
+        state = "ready-to-widen"
+    elif feedback_pending or feedback_due or feedback_dropped:
+        state = "feedback-blocked"
+    elif observed:
+        state = "observed"
+    else:
+        state = "no-local-evidence"
+
+    if feedback_dropped:
+        feedback_status = "blocked"
+        feedback_blocker = "thinking-tail-feedback-dropped"
+    elif feedback_due:
+        feedback_status = "blocked"
+        feedback_blocker = "thinking-tail-feedback-due"
+    elif feedback_pending:
+        feedback_status = "queued"
+        feedback_blocker = "thinking-tail-feedback-pending"
+    elif feedback_sent:
+        feedback_status = "sent"
+        feedback_blocker = None
+    else:
+        feedback_status = "missing"
+        feedback_blocker = "thinking-tail-feedback-missing"
+
+    decision_status = activation_proof.get("decision_status")
+    policy_source = "managed-recommended" if activation_proof.get("status") == "observed" else "local-default"
+    if not bool((managed_state.get("managed_enabled") if isinstance(managed_state, dict) else False)):
+        policy_source = "local-default"
+
+    return {
+        "schema": "tokenclaw.thinking_tail_compaction_loop_status.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "action_family": "crunch",
+        "candidate_id": activation_proof.get("candidate_id") or readiness.get("candidate_id") or backlog.get("candidate_id"),
+        "current_rule_state": {
+            "state": state,
+            "impact_status": impact.get("status") or "unknown",
+            "policy_source": policy_source,
+            "decision_status": decision_status,
+            "traffic_treatment": readiness.get("traffic_treatment"),
+            "next_fraction_cap": readiness.get("next_fraction_cap"),
+            "holdout_fraction": readiness.get("holdout_fraction"),
+            "ready": bool(readiness.get("ready")),
+            "top_blocker_reason": reason_codes[0] if reason_codes and reason_codes[0] != "thinking-tail-feedback-fresh" else None,
+        },
+        "canary": {
+            "observed_count": observed,
+            "applied_count": applied,
+            "holdout_count": holdout,
+            "skipped_count": skipped,
+            "safety_stop_count": safety_stop,
+            "applied_rate": _as_float(lifecycle.get("applied_rate")),
+            "holdout_rate": _as_float(lifecycle.get("holdout_rate")),
+            "safety_stop_rate": _as_float(lifecycle.get("safety_stop_rate")),
+            "target_fraction": readiness.get("next_fraction_cap"),
+            "holdout_fraction": readiness.get("holdout_fraction"),
+        },
+        "savings": {
+            "realized_savings_usd": round(_as_float(summary.get("net_savings_usd")), 8),
+            "observed_gross_savings_usd": round(_as_float(summary.get("observed_saved_usd")), 8),
+            "projected_savings_usd": round(_as_float(summary.get("projected_saved_usd")), 8),
+            "projected_holdout_savings_usd": round(_as_float(summary.get("projected_holdout_savings_usd")), 8),
+            "observed_saved_tokens": _as_int(summary.get("observed_saved_tokens")),
+            "projected_saved_tokens": _as_int(summary.get("projected_saved_tokens")),
+        },
+        "quality": {
+            "applied_minus_holdout_error_rate": round(_as_float(summary.get("applied_minus_holdout_error_rate")), 6),
+            "applied_minus_holdout_retry_rate": round(_as_float(summary.get("applied_minus_holdout_retry_rate")), 6),
+            "budget_governor_action": summary.get("budget_governor_action"),
+            "canary_impact_decision": summary.get("canary_impact_decision"),
+        },
+        "outcome_window": {
+            "first_observed_at": first_observed_at,
+            "latest_outcome_at": latest_outcome_at,
+            "newest_local_outcome_age_seconds": feedback_freshness.get("newest_local_outcome_age_seconds"),
+            "last_successful_drain_at": feedback_freshness.get("last_successful_drain_at"),
+            "last_successful_drain_age_seconds": feedback_freshness.get("last_successful_drain_age_seconds"),
+        },
+        "managed_feedback": {
+            "status": feedback_status,
+            "blocked_reason": feedback_blocker,
+            "queued": _as_int(backlog.get("queued")),
+            "pending": feedback_pending,
+            "due": feedback_due,
+            "sent": feedback_sent,
+            "dropped": feedback_dropped,
+            "retryable_error": _as_int(backlog.get("retryable_error")),
+            "queue_fraction": _as_float(backlog.get("queue_fraction")),
+            "status_counts": dict(backlog.get("status_counts") or {}),
+            "payload_json_included": False,
+        },
+        "reason_codes": reason_codes,
+        "lookback_limit": capped,
+        "privacy": {
+            **_metadata_only_privacy(),
+            "payload_json_included": False,
+            "raw_messages_included": False,
+            "raw_thinking_text_included": False,
+            "raw_provider_bodies_included": False,
+            "managed_server_calls_made": False,
+            "provider_calls_made": False,
+        },
+    }
+
+
 def stats_managed_activation_status(store_obj: Any | None, *, limit: int = 10000) -> dict[str, Any]:
     capped = max(1, min(int(limit or 1), 10000))
     managed_state = _managed_feed_state()
@@ -1643,6 +1816,13 @@ def stats_managed_activation_status(store_obj: Any | None, *, limit: int = 10000
     status = "ready" if not clean_reasons else "blocked"
     if proof.get("status") != "observed":
         status = "no-proof"
+    loop_status = _safe_thinking_tail_loop_status(
+        store_obj,
+        activation_proof=proof,
+        feedback_freshness=thinking_tail_feedback,
+        managed_state=managed_state,
+        limit=min(capped, 500),
+    )
     return {
         "schema": "tokenclaw.managed_activation_dashboard_status.v1",
         "generated_at": utc_now(),
@@ -1677,6 +1857,7 @@ def stats_managed_activation_status(store_obj: Any | None, *, limit: int = 10000
             },
             "payload_json_included": False,
         },
+        "thinking_tail_compaction_loop_status": loop_status,
         "feedback_burndown": {
             "schema": "tokenclaw.managed_activation_feedback_burndown.v1",
             "queue_rows_scanned": _as_int(freshness_summary.get("queue_rows_scanned")),
@@ -29683,6 +29864,17 @@ def dashboard_html() -> str:
       </div>
     </div>
     <div class="section">
+      <h2>Thinking-tail compaction loop</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>State</th><th>Treatment</th><th>Outcomes</th><th>Savings</th><th>Error delta</th><th>Retry delta</th><th>Outcome window</th><th>Managed feedback</th><th>Privacy</th>
+          </tr></thead>
+          <tbody id="thinking-tail-loop-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="section">
       <h2>Managed feedback freshness</h2>
       <div class="table-wrap">
         <table>
@@ -29880,6 +30072,13 @@ function renderManagedActivation(data){
   const feedback=data.feedback_burndown||{};
   const fresh=data.thinking_tail_feedback_freshness||{};
   const backlog=fresh.backlog_proof||{};
+  const loop=data.thinking_tail_compaction_loop_status||{};
+  const loopState=loop.current_rule_state||{};
+  const canary=loop.canary||{};
+  const savings=loop.savings||{};
+  const quality=loop.quality||{};
+  const outcome=loop.outcome_window||{};
+  const loopFeedback=loop.managed_feedback||{};
   const blocker=data.top_blocker_reason||'none';
   const status=data.status||'unknown';
   text('managed-activation-status',status);
@@ -29899,6 +30098,22 @@ function renderManagedActivation(data){
     <td>${fmtSec(fresh.last_successful_drain_age_seconds)}</td>
     <td>${esc(blocker)}</td>
     <td>${privacyBadge}</td>
+  </tr>`;
+  const loopPrivacy=loop.privacy||{};
+  const loopPrivacyBadge=(loopPrivacy.raw_prompts_included||loopPrivacy.raw_messages_included||loopPrivacy.raw_request_bodies_included||loopPrivacy.raw_thinking_text_included||loopPrivacy.session_ids_included||loopPrivacy.file_paths_included)
+    ?'<span class="badge err">raw included</span>'
+    :'<span class="badge ok">metadata only</span>';
+  const loopCls=loopState.state==='saving'||loopState.state==='ready-to-widen'?'ok':(loopState.state==='safety-stopped'||loopState.state==='feedback-blocked'?'err':'miss');
+  document.getElementById('thinking-tail-loop-tbody').innerHTML=`<tr>
+    <td><span class="badge ${loopCls}">${esc(loopState.state||'unknown')}</span><div class="muted">${esc(loopState.top_blocker_reason||loopState.impact_status||'-')}</div></td>
+    <td>${esc(loopState.policy_source||'-')}<div class="muted">target ${loopState.next_fraction_cap==null?'-':Math.round(Number(loopState.next_fraction_cap||0)*100)+'%'} · holdout ${loopState.holdout_fraction==null?'-':Math.round(Number(loopState.holdout_fraction||0)*100)+'%'}</div></td>
+    <td>${num(canary.applied_count)} applied · ${num(canary.holdout_count)} holdout<div class="muted">${num(canary.safety_stop_count)} safety stopped · ${num(canary.skipped_count)} skipped</div></td>
+    <td><span class="money">${money(savings.realized_savings_usd)}</span><div class="muted">projected ${money(savings.projected_savings_usd)} · ${num(savings.observed_saved_tokens)} tokens</div></td>
+    <td>${Math.round(Number(quality.applied_minus_holdout_error_rate||0)*10000)/100}%</td>
+    <td>${Math.round(Number(quality.applied_minus_holdout_retry_rate||0)*10000)/100}%</td>
+    <td>${outcome.latest_outcome_at?localTime(outcome.latest_outcome_at):'-'}<div class="muted">last drain ${fmtSec(outcome.last_successful_drain_age_seconds)}</div></td>
+    <td><span class="badge ${loopFeedback.status==='sent'?'ok':loopFeedback.status==='blocked'?'err':'miss'}">${esc(loopFeedback.status||'missing')}</span><div class="muted">${num(loopFeedback.pending)} pending · ${num(loopFeedback.sent)} sent · ${esc(loopFeedback.blocked_reason||'-')}</div></td>
+    <td>${loopPrivacyBadge}</td>
   </tr>`;
 }
 function renderWeekly(data){

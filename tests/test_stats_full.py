@@ -187,6 +187,76 @@ class StatsFullTest(unittest.TestCase):
             attempts=0,
             next_attempt_at="2000-01-01T00:00:00+00:00",
         )
+        raw_loop_secret = "raw thinking-tail loop secret must not leak"
+        for idx, (status, cohort, applied, tokens_saved, planned_tokens, status_code, retry_count) in enumerate(
+            (
+                ("applied", "canary_applied", True, 1200, 1200, 200, 0),
+                ("holdout", "canary_holdout", False, 0, 1100, 200, 0),
+                ("bypass", "safety_stop", False, 0, 900, 500, 1),
+            ),
+            start=1,
+        ):
+            server.store.log_call(
+                id=f"thinking-tail-loop-{idx}",
+                created_at=f"2026-06-13T00:0{idx}:00+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=status_code,
+                latency_ms=1000,
+                input_tokens_est=6000,
+                output_tokens_est=300,
+                actual_input_tokens=6000,
+                actual_output_tokens=300,
+                cost_est_usd=0.02,
+                cost_baseline_usd=0.05,
+                crunch_json=stable_json(
+                    {
+                        "anthropic_thinking_history_compaction": {
+                            "schema": "tokenclaw.anthropic_thinking_history_compaction_decision.v1",
+                            "enabled": True,
+                            "status": status,
+                            "reason": "local-canary-safety-stop" if status_code >= 400 else "thinking-history-compaction-applied",
+                            "changed": applied,
+                            "applied": applied,
+                            "policy_source": "local-manual",
+                            "rule_id": f"raw-loop-rule-{raw_loop_secret}",
+                            "candidate_id": f"raw-loop-candidate-{raw_loop_secret}",
+                            "category": "tool-result",
+                            "before_chars": 24000,
+                            "planned_saved_tokens": planned_tokens,
+                            "tokens_saved_est": tokens_saved,
+                            "saved_chars": tokens_saved * 4,
+                            "planned_saved_chars": planned_tokens * 4,
+                            "canary": {"cohort": cohort, "selected": applied},
+                            "lifecycle_feedback": {
+                                "status": status if status != "bypass" else "safety_stop",
+                                "cohort": cohort,
+                                "raw_payload_included": False,
+                            },
+                            "safety_stop_state": "stopped" if status_code >= 400 else "clear",
+                        }
+                    }
+                ),
+                routing_json=stable_json({"category": "tool-result", "workflow_phase": "tool-execution"}),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming", "cache_key": raw_loop_secret}),
+                error=raw_loop_secret if status_code >= 400 else None,
+                request_json=stable_json({"messages": [{"content": raw_loop_secret}], "file_path": f"/tmp/{raw_loop_secret}.py"}),
+                response_json=stable_json({"text": raw_loop_secret}),
+                session_id=raw_loop_secret,
+                category="tool-result",
+                cache_creation_input_tokens=100,
+                cache_read_input_tokens=3000,
+                retry_count=retry_count,
+                thinking_output_tokens=100,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+                requested_model_family="sonnet",
+                routed_model_family="sonnet",
+            )
 
         payload = stats_views.stats_managed_activation_status(server.store)
         app = create_dashboard_app(
@@ -208,19 +278,36 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(payload["activation_proof"]["thinking_tail_readiness"]["status"], "blocked")
         self.assertEqual(payload["feedback_burndown"]["queued"], 1)
         self.assertEqual(payload["feedback_burndown"]["due"], 1)
+        loop = payload["thinking_tail_compaction_loop_status"]
+        self.assertEqual(loop["schema"], "tokenclaw.thinking_tail_compaction_loop_status.v1")
+        self.assertEqual(loop["current_rule_state"]["state"], "safety-stopped")
+        self.assertEqual(loop["canary"]["applied_count"], 1)
+        self.assertEqual(loop["canary"]["holdout_count"], 1)
+        self.assertEqual(loop["canary"]["safety_stop_count"], 1)
+        self.assertGreater(loop["savings"]["observed_saved_tokens"], 0)
+        self.assertGreater(loop["savings"]["projected_saved_tokens"], 0)
+        self.assertEqual(loop["managed_feedback"]["status"], "blocked")
+        self.assertFalse(loop["managed_feedback"]["payload_json_included"])
+        self.assertFalse(loop["privacy"]["raw_thinking_text_included"])
+        self.assertFalse(loop["privacy"]["session_ids_included"])
+        self.assertFalse(loop["privacy"]["file_paths_included"])
         self.assertIn("thinking-tail-feedback-pending", payload["reason_codes"])
         self.assertFalse(payload["privacy"]["payload_json_included"])
         self.assertFalse(payload["feedback_burndown"]["payload_json_included"])
         self.assertEqual(endpoint.status_code, 200)
         self.assertEqual(endpoint.json()["activation_proof"]["decision_status"], "received")
+        self.assertEqual(endpoint.json()["thinking_tail_compaction_loop_status"]["canary"]["applied_count"], 1)
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn("Managed activation proof", dashboard.text)
         self.assertIn("managed-activation-tbody", dashboard.text)
+        self.assertIn("Thinking-tail compaction loop", dashboard.text)
+        self.assertIn("thinking-tail-loop-tbody", dashboard.text)
         self.assertIn("/tokenclaw/stats/managed-activation-status", dashboard.text)
 
         rendered = json.dumps(payload, sort_keys=True) + endpoint.text + dashboard.text
         self.assertNotIn("raw queued activation proof payload", rendered)
         self.assertNotIn("raw server response", rendered)
+        self.assertNotIn(raw_loop_secret, rendered)
 
     def _keys_in(self, value):
         keys = set()
