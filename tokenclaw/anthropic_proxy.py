@@ -67,6 +67,9 @@ from tokenclaw.routing_experiments import (
     _public_label as _public_metadata_label,
 )
 from tokenclaw.session_memory_hints import build_session_memory_optimization_hints
+from tokenclaw.streaming_tool_cache_invalidation_drill import (
+    build_streaming_tool_cache_invalidation_drill_cache_meta,
+)
 from tokenclaw.recommendations import (
     attach_observed_savings_to_routing_meta,
     apply_recommendation_to_body,
@@ -1405,6 +1408,18 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 crunch_meta=crunch_meta,
                 cache_meta=cache_meta,
                 current_thinking=_has_top_level_thinking(crunched),
+            )
+            cache_meta["streaming_tool_cache_invalidation_drill"] = (
+                build_streaming_tool_cache_invalidation_drill_cache_meta(
+                    cache_meta,
+                    category=category,
+                    stream=True,
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    endpoint=path,
+                    requested_model=str(resolved_requested_model),
+                    routed_model=str(crunched.get("model") or routed_model),
+                )
             )
             coordinator_enforcement = enforce_optimization_coordinator(
                 routing_meta=routing_meta,

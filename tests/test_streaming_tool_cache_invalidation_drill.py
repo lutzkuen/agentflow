@@ -16,6 +16,7 @@ from tokenclaw.streaming_tool_cache_invalidation_drill import (
     BLOCKER_UNSAFE,
     DRILL_SCHEMA,
     DRILL_SOURCE_SURFACE,
+    build_streaming_tool_cache_invalidation_drill_cache_meta,
     build_streaming_tool_cache_invalidation_drill,
     record_streaming_tool_cache_invalidation_drill_feedback,
 )
@@ -52,6 +53,20 @@ class StreamingToolCacheInvalidationDrillTests(unittest.TestCase):
         cache_hit: int = 0,
         raw_marker: str = "RAW_MUST_STAY_LOCAL",
     ) -> None:
+        cache_json = dict(cache_json)
+        if stream:
+            cache_json["streaming_tool_cache_invalidation_drill"] = (
+                build_streaming_tool_cache_invalidation_drill_cache_meta(
+                    cache_json,
+                    category=category,
+                    stream=True,
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    endpoint="/v1/messages",
+                    requested_model="claude-sonnet-4-5",
+                    routed_model="claude-sonnet-4-5",
+                )
+            )
         request_json = stable_json({
             "messages": [{"content": raw_marker}],
             "file_path": "/home/lutz/private/project/secret.py",
@@ -212,6 +227,9 @@ class StreamingToolCacheInvalidationDrillTests(unittest.TestCase):
                     window_hours=24, limit=100
                 )
                 payload = build_streaming_tool_cache_invalidation_drill(rows, window_hours=24)
+                stored_cache_rows = store.conn.execute(
+                    "select cache_json from calls where stream = 1"
+                ).fetchall()
             finally:
                 store.conn.close()
 
@@ -244,6 +262,30 @@ class StreamingToolCacheInvalidationDrillTests(unittest.TestCase):
         self.assertEqual(by_blocker[BLOCKER_STALE]["dependency_stability"], "stale")
         self.assertEqual(by_blocker[BLOCKER_UNSAFE]["dependency_stability"], "unsafe")
         self.assertEqual(by_blocker[BLOCKER_MISSING]["dependency_stability"], "missing")
+
+        cache_blockers = set()
+        for row in stored_cache_rows:
+            cache_meta = json.loads(row["cache_json"])
+            drill_meta = cache_meta.get("streaming_tool_cache_invalidation_drill")
+            self.assertIsInstance(drill_meta, dict)
+            self.assertTrue(drill_meta["metadata_only"])
+            self.assertTrue(drill_meta["evidence_collection_only"])
+            self.assertFalse(drill_meta["serves_cached_responses"])
+            self.assertFalse(drill_meta["creates_cache_entry"])
+            self.assertFalse(drill_meta["replay_eligible_entry_created"])
+            self.assertFalse(drill_meta["privacy"]["file_paths_included"])
+            self.assertFalse(drill_meta["privacy"]["cache_keys_included"])
+            cache_blockers.add(drill_meta["stale_risk_blocker"])
+        self.assertEqual(
+            cache_blockers,
+            {
+                BLOCKER_STABLE,
+                BLOCKER_MISSING,
+                BLOCKER_STALE,
+                BLOCKER_UNSAFE,
+                BLOCKER_NO_TOOL_REPEAT,
+            },
+        )
 
         # Acceptance: every evidence class classified, and nothing replay-eligible created.
         acceptance = payload["acceptance"]

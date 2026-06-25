@@ -372,6 +372,67 @@ def _finalize_cohort(cohort: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def build_streaming_tool_cache_invalidation_drill_cache_meta(
+    cache_meta: dict[str, Any],
+    *,
+    category: str | None = None,
+    stream: bool = True,
+    provider: str = "anthropic",
+    source_surface: str = "anthropic_messages",
+    endpoint: str = "/v1/messages",
+    requested_model: str | None = None,
+    routed_model: str | None = None,
+) -> dict[str, Any]:
+    """Classify one streaming cache decision for path-free drill evidence.
+
+    This helper is intentionally metadata-only. It does not compute cache keys,
+    inspect request bodies, write to the store, or make replay eligibility claims.
+    """
+    cache = dict(cache_meta) if isinstance(cache_meta, dict) else {}
+    audit = cache.get("file_dependency_audit")
+    audit = dict(audit) if isinstance(audit, dict) else {}
+    row = {
+        "stream": bool(stream),
+        "category": category,
+        "provider": provider,
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+        "requested_model": requested_model,
+        "routed_model": routed_model,
+    }
+    blocker = _classify_row(row, cache, audit) if stream else BLOCKER_NO_TOOL_REPEAT
+    return {
+        "schema": "tokenclaw.streaming_tool_cache_invalidation_drill_call.v1",
+        "event_type": DRILL_EVENT_TYPE,
+        "read_only": True,
+        "metadata_only": True,
+        "evidence_collection_only": True,
+        "serves_cached_responses": False,
+        "creates_cache_entry": False,
+        "replay_eligible_entry_created": False,
+        "mutates_provider_request": False,
+        "tool_cache_replay_enabled": False,
+        "stale_risk_blocker": blocker,
+        "dependency_stability": _dependency_stability(blocker),
+        "ttl_invalidation_bucket": _ttl_invalidation_bucket(audit, cache),
+        "replayability_level": _replayability_level(cache),
+        "tool_calls_present": _has_tool_blocks(row, cache),
+        "safe_invalidation_evidence": bool(audit.get("safe_invalidation_evidence")),
+        "snapshot_count_bucket": _safe_label(audit.get("snapshot_count_bucket"), "unknown"),
+        "next_action": NEXT_ACTION_BY_BLOCKER.get(blocker, "keep-streaming-tool-cache-drill-observing"),
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "tool_payloads_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+            "raw_identifiers_included": False,
+        },
+    }
+
+
 def build_streaming_tool_cache_invalidation_drill(
     rows: list[dict[str, Any]],
     *,
@@ -612,6 +673,7 @@ __all__ = [
     "DRILL_SOURCE_SURFACE",
     "ALL_BLOCKER_CODES",
     "build_streaming_tool_cache_invalidation_drill",
+    "build_streaming_tool_cache_invalidation_drill_cache_meta",
     "build_streaming_tool_cache_invalidation_drill_from_store",
     "record_streaming_tool_cache_invalidation_drill_feedback",
     "streaming_tool_cache_invalidation_drill_config",
