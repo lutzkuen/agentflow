@@ -245,7 +245,7 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         self.assertEqual(chat["candidate_id"], "anthropic-opus48-to-sonnet46-chat")
         self.assertEqual(chat["primary_model"], "claude-opus-4-8")
         self.assertEqual(chat["shadow_model"], "claude-sonnet-4-6")
-        self.assertEqual(chat["max_text_chars"], 32000)
+        self.assertEqual(chat["max_text_chars"], 0)
 
         self.assertTrue(streaming_tool_result["sampled"])
         self.assertEqual(streaming_tool_result["reason"], "streaming-shadow-sampled")
@@ -254,12 +254,12 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
             "anthropic-opus48-to-sonnet46-tool-result-stream",
         )
         self.assertEqual(streaming_tool_result["shadow_model"], "claude-sonnet-4-6")
-        self.assertEqual(streaming_tool_result["max_text_chars"], 128000)
+        self.assertEqual(streaming_tool_result["max_text_chars"], 0)
 
         self.assertTrue(tool_light["sampled"])
         self.assertEqual(tool_light["candidate_id"], "anthropic-opus48-to-sonnet46-tool-light")
         self.assertEqual(tool_light["shadow_model"], "claude-sonnet-4-6")
-        self.assertEqual(tool_light["max_text_chars"], 64000)
+        self.assertEqual(tool_light["max_text_chars"], 0)
 
     def test_thin_config_uses_preferred_pathway_without_legacy_candidate_matrix(self):
         config_dir = Path(self.home.name) / "config"

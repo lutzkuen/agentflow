@@ -489,7 +489,7 @@ class ActionExecutor:
             )
         if (
             target := _target_model(decision, local_actions)
-        ) and target != current_model and (
+        ) and target != current_model and decision.get("policy_decision_schema") and (
             traffic_treatment in {"live", "canary", "route_to"}
             or decision.get("selected_for_local_application") is True
             or str(decision.get("local_policy_decision_mode") or decision.get("recommended_mode") or "").strip().lower()
