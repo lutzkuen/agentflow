@@ -3300,16 +3300,25 @@ class DashboardImportTests(unittest.TestCase):
                 retry_count=0,
                 provider="anthropic",
             )
-            app = create_dashboard_app(
-                store_obj=store,
-                default_db=tmp.name,
-                upstream="https://anthropic.test",
-                limiter_status=lambda: [],
-                limiter_config={},
-            )
-            client = TestClient(app)
+            with patch.dict(
+                os.environ,
+                {
+                    "TOKENCLAW_RECOMMENDATION_ENABLED": "0",
+                    "TOKENCLAW_RECOMMENDATIONS_ENABLED": "0",
+                    "TOKENCLAW_RECOMMENDATION_SERVER_URL": "",
+                },
+                clear=False,
+            ):
+                app = create_dashboard_app(
+                    store_obj=store,
+                    default_db=tmp.name,
+                    upstream="https://anthropic.test",
+                    limiter_status=lambda: [],
+                    limiter_config={},
+                )
+                client = TestClient(app)
 
-            response = client.get("/tokenclaw/stats/local-pattern-coverage?limit=50")
+                response = client.get("/tokenclaw/stats/local-pattern-coverage?limit=50")
 
             self.assertEqual(response.status_code, 200)
             data = response.json()

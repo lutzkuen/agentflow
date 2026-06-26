@@ -15,7 +15,14 @@ from tokenclaw.store import Store
 
 
 class ActionExecutorTests(unittest.TestCase):
-    managed_live_env = {"TOKENCLAW_MANAGED": "1", "TOKENCLAW_MANAGED_MODE": "live"}
+    managed_live_env = {
+        "TOKENCLAW_MANAGED": "1",
+        "TOKENCLAW_MANAGED_MODE": "live",
+        "TOKENCLAW_LOCAL_RULES_ONLY": "0",
+        "TOKENCLAW_MANAGED_ROUTING": "1",
+        "TOKENCLAW_MANAGED_CRUNCH": "1",
+        "TOKENCLAW_MANAGED_CACHE": "1",
+    }
 
     def _routing_decision(self, **overrides):
         decision = {
@@ -784,7 +791,7 @@ anthropic_thinking_history_compaction:
             result = self._execute_crunch(
                 config=config,
                 decision=self._crunch_decision(treatment="widen", fraction=0.20),
-                env={"TOKENCLAW_MANAGED": "1", "TOKENCLAW_MANAGED_MODE": "dry_run"},
+                env={**self.managed_live_env, "TOKENCLAW_MANAGED_MODE": "dry_run"},
             )
             after = path.read_text(encoding="utf-8")
 

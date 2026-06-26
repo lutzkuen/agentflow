@@ -42,7 +42,6 @@ LOCAL_RUNTIME_DECISION_KEYS = {
     "endpoint",
     "enabled",
     "expired",
-    "expires_at",
     "fallback",
     "failure_mode",
     "generated_at",
@@ -441,7 +440,7 @@ class ActionExecutor:
                 profiles = result.get("effective_profiles")
                 if isinstance(profiles, dict):
                     profiles.pop(family, None)
-        if any(result[family].get("status") == "vetoed" for family in supported):
+        if any(result[family].get("status") == "vetoed" for family in DEFAULT_ACTION_FAMILIES):
             return self._finish(result, "vetoed", "local-action-vetoed")
         if not application_enabled:
             self._preview_managed_crunch_treatment(result, decision)
@@ -584,7 +583,12 @@ class ActionExecutor:
         return self._finish(result, "noop", "no-local-actions-applied")
 
     def _family_present(self, decision: dict[str, Any], local_actions: dict[str, Any], family: str) -> bool:
-        if isinstance(decision.get(family), dict):
+        decision_section = decision.get(family)
+        if isinstance(decision_section, dict):
+            status = str(decision_section.get("status") or "").strip().lower().replace("_", "-")
+            profile = str(decision_section.get("profile") or "").strip().lower()
+            if status in {"omitted", "not-present", "disabled", "off"} or profile == "off":
+                return False
             return True
         section = local_actions.get(family)
         return isinstance(section, dict) and section.get("status") not in {None, "not-present"}
@@ -837,7 +841,6 @@ class ActionExecutor:
         return self._finish(result, status, reason)
 
     def _finish(self, result: dict[str, Any], status: str, reason: str) -> dict[str, Any]:
-        enabled_families = set(result.get("enabled_local_action_families") or DEFAULT_ACTION_FAMILIES)
         result["status"] = status
         result["apply_reason"] = reason
         result["fallback"] = None if status == "applied" else "local-policy"
@@ -853,8 +856,7 @@ class ActionExecutor:
             "vetoed_families": [
                 family
                 for family in DEFAULT_ACTION_FAMILIES
-                if family in enabled_families
-                and isinstance(result.get(family), dict)
+                if isinstance(result.get(family), dict)
                 and result[family].get("status") == "vetoed"
             ],
             "held_families": [
