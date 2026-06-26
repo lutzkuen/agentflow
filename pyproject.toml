@@ -44,7 +44,7 @@ Issues = "https://github.com/lutzkuen/tokenclaw/issues"
 tokenclaw = "tokenclaw.cli:tokenclaw_main"
 
 [tool.setuptools]
-packages = ["tokenclaw", "tokenclaw.cli_commands", "tokenclaw.optimization"]
+packages = ["tokenclaw", "tokenclaw.cli_commands", "tokenclaw.optimization", "tokenclaw.stats"]
 
 [tool.setuptools.package-data]
 tokenclaw = ["*.yaml"]

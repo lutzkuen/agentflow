@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import importlib
 import importlib.util
 import os
 import json
@@ -1224,6 +1225,11 @@ class DashboardImportTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+    def test_dashboard_html_facade_matches_extracted_template(self):
+        html_module = importlib.import_module("tokenclaw.stats.dashboard_html")
+
+        self.assertEqual(stats_views.dashboard_html(), html_module.dashboard_html())
 
     def test_repeated_scaffold_dashboard_endpoints_are_content_free(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
