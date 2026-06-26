@@ -1930,6 +1930,19 @@ def routing_experiment_decision(
     if not ROUTING_EXPERIMENT_ENABLED:
         if not forced_openai_canary_shadow:
             return meta
+    # Backed or off: the bundled default policy is evidence-collection scaffolding,
+    # not a license to mint local canaries. Locally-minted route-down shadows are a
+    # server responsibility (ARCHITECTURE.md "canary-driven routing lives in
+    # tokenclaw_server"). When the policy is the bundled default and no opted-in
+    # server backs routing, stay off unless the server explicitly forced a shadow.
+    if (
+        ROUTING_EXPERIMENT_POLICY_SOURCE == "local-default"
+        and not _managed_policy_decisions_configured()
+        and not forced_openai_canary_shadow
+    ):
+        meta["reason"] = "no-backed-routing"
+        meta["backing_reason"] = "local-default-policy-without-managed-backing"
+        return meta
     if meta["kill_switch"]:
         meta["reason"] = "kill-switch"
         return meta

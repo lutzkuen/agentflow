@@ -162,6 +162,23 @@ class DashboardImportTests(unittest.TestCase):
         self.assertIn("TokenClaw", rendered)
         self.assertIn("/tokenclaw/stats", rendered)
         self.assertIn("/tokenclaw/stats/weekly", rendered)
+        today = rendered.split('<section class="tab-panel active" id="tab-today">', 1)[1]
+        today = today.split('<section class="tab-panel" id="tab-last7">', 1)[0]
+        self.assertIn('id="today-calls"', today)
+        self.assertIn('id="today-health"', today)
+        self.assertIn("<h2>Recent Calls</h2>", today)
+        self.assertNotIn("Managed feed", today)
+        self.assertNotIn("Managed activation proof", today)
+        self.assertNotIn("today-managed-state", today)
+        self.assertNotIn("managed-activation-status", today)
+        self.assertNotIn("today-managed-tbody", today)
+        self.assertNotIn("managed-activation-tbody", today)
+        self.assertNotIn("thinking-tail-loop-tbody", today)
+        self.assertNotIn("managed-feedback-freshness-tbody", today)
+        self.assertNotIn("<h2>Managed Backing</h2>", today)
+        self.assertNotIn("<h2>Managed activation proof</h2>", today)
+        self.assertNotIn("<h2>Thinking-tail compaction loop</h2>", today)
+        self.assertNotIn("<h2>Managed feedback freshness</h2>", today)
         for internal_text in (
             "Policy workbench",
             "Codex optimization readiness",

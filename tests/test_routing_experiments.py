@@ -25,12 +25,36 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         "TOKENCLAW_ROUTING_EXPERIMENT_SAMPLE_RATE",
         "TOKENCLAW_ROUTING_EXPERIMENT_DAILY_BUDGET_USD",
         "TOKENCLAW_ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD",
+        "TOKENCLAW_RECOMMENDATIONS_ENABLED",
         "TOKENCLAW_RECOMMENDATION_ENABLED",
+        "TOKENCLAW_POLICY_DECISIONS_ENABLED",
+        "TOKENCLAW_POLICY_DECISION_ENABLED",
         "TOKENCLAW_RECOMMENDATION_SERVER_URL",
         "TOKENCLAW_CONFIG_DIR",
         "TOKENCLAW_POLICY_CONFIG_DIR",
         "HOME",
     )
+
+    def _enable_managed_backing(self):
+        """Mark routing as server-backed so local-default shadow experiments run.
+
+        Under the backed-or-off rule the bundled default policy mints no local
+        canaries unless an opted-in server backs routing, so the default-policy
+        evidence-collection tests must simulate a healthy managed backend.
+        """
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+
+    def _disable_managed_backing(self):
+        for key in (
+            "TOKENCLAW_RECOMMENDATIONS_ENABLED",
+            "TOKENCLAW_RECOMMENDATION_ENABLED",
+            "TOKENCLAW_POLICY_DECISIONS_ENABLED",
+            "TOKENCLAW_POLICY_DECISION_ENABLED",
+            "TOKENCLAW_RECOMMENDATION_SERVER_URL",
+        ):
+            os.environ.pop(key, None)
 
     def setUp(self):
         self.old_cwd = Path.cwd()
@@ -40,6 +64,9 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
             os.environ.pop(key, None)
         os.environ["HOME"] = self.home.name
         os.chdir(self.home.name)
+        # Default fixture represents a server-backed install; tests that exercise
+        # the unbacked/off path opt out via _disable_managed_backing().
+        self._enable_managed_backing()
         importlib.reload(experiments)
 
     def tearDown(self):
@@ -89,6 +116,36 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         self.assertEqual(meta["routed_model"], "claude-haiku-4-5-20251001")
         self.assertEqual(meta["source_surface"], "anthropic_messages")
         self.assertEqual(meta["policy_source"], "local-default")
+
+    def test_default_policy_without_managed_backing_stays_off(self):
+        # Backed or off: the bundled default policy must not mint local route-down
+        # shadows when no opted-in server backs routing. Locally-minted, canary-driven
+        # routing is a server responsibility (ARCHITECTURE.md), so an unbacked install
+        # collects no shadow evidence and forwards no second copy of the prompt.
+        self._disable_managed_backing()
+
+        meta = experiments.routing_experiment_decision(
+            {"model": "claude-sonnet-4-6"},
+            {
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-sonnet-4-6",
+                "category": "short-completion",
+                "text_chars": 1000,
+            },
+            stream=False,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            random_value=lambda: 0.0,
+        )
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "no-backed-routing")
+        self.assertEqual(meta["backing_reason"], "local-default-policy-without-managed-backing")
+        self.assertEqual(meta["policy_source"], "local-default")
+        # User-visible model is untouched and no shadow candidate is selected.
+        self.assertEqual(meta["user_visible_model"], "claude-sonnet-4-6")
+        self.assertFalse(meta["counterfactual"])
+        self.assertIsNone(meta["candidate_id"])
 
     def test_default_policy_can_sample_anthropic_streaming_shadow_pass_through(self):
         meta = experiments.routing_experiment_decision(
@@ -405,6 +462,9 @@ blocklist:
         self.assertEqual(thin["blocklist"], [{"model": "gpt-5-nano"}])
 
     def test_dashboard_candidate_append_is_idempotent_and_makes_coverage_visible(self):
+        # Local coverage surface with no server backing: routing stays off until a
+        # manual candidate is appended.
+        self._disable_managed_backing()
         config_path = Path(self.home.name) / ".tokenclaw" / "routing_experiments.yaml"
         importlib.reload(experiments)
 
@@ -467,6 +527,7 @@ blocklist:
         self.assertEqual(after["selected_candidate_id"], result["candidate_id"])
 
     def test_dashboard_candidate_append_refreshes_coverage_without_module_reload(self):
+        self._disable_managed_backing()
         importlib.reload(experiments)
 
         before = experiments.routing_candidate_coverage(
@@ -505,6 +566,7 @@ blocklist:
         self.assertEqual(after["selected_candidate_id"], result["candidate_id"])
 
     def test_manual_durable_config_edit_refreshes_coverage_without_module_reload(self):
+        self._disable_managed_backing()
         config_path = Path(self.home.name) / ".tokenclaw" / "routing_experiments.yaml"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         importlib.reload(experiments)
@@ -609,6 +671,7 @@ routing_candidates: []
         self.assertEqual(after["selected_candidate_id"], result["candidate_id"])
 
     def test_strict_env_routing_experiments_path_does_not_fall_through_to_worktree_config(self):
+        self._disable_managed_backing()
         worktree_config = Path(self.home.name) / "config"
         worktree_config.mkdir()
         (worktree_config / "routing_experiments.yaml").write_text(
@@ -2387,6 +2450,7 @@ eligibility_overrides:
             self.assertNotIn(forbidden_key, rendered)
 
     def test_disabled_managed_mode_queues_routing_experiment_policy_event(self):
+        self._disable_managed_backing()
         feedback = experiments.routing_experiment_feedback_features(
             experiment_id="exp-1",
             experiment_meta={

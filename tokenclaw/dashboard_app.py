@@ -874,7 +874,7 @@ def create_dashboard_app(
     full_stats_ttl_s: float | None = None,
     admin_forwarder: DashboardAdminForwarder | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="AgentFlow Dashboard", version="0.1.0")
+    app = FastAPI(title="TokenClaw Dashboard", version="0.1.0")
 
     @app.get("/health")
     async def health() -> dict[str, Any]:

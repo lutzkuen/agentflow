@@ -215,7 +215,7 @@ def policy_rollback_cli(
     *,
     stdout: Any = None,
 ) -> int:
-    parser = argparse.ArgumentParser(description="Rollback local AgentFlow policy YAML files from apply backups")
+    parser = argparse.ArgumentParser(description="Rollback local TokenClaw policy YAML files from apply backups")
     parser.add_argument(
         "--apply-id",
         help="Rollback the exact policy workbench apply transaction with this apply ID.",
@@ -361,7 +361,7 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
 
 
 def sqlite_maintenance_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
-    parser = argparse.ArgumentParser(description="Run local SQLite retention maintenance for AgentFlow metadata")
+    parser = argparse.ArgumentParser(description="Run local SQLite retention maintenance for TokenClaw metadata")
     parser.add_argument(
         "--db",
         default=_default_db_path(),
@@ -1400,7 +1400,7 @@ def managed_activation_preview_cli(argv: Sequence[str] | None = None, *, stdout:
     parser.add_argument(
         "--db",
         default=_default_db_path(),
-        help="AgentFlow database URL or SQLite path for --persist-outcomes.",
+        help="TokenClaw database URL or SQLite path for --persist-outcomes.",
     )
     parser.add_argument(
         "--preview-stale-after-hours",
@@ -1573,12 +1573,12 @@ def managed_activation_preview_outcomes_cli(
     stdout: Any = None,
 ) -> int:
     parser = argparse.ArgumentParser(
-        description="Report review-only managed activation preview outcomes persisted in the local AgentFlow DB"
+        description="Report review-only managed activation preview outcomes persisted in the local TokenClaw DB"
     )
     parser.add_argument(
         "--db",
         default=_default_db_path(),
-        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
+        help="TokenClaw database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=1000, help="Stored preview outcomes to inspect, default: 1000.")
     parser.add_argument(
@@ -1685,7 +1685,7 @@ def managed_routing_pathway_outcomes_cli(
     parser.add_argument(
         "--db",
         default=_default_db_path(),
-        help="AgentFlow database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
+        help="TokenClaw database URL or SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=1000, help="Local evidence rows to inspect, default: 1000.")
     parser.add_argument(

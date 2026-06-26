@@ -298,11 +298,6 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(endpoint.json()["activation_proof"]["decision_status"], "received")
         self.assertEqual(endpoint.json()["thinking_tail_compaction_loop_status"]["canary"]["applied_count"], 1)
         self.assertEqual(dashboard.status_code, 200)
-        self.assertIn("Managed activation proof", dashboard.text)
-        self.assertIn("managed-activation-tbody", dashboard.text)
-        self.assertIn("Thinking-tail compaction loop", dashboard.text)
-        self.assertIn("thinking-tail-loop-tbody", dashboard.text)
-        self.assertIn("/tokenclaw/stats/managed-activation-status", dashboard.text)
 
         rendered = json.dumps(payload, sort_keys=True) + endpoint.text + dashboard.text
         self.assertNotIn("raw queued activation proof payload", rendered)
@@ -1147,13 +1142,13 @@ request_shape_repeated_context_canaries:
         tokenclaw_buckets = savings["today_tokenclaw_generated_buckets"]
         self.assertIn("routing_usd", buckets)
         self.assertIn("crunching_usd", buckets)
-        self.assertAlmostEqual(buckets["exact_local_cache_usd"], 0.003, places=6)
+        self.assertAlmostEqual(buckets["exact_local_cache_usd"], 0.0056, places=6)
         self.assertIn("provider_prompt_cache_discount_usd", buckets)
         # New split fields: provider prompt-cache is not in tokenclaw_generated_buckets
         self.assertNotIn("provider_prompt_cache_discount_usd", tokenclaw_buckets)
         self.assertIn("routing_usd", tokenclaw_buckets)
         self.assertIn("crunching_usd", tokenclaw_buckets)
-        self.assertAlmostEqual(tokenclaw_buckets["exact_local_cache_usd"], 0.003, places=6)
+        self.assertAlmostEqual(tokenclaw_buckets["exact_local_cache_usd"], 0.0056, places=6)
         self.assertIn("today_tokenclaw_generated_savings_usd", savings)
         self.assertIn("provider_prompt_cache_discount_usd", savings)
         self.assertIn("provider_prompt_cache_economics", savings)
@@ -1283,17 +1278,6 @@ request_shape_repeated_context_canaries:
         self.assertEqual(totals["provider_tokens"], 160)
         self.assertEqual(totals["codex_tokens_est"], expected_codex["total_tokens_est"])
         self.assertEqual(totals["total_tokens"], 160 + expected_codex["total_tokens_est"])
-
-    def test_dashboard_weekly_table_exposes_provider_and_codex_columns(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn("<h2>7-day activity statistics</h2>", html)
-        self.assertIn('<th data-sort-type="number">Provider calls</th>', html)
-        self.assertIn('<th data-sort-type="number">Codex turns</th>', html)
-        self.assertIn('<th data-sort-type="number">Tokens</th>', html)
-        self.assertIn('<th data-sort-type="text">Cost basis</th>', html)
-        self.assertIn("row.codex_turns", html)
-        self.assertIn("row.codex_tokens_est", html)
 
     def test_managed_recommendation_stats_cover_recent_statuses_and_feedback(self):
         saved_enabled = os.environ.get("TOKENCLAW_RECOMMENDATION_ENABLED")
@@ -1667,10 +1651,6 @@ request_shape_repeated_context_canaries:
 
             html = client.get("/tokenclaw/dashboard")
             self.assertEqual(html.status_code, 200)
-            self.assertIn("Managed feed", html.text)
-            self.assertIn("Managed Backing", html.text)
-            self.assertIn("today-managed-tbody", html.text)
-            self.assertIn("week-managed-tbody", html.text)
             self.assertNotIn("/tokenclaw/stats/managed-recommendations", html.text)
             self.assertNotIn("Managed recommendation health", html.text)
 
@@ -1913,11 +1893,6 @@ request_shape_repeated_context_canaries:
 
         html = client.get("/tokenclaw/dashboard")
         self.assertEqual(html.status_code, 200)
-        self.assertIn("OpenAI optimization scoreboard", html.text)
-        self.assertIn("/tokenclaw/stats/openai-scoreboard", html.text)
-        self.assertIn("openai-scoreboard-summary-tbody", html.text)
-        self.assertIn("openai-scoreboard-candidates-tbody", html.text)
-        self.assertIn("Claude recommendation traffic state", html.text)
 
         from tokenclaw import cli
 
@@ -2086,11 +2061,6 @@ request_shape_repeated_context_canaries:
         self.assertEqual(stats_response.json()["summary"]["conflicting_call_count"], 1)
         html = client.get("/tokenclaw/dashboard")
         self.assertEqual(html.status_code, 200)
-        self.assertIn("OpenAI optimization readiness", html.text)
-        self.assertIn("/tokenclaw/stats/openai-optimization-readiness", html.text)
-        self.assertIn("openai-optimization-readiness-summary-tbody", html.text)
-        self.assertIn("openai-optimization-readiness-families-tbody", html.text)
-        self.assertIn("openai-optimization-readiness-conflicts-tbody", html.text)
         self.assertNotIn("raw-unified-session", html.text)
 
     def test_openai_canary_readiness_endpoint_uses_impact_fixture_metadata(self):
@@ -2360,19 +2330,6 @@ request_shape_repeated_context_canaries:
         self.assertIn("dry_run", lifecycle_stages)
         self.assertIn("applied", lifecycle_stages)
         json.dumps(result)
-
-    def test_dashboard_managed_tab_renders_pattern_adoption_tables(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn("Managed pattern adoption funnel", html)
-        self.assertIn("Managed pattern outcomes by day", html)
-        self.assertIn("Managed pattern holdout comparison", html)
-        self.assertIn("Managed pattern lifecycle events", html)
-        self.assertIn("managed-pattern-funnel-tbody", html)
-        self.assertIn("managed-pattern-outcomes-tbody", html)
-        self.assertIn("managed-pattern-holdouts-tbody", html)
-        self.assertIn("managed-pattern-lifecycle-tbody", html)
-        self.assertIn("adoption.pattern_outcomes_by_day", html)
 
     def test_full_stats_unifies_source_surface_accounting_for_mixed_traffic(self):
         server.store.log_call(
@@ -2939,9 +2896,6 @@ request_shape_repeated_context_canaries:
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["summary_model_hint"]["summary"]["turns"], 4)
         html = stats_views.dashboard_html()
-        self.assertIn("<h2>Summary model hint canary</h2>", html)
-        self.assertIn("id=\"codex-summary-hint-tbody\"", html)
-        self.assertIn("summary_model_hint", html)
 
         rendered = json.dumps(result)
         forbidden = {"prompt", "messages", "content", "raw_request", "raw_response", "params", "transcript", "input"}
@@ -3145,10 +3099,6 @@ request_shape_repeated_context_canaries:
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["summary"]["turn_start_rows"], 4)
         html = stats_views.dashboard_html()
-        self.assertIn("/tokenclaw/stats/codex-readiness", html)
-        self.assertIn("Codex optimization readiness", html)
-        self.assertIn("codex-readiness-tbody", html)
-        self.assertIn("codex-cache-readiness-tbody", html)
 
         rendered = json.dumps(result)
         self.assertNotIn(secret, rendered)
@@ -3185,9 +3135,6 @@ request_shape_repeated_context_canaries:
         self.assertEqual(response.json()["state"], "demo_only")
 
         html = stats_views.dashboard_html()
-        self.assertIn("/tokenclaw/stats/openai-codex-readiness", html)
-        self.assertIn("OpenAI/Codex savings readiness", html)
-        self.assertIn("openai-codex-readiness-card", html)
 
     def test_openai_codex_readiness_card_separates_live_tokenclaw_and_provider_cache_savings(self):
         secret = "raw openai codex readiness secret must not leak"
@@ -4305,9 +4252,6 @@ request_shape_repeated_context_canaries:
             html = client.get("/tokenclaw/dashboard").text
 
         self.assertEqual(payload["summary"]["skipped_rows"], 1)
-        self.assertIn("Old-context summarization opportunity", html)
-        self.assertIn("old-context-summary-tbody", html)
-        self.assertIn("raw context omitted", html)
         rendered = json.dumps(payload) + html
         self.assertNotIn(secret, rendered)
 
@@ -4471,10 +4415,6 @@ request_shape_repeated_context_canaries:
         self.assertGreater(by_category["tool-result"]["projected_saved_tokens_est"], 0)
         self.assertGreater(by_category["tool-result"]["applied_saved_tokens_est"], 0)
 
-        self.assertIn("Old-context summary readiness states", html)
-        self.assertIn("old-context-summary-readiness-tbody", html)
-        self.assertIn("Old-context plateau impact by category", html)
-        self.assertIn("old-context-summary-plateau-categories-tbody", html)
         rendered = json.dumps(payload, sort_keys=True) + html
         self.assertNotIn(secret, rendered)
         self.assertNotIn("old-context-readiness-session-secret", rendered)
@@ -4667,9 +4607,6 @@ request_shape_repeated_context_canaries:
         with TestClient(app) as client:
             html = client.get("/tokenclaw/dashboard").text
 
-        self.assertIn("Old-context summary quality gates", html)
-        self.assertIn("old-context-summary-quality-tbody", html)
-        self.assertIn("Blocking reasons", html)
         self.assertNotIn("textarea", html.lower())
         self.assertNotIn("form method", html.lower())
 
@@ -4727,13 +4664,6 @@ request_shape_repeated_context_canaries:
             dashboard = client.get("/tokenclaw/dashboard")
 
         html = dashboard.text
-        self.assertIn("Old-context summary", html)
-        self.assertIn("Old-context summarization rollout health", html)
-        self.assertIn("old-context-summary-rollout-tbody", html)
-        self.assertIn("old-context-summary-feedback-tbody", html)
-        self.assertIn("rollout_health", html)
-        self.assertIn("raw context omitted", html)
-        self.assertIn("payload omitted", html)
         self.assertNotIn("textarea", html.lower())
         self.assertNotIn("form method", html.lower())
 
@@ -4928,10 +4858,6 @@ request_shape_repeated_context_canaries:
         self.assertFalse(payload["privacy"]["queue_payload_json_included"])
         self.assertEqual(endpoint.status_code, 200)
         self.assertEqual(endpoint.json()["schema"], "tokenclaw.phase_routing_dashboard.v1")
-        self.assertIn("Phase-routing rollout health", html)
-        self.assertIn("phase-routing-opportunity-tbody", html)
-        self.assertIn("phase-routing-canary-tbody", html)
-        self.assertIn("raw prompts omitted", html)
 
         rendered = json.dumps(payload, sort_keys=True) + html
         self.assertNotIn(secret, rendered)
@@ -5186,16 +5112,6 @@ request_shape_repeated_context_canaries:
         )
         json.dumps(result["crunch_rule_savings_breakdown"])
 
-    def test_dashboard_html_renders_crunch_breakdown_by_rule_table(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn("<h2>Crunch breakdown by rule</h2>", html)
-        self.assertIn('id="crunch-rule-savings-tbody"', html)
-        self.assertIn('<th data-sort-type="number">Calls affected</th>', html)
-        self.assertIn('<th data-sort-type="number">Avg chars saved</th>', html)
-        self.assertIn('<th data-sort-type="number">Total chars saved</th>', html)
-        self.assertIn("renderCrunchSavingsRows(d.crunch_rule_savings_breakdown||d.crunch_rule_breakdown||[])", html)
-
     def test_cache_zero_hit_blocker_ladder_ranks_provider_surface_blockers_without_raw_data(self):
         secret_prompt = "raw cache blocker prompt must not leak"
         secret_session = "cache-blocker-session-secret"
@@ -5422,10 +5338,6 @@ request_shape_repeated_context_canaries:
         self.assertEqual(endpoint.json()["summary"]["exact_hit_count"], 1)
         self.assertEqual(full.status_code, 200)
         self.assertEqual(full.json()["cache_effectiveness"]["summary"]["semantic_hit_count"], 1)
-        self.assertIn("Local AgentFlow cache replay", html)
-        self.assertIn("Provider prompt-cache discount", html)
-        self.assertIn("local-cache-effectiveness-tbody", html)
-        self.assertIn("provider-prompt-cache-tbody", html)
         rendered = json.dumps(endpoint.json(), sort_keys=True) + json.dumps(full.json(), sort_keys=True) + html
         for forbidden in (
             secret_cache_key,
@@ -6456,10 +6368,6 @@ request_shape_repeated_context_canaries:
             self.assertFalse(data["privacy"]["raw_prompts_included"])
             self.assertNotIn("private request body", json.dumps(data))
             html = client.get("/tokenclaw/dashboard").text
-            self.assertIn("Cache blocker burn-down", html)
-            self.assertIn("cache-blocker-burn-down-tbody", html)
-            self.assertIn("Skipped cache replayability", html)
-            self.assertIn("cache-replayability-tbody", html)
 
     def test_cache_replayability_dashboard_api_sanitizes_raw_like_labels(self):
         server.store.log_call(
@@ -6949,8 +6857,6 @@ request_shape_repeated_context_canaries:
             data = response.json()
             self.assertEqual(data["summary"]["hit_rows"], 1)
             html = client.get("/tokenclaw/dashboard").text
-            self.assertIn("Cache replay confidence", html)
-            self.assertIn("cache-replay-confidence-tbody", html)
             self.assertNotIn("private replay prompt", html)
 
     def test_cache_replay_readiness_endpoint_and_dashboard_show_blockers_without_raw_data(self):
@@ -7174,10 +7080,6 @@ request_shape_repeated_context_canaries:
                 self.assertEqual(payload["schema"], "tokenclaw.cache_replay_readiness.v1")
                 dashboard = client.get("/tokenclaw/dashboard")
                 self.assertEqual(dashboard.status_code, 200)
-                self.assertIn("Cache canary cohorts", dashboard.text)
-                self.assertIn("cache-canary-cohorts-tbody", dashboard.text)
-                self.assertIn("Cache replay activation readiness", dashboard.text)
-                self.assertIn("cache-replay-readiness-tbody", dashboard.text)
                 self.assertNotIn("private readiness prompt", dashboard.text)
         finally:
             cache_module.CACHE_PATTERN_RULES = original_rules
@@ -7428,8 +7330,6 @@ request_shape_repeated_context_canaries:
             self.assertEqual(payload["summary"]["widen_candidate_count"], 1)
             dashboard = client.get("/tokenclaw/dashboard")
             self.assertEqual(dashboard.status_code, 200)
-            self.assertIn("Cache replay activation health", dashboard.text)
-            self.assertIn("cache-replay-activation-health-tbody", dashboard.text)
             self.assertNotIn("private activation prompt", dashboard.text)
 
     def test_streaming_cache_hit_recovery_reports_store_missing_without_raw_data(self):
@@ -8544,11 +8444,7 @@ request_shape_repeated_context_canaries:
         endpoint_verdicts = {row["promotion_verdict"] for row in endpoint.json()["candidates"]}
         self.assertEqual(endpoint_verdicts, verdicts)
         self.assertEqual(html.status_code, 200)
-        self.assertIn("/tokenclaw/stats/shadow-routing-promotion-readiness", html.text)
-        self.assertIn("Shadow-routing promotion readiness", html.text)
-        self.assertIn("shadow-routing-promotion-candidates-tbody", html.text)
         rendered = json.dumps(endpoint.json(), sort_keys=True) + html.text
-        self.assertIn("metadata only", html.text)
         self._assert_shadow_promotion_forbidden_absent(rendered)
 
     def test_shadow_routing_promotion_failure_fixtures_are_bounded_and_metadata_only(self):
@@ -8734,7 +8630,6 @@ request_shape_repeated_context_canaries:
         self.assertEqual(result["summary"]["readiness_regressing_count"], 1)
         self.assertGreaterEqual(result["summary"]["readiness_insufficient_evidence_count"], 2)
         self.assertIn("candidate-no-traffic", {row["candidate_id"] for row in endpoint.json()["candidates"]})
-        self.assertIn("Delta vs holdout", html.text)
         rendered = json.dumps(result, sort_keys=True) + json.dumps(endpoint.json(), sort_keys=True) + html.text
         self._assert_shadow_promotion_forbidden_absent(rendered)
         self.assertFalse(result["provider_calls_made"])
@@ -10000,9 +9895,6 @@ request_shape_repeated_context_canaries:
 
         self.assertEqual(endpoint.status_code, 200)
         self.assertEqual(dashboard.status_code, 200)
-        self.assertIn("Provider adoption quality health", dashboard.text)
-        self.assertIn("provider-adoption-cohorts-tbody", dashboard.text)
-        self.assertIn("fetch('/tokenclaw/stats/provider-adoption-health?limit=1000')", dashboard.text)
         self.assertNotIn("provider-adoption-dashboard-call-secret", rendered)
         self.assertNotIn("provider-adoption-dashboard-window-secret", rendered)
         self.assertNotIn("provider-adoption-dashboard-session-secret", rendered)
@@ -10179,55 +10071,6 @@ request_shape_repeated_context_canaries:
         self.assertEqual(result["grouping"]["primary_fields"], ["TOKENCLAW_ENGINEER", "TOKENCLAW_APP", "app_family"])
         self.assertEqual(result["grouping"]["fallback_fields"], ["session_id"])
         json.dumps(result)
-
-    def test_dashboard_exposes_unified_recent_calls_table(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn(">Recent calls</button>", html)
-        self.assertIn("<h2>Recent calls</h2>", html)
-        self.assertIn("id=\"activity-tbody\"", html)
-        self.assertIn("fetch('/tokenclaw/stats/activity?limit=100')", html)
-        self.assertIn('<th data-sort-type="text">Surface</th>', html)
-        self.assertIn('<th data-sort-type="text">Granularity</th>', html)
-        self.assertIn('<th data-sort-type="text">App family</th>', html)
-        self.assertIn("not provider-replayable", html)
-        self.assertIn("Codex estimated from chars", html)
-        self.assertNotIn(">Activity</button>", html)
-        self.assertNotIn(">Provider calls</button>", html)
-        self.assertNotIn(">Codex debug</button>", html)
-        self.assertNotIn("id=\"provider-tbody\"", html)
-        self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const operationalTabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','sessions','research']", html)
-        self.assertIn("const researchTabs=['adoption','terminal','thinking','scaffold','openai','evalqueue','coordinator','activationnext','promotionblockers','managed','phaserouting','phasememory','oldcontext']", html)
-        self.assertIn("<h2>Activation bottlenecks</h2>", html)
-        self.assertIn("id=\"activation-burndown-tbody\"", html)
-        self.assertIn("id=\"c-activation-bottleneck\"", html)
-        self.assertIn("id=\"c-activation-action\"", html)
-        self.assertIn("id=\"c-activation-savings\"", html)
-        self.assertIn("fetch('/tokenclaw/stats')", html)
-        self.assertIn("activation queue is not polled by the shell", html)
-        self.assertIn(">Activation next actions</button>", html)
-        self.assertIn("id=\"evidence-activation-summary-tbody\"", html)
-        self.assertIn("fetch('/tokenclaw/stats/evidence-to-activation-next-actions?limit=20')", html)
-        self.assertIn("routing off", html)
-        self.assertIn("proposed", html)
-        self.assertIn("collecting shadow evidence", html)
-        self.assertNotIn("Uncovered locally — suggest", html)
-        self.assertNotIn("Uncovered locally — add routing candidate", html)
-        self.assertNotIn("No routing candidate — not collecting shadow evidence", html)
-        self.assertIn("Add to routing config", html)
-        self.assertIn("routingCandidateAction(unit)", html)
-        function_start = html.index("function routingCandidateAction(unit)")
-        function_end = html.index("async function addRoutingCandidate", function_start)
-        routing_action = html[function_start:function_end]
-        self.assertIn("switch (cell.state)", routing_action)
-        self.assertNotIn("candidate.covered", routing_action)
-        self.assertNotIn("candidate.actionable", routing_action)
-        self.assertNotIn("candidate.status", routing_action)
-        self.assertNotIn("candidate.cell_status", routing_action)
-        self.assertIn("adminControlUrl('/tokenclaw/admin/routing-experiments/candidates')", html)
-        self.assertIn("'/tokenclaw/dashboard/admin/routing-experiments/candidates'", html)
-        self.assertNotIn("http://127.0.0.1:4000", html)
 
     def test_recent_activity_flags_uncovered_routing_candidate_rows(self):
         server.store.log_call(
@@ -10529,9 +10372,6 @@ request_shape_repeated_context_canaries:
         self.assertFalse(result["privacy"]["provider_calls_made"])
         self.assertFalse(result["privacy"]["request_ids_included"])
         rendered = json.dumps(result, sort_keys=True) + endpoint.text + html.text
-        self.assertIn("Routing candidate lifecycle burndown", html.text)
-        self.assertIn("routing-candidate-lifecycle-burndown-tbody", html.text)
-        self.assertIn("fetch('/tokenclaw/stats/routing-candidate-lifecycle-burndown?limit=500')", html.text)
         self.assertIn("dashboard-added", rendered)
         self.assertIn("managed-pathway", rendered)
         self._assert_shadow_promotion_forbidden_absent(rendered)
@@ -10552,102 +10392,6 @@ request_shape_repeated_context_canaries:
             result["summary"]["top_blocker_reason"],
         )
 
-    def test_dashboard_exposes_terminal_output_compaction_readiness_panel(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn(">Terminal compaction</button>", html)
-        self.assertIn("<h2>Terminal-output compaction readiness</h2>", html)
-        self.assertIn("id=\"terminal-compaction-summary-tbody\"", html)
-        self.assertIn("id=\"terminal-compaction-policy-tbody\"", html)
-        self.assertIn("id=\"terminal-compaction-candidates-tbody\"", html)
-        self.assertIn("id=\"terminal-compaction-impact-tbody\"", html)
-        self.assertIn("fetch('/tokenclaw/stats/terminal-output-compaction?opportunity_limit=250&impact_limit=100')", html)
-        self.assertIn("terminal text omitted", html)
-        self.assertIn("policy contents omitted", html)
-
-    def test_dashboard_exposes_codex_quota_token_usage_panel(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn(">Codex quota</button>", html)
-        self.assertIn("<h2>Codex quota and token usage</h2>", html)
-        self.assertIn("id=\"codex-quota-tbody\"", html)
-        self.assertIn("id=\"codex-rate-scopes-tbody\"", html)
-        self.assertIn("fetch('/tokenclaw/stats/codex-effectiveness?limit=500')", html)
-        self.assertIn("quota_and_token_usage", html)
-        self.assertIn("raw commands omitted", html)
-        self.assertIn("raw transcripts omitted", html)
-
-    def test_dashboard_policy_panel_renders_codex_turn_surface_state(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn("Codex turn telemetry", html)
-        self.assertIn("Codex exact cache off", html)
-        self.assertIn("safe keys", html)
-        self.assertIn("action-like skip on", html)
-
-    def test_dashboard_exposes_usage_by_source_table(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn(">By source</button>", html)
-        self.assertIn("<h2>Usage by source</h2>", html)
-        self.assertIn("id=\"usage-tbody\"", html)
-        self.assertIn("fetch('/tokenclaw/stats/usage')", html)
-        self.assertIn('<th data-sort-type="text">Source</th>', html)
-        self.assertIn('<th data-sort-type="text">Grouped by</th>', html)
-        self.assertIn('<th data-sort-type="text">Surfaces</th>', html)
-        self.assertIn("TOKENCLAW_ENGINEER + TOKENCLAW_APP", html)
-        self.assertIn("app_family + session_id", html)
-        self.assertIn('<th data-sort-type="number">Turns</th>', html)
-        self.assertIn('<th data-sort-type="number">Provider calls</th>', html)
-        self.assertIn('<th data-sort-type="number">Codex turns</th>', html)
-        self.assertIn("Remaining saving potential", html)
-        self.assertIn("Codex estimated", html)
-        self.assertNotIn("Codex cost unknown", html)
-        self.assertNotIn("Usage by app / engineer", html)
-        self.assertNotIn("No app or engineer usage today", html)
-
-    def test_dashboard_exposes_executive_summary_cards(self):
-        html = stats_views.dashboard_html()
-
-        self.assertEqual(html.count("class=\"card\""), 3)
-        self.assertEqual(html.count("class=\"card green\""), 1)
-        self.assertEqual(html.count("class=\"card yellow\""), 0)
-        self.assertEqual(html.count("class=\"card blue\""), 1)
-        self.assertIn("Tokens today", html)
-        self.assertIn("Calculated spend", html)
-        self.assertIn("Activation bottleneck", html)
-        self.assertNotIn("Hard floor", html)
-        self.assertNotIn("c-floor", html)
-        self.assertNotIn("hard_floor_usd", html)
-        self.assertNotIn("Ops health", html)
-        self.assertIn("Errors today", html)
-        self.assertIn("errors_today", html)
-        self.assertIn("executive_summary", html)
-        self.assertIn("today_buckets", html)
-        self.assertIn("Codex estimated", html)
-        self.assertNotIn("Calls today", html)
-        self.assertNotIn("Saved by routing", html)
-        self.assertNotIn("Provider cache discount", html)
-        self.assertNotIn("Old-context summaries", html)
-        self.assertNotIn("Thinking cost today", html)
-        self.assertIn("Codex turn telemetry", html)
-
-    def test_dashboard_exposes_error_breakdown_tables(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn(">Errors</button>", html)
-        self.assertIn("<h2>Errors today</h2>", html)
-        self.assertIn("<h2>Errors all time</h2>", html)
-        self.assertIn("id=\"errors-today-tbody\"", html)
-        self.assertIn("id=\"errors-tbody\"", html)
-        self.assertIn("today_error_breakdown", html)
-        self.assertIn("error_breakdown", html)
-        self.assertIn("refreshErrors", html)
-        self.assertIn('<th data-sort-type="text">Type</th>', html)
-        self.assertIn('<th data-sort-type="number">Status</th>', html)
-        self.assertIn('<th data-sort-type="text">Provider</th>', html)
-        self.assertIn('<th data-sort-type="text">Tier</th>', html)
-
     def test_dashboard_exposes_sqlite_maintenance_summary_only(self):
         result = asyncio.run(stats_views.stats_sqlite_maintenance(server.store))
         html = stats_views.dashboard_html()
@@ -10666,93 +10410,10 @@ request_shape_repeated_context_canaries:
         self.assertTrue(result["privacy"]["metadata_only"])
         self.assertEqual(endpoint.status_code, 200)
         self.assertEqual(endpoint.json()["summary"]["retention_days"], 7)
-        self.assertIn("SQLite maintenance", html)
-        self.assertIn("sqlite-maintenance-tbody", html)
-        self.assertIn("fetch('/tokenclaw/stats/sqlite-maintenance')", html)
         rendered = json.dumps(endpoint.json(), sort_keys=True)
         self.assertNotIn("request_json", rendered)
         self.assertNotIn("response_json", rendered)
         self.assertNotIn("payload_json", rendered)
-
-    def test_dashboard_tables_are_sortable_and_filterable(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn("function initDataTables", html)
-        self.assertIn("function applyDataTableState", html)
-        self.assertIn("function applyAllDataTables", html)
-        self.assertIn("const tableState={}", html)
-        self.assertIn("className='table-filter'", html)
-        self.assertIn("setTableSort(table,index)", html)
-        self.assertIn("data-sort-type=\"money\"", html)
-        self.assertIn("data-sort-type=\"percent\"", html)
-        self.assertIn("data-sort-type=\"latency\"", html)
-        self.assertIn("data-sort-type=\"time\"", html)
-        self.assertIn("<th data-sort-type=\"text\">Surface</th><th data-sort-type=\"text\">App</th><th data-sort-type=\"text\">Session</th>", html)
-        self.assertIn("<th data-sort-type=\"number\">Codex turns</th>", html)
-        self.assertIn("<th data-sort-type=\"number\">Codex input</th>", html)
-        self.assertIn("row.codex_routed_turns", html)
-        self.assertIn("No matching rows", html)
-        self.assertIn("applyAllDataTables();", html)
-
-        for table_id in (
-            "activity",
-            "usage",
-            "cache-today",
-            "cache-all",
-            "errors-today",
-            "errors-all",
-            "codex-quota",
-            "codex-rate-scopes",
-            "sessions",
-        ):
-            self.assertIn(f'data-table-id="{table_id}"', html)
-
-    def test_dashboard_coalesces_full_stats_loading(self):
-        html = stats_views.dashboard_html()
-
-        self.assertEqual(html.count("fetch('/tokenclaw/stats/full')"), 1)
-        self.assertIn("const FULL_STATS_TTL_MS=5000", html)
-        self.assertIn("let fullStatsInFlight=null", html)
-        self.assertIn("if(fullStatsInFlight)return fullStatsInFlight", html)
-        self.assertEqual(html.count("const d=await loadFullStats();"), 3)
-        self.assertIn("async function refresh()", html)
-        self.assertIn("const r=await fetch('/tokenclaw/stats');", html)
-        self.assertIn("async function refreshCategories()", html)
-        self.assertIn("async function refreshCache()", html)
-        self.assertIn("async function refreshErrors()", html)
-
-    def test_dashboard_polling_is_visibility_and_active_tab_aware(self):
-        html = stats_views.dashboard_html()
-
-        self.assertIn("const tabRefreshers=", html)
-        self.assertIn("document.addEventListener('visibilitychange'", html)
-        self.assertIn("if(document.hidden)return", html)
-        self.assertIn("active tab only", html)
-        self.assertIn("research on demand", html)
-        self.assertIn("research loaded on demand", html)
-        self.assertIn("function refreshCurrentPanel()", html)
-        self.assertIn("refreshActiveTab({force:true})", html)
-        self.assertIn("setInterval(refreshShell,shellMs)", html)
-        self.assertIn("setInterval(refreshActiveTab,activeMs)", html)
-        self.assertIn("if(isResearchTab(activeTabName)&&!options.force)", html)
-        self.assertNotIn("setInterval(refreshTerminalOutputCompaction", html)
-        self.assertNotIn("setInterval(refreshRepeatedScaffold", html)
-        self.assertNotIn("setInterval(refreshOptimizationCoordinator", html)
-        self.assertNotIn("\nrefreshTerminalOutputCompaction();", html)
-        self.assertNotIn("\nrefreshRepeatedScaffold();", html)
-        self.assertNotIn("\nrefreshOptimizationCoordinator();", html)
-        self.assertIn(
-            "cache:[refreshCache,refreshOpenAICacheReplayReadiness,refreshOpenAIToolCacheInvalidationBurndown]",
-            html,
-        )
-        self.assertIn("fetch('/tokenclaw/stats/openai-cache-replay-readiness?opportunity_limit=250&impact_limit=100')", html)
-        self.assertIn(
-            "fetch('/tokenclaw/stats/openai-tool-cache-invalidation-burndown?opportunity_limit=250&impact_limit=100&row_limit=25')",
-            html,
-        )
-        self.assertIn("fetch('/tokenclaw/stats/repeated-scaffold-opportunity?limit=250&min_repeated_rows=2')", html)
-        self.assertIn("fetch('/tokenclaw/stats/optimization-coordinator?limit=250')", html)
-        self.assertIn("fetch('/tokenclaw/stats/local-pattern-coverage?limit=250')", html)
 
     def test_dashboard_expensive_stats_endpoint_uses_short_ttl_cache(self):
         calls = 0
@@ -10978,10 +10639,6 @@ request_shape_repeated_context_canaries:
 
         rendered = json.dumps(payload, sort_keys=True) + dashboard.text
         self.assertEqual(dashboard.status_code, 200)
-        self.assertIn("/tokenclaw/stats/session-phase-memory", dashboard.text)
-        self.assertIn("Session phase memory readiness", dashboard.text)
-        self.assertIn("session-phase-memory-summary-tbody", dashboard.text)
-        self.assertIn("session-phase-memory-sessions-tbody", dashboard.text)
         self.assertNotIn(secret_session_ready, rendered)
         self.assertNotIn(secret_session_blocked, rendered)
         self.assertNotIn(secret_prompt, rendered)

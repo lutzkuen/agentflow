@@ -1,6 +1,6 @@
 [project]
 name = "tokenclaw"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local proxy for token savings on LLM traffic: crunching, routing, caching, and telemetry."
 license = { text = "Apache-2.0" }
 classifiers = [

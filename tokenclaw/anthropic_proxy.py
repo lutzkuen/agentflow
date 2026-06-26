@@ -299,6 +299,118 @@ def _mark_streaming_experiment_skip(
     routing_meta["routing_experiment"] = experiment_meta
 
 
+def _managed_shadow_experiment_decision(
+    *,
+    recommendation_meta: dict[str, Any],
+    routing_meta: dict[str, Any],
+    requested_model: str,
+    primary_model: str,
+    stream: bool,
+    input_tokens_est: int,
+    random_value: float | None = None,
+) -> dict[str, Any] | None:
+    shadow = recommendation_meta.get("shadow")
+    if not isinstance(shadow, dict) or shadow.get("status") != "recommended":
+        return None
+    shadow_model = str(shadow.get("target_model") or "").strip()
+    if not shadow_model or shadow_model == primary_model:
+        return None
+    try:
+        fraction = max(0.0, min(1.0, float(shadow.get("fraction") or 0.0)))
+    except (TypeError, ValueError):
+        fraction = 0.0
+    selected = fraction > 0.0 and (random.random() if random_value is None else random_value) < fraction
+    reason_codes = [
+        str(item)
+        for item in (shadow.get("reason_codes") or [])
+        if isinstance(item, str) and item
+    ]
+    return {
+        "schema": "tokenclaw.routing_experiment_decision.v1",
+        "enabled": True,
+        "mode": "shadow_candidate_pass_through",
+        "kill_switch": False,
+        "status": "selected" if selected else "skipped",
+        "sampled": bool(selected),
+        "reason": "managed-shadow-sampled" if selected else "managed-shadow-not-sampled",
+        "counterfactual": True,
+        "shadow_only": True,
+        "policy_source": "managed-recommended",
+        "rule_path": "managed://tokenclaw-server/policy-decision/shadow",
+        "sample_rate": round(fraction, 6),
+        "sample_rate_scope": "managed-policy-decision-shadow",
+        "daily_budget_usd": None,
+        "daily_budget_scope": "managed-policy-decision-shadow",
+        "profile_id": str(shadow.get("policy_id") or "managed-shadow-recommendation"),
+        "budget_spent_usd": None,
+        "budget_remaining_usd": None,
+        "budget_exhausted": False,
+        "budget_cap_scope": "managed-policy-decision-shadow",
+        "similarity_threshold": None,
+        "min_samples_for_confidence": None,
+        "provider": "anthropic",
+        "source_surface": str(recommendation_meta.get("source_surface") or "anthropic_messages"),
+        "stream": bool(stream),
+        "streaming_shadow_supported": bool(stream),
+        "requested_model": requested_model,
+        "routed_model": shadow_model,
+        "shadow_model": shadow_model,
+        "primary_model": primary_model,
+        "user_visible_model": primary_model,
+        "category": str(routing_meta.get("category") or ""),
+        "workflow_phase": str(routing_meta.get("workflow_phase") or ""),
+        "text_chars": int(routing_meta.get("text_chars") or 0),
+        "input_tokens_est": input_tokens_est,
+        "min_text_chars": 0,
+        "min_text_chars_scope": "managed-policy-decision-shadow",
+        "max_text_chars": 0,
+        "max_text_chars_scope": "managed-policy-decision-shadow",
+        "eligibility_overrides_applied": [],
+        "candidate_id": shadow.get("policy_id") or recommendation_meta.get("policy_id"),
+        "selected_candidate": {
+            "candidate_id": shadow.get("policy_id") or recommendation_meta.get("policy_id"),
+            "requested_model": requested_model,
+            "routed_model": shadow_model,
+            "policy_source": "managed-recommended",
+            "source_surface": recommendation_meta.get("source_surface") or "anthropic_messages",
+        },
+        "eligible_candidate_count": 1,
+        "eligible_candidate_ids": [str(shadow.get("policy_id") or recommendation_meta.get("policy_id") or "managed-shadow-recommendation")],
+        "candidate_selector": "managed-policy-decision-shadow",
+        "candidate_policy_shape": "managed_policy_decision_shadow",
+        "candidate_selector_basis": {
+            "source": "managed-policy-decision-shadow",
+            "decision_id": recommendation_meta.get("decision_id"),
+            "policy_id": recommendation_meta.get("policy_id"),
+            "metadata_only": True,
+        },
+        "managed_shadow": {
+            "schema": "tokenclaw.managed_shadow_local_execution.v1",
+            "decision_id": recommendation_meta.get("decision_id"),
+            "policy_id": recommendation_meta.get("policy_id"),
+            "shadow_policy_id": shadow.get("policy_id"),
+            "mode": shadow.get("mode"),
+            "fraction": fraction,
+            "reason_codes": reason_codes,
+            "required_local_gates": shadow.get("required_local_gates") or [],
+            "metadata_only": True,
+            "provider_forwarding_by_managed_server": False,
+            "locally_executed": True,
+        },
+        "reason_codes": ["managed-shadow-recommendation", *reason_codes],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+            "provider_bodies_included": False,
+            "tool_payloads_included": False,
+        },
+    }
+
+
 def _attach_session_memory_hints(
     *,
     context: ProviderContext,
@@ -564,7 +676,7 @@ def provider_disabled_response(context: ProviderContext, expected: str) -> JSONR
     return JSONResponse(
         {
             "error": {
-                "message": f"AgentFlow is running in {context.provider!r} provider mode, not {expected!r}.",
+                "message": f"TokenClaw is running in {context.provider!r} provider mode, not {expected!r}.",
                 "type": "provider_mismatch",
             }
         },
@@ -1360,6 +1472,18 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             crunched["model"] = normalized_model
             routing_meta["routed_model"] = normalized_model
         routing_meta["managed_recommendation"] = recommendation_meta
+        managed_shadow_experiment = _managed_shadow_experiment_decision(
+            recommendation_meta=recommendation_meta,
+            routing_meta=routing_meta,
+            requested_model=str(resolved_requested_model),
+            primary_model=str(crunched.get("model") or routed_model),
+            stream=stream,
+            input_tokens_est=input_tokens,
+        )
+        if managed_shadow_experiment is not None:
+            routing_meta["routing_experiment"] = managed_shadow_experiment
+            experiment_meta = managed_shadow_experiment
+            sampled_shadow_pass_through = bool(managed_shadow_experiment.get("sampled"))
         if sampled_shadow_pass_through:
             managed_candidate_model = str(crunched.get("model") or "")
             if managed_candidate_model and managed_candidate_model != str(resolved_requested_model):

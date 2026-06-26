@@ -502,6 +502,59 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertNotIn("What is the capital", serialized)
         self.assertNotIn("Hello", serialized)
 
+    def test_managed_policy_shadow_decision_collects_opus48_shadow_canary(self):
+        routing_meta = {
+            "requested_model": "claude-opus-4-8",
+            "routed_model": "claude-opus-4-8",
+            "category": "tool-result",
+            "workflow_phase": "tool-execution",
+            "text_chars": 12000,
+        }
+        recommendation_meta = {
+            "schema": "tokenclaw.policy_decision.v1",
+            "policy_decision_schema": "tokenclaw.policy_decision.v1",
+            "decision_id": "decision-opus48-shadow",
+            "policy_id": "policy-opus48-shadow",
+            "source_surface": "anthropic_messages",
+            "shadow": {
+                "status": "recommended",
+                "target_model": "claude-sonnet-4-6",
+                "fraction": 1.0,
+                "mode": "async_eval",
+                "policy_id": "managed-shadow-opus48-sonnet46",
+                "reason_codes": ["managed-shadow-recommendation"],
+                "required_local_gates": [
+                    "sample-shadow-locally",
+                    "execute-shadow-provider-call-locally",
+                    "record-shadow-lifecycle-feedback",
+                ],
+            },
+        }
+
+        meta = anthropic_proxy._managed_shadow_experiment_decision(
+            recommendation_meta=recommendation_meta,
+            routing_meta=routing_meta,
+            requested_model="claude-opus-4-8",
+            primary_model="claude-opus-4-8",
+            stream=True,
+            input_tokens_est=3000,
+            random_value=0.0,
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta["policy_source"], "managed-recommended")
+        self.assertEqual(meta["candidate_selector"], "managed-policy-decision-shadow")
+        self.assertTrue(meta["sampled"])
+        self.assertEqual(meta["reason"], "managed-shadow-sampled")
+        self.assertTrue(meta["shadow_only"])
+        self.assertEqual(meta["requested_model"], "claude-opus-4-8")
+        self.assertEqual(meta["primary_model"], "claude-opus-4-8")
+        self.assertEqual(meta["shadow_model"], "claude-sonnet-4-6")
+        self.assertEqual(meta["routed_model"], "claude-sonnet-4-6")
+        self.assertEqual(meta["managed_shadow"]["decision_id"], "decision-opus48-shadow")
+        self.assertEqual(meta["managed_shadow"]["fraction"], 1.0)
+        assert_managed_egress_safe(meta)
+
     def test_unsampled_anthropic_stream_records_clear_skip_without_shadow_call(self):
         request_body = {
             "model": "claude-sonnet-4-6",

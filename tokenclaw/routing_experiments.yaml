@@ -1,4 +1,4 @@
-# AgentFlow default A/B routing experiment policy.
+# TokenClaw default A/B routing experiment policy.
 # Copy to ~/.tokenclaw/routing_experiments.yaml (or set TOKENCLAW_ROUTING_EXPERIMENTS)
 # to override routing experiment sampling. The active default keeps the user-visible
 # call on the requested model and records shadow-only route-down evidence for
@@ -61,7 +61,7 @@ model_pairs:
     routed_model: claude-sonnet-4-6
   - requested_model: claude-opus-4-5
     routed_model: claude-sonnet-4-6
-  # Legacy fallback pairs for older parsers. Newer AgentFlow uses
+  # Legacy fallback pairs for older parsers. Newer TokenClaw uses
   # routing_candidates below so multiple candidates can be scoped safely.
   - requested_model: gpt-5.5
     routed_model: gpt-5.4

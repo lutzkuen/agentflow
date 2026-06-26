@@ -1,4 +1,4 @@
-# AgentFlow default routing rules.
+# TokenClaw default routing rules.
 # Copy to ~/.tokenclaw/routing_rules.yaml (or set TOKENCLAW_ROUTING_RULES) to customize.
 #
 # Rules are evaluated top-to-bottom; first match wins.

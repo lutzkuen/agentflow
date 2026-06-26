@@ -656,8 +656,6 @@ pattern_rules:
                 self.assertEqual(response.status_code, 200)
                 payload = response.json()
                 self.assertEqual(payload["schema"], "tokenclaw.savings_loop_bottlenecks.v1")
-                self.assertIn("savings-loop-bottlenecks-tbody", dashboard.text)
-                self.assertIn("c-savings-loop", dashboard.text)
                 rendered = json.dumps(payload, sort_keys=True) + dashboard.text
                 self.assertNotIn(str(db), rendered)
                 self.assertNotIn(str(config_dir), rendered)

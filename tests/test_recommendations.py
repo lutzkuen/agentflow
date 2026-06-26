@@ -919,6 +919,14 @@ class RecommendationTest(unittest.TestCase):
                 "required_local_gates": ["local-shadow-gate"],
                 "reason_codes": ["active-routing-predictor-model"],
             },
+            "shadow": {
+                "status": "recommended",
+                "target_model": "claude-sonnet-4-6",
+                "fraction": 0.25,
+                "mode": "async_eval",
+                "policy_id": "managed-shadow-opus48-sonnet46",
+                "reason_codes": ["managed-shadow-recommendation"],
+            },
         })
         unit = {
             "schema": "tokenclaw.openai_preflight_feature_unit.v1",
@@ -967,6 +975,10 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["route_down_probability"], 0.93)
         self.assertEqual(meta["model_artifact_version"], "routing-predictor-v1-abcd")
         self.assertEqual(meta["predictor_rule_id"], "routing-evidence:anthropic:sonnet->haiku")
+        self.assertEqual(meta["shadow"]["status"], "recommended")
+        self.assertEqual(meta["shadow"]["target_model"], "claude-sonnet-4-6")
+        self.assertEqual(meta["shadow"]["fraction"], 0.25)
+        self.assertEqual(meta["shadow"]["policy_id"], "managed-shadow-opus48-sonnet46")
 
     def test_thinking_tail_feedback_freshness_marks_stale_and_fresh_backlog_proof(self):
         stale = build_thinking_tail_feedback_freshness(

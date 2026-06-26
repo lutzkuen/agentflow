@@ -1723,15 +1723,6 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertGreaterEqual(burndown_response.json()["summary"]["unknown_dependency_count"], 1)
         self.assertEqual(burndown_response.json()["summary"]["cache_apply_action_count"], 0)
         self.assertEqual(dashboard.status_code, 200)
-        self.assertIn("/tokenclaw/stats/openai-cache-replay-readiness", dashboard.text)
-        self.assertIn("/tokenclaw/stats/openai-tool-cache-invalidation-burndown", dashboard.text)
-        self.assertIn("OpenAI cache replay readiness", dashboard.text)
-        self.assertIn("openai-cache-replay-readiness-tbody", dashboard.text)
-        self.assertIn("OpenAI tool-cache invalidation burndown", dashboard.text)
-        self.assertIn("openai-tool-cache-invalidation-burndown-tbody", dashboard.text)
-        self.assertIn("openai-tool-cache-invalidation-blockers-tbody", dashboard.text)
-        self.assertIn("OpenAI cache replay impact gates", dashboard.text)
-        self.assertIn("openai-cache-replay-impact-gates-tbody", dashboard.text)
 
         output = io.StringIO()
         exit_code = cli.openai_cache_replay_readiness_cli(

@@ -7,7 +7,7 @@ enhanced_crunch_provider:
   # Local-only provider gate for model-assisted crunching. Managed optimizer
   # responses may recommend profiles, model families, thresholds, canary
   # fractions, and safety-stop thresholds, but source text and generated
-  # summaries stay in this local AgentFlow process or a customer-controlled
+  # summaries stay in this local TokenClaw process or a customer-controlled
   # sidecar/endpoint. Endpoint URLs are never included in metadata feedback.
   #
   # Supported modes:
@@ -22,7 +22,7 @@ enhanced_crunch_provider:
   endpoint_url: null
   max_summary_cost_usd: null
 old_context_summarization:
-  # Opt-in only. When enabled, AgentFlow may make one additional Anthropic
+  # Opt-in only. When enabled, TokenClaw may make one additional Anthropic
   # request to the model below to summarize old non-tool conversation turns.
   # The summary is inserted as tagged top-level system context, not as a
   # synthetic user turn, and the original recent turns plus all tool protocol
@@ -61,7 +61,7 @@ old_context_summarization:
     max_summary_failure_rate: 0.1
     max_error_rate_delta: 0.05
 openai_old_context_summarization:
-  # Opt-in only. When enabled, AgentFlow may make one additional local OpenAI
+  # Opt-in only. When enabled, TokenClaw may make one additional local OpenAI
   # provider request to summarize older non-tool Responses/Chat context before
   # forwarding the user's request. Applied and holdout cohorts are selected
   # deterministically; summary text stays out of logged metadata.
@@ -203,7 +203,7 @@ terminal_log_boilerplate:
   min_repeated_lines: 4
   max_annotations: 12
 terminal_output_compaction:
-  # Opt-in only. When enabled, AgentFlow can compact older Anthropic
+  # Opt-in only. When enabled, TokenClaw can compact older Anthropic
   # tool_result text that looks like repetitive terminal output before
   # forwarding. Recent turns, tool protocol IDs, commands, failures, stack
   # traces, exit status, and file-change evidence are preserved. Default
@@ -1659,7 +1659,7 @@ request_shape_repeated_context_canaries:
 repeated_provider_scaffolding:
   # Provider-message profile for reviewed repeated scaffolding candidates.
   # Disabled by default. When a local/manual or managed-recommended rule with
-  # reviewed pattern hashes is present, AgentFlow may replace older repeated
+  # reviewed pattern hashes is present, TokenClaw may replace older repeated
   # provider-message sections with bounded notices. System/developer messages,
   # tool_use/tool_result protocol payloads, thinking/reasoning blocks, and the
   # newest task tail are preserved by default.

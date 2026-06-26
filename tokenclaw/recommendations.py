@@ -1447,6 +1447,7 @@ def _copy_policy_decision_response_fields(body: dict[str, Any]) -> dict[str, Any
         "crunch",
         "cache",
         "canary",
+        "shadow",
         "omitted_actions",
         "privacy_summary",
         "provenance",

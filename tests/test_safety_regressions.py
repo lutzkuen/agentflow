@@ -69,6 +69,7 @@ class ManagedFeedbackAsyncClient:
     policy_decision_body = None
     policy_decision_status = 200
     policy_decision_error = None
+    client_contract_body = None
     session_tier_body = None
     session_tier_status = 200
     session_tier_error = None
@@ -92,6 +93,8 @@ class ManagedFeedbackAsyncClient:
                 "json": json,
                 "kwargs": kwargs,
             })
+            if ManagedFeedbackAsyncClient.client_contract_body is not None:
+                return FakeJsonResponse(ManagedFeedbackAsyncClient.client_contract_body, 200)
             return FakeJsonResponse({"error": "not configured"}, 404)
         if url.endswith("/v1/session-tier"):
             if ManagedFeedbackAsyncClient.session_tier_error is not None:
@@ -313,6 +316,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         ManagedFeedbackAsyncClient.policy_decision_body = None
         ManagedFeedbackAsyncClient.policy_decision_status = 200
         ManagedFeedbackAsyncClient.policy_decision_error = None
+        ManagedFeedbackAsyncClient.client_contract_body = None
         ManagedFeedbackAsyncClient.session_tier_body = None
         ManagedFeedbackAsyncClient.session_tier_status = 200
         ManagedFeedbackAsyncClient.session_tier_error = None
@@ -603,6 +607,19 @@ class SafetyRegressionRouteTests(unittest.TestCase):
 
     def test_anthropic_policy_decision_route_to_applies_with_loopback_auth_metadata(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        # Policy decisions are gated on an active client contract (the server's
+        # measurement plan); supply a valid one so the preflight is allowed to run.
+        ManagedFeedbackAsyncClient.client_contract_body = {
+            "schema": "tokenclaw.client_contract.v1",
+            "contract_id": "safety-loopback-contract",
+            "expires_at": "2999-01-01T00:00:00+00:00",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "measurement_plan": {"preflight": ["input_features.text_bucket"], "outcome": ["status_code"]},
+            "allowed_action_families": ["routing", "crunch", "cache"],
+            "privacy": {"metadata_only": True},
+        }
         ManagedFeedbackAsyncClient.policy_decision_body = {
             "schema": "tokenclaw.policy_decision.v1",
             "policy_id": "policy-managed-route-to",
