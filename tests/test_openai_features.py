@@ -2827,7 +2827,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertNotIn("SECRET_OPENAI_AB", queue_row["payload_json"])
         self.assertNotIn("SECRET_OPENAI_AB", call_row["routing_json"])
 
-    def test_openai_shadow_candidate_pass_through_keeps_primary_requested_model(self):
+    def test_openai_shadow_candidate_pass_through_requires_managed_target(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as policy_file:
             policy_file.write("\n".join([
                 "profile_id: first-safe-openai-codex-ab-v1",
@@ -2876,49 +2876,26 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["model"], "gpt-5.4")
-        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        self.assertEqual(len(CapturingOpenAIClient.calls), 1)
         self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5.4")
-        self.assertEqual(CapturingOpenAIClient.calls[1]["json"]["model"], "gpt-5.4-mini")
 
-        [experiment_row] = server.store.conn.execute(
-            """
-            select provider, source_surface, requested_model, routed_model,
-                   primary_model, shadow_model, primary_status_code, shadow_status_code,
-                   primary_response_json, shadow_response_json, experiment_json
-            from routing_experiments
-            """
-        ).fetchall()
-        experiment = json.loads(experiment_row["experiment_json"])
         [call_row] = server.store.conn.execute(
             "select requested_model, routed_model, routing_json, request_json, response_json from calls"
         ).fetchall()
         routing = json.loads(call_row["routing_json"])
-        queue_row = server.store.conn.execute(
-            "select source_surface, endpoint, status, payload_json from managed_outcome_feedback_queue "
-            "where source_surface = 'routing_experiment_outcome'"
-        ).fetchone()
-        payload = json.loads(queue_row["payload_json"])
 
         self.assertEqual(call_row["requested_model"], "gpt-5.4")
         self.assertEqual(call_row["routed_model"], "gpt-5.4")
-        self.assertEqual(experiment_row["requested_model"], "gpt-5.4")
-        self.assertEqual(experiment_row["routed_model"], "gpt-5.4-mini")
-        self.assertEqual(experiment_row["primary_model"], "gpt-5.4")
-        self.assertEqual(experiment_row["shadow_model"], "gpt-5.4-mini")
-        self.assertEqual(experiment_row["primary_status_code"], 200)
-        self.assertEqual(experiment_row["shadow_status_code"], 200)
-        self.assertIsNone(experiment_row["primary_response_json"])
-        self.assertIsNone(experiment_row["shadow_response_json"])
-        self.assertEqual(experiment["mode"], "shadow_candidate_pass_through")
-        self.assertTrue(experiment["counterfactual"])
-        self.assertTrue(experiment["shadow_only"])
-        self.assertEqual(experiment["reason"], "sampled-shadow-candidate-pass-through")
+        self.assertEqual(
+            server.store.conn.execute("select count(*) from routing_experiments").fetchone()[0],
+            0,
+        )
         self.assertEqual(routing["routing_experiment"]["primary_model"], "gpt-5.4")
-        self.assertEqual(routing["routing_experiment"]["shadow_model"], "gpt-5.4-mini")
-        self.assertEqual(payload["candidate"]["mode"], "shadow_candidate_pass_through")
-        self.assertTrue(payload["candidate"]["counterfactual"])
-        self.assertTrue(payload["candidate"]["shadow_only"])
-        self.assertNotIn("SECRET_SHADOW_AB", queue_row["payload_json"])
+        self.assertEqual(routing["routing_experiment"]["shadow_model"], "gpt-5.4")
+        self.assertFalse(routing["routing_experiment"]["sampled"])
+        self.assertFalse(routing["routing_experiment"]["counterfactual"])
+        self.assertFalse(routing["routing_experiment"]["shadow_only"])
+        self.assertEqual(routing["routing_experiment"]["reason"], "openai-shadow-requires-managed-target")
         self.assertNotIn("SECRET_SHADOW_AB", call_row["routing_json"])
         self.assertIsNone(call_row["request_json"])
         self.assertIsNone(call_row["response_json"])
