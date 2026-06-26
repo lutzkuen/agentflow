@@ -620,6 +620,88 @@ routing_candidates:
         self.assertEqual(after["status"], "covered")
         self.assertEqual(after["selected_candidate_id"], "manual-opus53-to-sonnet46-chat")
 
+    def test_manual_config_edit_refreshes_live_decision_without_module_reload(self):
+        config_path = Path(self.home.name) / ".tokenclaw" / "routing_experiments.yaml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 10.0
+providers: [anthropic]
+source_surfaces: [anthropic_messages]
+max_text_chars: 32000
+eligibility_overrides: []
+routing_candidates:
+  - candidate_id: manual-opus54-to-sonnet46-chat
+    requested_model: claude-opus-5-4
+    routed_model: claude-sonnet-4-6
+    provider: anthropic
+    source_surface: anthropic_messages
+    app_family: claude_code
+    category: chat
+""",
+            encoding="utf-8",
+        )
+        importlib.reload(experiments)
+
+        before = experiments.routing_experiment_decision(
+            {"model": "claude-opus-5-4"},
+            {
+                "requested_model": "claude-opus-5-4",
+                "routed_model": "claude-opus-5-4",
+                "category": "chat",
+                "text_chars": 12000,
+            },
+            stream=False,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            random_value=lambda: 0.0,
+        )
+        self.assertTrue(before["sampled"])
+        self.assertEqual(before["candidate_id"], "manual-opus54-to-sonnet46-chat")
+        self.assertEqual(before["max_text_chars"], 32000)
+
+        config_path.write_text(
+            """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 10.0
+providers: [anthropic]
+source_surfaces: [anthropic_messages]
+max_text_chars: 1000
+eligibility_overrides: []
+routing_candidates:
+  - candidate_id: manual-opus54-to-sonnet46-chat
+    requested_model: claude-opus-5-4
+    routed_model: claude-sonnet-4-6
+    provider: anthropic
+    source_surface: anthropic_messages
+    app_family: claude_code
+    category: chat
+""",
+            encoding="utf-8",
+        )
+
+        after = experiments.routing_experiment_decision(
+            {"model": "claude-opus-5-4"},
+            {
+                "requested_model": "claude-opus-5-4",
+                "routed_model": "claude-opus-5-4",
+                "category": "chat",
+                "text_chars": 12000,
+            },
+            stream=False,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            random_value=lambda: 0.0,
+        )
+        self.assertFalse(after["sampled"])
+        self.assertEqual(after["reason"], "request-too-large")
+        self.assertEqual(after["max_text_chars"], 1000)
+
     def test_dashboard_candidate_append_uses_durable_config_when_env_points_to_overlay(self):
         transient_path = Path(self.home.name) / "tokenclaw-run-routing-experiments.yaml"
         transient_path.write_text(

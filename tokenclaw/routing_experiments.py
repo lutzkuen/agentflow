@@ -1817,6 +1817,7 @@ def routing_experiment_decision(
     store_obj: Any | None = None,
     random_value: Callable[[], float] = random.random,
 ) -> dict[str, Any]:
+    refresh_experiment_policy_if_changed()
     requested = str(routing_meta.get("requested_model") or body.get("model") or "")
     routed = str(routing_meta.get("routed_model") or body.get("model") or "")
     mode = ROUTING_EXPERIMENT_MODE
