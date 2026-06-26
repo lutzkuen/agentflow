@@ -88,6 +88,55 @@ from tokenclaw.upstream_url import join_openai_upstream_url, openai_websocket_ur
 
 SESSION_COST_ALERT_USD = float(os.getenv("TOKENCLAW_SESSION_COST_ALERT_USD", "5.0"))
 OPENAI_REALTIME_EXTRA_HINT = "python -m pip install 'tokenclaw[openai-realtime]'"
+_PUBLIC_ERROR_MARKERS = (
+    "authorization",
+    "api_key",
+    "api key",
+    "bearer ",
+    "sk-",
+    "/home/",
+    "/tmp/",
+)
+
+
+def _safe_error_label(value: Any, *, limit: int = 300) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if any(marker in lowered for marker in _PUBLIC_ERROR_MARKERS):
+        return "redacted-provider-error"
+    return text[:limit]
+
+
+def _openai_shadow_http_error_detail(status_code: int | None, body: Any, raw_text: str | None = None) -> dict[str, Any] | None:
+    if status_code is None or status_code < 400:
+        return None
+    detail: dict[str, Any] = {
+        "schema": "tokenclaw.openai_shadow_http_error_detail.v1",
+        "status_code": int(status_code),
+        "metadata_only": True,
+        "provider_body_included": False,
+        "raw_response_included": False,
+    }
+    error_obj = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error_obj, dict):
+        for source_key, target_key in (
+            ("type", "provider_error_type"),
+            ("code", "provider_error_code"),
+            ("param", "provider_error_param"),
+        ):
+            label = _safe_error_label(error_obj.get(source_key), limit=120)
+            if label:
+                detail[target_key] = label
+        message = _safe_error_label(error_obj.get("message"), limit=500)
+        if message:
+            detail["provider_error_message"] = message
+    elif raw_text:
+        message = _safe_error_label(raw_text, limit=500)
+        if message:
+            detail["provider_error_message"] = message
+    return detail
 
 
 def _import_websockets() -> Any:
@@ -423,6 +472,7 @@ async def _run_openai_routing_experiment(
     shadow_response_body: Optional[dict[str, Any]] = None
     shadow_latency_ms: Optional[int] = None
     shadow_cost: Optional[float] = None
+    shadow_http_error_detail: Optional[dict[str, Any]] = None
     error: Optional[str] = None
 
     shadow_started = time.time()
@@ -439,6 +489,11 @@ async def _run_openai_routing_experiment(
         except Exception:
             error = upstream_error_text(r.text, r.status_code)
             shadow_response_body = None
+        shadow_http_error_detail = _openai_shadow_http_error_detail(
+            shadow_status_code,
+            shadow_response_body,
+            r.text,
+        )
     except Exception as exc:
         shadow_latency_ms = int((time.time() - shadow_started) * 1000)
         error = repr(exc)
@@ -453,6 +508,9 @@ async def _run_openai_routing_experiment(
             cache_read=cache_read,
             provider="openai",
         )
+
+    if shadow_http_error_detail is not None:
+        experiment_meta["shadow_http_error_detail"] = shadow_http_error_detail
 
     comparison = compare_response_outputs(primary_response_body, shadow_response_body)
     feedback_features = routing_experiment_feedback_features(
@@ -484,6 +542,7 @@ async def _run_openai_routing_experiment(
             "shadow_output_sha256": comparison["shadow_output_sha256"],
             "output_similarity": comparison["output_similarity"],
             "passed_threshold": comparison["passed_threshold"],
+            "shadow_http_error_detail": shadow_http_error_detail,
             "reason_codes": feedback_features.get("reason_codes", []),
             "cost_delta_usd": feedback_features.get("cost_delta_usd"),
             "latency_delta_ms": feedback_features.get("latency_delta_ms"),

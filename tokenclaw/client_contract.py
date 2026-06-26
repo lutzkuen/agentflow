@@ -45,6 +45,18 @@ _PROTO_SECTION_KEYS = {
     "schema",
 }
 
+_SHORT_FIELD_SECTION_ORDER = (
+    "input_features",
+    "tool_features",
+    "outcome_features",
+    "request_facts",
+    "grouping_identifiers",
+)
+
+_SHORT_FIELD_ALIASES = {
+    "streaming": ("stream",),
+}
+
 _PRIVACY_FALSE_KEYS = {
     "raw_prompts",
     "raw_prompt",
@@ -424,6 +436,31 @@ def _copy_path(source: Any, destination: dict[str, Any], parts: list[str]) -> bo
     return True
 
 
+def _copy_contract_path(payload: dict[str, Any], filtered: dict[str, Any], path: str) -> bool:
+    parts = _path_parts(path)
+    if not parts:
+        return False
+    if _copy_path(payload, filtered, parts):
+        return True
+    if len(parts) != 1:
+        return False
+
+    field = parts[0]
+    candidate_fields = (field, *_SHORT_FIELD_ALIASES.get(field, ()))
+    for section_key in _SHORT_FIELD_SECTION_ORDER:
+        section = payload.get(section_key)
+        if not isinstance(section, dict):
+            continue
+        for candidate in candidate_fields:
+            if candidate in section:
+                target = filtered.setdefault(section_key, {})
+                if not isinstance(target, dict):
+                    return False
+                target[field] = copy.deepcopy(section[candidate])
+                return True
+    return False
+
+
 def filter_payload_by_client_contract(
     payload: dict[str, Any],
     contract_meta: dict[str, Any] | None,
@@ -482,7 +519,7 @@ def filter_payload_by_client_contract(
             }
     copied = 0
     for path in safe_paths:
-        if _copy_path(payload, filtered, _path_parts(path)):
+        if _copy_contract_path(payload, filtered, path):
             copied += 1
     filtered = {key: value for key, value in filtered.items() if value not in ({}, [], None)}
     assert_managed_egress_safe(filtered)

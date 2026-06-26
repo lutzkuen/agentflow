@@ -189,6 +189,62 @@ class ClientContractTests(unittest.TestCase):
         self.assertNotIn("grouping_identifiers", filtered)
         self.assertEqual(managed_egress_violations(filtered), [])
 
+    def test_active_contract_maps_short_measurement_fields_to_feature_sections(self):
+        contract, _ = normalize_client_contract(
+            _contract(measurement_plan={
+                "preflight": [
+                    "category",
+                    "has_tools",
+                    "input_tokens",
+                    "requested_local_actions",
+                    "streaming",
+                    "text_chars",
+                    "tool_count",
+                    "uses_thinking",
+                    "workflow_phase",
+                ],
+                "outcome": [],
+            }),
+            self.request,
+        )
+        assert contract is not None
+        payload = {
+            "schema": "tokenclaw.policy_decision_preflight.v1",
+            "source_surface": "openai_responses",
+            "granularity": "provider_request",
+            "app_family": "codex",
+            "requested_model": "gpt-5-codex",
+            "input_features": {
+                "category": "chat",
+                "input_tokens": 1024,
+                "requested_local_actions": ["routing"],
+                "stream": True,
+                "text_chars": 4096,
+                "uses_thinking": False,
+                "workflow_phase": "chat",
+            },
+            "tool_features": {"has_tools": True, "tool_count": 2},
+        }
+
+        filtered, diagnostics = filter_payload_by_client_contract(
+            payload,
+            {"active": True, "contract": contract, "status": "received", "cache_status": "stored"},
+            stage="preflight",
+        )
+
+        self.assertEqual(diagnostics["copied_field_count"], 9)
+        self.assertEqual(filtered["input_features"], {
+            "category": "chat",
+            "input_tokens": 1024,
+            "requested_local_actions": ["routing"],
+            "streaming": True,
+            "text_chars": 4096,
+            "uses_thinking": False,
+            "workflow_phase": "chat",
+        })
+        self.assertEqual(filtered["tool_features"], {"has_tools": True, "tool_count": 2})
+        self.assertEqual(managed_egress_violations(filtered), [])
+
 
 if __name__ == "__main__":
     unittest.main()

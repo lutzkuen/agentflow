@@ -30,6 +30,10 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         "TOKENCLAW_POLICY_DECISIONS_ENABLED",
         "TOKENCLAW_POLICY_DECISION_ENABLED",
         "TOKENCLAW_RECOMMENDATION_SERVER_URL",
+        "TOKENCLAW_MANAGED",
+        "TOKENCLAW_MANAGED_MODE",
+        "TOKENCLAW_MANAGED_ROUTING",
+        "TOKENCLAW_MANAGED_API_KEY",
         "TOKENCLAW_CONFIG_DIR",
         "TOKENCLAW_POLICY_CONFIG_DIR",
         "HOME",
@@ -53,6 +57,10 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
             "TOKENCLAW_POLICY_DECISIONS_ENABLED",
             "TOKENCLAW_POLICY_DECISION_ENABLED",
             "TOKENCLAW_RECOMMENDATION_SERVER_URL",
+            "TOKENCLAW_MANAGED",
+            "TOKENCLAW_MANAGED_MODE",
+            "TOKENCLAW_MANAGED_ROUTING",
+            "TOKENCLAW_MANAGED_API_KEY",
         ):
             os.environ.pop(key, None)
 
@@ -293,10 +301,11 @@ fallback_routes:
             random_value=lambda: 0.0,
         )
 
-        self.assertTrue(meta["sampled"])
-        self.assertEqual(meta["shadow_model"], "gpt-5-mini")
-        self.assertEqual(meta["candidate_policy_shape"], "preferred_pathways")
-        self.assertEqual(meta["selected_candidate"]["candidate_source"], "client-preferred-pathway")
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "openai-shadow-requires-managed-target")
+        self.assertEqual(meta["shadow_model"], "gpt-5.5")
+        self.assertEqual(meta["candidate_policy_shape"], "model_pairs")
+        self.assertIsNone(meta["selected_candidate"])
 
     def test_thin_config_synthesizes_fallback_candidate_for_unenumerated_model(self):
         config_dir = Path(self.home.name) / "config"
@@ -1083,7 +1092,7 @@ eligibility_overrides:
         self.assertNotIn("req-secret", rendered)
         self.assertNotIn("session-secret", rendered)
 
-    def test_default_policy_samples_codex_turn_shadow_pass_through(self):
+    def test_default_policy_skips_codex_turn_without_managed_shadow_target(self):
         self.assertIn("codex-turn", experiments.ROUTING_EXPERIMENT_POLICY["categories"])
         self.assertGreaterEqual(len(experiments.ROUTING_EXPERIMENT_POLICY["routing_candidates"]), 5)
 
@@ -1102,20 +1111,20 @@ eligibility_overrides:
             random_value=lambda: 0.0,
         )
 
-        self.assertTrue(meta["sampled"])
+        self.assertFalse(meta["sampled"])
         self.assertEqual(meta["mode"], "shadow_candidate_pass_through")
-        self.assertTrue(meta["counterfactual"])
-        self.assertTrue(meta["shadow_only"])
+        self.assertFalse(meta["counterfactual"])
+        self.assertFalse(meta["shadow_only"])
         self.assertEqual(meta["primary_model"], "gpt-5-codex")
         self.assertEqual(meta["user_visible_model"], "gpt-5-codex")
-        self.assertEqual(meta["shadow_model"], "gpt-5-mini")
-        self.assertEqual(meta["routed_model"], "gpt-5-mini")
+        self.assertEqual(meta["shadow_model"], "gpt-5-codex")
+        self.assertEqual(meta["routed_model"], "gpt-5-codex")
         self.assertEqual(meta["source_surface"], "codex_turn")
-        self.assertEqual(meta["reason"], "sampled-shadow-candidate-pass-through")
+        self.assertEqual(meta["reason"], "openai-shadow-requires-managed-target")
         self.assertEqual(meta["candidate_policy_shape"], "routing_candidates")
-        self.assertEqual(meta["candidate_id"], "codex-gpt5-codex-to-mini-short-summary")
-        self.assertEqual(meta["sample_rate_scope"], "candidate")
-        self.assertEqual(meta["selected_candidate"]["app_family"], "codex")
+        self.assertIsNone(meta["candidate_id"])
+        self.assertEqual(meta["sample_rate_scope"], "global")
+        self.assertIsNone(meta["selected_candidate"])
 
     def test_default_policy_includes_broader_openai_codex_pathway_matrix(self):
         candidates = {
@@ -1183,23 +1192,25 @@ eligibility_overrides:
             random_value=lambda: 0.0,
         )
 
-        self.assertTrue(codex["sampled"])
-        self.assertEqual(codex["candidate_id"], "codex-gpt55-to-gpt53-codex-summary")
-        self.assertEqual(codex["shadow_model"], "gpt-5.3-codex")
+        self.assertFalse(codex["sampled"])
+        self.assertEqual(codex["reason"], "openai-shadow-requires-managed-target")
+        self.assertIsNone(codex["candidate_id"])
+        self.assertEqual(codex["shadow_model"], "gpt-5.5")
         self.assertEqual(codex["candidate_selector_basis"]["app_family"], "codex")
-        self.assertEqual(codex["selected_candidate"]["source_surface"], "codex_turn")
+        self.assertIsNone(codex["selected_candidate"])
 
-        self.assertTrue(generic["sampled"])
-        self.assertEqual(generic["candidate_id"], "generic-gpt55-to-gpt54-chat")
-        self.assertEqual(generic["shadow_model"], "gpt-5.4")
+        self.assertFalse(generic["sampled"])
+        self.assertEqual(generic["reason"], "openai-shadow-requires-managed-target")
+        self.assertIsNone(generic["candidate_id"])
+        self.assertEqual(generic["shadow_model"], "gpt-5.5")
         self.assertEqual(generic["candidate_selector_basis"]["app_family"], "generic_openai")
-        self.assertEqual(generic["selected_candidate"]["source_surface"], "openai_responses")
+        self.assertIsNone(generic["selected_candidate"])
 
-        self.assertTrue(aggressive["sampled"])
-        self.assertEqual(aggressive["candidate_id"], "generic-gpt55-to-mini-short-exploratory")
-        self.assertEqual(aggressive["shadow_model"], "gpt-5-mini")
-        self.assertEqual(aggressive["sample_rate"], 0.02)
-        self.assertEqual(aggressive["sample_rate_scope"], "candidate")
+        self.assertFalse(aggressive["sampled"])
+        self.assertEqual(aggressive["reason"], "openai-shadow-requires-managed-target")
+        self.assertIsNone(aggressive["candidate_id"])
+        self.assertEqual(aggressive["shadow_model"], "gpt-5.5")
+        self.assertEqual(aggressive["sample_rate_scope"], "global")
 
     def test_default_policy_does_not_let_generic_openai_use_codex_only_candidates(self):
         generic = experiments.routing_experiment_decision(
@@ -1231,17 +1242,51 @@ eligibility_overrides:
             random_value=lambda: 0.0,
         )
 
-        self.assertTrue(generic["sampled"])
-        self.assertEqual(generic["reason"], "sampled-shadow-candidate-pass-through")
-        self.assertEqual(generic["shadow_model"], "gpt-5.4")
-        self.assertEqual(generic["candidate_policy_shape"], "fallback_routes")
-        self.assertEqual(generic["selected_candidate"]["candidate_source"], "deterministic-fallback")
+        self.assertFalse(generic["sampled"])
+        self.assertEqual(generic["reason"], "openai-shadow-requires-managed-target")
+        self.assertEqual(generic["shadow_model"], "gpt-5.5")
+        self.assertEqual(generic["candidate_policy_shape"], "routing_candidates")
+        self.assertIsNone(generic["selected_candidate"])
         self.assertEqual(generic["eligible_candidate_count"], 0)
         self.assertEqual(generic["candidate_selector_basis"]["app_family"], "generic_openai")
-        self.assertTrue(codex_wrong_phase["sampled"])
-        self.assertEqual(codex_wrong_phase["shadow_model"], "gpt-5.4")
-        self.assertEqual(codex_wrong_phase["candidate_policy_shape"], "fallback_routes")
+        self.assertFalse(codex_wrong_phase["sampled"])
+        self.assertEqual(codex_wrong_phase["reason"], "openai-shadow-requires-managed-target")
+        self.assertEqual(codex_wrong_phase["shadow_model"], "gpt-5.5")
+        self.assertEqual(codex_wrong_phase["candidate_policy_shape"], "routing_candidates")
         self.assertEqual(codex_wrong_phase["eligible_candidate_count"], 0)
+
+    def test_openai_shadow_samples_only_server_managed_target(self):
+        meta = experiments.routing_experiment_decision(
+            {"model": "gpt-5.4", "input": "hello"},
+            {
+                "requested_model": "gpt-5.4",
+                "routed_model": "gpt-5.4",
+                "category": "chat",
+                "workflow_phase": "summary",
+                "text_chars": 1200,
+                "managed_recommendation": {
+                    "selected_for_shadow_evaluation": True,
+                    "shadow_model": "gpt-5.4-mini",
+                    "policy_id": "managed-shadow-gpt54-mini",
+                    "policy_source": "managed-recommended",
+                },
+            },
+            stream=False,
+            provider="openai",
+            source_surface="openai_responses",
+            random_value=lambda: 0.99,
+        )
+
+        self.assertTrue(meta["sampled"])
+        self.assertTrue(meta["sampled_by_canary"])
+        self.assertEqual(meta["trigger"], "managed-policy-routing-canary")
+        self.assertEqual(meta["candidate_selector"], "forced-managed-policy-routing-canary")
+        self.assertEqual(meta["candidate_policy_shape"], "managed-shadow")
+        self.assertEqual(meta["candidate_id"], "managed-shadow-gpt54-mini")
+        self.assertEqual(meta["policy_source"], "managed-recommended")
+        self.assertEqual(meta["shadow_model"], "gpt-5.4-mini")
+        self.assertEqual(meta["routed_model"], "gpt-5.4-mini")
+        self.assertEqual(meta["primary_model"], "gpt-5.4")
 
     def test_config_policy_samples_routed_down_non_streaming_call(self):
         with TemporaryDirectory() as tmp:
@@ -1434,16 +1479,16 @@ max_text_chars: 8000
                 random_value=lambda: 0.0,
             )
 
-        self.assertTrue(meta["sampled"])
+        self.assertFalse(meta["sampled"])
         self.assertEqual(meta["mode"], "shadow_candidate_pass_through")
-        self.assertTrue(meta["counterfactual"])
-        self.assertTrue(meta["shadow_only"])
-        self.assertEqual(meta["reason"], "sampled-shadow-candidate-pass-through")
+        self.assertFalse(meta["counterfactual"])
+        self.assertFalse(meta["shadow_only"])
+        self.assertEqual(meta["reason"], "openai-shadow-requires-managed-target")
         self.assertEqual(meta["requested_model"], "gpt-5.4")
-        self.assertEqual(meta["routed_model"], "gpt-5.4-mini")
+        self.assertEqual(meta["routed_model"], "gpt-5.4")
         self.assertEqual(meta["primary_model"], "gpt-5.4")
         self.assertEqual(meta["user_visible_model"], "gpt-5.4")
-        self.assertEqual(meta["shadow_model"], "gpt-5.4-mini")
+        self.assertEqual(meta["shadow_model"], "gpt-5.4")
 
     def test_shadow_candidate_pass_through_selects_among_multiple_explicit_candidates(self):
         with TemporaryDirectory() as tmp:
@@ -1512,16 +1557,19 @@ max_text_chars: 8000
                 random_value=lambda: 0.0,
             )
 
-        self.assertTrue(first["sampled"])
+        self.assertFalse(first["sampled"])
+        self.assertFalse(second["sampled"])
+        self.assertEqual(first["reason"], "openai-shadow-requires-managed-target")
+        self.assertEqual(second["reason"], "openai-shadow-requires-managed-target")
         self.assertEqual(first["candidate_policy_shape"], "routing_candidates")
-        self.assertEqual(first["eligible_candidate_count"], 2)
+        self.assertEqual(first["eligible_candidate_count"], 0)
         self.assertEqual(
             first["eligible_candidate_ids"],
-            ["adjacent-gpt55-to-gpt54", "aggressive-gpt55-to-mini"],
+            [],
         )
-        self.assertEqual(first["candidate_selector"], "weighted-metadata-hash")
-        self.assertEqual(first["candidate_id"], "aggressive-gpt55-to-mini")
-        self.assertEqual(first["routed_model"], "gpt-5-mini")
+        self.assertEqual(first["candidate_selector"], "not-evaluated")
+        self.assertIsNone(first["candidate_id"])
+        self.assertEqual(first["routed_model"], "gpt-5.5")
         self.assertEqual(first["candidate_id"], second["candidate_id"])
         self.assertEqual(first["candidate_selector_basis"]["provider"], "openai")
         self.assertEqual(first["candidate_selector_basis"]["source_surface"], "openai_responses")
@@ -1622,14 +1670,16 @@ max_text_chars: 8000
                 random_value=lambda: 0.0,
             )
 
-        self.assertTrue(codex["sampled"])
-        self.assertEqual(codex["candidate_id"], "codex-gpt55-to-gpt53-codex")
-        self.assertEqual(codex["shadow_model"], "gpt-5.3-codex")
-        self.assertEqual(codex["eligible_candidate_count"], 1)
+        self.assertFalse(codex["sampled"])
+        self.assertEqual(codex["reason"], "openai-shadow-requires-managed-target")
+        self.assertIsNone(codex["candidate_id"])
+        self.assertEqual(codex["shadow_model"], "gpt-5.5")
+        self.assertEqual(codex["eligible_candidate_count"], 0)
         self.assertEqual(codex["candidate_selector_basis"]["app_family"], "codex")
-        self.assertTrue(generic["sampled"])
-        self.assertEqual(generic["candidate_id"], "generic-gpt55-to-gpt54")
-        self.assertEqual(generic["shadow_model"], "gpt-5.4")
+        self.assertFalse(generic["sampled"])
+        self.assertEqual(generic["reason"], "openai-shadow-requires-managed-target")
+        self.assertIsNone(generic["candidate_id"])
+        self.assertEqual(generic["shadow_model"], "gpt-5.5")
         self.assertEqual(generic["candidate_selector_basis"]["app_family"], "generic_openai")
 
     def test_shadow_candidate_pass_through_skips_unconfigured_anthropic_pair(self):

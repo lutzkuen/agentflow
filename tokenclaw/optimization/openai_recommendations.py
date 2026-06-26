@@ -133,6 +133,9 @@ def _managed_target_model(meta: dict[str, Any]) -> Any:
         return proposal.get("target_model")
     if meta.get("route_to") is not None:
         return meta.get("route_to")
+    shadow = meta.get("shadow")
+    if isinstance(shadow, dict) and shadow.get("status") == "recommended" and shadow.get("target_model") is not None:
+        return shadow.get("target_model")
     return meta.get("target_model")
 
 
@@ -169,6 +172,17 @@ def _traffic_treatment(meta: dict[str, Any]) -> str:
             return value.strip().lower()
     mode = str(meta.get("recommended_mode") or "").strip().lower()
     return "live" if mode in LIVE_POLICY_DECISION_MODES else mode
+
+
+def _shadow_recommendation(meta: dict[str, Any]) -> dict[str, Any] | None:
+    shadow = meta.get("shadow")
+    if not isinstance(shadow, dict):
+        return None
+    if str(shadow.get("status") or "").strip().lower() != "recommended":
+        return None
+    if not isinstance(shadow.get("target_model"), str) or not shadow.get("target_model").strip():
+        return None
+    return shadow
 
 
 def _local_application_enabled(mode: str) -> bool:
@@ -213,13 +227,6 @@ def _server_execution_selection(meta: dict[str, Any]) -> dict[str, Any]:
     if meta.get("selected_for_shadow_evaluation") is True:
         return {"state": "shadow", "reason": "server-selected-shadow", "traffic_treatment": treatment or "shadow"}
 
-    if treatment in {"observe", "none"} or mode == "observe":
-        return {"state": "held", "reason": "observe-only", "traffic_treatment": treatment or "observe"}
-    if treatment == "shadow" or mode == "shadow":
-        return {"state": "shadow", "reason": "shadow-only", "traffic_treatment": "shadow"}
-    if treatment in {"hold", "held", "holdout"} or mode == "hold":
-        reason = "server-canary-holdout" if treatment == "holdout" else "server-held"
-        return {"state": "held", "reason": reason, "traffic_treatment": treatment or "hold"}
     if treatment in {"live", "canary", "route_to"} or mode in LIVE_POLICY_DECISION_MODES:
         if selected is False:
             reason = "server-canary-holdout" if treatment == "canary" else "server-route-not-selected"
@@ -227,6 +234,15 @@ def _server_execution_selection(meta: dict[str, Any]) -> dict[str, Any]:
         if selected is True or treatment in {"live", "route_to"} or mode in LIVE_POLICY_DECISION_MODES:
             return {"state": "apply", "reason": f"server-selected-{treatment or mode}", "traffic_treatment": treatment or mode}
         return {"state": "skipped", "reason": "server-route-selection-missing", "traffic_treatment": treatment}
+    if _shadow_recommendation(meta) is not None:
+        return {"state": "shadow", "reason": "server-recommended-shadow", "traffic_treatment": "shadow"}
+    if treatment in {"observe", "none"} or mode == "observe":
+        return {"state": "held", "reason": "observe-only", "traffic_treatment": treatment or "observe"}
+    if treatment == "shadow" or mode == "shadow":
+        return {"state": "shadow", "reason": "shadow-only", "traffic_treatment": "shadow"}
+    if treatment in {"hold", "held", "holdout"} or mode == "hold":
+        reason = "server-canary-holdout" if treatment == "holdout" else "server-held"
+        return {"state": "held", "reason": reason, "traffic_treatment": treatment or "hold"}
     if _server_selected_profile_action(meta):
         return {"state": "apply", "reason": "server-selected-local-profile", "traffic_treatment": treatment or "profile"}
     if meta.get("policy_decision_schema"):
@@ -361,7 +377,12 @@ async def fetch_openai_recommendation_decision(
             "lifecycle_event": "vetoed",
         })
         return decision
-    if fetched.get("policy_decision_schema") and fetched.get("routing_status") != "recommended" and not has_local_action_sections:
+    if (
+        fetched.get("policy_decision_schema")
+        and fetched.get("routing_status") != "recommended"
+        and not has_local_action_sections
+        and _shadow_recommendation(fetched) is None
+    ):
         decision.update({
             "status": "held",
             "apply_reason": "routing-not-recommended",

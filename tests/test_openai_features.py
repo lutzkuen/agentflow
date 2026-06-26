@@ -66,6 +66,30 @@ class CapturingOpenAIClient:
         return FakeJsonResponse(self.__class__.response_body, self.__class__.status_code)
 
 
+class SequencedOpenAIClient:
+    calls = []
+    responses = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, *, headers=None, json=None, **kwargs):
+        self.__class__.calls.append({
+            "url": url,
+            "headers": dict(headers or {}),
+            "json": json,
+            "kwargs": kwargs,
+        })
+        body, status_code = self.__class__.responses.pop(0)
+        return FakeJsonResponse(body, status_code)
+
+
 class FakeStreamResponse:
     def __init__(self, chunks, status_code=200, headers=None):
         self._chunks = chunks
@@ -1752,6 +1776,224 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertTrue(routing["routing_experiment"]["shadow_only"])
         self.assertIn("unit", seen)
         self.assertNotIn("raw canary prompt secret", row["routing_json"])
+
+    def test_openai_policy_decision_hold_with_shadow_recommendation_collects_gpt54_evidence(self):
+        request_body = {
+            "model": "gpt-5.4",
+            "input": "raw gpt54 shadow prompt secret",
+        }
+        seen = {}
+
+        async def fake_policy_decision(unit, *, request_facts=None):
+            seen["unit"] = copy.deepcopy(unit)
+            seen["request_facts"] = copy.deepcopy(request_facts)
+            rendered = json.dumps(unit, sort_keys=True)
+            facts_rendered = json.dumps(request_facts, sort_keys=True)
+            self.assertEqual(unit["schema"], "tokenclaw.openai_preflight_feature_unit.v1")
+            self.assertEqual(request_facts["schema"], "tokenclaw.request_facts_envelope.v1")
+            self.assertNotIn("raw gpt54 shadow prompt secret", rendered)
+            self.assertNotIn("raw gpt54 shadow prompt secret", facts_rendered)
+            return {
+                "enabled": True,
+                "status": "received",
+                "policy_decision_schema": "tokenclaw.policy_decision.v1",
+                "routing_status": "omitted",
+                "target_model": None,
+                "recommended_mode": "hold",
+                "traffic_treatment": "hold",
+                "route_selected": False,
+                "policy_id": "openai-gpt54-hold",
+                "reason": "openai-canary-evidence-missing",
+                "reason_codes": [
+                    "candidate-target-model-feature",
+                    "managed-shadow-candidate",
+                    "managed-shadow-recommendation",
+                    "openai-canary-evidence-missing",
+                ],
+                "shadow": {
+                    "status": "recommended",
+                    "target_model": "gpt-5.3",
+                    "fraction": 1.0,
+                    "policy_id": "managed-shadow-gpt54-gpt53",
+                    "mode": "async_eval",
+                    "reason_codes": ["managed-shadow-recommendation"],
+                    "required_local_gates": [
+                        "sample-shadow-locally",
+                        "execute-shadow-provider-call-locally",
+                        "record-shadow-lifecycle-feedback",
+                        "do-not-send-provider-payloads-to-managed-server",
+                    ],
+                },
+                "policy_source": "managed-recommended",
+            }
+
+        with patch.dict(os.environ, {
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_POLICY_DECISION_ENABLED": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
+        }):
+            with patch(
+                "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
+                side_effect=fake_policy_decision,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5.4")
+        self.assertEqual(CapturingOpenAIClient.calls[1]["json"]["model"], "gpt-5.3")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        managed = routing["managed_recommendation"]
+        self.assertEqual(row["routed_model"], "gpt-5.4")
+        self.assertEqual(managed["status"], "held")
+        self.assertEqual(managed["apply_reason"], "server-recommended-shadow")
+        self.assertFalse(managed["applied"])
+        self.assertTrue(managed["shadow_only"])
+        self.assertEqual(managed["shadow_model"], "gpt-5.3")
+        self.assertEqual(managed["server_traffic_treatment"], "shadow")
+        self.assertEqual(routing["managed_route_candidate_model"], "gpt-5.3")
+        self.assertTrue(routing["managed_route_shadow_only"])
+        self.assertEqual(routing["routing_experiment"]["trigger"], "managed-policy-routing-canary")
+        self.assertTrue(routing["routing_experiment"]["shadow_only"])
+        self.assertIn("unit", seen)
+        self.assertNotIn("raw gpt54 shadow prompt secret", row["routing_json"])
+
+    def test_openai_managed_shadow_records_sanitized_400_reason(self):
+        request_body = {
+            "model": "gpt-5.4",
+            "input": "raw gpt54 shadow prompt secret",
+        }
+
+        async def fake_policy_decision(_unit, *, request_facts=None):
+            return {
+                "enabled": True,
+                "status": "received",
+                "policy_decision_schema": "tokenclaw.policy_decision.v1",
+                "routing_status": "omitted",
+                "target_model": None,
+                "recommended_mode": "hold",
+                "traffic_treatment": "hold",
+                "route_selected": False,
+                "policy_id": "openai-gpt54-hold",
+                "reason": "openai-canary-evidence-missing",
+                "reason_codes": ["managed-shadow-recommendation"],
+                "shadow": {
+                    "status": "recommended",
+                    "target_model": "gpt-5.3",
+                    "fraction": 1.0,
+                    "policy_id": "managed-shadow-gpt54-gpt53",
+                    "mode": "async_eval",
+                    "reason_codes": ["managed-shadow-recommendation"],
+                },
+                "policy_source": "managed-recommended",
+            }
+
+        SequencedOpenAIClient.calls = []
+        SequencedOpenAIClient.responses = [
+            (
+                {
+                    "id": "resp_primary",
+                    "object": "response",
+                    "model": "gpt-5.4",
+                    "output": [{"type": "message", "content": [{"type": "output_text", "text": "primary ok"}]}],
+                    "usage": {"input_tokens": 11, "output_tokens": 3},
+                },
+                200,
+            ),
+            (
+                {
+                    "error": {
+                        "message": "Unsupported parameter: reasoning.effort",
+                        "type": "invalid_request_error",
+                        "param": "reasoning.effort",
+                        "code": "unsupported_parameter",
+                    }
+                },
+                400,
+            ),
+        ]
+
+        with patch.dict(os.environ, {
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_POLICY_DECISION_ENABLED": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
+        }):
+            with patch(
+                "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
+                side_effect=fake_policy_decision,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", SequencedOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(SequencedOpenAIClient.calls), 2)
+        [experiment_row] = server.store.conn.execute(
+            "select shadow_status_code, experiment_json from routing_experiments"
+        ).fetchall()
+        experiment = json.loads(experiment_row["experiment_json"])
+        detail = experiment["shadow_http_error_detail"]
+        self.assertEqual(experiment_row["shadow_status_code"], 400)
+        self.assertEqual(experiment["status"], "shadow-http-400")
+        self.assertEqual(detail["provider_error_type"], "invalid_request_error")
+        self.assertEqual(detail["provider_error_code"], "unsupported_parameter")
+        self.assertEqual(detail["provider_error_param"], "reasoning.effort")
+        self.assertEqual(detail["provider_error_message"], "Unsupported parameter: reasoning.effort")
+        self.assertFalse(detail["provider_body_included"])
+
+        [queue_row] = server.store.conn.execute(
+            "select payload_json from managed_outcome_feedback_queue where source_surface = 'routing_experiment_outcome'"
+        ).fetchall()
+        event = json.loads(queue_row["payload_json"])
+        self.assertEqual(event["outcome"]["shadow_http_error_detail"]["provider_error_code"], "unsupported_parameter")
+        self.assertNotIn("raw gpt54 shadow prompt secret", json.dumps(event, sort_keys=True))
+
+    def test_openai_policy_decision_live_without_predictor_evidence_is_held_locally(self):
+        request_body = {
+            "model": "gpt-5.4",
+            "input": "raw gpt54 live prompt secret",
+        }
+
+        async def fake_policy_decision(_unit, *, request_facts=None):
+            return {
+                "enabled": True,
+                "status": "received",
+                "policy_decision_schema": "tokenclaw.policy_decision.v1",
+                "routing_status": "recommended",
+                "target_model": "gpt-5.3",
+                "recommended_mode": "live",
+                "traffic_treatment": "live",
+                "route_selected": True,
+                "policy_id": "policy-only-live-route",
+                "reason": "policy-only live route",
+                "reason_codes": ["managed-routing-recommendation"],
+                "policy_source": "managed-recommended",
+            }
+
+        with patch.dict(os.environ, {
+            "TOKENCLAW_RECOMMENDATION_ENABLED": "1",
+            "TOKENCLAW_POLICY_DECISION_ENABLED": "1",
+            "TOKENCLAW_OPENAI_RECOMMENDATION_MODE": "canary",
+        }):
+            with patch(
+                "tokenclaw.optimization.openai_recommendations.fetch_policy_decision",
+                side_effect=fake_policy_decision,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreaterEqual(len(CapturingOpenAIClient.calls), 1)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5.4")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        managed = routing["managed_recommendation"]
+        self.assertEqual(row["routed_model"], "gpt-5.4")
+        self.assertEqual(managed["status"], "held")
+        self.assertEqual(managed["apply_reason"], "routing-predictor-evidence-required")
+        self.assertFalse(managed["applied"])
+        self.assertFalse(managed["changed_model"])
 
     def test_openai_policy_decision_canary_holdout_preserves_local_model(self):
         request_body = {

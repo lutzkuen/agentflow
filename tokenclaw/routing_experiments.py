@@ -1977,15 +1977,7 @@ def routing_experiment_decision(
         candidate = None
         selected_candidate: dict[str, Any] | None = None
         force_shadow = False
-        if provider == "openai" and openai_canary.get("status") == "applied":
-            candidate = str(openai_canary.get("shadow_model") or openai_canary.get("target_model") or "").strip() or None
-            force_shadow = candidate is not None
-            meta["trigger"] = "openai-local-routing-canary"
-            meta["canary_policy_id"] = openai_canary.get("policy_id")
-            meta["canary_cohort"] = openai_canary.get("cohort")
-            if force_shadow:
-                meta["candidate_selector"] = "forced-openai-local-routing-canary"
-        elif provider == "openai" and managed.get("selected_for_shadow_evaluation") is True:
+        if provider == "openai" and managed.get("selected_for_shadow_evaluation") is True:
             candidate = str(managed.get("shadow_model") or managed.get("would_route_model") or "").strip() or None
             force_shadow = candidate is not None
             meta["trigger"] = "managed-policy-routing-canary"
@@ -1993,6 +1985,20 @@ def routing_experiment_decision(
             meta["canary_cohort"] = (managed.get("local_canary") or {}).get("cohort") if isinstance(managed.get("local_canary"), dict) else None
             if force_shadow:
                 meta["candidate_selector"] = "forced-managed-policy-routing-canary"
+                meta["candidate_policy_shape"] = "managed-shadow"
+                meta["candidate_id"] = _safe_candidate_id(
+                    managed.get("policy_id") or managed.get("recommendation_id") or "managed-openai-shadow",
+                    fallback="managed-openai-shadow",
+                )
+                meta["policy_source"] = managed.get("policy_source") or "managed-recommended"
+            else:
+                meta["reason"] = "managed-shadow-target-missing"
+                return meta
+        elif provider == "openai":
+            meta["reason"] = "openai-shadow-requires-managed-target"
+            if openai_canary.get("status") == "applied":
+                meta["retired_local_trigger"] = "openai-local-routing-canary"
+            return meta
         if candidate is None:
             selection = _route_down_candidate_selection(
                 requested,
@@ -2294,6 +2300,11 @@ def routing_experiment_feedback_features(
     requested_model = str(experiment_meta.get("requested_model") or routing_meta.get("requested_model") or "")
     routed_model = str(experiment_meta.get("routed_model") or routing_meta.get("routed_model") or "")
     shadow_preflight = experiment_meta.get("shadow_request_preflight") if isinstance(experiment_meta, dict) else None
+    shadow_http_error_detail = (
+        experiment_meta.get("shadow_http_error_detail")
+        if isinstance(experiment_meta.get("shadow_http_error_detail"), dict)
+        else None
+    )
     unsupported_shape_reason = None
     if isinstance(shadow_preflight, dict) and shadow_preflight.get("status") == "unsupported":
         unsupported_shape_reason = _public_label(shadow_preflight.get("reason"), fallback="unsupported-shape")
@@ -2353,6 +2364,7 @@ def routing_experiment_feedback_features(
         "status": status,
         "provider": experiment_meta.get("provider") or "anthropic",
         "source_surface": experiment_meta.get("source_surface") or "anthropic_messages",
+        "policy_source": experiment_meta.get("policy_source"),
         "requested_model": requested_model,
         "routed_model": routed_model,
         "primary_model": primary_model,
@@ -2382,6 +2394,7 @@ def routing_experiment_feedback_features(
         "reason_codes": reason_codes,
         "shadow_unsupported_shape_reason": unsupported_shape_reason,
         "shadow_unavailable_reason": unavailable_reason,
+        "shadow_http_error_detail": shadow_http_error_detail,
         "shadow_error_class": _public_label(error, fallback="none") if error else None,
         "cost_delta_usd": (
             round(float(primary_cost_est_usd or 0.0) - float(shadow_cost_est_usd or 0.0), 6)
@@ -2445,6 +2458,9 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
             "eligible_candidate_count": feedback_features.get("eligible_candidate_count"),
             "candidate_selector": feedback_features.get("candidate_selector"),
             "candidate_policy_shape": feedback_features.get("candidate_policy_shape"),
+            "policy_source": feedback_features.get("policy_source"),
+            "provider": provider,
+            "source_surface": source_surface,
             "text_chars_bucket": feedback_features.get("text_chars_bucket"),
             "requested_model_family": requested_family,
             "routed_model_family": routed_family,
@@ -2469,6 +2485,7 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
             "primary_output_sha256": feedback_features.get("primary_output_sha256"),
             "shadow_output_sha256": feedback_features.get("shadow_output_sha256"),
             "error_present": bool(feedback_features.get("error_present")),
+            "shadow_http_error_detail": feedback_features.get("shadow_http_error_detail"),
         },
         "reason_codes": reason_codes,
         "routing": {
@@ -2492,6 +2509,10 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
     experiment_hash = _hash_identifier(feedback_features.get("experiment_id"))
     if experiment_hash:
         event["experiment_hash"] = experiment_hash
+    if provider == "openai":
+        event["candidate"]["requested_model"] = requested_model
+        event["candidate"]["routed_model"] = routed_model
+        event["candidate"]["shadow_model"] = shadow_model
     return event
 
 

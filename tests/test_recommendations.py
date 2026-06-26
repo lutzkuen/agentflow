@@ -1214,6 +1214,50 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(schema_meta["schema_error"], "schema-mismatch")
         self.assertEqual(schema_meta["fallback"], "local-policy")
 
+    def test_policy_decision_fetch_accepts_agentflow_server_schema_alias(self):
+        os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        FakeAsyncClient.response = FakeResponse(body={
+            "schema": "agentflow.policy_decision.v1",
+            "policy_id": "managed-opus48-sonnet46",
+            "decision_id": "policy-decision:alias",
+            "confidence": 0.91,
+            "routing": {
+                "status": "recommended",
+                "target_model": "claude-sonnet-4-6",
+                "recommended_mode": "shadow",
+                "confidence": 0.91,
+                "reason_codes": ["server-policy"],
+            },
+            "shadow": {
+                "status": "recommended",
+                "target_model": "claude-sonnet-4-6",
+                "fraction": 0.25,
+                "policy_id": "managed-shadow-opus48-sonnet46",
+            },
+            "privacy_summary": {"metadata_only": True},
+        })
+
+        with self._active_policy_contract_patch():
+            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_policy_decision({
+                    "source_surface": "anthropic_messages",
+                    "granularity": "provider_request",
+                    "app_family": "claude_code",
+                    "requested_model": "claude-opus-4-8",
+                    "candidate_target_model": "claude-sonnet-4-6",
+                    "input_features": {"requested_local_actions": ["routing"]},
+                    "tool_features": {},
+                    "replayability_level": "features_only",
+                }))
+
+        self.assertEqual(meta["status"], "received")
+        self.assertEqual(meta["policy_decision_schema"], "tokenclaw.policy_decision.v1")
+        self.assertEqual(meta["target_model"], "claude-sonnet-4-6")
+        self.assertEqual(meta["recommended_mode"], "shadow")
+        self.assertEqual(meta["shadow"]["status"], "recommended")
+
     def test_policy_decision_enabled_without_server_url_fails_closed_locally(self):
         os.environ["TOKENCLAW_RECOMMENDATIONS_ENABLED"] = "1"
         os.environ["TOKENCLAW_POLICY_DECISIONS_ENABLED"] = "1"
@@ -1299,6 +1343,8 @@ class RecommendationTest(unittest.TestCase):
             "confidence": 0.92,
             "route_down_probability": 0.9,
             "model_artifact_version": "routing-predictor-v1-abcd",
+            "predictor_rule_id": "routing-evidence:anthropic:sonnet->haiku",
+            "reason_codes": ["active-routing-predictor-model"],
             "recommended_mode": "shadow",
             "policy_id": "routing-policy",
         }
@@ -1317,14 +1363,20 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(observed["local_action_taken"], "shadow")
         self.assertEqual(observed["would_route_model"], "claude-haiku-4-5-20251001")
 
-        missing_version = dict(base_meta, recommended_mode="canary", model_artifact_version=None)
+        missing_version = dict(
+            base_meta,
+            recommended_mode="canary",
+            model_artifact_version=None,
+            predictor_rule_id=None,
+            reason_codes=[],
+        )
         skipped = recommendations.apply_recommendation_to_body(
             provider="anthropic",
             body=body,
             routing_meta=routing_meta,
             recommendation_meta=missing_version,
         )
-        self.assertEqual(skipped["apply_reason"], "routing-predictor-model-version-missing")
+        self.assertEqual(skipped["apply_reason"], "routing-predictor-evidence-required")
         self.assertEqual(body["model"], "claude-sonnet-4-6")
 
         os.environ["TOKENCLAW_POLICY_DECISION_CANARY_FRACTION"] = "1"
@@ -1338,6 +1390,120 @@ class RecommendationTest(unittest.TestCase):
         self.assertTrue(applied["applied"])
         self.assertEqual(applied["local_action_taken"], "canary_applied")
         self.assertEqual(body["model"], "claude-haiku-4-5-20251001")
+
+    def test_policy_decision_application_holds_server_live_without_trained_predictor_evidence(self):
+        os.environ["TOKENCLAW_MANAGED"] = "1"
+        os.environ["TOKENCLAW_MANAGED_MODE"] = "canary"
+        os.environ["TOKENCLAW_MANAGED_ROUTING"] = "1"
+        os.environ["TOKENCLAW_MANAGED_CRUNCH"] = "0"
+        os.environ["TOKENCLAW_MANAGED_CACHE"] = "0"
+        meta = {
+            "status": "received",
+            "policy_decision_schema": "tokenclaw.policy_decision.v1",
+            "routing_status": "recommended",
+            "target_model": "claude-sonnet-4-6",
+            "confidence": 0.5,
+            "recommended_mode": "live",
+            "traffic_treatment": "live",
+            "server_traffic_treatment": "live",
+            "route_selected": True,
+            "policy_id": "managed-anthropic-opus-to-sonnet-routing-v1",
+            "reason": "server live route",
+            "generated_at": "2026-06-26T09:00:00+00:00",
+            "expires_at": "2026-06-26T10:00:00+00:00",
+            "expired": False,
+            "granularity": "provider_request",
+            "app_family": "claude_code",
+            "shadow": {"status": "recommended", "target_model": "claude-sonnet-4-6"},
+            "crunch": {"status": "omitted", "profile": "off"},
+            "cache": {"status": "omitted", "profile": "off"},
+            "routing": {
+                "status": "recommended",
+                "target_model": "claude-sonnet-4-6",
+                "recommended_mode": "live",
+                "traffic_treatment": "live",
+                "route_selected": True,
+            },
+        }
+        body = {"model": "claude-opus-4-8"}
+        routing_meta = {
+            "routed_model": "claude-opus-4-8",
+            "requested_model": "claude-opus-4-8",
+            "source_surface": "anthropic_messages",
+            "reason": "local route",
+        }
+
+        applied = recommendations.apply_recommendation_to_body(
+            provider="anthropic",
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta=meta,
+        )
+
+        self.assertFalse(applied["applied"])
+        self.assertFalse(applied["changed_model"])
+        self.assertEqual(applied["apply_reason"], "routing-predictor-evidence-required")
+        self.assertEqual(applied["local_action_taken"], "noop")
+        self.assertEqual(body["model"], "claude-opus-4-8")
+        self.assertEqual(routing_meta["routed_model"], "claude-opus-4-8")
+
+    def test_policy_decision_application_applies_server_live_with_trained_predictor_evidence(self):
+        os.environ["TOKENCLAW_MANAGED"] = "1"
+        os.environ["TOKENCLAW_MANAGED_MODE"] = "canary"
+        os.environ["TOKENCLAW_MANAGED_ROUTING"] = "1"
+        os.environ["TOKENCLAW_MANAGED_CRUNCH"] = "0"
+        os.environ["TOKENCLAW_MANAGED_CACHE"] = "0"
+        meta = {
+            "status": "received",
+            "policy_decision_schema": "tokenclaw.policy_decision.v1",
+            "routing_status": "recommended",
+            "target_model": "claude-sonnet-4-6",
+            "confidence": 0.91,
+            "recommended_mode": "live",
+            "traffic_treatment": "live",
+            "server_traffic_treatment": "live",
+            "route_selected": True,
+            "policy_id": "routing-predictor:artifact:opus-sonnet",
+            "model_artifact_version": "routing-predictor-v1-opus-sonnet",
+            "predictor_rule_id": "routing-evidence:anthropic:opus->sonnet",
+            "reason_codes": ["active-routing-predictor-model"],
+            "reason": "server live route",
+            "crunch": {"status": "omitted", "profile": "off"},
+            "cache": {"status": "omitted", "profile": "off"},
+            "routing": {
+                "status": "recommended",
+                "target_model": "claude-sonnet-4-6",
+                "recommended_mode": "live",
+                "traffic_treatment": "live",
+                "route_selected": True,
+                "model_artifact_version": "routing-predictor-v1-opus-sonnet",
+                "predictor_rule_id": "routing-evidence:anthropic:opus->sonnet",
+                "reason_codes": ["active-routing-predictor-model"],
+            },
+        }
+        body = {"model": "claude-opus-4-8"}
+        routing_meta = {
+            "routed_model": "claude-opus-4-8",
+            "requested_model": "claude-opus-4-8",
+            "source_surface": "anthropic_messages",
+            "reason": "local route",
+        }
+
+        applied = recommendations.apply_recommendation_to_body(
+            provider="anthropic",
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta=meta,
+        )
+
+        self.assertTrue(applied["applied"])
+        self.assertTrue(applied["changed_model"])
+        self.assertEqual(applied["apply_reason"], "server-live-selected")
+        self.assertEqual(applied["local_action_taken"], "live_applied")
+        self.assertEqual(body["model"], "claude-sonnet-4-6")
+        self.assertEqual(routing_meta["routed_model"], "claude-sonnet-4-6")
+        self.assertEqual(routing_meta["managed_route_recommended_mode"], "live")
+        self.assertEqual(routing_meta["final_policy_source"], "managed-recommended")
 
     def test_policy_decision_plural_env_and_routing_action_apply_live_route(self):
         os.environ["TOKENCLAW_RECOMMENDATIONS_ENABLED"] = "1"
@@ -1355,6 +1521,9 @@ class RecommendationTest(unittest.TestCase):
                 "target_model": "claude-haiku-4-5-20251001",
                 "confidence": 0.91,
                 "reason": "lossless downgrade predictor",
+                "model_artifact_version": "routing-predictor-v1-route-to",
+                "predictor_rule_id": "routing-evidence:anthropic:sonnet->haiku",
+                "reason_codes": ["active-routing-predictor-model"],
             },
         })
 

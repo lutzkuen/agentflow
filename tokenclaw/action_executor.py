@@ -41,8 +41,13 @@ LOCAL_RUNTIME_DECISION_KEYS = {
     "client_routing_policy",
     "endpoint",
     "enabled",
+    "expired",
+    "expires_at",
     "fallback",
     "failure_mode",
+    "generated_at",
+    "granularity",
+    "app_family",
     "latency_ms",
     "lifecycle_event",
     "live_promotion_mode",
@@ -66,6 +71,7 @@ LOCAL_RUNTIME_DECISION_KEYS = {
     "server_recommended_mode",
     "server_traffic_treatment",
     "server_url",
+    "shadow",
     "shadow_model",
     "shadow_only",
     "status",
@@ -257,6 +263,20 @@ def _treatment_reason(treatment: str | None, selected: bool | None) -> str:
     return "server-traffic-treatment-held"
 
 
+def _has_trained_routing_predictor_evidence(decision: dict[str, Any]) -> bool:
+    routing = decision.get("routing") if isinstance(decision.get("routing"), dict) else {}
+    artifact = str(decision.get("model_artifact_version") or routing.get("model_artifact_version") or "").strip()
+    if not artifact.startswith("routing-predictor-"):
+        return False
+    if str(decision.get("predictor_rule_id") or routing.get("predictor_rule_id") or "").strip():
+        return True
+    reason_codes = set()
+    for source in (decision.get("reason_codes"), routing.get("reason_codes")):
+        if isinstance(source, list):
+            reason_codes.update(str(item) for item in source)
+    return "active-routing-predictor-model" in reason_codes
+
+
 def _disabled_family(name: str) -> dict[str, Any]:
     return {
         "status": "vetoed",
@@ -421,7 +441,7 @@ class ActionExecutor:
                 profiles = result.get("effective_profiles")
                 if isinstance(profiles, dict):
                     profiles.pop(family, None)
-        if any(result[family].get("status") == "vetoed" for family in DEFAULT_ACTION_FAMILIES):
+        if any(result[family].get("status") == "vetoed" for family in supported):
             return self._finish(result, "vetoed", "local-action-vetoed")
         if not application_enabled:
             self._preview_managed_crunch_treatment(result, decision)
@@ -467,6 +487,22 @@ class ActionExecutor:
                 status="held",
                 reason=treatment_reason,
             )
+        if (
+            target := _target_model(decision, local_actions)
+        ) and target != current_model and (
+            traffic_treatment in {"live", "canary", "route_to"}
+            or decision.get("selected_for_local_application") is True
+            or str(decision.get("local_policy_decision_mode") or decision.get("recommended_mode") or "").strip().lower()
+            in {"live", "apply", "applied", "canary", "route_to"}
+        ) and not _has_trained_routing_predictor_evidence(decision):
+            result["would_route_model"] = target
+            result["routing"].update({
+                "status": "held",
+                "applied": False,
+                "target_model": target,
+                "apply_reason": "routing-predictor-evidence-required",
+            })
+            return self._finish(result, "held", "routing-predictor-evidence-required")
         applied_families: list[str] = []
         target_model = _target_model(decision, local_actions)
         if target_model:
@@ -540,7 +576,7 @@ class ActionExecutor:
                 else:
                     result[family] = _disabled_family(family)
 
-        if any(result[family].get("status") == "vetoed" for family in DEFAULT_ACTION_FAMILIES):
+        if any(result[family].get("status") == "vetoed" for family in supported):
             return self._finish(result, "vetoed", "local-action-vetoed")
         if applied_families:
             result["applied_families"] = sorted(set(applied_families))
@@ -801,6 +837,7 @@ class ActionExecutor:
         return self._finish(result, status, reason)
 
     def _finish(self, result: dict[str, Any], status: str, reason: str) -> dict[str, Any]:
+        enabled_families = set(result.get("enabled_local_action_families") or DEFAULT_ACTION_FAMILIES)
         result["status"] = status
         result["apply_reason"] = reason
         result["fallback"] = None if status == "applied" else "local-policy"
@@ -816,7 +853,9 @@ class ActionExecutor:
             "vetoed_families": [
                 family
                 for family in DEFAULT_ACTION_FAMILIES
-                if isinstance(result.get(family), dict) and result[family].get("status") == "vetoed"
+                if family in enabled_families
+                and isinstance(result.get(family), dict)
+                and result[family].get("status") == "vetoed"
             ],
             "held_families": [
                 family

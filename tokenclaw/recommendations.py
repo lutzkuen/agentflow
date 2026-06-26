@@ -49,6 +49,10 @@ REQUEST_FACTS_SCHEMA = "tokenclaw.request_facts.v1"
 REQUEST_FACTS_ENVELOPE_SCHEMA = "tokenclaw.request_facts_envelope.v1"
 POLICY_DECISION_PREFLIGHT_SCHEMA = "tokenclaw.policy_decision_preflight.v1"
 POLICY_DECISION_SCHEMA = "tokenclaw.policy_decision.v1"
+POLICY_DECISION_RESPONSE_SCHEMAS = {
+    POLICY_DECISION_SCHEMA,
+    "agentflow.policy_decision.v1",
+}
 MANAGED_API_KEY_ENV = "TOKENCLAW_MANAGED_API_KEY"
 RECOMMENDATION_ENABLED_ENV = "TOKENCLAW_RECOMMENDATION_ENABLED"
 RECOMMENDATIONS_ENABLED_ENV = "TOKENCLAW_RECOMMENDATIONS_ENABLED"
@@ -1464,7 +1468,7 @@ def _copy_policy_decision_response_fields(body: dict[str, Any]) -> dict[str, Any
 def _normalize_policy_decision(body: Any) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(body, dict):
         return None, "response was not a JSON object"
-    if body.get("schema") != POLICY_DECISION_SCHEMA:
+    if body.get("schema") not in POLICY_DECISION_RESPONSE_SCHEMAS:
         return None, "schema-mismatch"
     privacy = body.get("privacy_summary")
     if isinstance(privacy, dict):
@@ -1506,6 +1510,8 @@ def _normalize_policy_decision(body: Any) -> tuple[dict[str, Any] | None, str | 
     recommended_mode = routing_action.get("recommended_mode") or routing.get("recommended_mode")
     if explicit_routing_action and not recommended_mode:
         recommended_mode = "route_to"
+    traffic_treatment = routing_action.get("traffic_treatment") or routing.get("traffic_treatment")
+    route_selected = routing_action.get("route_selected") if "route_selected" in routing_action else routing.get("route_selected")
     normalized = _copy_policy_decision_response_fields(body)
     normalized.update({
         "schema": POLICY_DECISION_SCHEMA,
@@ -1518,6 +1524,9 @@ def _normalize_policy_decision(body: Any) -> tuple[dict[str, Any] | None, str | 
         "reason": reason,
         "routing_status": routing.get("status") or ("recommended" if explicit_routing_action else None),
         "recommended_mode": recommended_mode,
+        "traffic_treatment": traffic_treatment if isinstance(traffic_treatment, str) else None,
+        "server_traffic_treatment": traffic_treatment if isinstance(traffic_treatment, str) else None,
+        "route_selected": route_selected if isinstance(route_selected, bool) else None,
         "route_down_probability": routing_action.get("route_down_probability", routing.get("route_down_probability")),
         "model_artifact_version": routing_action.get("model_artifact_version", routing.get("model_artifact_version")),
         "model_evidence_hash": routing_action.get("model_evidence_hash", routing.get("model_evidence_hash")),
@@ -1926,6 +1935,20 @@ def policy_decision_canary_sample(meta: dict[str, Any], *, current_model: str, t
     }
 
 
+def _has_trained_routing_predictor_evidence(meta: dict[str, Any]) -> bool:
+    routing = meta.get("routing") if isinstance(meta.get("routing"), dict) else {}
+    artifact = str(meta.get("model_artifact_version") or routing.get("model_artifact_version") or "").strip()
+    if not artifact.startswith("routing-predictor-"):
+        return False
+    if str(meta.get("predictor_rule_id") or routing.get("predictor_rule_id") or "").strip():
+        return True
+    reason_codes = set()
+    for source in (meta.get("reason_codes"), routing.get("reason_codes")):
+        if isinstance(source, list):
+            reason_codes.update(str(item) for item in source)
+    return "active-routing-predictor-model" in reason_codes
+
+
 def _policy_decision_routing_gate(meta: dict[str, Any], *, target_model: str, current_model: str) -> str | None:
     if meta.get("routing_status") != "recommended":
         return "routing-not-recommended"
@@ -1933,6 +1956,16 @@ def _policy_decision_routing_gate(meta: dict[str, Any], *, target_model: str, cu
         return "missing-target-model"
     if target_model == current_model:
         return "target-model-already-selected"
+    server_treatment = str(meta.get("traffic_treatment") or meta.get("server_traffic_treatment") or "").strip().lower()
+    recommended_mode = str(meta.get("recommended_mode") or "").strip().lower()
+    if (
+        server_treatment in {"live", "canary"}
+        or recommended_mode in {"live", "apply", "applied", "canary", "route_to"}
+        or meta.get("route_to_present") is True
+    ) and not _has_trained_routing_predictor_evidence(meta):
+        return "routing-predictor-evidence-required"
+    if server_treatment in {"live", "canary"} and meta.get("route_selected") is not False:
+        return None
     try:
         confidence = float(meta.get("confidence") or 0.0)
     except (TypeError, ValueError):
@@ -2137,6 +2170,42 @@ def apply_policy_decision_routing_to_body(
         routing_meta["managed_route_candidate_model"] = target_model
         routing_meta["managed_route_candidate_reason"] = meta.get("reason")
         routing_meta["managed_route_recommended_mode"] = recommended_mode
+        routing_meta["managed_local_actions"] = execution
+        return meta
+    if recommended_mode in {"live", "apply", "applied"}:
+        meta["target_model_after_client_policy"] = target_model
+        execution = executor.execute(
+            body=body,
+            routing_meta=routing_meta,
+            decision=meta,
+            application_enabled=True,
+            source_surface=str(routing_meta.get("source_surface") or meta.get("source_surface") or ""),
+        )
+        if execution.get("status") == "vetoed":
+            meta.update({
+                "applied": False,
+                "changed_model": False,
+                "apply_reason": execution.get("apply_reason") or "local-action-vetoed",
+                "fallback": "local-policy",
+                "would_route_model": target_model,
+                "local_action_taken": "vetoed",
+                "action_executor": execution,
+                "local_actions": execution,
+            })
+            routing_meta["managed_local_actions"] = execution
+            return meta
+        routing_meta["managed_routing_confidence"] = meta.get("confidence")
+        routing_meta["managed_route_recommended_mode"] = recommended_mode
+        meta.update({
+            "applied": bool(execution.get("changed_model")),
+            "changed_model": bool(execution.get("changed_model")),
+            "fallback": execution.get("fallback"),
+            "apply_reason": "server-live-selected" if execution.get("changed_model") else execution.get("apply_reason"),
+            "local_action_taken": "live_applied" if execution.get("changed_model") else "noop",
+            "local_policy_decision_mode": recommended_mode,
+            "action_executor": execution,
+            "local_actions": execution,
+        })
         routing_meta["managed_local_actions"] = execution
         return meta
     if recommended_mode != "canary":
