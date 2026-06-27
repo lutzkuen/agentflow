@@ -915,7 +915,14 @@ def _prepare_anthropic_shadow_request(
     _strip_model_incompatible_params(shadow_body, sanitization, primary_model)
     if sanitization.get("stripped_params"):
         diagnostics["stripped_params"] = sanitization["stripped_params"]
-    if model_tier(shadow_model) == "haiku":
+    # The shadow leg disables extended thinking (the ``thinking`` param is stripped
+    # above and streaming is forced off), so any thinking/redacted_thinking blocks
+    # left in the assistant history make the request self-contradictory — Anthropic
+    # rejects "thinking blocks without thinking enabled" with a 400
+    # invalid_request_error. This stripping was previously gated to haiku shadows,
+    # which silently 400'd every opus->sonnet tool-result canary while leaving the
+    # haiku path healthy. Strip for any shadow whose thinking is now disabled.
+    if not _has_top_level_thinking(shadow_body):
         diagnostics["candidate_would_strip_thinking_history"] = True
         pre_sanitization_tool_audit = _anthropic_shadow_tool_result_audit(shadow_body)
         if int(pre_sanitization_tool_audit.get("thinking_blocks_before_tool_results") or 0) > 0:

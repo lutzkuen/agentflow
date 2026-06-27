@@ -127,15 +127,20 @@ def _default_experiment_policy() -> dict[str, Any]:
         "daily_budget_usd": 10.0,
         "min_text_chars": 0,
         "max_text_chars": 8000,
-        "providers": ["anthropic", "openai"],
-        "source_surfaces": ["anthropic_messages", "openai_responses", "openai_chat", "codex_turn"],
-        "streaming_shadow_source_surfaces": ["anthropic_messages"],
+        # Local canary origination is disabled (see the "Backed or off" gate in
+        # routing_experiment_decision): the managed server decides anthropic canaries,
+        # and server-directed anthropic shadows are executed via
+        # _managed_shadow_experiment_decision, not this policy. Only the server-forced
+        # OpenAI/codex shadow path still flows through this local policy, so only its
+        # OpenAI/codex candidates remain. Anthropic candidates, model pairs, fallback
+        # routes, the anthropic streaming-shadow surface, and the anthropic text-size
+        # eligibility caps (incl. the 128k tool-result cap) were removed as dead code.
+        "providers": ["openai"],
+        "source_surfaces": ["openai_responses", "openai_chat", "codex_turn"],
+        "streaming_shadow_source_surfaces": [],
         "blocklist": [],
         "preferred_pathways": [],
         "fallback_routes": [
-            {"requested_model": "claude-opus-4-8", "routed_model": "claude-sonnet-4-6"},
-            {"requested_model": "claude-opus-4-5", "routed_model": "claude-sonnet-4-6"},
-            {"requested_model": "claude-sonnet-4-6", "routed_model": "claude-haiku-4-5-20251001"},
             {"requested_model": "gpt-5.5", "routed_model": "gpt-5.4"},
             {"requested_model": "gpt-5.4", "routed_model": "gpt-5.3"},
             {"requested_model": "gpt-5.3-codex", "routed_model": "gpt-5-codex"},
@@ -144,9 +149,6 @@ def _default_experiment_policy() -> dict[str, Any]:
             {"requested_model": "gpt-5-mini", "routed_model": "gpt-5-nano"},
         ],
         "model_pairs": [
-            {"requested_model": "claude-sonnet-4-6", "routed_model": "claude-haiku-4-5-20251001"},
-            {"requested_model": "claude-opus-4-8", "routed_model": "claude-sonnet-4-6"},
-            {"requested_model": "claude-opus-4-5", "routed_model": "claude-sonnet-4-6"},
             {"requested_model": "gpt-5.5", "routed_model": "gpt-5.4"},
             {"requested_model": "gpt-5.4", "routed_model": "gpt-5.4-mini"},
             {"requested_model": "gpt-5.3-codex", "routed_model": "gpt-5-codex"},
@@ -155,70 +157,6 @@ def _default_experiment_policy() -> dict[str, Any]:
             {"requested_model": "gpt-5-mini", "routed_model": "gpt-5-nano"},
         ],
         "routing_candidates": [
-            {
-                "candidate_id": "anthropic-sonnet46-to-haiku45-short",
-                "requested_model": "claude-sonnet-4-6",
-                "routed_model": "claude-haiku-4-5-20251001",
-                "provider": "anthropic",
-                "source_surface": "anthropic_messages",
-                "app_family": "claude_code",
-                "category": "short-completion",
-                "max_text_chars": 8000,
-            },
-            {
-                "candidate_id": "anthropic-sonnet46-to-haiku45-tool-result-stream",
-                "requested_model": "claude-sonnet-4-6",
-                "routed_model": "claude-haiku-4-5-20251001",
-                "provider": "anthropic",
-                "source_surface": "anthropic_messages",
-                "app_family": "claude_code",
-                "category": "tool-result",
-                "stream": True,
-                "max_text_chars": 128000,
-                "sample_rate": 0.10,
-            },
-            {
-                "candidate_id": "anthropic-opus45-to-sonnet46-chat",
-                "requested_model": "claude-opus-4-5",
-                "routed_model": "claude-sonnet-4-6",
-                "provider": "anthropic",
-                "source_surface": "anthropic_messages",
-                "app_family": "claude_code",
-                "category": "chat",
-                "max_text_chars": 8000,
-            },
-            {
-                "candidate_id": "anthropic-opus48-to-sonnet46-chat",
-                "requested_model": "claude-opus-4-8",
-                "routed_model": "claude-sonnet-4-6",
-                "provider": "anthropic",
-                "source_surface": "anthropic_messages",
-                "app_family": "claude_code",
-                "category": "chat",
-                "max_text_chars": 32000,
-            },
-            {
-                "candidate_id": "anthropic-opus48-to-sonnet46-tool-result-stream",
-                "requested_model": "claude-opus-4-8",
-                "routed_model": "claude-sonnet-4-6",
-                "provider": "anthropic",
-                "source_surface": "anthropic_messages",
-                "app_family": "claude_code",
-                "category": "tool-result",
-                "stream": True,
-                "max_text_chars": 128000,
-                "sample_rate": 0.10,
-            },
-            {
-                "candidate_id": "anthropic-opus48-to-sonnet46-tool-light",
-                "requested_model": "claude-opus-4-8",
-                "routed_model": "claude-sonnet-4-6",
-                "provider": "anthropic",
-                "source_surface": "anthropic_messages",
-                "app_family": "claude_code",
-                "category": "tool-light",
-                "max_text_chars": 64000,
-            },
             {
                 "candidate_id": "codex-gpt55-to-gpt53-codex-summary",
                 "requested_model": "gpt-5.5",
@@ -335,32 +273,7 @@ def _default_experiment_policy() -> dict[str, Any]:
         "similarity_threshold": 0.86,
         "min_samples_for_confidence": 20,
         "store_response_bodies": False,
-        "eligibility_overrides": [
-            {
-                "scope": "category",
-                "provider": "anthropic",
-                "source_surface": "anthropic_messages",
-                "category": "chat",
-                "max_text_chars": 32000,
-            },
-            {
-                "scope": "category",
-                "provider": "anthropic",
-                "source_surface": "anthropic_messages",
-                "category": "tool-light",
-                "max_text_chars": 64000,
-            },
-            {
-                "scope": "category",
-                "provider": "anthropic",
-                "source_surface": "anthropic_messages",
-                "category": "tool-result",
-                "stream": True,
-                "max_text_chars": 128000,
-                "sample_rate": 0.10,
-                "daily_budget_usd": 10.0,
-            },
-        ],
+        "eligibility_overrides": [],
     }
 
 
@@ -1607,7 +1520,7 @@ def routing_candidate_coverage(
             },
         }
 
-    if ROUTING_EXPERIMENT_POLICY_SOURCE == "local-default" and not _managed_policy_decisions_configured():
+    if str(ROUTING_EXPERIMENT_POLICY_SOURCE).startswith("local-"):
         return {
             "schema": "tokenclaw.routing_candidate_coverage.v1",
             "status": "routing-off",
@@ -1931,18 +1844,20 @@ def routing_experiment_decision(
     if not ROUTING_EXPERIMENT_ENABLED:
         if not forced_openai_canary_shadow:
             return meta
-    # Backed or off: the bundled default policy is evidence-collection scaffolding,
-    # not a license to mint local canaries. Locally-minted route-down shadows are a
-    # server responsibility (ARCHITECTURE.md "canary-driven routing lives in
-    # tokenclaw_server"). When the policy is the bundled default and no opted-in
-    # server backs routing, stay off unless the server explicitly forced a shadow.
+    # Backed or off: local policy (the bundled default *or* the user's manual YAML)
+    # is evidence-collection scaffolding, not a license to mint canaries. Canaries are
+    # a server responsibility (ARCHITECTURE.md "canary-driven routing lives in
+    # tokenclaw_server"); when the server is unavailable or not backing this call there
+    # is no point running a canary, so there is no local fallback. Stay off for any
+    # local-originated policy source unless the server explicitly forced this shadow
+    # (forced_openai_canary_shadow is itself a server signal). Server-directed anthropic
+    # shadows arrive via _managed_shadow_experiment_decision and bypass this path.
     if (
-        ROUTING_EXPERIMENT_POLICY_SOURCE == "local-default"
-        and not _managed_policy_decisions_configured()
+        str(ROUTING_EXPERIMENT_POLICY_SOURCE).startswith("local-")
         and not forced_openai_canary_shadow
     ):
         meta["reason"] = "no-backed-routing"
-        meta["backing_reason"] = "local-default-policy-without-managed-backing"
+        meta["backing_reason"] = "local-policy-without-managed-backing"
         return meta
     if meta["kill_switch"]:
         meta["reason"] = "kill-switch"

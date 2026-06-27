@@ -422,12 +422,22 @@ class StreamingCacheTest(unittest.TestCase):
 
     def _streaming_experiment_decision(self, *, random_value):
         def decide(body, routing_meta, **kwargs):
-            return routing_experiments.routing_experiment_decision(
-                body,
-                routing_meta,
-                **kwargs,
-                random_value=lambda: random_value,
-            )
+            # Local origination is disabled (backed-or-off); shadows only run when the
+            # server backs the call. These tests exercise the shadow *executor*, so
+            # simulate a server-backed install by marking the policy source managed
+            # for the duration of the decision (otherwise the gate returns
+            # no-backed-routing and no shadow is minted).
+            saved_source = routing_experiments.ROUTING_EXPERIMENT_POLICY_SOURCE
+            routing_experiments.ROUTING_EXPERIMENT_POLICY_SOURCE = "managed-recommended"
+            try:
+                return routing_experiments.routing_experiment_decision(
+                    body,
+                    routing_meta,
+                    **kwargs,
+                    random_value=lambda: random_value,
+                )
+            finally:
+                routing_experiments.ROUTING_EXPERIMENT_POLICY_SOURCE = saved_source
 
         return decide
 
@@ -884,6 +894,54 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertNotIn("tool output secret", serialized)
         self.assertNotIn("toolu_1", serialized)
         self.assertNotIn("secret.py", serialized)
+
+    def test_opus_to_sonnet_shadow_strips_thinking_history_not_just_haiku(self):
+        # Regression: opus-4-8 -> sonnet-4-6 tool-result canaries 400'd with
+        # invalid_request_error because the shadow stripped the top-level
+        # ``thinking`` param but left thinking blocks in the assistant history,
+        # an invalid combination. The strip used to be gated to haiku shadows.
+        request_body = {
+            "model": "claude-opus-4-8",
+            "max_tokens": 64000,
+            "stream": True,
+            "thinking": {"type": "enabled", "budget_tokens": 8000},
+            "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "current reasoning secret", "signature": "sig-secret"},
+                        {"type": "redacted_thinking", "data": "redacted reasoning secret"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "secret.py"}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "tool output secret"}],
+                },
+            ],
+        }
+
+        shadow_body, preflight = anthropic_proxy._prepare_anthropic_shadow_request(
+            request_body,
+            shadow_model="claude-sonnet-4-6",
+            primary_model="claude-opus-4-8",
+        )
+
+        self.assertIsNotNone(shadow_body)
+        self.assertEqual(preflight["status"], "ok")
+        # thinking is disabled for the shadow leg ...
+        self.assertNotIn("thinking", shadow_body)
+        self.assertIn("thinking", preflight["stripped_params"])
+        # ... so the now-invalid thinking history must be stripped too.
+        self.assertTrue(preflight["candidate_would_strip_thinking_history"])
+        self.assertEqual(preflight["thinking_history_blocks_stripped"], 2)
+        assistant_blocks = shadow_body["messages"][0]["content"]
+        self.assertEqual([block["type"] for block in assistant_blocks], ["tool_use"])
+        self.assertEqual(preflight["tool_result_audit"]["status"], "ok")
+        # the original request is untouched (deep-copied)
+        self.assertIn("thinking", request_body)
+        self.assertEqual(len(request_body["messages"][0]["content"]), 3)
 
     def test_streamed_orphan_tool_result_shadow_is_skipped_before_provider_call(self):
         request_body = {
