@@ -943,6 +943,68 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertIn("thinking", request_body)
         self.assertEqual(len(request_body["messages"][0]["content"]), 3)
 
+    def test_opus_to_sonnet_shadow_folds_system_role_message_into_system_param(self):
+        # Regression: opus-4-8 -> sonnet-4-6 canaries 400'd with
+        # ``invalid_request_error: role 'system' is not supported on this model``
+        # because the client placed the system prompt as a ``system``-role message
+        # inside ``messages``. Opus tolerates it; sonnet rejects it. The shadow leg
+        # must fold those into the top-level ``system`` param so the call validates.
+        request_body = {
+            "model": "claude-opus-4-8",
+            "max_tokens": 1024,
+            "stream": True,
+            "system": "top-level guidance",
+            "messages": [
+                {"role": "system", "content": "inline system rule"},
+                {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            ],
+        }
+
+        shadow_body, preflight = anthropic_proxy._prepare_anthropic_shadow_request(
+            request_body,
+            shadow_model="claude-sonnet-4-6",
+            primary_model="claude-opus-4-8",
+        )
+
+        self.assertIsNotNone(shadow_body)
+        self.assertEqual(preflight["status"], "ok")
+        self.assertEqual(preflight["system_role_messages_folded"], 1)
+        # No system-role message survives in messages.
+        self.assertTrue(all(m.get("role") != "system" for m in shadow_body["messages"]))
+        self.assertEqual([m["role"] for m in shadow_body["messages"]], ["user"])
+        # Top-level system is a block list combining existing + folded content.
+        self.assertEqual(
+            shadow_body["system"],
+            [
+                {"type": "text", "text": "top-level guidance"},
+                {"type": "text", "text": "inline system rule"},
+            ],
+        )
+        # Original request untouched (deep-copied).
+        self.assertEqual(len(request_body["messages"]), 2)
+        self.assertEqual(request_body["system"], "top-level guidance")
+
+    def test_shadow_without_system_role_message_leaves_messages_unchanged(self):
+        request_body = {
+            "model": "claude-opus-4-8",
+            "max_tokens": 1024,
+            "stream": True,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            ],
+        }
+
+        shadow_body, preflight = anthropic_proxy._prepare_anthropic_shadow_request(
+            request_body,
+            shadow_model="claude-sonnet-4-6",
+            primary_model="claude-opus-4-8",
+        )
+
+        self.assertIsNotNone(shadow_body)
+        self.assertNotIn("system_role_messages_folded", preflight)
+        self.assertNotIn("system", shadow_body)
+        self.assertEqual([m["role"] for m in shadow_body["messages"]], ["user"])
+
     def test_streamed_orphan_tool_result_shadow_is_skipped_before_provider_call(self):
         request_body = {
             "model": "claude-sonnet-4-6",

@@ -863,6 +863,56 @@ def _assistant_empty_content_count(body: dict[str, Any]) -> int:
     return count
 
 
+def _system_content_blocks(content: Any) -> list[dict[str, Any]]:
+    """Normalize a ``system`` value (string or block list) to a content-block list."""
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content.strip() else []
+    if isinstance(content, list):
+        blocks: list[dict[str, Any]] = []
+        for block in content:
+            if isinstance(block, dict):
+                blocks.append(block)
+            elif isinstance(block, str) and block.strip():
+                blocks.append({"type": "text", "text": block})
+        return blocks
+    return []
+
+
+def _fold_system_role_messages(body: dict[str, Any], diagnostics: dict[str, Any]) -> None:
+    """Fold ``role: 'system'`` messages into the top-level ``system`` parameter.
+
+    Some Claude clients place the system prompt as a ``system``-role entry inside
+    ``messages`` instead of the top-level ``system`` field. Opus 4.8 tolerates
+    this, but other models (e.g. Sonnet 4.6) reject it with a 400
+    ``invalid_request_error: role 'system' is not supported on this model``. The
+    shadow leg forwards the primary body to a different model, so any such message
+    must be moved to the top-level ``system`` param for the request to validate —
+    otherwise every opus->sonnet canary silently 400s and records no evidence.
+    Content is moved, never logged.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    folded_blocks: list[dict[str, Any]] = []
+    kept: list[Any] = []
+    folded = 0
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "system":
+            folded_blocks.extend(_system_content_blocks(message.get("content")))
+            folded += 1
+            continue
+        kept.append(message)
+    if not folded:
+        return
+    combined = _system_content_blocks(body.get("system")) + folded_blocks
+    if combined:
+        body["system"] = combined
+    body["messages"] = kept
+    diagnostics["system_role_messages_folded"] = folded
+
+
 def _normalize_shadow_non_streaming_max_tokens(
     body: dict[str, Any], diagnostics: dict[str, Any]
 ) -> None:
@@ -911,6 +961,7 @@ def _prepare_anthropic_shadow_request(
         "session_ids_included": False,
     }
     _normalize_shadow_non_streaming_max_tokens(shadow_body, diagnostics)
+    _fold_system_role_messages(shadow_body, diagnostics)
     sanitization: dict[str, Any] = {}
     _strip_model_incompatible_params(shadow_body, sanitization, primary_model)
     if sanitization.get("stripped_params"):
