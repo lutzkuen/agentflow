@@ -46,6 +46,28 @@ class TierLimiterTests(unittest.TestCase):
 
         self.assertEqual(limiter.backoff_until["haiku"], existing_until)
 
+    def test_record_backoff_skips_long_usage_limit_retry_after(self):
+        # A long retry-after is the user's account/usage limit, not transient
+        # server overload. Recording it would make later requests short-circuit with
+        # a synthetic "temporarily limiting requests" error that masks the real
+        # usage limit. It must not be stored, so the next request reaches the
+        # upstream and the genuine usage-limit 429 passes through.
+        limiter = TierLimiter(max_recorded_backoff_seconds=300)
+
+        asyncio.run(limiter.record_backoff("claude-opus-4-8", {"retry-after": "9834"}))
+
+        self.assertNotIn("opus", limiter.backoff_until)
+        # await_backoff does not raise; the request proceeds to the upstream.
+        asyncio.run(limiter.await_backoff("claude-opus-4-8"))
+
+    def test_record_backoff_still_records_short_transient_backoff(self):
+        limiter = TierLimiter(max_recorded_backoff_seconds=300)
+
+        asyncio.run(limiter.record_backoff("claude-opus-4-8", {"retry-after": "45"}))
+
+        self.assertIn("opus", limiter.backoff_until)
+        self.assertGreater(limiter.backoff_until["opus"], time.time())
+
 
 if __name__ == "__main__":
     unittest.main()

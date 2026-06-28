@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+
+def _tier_backoff_max_seconds_default() -> float:
+    try:
+        return float(os.getenv("TOKENCLAW_TIER_BACKOFF_MAX_SECONDS", "300"))
+    except (TypeError, ValueError):
+        return 300.0
 
 
 def model_tier(model: str) -> str:
@@ -37,10 +45,16 @@ class TierLimiter:
         min_request_interval_ms: int = 0,
         max_tier_backoff_wait: float = 30.0,
         max_concurrent_per_tier: int = 2,
+        max_recorded_backoff_seconds: float | None = None,
     ) -> None:
         self.min_request_interval_ms = min_request_interval_ms
         self.max_tier_backoff_wait = max_tier_backoff_wait
         self.max_concurrent_per_tier = max_concurrent_per_tier
+        self.max_recorded_backoff_seconds = (
+            _tier_backoff_max_seconds_default()
+            if max_recorded_backoff_seconds is None
+            else max_recorded_backoff_seconds
+        )
         self.forward_lock = asyncio.Lock()
         self.last_forward_time = 0.0
         self.backoff_until: dict[str, float] = {}
@@ -100,6 +114,20 @@ class TierLimiter:
             delay = float(raw) if raw else default_seconds
         except (ValueError, TypeError):
             delay = default_seconds
+        # The tier backoff is a SHORT transient-overload smoothing mechanism. A long
+        # retry-after is the user's account/usage limit (Anthropic returns
+        # minutes-to-hours), not transient server overload. Recording it would make
+        # later requests short-circuit with a synthetic "temporarily limiting
+        # requests for <tier> tier" error — which clients render as "Server is
+        # temporarily limiting requests (not your usage limit)", masking the real
+        # cause for hours. Skip storing it: let the next request reach the upstream
+        # and pass the genuine usage-limit 429 straight through to the client.
+        if delay > self.max_recorded_backoff_seconds:
+            print(
+                f"tier_backoff: passthrough long retry-after={delay:.0f}s tier={tier} "
+                f"(usage-limit, not recorded as transient backoff)"
+            )
+            return
         new_until = time.time() + delay
         async with self.backoff_update_lock:
             if new_until > self.backoff_until.get(tier, 0.0):
