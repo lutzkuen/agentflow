@@ -84,6 +84,20 @@ class PricingTest(unittest.TestCase):
         self.assertEqual(basis["cached_input_usd_per_million"], 0.350)
         self.assertEqual(basis["output_usd_per_million"], 28.0)
 
+    def test_current_opus_generations_use_current_rate_not_legacy_opus4(self):
+        # Regression: claude-opus-4-8 (the live production model) substring-matched
+        # the retired "claude-opus-4" entry and was billed at $15/$75 instead of its
+        # real $5/$25 — a 3x overstatement that corrupted the savings metric and
+        # routing-savings math. Current Opus generations must price at $5/$25.
+        for model in ("claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"):
+            cost = estimate_cost(model, 1_000_000, 1_000_000)
+            self.assertEqual(cost, 30.0, f"{model} should be $5/$25 -> $30 for 1M/1M")
+        # Legacy Opus 4 / 4.1 stay at the original $15/$75.
+        self.assertEqual(estimate_cost("claude-opus-4", 1_000_000, 1_000_000), 90.0)
+        self.assertEqual(estimate_cost("claude-opus-4-1", 1_000_000, 1_000_000), 90.0)
+        # Sonnet 4.6 unchanged at $3/$15.
+        self.assertEqual(estimate_cost("claude-sonnet-4-6", 1_000_000, 1_000_000), 18.0)
+
     def test_openai_unknown_model_is_unpriced(self):
         self.assertIsNone(estimate_cost("not-a-model", 1000, 1000, provider="openai"))
 

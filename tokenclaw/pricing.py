@@ -15,6 +15,16 @@ DEFAULT_CODEX_APP_MODEL = "gpt-5.3-codex"
 DEFAULT_CODEX_APP_PROCESSING_MODE = "standard"
 
 ANTHROPIC_MODEL_PRICES = {
+    # Current-generation models must precede the legacy "claude-opus-4" substring:
+    # _match_prices returns the first key that is a substring of the model id, so
+    # "claude-opus-4-8" would otherwise match "claude-opus-4" and be billed at the
+    # retired Opus 4 rate ($15/$75) instead of its real $5/$25 — a 3x overstatement
+    # that corrupts every cost_est, the savings metric, and routing-savings math for
+    # the dominant production model. Opus 4.6/4.7/4.8 are all $5/$25; Fable 5 $10/$50.
+    "claude-fable-5": (10.0, 50.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+    "claude-opus-4-6": (5.0, 25.0),
     "claude-opus-4.5": (5.0, 25.0),
     "claude-opus-4-5": (5.0, 25.0),
     "claude-opus-4": (15.0, 75.0),
