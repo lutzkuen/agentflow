@@ -1056,6 +1056,60 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertEqual(len(request_body["messages"]), 2)
         self.assertEqual(request_body["system"], "top-level guidance")
 
+    def test_opus_to_sonnet_shadow_strips_clear_thinking_context_edit(self):
+        # Regression: after thinking is disabled on the shadow leg, a leftover
+        # context-management clear_thinking strategy 400s with
+        # "clear_thinking_... requires thinking to be enabled or adaptive". It must
+        # be stripped; non-thinking edits (clear_tool_uses_*) must stay.
+        request_body = {
+            "model": "claude-opus-4-8",
+            "max_tokens": 1024,
+            "stream": True,
+            "thinking": {"type": "enabled", "budget_tokens": 8000},
+            "context_management": {
+                "edits": [
+                    {"type": "clear_thinking_20251015"},
+                    {"type": "clear_tool_uses_20250919", "trigger": {"type": "input_tokens", "value": 100000}},
+                ]
+            },
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        }
+
+        shadow_body, preflight = anthropic_proxy._prepare_anthropic_shadow_request(
+            request_body,
+            shadow_model="claude-sonnet-4-6",
+            primary_model="claude-opus-4-8",
+        )
+
+        self.assertIsNotNone(shadow_body)
+        self.assertEqual(preflight["status"], "ok")
+        self.assertNotIn("thinking", shadow_body)
+        self.assertEqual(preflight["thinking_dependent_context_edits_stripped"], 1)
+        edit_types = [e["type"] for e in shadow_body["context_management"]["edits"]]
+        self.assertEqual(edit_types, ["clear_tool_uses_20250919"])
+        # Original request untouched (deep-copied).
+        self.assertEqual(len(request_body["context_management"]["edits"]), 2)
+
+    def test_shadow_strips_context_management_when_only_clear_thinking(self):
+        request_body = {
+            "model": "claude-opus-4-8",
+            "max_tokens": 1024,
+            "stream": True,
+            "thinking": {"type": "enabled", "budget_tokens": 8000},
+            "context_management": {"edits": [{"type": "clear_thinking_20251015"}]},
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        }
+
+        shadow_body, preflight = anthropic_proxy._prepare_anthropic_shadow_request(
+            request_body,
+            shadow_model="claude-sonnet-4-6",
+            primary_model="claude-opus-4-8",
+        )
+
+        self.assertIsNotNone(shadow_body)
+        self.assertNotIn("context_management", shadow_body)
+        self.assertEqual(preflight["thinking_dependent_context_edits_stripped"], 1)
+
     def test_shadow_without_system_role_message_leaves_messages_unchanged(self):
         request_body = {
             "model": "claude-opus-4-8",

@@ -943,6 +943,43 @@ def _fold_system_role_messages(body: dict[str, Any], diagnostics: dict[str, Any]
     diagnostics["system_role_messages_folded"] = folded
 
 
+def _strip_thinking_dependent_context_management(
+    body: dict[str, Any], diagnostics: dict[str, Any]
+) -> None:
+    """Drop context-management edits that require thinking from a no-thinking shadow.
+
+    Anthropic's context-management ``clear_thinking_*`` strategy requires ``thinking``
+    to be enabled or adaptive. The shadow leg disables thinking (the ``thinking``
+    param is stripped and streaming forced off), so leaving such an edit in place
+    makes the request self-contradictory and Anthropic returns a 400
+    ``invalid_request_error: clear_thinking_... strategy requires thinking to be
+    enabled or adaptive``. Remove only the thinking-dependent edits; other context
+    edits (e.g. ``clear_tool_uses_*``) are fine and stay. Drop the container if it
+    empties. Operates on request shape only; no prompt content is read.
+    """
+    context_management = body.get("context_management")
+    if not isinstance(context_management, dict):
+        return
+    edits = context_management.get("edits")
+    if not isinstance(edits, list):
+        return
+    kept: list[Any] = []
+    removed = 0
+    for edit in edits:
+        edit_type = str(edit.get("type") or "").lower() if isinstance(edit, dict) else ""
+        if "clear_thinking" in edit_type:
+            removed += 1
+            continue
+        kept.append(edit)
+    if not removed:
+        return
+    if kept:
+        context_management["edits"] = kept
+    else:
+        body.pop("context_management", None)
+    diagnostics["thinking_dependent_context_edits_stripped"] = removed
+
+
 def _normalize_shadow_non_streaming_max_tokens(
     body: dict[str, Any], diagnostics: dict[str, Any]
 ) -> None:
@@ -996,6 +1033,9 @@ def _prepare_anthropic_shadow_request(
     _strip_model_incompatible_params(shadow_body, sanitization, primary_model)
     if sanitization.get("stripped_params"):
         diagnostics["stripped_params"] = sanitization["stripped_params"]
+    # Thinking is now disabled on the shadow, so any context-management strategy that
+    # requires thinking (clear_thinking_*) must go or the request 400s.
+    _strip_thinking_dependent_context_management(shadow_body, diagnostics)
     # The shadow leg disables extended thinking (the ``thinking`` param is stripped
     # above and streaming is forced off), so any thinking/redacted_thinking blocks
     # left in the assistant history make the request self-contradictory — Anthropic
