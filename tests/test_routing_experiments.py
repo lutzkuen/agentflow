@@ -283,6 +283,41 @@ blocklist:
         self.assertEqual(result["primary_output_sha256"], result["shadow_output_sha256"])
         self.assertEqual(result["output_similarity"], 1.0)
 
+    def test_response_comparison_scores_matching_tool_calls_on_tool_only_turns(self):
+        # Tool-execution turns answer with tool_use blocks and no prose. Text-only
+        # similarity was ~0 even when both models chose the same action, so these
+        # canaries could never pass quality and routing could never promote. The
+        # comparison must score the tool calls.
+        primary = {
+            "content": [
+                {"type": "tool_use", "id": "a", "name": "read_file", "input": {"path": "main.py"}}
+            ]
+        }
+        shadow = {
+            "content": [
+                {"type": "tool_use", "id": "b", "name": "read_file", "input": {"path": "main.py"}}
+            ]
+        }
+
+        result = experiments.compare_response_outputs(primary, shadow)
+
+        self.assertEqual(result["primary_output_chars"], 0)
+        self.assertEqual(result["shadow_output_chars"], 0)
+        self.assertEqual(result["primary_tool_call_count"], 1)
+        self.assertEqual(result["shadow_tool_call_count"], 1)
+        self.assertEqual(result["output_similarity"], 1.0)
+        self.assertTrue(result["passed_threshold"])
+        self.assertEqual(result["primary_output_sha256"], result["shadow_output_sha256"])
+
+    def test_response_comparison_distinguishes_different_tool_choices(self):
+        primary = {"content": [{"type": "tool_use", "name": "read_file", "input": {"path": "a.py"}}]}
+        shadow = {"content": [{"type": "tool_use", "name": "run_tests", "input": {"suite": "all"}}]}
+
+        result = experiments.compare_response_outputs(primary, shadow)
+
+        self.assertLess(result["output_similarity"], 1.0)
+        self.assertNotEqual(result["primary_output_sha256"], result["shadow_output_sha256"])
+
     def test_report_explains_unqualified_traffic_with_decision_reasons(self):
         with TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))

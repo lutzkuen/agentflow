@@ -2120,18 +2120,71 @@ def response_output_text(resp: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _response_tool_calls(resp: dict[str, Any]) -> list[str]:
+    """Canonical per-tool-call strings (name + sorted-key JSON args) from a response.
+
+    Tool-execution turns answer with tool_use/tool_call blocks and little or no
+    prose, so a text-only similarity is ~0 even when two models choose the very same
+    action. Comparing the tool calls is what makes the quality gate meaningful for
+    the dominant tool-execution traffic. Computed locally for scoring only; the raw
+    strings are never persisted (only the count, a hash, and the float similarity).
+    """
+    if not isinstance(resp, dict):
+        return []
+    calls: list[str] = []
+
+    def add(name: Any, args: Any) -> None:
+        calls.append("tool_use:" + str(name or "") + ":" + stable_json(args))
+
+    for block in resp.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            add(block.get("name"), block.get("input"))
+    for item in resp.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") in ("function_call", "tool_call"):
+            add(item.get("name"), item.get("arguments"))
+        for block in item.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                add(block.get("name"), block.get("input"))
+    for choice in resp.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message") or {}
+        for call in message.get("tool_calls") or []:
+            if isinstance(call, dict):
+                function = call.get("function") or {}
+                add(function.get("name"), function.get("arguments"))
+    return calls
+
+
+def response_output_signature(resp: dict[str, Any]) -> str:
+    """Text output plus tool-call signature — the basis for routing-quality similarity."""
+    text = response_output_text(resp)
+    tools = "\n".join(_response_tool_calls(resp))
+    if text and tools:
+        return text + "\n" + tools
+    return text or tools
+
+
 def compare_response_outputs(primary_response: dict[str, Any] | None, shadow_response: dict[str, Any] | None) -> dict[str, Any]:
     primary_text = response_output_text(primary_response or {})
     shadow_text = response_output_text(shadow_response or {})
-    if primary_text or shadow_text:
-        similarity = cosine_similarity(build_embedding(primary_text), build_embedding(shadow_text))
+    primary_signature = response_output_signature(primary_response or {})
+    shadow_signature = response_output_signature(shadow_response or {})
+    if primary_signature or shadow_signature:
+        similarity = cosine_similarity(
+            build_embedding(primary_signature), build_embedding(shadow_signature)
+        )
     else:
         similarity = 1.0 if stable_json(primary_response or {}) == stable_json(shadow_response or {}) else 0.0
     return {
         "primary_output_chars": len(primary_text),
         "shadow_output_chars": len(shadow_text),
-        "primary_output_sha256": sha256_text(primary_text),
-        "shadow_output_sha256": sha256_text(shadow_text),
+        "primary_tool_call_count": len(_response_tool_calls(primary_response or {})),
+        "shadow_tool_call_count": len(_response_tool_calls(shadow_response or {})),
+        "primary_output_sha256": sha256_text(primary_signature),
+        "shadow_output_sha256": sha256_text(shadow_signature),
         "output_similarity": round(float(similarity), 6),
         "passed_threshold": float(similarity) >= ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD,
     }
