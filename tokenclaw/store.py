@@ -827,6 +827,7 @@ class SQLiteStore:
             self._ensure_column("routing_experiments", "budget_spent_before_usd", "real")
             self._ensure_column("routing_experiments", "budget_remaining_before_usd", "real")
             self._ensure_column("routing_experiments", "budget_spent_after_usd", "real")
+            self._ensure_column("routing_experiments", "shadow_routed_cost_est_usd", "real")
             cur.execute("""
             create table if not exists codex_app_events (
               id text primary key,
@@ -2340,7 +2341,7 @@ class SQLiteStore:
             "primary_latency_ms", "shadow_latency_ms", "primary_output_chars",
             "shadow_output_chars", "primary_output_sha256", "shadow_output_sha256",
             "output_similarity", "passed_threshold", "primary_cost_est_usd",
-            "shadow_cost_est_usd", "budget_limit_usd", "budget_spent_before_usd",
+            "shadow_cost_est_usd", "shadow_routed_cost_est_usd", "budget_limit_usd", "budget_spent_before_usd",
             "budget_remaining_before_usd", "budget_spent_after_usd",
             "error", "routing_json", "experiment_json",
             "primary_response_json", "shadow_response_json",

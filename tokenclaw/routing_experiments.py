@@ -4364,6 +4364,7 @@ def build_routing_experiment_report(
                passed_threshold,
                primary_cost_est_usd,
                shadow_cost_est_usd,
+               coalesce(shadow_routed_cost_est_usd, shadow_cost_est_usd) as shadow_routed_cost_est_usd,
                error,
                routing_json,
                experiment_json
@@ -4416,6 +4417,7 @@ def build_routing_experiment_report(
                 "fallback_or_retry_count": 0,
                 "primary_cost_usd": 0.0,
                 "shadow_cost_usd": 0.0,
+                "shadow_routed_cost_usd": 0.0,
                 "similarities": [],
                 "passed": [],
                 "latency_deltas": [],
@@ -4456,6 +4458,9 @@ def build_routing_experiment_report(
             item["latency_deltas"].append(float(row["primary_latency_ms"]) - float(row["shadow_latency_ms"]))
         item["primary_cost_usd"] += float(row["primary_cost_est_usd"] or 0.0)
         item["shadow_cost_usd"] += float(row["shadow_cost_est_usd"] or 0.0)
+        item["shadow_routed_cost_usd"] += float(
+            row["shadow_routed_cost_est_usd"] if row["shadow_routed_cost_est_usd"] is not None else (row["shadow_cost_est_usd"] or 0.0)
+        )
         if routing.get("fallback_reason") or routing.get("retry_count") or experiment.get("fallback_reason") or experiment.get("retry_count"):
             item["fallback_or_retry_count"] += 1
         if item["last_sample_at"] is None or str(row["created_at"]) > str(item["last_sample_at"]):
@@ -4480,7 +4485,11 @@ def build_routing_experiment_report(
         item["shadow_error_rate"] = round(int(item["shadow_error_samples"]) / int(item["samples"]), 4) if item["samples"] else 0.0
         item["primary_cost_usd"] = round(float(item["primary_cost_usd"]), 6)
         item["shadow_cost_usd"] = round(float(item["shadow_cost_usd"]), 6)
-        item["cost_delta_usd"] = round(float(item["primary_cost_usd"]) - float(item["shadow_cost_usd"]), 6)
+        item["shadow_routed_cost_usd"] = round(float(item["shadow_routed_cost_usd"]), 6)
+        # Routing economics use the counterfactual routed cost (what the cheaper model
+        # would cost on the same cached token profile), not the uncached shadow probe.
+        item["cost_delta_usd"] = round(float(item["primary_cost_usd"]) - float(item["shadow_routed_cost_usd"]), 6)
+        item["shadow_probe_cost_usd"] = item["shadow_cost_usd"]
         item["avg_latency_delta_ms"] = round(float(avg_latency_delta), 2) if avg_latency_delta is not None else None
         last_age = _age_hours(item.get("last_sample_at"))
         item["last_sample_age_hours"] = round(last_age, 2) if last_age is not None else None
@@ -4529,7 +4538,7 @@ def build_routing_experiment_report(
                         then passed_threshold else null end) as pass_rate,
                round(sum(coalesce(primary_cost_est_usd, 0)), 6) as primary_cost_usd,
                round(sum(coalesce(shadow_cost_est_usd, 0)), 6) as shadow_cost_usd,
-               round(sum(coalesce(primary_cost_est_usd, 0) - coalesce(shadow_cost_est_usd, 0)), 6) as cost_delta_usd,
+               round(sum(coalesce(primary_cost_est_usd, 0) - coalesce(shadow_routed_cost_est_usd, shadow_cost_est_usd, 0)), 6) as cost_delta_usd,
                round(avg(case when primary_latency_ms is not null and shadow_latency_ms is not null
                               then primary_latency_ms - shadow_latency_ms else null end), 2) as avg_latency_delta_ms
         from routing_experiments

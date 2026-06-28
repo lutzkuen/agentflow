@@ -1137,6 +1137,9 @@ similarity_threshold: 0.86
         workflow_phase: str = "summary",
         fallback: bool = False,
         stream: bool = False,
+        primary_cost_est_usd: float = 0.003,
+        shadow_cost_est_usd: float = 0.001,
+        shadow_routed_cost_est_usd: float | None = None,
     ) -> None:
         created_at = created_at or utc_now()
         similarity = 0.94 if passed else 0.7
@@ -1178,8 +1181,9 @@ similarity_threshold: 0.86
             shadow_output_sha256=f"shadow-{idx}",
             output_similarity=similarity if shadow_status_code and shadow_status_code < 400 else None,
             passed_threshold=1 if passed else 0,
-            primary_cost_est_usd=0.003,
-            shadow_cost_est_usd=0.001,
+            primary_cost_est_usd=primary_cost_est_usd,
+            shadow_cost_est_usd=shadow_cost_est_usd,
+            shadow_routed_cost_est_usd=shadow_routed_cost_est_usd,
             routing_json=stable_json(routing_json),
             experiment_json=stable_json(experiment_json),
             error=error,
@@ -1226,6 +1230,35 @@ similarity_threshold: 0.86
             '"cache_key"',
         ):
             self.assertNotIn(forbidden, rendered)
+
+    def test_promotion_uses_counterfactual_routed_cost_not_uncached_probe(self):
+        # The shadow probe is a fresh, uncached call, so on cached traffic it costs
+        # more than the cached primary (e.g. $0.96 vs $0.25) — which used to reject
+        # the candidate as "shadow-more-expensive" even though live routing to the
+        # cheaper model gets the same caching and is actually cheaper. The promotion
+        # cost delta must use the counterfactual routed cost.
+        report = self._promotion_report_for_samples(
+            primary_cost_est_usd=0.25,
+            shadow_cost_est_usd=0.96,  # uncached probe — more expensive
+            shadow_routed_cost_est_usd=0.15,  # what the route would actually cost
+        )
+
+        candidate = report["candidates"][0]
+        self.assertGreater(candidate["cost_delta_usd"], 0)
+        self.assertNotIn("shadow-more-expensive", candidate["promotion_reason_codes"])
+        self.assertEqual(candidate["promotion_verdict"], "promote")
+
+    def test_promotion_rejects_when_counterfactual_route_is_more_expensive(self):
+        report = self._promotion_report_for_samples(
+            primary_cost_est_usd=0.25,
+            shadow_cost_est_usd=0.10,
+            shadow_routed_cost_est_usd=0.40,  # route genuinely costs more
+        )
+
+        candidate = report["candidates"][0]
+        self.assertLess(candidate["cost_delta_usd"], 0)
+        self.assertEqual(candidate["promotion_verdict"], "reject")
+        self.assertIn("shadow-more-expensive", candidate["promotion_reason_codes"])
 
     def test_shadow_promotion_report_needs_more_samples_for_low_count(self):
         report = self._promotion_report_for_samples(sample_count=2)

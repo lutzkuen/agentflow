@@ -1241,6 +1241,24 @@ async def _run_anthropic_routing_experiment(
             cache_read,
         )
 
+    # Counterfactual routed cost: what the shadow model WOULD cost serving the
+    # primary's exact token profile (same cache_read/cache_creation split). The raw
+    # shadow probe above is a fresh, uncached call, so on cached traffic it costs far
+    # more than the cached primary — making routing look more expensive than it is.
+    # Live routing to the cheaper model gets the same caching, so this counterfactual
+    # is the fair economics for the promotion decision. Budget still uses the real
+    # probe cost (shadow_cost); promotion uses this.
+    shadow_routed_cost: Optional[float] = None
+    primary_usage = primary_response_body.get("usage") if isinstance(primary_response_body, dict) else None
+    if isinstance(primary_usage, dict):
+        shadow_routed_cost = estimate_cost(
+            shadow_model,
+            int(primary_usage.get("input_tokens") or 0) or input_tokens_est,
+            int(primary_usage.get("output_tokens") or 0),
+            int(primary_usage.get("cache_creation_input_tokens") or 0),
+            int(primary_usage.get("cache_read_input_tokens") or 0),
+        )
+
     comparison = compare_response_outputs(primary_response_body, shadow_response_body)
     feedback_features = routing_experiment_feedback_features(
         experiment_id=experiment_id,
@@ -1339,6 +1357,7 @@ async def _run_anthropic_routing_experiment(
         passed_threshold=1 if comparison["passed_threshold"] else 0,
         primary_cost_est_usd=primary_cost_est_usd,
         shadow_cost_est_usd=shadow_cost,
+        shadow_routed_cost_est_usd=shadow_routed_cost,
         budget_limit_usd=experiment_meta.get("daily_budget_usd"),
         budget_spent_before_usd=experiment_meta.get("budget_spent_usd"),
         budget_remaining_before_usd=experiment_meta.get("budget_remaining_usd"),
