@@ -1231,6 +1231,35 @@ similarity_threshold: 0.86
         ):
             self.assertNotIn(forbidden, rendered)
 
+    def test_promotion_evidence_window_ages_out_old_poison_samples(self):
+        # With the window enabled, a pre-fix shadow-http-400 sample older than the
+        # window must not count against the candidate; recent clean samples should.
+        tmp = TemporaryDirectory()
+        tmp_path = Path(tmp.name)
+        manual = self._reload_with_promotion_fixture_policy(tmp_path, daily_budget_usd=10.0)
+        store = Store(str(tmp_path / "tokenclaw.sqlite3"))
+        old = (datetime.now(timezone.utc) - timedelta(hours=100)).isoformat()
+        try:
+            # Old poison: a 400 sample 100h ago.
+            self._log_shadow_promotion_sample(
+                store, idx=0, created_at=old, shadow_status_code=400, passed=False, error="shadow-http-400"
+            )
+            # Recent clean samples.
+            for idx in range(1, 4):
+                self._log_shadow_promotion_sample(store, idx=idx)
+            original = manual.ROUTING_PROMOTION_EVIDENCE_WINDOW_HOURS
+            manual.ROUTING_PROMOTION_EVIDENCE_WINDOW_HOURS = 72.0
+            try:
+                report = manual.build_routing_experiment_report(store, limit=10)
+            finally:
+                manual.ROUTING_PROMOTION_EVIDENCE_WINDOW_HOURS = original
+            candidate = report["candidates"][0]
+            self.assertNotIn("shadow-http-400-observed", candidate["promotion_reason_codes"])
+            self.assertEqual(candidate["samples"], 3)
+        finally:
+            store.conn.close()
+            tmp.cleanup()
+
     def test_promotion_uses_counterfactual_routed_cost_not_uncached_probe(self):
         # The shadow probe is a fresh, uncached call, so on cached traffic it costs
         # more than the cached primary (e.g. $0.96 vs $0.25) — which used to reject

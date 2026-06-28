@@ -1016,6 +1016,17 @@ ROUTING_EXPERIMENT_MIN_SAMPLES = int(ROUTING_EXPERIMENT_POLICY["min_samples_for_
 ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES = bool(ROUTING_EXPERIMENT_POLICY["store_response_bodies"])
 ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE = "routing_experiment_outcome"
 ROUTING_PROMOTION_FRESHNESS_MAX_AGE_HOURS = 168
+# Promotion evidence is scored over a recent window so that pre-fix shadow failures
+# (e.g. the system-role / clear_thinking 400s and text-only-0.0 scores collected
+# before those fixes deployed) age out and stop permanently poisoning a candidate's
+# 400-count and pass-rate. Older rows still appear in the raw table; they just no
+# longer gate promotion. 0 / unset disables the window (score all history).
+try:
+    ROUTING_PROMOTION_EVIDENCE_WINDOW_HOURS = float(
+        os.getenv("TOKENCLAW_ROUTING_PROMOTION_EVIDENCE_WINDOW_HOURS", "0")
+    )
+except (TypeError, ValueError):
+    ROUTING_PROMOTION_EVIDENCE_WINDOW_HOURS = 0.0
 ROUTING_PROMOTION_MIN_COMPARED_COVERAGE = 0.80
 ROUTING_PROMOTION_MIN_PASS_RATE = 0.90
 ROUTING_PROMOTION_MAX_SHADOW_ERROR_RATE = 0.05
@@ -4344,8 +4355,14 @@ def build_routing_experiment_report(
 ) -> dict[str, Any]:
     capped = max(1, min(int(limit or 1), 1000))
     conn = store_obj.conn
-    rows = conn.execute(
-        """
+    # Score promotion evidence over a recent window so pre-fix shadow failures age
+    # out instead of permanently poisoning a candidate's 400-count and pass-rate.
+    promotion_cutoff = (
+        _since_cutoff_iso(window_hours=ROUTING_PROMOTION_EVIDENCE_WINDOW_HOURS)
+        if ROUTING_PROMOTION_EVIDENCE_WINDOW_HOURS and ROUTING_PROMOTION_EVIDENCE_WINDOW_HOURS > 0
+        else None
+    )
+    rows_select = """
         select created_at,
                coalesce(provider, 'anthropic') as provider,
                coalesce(source_surface, 'anthropic_messages') as source_surface,
@@ -4369,10 +4386,14 @@ def build_routing_experiment_report(
                routing_json,
                experiment_json
         from routing_experiments
+        {where}
         order by created_at desc
         limit 50000
-        """
-    ).fetchall()
+    """
+    if promotion_cutoff:
+        rows = conn.execute(rows_select.format(where="where created_at >= ?"), (promotion_cutoff,)).fetchall()
+    else:
+        rows = conn.execute(rows_select.format(where=""), ()).fetchall()
     grouped: dict[tuple[str, str, bool, str, str, str, str, str], dict[str, Any]] = {}
     for row in rows:
         experiment = _parse_jsonish(row["experiment_json"])
