@@ -565,6 +565,78 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertEqual(meta["managed_shadow"]["fraction"], 1.0)
         assert_managed_egress_safe(meta)
 
+    def test_managed_shadow_decision_stops_sampling_when_daily_budget_exhausted(self):
+        # Coverage now includes thinking traffic, so the managed shadow path must
+        # respect a daily spend ceiling instead of sampling without bound.
+        class _FakeRow(dict):
+            pass
+
+        class _FakeCursor:
+            def __init__(self, spend):
+                self._spend = spend
+
+            def fetchone(self):
+                return _FakeRow({"shadow_spend_usd": self._spend})
+
+        class _FakeConn:
+            def __init__(self, spend):
+                self._spend = spend
+
+            def execute(self, *_args, **_kwargs):
+                return _FakeCursor(self._spend)
+
+        class _FakeStore:
+            def __init__(self, spend):
+                self.conn = _FakeConn(spend)
+
+        recommendation_meta = {
+            "schema": "tokenclaw.policy_decision.v1",
+            "decision_id": "decision-budget",
+            "policy_id": "policy-budget",
+            "source_surface": "anthropic_messages",
+            "shadow": {
+                "status": "recommended",
+                "target_model": "claude-sonnet-4-6",
+                "fraction": 1.0,
+                "mode": "async_eval",
+                "policy_id": "managed-shadow-budget",
+                "reason_codes": ["managed-shadow-recommendation"],
+            },
+        }
+        routing_meta = {"requested_model": "claude-opus-4-8", "category": "tool-result"}
+
+        # Over budget -> not sampled, with an auditable reason.
+        over = anthropic_proxy._managed_shadow_experiment_decision(
+            recommendation_meta=recommendation_meta,
+            routing_meta=routing_meta,
+            requested_model="claude-opus-4-8",
+            primary_model="claude-opus-4-8",
+            stream=True,
+            input_tokens_est=3000,
+            random_value=0.0,
+            store_obj=_FakeStore(anthropic_proxy.MANAGED_SHADOW_DAILY_BUDGET_USD + 1.0),
+        )
+        self.assertIsNotNone(over)
+        self.assertFalse(over["sampled"])
+        self.assertTrue(over["budget_exhausted"])
+        self.assertEqual(over["reason"], "managed-shadow-budget-exhausted")
+
+        # Under budget -> sampled, budget fields populated (not None).
+        under = anthropic_proxy._managed_shadow_experiment_decision(
+            recommendation_meta=recommendation_meta,
+            routing_meta=routing_meta,
+            requested_model="claude-opus-4-8",
+            primary_model="claude-opus-4-8",
+            stream=True,
+            input_tokens_est=3000,
+            random_value=0.0,
+            store_obj=_FakeStore(0.0),
+        )
+        self.assertTrue(under["sampled"])
+        self.assertFalse(under["budget_exhausted"])
+        self.assertEqual(under["daily_budget_usd"], anthropic_proxy.MANAGED_SHADOW_DAILY_BUDGET_USD)
+        self.assertEqual(under["budget_spent_usd"], 0.0)
+
     def test_unsampled_anthropic_stream_records_clear_skip_without_shadow_call(self):
         request_body = {
             "model": "claude-sonnet-4-6",

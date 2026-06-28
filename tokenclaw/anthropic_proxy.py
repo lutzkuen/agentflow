@@ -65,6 +65,7 @@ from tokenclaw.routing_experiments import (
     routing_experiment_feedback_features,
     routing_experiment_decision,
     _public_label as _public_metadata_label,
+    _today_shadow_spend_usd,
 )
 from tokenclaw.session_memory_hints import build_session_memory_optimization_hints
 from tokenclaw.streaming_tool_cache_invalidation_drill import (
@@ -111,6 +112,15 @@ MAX_THINKING_BUDGET_TOKENS = int(os.getenv("TOKENCLAW_MAX_THINKING_BUDGET_TOKENS
 # non-streaming ceiling for all current Claude models.
 ANTHROPIC_SHADOW_NONSTREAMING_MAX_TOKENS = int(
     os.getenv("TOKENCLAW_ANTHROPIC_SHADOW_NONSTREAMING_MAX_TOKENS", "8192")
+)
+# Daily ceiling on TokenClaw-attributable Anthropic shadow spend. The managed
+# shadow path is the only Anthropic shadow trigger and previously had no cap; as
+# coverage widens toward "all incoming Claude traffic" (e.g. thinking traffic now
+# eligible), an uncapped path could run up real candidate-model spend. The cap
+# bounds it: once today's shadow spend reaches it, sampling stops for the day and
+# the primary request is served unchanged. <=0 disables the cap.
+MANAGED_SHADOW_DAILY_BUDGET_USD = float(
+    os.getenv("TOKENCLAW_MANAGED_SHADOW_DAILY_BUDGET_USD", "10.0")
 )
 # Upstream invalid-request messages describe the request shape (parameter names
 # and limits), not prompt content, so a short truncated copy is safe to retain
@@ -308,6 +318,7 @@ def _managed_shadow_experiment_decision(
     stream: bool,
     input_tokens_est: int,
     random_value: float | None = None,
+    store_obj: Any | None = None,
 ) -> dict[str, Any] | None:
     shadow = recommendation_meta.get("shadow")
     if not isinstance(shadow, dict) or shadow.get("status") != "recommended":
@@ -319,7 +330,20 @@ def _managed_shadow_experiment_decision(
         fraction = max(0.0, min(1.0, float(shadow.get("fraction") or 0.0)))
     except (TypeError, ValueError):
         fraction = 0.0
-    selected = fraction > 0.0 and (random.random() if random_value is None else random_value) < fraction
+    source_surface = str(recommendation_meta.get("source_surface") or "anthropic_messages")
+    budget_limit = MANAGED_SHADOW_DAILY_BUDGET_USD
+    budget_spent = (
+        _today_shadow_spend_usd(store_obj, provider="anthropic", source_surface=source_surface)
+        if budget_limit > 0
+        else 0.0
+    )
+    budget_remaining = max(0.0, budget_limit - budget_spent) if budget_limit > 0 else None
+    budget_exhausted = budget_limit > 0 and budget_spent >= budget_limit
+    selected = (
+        not budget_exhausted
+        and fraction > 0.0
+        and (random.random() if random_value is None else random_value) < fraction
+    )
     reason_codes = [
         str(item)
         for item in (shadow.get("reason_codes") or [])
@@ -332,19 +356,25 @@ def _managed_shadow_experiment_decision(
         "kill_switch": False,
         "status": "selected" if selected else "skipped",
         "sampled": bool(selected),
-        "reason": "managed-shadow-sampled" if selected else "managed-shadow-not-sampled",
+        "reason": (
+            "managed-shadow-sampled"
+            if selected
+            else "managed-shadow-budget-exhausted"
+            if budget_exhausted
+            else "managed-shadow-not-sampled"
+        ),
         "counterfactual": True,
         "shadow_only": True,
         "policy_source": "managed-recommended",
         "rule_path": "managed://tokenclaw-server/policy-decision/shadow",
         "sample_rate": round(fraction, 6),
         "sample_rate_scope": "managed-policy-decision-shadow",
-        "daily_budget_usd": None,
+        "daily_budget_usd": round(budget_limit, 6) if budget_limit > 0 else None,
         "daily_budget_scope": "managed-policy-decision-shadow",
         "profile_id": str(shadow.get("policy_id") or "managed-shadow-recommendation"),
-        "budget_spent_usd": None,
-        "budget_remaining_usd": None,
-        "budget_exhausted": False,
+        "budget_spent_usd": round(budget_spent, 6) if budget_limit > 0 else None,
+        "budget_remaining_usd": round(budget_remaining, 6) if budget_remaining is not None else None,
+        "budget_exhausted": bool(budget_exhausted),
         "budget_cap_scope": "managed-policy-decision-shadow",
         "similarity_threshold": None,
         "min_samples_for_confidence": None,
@@ -1537,6 +1567,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             primary_model=str(crunched.get("model") or routed_model),
             stream=stream,
             input_tokens_est=input_tokens,
+            store_obj=context.store,
         )
         if managed_shadow_experiment is not None:
             routing_meta["routing_experiment"] = managed_shadow_experiment
