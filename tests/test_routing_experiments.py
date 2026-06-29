@@ -318,6 +318,41 @@ blocklist:
         self.assertLess(result["output_similarity"], 1.0)
         self.assertNotEqual(result["primary_output_sha256"], result["shadow_output_sha256"])
 
+    def test_tool_turn_scores_on_action_agreement_despite_divergent_prose(self):
+        # The decisive case for promotion on relevant traffic: a thinking primary and
+        # a non-thinking shadow narrate the SAME tool action with very different
+        # prose. The diluted text+tool cosine scored this ~0.2 (fail); scoring on the
+        # tool action it is a match (pass), so the route can actually promote.
+        primary = {
+            "content": [
+                {"type": "text", "text": "Let me carefully reason about the file we need; "
+                                          "the user asked about main, so I will open it now."},
+                {"type": "tool_use", "name": "read_file", "input": {"path": "main.py"}},
+            ]
+        }
+        shadow = {
+            "content": [
+                {"type": "text", "text": "Reading main.py."},
+                {"type": "tool_use", "name": "read_file", "input": {"path": "main.py"}},
+            ]
+        }
+
+        result = experiments.compare_response_outputs(primary, shadow)
+
+        self.assertEqual(result["tool_call_similarity"], 1.0)
+        self.assertLess(result["text_similarity"], 0.86)  # prose alone would fail
+        self.assertEqual(result["output_similarity"], 1.0)  # action agreement wins
+        self.assertTrue(result["passed_threshold"])
+
+    def test_text_turn_without_tool_calls_still_scored_on_text(self):
+        primary = {"content": [{"type": "text", "text": "The capital of France is Paris."}]}
+        shadow = {"content": [{"type": "text", "text": "Paris is the capital of France."}]}
+
+        result = experiments.compare_response_outputs(primary, shadow)
+
+        self.assertIsNone(result["tool_call_similarity"])
+        self.assertEqual(result["output_similarity"], result["text_similarity"])
+
     def test_report_explains_unqualified_traffic_with_decision_reasons(self):
         with TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "tokenclaw.sqlite3"))

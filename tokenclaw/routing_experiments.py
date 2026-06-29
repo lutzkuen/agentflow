@@ -2178,24 +2178,48 @@ def response_output_signature(resp: dict[str, Any]) -> str:
     return text or tools
 
 
+def _tool_call_set_similarity(primary_calls: list[str], shadow_calls: list[str]) -> float | None:
+    """Jaccard agreement between two canonical tool-call sets, or None if no calls."""
+    primary_set, shadow_set = set(primary_calls), set(shadow_calls)
+    union = primary_set | shadow_set
+    if not union:
+        return None
+    return len(primary_set & shadow_set) / len(union)
+
+
 def compare_response_outputs(primary_response: dict[str, Any] | None, shadow_response: dict[str, Any] | None) -> dict[str, Any]:
     primary_text = response_output_text(primary_response or {})
     shadow_text = response_output_text(shadow_response or {})
     primary_signature = response_output_signature(primary_response or {})
     shadow_signature = response_output_signature(shadow_response or {})
+    primary_calls = _response_tool_calls(primary_response or {})
+    shadow_calls = _response_tool_calls(shadow_response or {})
     if primary_signature or shadow_signature:
-        similarity = cosine_similarity(
+        text_similarity = cosine_similarity(
             build_embedding(primary_signature), build_embedding(shadow_signature)
         )
     else:
-        similarity = 1.0 if stable_json(primary_response or {}) == stable_json(shadow_response or {}) else 0.0
+        text_similarity = 1.0 if stable_json(primary_response or {}) == stable_json(shadow_response or {}) else 0.0
+    tool_call_similarity = _tool_call_set_similarity(primary_calls, shadow_calls)
+    # On a tool-execution turn the actionable output is the tool call, so route
+    # equivalence is tool-call agreement — not prose overlap. A thinking primary and
+    # a (forced) non-thinking shadow always differ in wording around an identical
+    # action, which dragged the diluted text+tool cosine to ~0.2 and made every
+    # tool-execution canary fail quality, blocking promotion on the dominant traffic.
+    # Score those turns on tool-call agreement; same tool+args -> equivalent action.
+    if primary_calls:
+        similarity = tool_call_similarity if tool_call_similarity is not None else text_similarity
+    else:
+        similarity = text_similarity
     return {
         "primary_output_chars": len(primary_text),
         "shadow_output_chars": len(shadow_text),
-        "primary_tool_call_count": len(_response_tool_calls(primary_response or {})),
-        "shadow_tool_call_count": len(_response_tool_calls(shadow_response or {})),
+        "primary_tool_call_count": len(primary_calls),
+        "shadow_tool_call_count": len(shadow_calls),
         "primary_output_sha256": sha256_text(primary_signature),
         "shadow_output_sha256": sha256_text(shadow_signature),
+        "text_similarity": round(float(text_similarity), 6),
+        "tool_call_similarity": round(float(tool_call_similarity), 6) if tool_call_similarity is not None else None,
         "output_similarity": round(float(similarity), 6),
         "passed_threshold": float(similarity) >= ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD,
     }
