@@ -1110,6 +1110,52 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertNotIn("context_management", shadow_body)
         self.assertEqual(preflight["thinking_dependent_context_edits_stripped"], 1)
 
+    def test_keep_thinking_shadow_preserves_sonnet_thinking_and_clear_thinking(self):
+        # With the keep-thinking experiment flag on, the shadow tests sonnet WITH its
+        # own thinking (the fair routing counterfactual): thinking stays enabled with
+        # a clamped budget, clear_thinking context edits stay (thinking is enabled),
+        # but the primary model's thinking-history blocks are still stripped (their
+        # signatures never validate on the shadow model).
+        request_body = {
+            "model": "claude-opus-4-8",
+            "max_tokens": 64000,
+            "stream": True,
+            "thinking": {"type": "enabled", "budget_tokens": 32000, "effort": "high"},
+            "context_management": {"edits": [{"type": "clear_thinking_20251015"}]},
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "opus reasoning", "signature": "opus-sig"},
+                        {"type": "tool_use", "id": "t1", "name": "read_file", "input": {"path": "a.py"}},
+                    ],
+                },
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x"}]},
+            ],
+        }
+
+        with patch.object(anthropic_proxy, "ANTHROPIC_SHADOW_KEEP_THINKING", True):
+            shadow_body, preflight = anthropic_proxy._prepare_anthropic_shadow_request(
+                request_body,
+                shadow_model="claude-sonnet-4-6",
+                primary_model="claude-opus-4-8",
+            )
+
+        self.assertIsNotNone(shadow_body)
+        self.assertEqual(preflight["status"], "ok")
+        self.assertEqual(preflight["shadow_thinking_mode"], "kept")
+        # Thinking kept + normalized: enabled, budget clamped under non-streaming max_tokens, effort dropped.
+        self.assertEqual(shadow_body["thinking"]["type"], "enabled")
+        self.assertLess(shadow_body["thinking"]["budget_tokens"], shadow_body["max_tokens"])
+        self.assertNotIn("effort", shadow_body["thinking"])
+        # clear_thinking stays valid because thinking is enabled.
+        self.assertIn("context_management", shadow_body)
+        # The primary's thinking-history block is still stripped (cross-model signature).
+        assistant_types = [b["type"] for b in shadow_body["messages"][0]["content"]]
+        self.assertEqual(assistant_types, ["tool_use"])
+        # Original request untouched.
+        self.assertEqual(request_body["thinking"]["budget_tokens"], 32000)
+
     def test_shadow_without_system_role_message_leaves_messages_unchanged(self):
         request_body = {
             "model": "claude-opus-4-8",

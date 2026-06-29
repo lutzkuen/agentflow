@@ -122,6 +122,14 @@ ANTHROPIC_SHADOW_NONSTREAMING_MAX_TOKENS = int(
 MANAGED_SHADOW_DAILY_BUDGET_USD = float(
     os.getenv("TOKENCLAW_MANAGED_SHADOW_DAILY_BUDGET_USD", "10.0")
 )
+# Experiment flag: keep the shadow model's OWN extended thinking enabled instead of
+# forcing it off. The forced-off shadow compares a thinking primary (opus) against a
+# no-thinking shadow (sonnet), which understates the shadow on agent-loop turns where
+# reasoning drives the next action. Keeping thinking on tests the fair counterfactual
+# (what live routing to sonnet would actually produce). Default off; enable to A/B.
+ANTHROPIC_SHADOW_KEEP_THINKING = os.getenv(
+    "TOKENCLAW_ANTHROPIC_SHADOW_KEEP_THINKING", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 # Upstream invalid-request messages describe the request shape (parameter names
 # and limits), not prompt content, so a short truncated copy is safe to retain
 # for diagnosing future 4xx causes without leaking raw prompts. The cap stays at
@@ -980,6 +988,36 @@ def _strip_thinking_dependent_context_management(
     diagnostics["thinking_dependent_context_edits_stripped"] = removed
 
 
+def _normalize_shadow_thinking_for_keep(body: dict[str, Any], diagnostics: dict[str, Any]) -> None:
+    """Keep the shadow model's own thinking enabled, normalized to a valid shape.
+
+    Drops opus-only sub-params the shadow model may reject and clamps the thinking
+    budget below the (already clamped) non-streaming ``max_tokens`` so the request
+    validates. The shadow then reasons with its OWN thinking rather than being
+    forced to answer cold — the fair routing counterfactual.
+    """
+    thinking = body.get("thinking")
+    if not isinstance(thinking, dict):
+        return
+    thinking.pop("effort", None)
+    body.pop("interleaved_thinking", None)
+    try:
+        max_tokens = int(body.get("max_tokens") or ANTHROPIC_SHADOW_NONSTREAMING_MAX_TOKENS)
+    except (TypeError, ValueError):
+        max_tokens = ANTHROPIC_SHADOW_NONSTREAMING_MAX_TOKENS
+    ceiling = max(1024, max_tokens - 512)
+    try:
+        requested_budget = int(thinking.get("budget_tokens") or 0)
+    except (TypeError, ValueError):
+        requested_budget = 0
+    budget = requested_budget if requested_budget > 0 else min(4096, ceiling)
+    budget = max(1024, min(budget, ceiling))
+    thinking["budget_tokens"] = budget
+    thinking["type"] = "enabled"
+    diagnostics["shadow_thinking_mode"] = "kept"
+    diagnostics["shadow_thinking_budget"] = budget
+
+
 def _normalize_shadow_non_streaming_max_tokens(
     body: dict[str, Any], diagnostics: dict[str, Any]
 ) -> None:
@@ -1030,27 +1068,32 @@ def _prepare_anthropic_shadow_request(
     _normalize_shadow_non_streaming_max_tokens(shadow_body, diagnostics)
     _fold_system_role_messages(shadow_body, diagnostics)
     sanitization: dict[str, Any] = {}
-    _strip_model_incompatible_params(shadow_body, sanitization, primary_model)
-    if sanitization.get("stripped_params"):
-        diagnostics["stripped_params"] = sanitization["stripped_params"]
-    # Thinking is now disabled on the shadow, so any context-management strategy that
-    # requires thinking (clear_thinking_*) must go or the request 400s.
-    _strip_thinking_dependent_context_management(shadow_body, diagnostics)
-    # The shadow leg disables extended thinking (the ``thinking`` param is stripped
-    # above and streaming is forced off), so any thinking/redacted_thinking blocks
-    # left in the assistant history make the request self-contradictory — Anthropic
-    # rejects "thinking blocks without thinking enabled" with a 400
-    # invalid_request_error. This stripping was previously gated to haiku shadows,
-    # which silently 400'd every opus->sonnet tool-result canary while leaving the
-    # haiku path healthy. Strip for any shadow whose thinking is now disabled.
-    if not _has_top_level_thinking(shadow_body):
-        diagnostics["candidate_would_strip_thinking_history"] = True
-        pre_sanitization_tool_audit = _anthropic_shadow_tool_result_audit(shadow_body)
-        if int(pre_sanitization_tool_audit.get("thinking_blocks_before_tool_results") or 0) > 0:
-            diagnostics["pre_sanitization_tool_result_audit"] = pre_sanitization_tool_audit
-        shadow_body, stripped_thinking = strip_thinking_history_blocks(shadow_body)
-        if stripped_thinking:
-            diagnostics["thinking_history_blocks_stripped"] = stripped_thinking
+    keep_thinking = ANTHROPIC_SHADOW_KEEP_THINKING and _has_top_level_thinking(shadow_body)
+    if keep_thinking:
+        # Keep the shadow model's own thinking on (fair counterfactual); just
+        # normalize it. clear_thinking context edits stay valid because thinking
+        # remains enabled.
+        _normalize_shadow_thinking_for_keep(shadow_body, diagnostics)
+    else:
+        _strip_model_incompatible_params(shadow_body, sanitization, primary_model)
+        if sanitization.get("stripped_params"):
+            diagnostics["stripped_params"] = sanitization["stripped_params"]
+        # Thinking is now disabled on the shadow, so any context-management strategy
+        # that requires thinking (clear_thinking_*) must go or the request 400s.
+        _strip_thinking_dependent_context_management(shadow_body, diagnostics)
+        diagnostics["shadow_thinking_mode"] = "disabled"
+    # The assistant thinking/redacted_thinking history carries the PRIMARY model's
+    # signatures, which never validate on a different shadow model, so strip it
+    # whether or not the shadow keeps its own thinking enabled. (Without thinking it
+    # would also be the self-contradictory "thinking blocks without thinking
+    # enabled" 400 that silently killed every opus->sonnet tool-result canary.)
+    diagnostics["candidate_would_strip_thinking_history"] = True
+    pre_sanitization_tool_audit = _anthropic_shadow_tool_result_audit(shadow_body)
+    if int(pre_sanitization_tool_audit.get("thinking_blocks_before_tool_results") or 0) > 0:
+        diagnostics["pre_sanitization_tool_result_audit"] = pre_sanitization_tool_audit
+    shadow_body, stripped_thinking = strip_thinking_history_blocks(shadow_body)
+    if stripped_thinking:
+        diagnostics["thinking_history_blocks_stripped"] = stripped_thinking
     tool_audit = _anthropic_shadow_tool_result_audit(shadow_body)
     diagnostics["tool_result_audit"] = tool_audit
     if tool_audit["status"] == "unsupported":
