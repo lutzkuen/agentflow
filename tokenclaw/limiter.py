@@ -19,7 +19,9 @@ def model_tier(model: str) -> str:
     m = model.lower()
     if "haiku" in m:
         return "haiku"
-    if "opus" in m:
+    # Mythos-class (fable/mythos) models share the opus concurrency/backoff tier —
+    # the semaphore map only has haiku/sonnet/opus buckets and these are top-tier.
+    if "opus" in m or "fable" in m or "mythos" in m:
         return "opus"
     return "sonnet"
 

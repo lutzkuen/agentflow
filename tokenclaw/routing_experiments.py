@@ -520,6 +520,8 @@ def _candidate_id_for_dashboard(payload: dict[str, Any]) -> str:
 
 def _suggest_adjacent_routed_model(requested: str) -> str:
     model_l = requested.lower()
+    if "fable" in model_l or "mythos" in model_l:
+        return "claude-opus-4-8"
     if "opus" in model_l:
         return "claude-sonnet-4-6"
     if "sonnet" in model_l:
@@ -2243,7 +2245,7 @@ def _model_family(model: Any) -> str | None:
     if not model:
         return None
     model_l = str(model).lower()
-    for family in ("haiku", "sonnet", "opus", "codex", "gpt-5", "gpt-4", "gpt-3"):
+    for family in ("haiku", "sonnet", "opus", "fable", "mythos", "codex", "gpt-5", "gpt-4", "gpt-3"):
         if family in model_l:
             return family
     return "other"
