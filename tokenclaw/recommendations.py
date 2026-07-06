@@ -1399,7 +1399,11 @@ def _policy_decision_payload_from_request_facts(envelope: dict[str, Any]) -> dic
 def _policy_decision_extra_input_features(unit: dict[str, Any]) -> dict[str, Any]:
     raw_input_features = unit.get("input_features") if isinstance(unit.get("input_features"), dict) else {}
     safe_input_features = _policy_decision_input_features(raw_input_features)
-    extra: dict[str, Any] = {}
+    # Opt in to server-side trained-routing-predictor serving. The request-facts
+    # payload path (used for live traffic) does not go through
+    # _policy_decision_preflight_payload, so without this the predictor is never
+    # consulted and every request falls back to the legacy hold.
+    extra: dict[str, Any] = {"use_routing_predictor": True}
     thinking_tail_freshness = safe_input_features.get("thinking_tail_feedback_freshness")
     if isinstance(thinking_tail_freshness, dict):
         extra["thinking_tail_feedback_freshness"] = thinking_tail_freshness
