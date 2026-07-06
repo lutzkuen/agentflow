@@ -13583,7 +13583,7 @@ def _routing_candidate_target(provider: str, requested_model: str, category: str
 
     if provider == "anthropic":
         if "opus" in requested:
-            return "claude-sonnet-4-6", "anthropic-routing-rules", "Opus pass-through may have a Sonnet downgrade path after quality evidence"
+            return "claude-sonnet-5", "anthropic-routing-rules", "Opus pass-through may have a Sonnet downgrade path after quality evidence"
         if "sonnet" in requested and (category in {"tool-result", "tool-light", "short-completion", "summary"} or phase in {"tool-execution", "summary"}):
             return "claude-haiku-4-5-20251001", "anthropic-routing-rules", "phase/category metadata matches existing local Haiku executor shapes"
         return None, None, "Anthropic aggregate bucket needs phase or thinking/tool safety evidence before downgrade"

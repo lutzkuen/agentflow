@@ -62,7 +62,7 @@ def _target_for_requested(model: Any) -> tuple[str | None, str | None]:
     if tier == "sonnet":
         return "haiku", "claude-haiku-4-5-20251001"
     if tier == "opus":
-        return "sonnet", "claude-sonnet-4-6"
+        return "sonnet", "claude-sonnet-5"
     return None, None
 
 
@@ -71,7 +71,7 @@ def _resolve_route_to(route_to: Any) -> str:
     if value == "haiku":
         return os.getenv("TOKENCLAW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
     if value == "sonnet":
-        return os.getenv("TOKENCLAW_SONNET_MODEL", "claude-sonnet-4-6")
+        return os.getenv("TOKENCLAW_SONNET_MODEL", "claude-sonnet-5")
     if value == "opus":
         return os.getenv("TOKENCLAW_OPUS_MODEL", "claude-opus-4-5")
     return value

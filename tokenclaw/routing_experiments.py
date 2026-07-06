@@ -523,7 +523,7 @@ def _suggest_adjacent_routed_model(requested: str) -> str:
     if "fable" in model_l or "mythos" in model_l:
         return "claude-opus-4-8"
     if "opus" in model_l:
-        return "claude-sonnet-4-6"
+        return "claude-sonnet-5"
     if "sonnet" in model_l:
         return "claude-haiku-4-5-20251001"
     if "gpt-5.5" in model_l or "gpt-5-5" in model_l:

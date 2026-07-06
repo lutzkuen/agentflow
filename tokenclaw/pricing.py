@@ -28,6 +28,7 @@ ANTHROPIC_MODEL_PRICES = {
     "claude-opus-4.5": (5.0, 25.0),
     "claude-opus-4-5": (5.0, 25.0),
     "claude-opus-4": (15.0, 75.0),
+    "claude-sonnet-5": (3.0, 15.0),
     "claude-sonnet-4.5": (3.0, 15.0),
     "claude-sonnet-4-5": (3.0, 15.0),
     "claude-sonnet-4": (3.0, 15.0),

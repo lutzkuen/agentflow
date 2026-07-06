@@ -12,7 +12,7 @@ from tokenclaw.paths import tokenclaw_config_path, safe_expanduser
 from tokenclaw.store import stable_json
 
 HAIKU_DEFAULT = env("TOKENCLAW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
-SONNET_DEFAULT = env("TOKENCLAW_SONNET_MODEL", "claude-sonnet-4-6")
+SONNET_DEFAULT = env("TOKENCLAW_SONNET_MODEL", "claude-sonnet-5")
 OPUS_DEFAULT = env("TOKENCLAW_OPUS_MODEL", "claude-opus-4-5")
 OPENAI_LARGE_DEFAULT = env("TOKENCLAW_OPENAI_LARGE_MODEL", "gpt-5-codex")
 OPENAI_SMALL_DEFAULT = env("TOKENCLAW_OPENAI_SMALL_MODEL", "gpt-5-mini")
