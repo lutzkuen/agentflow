@@ -15,21 +15,26 @@ By default, TokenClaw does **not** store raw prompts or responses.
 
 Requires Python 3.10+.
 
-Install the published package from PyPI:
+Install the published package from PyPI. The base install is the **server-free
+library** (crunching + local exact-match cache) and pulls only one dependency
+(PyYAML). The local proxy, CLI, and dashboard live behind the `server` extra:
 
 ```bash
-pip install tokenclaw
+pip install tokenclaw            # library only: crunching + local cache
+pip install 'tokenclaw[server]'  # + the local proxy, CLI, and dashboard
 ```
 
-The default install is intentionally focused on the local proxy, dashboard,
-local SQLite telemetry, and file-backed YAML rules. Advanced dependencies stay
-behind optional extras:
+To use TokenClaw's crunching and local cache directly inside your own Python app
+(e.g. a self-built OpenAI app) without running a server, see
+[docs/library.md](docs/library.md).
+
+Further optional extras stack on top of the `server` install:
 
 ```bash
 pip install 'tokenclaw[managed]'          # Postgres-backed managed/workbench storage
 pip install 'tokenclaw[compression]'      # zstd request-body decoding
 pip install 'tokenclaw[openai-realtime]'  # OpenAI realtime WebSocket proxy bridge
-pip install 'tokenclaw[all]'              # all optional runtime extras
+pip install 'tokenclaw[all]'              # all optional runtime extras (incl. server)
 ```
 
 For TokenClaw development, clone this repository and install it in editable
@@ -40,7 +45,7 @@ git clone https://github.com/lutzkuen/tokenclaw.git
 cd tokenclaw
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e '.[server]'   # include the proxy/CLI/dashboard stack
 ```
 
 Then start the local savings stack from one terminal:
