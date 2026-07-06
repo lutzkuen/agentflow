@@ -1,7 +1,8 @@
 [project]
 name = "tokenclaw"
-version = "0.2.0"
-description = "Local proxy for token savings on LLM traffic: crunching, routing, caching, and telemetry."
+version = "0.2.1"
+description = "Token savings for LLM traffic: crunching + local cache as a library, or a local proxy with routing and telemetry."
+readme = "README.md"
 license = { text = "Apache-2.0" }
 classifiers = [
   "License :: OSI Approved :: Apache Software License",

@@ -67,21 +67,38 @@ jobs:
             venv_python=".venv-smoke/bin/python"
             venv_bin="$PWD/.venv-smoke/bin"
           fi
+          wheel="$(ls dist/*.whl)"
           "$venv_python" -m pip install --upgrade pip
-          "$venv_python" -m pip install dist/*.whl
+
+          # 1) The base install is the server-free library: it must import with no
+          #    web stack loaded and must not require any optional extra.
+          "$venv_python" -m pip install "$wheel"
           "$venv_python" - <<'PY'
+          import sys
           import importlib.metadata as md
 
+          import tokenclaw
+          from tokenclaw import crunch_openai, LocalCache  # public library API
+
+          heavy = {"fastapi", "uvicorn", "httpx", "starlette", "pydantic"}
+          leaked = sorted(m for m in sys.modules if m.split(".")[0] in heavy)
+          if leaked:
+              raise SystemExit(f"base import unexpectedly pulled server deps: {leaked}")
+
           # Requires-Dist entries gated behind an optional extra carry a
-          # `; extra == "..."` marker; only unmarked entries are installed with
-          # the base wheel, so the forbidden check must ignore the extras.
+          # `; extra == "..."` marker; only unmarked entries install with the
+          # base wheel, so the forbidden check ignores the extras.
           requires = md.requires("tokenclaw") or []
           base_requires = [req for req in requires if "extra" not in req.partition(";")[2]]
-          forbidden = ("psycopg", "zstandard", "websockets")
+          forbidden = ("fastapi", "uvicorn", "httpx", "pydantic", "python-dotenv",
+                       "psycopg", "zstandard", "websockets")
           for name in forbidden:
               if any(req.lower().startswith(name) for req in base_requires):
                   raise SystemExit(f"base wheel unexpectedly requires optional dependency: {name}")
           PY
+
+          # 2) Add the [server] extra so the CLI/proxy/DB smoke below can run.
+          "$venv_python" -m pip install "${wheel}[server]"
           echo "VENV_PY=$venv_python" >> "$GITHUB_ENV"
           echo "$venv_bin" >> "$GITHUB_PATH"
 

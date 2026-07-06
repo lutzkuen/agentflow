@@ -1,32 +1,63 @@
 # TokenClaw
 
-TokenClaw is a **local proxy and executor for token savings and telemetry on
-LLM traffic**.
+**Cut token cost on your own LLM traffic — as a library or a local proxy.**
+TokenClaw shrinks ("crunches") LLM requests and serves a local exact-match cache
+using explicit, lossless-first rules. Use it either way:
 
-Run it on localhost, point OpenAI-compatible or Anthropic-compatible clients at it, and keep using your normal provider credentials. TokenClaw forwards the real provider call, records local usage metadata, and shows cost and traffic behavior in a read-only dashboard.
-It applies explicit local rules and opted-in managed policy decisions for
-crunching, caching, and routing while preserving quality. The local client is
-the proxy/executor; `tokenclaw_server` is the policy brain for measurement
-contracts, learned recommendations, canaries, and research.
+- **As a library** (the quick start below) — call one function on your request dict
+  before you send it. Pure, in-process, no server, no network. The base install is
+  just this.
+- **As a local proxy** ([Run as a local proxy](#run-as-a-local-proxy)) — point an
+  OpenAI- or Anthropic-compatible client at localhost for zero-code-change savings,
+  a read-only dashboard, and opt-in managed routing.
 
 By default, TokenClaw does **not** store raw prompts or responses.
 
-## Quick start
+## Use it as a library (no server)
 
 Requires Python 3.10+.
 
-Install the published package from PyPI. The base install is the **server-free
-library** (crunching + local exact-match cache) and pulls only one dependency
-(PyYAML). The local proxy, CLI, and dashboard live behind the `server` extra:
-
 ```bash
-pip install tokenclaw            # library only: crunching + local cache
-pip install 'tokenclaw[server]'  # + the local proxy, CLI, and dashboard
+pip install tokenclaw
 ```
 
-To use TokenClaw's crunching and local cache directly inside your own Python app
-(e.g. a self-built OpenAI app) without running a server, see
-[docs/library.md](docs/library.md).
+**The library never sees your API key.** `crunch_openai()` is a pure function over
+your request dict: no network calls, no auth, and the base install imports nothing
+beyond PyYAML. It hands back the same keyword arguments you already pass to the
+OpenAI SDK — just smaller — so it is additive and reversible (delete one line to undo).
+
+Before:
+
+```python
+resp = client.responses.create(model="gpt-5", input=my_input)
+```
+
+After:
+
+```python
+from tokenclaw import crunch_openai
+
+kwargs, report = crunch_openai(model="gpt-5", input=my_input)
+resp = client.responses.create(**kwargs)      # same call, smaller request
+print(f"saved {report.chars_saved} chars via {report.applied_rules}")
+```
+
+Chat Completions works the same way with `messages=`. There is also a
+provider-agnostic `crunch_request(body, provider=...)` (OpenAI or Anthropic) and an
+optional, still-server-free `LocalCache`. Full guide with the crunch→cache pattern:
+**[docs/library.md](docs/library.md)**. The credential/trust boundary is spelled out
+in [docs/client-server-boundary.md](docs/client-server-boundary.md).
+
+## Run as a local proxy
+
+For zero-code-change savings across a whole app or IDE — plus a read-only dashboard
+and opt-in managed routing — install the `server` extra and point your client's base
+URL at localhost. This is the heavier, more trust-demanding path (a proxy that
+forwards your real provider calls); the library above touches nothing on the wire.
+
+```bash
+pip install 'tokenclaw[server]'  # proxy + CLI + dashboard
+```
 
 Further optional extras stack on top of the `server` install:
 

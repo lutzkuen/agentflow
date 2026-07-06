@@ -1,0 +1,52 @@
+name: Publish to PyPI
+
+# Publishes `tokenclaw` to PyPI via PyPI Trusted Publishing (OIDC) — no API token
+# is stored in the repo, and each release is a verifiable "built by CI from this
+# exact commit" artifact.
+#
+# One-time setup on PyPI (https://pypi.org/manage/project/tokenclaw/settings/publishing/
+# -> "Add a new trusted publisher" -> GitHub):
+#   Owner:            lutzkuen
+#   Repository name:  tokenclaw
+#   Workflow name:    publish.yml
+#   Environment name: pypi
+#
+# After that, publishing a GitHub Release (tag e.g. v0.2.1) triggers this workflow,
+# which builds from that commit and uploads. No secrets to manage or rotate.
+
+'on':
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tokenclaw/
+    permissions:
+      id-token: write # required for Trusted Publishing (OIDC); replaces an API token
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build and check distributions
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
