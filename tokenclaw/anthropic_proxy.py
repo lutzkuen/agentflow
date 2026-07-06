@@ -1316,6 +1316,7 @@ async def _run_anthropic_routing_experiment(
         shadow_latency_ms=shadow_latency_ms,
         primary_cost_est_usd=primary_cost_est_usd,
         shadow_cost_est_usd=shadow_cost,
+        shadow_routed_cost_est_usd=shadow_routed_cost,
         error=error,
     )
     experiment_meta.update(

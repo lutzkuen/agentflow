@@ -2300,6 +2300,7 @@ def routing_experiment_feedback_features(
     shadow_latency_ms: int | None,
     primary_cost_est_usd: float | None,
     shadow_cost_est_usd: float | None,
+    shadow_routed_cost_est_usd: float | None = None,
     error: str | None = None,
 ) -> dict[str, Any]:
     category = str(routing_meta.get("category") or experiment_meta.get("category") or "unknown")
@@ -2406,6 +2407,14 @@ def routing_experiment_feedback_features(
             round(float(primary_cost_est_usd or 0.0) - float(shadow_cost_est_usd or 0.0), 6)
             if primary_cost_est_usd is not None or shadow_cost_est_usd is not None else None
         ),
+        # Counterfactual routing economics: primary minus what the shadow model would
+        # cost on the primary's cached token profile (positive = routing saves). The
+        # raw probe delta above understates savings on cached traffic because the
+        # probe is a fresh, uncached call.
+        "routed_cost_delta_usd": (
+            round(float(primary_cost_est_usd or 0.0) - float(shadow_routed_cost_est_usd), 6)
+            if shadow_routed_cost_est_usd is not None and primary_cost_est_usd is not None else None
+        ),
         "latency_delta_ms": (
             int(primary_latency_ms or 0) - int(shadow_latency_ms or 0)
             if primary_latency_ms is not None or shadow_latency_ms is not None else None
@@ -2488,6 +2497,7 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
             "similarity_threshold": feedback_features.get("similarity_threshold"),
             "latency_delta_ms": feedback_features.get("latency_delta_ms"),
             "cost_delta_usd": feedback_features.get("cost_delta_usd"),
+            "routed_cost_delta_usd": feedback_features.get("routed_cost_delta_usd"),
             "primary_output_sha256": feedback_features.get("primary_output_sha256"),
             "shadow_output_sha256": feedback_features.get("shadow_output_sha256"),
             "error_present": bool(feedback_features.get("error_present")),
