@@ -38,7 +38,7 @@ VOLUME ["/data", "/config"]
 EXPOSE 4000 4002 4003
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4002/tokenclaw/stats', timeout=3).read()" || exit 1
+    CMD for url in http://127.0.0.1:4002/tokenclaw/stats http://127.0.0.1:4003/health http://127.0.0.1:4000/health; do python -c "import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=3).read()" "$url" && exit 0; done; exit 1
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["tokenclaw", "start"]
