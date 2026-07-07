@@ -46,13 +46,15 @@ Local crunching, local cache, local routing, provider proxying, and the read-onl
 
 ## Run a single proxy
 
-The default command is `tokenclaw start`. You can pass TokenClaw subcommands directly:
+The default command is `tokenclaw start`. You can pass TokenClaw subcommands directly; `start` will create the matching local activation profile when it is missing:
 
 ```bash
-docker run --rm -p 4003:4003 -v tokenclaw-data:/data -v tokenclaw-config:/config lutzkuen/tokenclaw:latest run openai
+docker run --rm -p 4003:4003 -p 4002:4002 -v tokenclaw-data:/data -v tokenclaw-config:/config lutzkuen/tokenclaw:latest start --openai
 
-docker run --rm -p 4000:4000 -v tokenclaw-data:/data -v tokenclaw-config:/config lutzkuen/tokenclaw:latest run claude
+docker run --rm -p 4000:4000 -p 4002:4002 -v tokenclaw-data:/data -v tokenclaw-config:/config lutzkuen/tokenclaw:latest start --claude
 ```
+
+Use `--no-dashboard` if you want only the provider proxy process.
 
 ## Publishing
 
