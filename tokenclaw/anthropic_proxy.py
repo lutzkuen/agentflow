@@ -1043,6 +1043,54 @@ def _normalize_shadow_non_streaming_max_tokens(
         diagnostics["max_tokens_effective"] = ceiling
 
 
+# Substrings of models that accept the 1M-token long-context beta
+# (`anthropic-beta: context-1m-*`). Shadows reuse the client's request headers, so
+# this beta must be dropped for a shadow target that does not support it (e.g. Haiku)
+# or Anthropic rejects the shadow 400 "authentication style is incompatible with the
+# long context beta header". Keep the list to genuinely 1M-capable models so the
+# working opus->sonnet-5 shadow (sonnet-5 supports 1M) is untouched.
+_ANTHROPIC_1M_CONTEXT_MODEL_HINTS = (
+    "sonnet-5",
+    "sonnet-4-5",
+    "sonnet-4.5",
+    "opus-4-5",
+    "opus-4-6",
+    "opus-4-7",
+    "opus-4-8",
+)
+
+
+def _model_supports_1m_context(model: str) -> bool:
+    lowered = (model or "").lower()
+    return any(hint in lowered for hint in _ANTHROPIC_1M_CONTEXT_MODEL_HINTS)
+
+
+def _shadow_headers_for_model(headers: dict[str, str], shadow_model: str) -> dict[str, str]:
+    """Return headers safe to forward to ``shadow_model``.
+
+    Drops the 1M long-context beta (``context-1m-*``) from ``anthropic-beta`` when the
+    shadow target does not support it, so a Haiku/small-model shadow of a 1M-context
+    request does not 400. Other beta tokens (e.g. ``prompt-caching``) are preserved.
+    Returns the original dict unchanged (same identity) when nothing needs stripping.
+    """
+    if _model_supports_1m_context(shadow_model):
+        return headers
+    beta = headers.get("anthropic-beta")
+    if not beta or "context-1m" not in beta.lower():
+        return headers
+    kept = [
+        token.strip()
+        for token in beta.split(",")
+        if token.strip() and "context-1m" not in token.strip().lower()
+    ]
+    new_headers = dict(headers)
+    if kept:
+        new_headers["anthropic-beta"] = ",".join(kept)
+    else:
+        new_headers.pop("anthropic-beta", None)
+    return new_headers
+
+
 def _prepare_anthropic_shadow_request(
     request_body: dict[str, Any],
     *,
@@ -1236,6 +1284,9 @@ async def _run_anthropic_routing_experiment(
         primary_model=primary_model,
     )
     experiment_meta["shadow_request_preflight"] = shadow_preflight
+    shadow_headers = _shadow_headers_for_model(headers, shadow_model)
+    if shadow_headers is not headers:
+        experiment_meta["shadow_long_context_beta_stripped"] = True
     shadow_status_code: Optional[int] = None
     shadow_response_body: Optional[dict[str, Any]] = None
     shadow_latency_ms: Optional[int] = None
@@ -1254,7 +1305,7 @@ async def _run_anthropic_routing_experiment(
                 async with httpx.AsyncClient(timeout=context.http_timeout) as client:
                     await context.limiter.await_backoff(shadow_model)
                     await context.limiter.throttle_forward()
-                    r = await client.post(context.anthropic_upstream.rstrip("/") + path, headers=headers, json=shadow_body)
+                    r = await client.post(context.anthropic_upstream.rstrip("/") + path, headers=shadow_headers, json=shadow_body)
             shadow_latency_ms = int((time.time() - shadow_started) * 1000)
             shadow_status_code = r.status_code
             try:
