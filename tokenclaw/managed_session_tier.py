@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from tokenclaw.http_client import async_client
 
 from tokenclaw.action_executor import ActionExecutor
 from tokenclaw.managed_egress import (
@@ -347,7 +348,7 @@ async def fetch_or_get_session_tier(
 
     started = time.time()
     try:
-        async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
+        async with async_client(timeout=recommendation_timeout_seconds()) as client:
             response = await client.post(
                 recommendation_server_url() + SESSION_TIER_PATH,
                 json=payload,

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
 
 import httpx
+from tokenclaw.http_client import async_client
 from fastapi import Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -385,7 +386,7 @@ async def _fetch_openai_old_context_summary(
     model = str(summary_request.get("model") or "")
     try:
         async with context.limiter.semaphores[model_tier(model)]:
-            async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+            async with async_client(timeout=context.http_timeout) as client:
                 await context.limiter.await_backoff(model)
                 await context.limiter.throttle_forward()
                 r = await client.post(
@@ -478,7 +479,7 @@ async def _run_openai_routing_experiment(
     shadow_started = time.time()
     try:
         async with context.limiter.semaphores[model_tier(shadow_model)]:
-            async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+            async with async_client(timeout=context.http_timeout) as client:
                 await context.limiter.await_backoff(shadow_model)
                 await context.limiter.throttle_forward()
                 r = await client.post(join_openai_upstream_url(context.openai_upstream, path), headers=headers, json=shadow_body)
@@ -648,7 +649,7 @@ async def openai_passthrough(context: ProviderContext, request: Request, path: s
         return provider_disabled_response(context, "openai")
     headers = build_forward_headers(context, request, force_json=False)
     content = await request.body()
-    async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+    async with async_client(timeout=context.http_timeout) as client:
         r = await client.request(
             request.method,
             join_openai_upstream_url(context.openai_upstream, path),
@@ -910,7 +911,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
 
                 try:
                     async with context.limiter.semaphores[model_tier(crunched["model"])]:
-                        async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+                        async with async_client(timeout=context.http_timeout) as client:
                             while True:
                                 await context.limiter.await_backoff(crunched["model"])
                                 await context.limiter.throttle_forward()
@@ -1492,7 +1493,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 return JSONResponse(sem_resp, headers={"x-tokenclaw-cache": "semantic-hit", "x-tokenclaw-routed-model": str(crunched.get("model"))})
 
         async with context.limiter.semaphores[model_tier(crunched["model"])]:
-            async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+            async with async_client(timeout=context.http_timeout) as client:
                 while True:
                     await context.limiter.await_backoff(crunched["model"])
                     await context.limiter.throttle_forward()

@@ -7,6 +7,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 import httpx
+from tokenclaw.http_client import async_client
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
@@ -70,7 +71,7 @@ async def _default_dashboard_admin_forwarder(
     headers: dict[str, str],
 ) -> tuple[int, dict[str, Any]]:
     url = f"{_dashboard_admin_base_url()}{path}"
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with async_client(timeout=10.0) as client:
         response = await client.post(url, json=payload, headers=headers)
     try:
         data = response.json()

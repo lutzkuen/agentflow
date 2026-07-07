@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
 
 import httpx
+from tokenclaw.http_client import async_client
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -1213,7 +1214,7 @@ async def _fetch_old_context_summary(context: ProviderContext, summary_request: 
     model = str(summary_request.get("model") or OLD_CONTEXT_SUMMARY_MODEL)
     try:
         async with context.limiter.semaphores[model_tier(model)]:
-            async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+            async with async_client(timeout=context.http_timeout) as client:
                 await context.limiter.await_backoff(model)
                 await context.limiter.throttle_forward()
                 r = await client.post(
@@ -1302,7 +1303,7 @@ async def _run_anthropic_routing_experiment(
     else:
         try:
             async with context.limiter.semaphores[model_tier(shadow_model)]:
-                async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+                async with async_client(timeout=context.http_timeout) as client:
                     await context.limiter.await_backoff(shadow_model)
                     await context.limiter.throttle_forward()
                     r = await client.post(context.anthropic_upstream.rstrip("/") + path, headers=shadow_headers, json=shadow_body)
@@ -2030,7 +2031,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
 
                 try:
                     async with context.limiter.semaphores[model_tier(crunched["model"])]:
-                        async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+                        async with async_client(timeout=context.http_timeout) as client:
                             while True:
                                 await context.limiter.await_backoff(crunched["model"])
                                 await context.limiter.throttle_forward()
@@ -2516,7 +2517,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 return JSONResponse(sem_resp, headers={"x-tokenclaw-cache": "semantic-hit", "x-tokenclaw-routed-model": str(crunched.get("model"))})
 
         async with context.limiter.semaphores[model_tier(crunched["model"])]:
-            async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+            async with async_client(timeout=context.http_timeout) as client:
                 while True:
                     await context.limiter.await_backoff(crunched["model"])
                     await context.limiter.throttle_forward()

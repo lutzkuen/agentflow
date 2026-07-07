@@ -598,6 +598,29 @@ export TOKENCLAW_LOG_BODIES=1
 | `TOKENCLAW_POLICY_DECISION_MIN_CONFIDENCE` | `0.75` | Minimum managed routing confidence before local apply |
 | `TOKENCLAW_POLICY_DECISION_CANARY_FRACTION` | `0.0` | Fraction of eligible managed routing decisions to apply |
 | `TOKENCLAW_MANAGED_API_KEY` | unset | Bearer token for non-loopback managed servers |
+| `TOKENCLAW_CA_BUNDLE` | unset | PEM to trust *in addition to* public roots (corporate/proxy CA). `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` are also honored |
+| `TOKENCLAW_TLS_TRUST_STORE` | unset | Set to `system` to use the OS trust store (needs `pip install truststore`) |
+| `TOKENCLAW_TLS_VERIFY` | `1` | Set to `0` to disable outbound TLS verification (insecure; last resort) |
+
+### Corporate TLS interception (SSL inspection)
+
+If your network re-signs TLS with a corporate root CA (common on managed laptops),
+the proxy's outbound calls to the provider will fail verification and surface as
+`500`s. Point TokenClaw at the corporate CA — no restart-time code changes needed:
+
+```bash
+# Preferred: trust the corporate root CA in addition to the public roots
+export TOKENCLAW_CA_BUNDLE=/path/to/corporate-root-ca.pem
+
+# Or, if the CA is already installed in the OS trust store:
+pip install truststore && export TOKENCLAW_TLS_TRUST_STORE=system
+
+# Last resort (insecure), when you cannot obtain the CA:
+export TOKENCLAW_TLS_VERIFY=0
+```
+
+Export the corporate root CA from your OS keychain/trust store (or ask IT) as a PEM.
+These apply to every outbound HTTPS client (provider and managed-server calls).
 
 For local managed-server development, set `TOKENCLAW_RECOMMENDATION_SERVER_URL=http://127.0.0.1:4100`.
 That URL is treated as loopback-only and does not require `TOKENCLAW_MANAGED_API_KEY`.

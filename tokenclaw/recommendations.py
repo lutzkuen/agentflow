@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from tokenclaw.http_client import async_client
 
 from tokenclaw import __version__ as TOKENCLAW_VERSION
 from tokenclaw.action_executor import ActionExecutor
@@ -1616,7 +1617,7 @@ async def fetch_policy_decision(unit: dict[str, Any], *, request_facts: dict[str
 
     started = time.time()
     try:
-        async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
+        async with async_client(timeout=recommendation_timeout_seconds()) as client:
             response = await client.post(
                 recommendation_server_url() + POLICY_DECISION_PATH,
                 json=payload,
@@ -1813,7 +1814,7 @@ async def fetch_recommendation(unit: dict[str, Any]) -> dict[str, Any]:
 
     started = time.time()
     try:
-        async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
+        async with async_client(timeout=recommendation_timeout_seconds()) as client:
             response = await client.post(
                 recommendation_server_url() + RECOMMENDATION_PATH,
                 json=payload,
@@ -3983,7 +3984,7 @@ async def _send_outcome_payload(*, endpoint: str, payload: dict[str, Any], unit_
     url = recommendation_server_url() + endpoint
     started = time.time()
     try:
-        async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
+        async with async_client(timeout=recommendation_timeout_seconds()) as client:
             if endpoint == PROMOTION_BLOCKER_ACTION_OUTCOME_ROLLUPS_PATH:
                 response = await client.post(url, json=payload, headers=_managed_headers())
             else:
@@ -4074,7 +4075,7 @@ async def _send_policy_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     started = time.time()
     try:
-        async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
+        async with async_client(timeout=recommendation_timeout_seconds()) as client:
             response = await client.post(
                 recommendation_server_url() + POLICY_EVENTS_PATH,
                 json=_sanitize_features(payload),
